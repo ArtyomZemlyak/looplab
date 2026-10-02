@@ -22,6 +22,7 @@ it and merges `HANDLERS` into its dispatch table.
 """
 from __future__ import annotations
 
+import math
 from types import MappingProxyType
 
 from looplab.core.fitness import is_usable_metric
@@ -389,7 +390,27 @@ def _on_report_generated(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> No
 # This family's rows of the fold's dispatch table. `replay.py::_HANDLERS` is assembled from every
 # family's table and refuses a type two of them claim, so a journal handler is registered HERE,
 # beside its body, and nowhere else.
+def _on_upstream(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
+    st.upstream_history.append({"seq": e.seq, "type": e.type, **d})
+    del st.upstream_history[:-200]
+    if e.type == "base_advanced":
+        st.upstream_base = {"seq": e.seq, **d}
+
+
+def _on_upstream_execution(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
+    _on_upstream(st, e, d, ctx)
+    row = d.get("execution")
+    seconds = row.get("seconds") if isinstance(row, dict) else None
+    if type(seconds) in (int, float) and math.isfinite(seconds) and seconds >= 0:
+        st.total_eval_seconds += seconds
+        st.eval_seconds_by_kind["upstream"] = st.eval_seconds_by_kind.get("upstream", 0.0) + seconds
+
+
 HANDLERS = {
+    **{name: _on_upstream for name in ("upstream_proposal_started", "upstream_proposed",
+       "upstream_proposal_failed", "upstream_gate_started",
+       "upstream_gate_finished", "upstream_gate_abandoned", "base_advanced")},
+    "upstream_execution": _on_upstream_execution,
     EV_DATA_PROFILED: _on_data_profiled,
     EV_DATA_PROVENANCE: _on_data_provenance,
     EV_HOST_GRADING: _on_host_grading,

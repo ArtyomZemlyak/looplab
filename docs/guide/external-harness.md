@@ -1361,6 +1361,48 @@ in this mode. `param_search` tasks do not use the external editing Developer.
 
 ## Scope and provenance
 
+### Reusable capabilities and verified base advancement
+
+When the operator launches a pinned repo task with `upstream`, search
+`phases(query="upstream")` and read `phase_info("upstream")`. Use
+`upstream_status(run_id, expected_generation, offset, limit)` for the current base,
+Maintainer instructions, per-hunk nominations and paged gate history. A nomination
+is advice; a completed source must have its current primary score and seed receipt.
+
+1. Pause through the ordinary durable command, then wait for engine exit. Every
+   fresh upstream write requires a stopped engine; readings start no work.
+2. Author `upstream_propose` with `{run_id, body}`. Retain the exact body:
+   `expected_generation`, stable `action_id`, `source_node_id`,
+   `expected_base_revision`, selected `hunk_hashes`, `files`/`deleted`, separate
+   `recipe_files`/`recipe_deleted`, `summary`, `flag:{name,default,enabled}`,
+   `documentation_path`, and `critic:{verdict:"pass",reason,reviewer}`.
+   The flag preserves the prior default. Scoring boundaries remain protected.
+3. Explicitly call `upstream_check` with `expected_generation`, new `action_id` and
+   `proposal_id`. This buys actual operator tests, old-recipe artifact regressions,
+   paired full source repetitions and any required original repair trigger.
+   Read `status`, `result`, execution costs and `evidence_token`; model prose never
+   certifies a gate. No node score is rewritten by these separate executions.
+4. Call `upstream_advance` only with a current passing gate, exact `evidence_token`
+   and `expected_base_revision`. Its CAS changes future seeds. Resume explicitly;
+   conflicting pending overlays retain their entire old verified base with a reason.
+5. Continue checking ordinary harness progress/checkpoints/result notices. The new
+   base does not waive enabled research/report/knowledge obligations. Reuse the
+   shared runner and express scientific changes as recipes.
+
+Exact body/action retries recover the original ACK without re-execution or fresh
+evidence, including after resume. A started claim with no verdict is unresolved;
+inspect its logs before asking the operator to abandon it through
+`POST /api/runs/{run_id}/upstream/recover`. Recovery grants no pass or resume. A new
+check requires a new action ID. Damaged event sources refuse even old ACK reads.
+Typed MCP validates complete page/receipt identities, gates and numerical costs;
+incomplete HTTP 200 is unavailable/unknown. Read explicitly before recovery.
+
+The scoped token may write this lane on external runs; internal runs require the
+owner credential. Task declarations and interrupted-claim recovery are owner-only.
+The UI Assistant uses the same lane with its ordinary approval policy. No hidden
+Maintainer model job is launched. Support and bounds are documented in
+[doc 72 §18](../72-node-to-framework-upstream-2026-10-01.md#18-upstream-lane).
+
 The MCP adapter forwards JSON API requests and limits a response to 256 KiB and
 a request body to 1 MiB. Query narrow routes for larger outputs; binary uploads
 need their dedicated API or CLI flow. A dedicated harness token can read and

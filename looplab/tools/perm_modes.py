@@ -132,6 +132,9 @@ _ACTION_RISK = {
     ("run_control", "delete_node"): RISK_HIGH,
     ("run_control", "delete_run"): RISK_HIGH,
     ("run_control", "set_trust_gate"): RISK_HIGH,
+    ("run_control", "upstream_propose"): RISK_HIGH,
+    ("run_control", "upstream_check"): RISK_HIGH,
+    ("run_control", "upstream_advance"): RISK_HIGH,
 }
 
 _CONSEQUENCE = {
@@ -171,6 +174,9 @@ _ACTION_CONSEQUENCE = {
     ("run_control", "delete_node"): "Permanently removes the reviewed node subtree from the run.",
     ("run_control", "delete_run"): "Permanently deletes the scoped run directory.",
     ("run_control", "set_trust_gate"): "Changes the scoped run's trust-enforcement policy.",
+    ("run_control", "upstream_propose"): "Writes a run-owned generalized base proposal; never changes owner checkout.",
+    ("run_control", "upstream_check"): "Executes and charges the declared full-source and regression/trigger checks.",
+    ("run_control", "upstream_advance"): "Changes the verified base for future experiment lifecycles by explicit CAS.",
 }
 _NON_REMEMBERABLE_ACTIONS = frozenset({("git_mut", "git_commit")})
 _SCOPE_KEYS = ("path", "paths", "cwd", "run_id", "node_id", "task_id", "preview", "verb")

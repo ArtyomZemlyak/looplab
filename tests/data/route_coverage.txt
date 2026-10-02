@@ -128,13 +128,18 @@ POST /api/runs/{run_id}/reviews	tests/test_card_public_projection.py tests/test_
 DELETE /api/runs/{run_id}/reviews/{link_id}	tests/test_review_capabilities.py
 POST /api/runs/{run_id}/skill-candidates	tests/test_external_run_mode.py
 GET /api/runs/{run_id}/spans/{sid}	tests/test_server.py tests/test_span_index.py tests/test_trace_delta.py tests/test_trace_file_security.py tests/test_trace_projection_security.py
-GET /api/runs/{run_id}/state	tests/test_admission_refuses_a_snapshot_the_child_would_refuse.py tests/test_campaign_runs.py tests/test_card_public_projection.py tests/test_collaboration.py tests/test_concept_tag_command.py tests/test_evidence_consumer_fences.py tests/test_external_run_mode.py tests/test_external_selection.py tests/test_fork_from_seq.py tests/test_log_pages.py tests/test_provider_error_redaction.py tests/test_refusal_vocabulary.py tests/test_report.py tests/test_request_fold_memo.py tests/test_review_capabilities.py tests/test_review_fixes.py tests/test_run_command_service.py tests/test_seq_gap_visibility.py tests/test_server.py tests/test_server_code_freshness.py tests/test_stalled_finalization_affordance.py tests/test_state_delta.py tests/test_tui.py
+GET /api/runs/{run_id}/state	tests/test_admission_refuses_a_snapshot_the_child_would_refuse.py tests/test_campaign_runs.py tests/test_card_public_projection.py tests/test_collaboration.py tests/test_concept_tag_command.py tests/test_evidence_consumer_fences.py tests/test_external_run_mode.py tests/test_external_selection.py tests/test_fork_from_seq.py tests/test_log_pages.py tests/test_provider_error_redaction.py tests/test_refusal_vocabulary.py tests/test_report.py tests/test_request_fold_memo.py tests/test_review_capabilities.py tests/test_review_fixes.py tests/test_run_command_service.py tests/test_seq_gap_visibility.py tests/test_server.py tests/test_server_code_freshness.py tests/test_stalled_finalization_affordance.py tests/test_state_delta.py tests/test_tui.py tests/test_upstream_api.py
 POST /api/runs/{run_id}/suggest	tests/test_collaboration.py tests/test_provider_error_redaction.py tests/test_report.py tests/test_server.py
 POST /api/runs/{run_id}/supertask	tests/test_server.py
 GET /api/runs/{run_id}/trace	tests/test_server.py tests/test_span_index.py tests/test_trace_facts_and_sse_offload.py tests/test_trace_file_security.py tests/test_trace_projection_security.py tests/test_trace_projection_transport.py
 GET /api/runs/{run_id}/trace/by_trace/{trace_id}	tests/test_server.py tests/test_span_index.py tests/test_trace_conversation_by_trace.py tests/test_trace_file_security.py tests/test_trace_projection_security.py tests/test_trace_projection_transport.py
 GET /api/runs/{run_id}/trace/by_trace/{trace_id}/conversation	tests/test_trace_conversation_by_trace.py
 GET /api/runs/{run_id}/trace/tail	tests/test_refusal_vocabulary.py tests/test_server.py tests/test_trace_facts_and_sse_offload.py tests/test_trace_file_security.py tests/test_trace_projection_security.py
+GET /api/runs/{run_id}/upstream	tests/test_upstream_api.py
+POST /api/runs/{run_id}/upstream/advance	tests/test_upstream_api.py
+POST /api/runs/{run_id}/upstream/check	tests/test_upstream_api.py
+POST /api/runs/{run_id}/upstream/proposals	tests/test_upstream_api.py
+POST /api/runs/{run_id}/upstream/recover	tests/test_upstream_api.py
 GET /api/scope-report-actions/{action_id}	tests/test_report.py
 POST /api/scope-report-actions/{action_id}/abandon	tests/test_report.py
 GET /api/scope-report/{scope_type}/{scope_id:path}	tests/test_report.py

@@ -116,6 +116,13 @@ class ConfigRefusal(OperatorRefusal, ValueError):
     """
 
 
+class UpstreamRefusal(ConfigRefusal):
+    """A coded refusal in the opt-in, operator-declared upstream lane (doc 72)."""
+    def __init__(self, code, message):
+        self.code = code
+        super().__init__(message)
+
+
 class EnvironmentRefusal(OperatorRefusal, RuntimeError):
     """A refusal because the machine this command needs is not equipped for what was asked.
 

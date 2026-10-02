@@ -23,7 +23,7 @@ import random
 import re
 from typing import NamedTuple, Optional
 
-from pydantic import BaseModel, ConfigDict, Field, ValidationInfo, field_validator, model_validator, model_serializer
+from pydantic import BaseModel, ConfigDict, Field, PrivateAttr, ValidationInfo, field_validator, model_validator, model_serializer
 
 from looplab.core.comparison import ComparisonContract
 from looplab.core.models import Idea, Node, RunState, validate_direction
@@ -1943,6 +1943,31 @@ class RepoTask(BaseModel):
     # How the root editable_path is materialized per node; see EditableSpec.seed_mode.
     seed_mode: str = ""                        # "" -> Settings.seed_mode | auto | tracked | all
     seed_base: Optional[dict] = None           # immutable initial run/bundle seed reference (doc 72)
+    upstream: Optional[dict] = None            # operator-declared gate; absent preserves legacy behavior
+    _upstream_run_dir: Optional[str] = PrivateAttr(default=None)
+
+    def bind_run_directory(self, run_dir):
+        self._upstream_run_dir = str(Path(run_dir).resolve()) if self.upstream is not None else None
+
+    def effective_seed_base(self):
+        if self.upstream is not None and self._upstream_run_dir is not None:
+            from looplab.engine.upstream_state import active_base, events_for
+            rd = Path(self._upstream_run_dir)
+            if (rd / "events.jsonl").exists():
+                return active_base(events_for(rd), self.seed_base)["selector"]
+        return self.seed_base
+
+    @field_validator("upstream", mode="before")
+    @classmethod
+    def _upstream_valid(cls, value):
+        from looplab.engine.upstream_spec import normalize_upstream
+        return normalize_upstream(value)
+
+    @model_validator(mode="after")
+    def _upstream_obligations(self):
+        if self.upstream is not None and (self.seed_base is None or self.eval is None or self.eval.scorer_boundary is None):
+            raise ValueError("upstream requires an initial seed_base and operator-declared cmd.scorer_boundary")
+        return self
 
     @field_validator("seed_base", mode="before")
     @classmethod
@@ -1955,6 +1980,8 @@ class RepoTask(BaseModel):
         payload = handler(self)
         if self.seed_base is None and isinstance(payload, dict):
             payload.pop("seed_base", None)
+        if self.upstream is None and isinstance(payload, dict):
+            payload.pop("upstream", None)
         return payload
     # Multi-repo workspace (Phase 4): additional editable repos, each mounted at its `name`
     # subdir with its own surface/protect. Use this (optionally with editable_path for a
@@ -2172,7 +2199,7 @@ class RepoTask(BaseModel):
                         "seed_mode": (e.seed_mode or self.seed_mode)})
         if self.seed_base is not None:
             from looplab.engine.seed_base import pinned_editables
-            out = pinned_editables(out, self.seed_base)
+            out = pinned_editables(out, self.effective_seed_base())
         return out
 
     def _entrypoint_protect(self, mounts: list[dict]) -> dict[str, list[str]]:
@@ -2518,6 +2545,8 @@ class RepoTask(BaseModel):
             "edit_surface": surface,                     # namespaced union over all repos
             "protected_names": self._protected_names(),
             **({"seed_base": dict(self.seed_base)} if self.seed_base is not None else {}),
+            **({"upstream": self.upstream, "effective_seed_base": self.effective_seed_base()}
+               if self.upstream is not None else {}),
             **({"scorer_boundary": self.eval.scorer_boundary}
                if self.eval and self.eval.scorer_boundary is not None else {}),
             "references": [r.model_dump() for r in self.references],

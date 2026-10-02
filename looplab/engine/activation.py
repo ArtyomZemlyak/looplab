@@ -51,6 +51,7 @@ from looplab.core.node_evidence import open_untrusted_regular, read_bounded_regu
 from looplab.engine.eval_log_plan import _file_identity, _log_name_key, attempt_byte_floor
 
 ACTIVATION_MANIFEST_NAME = "looplab_activation.json"
+CHANGE_CAPABILITY = "capability"  # doc 72 hunk advice; activation.change_class semantics stay unchanged
 MAX_MARKERS = 8
 MAX_MARKER_CHARS = 200
 # Per file, from its START and from its END: a marker is usually printed at warmup and a log is

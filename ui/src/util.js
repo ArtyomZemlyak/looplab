@@ -102,15 +102,6 @@ export function parentMetric(node, state) {
   return p ? (p.confirmed_mean ?? p.metric) : null
 }
 
-export function delta(node, state) {
-  const pm = parentMetric(node, state)
-  const m = node.confirmed_mean ?? node.metric
-  if (pm == null || m == null) return null
-  const d = m - pm
-  const improved = state.direction === 'min' ? d < 0 : d > 0
-  return { d, improved }
-}
-
 // Intra-node sweep detection. A node is a sweep when it carries trials (per-node detail), a
 // trials_summary (trimmed live state), or its idea declared a search `space` (even before it ran).
 // The node's `operator` stays draft/improve (authoritative for ASHA/policy), so detection keys off

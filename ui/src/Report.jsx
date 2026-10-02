@@ -1,4 +1,6 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react'
+import BaseRevision from './BaseRevision.jsx'
+import UpstreamPanel from './UpstreamPanel.jsx'
 import { peekReportRefreshIntent, reportRefreshIntent, isTransientCommandReadError, deadlineGet, fmt,
   fmtCost, fmtInt, CONTROL, runNodeApiPath } from './util.js'
 import { Trajectory, ImprovementWaterfall } from './charts.jsx'
@@ -554,7 +556,8 @@ export default function ReportView({ state, runId, onOpenPanel, canOpenPanel, on
       </div>}
 
       {best && <><h2 id="report-section-champion" tabIndex={-1} className="section-h">Selected experiment</h2>
-        <ChampionCard best={best} state={state} /></>}
+        <ChampionCard best={best} state={state} /><BaseRevision node={best} state={state} /></>}
+      <UpstreamPanel state={state} />
 
       {a.steps.length > 0 && <>
         <h2 id="report-section-trajectory" tabIndex={-1} className="section-h">{a.steps.length > 1 ? 'Recorded metric trajectory' : 'First eligible metric'}</h2>
@@ -563,7 +566,7 @@ export default function ReportView({ state, runId, onOpenPanel, canOpenPanel, on
         <Trajectory nodes={Object.values(state.nodes)} direction={state.direction} state={state}
           steps={a.steps} onPick={onPickNode} />
         <ImprovementWaterfall steps={a.steps} direction={state.direction} />
-        <DataTable caption="Metric trajectory steps" card={false}><table className="tbl report-steps-table"><thead><tr><th>#</th><th>node</th><th>operator</th><th>metric</th><th>Δ</th><th>what changed</th></tr></thead><tbody>
+        <DataTable caption="Metric trajectory steps" card={false}><table className="tbl report-steps-table"><thead><tr><th>#</th><th>node</th><th>operator</th><th>metric</th><th>Δ</th><th>base</th><th>what changed</th></tr></thead><tbody>
           {a.steps.map((s, i) => <tr key={s.id}>
             <td>{i + 1}</td><td>#{s.id}</td><td><span className="report-step-kind" aria-hidden="true">
               {s.operator || 'unknown operator'}
@@ -571,6 +574,7 @@ export default function ReportView({ state, runId, onOpenPanel, canOpenPanel, on
             </span><span className="sr-only">{reportStepIdentity(s.operator, s.theme)}</span></td>
             <td>{fmt(s.to)}</td>
             <td className={`report-delta ${s.delta == null ? 'baseline' : (impr(s) ? 'improved' : 'regressed')}`}>{s.delta == null ? 'baseline' : fmt(s.delta)}</td>
+            <td><BaseRevision node={state.nodes[s.id]} state={state} compact /></td>
             <td className="muted">{s.diff.length > 2
               ? <details className="report-step-changes"><summary>{s.diff.length} parameter changes</summary>
                   <span>{paramDiffLabel(s.diff)}</span></details>

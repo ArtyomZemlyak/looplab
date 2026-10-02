@@ -113,8 +113,12 @@ export const DEFAULT_BUDGETS = Object.freeze({
     // current 608,712 B (+1,072 B). The bytes buy strict optional telemetry validation
     // and EN/RU activity labels. CSS, initial shell and structural ceilings are unchanged;
     // 595 KiB leaves 568 B above this measured baseline.
-    js: { gzip: 595 * KIB },
-    css: { gzip: 57.5 * KIB },
+    // 2026-10-02 doc 72: measured 612,980 B JS / 59,141 B CSS. +4,268 B JS
+    // buys recorded seed identity, capability origins, explicit gate workflow and
+    // evidence-bound lineage deltas. Provenance panels stay lazy; graph-only CSS
+    // excludes their full styles. Static cycles and forbidden reachability still fail.
+    js: { gzip: 599 * KIB },
+    css: { gzip: 58 * KIB },
   },
   individual: {
     js: { raw: 450 * KIB, gzip: 110 * KIB },
@@ -157,7 +161,9 @@ export const DEFAULT_BUDGETS = Object.freeze({
       baselineRoots: [entry, named('RunList'), ownerChrome],
       // Measured 3,951 B gzip after the list/model dependencies already present in the portfolio
       // route. Keep the on-demand comparison workspace below 4 KiB incremental transfer.
-      limits: { js: { gzip: 4 * KIB } },
+      // 2026-10-02 eight-character asset hashes: unchanged comparison code, measured
+      // 4,097 B (+1 B over the old ceiling). Reserve 64 B for reference compression.
+      limits: { js: { gzip: 4 * KIB + 64 } },
     },
     {
       name: 'owner Claims & Curation route',
@@ -194,7 +200,9 @@ export const DEFAULT_BUDGETS = Object.freeze({
       // recorded result, repeat checks and comparison qualifications share this route.
       // Shared health extraction changes compression streams: 401,716 B JS.
       // 2026-10-01 Assistant language: 405,152 B; the same owner chrome increment.
-      limits: { js: { gzip: 396 * KIB }, css: { gzip: 46 * KIB } },
+      // 2026-10-02 doc 72: 405,898 B JS, recorded base details + comparable-score
+      // arrows; full UpstreamPanel remains behind the panel hub. CSS stays bounded.
+      limits: { js: { gzip: 397 * KIB }, css: { gzip: 46 * KIB } },
     },
     {
       name: 'valid review DAG route',

@@ -1,0 +1,13 @@
+/* Recorded provenance is shared by Inspector, Report, Overview and the graph. */
+.base-revision { padding: 12px 14px; margin: 10px 0; border: 1px solid var(--line); border-radius: 8px; line-height: 1.5; }
+.base-revision p { margin: 6px 0; }
+.base-revision.compact { padding: 0; margin: 0; border: 0; white-space: nowrap; font-size: 12px; }
+.base-digest { display: block; overflow-wrap: anywhere; margin-top: 8px; }
+.upstream-panel { padding: 14px 16px; margin: 14px 0; border: 1px solid var(--line); border-radius: 8px; line-height: 1.5; }
+.upstream-panel .ov-section-head { display: flex; justify-content: space-between; align-items: baseline; gap: 12px; flex-wrap: wrap; }
+.upstream-panel .ov-section-head h3 { margin: 0; font-size: 14px; }
+.upstream-panel .ov-section-head > span { font-size: 12px; color: var(--fg-dim); }
+.upstream-panel p { margin: 8px 0; }
+.upstream-panel code, .base-revision code { font-variant-numeric: tabular-nums; }
+.upstream-bases { display: flex; gap: 8px; flex-wrap: wrap; margin: 12px 0; }
+.upstream-panel .btn { margin-top: 8px; }

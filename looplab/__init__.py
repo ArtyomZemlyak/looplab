@@ -32,6 +32,13 @@ __version__ = "0.1.0"
 
 # old flat module name -> its subpackage today (kept in sync by tests/test_package_layout.py)
 _LAYOUT = {
+    "maintainer": "agents",
+    "upstream": "engine",
+    "upstream_state": "engine",
+    "upstream_spec": "engine",
+    "upstream_workspace": "engine",
+    "upstream_gate": "engine",
+    "upstream_tools": "tools",
     "_base": "tools",
     "_log_index": "serve",   # scaffolding shared by the two incremental log indexes (doc 25 SC-04)
     "_mcp_transport": "tools",

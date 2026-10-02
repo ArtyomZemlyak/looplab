@@ -2673,6 +2673,9 @@ class RunState(BaseModel):
     # runs), distinct from the run's total wall-clock (which includes LLM/agent time). The
     # search stops cleanly once this crosses `max_eval_seconds` — guards the silent long sweep.
     total_eval_seconds: float = 0.0
+    upstream_history: list[dict] = Field(default_factory=list)
+    upstream_base: Optional[dict] = None
+    upstream_enabled: bool = False
     # P1-2 separate budget buckets: the SAME cumulative eval seconds split by category (node/search
     # eval vs multi-seed confirm) for observability — where the compute went, not just the total. LLM
     # spend is already its own bucket (llm_cost -> total_llm_*); holdout re-scores existing predictions

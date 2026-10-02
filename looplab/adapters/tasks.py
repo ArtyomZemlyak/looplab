@@ -213,7 +213,10 @@ def load_task(path: str | Path, *, existing_run: bool = False) -> TaskAdapter:
     # `task.snapshot.json`, so re-entering an existing run can't be refused by a rule added later.
     from looplab.core.appconfig import load_document
     task, _settings, _out = load_document(Path(path))
-    return validate_task(task, existing_run=True) if existing_run else validate_task(task)
+    adapter = validate_task(task, existing_run=True) if existing_run else validate_task(task)
+    if existing_run and isinstance(adapter, RepoTask):
+        adapter.bind_run_directory(Path(path).parent)
+    return adapter
 
 
 # Re-export: the factory moved to its dependency-true home (core/llm.py — it only ever needed

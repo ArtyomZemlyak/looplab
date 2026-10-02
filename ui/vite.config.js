@@ -97,8 +97,8 @@ export default defineConfig({
       output: {
         // Import specifiers are shipped in every split chunk. Content hashes already provide cache
         // identity, so repeating long facade names in those runtime URLs only spends transfer bytes.
-        entryFileNames: 'assets/[hash:6].js',
-        chunkFileNames: 'assets/[hash:6].js',
+        entryFileNames: 'assets/[hash:8].js',
+        chunkFileNames: 'assets/[hash:8].js',
         minify: {
           compress: {
             maxIterations: 10,

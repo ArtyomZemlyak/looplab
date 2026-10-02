@@ -47,6 +47,7 @@ class Phase:
 # The writes the scoped harness credential may not make (`tests/test_agent_token_scope.py` drives
 # each against the middleware, and every other HTTP write of the index through it).
 OPERATOR_WRITES = frozenset({"PUT /api/settings", "POST /api/start",
+                             "POST /api/runs/{run_id}/upstream/recover",
                              "POST /api/runs/{run_id}/resolve-activity-claims",
                              "PUT /api/{kind}/{name}/operations/{operation_id}"})
 
@@ -57,6 +58,11 @@ OPERATOR_WRITES = frozenset({"PUT /api/settings", "POST /api/start",
 # not proposed tools. A phase can be skipped if its analysis is redundant; the
 # evaluator and its recorded metrics are never replaced by an agent's judgement.
 PHASES: tuple[Phase, ...] = (
+    Phase("upstream", "Capability/BaseRevision", "agents/maintainer.py; engine/upstream.py",
+          "Generalize measured reusable hunks into a run-owned worktree; keep recipes separate and the old flag default. Pause and wait for engine exit; buy real full-source equivalence plus declared artifact regression/repair-trigger checks; inspect the verdict; advance with explicit current-evidence CAS, then resume separately. A crashed claim needs operator abandonment and a fresh action. Never writes or pushes the owner repository.",
+          ("GET /api/runs/{run_id}/upstream", "GET /api/runs/{run_id}/state"),
+          ("POST /api/runs/{run_id}/upstream/proposals", "POST /api/runs/{run_id}/upstream/check",
+           "POST /api/runs/{run_id}/upstream/advance", "POST /api/runs/{run_id}/upstream/recover")),
     Phase("recovery", "Run/CommandReceipt", "serve/command_receipt.py; serve/run_commands.py",
           "Reconnect to the same run; observe a saved receipt before explicitly choosing recovery. An idle run still needs engine ownership before another candidate. An inconclusive lock probe does not prove death; reads never resume. Agent liveness is not measured.",
           ("GET /api/runs/{run_id}/state", "GET /api/runs/{run_id}/command-receipt",

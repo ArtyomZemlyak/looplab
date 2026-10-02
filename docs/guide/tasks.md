@@ -906,6 +906,44 @@ Dataset, environment, opaque command dependencies and task assets are outside th
 base receipt. Without `seed_base`, existing task serialization and live seeding stay
 unchanged.
 
+### Promote reusable code into a verified base
+
+For a pinned repo task, the operator can opt into the [upstream lane](../72-node-to-framework-upstream-2026-10-01.md#18-upstream-lane).
+Keep scoring in declared protected files via `cmd.scorer_boundary`; declare real
+tests and observable old-recipe regressions alongside `seed_base`:
+
+```yaml
+upstream:
+  repeats: 3                    # 2..10 full old/new source pairs
+  atol: 0.0
+  rtol: 0.0
+  sigma: 2.0                   # paired SEM allowance, maximum 4
+  tests:
+    - name: syntax
+      command: [python, -m, py_compile, train.py]
+      timeout: 10
+  regressions:
+    - name: original_recipe
+      command: [python, train.py]
+      artifacts: [predictions.json]
+      timeout: 10
+  repair_probes: []             # when needed: actual failing recipe, old fail/new pass
+```
+
+The Assistant or external agent authors a Maintainer proposal: generalized runner,
+separate source recipe, documented flag with the old default, and a named critic.
+The proposal alone changes no base. Pause and wait for engine exit; explicitly buy
+the tests, full repeated source evaluations and regression/repair checks. Inspect
+their measured result, then advance with the current base revision and evidence
+token. Resume separately. Gate work is charged separately from experiment scores.
+
+This declaration is fixed at launch; changing it requires another task/run.
+Repair probes must exercise the original failing trigger, and cannot replace the
+implementation being tested. Missing dependencies/evidence refuse advancement.
+The first gate supports `trusted_local` self-contained evaluators; host scorers,
+sandbox execution and environment installation require a separate supported gate.
+Owner checkout and protected scoring files are never upstream write targets.
+
 **The protocol: the ruler, per facet.** Since 2026-09-26 the record also carries `protocol` — a map of
 refuse-only facets, each a digest, describing the conditions the number was measured under
 (`engine/comparability.py::protocol_record`):

@@ -2,18 +2,21 @@ import React, { useCallback, useContext, useEffect, useLayoutEffect, useMemo, us
 import { ReactFlow, Background, Controls, MiniMap, Handle, Position, Panel,
   useNodesInitialized, useReactFlow, useViewport } from '@xyflow/react'
 import '@xyflow/react/dist/style.css'
-import { fmt, layoutWithGroups, nodeClass, delta, workingNodeIds, operatorMeta, OPERATOR_LEGEND,
+import './baseFilter.css'
+import { fmt, layoutWithGroups, nodeClass, workingNodeIds, operatorMeta, OPERATOR_LEGEND,
   isSweep, sweepInfo, chipFontSize, storageGet, storageSet, nodeActivityView, nodeActivityStatus,
   NODE_ACTIVITY } from './util.js'
 import { stripMd } from './markdown.jsx'
 import { nodeChip } from './report.js'
 import { forkChip } from './forkProvenance.js'
 import { seedContractText, seedSource } from './seedProvenance.js'
+import { baseChoices, baseMatches } from './baseRevision.js'
 import { nodeTheme } from './conceptId.js'
 import { nodeCanonicalConcepts } from './conceptChips.js'
 import { conceptMaterializationStatus, orderConceptTags, runConstantConcepts } from './nodeProjection.js'
 import { dagCollapsedKey, dagLayoutProjection } from './dagProjection.js'
 import { OpIcon } from './icons.jsx'
+import { delta } from './lineageDelta.js'
 import { Spark } from './charts.jsx'
 import { GroupRegion, SuperShell } from './groupnodes.jsx'
 import EnergyEdge from './EnergyEdge.jsx'
@@ -496,9 +499,16 @@ function visibleViewportBounds() {
 
 export default function Dag({ state, selectedId, onSelect, groupMode = 'none', collapsed = new Set(),
                              onToggleGroup, onSetMode, onCollapseAll, onExpandAll, onAutoCollapse, selectedGroup, onSelectGroup,
-                             themeFilter = null, highlightIds = null, onNodeAction, mergeArm = null,
+                             themeFilter = null, highlightIds: conceptIds = null, onNodeAction, mergeArm = null,
                              nodeMenuActions = null, compact = false, evalStages = null }) {
   const workIds = useMemo(() => workingNodeIds(state), [state])
+  const [baseFilter, setBaseFilter] = useState('')
+  const bases = useMemo(() => baseChoices(state.nodes), [state.nodes])
+  useEffect(() => { if (baseFilter && !bases.some(row => row.digest === baseFilter)) setBaseFilter('') }, [bases, baseFilter])
+  const highlightIds = useMemo(() => baseFilter
+    ? new Set(Object.values(state.nodes || {}).filter(n => baseMatches(n, baseFilter) && (!conceptIds || conceptIds.has(n.id))).map(n => n.id))
+    : conceptIds, [state.nodes, baseFilter, conceptIds])
+  const highlightLabel = baseFilter ? `recorded base ${baseFilter === 'unknown' ? 'unknown' : baseFilter.slice(0, 12)}${conceptIds ? ' and selected concepts' : ''}` : 'selected concepts'
   const [menu, setMenu] = useState(null)   // U3: right-click node menu {x,y,nodeId}
   const [groupActionKey, setGroupActionKey] = useState('')
   useEffect(() => setGroupActionKey(''), [groupMode])
@@ -653,7 +663,7 @@ export default function Dag({ state, selectedId, onSelect, groupMode = 'none', c
       if (!rects.length) return
       const geo = regionGeometry(rects)
       const filtered = themeFilteredGroupAggregate(
-        cell.ids, ns, state.direction, themeFilter, state, highlightIds)
+        cell.ids, ns, state.direction, themeFilter, state, highlightIds, highlightLabel)
       rfNodes.push({
         id: `region:${cell.band ?? 'g'}:${cell.key}`, type: 'groupLane', position: { x: geo.x, y: geo.y }, zIndex: 0,
         selectable: false, draggable: false, focusable: false,
@@ -671,7 +681,7 @@ export default function Dag({ state, selectedId, onSelect, groupMode = 'none', c
     groups.forEach((ids, key) => {
       if (!collapsed.has(key)) return
       const p = pos[superId(key)]; if (!p) return
-      const agg = themeFilteredGroupAggregate(ids, ns, state.direction, themeFilter, state, highlightIds)
+      const agg = themeFilteredGroupAggregate(ids, ns, state.direction, themeFilter, state, highlightIds, highlightLabel)
       rfNodes.push({
         id: superId(key), type: 'groupSuper', position: p, zIndex: 1, draggable: false,
         data: {
@@ -749,7 +759,7 @@ export default function Dag({ state, selectedId, onSelect, groupMode = 'none', c
     })
     return { nodes: rfNodes, edges: rfEdges, groupKeys: [...groups.keys()] }
   }, [projection, geometry, state, selectedId, workIds, onSelect, groupMode, collapsed, selectedGroup, onToggleGroup, onSelectGroup,
-      themeFilter, highlightIds, fx, onNodeAction, openActions])
+      themeFilter, highlightIds, highlightLabel, fx, onNodeAction, openActions])
   const { edges, groupKeys } = base
   const activeGroupActionKey = groupKeys.includes(groupActionKey) ? groupActionKey : ''
   // Inject the transient `actionsOpen` flag onto ONLY the node whose action menu is open, keyed on
@@ -855,6 +865,10 @@ export default function Dag({ state, selectedId, onSelect, groupMode = 'none', c
       <Background color="var(--line)" gap={22} />
       <Controls showInteractive={false} />
       <Panel position="top-right" className="grp-control">
+        {bases.some(row => row.digest !== 'unknown') && <label className="base-filter">base{' '}
+          <select className="text" aria-label="Filter experiments by recorded code base" value={baseFilter} onChange={e => setBaseFilter(e.target.value)}>
+            <option value="">All bases</option>{bases.map(row => <option key={row.digest} value={row.digest}>{row.digest === 'unknown' ? 'Unknown' : row.digest.slice(0, 12)} · {row.count}</option>)}
+          </select></label>}
         <span className="muted">group by</span>
         <select className="text" aria-label="Group experiments by" value={groupMode} onChange={e => onSetMode && onSetMode(e.target.value)}>
           {GROUP_MODES.map(([v, l]) => <option key={v} value={v}>{l}</option>)}

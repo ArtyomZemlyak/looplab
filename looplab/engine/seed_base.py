@@ -80,15 +80,17 @@ def selected_seed_base(selector):
 def pinned_editables(mounts, selector):
     """Scouts/write tools/probes resolve the same source as evaluation."""
     archive, _ = selected_seed_base(selector)
-    return [{**ed, "origin_path": ed["path"], "path": str(archive if ed["name"] in ("", ".")
+    return [{**ed, "origin_path": ed.get("origin_path", ed["path"]), "path": str(archive if ed["name"] in ("", ".")
              else archive / ed["name"])} for ed in mounts]
 
 
-def enforce_initial_seed_base(events, current):
+def enforce_initial_seed_base(events, current, upstream=None):
     start = next((event for event in events if event.type == "run_started"), None)
     if start is not None and start.data.get("seed_base") != current:
         raise ConfigRefusal("seed_base differs from run_started; restore the initial selection or launch a new run. "
-                            "Changing a live base requires the future advancement gate.")
+                            "Changing a live base requires the explicit upstream advancement gate.")
+    if start is not None and start.data.get("upstream") != upstream:
+        raise ConfigRefusal("upstream differs from run_started; restore the launched declaration or launch a new run")
     if current is not None:
         selected_seed_base(current)  # missing/damaged origin refuses BEFORE recovery or workspace cleanup
 

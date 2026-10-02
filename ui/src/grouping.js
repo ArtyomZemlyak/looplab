@@ -176,7 +176,7 @@ export function groupAggregate(memberIds, nodesObj, direction, state = null) {
 // only matching experiments while retaining the full membership count as context. This prevents an
 // operator/theme super-node from presenting a cross-theme best as if it belonged to the active theme.
 export function themeFilteredGroupAggregate(
-  memberIds, nodesObj, direction, themeFilter = null, state = null, highlightIds = null,
+  memberIds, nodesObj, direction, themeFilter = null, state = null, highlightIds = null, highlightLabel = 'selected concepts',
 ) {
   const activeIds = memberIds.filter(id => nodeIsActive(nodesObj[id], state))
   const totalCount = activeIds.length
@@ -185,8 +185,8 @@ export function themeFilteredGroupAggregate(
     && (!conceptFilterActive || highlightIds.has(id)))
   const filterActive = !!themeFilter || conceptFilterActive
   const filterDescription = themeFilter && conceptFilterActive
-    ? `primary concept axis ${themeFilter} and selected concepts`
-    : themeFilter ? `primary concept axis ${themeFilter}` : conceptFilterActive ? 'selected concepts' : null
+    ? `primary concept axis ${themeFilter} and ${highlightLabel}`
+    : themeFilter ? `primary concept axis ${themeFilter}` : conceptFilterActive ? highlightLabel : null
   return {
     ...groupAggregate(matchedIds, nodesObj, direction, state),
     matchedIds,

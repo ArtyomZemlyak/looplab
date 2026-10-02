@@ -1,4 +1,5 @@
 import React, { useEffect, useId, useLayoutEffect, useMemo, useRef, useState } from 'react'
+import UpstreamPanel from './UpstreamPanel.jsx'
 import { deadlineGet, get, post, fmt, fmtInt, fmtBytes, fmtElapsedSeconds, CONTROL,
   operatorMeta, runApiPath, runNodeApiPath, createIdempotencyKey,
   getAuthoringOperation, putAuthoringOperation, validAuthoringName, validAuthoringTargetRootId,
@@ -457,6 +458,7 @@ export function OverviewPanel({ state, maxEval, phase, runState, onClose, onOpen
   }
   return (
     <Panel title="Overview" sub={state.label || state.run_id || state.task_id || ''} onClose={onClose} wide className="overview-panel">
+      <UpstreamPanel state={state} onClose={onClose} />
       <div className="ov-summary">
         <div className="ov-best">
           <span className="ov-label">Best metric</span>

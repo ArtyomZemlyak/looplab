@@ -572,7 +572,7 @@ class ReentryMixin:
     def _reentry_repin(self) -> bool:
         _events = self.store.read_all()
         from looplab.engine.seed_base import enforce_initial_seed_base
-        enforce_initial_seed_base(_events, self._repo_spec.get("seed_base"))
+        enforce_initial_seed_base(_events, self._repo_spec.get("seed_base"), self._repo_spec.get("upstream"))
         _entry = fold(_events)
         # Re-pin after setup for the same reason the receipt check repeats here: a FRESH run's own
         # run_started was appended by `_setup_phase` a few lines ago (a no-op re-pin), while a resume

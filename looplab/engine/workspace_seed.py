@@ -534,7 +534,7 @@ def seed_candidate_workspace(repo_spec, workdir, *, seed_mode: str = "auto", ign
     def _target(editable):
         return work if editable.get("name") in (".", "") else work / editable["name"]
 
-    pin = repo_spec.get("seed_base")
+    pin = repo_spec.get("effective_seed_base") or repo_spec.get("seed_base")
     if pin is not None:
         from looplab.engine.seed_base import seed_pinned_workspace
         rows.extend(seed_pinned_workspace(pin, editables, work))

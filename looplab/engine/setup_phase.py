@@ -222,6 +222,8 @@ class SetupPhaseMixin:
                             "workspace": wf,
                             **({"seed_base": dict(self._repo_spec["seed_base"])}
                                if self._repo_spec.get("seed_base") is not None else {}),
+                            **({"upstream": self._repo_spec["upstream"]}
+                               if self._repo_spec.get("upstream") is not None else {}),
                             # P0-5 environment identity: pin the interpreter + key-lib versions so a
                             # resume can flag a library upgrade that breaks bit-reproducibility.
                             "env": self._env_fingerprint(),

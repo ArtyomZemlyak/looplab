@@ -10,7 +10,7 @@ vocabulary a client may append is `serve/protocol.py::CONTROL_EVENTS`.
 
 <!-- generated: api routes -->
 
-154 routes on 136 paths; 10 deprecated; 27 with a declared response model.
+159 routes on 141 paths; 10 deprecated; 27 with a declared response model.
 
 ### `/api`
 
@@ -232,6 +232,11 @@ vocabulary a client may append is `serve/protocol.py::CONTROL_EVENTS`.
 | `GET` | `/api/runs/{run_id}/trace/by_trace/{trace_id}` | Spans of ONE operation's trace (by trace_id) as a tree, WITH capped I/O — powers the | — |  |
 | `GET` | `/api/runs/{run_id}/trace/by_trace/{trace_id}/conversation` | ONE operation's trace as the LINEAR conversation, the twin of `/nodes/{nid}/conversation`. | — |  |
 | `GET` | `/api/runs/{run_id}/trace/tail` | LIVE 'what is the agent doing right now' feed: the most recent generation (LLM thinking/ | — |  |
+| `GET` | `/api/runs/{run_id}/upstream` | Read current base, per-hunk nominations and paged measured upstream history. Starts no work. | — |  |
+| `POST` | `/api/runs/{run_id}/upstream/advance` | Explicit current-evidence CAS, only with a stopped engine; then resume separately. | — |  |
+| `POST` | `/api/runs/{run_id}/upstream/check` | Buy explicit real source repetitions, old-recipe artifact regressions and trigger tests. | — |  |
+| `POST` | `/api/runs/{run_id}/upstream/proposals` | Author a generalized capability in a run-owned Maintainer git worktree; no base switch. | — |  |
+| `POST` | `/api/runs/{run_id}/upstream/recover` | Operator abandonment of an interrupted claim, granting no pass and no resume. | — |  |
 
 ### `/api/scope-report`
 

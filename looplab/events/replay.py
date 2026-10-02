@@ -102,6 +102,7 @@ from looplab.events.types import (
     EV_NODE_ABORT, EV_NODE_BUILDING, EV_NODE_CONFIRMED,
     EV_NODE_CREATED, EV_NODE_EVAL_STARTED, EV_NODE_EVALUATED, EV_NODE_FAILED, EV_NODE_REPAIRED,
     EV_NODE_RESET,
+    EV_NODE_OVERLAY_REBASED,
     EV_APPLIED_PARAMS_BACKFILLED,
     EV_SCORE_METRICS_BACKFILLED,
     EV_NODE_TOMBSTONED, EV_NODE_VALUE_ESTIMATED, EV_PAUSE, EV_STAGE_FINISHED,
@@ -178,6 +179,7 @@ def _on_run_started(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
     _dir = str(d.get("direction", "min")).strip().lower()
     st.direction = _dir if _dir in ("min", "max") else "min"
     st.config_hash = d.get("config_hash", "")
+    st.upstream_enabled = isinstance(d.get("upstream"), dict) and bool(d["upstream"])
     # doc 67 67.14: the task's declared baseline/target, held to the one rule the writer used
     # (`core/headroom.py::normalized_reference`); None on every log that pinned none. Reporting only.
     st.reference_score = normalized_reference(d.get("reference_score"))
@@ -962,6 +964,16 @@ def _record_repair_ledger(st: RunState, d: dict, ctx: "_FoldCtx") -> None:
         "rationale": (rationale[:_REPAIR_LEDGER_RATIONALE_CAP]
                       if isinstance(rationale, str) else None),
     })
+
+
+def _on_node_overlay_rebased(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
+    n = _node_for_event(st, d)
+    files, deleted = d.get("files"), d.get("deleted")
+    if (n is not None and n.id not in st.aborted_nodes and not n.tombstoned
+            and _generation_matches(n, d) and n.status is NodeStatus.pending
+            and isinstance(files, dict) and all(isinstance(k, str) and isinstance(v, str) for k, v in files.items())
+            and isinstance(deleted, list) and all(isinstance(v, str) for v in deleted)):
+        n.files, n.deleted = dict(files), list(deleted)
 
 
 def _on_node_repaired(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
@@ -2568,6 +2580,7 @@ _OWN_HANDLERS = {
     EV_NODE_EVALUATED: _on_node_evaluated,
     EV_NODE_FAILED: _on_node_failed,
     EV_NODE_REPAIRED: _on_node_repaired,
+    EV_NODE_OVERLAY_REBASED: _on_node_overlay_rebased,
     EV_NODE_TOMBSTONED: _on_node_tombstoned,
     EV_APPLIED_PARAMS_BACKFILLED: _on_applied_params_backfilled,
     EV_SCORE_METRICS_BACKFILLED: _on_score_metrics_backfilled,

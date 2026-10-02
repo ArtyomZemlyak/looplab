@@ -360,6 +360,58 @@ class HarnessAPI:
                     "message": "Completion page is incomplete or inconsistent. Read it again explicitly before interpreting results; no paging, retry or engine work was made."}
         return result
 
+    def upstream_status(self, run_id: str, expected_generation: str, offset: int = 0, limit: int = 40) -> dict:
+        self._run_identity(run_id, expected_generation)
+        if type(offset) is not int or offset < 0 or type(limit) is not int or not 1 <= limit <= 100:
+            raise ValueError("Use a nonnegative offset and limit 1..100")
+        result = self._checked_generation(self.request("GET", f"/api/runs/{quote(run_id, safe='')}/upstream?expected_generation={expected_generation}&offset={offset}&limit={limit}"), expected_generation)
+        if result.get("status") == 200 and not result.get("code"):
+            page = result["body"]
+            active, candidates = page.get("active_base"), page.get("candidates")
+            valid = (page.get("version") == 1 and type(page.get("enabled")) is bool and type(page.get("engine_running")) is bool
+                and page.get("source_health") == {"events": "complete"} and isinstance(page.get("history"), list)
+                and len(page["history"]) <= limit and "next_offset" in page
+                and (page["next_offset"] is None or type(page["next_offset"]) is int and page["next_offset"] == offset + limit)
+                and isinstance(active, dict) and isinstance(active.get("revision"), str)
+                and re.fullmatch(r"[0-9a-f]{64}", active["revision"]) is not None
+                and "selector" in active and "advance_seq" in active
+                and isinstance(candidates, dict) and isinstance(candidates.get("rows"), list)
+                and type(candidates.get("bounded")) is bool and candidates.get("limit") == 200)
+            from looplab.harness.upstream_receipts import page_detail
+            if not valid or not page_detail(page):
+                return self._read_refusal("invalid_upstream_page")
+        return result
+
+    def upstream_write(self, run_id: str, operation: str, body: dict) -> dict:
+        if operation not in ("proposals", "check", "advance") or not isinstance(body, dict):
+            raise ValueError("Use propose/check/advance and the retained exact request body")
+        self._run_identity(run_id, body.get("expected_generation", ""))
+        result = self.request("POST", f"/api/runs/{quote(run_id, safe='')}/upstream/{operation}", body)
+        if result.get("status") == 200 and not result.get("code"):
+            from looplab.engine.upstream_state import digest
+            from looplab.engine.upstream_spec import normalize_request
+            receipt = result.get("body")
+            expected = {"proposals": {"upstream_proposed", "upstream_proposal_failed"},
+                        "check": {"upstream_gate_finished", "upstream_gate_abandoned"}, "advance": {"base_advanced"}}[operation]
+            valid = (isinstance(receipt, dict) and receipt.get("version") == 1
+                and receipt.get("action_id") == body.get("action_id") and receipt.get("request_hash") == digest(normalize_request("propose" if operation == "proposals" else operation, body))
+                and receipt.get("event_type") in expected and receipt.get("status") in ("succeeded", "failed")
+                and type(receipt.get("seq")) is int and receipt["seq"] >= 0
+                and isinstance(receipt.get("proposal_id"), str) and re.fullmatch(r"up_[0-9a-f]{24}", receipt["proposal_id"]) is not None)
+            if valid and operation == "check" and receipt["event_type"] == "upstream_gate_finished":
+                measured = receipt.get("result")
+                valid = (isinstance(measured, dict) and type(measured.get("passed")) is bool
+                    and receipt["status"] == ("succeeded" if measured["passed"] else "failed")
+                    and isinstance(measured.get("checks"), list) and isinstance(measured.get("executions"), list)
+                    and receipt.get("evidence_token") == digest(measured))
+            from looplab.harness.upstream_receipts import event
+            if valid:
+                valid = event(receipt, receipt["event_type"]) and receipt["status"] == (
+                    "failed" if receipt["event_type"] == "upstream_proposal_failed" or receipt["event_type"] == "upstream_gate_finished" and receipt["result"]["passed"] is False else "succeeded")
+            if not valid:
+                return self._unknown_write(result, "invalid_upstream_receipt")
+        return result
+
     def connection_check(self, run_id: str, expected_generation: str = "") -> dict:
         """Explicit, read-only bootstrap check; never resumes a worker or probes a model.
 
@@ -552,6 +604,26 @@ def build_server(api: HarnessAPI):
             phase["entity_schema"] = (ResearchMemo if phase_id == "research"
                                       else Idea).model_json_schema()
         return phase
+
+    @mcp.tool(annotations=ToolAnnotations(readOnlyHint=True, destructiveHint=False, idempotentHint=True, openWorldHint=False))
+    def upstream_status(run_id: str, expected_generation: str, offset: int = 0, limit: int = 40) -> dict:
+        """Read verified base, reusable hunk nominations and paged measured gate history. No work starts."""
+        return api.upstream_status(run_id, expected_generation, offset, limit)
+
+    @mcp.tool(annotations=ToolAnnotations(readOnlyHint=False, destructiveHint=True, idempotentHint=True, openWorldHint=False))
+    def upstream_propose(run_id: str, body: dict) -> dict:
+        """Submit Maintainer's generalized patch plus separate recipe, documented old-default flag and critic. Preserve exact body/action_id. Requires stopped engine."""
+        return api.upstream_write(run_id, "proposals", body)
+
+    @mcp.tool(annotations=ToolAnnotations(readOnlyHint=False, destructiveHint=True, idempotentHint=True, openWorldHint=True))
+    def upstream_check(run_id: str, body: dict) -> dict:
+        """Buy explicit full-source equivalence and operator regression/repair-trigger checks. A lost response never implies a failed check; read history before exact retry."""
+        return api.upstream_write(run_id, "check", body)
+
+    @mcp.tool(annotations=ToolAnnotations(readOnlyHint=False, destructiveHint=True, idempotentHint=True, openWorldHint=False))
+    def upstream_advance(run_id: str, body: dict) -> dict:
+        """Explicit stopped-engine CAS with current passing evidence_token and expected_base_revision. Only future lifecycles change. Resume separately."""
+        return api.upstream_write(run_id, "advance", body)
 
     @mcp.tool()
     def settings_keys(query: str = "") -> dict:

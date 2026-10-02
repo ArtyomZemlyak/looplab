@@ -1106,6 +1106,16 @@ EV_LESSONS_STORE_UNAVAILABLE = "lessons_store_unavailable"
 # it) — an order the main task alone writes, in staging order.
 EV_CARD_RANKING_STAGED = "card_ranking_staged"
 
+EV_UPSTREAM_PROPOSAL_STARTED = "upstream_proposal_started"
+EV_UPSTREAM_PROPOSED = "upstream_proposed"
+EV_UPSTREAM_PROPOSAL_FAILED = "upstream_proposal_failed"
+EV_UPSTREAM_GATE_STARTED = "upstream_gate_started"
+EV_UPSTREAM_EXECUTION = "upstream_execution"
+EV_UPSTREAM_GATE_FINISHED = "upstream_gate_finished"
+EV_UPSTREAM_GATE_ABANDONED = "upstream_gate_abandoned"
+EV_BASE_ADVANCED = "base_advanced"
+EV_NODE_OVERLAY_REBASED = "node_overlay_rebased"
+
 ALL_EVENT_TYPES: frozenset[str] = frozenset(
     v for k, v in globals().items() if k.startswith("EV_") and isinstance(v, str)
 )
@@ -1318,6 +1328,15 @@ class PayloadContract:
 
 
 EVENT_PAYLOAD_KEYS: dict[str, PayloadContract] = {
+    "node_overlay_rebased": PayloadContract("A future lifecycle's effective overlay, after verified base migration or exact capability absorption.", required=("deleted", "files", "generation", "node_id", "selector"), optional=("attempt",)),
+    "upstream_proposal_started": PayloadContract("Durable claim before run-owned Maintainer work.", required=('action_id', 'proposal_id', 'request_hash'), stored_whole=True),
+    "upstream_proposal_failed": PayloadContract("A proposal failed; no gate permission.", required=('action_id', 'code', 'proposal_id', 'request_hash'), stored_whole=True),
+    "upstream_proposed": PayloadContract("Generalized capability with immutable candidate archive and separate source recipe.", required=('action_id', 'base_revision', 'capability_paths', 'commit', 'critic', 'expected_base_revision', 'flag', 'hunk_hashes', 'manifest_hash', 'old_selector', 'proposal_id', 'repair_trigger_nodes', 'request_hash', 'selector', 'source_node_id', 'source_recipe', 'source_signature', 'summary'), stored_whole=True),
+    "upstream_gate_started": PayloadContract("Claim before real equivalence/regression work; no implicit retry.", required=('action_id', 'input_identity', 'proposal_id', 'request_hash'), stored_whole=True),
+    "upstream_execution": PayloadContract("Separate charged gate execution, never a node score.", required=('action_id', 'execution', 'proposal_id', 'request_hash'), stored_whole=True),
+    "upstream_gate_finished": PayloadContract("Measured gate verdict bound to actual source and inputs.", required=('action_id', 'evidence_token', 'proposal_id', 'request_hash', 'result'), stored_whole=True),
+    "upstream_gate_abandoned": PayloadContract("Operator recovery of an interrupted claim; grants no pass.", required=('action_id', 'claim_action_id', 'proposal_id', 'reason', 'request_hash'), stored_whole=True),
+    "base_advanced": PayloadContract("Explicit stopped-engine CAS: only future lifecycles adopt the verified base.", required=('action_id', 'evidence_token', 'flag', 'from_revision', 'gate_seq', 'hunk_hashes', 'proposal_id', 'request_hash', 'selector', 'source_node_id', 'summary'), stored_whole=True),
     "ablate": PayloadContract(
         "One ablation of the champion's code: which blocks were removed and what each removal cost the metric.",
         required=("generation", "impacts", "parent_id"),
@@ -2302,7 +2321,7 @@ EVENT_PAYLOAD_KEYS: dict[str, PayloadContract] = {
             "speculation_calibration_seed", "speculation_depth", "speculation_depth_auto",
             "speculation_gate_receipt_digest", "speculation_implementation_digest",
             "speculation_policy_scope", "speculation_runtime_scope_sha256", "split_salt",
-            "task_id", "task_identity", "trust_gate", "verifier_ci_tie", "workspace"
+            "task_id", "task_identity", "trust_gate", "upstream", "verifier_ci_tie", "workspace"
         ),
     ),
     "run_width_settled": PayloadContract(

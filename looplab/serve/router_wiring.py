@@ -155,7 +155,8 @@ def router_builders() -> tuple:
         boss as _boss_router, collaboration as _collaboration_router,
         control as _control_router, cross_run as _cross_run_router,
         genesis as _genesis_router, misc as _misc_router, org as _org_router,
-        reports as _reports_router, reviews as _reviews_router, runs as _runs_router)
+        reports as _reports_router, reviews as _reviews_router, runs as _runs_router,
+        upstream_ops as _upstream_router)
 
     return (_runs_router.build_router, _attention_router.build_router,
             _collaboration_router.build_router,
@@ -163,7 +164,7 @@ def router_builders() -> tuple:
             _control_router.build_router, _genesis_router.build_router,
             _assistant_router.build_router, _boss_router.build_router,
             _jobs_router.build_router, _reports_router.build_router,
-            _cross_run_router.build_router, _misc_router.build_router)
+            _cross_run_router.build_router, _upstream_router.build_router, _misc_router.build_router)
 
 
 def _module_stem(builder) -> str:

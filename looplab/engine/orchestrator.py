@@ -1163,6 +1163,8 @@ class Engine(ConfirmPhaseMixin, NoiseFloorMixin, AblationMixin, NoveltyGateMixin
         self._apply_search_split(refuse=False)
         self._holdout_epoch = 0
         # RepoTask (ADR-7): an existing repo the agent edits + a command-based eval.
+        if callable(getattr(task, "bind_run_directory", None)):
+            task.bind_run_directory(self.run_dir)
         rs = getattr(task, "repo_spec", None)
         self._repo_spec: dict = rs() if callable(rs) else {}
         es = getattr(task, "eval_spec", None)
@@ -1752,7 +1754,7 @@ class Engine(ConfirmPhaseMixin, NoiseFloorMixin, AblationMixin, NoveltyGateMixin
         # `events/types.py::PROGRESS_STAGES`, which is why that vocabulary has one stage and not two.
         events = self.store.read_all()
         from looplab.engine.seed_base import enforce_initial_seed_base
-        enforce_initial_seed_base(events, self._repo_spec.get("seed_base"))
+        enforce_initial_seed_base(events, self._repo_spec.get("seed_base"), self._repo_spec.get("upstream"))
         # THIS PROCESS'S ENTRY BOUNDARY, from the log it reads first: every `card_build_attempted`
         # receipt at or below it was written by an earlier process, which is the one fact that lets a
         # quarantine close call itself a restart's (`speculation.py::_attempt_predates_this_process`).

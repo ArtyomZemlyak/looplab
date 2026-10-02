@@ -317,7 +317,7 @@ class WorkspaceSeeder:
         # this discriminator exists to refuse. An opaque marker keeps it refusable.
         return {**base, "dirty": digest[:16] if digest else "unknown"}
 
-    def seed_workspace(self, workdir) -> dict | None:
+    def seed_workspace(self, workdir, *, repo_spec=None, base_rebase=None) -> dict | None:
         """RepoTask (ADR-7): materialize the editable repo tree(s) into the eval workdir, plus
         any runtime-mounted reference repos and data files. Phase 4: each editable repo is
         mounted at its own subdir (name=".") -> workspace root). The agent's `Node.files` edits
@@ -327,8 +327,9 @@ class WorkspaceSeeder:
             return
         if (self._e._repo_spec or {}).get("seed_base") is not None:
             from looplab.engine.seed_base import enforce_initial_seed_base
-            enforce_initial_seed_base(self._e.store.read_all(), self._e._repo_spec["seed_base"])
+            enforce_initial_seed_base(self._e.store.read_all(), self._e._repo_spec["seed_base"], self._e._repo_spec.get("upstream"))
         from looplab.engine.workspace_seed import SeedOps, seed_candidate_workspace
+        spec = repo_spec if repo_spec is not None else self._e._repo_spec
         wd = Path(workdir)
         sp = (self._e.tracer.span("seed_workspace") if self._e.tracer is not None
               else __import__("contextlib").nullcontext(None))
@@ -342,7 +343,7 @@ class WorkspaceSeeder:
             # this seeder's own bound methods so `Engine._seed_repo_tree` / `_link_input` /
             # `copy_input` remain the patch points they have always been.
             rows = seed_candidate_workspace(
-                self._e._repo_spec, wd, seed_mode=(self._e._seed_mode or "auto"),
+                spec, wd, seed_mode=(self._e._seed_mode or "auto"),
                 capture_base_revision=True,
                 base_archive_dir=Path(archive_run) / "base_snapshots" if archive_run is not None else None,
                 ops=SeedOps(seed_repo_tree=self._e._seed_repo_tree,
@@ -392,6 +393,8 @@ class WorkspaceSeeder:
                 payload["workspace_bytes"] = sum(editable_bytes)
             base_revision = next((row["base_revision"] for row in rows if "base_revision" in row), None)
             if base_revision is not None:
+                if base_rebase is not None:
+                    base_revision["rebase"] = base_rebase
                 payload["base_revision"] = base_revision
             event = self._e.store.append(EV_WORKSPACE_SEEDED, payload)
             if base_revision is not None and type(getattr(event, "seq", None)) is int:
@@ -455,7 +458,14 @@ class WorkspaceSeeder:
 
         if (self._e._repo_spec or {}).get("seed_base") is not None:
             from looplab.engine.seed_base import enforce_initial_seed_base
-            enforce_initial_seed_base(self._e.store.read_all(), self._e._repo_spec["seed_base"])
+            enforce_initial_seed_base(self._e.store.read_all(), self._e._repo_spec["seed_base"], self._e._repo_spec.get("upstream"))
+        upstream_plan = None
+        authored_node = node
+        if (self._e._repo_spec or {}).get("upstream") is not None:
+            from looplab.engine.upstream_state import events_for
+            from looplab.engine.upstream_workspace import materialization_plan
+            spec, node, rebase = materialization_plan(self._e._repo_spec, node, events_for(self._e.run_dir))
+            upstream_plan = (spec, rebase)
         # SETTLED, not a bare `resolve()` (review 2026-09-22, WIN-4): concurrent sibling evals reach
         # this line together, and the first to write creates `run/nodes`. On Windows a resolve of a
         # workdir that does not exist yet, straddling that creation, keeps its `\\?\` prefix, so
@@ -472,7 +482,13 @@ class WorkspaceSeeder:
             # Read-only-aware: a workdir seeded from a git clone holds read-only pack files, which
             # Windows refuses to unlink — a second materialization of the same node failed there.
             rmtree_readonly_aware(wd)
-        base_revision = self._e._seed_workspace(wd) # RepoTask: editable repo tree (ADR-7) …
+        if upstream_plan and (node.files != authored_node.files or node.deleted != authored_node.deleted):
+            self._e.store.append("node_overlay_rebased", {"node_id": node.id, "generation": node.attempt,
+                "files": node.files, "deleted": node.deleted, "selector": upstream_plan[0]["effective_seed_base"]},
+                require_lock=True, require_durable=True)
+            authored_node.files, authored_node.deleted = dict(node.files), list(node.deleted)
+        base_revision = (self.seed_workspace(wd, repo_spec=upstream_plan[0], base_rebase=upstream_plan[1])
+                         if upstream_plan else self._e._seed_workspace(wd))
         self._e._write_node_files(node, wd)         # … agent edits on top …
         self._e._write_assets(wd)                   # … task assets win any name collision
         return base_revision

@@ -1,10 +1,11 @@
 # 72 — Из ноды во фреймворк: upstream возможностей, найденных в прогоне (2026-10-01)
 
-> **Статус: upstream — предложение; 72.2 и archive/export/scorer/initial-pin prerequisites реализованы (§8–16).** Ни один
+> **Статус: WP1–WP3 и 72.1–72.7 реализованы в opt-in scope §18; review — §17.** Ни один
 > дефолт не переключён. Исторические свидетельства ниже:
 > каждое исходное утверждение о коде сверено с `master` @ `65551da0` (2026-10-01) и цитируется как
-> `<модуль>.py::<символ>`; каждый `proof:` из раздела 5 прогнан через
-> `core/claimpin.py::predicate_holds` над этим деревом. Свидетельства — журнал прогона
+> `<модуль>.py::<символ>`; исходные symbol proofs проверялись через
+> `core/claimpin.py::predicate_holds`. Текущая приёмка в разделах 5 и 18 подтверждается
+> исполнением, а не историческими symbol proofs. Исторические свидетельства — журнал прогона
 > `minionerec-lora-v1` (`events.jsonl`, 1 892 логических события после распаковки батчей, последнее —
 > 2026-10-01 14:33 UTC) и рабочие каталоги его узлов `nodes/node_0..3`; оба читались только на
 > чтение. Пометки: **[измерено]** — число или дифф сняты с журнала/диска в этом проходе;
@@ -13,14 +14,18 @@
 > навсегда) здесь **не пересматривается**: раздел 2.1 объясняет, почему предложение его не задевает.
 
 **Ревью 2026-10-02.** Исторические измерения выше относятся к исходному проходу, а не
-к повторному чтению удалённого прогона. Актуальная база кода: `cdebb964c`, интегрирована
-с harness fixes в `034d3ae97`. Цель остаётся переносом проверенной общей возможности
-из узла в базу. Первая реализация — наблюдаемая база засева (72.2); запись digest
-сама по себе не является архивом, воспроизводимостью или разрешением upstream.
+к повторному чтению удалённого прогона. Ревью начиналось на `cdebb964c`, интегрированном
+с harness fixes в `034d3ae97`. Цель — перенос проверенной общей возможности из узла
+в базу — реализована по контракту §17 с приёмкой и границами §18. Наблюдаемая база
+засева (72.2) стала первым этапом; один digest по-прежнему не заменяет архив,
+измеренную проверку или явное разрешение upstream.
 
 ---
 
 ## 0. Сводка
+
+Первые пять строк и строка «Главный риск» описывают исходный прогон. Текущий
+реализованный путь и его ограничения описаны в §18.
 
 | Вопрос | Ответ | Где |
 |---|---|---|
@@ -29,10 +34,10 @@
 | Что потеряно на узле 2 | 15 ч 26 мин стены, из них 8.07 ч — четыре упавших или задержанных оценки; три из четырёх причин — общие дефекты пайплайна, не наука узла | 1.2 |
 | Кто ещё ударился бы о те же дефекты | Семь черновиков-соседей (3, 6, 7, 10, 12, 13, 20) несут оба триггера и не могут унаследовать фикс соседа | 1.2 |
 | Узел 19 | Плечо исследователя реализовано одноразовым сценарием на 156 строк, который копирует общий раннер и в третий раз переписывает фикс узла 2; по диффам env это плечо выражалось рецептом поверх общего раннера | 1.3 |
-| Что уже реализовано | 72.2: receipt скопированной базы; prerequisites 72.1: bounded архив, export-bundle, byte evidence объявленной границы скорера и immutable initial pin новой задачи. Переноса в базу пока нет | 8, 10, 12, 14, 16 |
+| Что уже реализовано | Archived seed, Maintainer worktree, per-hunk nomination, измеренные equivalence/regression/repair gates, explicit CAS, перенос overlay, Assistant/MCP и provenance/filter UI | 8–18 |
 | Предложение | «Полоса upstream»: классификация диффа узла на РЕЦЕПТ и ВОЗМОЖНОСТЬ, роль Maintainer в worktree БАЗЫ (по одному на кандидата), гейт эквивалентности/регрессии, журналируемое `base_advanced` | 3 |
 | Главный риск | Контракт оценки декларативен: он не видит байтов скорера, а в этой задаче скорер и тренер — один файл без защиты (`protect: []`) | 3.4, 4 |
-| Открытые пункты | Шесть маркеров с фальсификаторами; 72.2 закрыт в описанном scope | 5, 8 |
+| Состояние пунктов | 72.1–72.7 закрыты в ограниченном, исполняемом scope; неподдерживаемые среды явно отказываются | 5, 18 |
 
 ---
 
@@ -354,46 +359,23 @@ PR/MR для человека; движок туда не пушит.
 
 ## 5. Состояние пунктов
 
-Каждый маркер несёт свой фальсификатор (грамматика `core/claimpin.py::PROOF`), который сегодня
-истинен и перестанет быть истинным, когда пункт отгрузят. Смежный 67.12 теперь
-реализован в bounded regular-file scope (§10–12); data/environment не архивированы.
-Постоянный отказ `f3-node-workspace-worktree` (doc 29 §F3, doc 37) сохраняется.
+Пункты закрыты по исполняемому пути §18. Исторические absent-фальсификаторы
+из исходного ревью сняты: символ сам по себе не был достаточной приёмкой.
+Постоянный отказ от git worktree для **узлов** сохраняется; worktree здесь
+принадлежит только Maintainer. Архивы не включают data/environment.
 
-- **72.1** OPEN[no-base-advance-event] внутри живого прогона база движется только ручной правкой
-  рабочей копии оператора, и это не записано ничем, кроме сменившегося `substrate` на следующем
-  терминале (раздел 1.1: `bfe1cc85…` → `bd9473c6…` без единого события); нет события, которое
-  продвигает базу к коммиту и засевает не запущенные узлы на ней (раздел 3.6).
-  proof:absent:EV_BASE_ADVANCED@looplab/events/types.py
-- **72.2 — реализовано 2026-10-02.** `workspace_seeded.base_revision` описывает
-  скопированные editable/protected файлы до mounts/overlay/assets. Primary terminal
-  сохраняет этот receipt в `metric_provenance.base_revision`, связывая его с
-  `seed_event_seq`, `node_id` и generation. Старый `comparability.substrate` остаётся
-  отдельным live discriminator; фильтрация UI и equivalence ещё не реализованы.
-  Bounded архив добавлен в §10; data/environment и scorer closure он не сохраняет.
-  При недоступной полной идентичности — unknown, а не частичный digest. Приёмка: §8.
-- **72.3** OPEN[repair-fix-never-reaches-the-base] фикс ремонта инфраструктурного отказа остаётся в
-  оверлее одного узла; `RunState.repair_candidates` только ранжирует (и при одном заплатившем узле
-  молчит), а соседи с тем же триггером платят заново (раздел 1.2: семь черновиков). Нет выбора
-  кандидатов по триггеру у не запущенных узлов (раздел 3.2).
-  proof:absent:upstream_candidates@looplab
-- **72.4** OPEN[node-diff-not-split-recipe-capability] дифф узла классифицируется одним словом на
-  узел (`activation.change_class`: `config_only`/`code`), а не по ханку с происхождением; общий фикс
-  пайплайна в `experiment.env` неотличим от научной ручки (разделы 1.2, 3.1).
-  proof:absent:CHANGE_CAPABILITY@looplab/engine/activation.py
-- **72.5** OPEN[no-maintainer-role] нет роли, которая обобщает возможность узла в worktree базового
-  репозитория (флаг с прежним дефолтом, без хардкодов узла, с тестами и документацией ручки), —
-  узел 19 оставил 156-строчную копию раннера в оверлее (разделы 1.3, 3.3).
-  proof:missing:looplab/agents/maintainer.py
-- **72.6** OPEN[no-upstream-equivalence-gate] нет гейта, который перед продвижением базы доказывает
-  эквивалентность (рецепт узла на новой базе в пределах пола шума; для фикса ремонта — стадия отказа с
-  её настоящим триггером, не канарейка), регрессию (флаг выключен — старые рецепты байт-в-байт) и
-  неизменность пути оценки по БАЙТАМ, а не по декларации (раздел 3.4). Вердикт должен быть событием.
-  proof:absent:EV_UPSTREAM@looplab/events/types.py
-- **72.7** OPEN[ui-does-not-name-a-nodes-base] UI и отчёт не показывают, на какой базе бежал узел и
-  какая возможность базы пришла из какого узла (WP3, раздел 3.7).
-  proof:absent:base_revision@ui/src
+| Пункт | Реализация и проверяемый результат |
+|---|---|
+| **72.1 — CLOSED** | `UpstreamLane.advance`: stopped-engine current-evidence CAS, durable `base_advanced`; actual next Engine evaluation uses its archived selector. |
+| **72.2 — CLOSED** | Same-read `workspace_seeded.base_revision`; terminal receipt identifies seed event, node and lifecycle. Partial/legacy provenance stays unknown. |
+| **72.3 — CLOSED** | Applied current-lifecycle repair hunks, original failing env tokens and pending neighbors; real old-fail/new-pass operator probe. Config fixes are generalized into runner code under an opt-in flag. |
+| **72.4 — CLOSED** | Per-hunk path/ranges/hash, idea/repair origin, recipe/capability/already_promoted advice; advice never certifies a score or authorizes advancement. |
+| **72.5 — CLOSED** | Dedicated `agents/maintainer.py` author contract and validator; run-owned reachable git worktrees, separate source recipe, documented prior-default flag and named critic. Assistant/external agent authors the proposal; no extra hidden paid role. |
+| **72.6 — CLOSED** | Operator tests, artifact regressions, paired full source repeats with SEM/tolerance and reproduction of the source score; repair trigger gate; scorer bytes and actual inputs bound before/after and at CAS. Durable claims, execution costs and exact ACKs are separate from Node.metric. |
+| **72.7 — CLOSED** | Inspector, Overview and Report show recorded base/origin/conflict; graph base filter intersects concept filters and aggregates only matching nodes. Assistant is the action entry point. |
 
----
+Historical implementation milestones (§7–16) retain their dated “next step” notes.
+The current contract and limitations are §18, not those earlier intermediate states.
 
 ## 6. Рекомендуемый порядок
 
@@ -888,3 +870,138 @@ data drift/stale source/base/CAS, lost ACK/crashed claim/recovery, protected wri
 three-way nonoverlap/conflict и reset, archive/export/replay, external MCP и UI.
 Документ отмечает поддержку по этому scope и точные оставшиеся ограничения;
 маркер снимается по исполняемому пути, а не по появлению символа.
+
+## 18. Законченный upstream lane: контракт, приёмка и границы
+
+Ревью §17 опубликовано отдельным commit `9c8570109` до реализации. WP1–WP3
+закрываются одним shared engine transaction, доступным Assistant и внешнему агенту.
+Новый opt-in `RepoTask.upstream` требует immutable `seed_base`, declared
+`cmd.scorer_boundary`, operator tests и old-recipe artifact regressions. Декларация
+закреплена в `run_started`; её нельзя добавить/ослабить на resume. Без неё
+никакой новый платный шаг или advancement не запускается.
+
+### 18.1 Авторство и измеренное решение
+
+`upstream_candidates` сравнивает source overlay с его реально архивированным seed:
+path, ranges, SHA-256 hunks, source lifecycle signature и repair/idea origin.
+Repair применяется только до terminal текущего lifecycle. Для env-fix pending
+триггер ищется по **старому падающему** присваиванию, не по исправленному значению.
+Unchanged и post-terminal repair не превращают научную ручку в capability.
+`already_promoted` hunks и `state_brief` помогают не предлагать общий runner заново.
+Классификация — bounded advice, не доказательство полезности или разрешение записи.
+
+Maintainer — отдельный author contract, вызываемый автором Assistant/внешним агентом.
+Он получает исходную реализацию, делает generalized patch, отдельный source recipe,
+явный flag с прежним default, документацию и named critic review. Worktree создаётся
+в `RUN_DIR/upstream/proposals/...`; reachable git refs лежат в `upstream/git`.
+Обычные node directories остаются обычными directory, owner checkout не записывается.
+Critic prose не выдаётся за независимую модельную оценку или measured verdict.
+
+Env repair переносится в runner implementation; recipe может явно включить новый
+repair flag. Pending scientific knobs не переписываются автоматически. Operator
+repair probe обязан содержать исходный failing trigger. Probe не может подменить
+проверяемый implementation своим overlay. Patch/recipe/probes проходят прежние
+surface/protect проверки; supplied score не является входом решения.
+
+Gate реально исполняет declared tests, paired full old/new source repetitions,
+old-recipe artifact regressions и, для repair nomination, old-fail/new-pass probe.
+Source mean должен воспроизвести исходный task score. Tolerance = `atol + rtol ×
+scale + sigma × hypot(old_SEM, new_SEM)`; repetitions 2–10 (default 3), sigma ≤4.
+Один source score, canary или prose не заменяют gate. Общий stage resolver сохраняет
+operator stages; opaque train+score command исполняется один раз за evaluation.
+
+Каждое gate execution пишет log/workspace и отдельный `upstream_execution` с фактической
+стоимостью в `eval_seconds_by_kind.upstream`; Node.metric не обновляется. Fingerprint
+связывает task/config bytes, source lifecycle, оба actual archives, source recipe,
+declared inputs, installed interpreter distributions и process environment. Scorer
+boundary неизменна до/после каждого исполнения. Input drift между gate и CAS отказывает.
+
+### 18.2 Явная смена базы и восстановление
+
+Assistant tools и scoped MCP: `upstream_status`, `upstream_propose`, `upstream_check`,
+`upstream_advance`. `phases(query="upstream")` / `phase_info` показывают соответствующие
+API и write access. Внутренний run требует owner credential для upstream writes;
+scoped token работает с external run, recovery остаётся operator-only.
+Assistant plan mode только читает. Каждая mutation проходит существующую approval
+policy; approval scope содержит digest полного запроса, включая bytes после preview.
+
+Порядок: pause → дождаться **выхода engine** → propose → check → прочитать measured
+gate → explicit CAS advance → отдельно resume. Lifecycle и required interprocess
+locks ограждают launch/reset/delete. Начатые evaluations и queued candidate admission
+блокируют advancement. Нет автоматического продвижения, перезапуска, takeover или
+неизвестного engine wait.
+
+Claim append durable **до** работы. Exact action/body возвращает исходный ACK и не
+покупает повторную training; ACK читается и после resume. Started claim без verdict
+отказывает повторному запуску. Оператор inspect-ит logs/worktree и явно abandons claim
+через `/upstream/recover`, после чего агент выбирает новый action ID. Abandonment —
+успешная audit action, не gate pass/advance/resume. Повреждённый/незавершённый log
+отказывает даже восстановлению ACK. Typed MCP проверяет identities, generations,
+pagination, gates, finite numeric execution/cost fields и evidence token; incomplete
+HTTP 200 остаётся unavailable/unknown, не saved success. Source recipe bytes хранятся
+в manifest/events; ACK/read возвращают их digest/path metadata.
+
+`base_advanced` с exact gate token/CAS сохраняет immutable selector. Future materialization
+берёт эту базу. Three-way merge переносит nonoverlap; точная унаследованная реализация
+поглощается проверенным общим runner. Scientific recipe сохраняется отдельно. Конфликт
+оставляет **весь** узел на старой verified базе с перечнем конфликтов. Effective overlay
+пишется `node_overlay_rebased`, поэтому export/reset/replay не возвращают удалённую
+копию runner. Terminal сохраняет именно использованные base/seed/node/generation.
+Старые scores не ретаргетятся и не объявляются автоматически сравнимыми с новой базой.
+
+### 18.3 Приёмка
+
+`benchmarks/upstream_smoke.py` запускает disposable UI server, настоящий Engine и
+scoped stdio MCP. Никаких model calls или ML leaderboard claims. Acceptance:
+`.tmp/doc72-full-upstream-complete/acceptance.json` — два настоящих CPU SGD experiment,
+7 gate executions, точные ACK retries без повторного исполнения, explicit advance,
+следующий child с recipe `MOMENTUM=0.3` без копии runner, result commentary по-русски,
+сохранённый прежний score и scorer bytes, replay и verified export без log writes/eval.
+
+`tests/test_upstream_repairs.py`: настоящее падение negative-recipe training, applied
+repair и source evaluation; generalized opt-in sentinel, 9 gate executions, старый
+trigger падает/новый проходит, default artifact regression и paired equivalence.
+Canary без trigger и post-terminal repair отказываются.
+
+Functional tests покрывают failed default/equivalence, source reset, archive/snapshot
+drift, torn log, masked probe, бюджеты, engine-running guard, lost claim/recovery,
+exact body conflicts, protected scorer, operator stages/opaque single training,
+pending overlay conflict/absorption/rematerialization, typed API/MCP, scoped owner
+boundaries и полное Assistant approval binding. UI unit tests проверяют unknown
+provenance, filtering/origin и связанные graph/report/Inspector flows.
+
+Финальная UI-проверка production build на desktop 1920×1080 подтвердила историю
+баз, Assistant handoff без автоматической отправки и выделение нового seed на
+графе. Исправлены стили provenance, ранее зависевшие от загрузки Overview, и
+ложный ▲/▼ между несопоставимыми результатами. Arrow требует matching recorded
+evaluation, finite measured scores и совместимую записанную базу; confirmation
+means и unknown evidence не превращаются в improvement. 1814 UI tests прошли
+с concurrency=4. Build и bundle size/reachability/cycle gates прошли; измеренный
+baseline нового provenance UI записан рядом с budget, route boundaries сохранены.
+
+Replay-first: 193 tests. Общая Python regression: 1258 passed, 10 skipped, один
+Windows `rmtree` отказ на уже пустом workspace при нагруженном прогоне. Тот же
+seed suite отдельно: 13 passed, 1 skipped; ещё 32 реальные rematerialization
+циклы прошли. Причина системного отказа не доказана; containment/delete guard
+не ослаблен и эта ошибка не объявлена исправленной. Первый oversubscribed UI
+прогон также имел один timing failure; isolated case и весь controlled suite
+прошли. API/event references, архитектурная схема, docs budgets и strict MkDocs
+проверены отдельно. Эти результаты не заменяют явно ограниченный gate scope ниже.
+
+### 18.4 Явные ограничения
+
+Первая lane требует `trusted_local`, self-contained command evaluator и declared
+scorer boundary. Docker/host scorer/run_setup/environment installation отказываются
+этим gate; они не исполняются менее защищённым альтернативным путём. Проверяются
+только declared observable recipes/triggers/dependencies, не произвольный внешний
+side effect или полнота undeclared scorer closure. Boundaries файловые, не protected
+regions внутри совмещённого trainer/scorer. Первичный GPU benchmark и отдельный
+paid Maintainer/critic model workflow этой приёмкой не заявлены.
+
+Regular archive bounds — 20 000 entries/64 MiB; event source read — 32 MiB,
+patch — bounded text 2 MiB. MCP transport сохраняет прежние 1 MiB request / 256 KiB
+response limits: слишком большой ответ unavailable, нужны узкие history pages.
+Origin log/archive, inputs и interpreter остаются required dependencies для resume;
+export переносит actual base bytes и provenance, не объявляет environment/data
+архивированными и не переназначает absolute origin молча. POSIX/Windows symlink
+привилегии и arbitrary GPU reproducibility не объявлены покрытыми CPU-прогоном.

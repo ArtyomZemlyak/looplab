@@ -11,6 +11,7 @@ import { OpIcon } from './icons.jsx'
 import Markdown from './markdown.jsx'
 import CodeViewer from './CodeViewer.jsx'
 import ExperimentResult from './ExperimentResult.jsx'
+import BaseRevision from './BaseRevision.jsx'
 import { diffLines } from './lineDiff.js'
 import { nodeFeasibilityStatus, isSalvagedMetricViolation,
   OBJECTIVE_SOURCE_LABEL, objectiveMetricSource, objectiveSourceCaveated,
@@ -1064,6 +1065,7 @@ function Overview({ n, state, runId, onToast, draftStore, expectedGeneration, on
   }
   return <>
     <ExperimentResult node={n} state={state} onTab={onTab} />
+    <BaseRevision node={n} state={state} />
     <div className="kv">
       <KV k="node" v={`#${n.id}`} />
       <KV k="operator" v={n.operator} />

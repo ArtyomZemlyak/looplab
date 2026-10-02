@@ -640,6 +640,15 @@ def _state_brief(state: RunState, parent: Optional[Node], digest_cap: int = 0,
     # The board itself — both halves, in the one spelling every prompt that must not re-propose
     # an existing question shares (`board_prompt_lines`). The deep-research memo prompt renders
     # the SAME rows; it had this exact defect and did not get this exact fix.
+    if state.upstream_base:
+        base = state.upstream_base
+        lines.append("Active verified capability base: " + str(base.get("selector", {}).get("digest", "unknown"))
+                     + "; source experiment #" + str(base.get("source_node_id"))
+                     + "; " + str(base.get("summary", ""))[:700]
+                     + ". Reuse its runner/flags; do not re-propose the capability or duplicate its implementation. Scientific recipe changes remain experiments. Prior results retain their recorded bases.")
+        for row in [r for r in state.upstream_history if r.get("type") == "base_advanced"][-10:]:
+            lines.append("Promoted capability hunks: " + ", ".join(row.get("hunk_hashes", []))
+                         + " — " + str(row.get("summary", ""))[:250])
     lines.extend(board_prompt_lines(state, hyp_order, board_cards, for_proposal=for_proposal,
                                     fit=fit, support=verdict_support))
     return "\n".join(line for line in lines if line)
