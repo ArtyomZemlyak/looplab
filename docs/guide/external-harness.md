@@ -83,6 +83,14 @@ External agents should add a short interpretation after each completion:
    generation from `/state`. Check `status`, `code` and `outcome` before using `body`.
    This reads `GET /api/runs/{run_id}/result-notices?expected_generation=TOKEN`;
    direct HTTP/MCP `api_request` is also available.
+   The typed tool checks the version-1 envelope (`total`, `items`, `has_more`,
+   `next_cursor`), the requested page size, distinct terminal receipt identities,
+   evidence tokens and numeric score/confirmation fields. Boolean/string/nonfinite
+   scores and failed/aborted receipts claiming a score are refused. An incomplete
+   HTTP 200 returns `response_incomplete`, `outcome=unavailable`,
+   `reason=invalid_result_page`, without its body. This is not an empty result list.
+   Read again explicitly after checking the server; the tool does not repair,
+   retry or follow pages. Extra fields are retained for compatible server additions.
 2. Copy the item's `id` and `evidence_token`. Submit through MCP `api_request`:
 
    ```json
@@ -1218,6 +1226,11 @@ return source refusals without modifying event or sidecar bytes. With
 operator restores its known-good backup, then recovers the old ACKs and explicitly
 satisfies current finish obligations. This probe preserves normal EventStore
 torn-tail handling and makes no production repair request.
+`--case agent_loss --drop-command-response --read-fault incomplete_result_page`
+removes `items` from a real successful result reply while preserving generation.
+The typed read must return `invalid_result_page`, without body or automatic retry.
+The next explicit read recovers the measured receipt without changing event bytes.
+Run this response-loss probe separately from backlog/engine-loss probes.
 `--case agent_loss --drop-command-response --read-fault stale_result_generation`
 instead replaces a successful result page's generation at the owned proxy. The
 typed tool must return unavailable context without those receipts; the next explicit

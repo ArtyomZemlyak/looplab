@@ -594,9 +594,9 @@ External run здесь намеренно не получал кандидат�
 | OB-07 | Частично | Composer показывает активные права и понятное пояснение; четыре варианта раскрываются по запросу, выбор возвращает фокус на видимый переключатель. | Проверить понимание режимов с новым пользователем. |
 | OB-08 | Частично | Essential открывается с модели, показывает 13 полей ресурсов и лимитов с короткими пояснениями; технические детали и runtime permissions раскрываются отдельно. | Проверить подключение модели и понимание лимитов с новым пользователем. |
 | OB-09 | Частично | Run workspace и Agent cycle показывают next step; списки различают внешний режим и engine, attention открывает текущие вопросы (§34–36). Гибель MCP и pause/resume проверены (§37–38). §47 показывает последнее успешное scoped progress чтение. | Активность запросов не доказывает живость агента; многочасовой сценарий OB-10 ещё открыт. |
-| OB-10 | Частично | UI готовит handoff без credential; `connection_check` проверяет live run. Codex/Claude выполнили measured candidates; §37–60 проверяют MCP/UI recovery, pause/resume, engine loss, obligations, monitor, deadline и ASHA. §47–60 — request activity, auth, потерянные/неполные ответы, identity/discovery recovery, отдельный `[harness]` клиент и восстановление пропущенных интерпретаций результатов. | §33: Claude tool cycle с scripted provider. Модельные решения, интерактивное подтверждение инструментов и многочасовой сеанс ещё не проверены. |
-| OB-11 | Реализовано | Общий `next_step` в progress/UI, компактный GET и MCP `run_progress`; source health, gates и пагинация сохраняются. §39/41 исправляют ссылки checkpoint/concept base на реальные MCP-фазы; §52 различает unavailable discovery и пустой catalog; §53 убирает FastAPI dependency из `phase_info`; §54–55 дают cursor и typed MCP read для результатов; §56 — проверенный repair recipe; §57 — original ACK для superseded review/decision. §58 — source completeness для ACK, admission и finish. §59 — MCTS value ACK с исходной evidence revision и реальные policy switches; §60 — event source integrity for semantic reads, publications and replay ACK. | Проверены контракт, subprocess-кандидаты, desktop и discovery из серверной подсказки; подключение нового клиента относится к OB-10. |
-| OB-12 | Реализовано | Recovery-рецепт в UI/MCP/guide; original receipt без worker restart, поиск по ID/key. §37–60: source health, lifecycle verdict, engine recovery, obligations, monitor, retarget, idle recovery, activity, unknown acknowledgement, identity квитанции, minimal client и пагинация результатов без дублей интерпретаций. | Проверены гибель MCP/engine, restart UI, потерянные подтверждения, pause/resume и reset без дубля кандидата. §49–53 повреждают реальные replies, включая discovery. §54 восстанавливает сообщения после reconnect. Наблюдение запросов не измеряет живость агента. |
+| OB-10 | Частично | UI готовит handoff без credential; `connection_check` проверяет live run. Codex/Claude выполнили measured candidates; §37–61 проверяют MCP/UI recovery, pause/resume, engine loss, obligations, monitor, deadline и ASHA. §47–61 — request activity, auth, потерянные/неполные ответы, identity/discovery recovery, отдельный `[harness]` клиент и восстановление пропущенных интерпретаций результатов. | §33: Claude tool cycle с scripted provider. Модельные решения, интерактивное подтверждение инструментов и многочасовой сеанс ещё не проверены. |
+| OB-11 | Реализовано | Общий `next_step` в progress/UI, компактный GET и MCP `run_progress`; source health, gates и пагинация сохраняются. §39/41 исправляют ссылки checkpoint/concept base на реальные MCP-фазы; §52 различает unavailable discovery и пустой catalog; §53 убирает FastAPI dependency из `phase_info`; §54–55 дают cursor и typed MCP read для результатов; §56 — проверенный repair recipe; §57 — original ACK для superseded review/decision. §58 — source completeness для ACK, admission и finish. §59 — MCTS value ACK с исходной evidence revision и реальные policy switches; §60 — event source integrity for semantic reads, publications and replay ACK; §61 — typed completion page validation. | Проверены контракт, subprocess-кандидаты, desktop и discovery из серверной подсказки; подключение нового клиента относится к OB-10. |
+| OB-12 | Реализовано | Recovery-рецепт в UI/MCP/guide; original receipt без worker restart, поиск по ID/key. §37–61: source health, lifecycle verdict, engine recovery, obligations, monitor, retarget, idle recovery, activity, unknown acknowledgement, identity квитанции, minimal client и пагинация результатов без дублей интерпретаций. | Проверены гибель MCP/engine, restart UI, потерянные подтверждения, pause/resume и reset без дубля кандидата. §49–53 повреждают реальные replies, включая discovery. §54 восстанавливает сообщения после reconnect. Наблюдение запросов не измеряет живость агента. |
 | OB-14 | Частично | Начало сайта показывает два основных входа. | Большая архитектурная схема всё ещё нуждается в упрощении для первого знакомства. |
 
 Остальные пункты §3 и соответствующие сценарии §11 остаются открытыми. Изменения первого
@@ -2978,5 +2978,64 @@ generation fence, missing/empty/unreadable source, повреждение во �
 backend/MCP/progress набор — **374 passed**. Guide, AGENTS, MCP instructions,
 manifest и full B/E diagram обновлены. API reference регенерирован; **31**
 docs/diagram check и `mkdocs build --strict` прошли.
+Модельные решения, interactive client approvals, многочасовые сеансы и physical
+remote transfer остаются открытыми.
+
+## 61. OB-10/11/12: неполная MCP-страница результатов не означает отсутствие результатов
+
+**2026-10-02.** Typed `result_notices` проверял generation, но принимал любой
+JSON object с совпадающей generation. Ответ без `items`/paging или с неправильным
+terminal receipt мог стать основанием для вывода об отсутствии результатов либо
+для интерпретации неверной строки. До исправления **32** новые проверки упали;
+существующие generation/transport fences при этом продолжали работать.
+
+После generation fence инструмент проверяет минимальную структуру version-1
+страницы: `total`, `items`, requested limit, строгий boolean `has_more`, наличие и
+согласованность `next_cursor`. Последняя страница старого cursor может содержать
+меньше items, чем общий total; это не ошибка и не повод автоматически читать ещё.
+На начальной странице total и флаг продолжения должны соответствовать списку.
+Пустой список не может обещать продолжение. Receipt IDs должны быть distinct;
+node ID/attempt согласованы с `node:N:A`, status terminal, evidence token валиден,
+score/confirmed mean — числа или null. Boolean/string/nonfinite score отказан;
+failed/aborted строка не может заявлять completed score. Run receipt имеет
+`id=run`, `kind=run`, `status=finished`. Совместимые дополнительные поля сохраняются.
+Это проверка структуры ответа, не замена server provenance и domain validation.
+
+Неполный HTTP **200** возвращает `response_incomplete`, `outcome=unavailable`,
+`reason=invalid_result_page`, **без body**. Generation mismatch и HTTP refusals
+сохраняют прежние коды. Инструмент выполняет один GET: не чинит ответ, не делает
+retry/paging, не публикует commentary и не запускает engine. Агент явно обновляет
+страницу прежде, чем интерпретировать результат или отправлять его в чат.
+
+### Реальный неполный ответ и recovery после гибели engine
+
+`external_idle_recovery_smoke --case agent_loss --drop-command-response
+--read-fault incomplete_result_page --mcp-python PATH_TO_HARNESS_ONLY_PYTHON`
+получил настоящую успешную страницу от private UI; owned proxy удалил `items`,
+сохранив generation и HTTP 200. MCP отказал без body. Следующий явный GET вернул
+измеренный узел; read refusal/recovery не изменили event bytes. В том же case
+потеряны ответы уже принятых inject и commentary: exact retries вернули исходные
+ACK без второго scorer или второй интерпретации. Два SGD scores:
+**0.13721179500378475 / 0.01337676906957059**, один engine, три русских commentary.
+Proof: `.tmp/external-result-shape-fault-1/acceptance.json`.
+
+Отдельный `--case engine_loss --result-backlog --failed-first --obligations`
+проверил typed pages после явного resume: failed parent без score, исправленный
+measured child с MSE **0.01337676906957059**, финальный run receipt и старые страницы
+с limit=1. Ровно два scorer invocations, исходный и один replacement engine,
+три commentary. Original journal receipts остались superseded; свежие report и
+reviews выполнены отдельно. Proof: `.tmp/external-result-shape-engine-1/acceptance.json`.
+В обоих cases protected scorer неизменен, `inspect`/`replay` проходят. Minimal
+клиент не имеет FastAPI, блокирует FastAPI/Uvicorn imports и читает 32 phases
+до/после reconnect. Первое сочетание всех CLI flags было отказано самим fixture:
+response-loss probes идут отдельно от backlog/engine-loss. Ограничение сохранено,
+два корректных отдельных probes выполнены успешно.
+
+**45** новых проверок охватывают повреждения envelope/receipt, пустые и старые страницы,
+requested limit, дубли, terminal statuses, compatible extra fields и nonfinite JSON.
+Перед изменением прошли **193 replay** проверки. Guide, AGENTS, MCP instructions,
+manifest и full B/E diagram обновлены. Финальный backend/MCP/progress набор —
+**419 passed**, ещё **31 docs/diagram** check и `mkdocs build --strict` прошли.
+API reference регенерирован без изменения endpoint/settings/event schema.
 Модельные решения, interactive client approvals, многочасовые сеансы и physical
 remote transfer остаются открытыми.

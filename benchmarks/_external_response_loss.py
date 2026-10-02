@@ -17,7 +17,7 @@ from looplab.harness.mcp_server import MAX_RESPONSE_BYTES
 class ResponseLossProxy:
     def __init__(self, upstream, mode="disconnect", read_mode="disconnect"):
         assert mode in ("disconnect", "invalid_json", "oversized", "server_error")
-        assert read_mode in ("disconnect", "stale_generation", "wrong_receipt")
+        assert read_mode in ("disconnect", "stale_generation", "wrong_receipt", "incomplete_result_page")
         target = urlsplit(upstream)
         assert target.hostname == "127.0.0.1"
         self.drop_next_read = False
@@ -70,6 +70,8 @@ class ResponseLossProxy:
                                 value = json.loads(payload)
                                 if read_mode == "stale_generation":
                                     value["generation"] = "f" * 64
+                                elif read_mode == "incomplete_result_page":
+                                    del value["items"]
                                 else:
                                     value["command"]["id"] = "cmd_" + "f" * 32
                                 payload = json.dumps(value).encode("utf8")

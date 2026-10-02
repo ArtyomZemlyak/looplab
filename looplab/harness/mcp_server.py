@@ -47,7 +47,7 @@ MCP_INSTRUCTIONS = (
     "After each terminal node and finalized run, call result_notices with the current generation and POST "
     "a brief interpretation in the user's language with receipt_id, evidence_token and a stable "
     "action_id; retry a lost response with the exact body. Scores come from LoopLab, not prose. "
-    "On reconnect, follow result-notices.next_cursor for older receipts, preserving expected_generation; only publish missing current commentary. A changed cursor requires refreshing the latest page. "
+    "Typed result pages also validate the version-1 envelope, paging and terminal receipt identities/numeric fields; invalid_result_page with HTTP 200 is unavailable, not empty results. Read again explicitly; no automatic repair/retry. On reconnect, follow result-notices.next_cursor for older receipts, preserving expected_generation; only publish missing current commentary. A changed cursor requires refreshing the latest page. "
     "Commentary executes no actions and never replaces checkpoints or report obligations. "
     "Use only the scoped harness credential; owner-only workflows require the operator."
 )
@@ -246,7 +246,54 @@ class HarnessAPI:
         if cursor is not None:
             query["cursor"] = cursor
         path = f"/api/runs/{quote(run_id, safe='')}/result-notices?{urlencode(query)}"
-        return self._checked_generation(self.request("GET", path), expected_generation)
+        result = self._checked_generation(self.request("GET", path), expected_generation)
+        if result["status"] != 200 or result.get("code"):
+            return result
+        # Matching generation alone cannot turn missing results/paging or malformed
+        # terminal identities into completion evidence. Keep unknown extra fields
+        # for compatible server additions; never coerce, repair, page or retry here.
+        page = result["body"]
+        items = page.get("items")
+        total = page.get("total")
+        more = page.get("has_more")
+        next_cursor = page.get("next_cursor")
+        valid = (type(page.get("version")) is int and page["version"] == 1
+                 and type(total) is int and total >= 0 and isinstance(items, list)
+                 and len(items) <= min(limit, total) and type(more) is bool
+                 and "next_cursor" in page
+                 and ((more and isinstance(next_cursor, str) and 1 <= len(next_cursor) <= 256)
+                      or (more is False and next_cursor is None))
+                 and (not more or (bool(items) and total > len(items))))
+        if valid and "cursor" not in query:
+            valid = more == (total > len(items))
+        identities = set()
+        for row in items if valid else ():
+            valid = isinstance(row, dict)
+            if valid:
+                rid, token = row.get("id"), row.get("evidence_token")
+                valid = (isinstance(rid, str) and rid not in identities
+                         and isinstance(token, str) and re.fullmatch(r"[0-9a-f]{64}", token) is not None
+                         and all(key in row and (row[key] is None or
+                             (type(row[key]) in (int, float)
+                              and -float("inf") < row[key] < float("inf")))
+                             for key in ("score", "confirmed_mean")))
+            if valid and row.get("kind") == "node":
+                nid, attempt = row.get("node_id"), row.get("attempt")
+                valid = (type(nid) is int and nid >= 0 and type(attempt) is int and attempt >= 0
+                         and rid == f"node:{nid}:{attempt}"
+                         and row.get("status") in ("evaluated", "failed", "aborted")
+                         and (row["status"] == "evaluated" or
+                              (row["score"] is None and row["confirmed_mean"] is None)))
+            elif valid:
+                valid = row.get("kind") == "run" and rid == "run" and row.get("status") == "finished"
+            if not valid:
+                break
+            identities.add(rid)
+        if not valid:
+            return {"status": 200, "code": "response_incomplete", "outcome": "unavailable",
+                    "reason": "invalid_result_page",
+                    "message": "Completion page is incomplete or inconsistent. Read it again explicitly before interpreting results; no paging, retry or engine work was made."}
+        return result
 
     def connection_check(self, run_id: str, expected_generation: str = "") -> dict:
         """Explicit, read-only bootstrap check; never resumes a worker or probes a model.
@@ -502,7 +549,9 @@ def build_server(api: HarnessAPI):
         Pass next_cursor unchanged for older receipts; refresh the latest page after
         draining or changed cursor evidence. Limit 1..200, default 50; reduce it if
         the response exceeds the byte cap. Check status/code/outcome before body:
-        malformed or mismatched-generation HTTP 200 is unavailable, not zero results.
+        malformed, incomplete-page or mismatched-generation HTTP 200 is unavailable,
+        not zero results. The version-1 envelope, paging and terminal receipt
+        identities/numeric fields are checked; extra fields are retained.
         POST missing interpretations via api_request using current receipt_id and
         evidence_token, a stable action_id and exact body for lost-response retries.
         Commentary never replaces checkpoints/reports or adds an engine wait.
