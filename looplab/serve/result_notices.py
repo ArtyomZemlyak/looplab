@@ -73,6 +73,23 @@ def _measurement(node):
         "error", "error_reason", "tombstoned"})
 
 
+def _current_trust_signals(state):
+    """Advisory evidence is distinct from selection exclusion, and bound to the attempt."""
+    signals = {}
+    for record in state.reward_hacks:
+        node = state.nodes.get(record.get("node_id"))
+        if (node is None or node.tombstoned or node.id in state.aborted_nodes
+                or record.get("generation", 0) != node.attempt):
+            continue
+        named = [s for s in record.get("signals", [])
+                 if isinstance(s.get("signal"), str) and s["signal"].strip()]
+        if named:
+            # Bind the full folded record, including audit version/code digest;
+            # identical warning text does not imply identical evidence.
+            signals.setdefault(node.id, []).append(record)
+    return signals
+
+
 def _receipts(srv, rd: Path, expected_generation: str) -> tuple[str, list[dict]]:
     from looplab.harness.obligations import evidence_revision
 
@@ -88,6 +105,8 @@ def _receipts(srv, rd: Path, expected_generation: str) -> tuple[str, list[dict]]
         raise HTTPException(503, "result event source incomplete")
     state = fold(events)
     flagged = set(flagged_node_ids(state))
+    trust_signals = _current_trust_signals(state)
+    advisory = set(trust_signals) - flagged
     terminal_seq = {}
     for event in events:
         if event.type in (EV_NODE_EVALUATED, EV_NODE_FAILED):
@@ -117,11 +136,15 @@ def _receipts(srv, rd: Path, expected_generation: str) -> tuple[str, list[dict]]
                "confirmed_seeds": node.confirmed_seeds, "parents": parents,
                "score_comparison": completion_score_comparison(node, parents, state, flagged),
                "trust_flagged": node.id in flagged, "violations": len(node.violations),
+               "trust_advisory": node.id in advisory,
+               "parent_trust_advisory": any(p["node_id"] in advisory for p in parents),
                "salvaged": bool((node.metric_provenance or {}).get("salvaged"))
                if isinstance(node.metric_provenance, dict) else False,
                "failure": redact_secrets(node.error_reason or node.error or "")[:160] if node.status == "failed" else ""}
         row["evidence_token"] = _digest({"receipt": row, "measurement": _measurement(node),
-            "parents": [_measurement(state.nodes[p["node_id"]]) for p in parents]})
+            "parents": [_measurement(state.nodes[p["node_id"]]) for p in parents],
+            "trust": {"mode": state.trust_gate, "node": trust_signals.get(node.id, []),
+                      "parents": [trust_signals.get(p["node_id"], []) for p in parents]}})
         rows.append(row)
     rows.sort(key=lambda row: (row["completed_seq"], row["node_id"], row["attempt"]))
     # A trainer exit / stop request / finalization in progress is not a run result.

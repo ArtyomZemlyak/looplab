@@ -96,6 +96,9 @@ and LoopLab's internal research roles. For setup from a fresh checkout, use
    code base, evaluation conditions and eligibility support it. A parent's current score
    alone does not establish a comparison. Reset or missing evidence explains why comparison
    is unavailable; repeat means and Trust exclusions are labelled separately.
+   Completion briefs also show advisory Trust warnings for the current attempt
+   or its comparison parents. A numeric gain and repeated seeds do not clear a
+   warning. Advisory warnings and exclusion from selection are stated separately.
    Trust warnings in the selected result, Overview, chart and workspace header
    refer to active node attempts. A signal from before a reset remains in
    **Trust → Reward-hacking signal history**, with its attempt and scope; it

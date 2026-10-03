@@ -161,7 +161,10 @@ export const DEFAULT_BUDGETS = Object.freeze({
     // 2026-10-03 doc 72 §20.8: 631,337 -> 631,618 B (+281 B) buys current-attempt
     // Trust summaries and visible, non-actionable stale signal history. 617 KiB leaves 190 B;
     // lifecycle readers stay in shared-support, keeping Concepts lazy. Route/CSS gates unchanged.
-    js: { gzip: 617 * KIB },
+    // 2026-10-03 doc 72 §20.9: 631,618 -> 631,993 B (+375 B) carries advisory
+    // attempt/parent warnings to completion chat in RU/EN. 617.5 KiB leaves 327 B;
+    // all route, CSS and structural limits remain unchanged.
+    js: { gzip: 617.5 * KIB },
     css: { gzip: 58.25 * KIB },
   },
   individual: {

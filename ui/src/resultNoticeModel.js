@@ -73,6 +73,8 @@ export function validResultNotices(value, generation, cursor = null, limit = 200
       && ['evaluated', 'failed', 'aborted'].includes(row.status)
       && (row.status === 'evaluated' || row.score === null && row.confirmed_mean === null)
       && typeof row.feasible === 'boolean' && typeof row.trust_flagged === 'boolean' && typeof row.salvaged === 'boolean' && integer(row.violations)
+      && typeof row.trust_advisory === 'boolean' && typeof row.parent_trust_advisory === 'boolean'
+      && !(row.trust_flagged && row.trust_advisory) && (!row.parent_trust_advisory || row.parents?.length > 0)
       && typeof row.failure === 'string' && row.failure.length <= 160
       && Array.isArray(row.parents) && row.parents.length <= 8
       && row.parents.every(p => p && integer(p.node_id) && integer(p.attempt) && metric(p.score)
@@ -120,8 +122,13 @@ export function resultNoticeText(row, language = 'en') {
       : `${ru && row.objective === 'task metric' ? 'Метрика задачи' : row.objective}: ${label} ${number(score)} (${direction}).`
     if (row.status === 'evaluated' && row.confirmed_mean !== null && row.score !== null) outcome += ru
       ? ` Основная оценка: ${number(row.score)}.` : ` Evaluation score: ${number(row.score)}.`
-    if (row.status === 'evaluated' && (!row.feasible || row.violations > 0 || row.trust_flagged)) outcome += ru
-      ? ' Есть ограничения или сигналы Trust; проверьте допустимость.' : 'Constraints or Trust signals recorded; check eligibility.'
+    if (row.status === 'evaluated' && (!row.feasible || row.violations > 0)) outcome += ru
+      ? ' Нарушены ограничения; проверьте допустимость.' : 'Constraints violated; check eligibility.'
+    if (row.trust_flagged) outcome += ru
+      ? ' Исключён из отбора политикой Trust.' : 'Excluded from selection by the Trust policy.'
+    else if (row.trust_advisory) outcome += ru
+      ? ' Есть предупреждение Trust для этой попытки; оно не исключает результат из отбора. Проверьте Trust перед продолжением.'
+      : 'A Trust warning is recorded for this attempt; it does not exclude the result from selection. Review Trust before continuing.'
     if (row.salvaged && row.score !== null) outcome += ru
       ? ' Метрика восстановлена после ошибки; проверьте источник.' : 'Metric recovered after failure; review provenance.'
     const comparisonStatus = row.score_comparison?.status
@@ -152,6 +159,9 @@ export function resultNoticeText(row, language = 'en') {
         ? ru ? 'Несколько исходных экспериментов. Единой оценки для сравнения нет.' : 'Multiple parents; no single comparison baseline.'
         : ru ? 'Нет пригодной оценки исходного эксперимента для сравнения.' : 'No usable parent score is available for comparison.'
     }
+    if (row.parent_trust_advisory) comparison += ru
+      ? ' У исходного эксперимента есть предупреждение Trust; числовое сравнение не подтверждает надёжность результата.'
+      : 'A parent has a Trust warning; the numeric comparison does not establish result reliability.'
     next = ['failed', 'aborted'].includes(row.status) ? ru ? 'Проверьте логи и причину остановки перед повторным запуском.' : 'Review logs and the stop cause before retrying.'
       : ru ? 'Откройте Metrics и Trust; следующий эксперимент выбирает агент.' : 'Review Metrics and Trust; the agent chooses the next experiment.'
   }

@@ -1,0 +1,13 @@
+{
+  "cases": [
+    {"name":"audit_child_hard","mode":"audit","target":1,"signal":"protected_missing","reset":false,"trust_flagged":false,"trust_advisory":true,"parent_trust_advisory":false,"comparison":"same"},
+    {"name":"gate_child_hard","mode":"gate","target":1,"signal":"protected_missing","reset":false,"trust_flagged":true,"trust_advisory":false,"parent_trust_advisory":false,"comparison":"ineligible"},
+    {"name":"block_child_hard","mode":"block","target":1,"signal":"critic:hardcoded_metric","reset":false,"trust_flagged":true,"trust_advisory":false,"parent_trust_advisory":false,"comparison":"ineligible"},
+    {"name":"gate_child_soft","mode":"gate","target":1,"signal":"perfect_metric","reset":false,"trust_flagged":false,"trust_advisory":true,"parent_trust_advisory":false,"comparison":"same"},
+    {"name":"audit_parent_hard","mode":"audit","target":0,"signal":"protected_missing","reset":false,"trust_flagged":false,"trust_advisory":false,"parent_trust_advisory":true,"comparison":"same"},
+    {"name":"gate_parent_soft","mode":"gate","target":0,"signal":"suspicious_output","reset":false,"trust_flagged":false,"trust_advisory":false,"parent_trust_advisory":true,"comparison":"same"},
+    {"name":"gate_parent_hard","mode":"gate","target":0,"signal":"protected_missing","reset":false,"trust_flagged":false,"trust_advisory":false,"parent_trust_advisory":false,"comparison":"ineligible"},
+    {"name":"old_child_hard","mode":"audit","target":1,"signal":"protected_missing","reset":true,"trust_flagged":false,"trust_advisory":false,"parent_trust_advisory":false,"comparison":"same"},
+    {"name":"empty_signal","mode":"audit","target":1,"signal":" ","reset":false,"trust_flagged":false,"trust_advisory":false,"parent_trust_advisory":false,"comparison":"same"}
+  ]
+}

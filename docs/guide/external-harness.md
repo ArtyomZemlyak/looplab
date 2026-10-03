@@ -104,6 +104,18 @@ External agents should add a short interpretation after each completion:
    Missing or inconsistent comparison metadata makes a typed read unavailable;
    update an older server and read again explicitly. Parent eligibility/base
    changes invalidate the evidence token and withdraw attached commentary.
+   Required booleans distinguish Trust meanings: `trust_flagged` means exclusion
+   by the run's Trust policy; `trust_advisory` means this attempt has a named
+   warning without that exclusion. `parent_trust_advisory` warns about an attempt
+   in the returned comparison parents. Advisory signals, including soft signals
+   under `gate`/`block`, do not change scores or selection eligibility. Explain
+   the warning separately from numeric improvement; repeated seeds do not clear
+   it. These fields are not detector-coverage proofs. Missing, nonboolean or
+   contradictory fields make the typed page unavailable. New signal evidence
+   on either side changes the token and withdraws current commentary even when
+   the score and warning booleans are unchanged; exact publication retries still
+   acknowledge the original receipt. An old-attempt signal does not warn about
+   the replacement attempt.
 2. Copy the item's `id` and `evidence_token`. Submit through MCP `api_request`:
 
    ```json

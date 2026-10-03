@@ -2,6 +2,13 @@
 from looplab.core.fitness import is_usable_metric
 
 
+def valid_trust_evidence(row):
+    return (all(type(row.get(key)) is bool for key in
+                ("trust_flagged", "trust_advisory", "parent_trust_advisory"))
+            and not (row["trust_flagged"] and row["trust_advisory"])
+            and (not row["parent_trust_advisory"] or bool(row.get("parents"))))
+
+
 def valid_score_comparison(row):
     comparison, parents = row.get("score_comparison"), row.get("parents")
     if (not isinstance(comparison, dict) or type(comparison.get("version")) is not int

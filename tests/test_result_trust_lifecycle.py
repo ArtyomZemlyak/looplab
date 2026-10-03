@@ -37,6 +37,9 @@ def test_trust_history_does_not_flag_a_replacement_attempt(tmp_path, monkeypatch
             for record in state["reward_hacks"]] == case["records"]
     assert len(hard_flagged_ids(fold(store.read_all()))) == case["current_nodes"]
     page = _read(client, gen).json()
+    node = next(row for row in page["items"] if row.get("node_id") == 1)
+    assert node["trust_advisory"] is bool(case["current_nodes"])
+    assert node["trust_flagged"] is False and node["parent_trust_advisory"] is False
     run = next(row for row in page["items"] if row["kind"] == "run")
     assert ("trust_flagged" in run["caveats"]) == bool(case["current_nodes"])
     assert run["selected_node"] == 1 and run["attempt"] == 1

@@ -1,6 +1,7 @@
 export const generation = 'a'.repeat(64)
 export const node = { id: 'node:2:1', kind: 'node', node_id: 2, attempt: 1, status: 'evaluated',
   score: 0.5, confirmed_mean: null, confirmed_seeds: null, feasible: true, trust_flagged: false,
+  trust_advisory: false, parent_trust_advisory: false,
   salvaged: false, violations: 0, objective: 'accuracy', direction: 'max', failure: '', commentary: null,
   evidence_token: 'b'.repeat(64), score_comparison: { version: 1, parent_count: 1, status: 'unknown' },
   parents: [{ node_id: 0, attempt: 0, score: 0.4, comparability: 'unknown' }] }

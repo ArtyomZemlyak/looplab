@@ -81,6 +81,7 @@ def _page():
     return {"version": 1, "generation": GEN, "total": 1, "has_more": False, "next_cursor": None,
         "items": [{"id": "node:0:0", "kind": "node", "node_id": 0, "attempt": 0,
                    "status": "evaluated", "score": .25, "confirmed_mean": None,
+                   "trust_flagged": False, "trust_advisory": False, "parent_trust_advisory": False,
                    "parents": [], "score_comparison": {"version": 1, "parent_count": 0, "status": "no_parent"},
                    "evidence_token": "b" * 64}]}
 
@@ -156,6 +157,26 @@ def test_incomplete_or_inconsistent_comparison_is_unavailable(comparison, parent
 def test_missing_comparison_metadata_is_not_legacy_permission_to_compare():
     page = _page()
     del page["items"][0]["score_comparison"]
+    _refused_page(page)
+
+
+@pytest.mark.parametrize("field", ["trust_flagged", "trust_advisory", "parent_trust_advisory"])
+@pytest.mark.parametrize("value", [None, 0, "false", "missing"])
+def test_missing_or_malformed_trust_evidence_is_unavailable(field, value):
+    page = _page()
+    if value == "missing":
+        del page["items"][0][field]
+    else:
+        page["items"][0][field] = value
+    _refused_page(page)
+
+
+@pytest.mark.parametrize("changes", [
+    {"trust_flagged": True, "trust_advisory": True}, {"parent_trust_advisory": True},
+])
+def test_contradictory_trust_evidence_is_unavailable(changes):
+    page = _page()
+    page["items"][0].update(changes)
     _refused_page(page)
 
 

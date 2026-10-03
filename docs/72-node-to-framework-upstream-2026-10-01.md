@@ -2032,7 +2032,8 @@ Events не выдаются за хранилище отдельной commenta
 нейтральные подписи графиков и общий вывод Overview/Report — §20.5;
 сравнение и свежесть evidence в Inspector — §20.6;
 границы сравнения в чатовых completion briefs — §20.7;
-актуальность Trust-сигналов после reset — §20.8.
+актуальность Trust-сигналов после reset — §20.8;
+advisory Trust в чатовых итогах узла и сравнениях — §20.9.
 Полная приёмка единого вывода во всех видах остаётся OPEN.
 
 #### 72.O6 — P1 / OPEN: результат repo-задачи, который можно взять и воспроизвести
@@ -3018,3 +3019,59 @@ Staging build и bundle gate прошли; документационные/API/
 передачу advisory Trust-сигналов в node chat briefs: gate exclusions и audit
 caveats имеют разный смысл и не должны смешиваться. Полный scope других OPEN
 тем и доставка изменений в master остаются отдельными шагами.
+
+### 20.9 72.O5: advisory Trust сопровождает чатовый итог и сравнение (2026-10-03)
+
+**Найдено:** node completion receipt отдавал только `trust_flagged` — исключение
+из отбора, а не все записанные сигналы. При `trust_gate=audit` чат показывал
+числовое улучшение без предупреждения даже при текущем hard signal. Мягкие
+сигналы при gate/block тоже терялись. Сигнал у родителя не сопровождал сравнение
+чистого нового узла. Изменение advisory evidence не снимало старую интерпретацию,
+если измеренные числа и eligibility не менялись.
+
+**Сделано:** node receipts требуют отдельные booleans `trust_advisory` и
+`parent_trust_advisory`; прежний `trust_flagged` сохраняет значение исключения
+по политике Trust. Сервер выводит advisory из named signals текущих активных
+попыток, отдельно от enforced exclusions. Старые, aborted/tombstone и пустые
+сигналы не становятся предупреждением замещающей попытки. Родительское
+предупреждение относится только к возвращённым comparison parents, без
+подстановки reset-родителя. Signals не меняют score, confirmation или политику
+отбора; `score_comparison=same` по-прежнему разрешает числовое сравнение.
+
+В Assistant chat на RU/EN предупреждение своей попытки сопровождает измерение,
+предупреждение родителя — сравнение. Формулировки отделяют advisory от исключения
+из отбора; numeric gain и repeat seeds не снимают warning. Данные предупреждений
+и текущий Trust mode входят в evidence token, в том числе изменение деталей
+и audit version/code digest при прежних booleans. Такая смена снимает актуальность attached commentary и
+cursor; exact retry подтверждает первоначальную публикацию и не освежает её.
+MCP и UI отказывают missing/nonboolean/contradictory fields как unavailable;
+отсутствие поля не становится чистым результатом. Guide описывает поля и
+необходимость обновить старый сервер. Новых endpoints, polling, paid calls,
+engine waits или mutation controls не добавлено.
+
+**Проверено:** общий JSON fixture связывает real folded HTTP receipts, typed MCP
+и UI: audit/gate/block, hard/soft, child/parent, reset и blank signal. Числа
+evaluation/confirmation сохраняются отдельно. Дополнительные HTTP проверки
+подтверждают отзыв commentary/cursor при новой advisory записи и новых деталях
+того же сигнала, отказ fresh publication по старому token и точный retry.
+Замена синтетического event source при том же числе записей, тексте предупреждения
+и оценке подтверждает, что смена audit identity тоже снимает старую интерпретацию.
+Mounted Assistant chat на обоих языках показывает эти предупреждения,
+подготавливает вопрос без отправки и делает только GET.
+
+Replay-first — **193 passed**; result/MCP, lifecycle, champion caveats и trust
+contracts — **176 passed**; выбранные UI result/language, Report/Overview,
+Inspector, live state, accessibility и command regressions — **173 passed**
+(`--test-concurrency=4`). Staging build и bundle gate прошли. JS gzip total
+**631 618 → 631 993 B** (**+375 B**); CSS **59 578 B** без изменения, initial shell
+**83 037 B**, review DAG **268 389 B**, Concepts **257 927 B**. Total JS target
+переизмерен до **617.5 KiB** с запасом **327 B**; route, CSS, reachability и cycle
+ceilings сохранены. Документационные/API/merge и layer contracts — **96 passed**;
+strict MkDocs и diff check прошли. Изменения сохраняются локальным коммитом.
+
+**O5 остаётся OPEN:** mixed-base/retarget/repeat пользовательский маршрут и
+объяснение результата человеком по §19.4 ещё не приняты. Run-wide caveats
+сохраняют прежний contract: hard advisory у выбранного результата не означает
+все мягкие предупреждения всего run. Следующий review должен проверить эту
+границу в итоговой истории пользователя. Полный product suite, живое ML обучение,
+browser приёмка и доставка в master этим проходом не заявляются.
