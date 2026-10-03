@@ -1,0 +1,63 @@
+{
+  "version": 1,
+  "date": "2026-10-03",
+  "review": "doc72 section 19.15",
+  "source_commit": "06073885fddafc2152affd2308c2c7ed74999bc2",
+  "scope": "Documentation and source contract review of Assistant entry, result meaning, LoopLab-owned worktrees and task repository delivery",
+  "production_changes": false,
+  "fresh_ui_audit": false,
+  "previous_ui_evidence": "../72-review-19-14/evidence.json",
+  "suites": [
+    {
+      "selectors": ["tests/test_events_replay.py"],
+      "order": "replay first",
+      "passed": 193,
+      "skipped": 0,
+      "failed": 0,
+      "seconds": 3.74
+    },
+    {
+      "selectors": [
+        "tests/test_a_repo_merge_recombines_its_parents.py",
+        "tests/test_a_merge_reads_its_co_parents_in_full.py",
+        "tests/test_champion_metric_caveats.py",
+        "tests/test_finalize_protocol.py",
+        "tests/test_export_bundle.py"
+      ],
+      "passed": 38,
+      "skipped": 2,
+      "failed": 0,
+      "seconds": 7.70,
+      "skip_reason": "Directory symlink creation is unavailable on this Windows host",
+      "coverage": "Candidate recombination and co-parent access, caveats, durable finish protocol, evidence bundle; no target repo merge"
+    }
+  ],
+  "open_refinements": [
+    "O5: finished does not certify improvement; explicit negative or absent eligible result",
+    "O9: scoped verified/offline promises and distinct candidate/base/target merge terms",
+    "O11: ordinary Assistant experiment does not require reuse onboarding",
+    "O14: measured result survives delivery refusal; composed accepted capabilities and chosen recipe identified",
+    "One active priority queue in section 19.4; section 19.5 is historical"
+  ],
+  "not_executed": [
+    "Fresh user or installation acceptance",
+    "Fresh UI or accessibility audit",
+    "Paid Assistant or live external client",
+    "Integration of independent runs into a user target repository",
+    "Full CI suite"
+  ],
+  "documentation_validation": {
+    "status": "passed",
+    "selectors": [
+      "tests/test_documentation_contracts.py",
+      "tests/test_documented_entry_points_resolve.py",
+      "tests/test_merge_history_integrity.py"
+    ],
+    "passed": 34,
+    "skipped": 0,
+    "failed": 0,
+    "seconds": 6.24,
+    "mkdocs_strict": "passed",
+    "git_diff_check": "passed"
+  }
+}
