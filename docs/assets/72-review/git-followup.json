@@ -1,0 +1,228 @@
+{
+  "refs": {
+    "HEAD": "b8721d7363fab370e31952375ed5745ef65a948d",
+    "master": "1103ba87b22cd3c02dcae80db87473d0c8ae8374",
+    "origin/master": "cdebb964c0a7ca5df73ffaabc1e97e7cbe4015d8"
+  },
+  "scope": "8 previously dirty worktrees and 5 named non-ancestor branch heads; no merge or cleanup",
+  "dirty_worktrees": [
+    {
+      "path": "C:/tmp/autornd-bundle-fix-20260720",
+      "head": "1d1569578b5e0a4ab4148aa8c5ed549e1b8b488a",
+      "status": {
+        "exit_code": 0,
+        "stdout": " M ui/vite.config.js\n",
+        "stderr": ""
+      },
+      "diff_stat": {
+        "exit_code": 0,
+        "stdout": "",
+        "stderr": "warning: in the working copy of 'ui/vite.config.js', LF will be replaced by CRLF the next time Git touches it\n"
+      },
+      "staged_stat": {
+        "exit_code": 0,
+        "stdout": "",
+        "stderr": ""
+      }
+    },
+    {
+      "path": "C:/tmp/autornd-card-ui-lifecycle-20260721",
+      "head": "cb46a3f5f688976e31581fbb87ff270fbc9ea565",
+      "status": {
+        "exit_code": 0,
+        "stdout": " M ui/src/RunView.jsx\n M ui/src/panels.jsx\n M ui/src/runRouteState.js\n M ui/src/styles.css\n M ui/test/runRouteState.test.js\n?? ui/src/cardReadModel.js\n?? ui/test/cardSurface.test.js\n",
+        "stderr": ""
+      },
+      "diff_stat": {
+        "exit_code": 0,
+        "stdout": " ui/src/RunView.jsx            |  5 +++--\n ui/src/panels.jsx             | 47 ++++++++++++++++++++++++++++++++++---------\n ui/src/runRouteState.js       |  2 +-\n ui/src/styles.css             |  4 ++++\n ui/test/runRouteState.test.js | 10 ++++++++-\n 5 files changed, 55 insertions(+), 13 deletions(-)\n",
+        "stderr": "warning: in the working copy of 'ui/src/panels.jsx', LF will be replaced by CRLF the next time Git touches it\nwarning: in the working copy of 'ui/src/styles.css', LF will be replaced by CRLF the next time Git touches it\n"
+      },
+      "staged_stat": {
+        "exit_code": 0,
+        "stdout": "",
+        "stderr": ""
+      }
+    },
+    {
+      "path": "C:/tmp/autornd-concept-cache-20260717",
+      "head": "ca40a675e54b0e8d9b43ace0a50f411494751d76",
+      "status": {
+        "exit_code": 0,
+        "stdout": " M looplab/events/replay.py\n M looplab/serve/routers/runs.py\n M tests/test_concepts_endpoint.py\n M tests/test_golden_replay.py\n?? tests/test_concept_incremental_replay.py\n",
+        "stderr": ""
+      },
+      "diff_stat": {
+        "exit_code": 0,
+        "stdout": " looplab/events/replay.py        |  64 ++++++++--\n looplab/serve/routers/runs.py   | 277 ++++++++++++++++++++++++++++++++++------\n tests/test_concepts_endpoint.py |  24 ++--\n tests/test_golden_replay.py     |  54 +++++++-\n 4 files changed, 357 insertions(+), 62 deletions(-)\n",
+        "stderr": "warning: in the working copy of 'looplab/events/replay.py', LF will be replaced by CRLF the next time Git touches it\nwarning: in the working copy of 'looplab/serve/routers/runs.py', LF will be replaced by CRLF the next time Git touches it\nwarning: in the working copy of 'tests/test_concepts_endpoint.py', LF will be replaced by CRLF the next time Git touches it\nwarning: in the working copy of 'tests/test_golden_replay.py', LF will be replaced by CRLF the next time Git touches it\n"
+      },
+      "staged_stat": {
+        "exit_code": 0,
+        "stdout": "",
+        "stderr": ""
+      }
+    },
+    {
+      "path": "C:/tmp/autornd-delta-missing-base-20260718",
+      "head": "b871755601cd17cb7fe99ea99e0ab7823884f3c2",
+      "status": {
+        "exit_code": 0,
+        "stdout": " M looplab/agents/strategist.py\n M looplab/core/models.py\n M looplab/engine/strategy.py\n M looplab/events/digest.py\n M looplab/search/coverage.py\n M looplab/tools/run_tools.py\n",
+        "stderr": ""
+      },
+      "diff_stat": {
+        "exit_code": 0,
+        "stdout": " looplab/agents/strategist.py | 19 +++++++++--\n looplab/core/models.py       | 52 ++++++++++++++++++++++++++++++\n looplab/engine/strategy.py   | 12 +++++--\n looplab/events/digest.py     | 29 +++++++++++++----\n looplab/search/coverage.py   | 26 ++++++++++++---\n looplab/tools/run_tools.py   | 77 ++++++++++++++++++--------------------------\n 6 files changed, 155 insertions(+), 60 deletions(-)\n",
+        "stderr": "warning: in the working copy of 'looplab/agents/strategist.py', LF will be replaced by CRLF the next time Git touches it\nwarning: in the working copy of 'looplab/core/models.py', LF will be replaced by CRLF the next time Git touches it\nwarning: in the working copy of 'looplab/engine/strategy.py', LF will be replaced by CRLF the next time Git touches it\nwarning: in the working copy of 'looplab/events/digest.py', LF will be replaced by CRLF the next time Git touches it\nwarning: in the working copy of 'looplab/search/coverage.py', LF will be replaced by CRLF the next time Git touches it\nwarning: in the working copy of 'looplab/tools/run_tools.py', LF will be replaced by CRLF the next time Git touches it\n"
+      },
+      "staged_stat": {
+        "exit_code": 0,
+        "stdout": "",
+        "stderr": ""
+      }
+    },
+    {
+      "path": "C:/tmp/autornd-empty-concept-delta-20260717",
+      "head": "0531767b7722e7ceed75aee740ac76899676cdb5",
+      "status": {
+        "exit_code": 0,
+        "stdout": " M docs/guide/concepts.md\n M looplab/agents/agent.py\n M looplab/agents/roles.py\n M looplab/core/models.py\n M looplab/events/replay.py\n M looplab/events/types.py\n M looplab/search/concept_graph.py\n M looplab/serve/routers/boss.py\n M tests/data/golden_run_state.json\n M tests/test_prompt_capability_sync.py\n M tests/test_run_base_delta.py\n",
+        "stderr": ""
+      },
+      "diff_stat": {
+        "exit_code": 0,
+        "stdout": " docs/guide/concepts.md               |  34 +++++--\n looplab/agents/agent.py              |  13 ++-\n looplab/agents/roles.py              |  54 ++++++++---\n looplab/core/models.py               |  19 ++--\n looplab/events/replay.py             | 113 ++++++++++++++++++----\n looplab/events/types.py              |   3 +-\n looplab/search/concept_graph.py      |  21 +++-\n looplab/serve/routers/boss.py        |   9 +-\n tests/data/golden_run_state.json     |  10 +-\n tests/test_prompt_capability_sync.py |  16 +++-\n tests/test_run_base_delta.py         | 179 ++++++++++++++++++++++++++++++++---\n 11 files changed, 396 insertions(+), 75 deletions(-)\n",
+        "stderr": "warning: in the working copy of 'docs/guide/concepts.md', LF will be replaced by CRLF the next time Git touches it\nwarning: in the working copy of 'looplab/agents/agent.py', LF will be replaced by CRLF the next time Git touches it\nwarning: in the working copy of 'looplab/agents/roles.py', LF will be replaced by CRLF the next time Git touches it\nwarning: in the working copy of 'looplab/core/models.py', LF will be replaced by CRLF the next time Git touches it\nwarning: in the working copy of 'looplab/events/replay.py', LF will be replaced by CRLF the next time Git touches it\nwarning: in the working copy of 'looplab/events/types.py', LF will be replaced by CRLF the next time Git touches it\nwarning: in the working copy of 'looplab/search/concept_graph.py', LF will be replaced by CRLF the next time Git touches it\nwarning: in the working copy of 'looplab/serve/routers/boss.py', LF will be replaced by CRLF the next time Git touches it\nwarning: in the working copy of 'tests/data/golden_run_state.json', LF will be replaced by CRLF the next time Git touches it\nwarning: in the working copy of 'tests/test_prompt_capability_sync.py', LF will be replaced by CRLF the next time Git touches it\nwarning: in the working copy of 'tests/test_run_base_delta.py', LF will be replaced by CRLF the next time Git touches it\n"
+      },
+      "staged_stat": {
+        "exit_code": 0,
+        "stdout": "",
+        "stderr": ""
+      }
+    },
+    {
+      "path": "C:/Users/artyo/Documents/autornd/.claude/worktrees/vigilant-saha-d21ba6",
+      "head": "f0ea1303a8622d8bcbb9d8810736bd2b04a7e04e",
+      "status": {
+        "exit_code": 0,
+        "stdout": " M looplab/dataset_task.py\n M looplab/run_tools.py\n M tests/test_dataset_task.py\n",
+        "stderr": ""
+      },
+      "diff_stat": {
+        "exit_code": 0,
+        "stdout": " looplab/dataset_task.py    | 79 ++++++++++++++++++++++++++++++++++++++\n looplab/run_tools.py       | 38 +++++++++++++------\n tests/test_dataset_task.py | 94 +++++++++++++++++++++++++++++++++++++++++++++-\n 3 files changed, 198 insertions(+), 13 deletions(-)\n",
+        "stderr": ""
+      },
+      "staged_stat": {
+        "exit_code": 0,
+        "stdout": "",
+        "stderr": ""
+      }
+    },
+    {
+      "path": "C:/Users/artyo/Documents/autornd/.codex-review-sweep",
+      "head": "57db53c8e1ecd427cc92e8b7aedae766ade7b904",
+      "status": {
+        "exit_code": 0,
+        "stdout": " M looplab/core/models.py\n M looplab/engine/proposal_cues.py\n M looplab/engine/strategy.py\n M looplab/events/digest.py\n M looplab/events/replay.py\n M looplab/search/concept_graph.py\n M looplab/search/coverage.py\n M looplab/serve/concept_frame.py\n M looplab/tools/run_tools.py\n M tests/test_concept_edges.py\n M tests/test_coverage.py\n M tests/test_run_tools.py\n?? looplab/core/concept_ids.py\n?? looplab/search/concept_edges.py\n",
+        "stderr": "warning: could not open directory '.pytest-review-sweep/': Permission denied\nwarning: could not open directory '.pytest-review-sweep-2/': Permission denied\nwarning: could not open directory '.pytest-review-sweep-3/': Permission denied\nwarning: could not open directory '.pytest-review-sweep-4/': Permission denied\n"
+      },
+      "diff_stat": {
+        "exit_code": 0,
+        "stdout": " looplab/core/models.py          |   9 +++\n looplab/engine/proposal_cues.py |   2 +-\n looplab/engine/strategy.py      | 146 +++++++++++++++++-------------------\n looplab/events/digest.py        |  31 +-------\n looplab/events/replay.py        | 162 ++++++++++++++++++++++++++++++++++++++--\n looplab/search/concept_graph.py |  52 +++++++------\n looplab/search/coverage.py      |  37 ++++++---\n looplab/serve/concept_frame.py  |  39 +++-------\n looplab/tools/run_tools.py      |  42 +++++------\n tests/test_concept_edges.py     | 103 ++++++++++++++++++++++++-\n tests/test_coverage.py          |  39 +++++++++-\n tests/test_run_tools.py         |  48 ++++++++++--\n 12 files changed, 503 insertions(+), 207 deletions(-)\n",
+        "stderr": "warning: in the working copy of 'looplab/core/models.py', LF will be replaced by CRLF the next time Git touches it\nwarning: in the working copy of 'looplab/engine/proposal_cues.py', LF will be replaced by CRLF the next time Git touches it\nwarning: in the working copy of 'looplab/engine/strategy.py', LF will be replaced by CRLF the next time Git touches it\nwarning: in the working copy of 'looplab/events/digest.py', LF will be replaced by CRLF the next time Git touches it\nwarning: in the working copy of 'looplab/events/replay.py', LF will be replaced by CRLF the next time Git touches it\nwarning: in the working copy of 'looplab/search/concept_graph.py', LF will be replaced by CRLF the next time Git touches it\nwarning: in the working copy of 'looplab/search/coverage.py', LF will be replaced by CRLF the next time Git touches it\nwarning: in the working copy of 'looplab/serve/concept_frame.py', LF will be replaced by CRLF the next time Git touches it\nwarning: in the working copy of 'looplab/tools/run_tools.py', LF will be replaced by CRLF the next time Git touches it\nwarning: in the working copy of 'tests/test_concept_edges.py', LF will be replaced by CRLF the next time Git touches it\nwarning: in the working copy of 'tests/test_coverage.py', LF will be replaced by CRLF the next time Git touches it\nwarning: in the working copy of 'tests/test_run_tools.py', LF will be replaced by CRLF the next time Git touches it\n"
+      },
+      "staged_stat": {
+        "exit_code": 0,
+        "stdout": "",
+        "stderr": ""
+      }
+    },
+    {
+      "path": "C:/Users/artyo/Documents/autornd/.codex-ui-next",
+      "head": "ce5a02696dd8541cd565bb99bfeb9c79032a3a04",
+      "status": {
+        "exit_code": 0,
+        "stdout": " M docs/18-desktop-concepts-ui-ux-review-2026-07-16.md\n M docs/guide/ui.md\n M docs/infographic/agent-architecture.html\n",
+        "stderr": ""
+      },
+      "diff_stat": {
+        "exit_code": 0,
+        "stdout": " .../18-desktop-concepts-ui-ux-review-2026-07-16.md | 30 +++++++++++++---------\n docs/guide/ui.md                                   | 10 ++++++++\n docs/infographic/agent-architecture.html           |  2 +-\n 3 files changed, 29 insertions(+), 13 deletions(-)\n",
+        "stderr": "warning: in the working copy of 'docs/18-desktop-concepts-ui-ux-review-2026-07-16.md', LF will be replaced by CRLF the next time Git touches it\nwarning: in the working copy of 'docs/guide/ui.md', LF will be replaced by CRLF the next time Git touches it\nwarning: in the working copy of 'docs/infographic/agent-architecture.html', LF will be replaced by CRLF the next time Git touches it\n"
+      },
+      "staged_stat": {
+        "exit_code": 0,
+        "stdout": "",
+        "stderr": ""
+      }
+    }
+  ],
+  "patch_equivalence_samples": [
+    {
+      "branch": "refs/heads/codex/ui-concept-corruption-docs-20260718",
+      "head": "1744b5236f98cc669cd563b940d63130eaac2719",
+      "exit_code": 0,
+      "stdout": "+ ead5fe2d2a523fdee92e54dee424fb2a0e8747f7\n+ 1744b5236f98cc669cd563b940d63130eaac2719\n",
+      "stderr": "",
+      "patch_equivalent_commits": 0,
+      "unmatched_commits": 2
+    },
+    {
+      "branch": "refs/heads/codex/ui-concept-relations-a11y-20260718",
+      "head": "9df60ea61bc2378c1774416ae7ad5d3dc0389a67",
+      "exit_code": 0,
+      "stdout": "+ 9df60ea61bc2378c1774416ae7ad5d3dc0389a67\n",
+      "stderr": "",
+      "patch_equivalent_commits": 0,
+      "unmatched_commits": 1
+    },
+    {
+      "branch": "refs/heads/codex/part-iv-cross-runs-validation-20260715",
+      "head": "3fb56fd53308276a4ba1ca72a7566077810058d4",
+      "exit_code": 0,
+      "stdout": "+ 3fb56fd53308276a4ba1ca72a7566077810058d4\n",
+      "stderr": "",
+      "patch_equivalent_commits": 0,
+      "unmatched_commits": 1
+    },
+    {
+      "branch": "refs/heads/codex/audit-part-v-cross-run-20260721",
+      "head": "d9df49a334e7c9a313bf8b1b33106591bf2a05d4",
+      "exit_code": 0,
+      "stdout": "- 78027878ea86fc738992a814882ede551f94d6cd\n- d9df49a334e7c9a313bf8b1b33106591bf2a05d4\n",
+      "stderr": "",
+      "patch_equivalent_commits": 2,
+      "unmatched_commits": 0
+    },
+    {
+      "branch": "refs/heads/codex/watchdog-nonfinite",
+      "head": "2e606c712e9a990d1ddc3c3fed1a5f24e13f7cea",
+      "exit_code": 0,
+      "stdout": "- 2e606c712e9a990d1ddc3c3fed1a5f24e13f7cea\n",
+      "stderr": "",
+      "patch_equivalent_commits": 1,
+      "unmatched_commits": 0
+    }
+  ],
+  "normalization_control": {
+    "path": "C:/tmp/autornd-bundle-fix-20260720",
+    "file": "ui/vite.config.js",
+    "index": {
+      "exit_code": 0,
+      "stdout": "100644 4e968ac9173e60268bd0ab2db2fa6332d8ee3047 0\tui/vite.config.js\n",
+      "stderr": ""
+    },
+    "filtered_hash": {
+      "exit_code": 0,
+      "stdout": "4e968ac9173e60268bd0ab2db2fa6332d8ee3047\n",
+      "stderr": ""
+    },
+    "raw_hash": {
+      "exit_code": 0,
+      "stdout": "8d71059be14406063ed3af0813af7dc0c49eb536\n",
+      "stderr": ""
+    }
+  }
+}
