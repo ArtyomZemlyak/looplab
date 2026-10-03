@@ -5,19 +5,16 @@
 
 import { costPricing, fmt, isSweep, operatorMeta } from './util.js'
 import { nodeTheme } from './conceptId.js'
-import { activeNodeMap, nodeIsActive } from './nodeProjection.js'
+import { activeNodeMap } from './nodeProjection.js'
 import { normalizeRunReport, reportCoverageText, reportNarrativeCoverage } from './reportModel.js'
 import { OBJECTIVE_SOURCE_LABEL, objectiveMetricSource,
   objectiveSourceCaveated } from './trustSemantics.js'
 import { sourceIncomplete } from './runIndex.js'
-import { scoreDifference, parentScoreDifference } from './scoreComparison.js'
+import { scoreDifference, parentScoreDifference, eligibleMeasuredResult as eligibleResult } from './scoreComparison.js'
+import { resultMeasurement } from './resultMeasurement.js'
 
 const metricOf = (n) => (n.confirmed_mean ?? n.metric)
 const isEvaluated = (n) => n.status === 'evaluated' && metricOf(n) != null
-// Mirror counts_toward_best over the current population, including the Trust gate exclusion set.
-const eligibleResult = (node, state) => nodeIsActive(node, state) && node.status === 'evaluated'
-  && node.feasible === true && Number.isFinite(metricOf(node))
-  && !(state?.breed_excluded || []).some(id => Number(id) === Number(node.id))
 const better = (dir) => (a, b) => (dir === 'min' ? a < b : a > b)
 
 // The parameters that changed between a node and its first parent (the "what changed" of a step).
@@ -55,6 +52,7 @@ export function improvements(nodes, direction, state = null) {
       steps.push({
         id: n.id, operator: n.operator, theme: nodeTheme(n, state),
         from: best ? best.v : null, to: v,
+        measurement: resultMeasurement(n.confirmed_mean != null).label,
         delta: best ? v - best.v : null,
         params: n.idea?.params || {}, rationale: n.idea?.rationale || '',
         diff: paramDiff(n, parent), parentId: parent?.id ?? null,
@@ -495,9 +493,9 @@ export function toMarkdown(state, _best, context = {}) {
   L.push('', 'This numeric frontier may combine evaluation scores and confirmation means. Its changes do not establish a comparable improvement. Use the selected-result verdict above.')
   if (a.steps.length) {
     L.push('')
-    L.push('| step | node | operator | metric | Δ | what changed |')
-    L.push('|---|---|---|---|---|---|')
-    a.steps.forEach((s, i) => L.push(`| ${i + 1} | #${s.id} | ${s.operator}${s.theme ? ` (${s.theme})` : ''} | ${fmt(s.to)} | ${s.delta == null ? 'baseline' : fmt(s.delta)} | ${paramDiffLabel(s.diff)} |`))
+    L.push('| step | node | operator | recorded value | measurement | numeric change | what changed |')
+    L.push('|---|---|---|---|---|---|---|')
+    a.steps.forEach((s, i) => L.push(`| ${i + 1} | #${s.id} | ${s.operator}${s.theme ? ` (${s.theme})` : ''} | ${fmt(s.to)} | ${s.measurement} | ${s.delta == null ? 'first eligible' : fmt(s.delta)} | ${paramDiffLabel(s.diff)} |`))
     if (a.steps.length > 1) L.push(`\nRecorded frontier change: **${fmt(a.totalGain)}** across ${a.steps.length} steps (first eligible ${fmt(a.firstBest)} → numeric frontier ${fmt(a.finalBest)}).`)
   } else L.push('\n_No improving steps recorded yet._')
   L.push('')

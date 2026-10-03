@@ -150,7 +150,8 @@ test('Report uses semantic section headings and exposes an unambiguous operator/
     assert.doesNotMatch(baselineMarkup, /class="report-sub muted">report-min/)
     assert.match(baselineMarkup, /<h2 id="report-section-trajectory" tabindex="-1" class="section-h">First eligible metric<\/h2>/)
     assert.doesNotMatch(baselineMarkup, /How the metric got better/)
-    assert.match(baselineMarkup, /First feasible metric; no improvement is recorded yet/)
+    assert.match(baselineMarkup, /First eligible value/)
+    assert.match(baselineMarkup, /Numeric changes do not establish comparable improvement/)
   } finally {
     await vite.close()
   }

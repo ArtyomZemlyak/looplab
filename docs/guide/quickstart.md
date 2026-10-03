@@ -84,6 +84,10 @@ and LoopLab's internal research roles. For setup from a fresh checkout, use
    experiments and missing or changed comparison evidence; it does not mean failure.
    Comparisons use evaluation scores. The separately labelled numeric frontier may
    contain confirmation means and is not evidence of a comparable improvement.
+   **Overview → Result interpretation** uses the same selected-result verdict as Report.
+   **Read Report** opens its evidence. Trajectory and **Numeric frontier changes** label
+   recorded measurement types; their arrows show numeric changes, not proven improvements.
+   **View data** and **Export CSV** retain the recorded values and measurement labels.
 
 ## Reuse a useful code change
 

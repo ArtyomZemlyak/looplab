@@ -44,16 +44,18 @@
 .champion-params-list dt, .champion-params-list dd { min-width: 0; margin: 0; padding: 5px 0;
   border-bottom: 1px solid var(--line); overflow-wrap: anywhere; }
 .champion-params-list dt { color: var(--fg-dim); }
-.report-view .report-steps-table { table-layout: fixed; min-width: 760px; }
+.report-view .report-steps-table { table-layout: fixed; min-width: 1040px; }
 .report-steps-table th:nth-child(1) { width: 40px; }
 .report-steps-table th:nth-child(2) { width: 66px; }
 .report-steps-table th:nth-child(3) { width: 210px; }
 .report-steps-table th:nth-child(4) { width: 100px; }
-.report-steps-table th:nth-child(5) { width: 105px; }
+.report-steps-table th:nth-child(5) { width: 160px; }
+.report-steps-table th:nth-child(6) { width: 125px; }
+.report-steps-table th:nth-child(7) { width: 130px; }
 .report-steps-table :is(th, td):nth-child(1),
 .report-steps-table :is(th, td):nth-child(2),
 .report-steps-table :is(th, td):nth-child(4),
-.report-steps-table :is(th, td):nth-child(5) { white-space: nowrap; }
+.report-steps-table :is(th, td):nth-child(6) { white-space: nowrap; }
 .report-steps-table td:last-child { overflow-wrap: anywhere; }
 .report-step-changes > span { display: block; margin-top: 5px; line-height: 1.5; }
 
@@ -123,9 +125,6 @@
 .report-step-kind { display: inline-flex; flex-wrap: wrap; align-items: center; gap: 6px; }
 .report-step-theme { text-transform: none; letter-spacing: 0; }
 .report-delta { font-weight: 650; }
-.report-delta.baseline { color: var(--accent-text); }
-.report-delta.improved { color: var(--trust-ok-ink); }
-.report-delta.regressed { color: var(--trust-alarm-ink); }
 
 .report-inline-state,
 .report-empty-state,

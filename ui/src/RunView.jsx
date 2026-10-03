@@ -2806,6 +2806,7 @@ export default function RunView({ runId, onBack, reviewMode = false, reviewMeta 
       <>
       {panel === 'overview' && panelAllowed('overview') && <OverviewPanel state={state} maxEval={maxEval}
         phase={displayedPhase} runState={liveLabel} onClose={closePanel}
+        onReadReport={() => route.update(current => ({ ...current, view: 'report', panel: null }))}
         onOpenPanel={p => { if (panelAllowed(p)) setPanel(p, { mode: 'replace' }) }} />}
       {panel === 'research' && panelAllowed('research') && <ResearchPanel state={state} runId={runId}
         onToast={showToast} onClose={closePanel} onSelect={selectNodeFromPanel}

@@ -2028,7 +2028,8 @@ Events не выдаются за хранилище отдельной commenta
 
 **Выполненные increments:** пагинация текущих итогов и интерпретаций в чате — §20.2;
 общие подписи типа измерения/повторов и eligibility отчёта — §20.3;
-сопоставимые primary-score rollups и покрытие сравнений — §20.4.
+сопоставимые primary-score rollups и покрытие сравнений — §20.4;
+нейтральные подписи графиков и общий вывод Overview/Report — §20.5.
 Полная приёмка единого вывода во всех видах остаётся OPEN.
 
 #### 72.O6 — P1 / OPEN: результат repo-задачи, который можно взять и воспроизвести
@@ -2736,3 +2737,74 @@ lazy reachability и cycle checks сохранены. Remote CI и достав�
 полная mixed-base/retarget/repeat приёмка и объяснение результатов пользователем
 по §19.4 ещё не завершены. Следующий шаг — проверить подписи и числовую
 траекторию реальных rendered views по тем же границам сравнения.
+
+### 20.5 72.O5: числовые графики и общий вывод Overview/Report (2026-10-03)
+
+**Найдено и исправлено:** оговорка Report не меняла смысл самого waterfall:
+он называл каждое движение frontier «improved/regressed», рисовал зелёные/красные
+полосы и подписывал первую оценку baseline. Trajectory разрешал неизвестную
+feasibility задавать best, игнорировал Trust gate исключение и принимал
+оставшуюся метрику pending/failed узла. Overview тоже показывал любой
+`best_node_id` как «Best metric», без eligibility и общего вывода Report.
+
+Waterfall теперь называется **Numeric frontier changes** (для одной оценки —
+**First eligible value**). Синие полосы и ↑/↓ обозначают только знак числового
+изменения; «Later changes» меняет масштаб без вердикта об улучшении. Общая
+оговорка явно отделяет numeric frontier от сопоставимого улучшения. Каждая
+ступень Report, tooltip, View data и CSV указывает evaluation score либо
+confirmation mean. Markdown сохраняет этот тип в отдельной колонке; первая
+оценка называется first eligible, а не baseline задачи. Неизвестный тип
+переданной legacy ступени не выдумывается. CSV waterfall теперь выгружается
+как `numeric-frontier.csv`.
+
+Trajectory показывает конечные recorded значения только evaluated/active
+узлов. Infeasible, неизвестно-допустимые и Trust-исключённые оценки остаются
+точками с оговоркой и отдельным selection status в таблице, но не двигают
+numeric frontier. Tombstone/abort и оставшаяся метрика pending/failed узла
+не попадают в текущую траекторию. Confirmation mean без основной оценки
+остаётся отображаемым recorded mean. При неизвестном направлении нет frontier
+или автоматически выбранного max. Выбор ближайшей точки, log/detail scales,
+таблицы для клавиатуры и ограничение числа визуальных ступеней сохранены.
+Даже линия допустимых результатов не доказывает сопоставимость или значимость.
+
+Общий eligibility helper используется Report и Trajectory. Overview теперь
+показывает **Selected result** из того же deterministic verdict, его тип
+измерения, оговорки и следующий шаг. Непригодный selected не подменяется другим
+числовым лидером. Счётчики относятся к текущим active узлам. **Read Report**
+меняет workspace view и закрывает Overview одним route update; это не
+неподдерживаемая overlay-панель с именем report. Discuss in Assistant сохранён.
+UI не отправляет запрос модели или команду при интерпретации или навигации.
+Эти виды остаются английскими; полная локализация не заявляется.
+
+Колонки measurement/numeric change получили место в desktop таблице Report;
+неиспользуемые стили «improved/regressed» удалены. Print-правила и существующая
+horizontal overflow оболочка сохранены.
+
+**Проверено:** живые React mounts min/max, неизвестное направление, mean/score,
+неизвестная feasibility, Trust gate, pending/failed, tombstone/abort и нечисловые
+значения. Матрица смешанных means/bases, retarget и неизвестных conditions
+проходит через реальный Report render, waterfall mount, таблицу и скачивание
+CSV с проверкой Blob. Overview при обновлении evidence сохраняет точный вывод
+Report, включая отсутствие eligible selected и incomplete source. Полный
+RunView mount проверяет переход Overview → Report и отсутствие POST. Dense
+charts, двухмасштабный waterfall, keyboard data и ближайшая точка проходят
+существующие interaction tests. Accessibility contracts также проходят;
+jsdom не подтверждает реальный размер/контраст на мониторе.
+
+**Свежие проверки:** replay-first — **193 passed**, UI — **130 passed**;
+documentation/merge contracts — **30 passed**. Strict MkDocs, отдельная staging
+сборка, bundle gate и `git diff --check` прошли. Это целевые проверки;
+полный suite, живое ML-обучение, приёмка человеком и remote CI не запускались.
+
+JS gzip **630 264 → 630 589 B** (**+325 B**), CSS **59 598 → 59 578 B**
+(**−20 B**); initial shell — **83 044 B JS gzip**. Total ceiling **616 KiB**
+сохранён (195 B свободно), CSS ceiling сохранён (70 B свободно). Review DAG
+вырос **267 468 → 268 210 B** из-за общего helper/подписей; только его size
+target переизмерен до **262.25 KiB** (334 B свободно). Остальные route ceilings,
+owner exclusions, cycle checks и lazy reachability gates сохранены.
+Доставка в master этим increment не выполнялась.
+
+**O5 остаётся OPEN:** единый вывод в каждой result surface, полный сценарий
+mixed-base/retarget/repeats и пользовательское объяснение своими словами по
+§19.4 ещё требуют приёмки. Следующий шаг — сверить Experiment result в Inspector
+с общим comparison helper, особенно после reset родителя и смены записанной базы.

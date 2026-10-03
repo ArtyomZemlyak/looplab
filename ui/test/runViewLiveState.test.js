@@ -42,7 +42,7 @@ const GENERATION = 'a'.repeat(64)
 const experiment = (id, metric) => ({
   id, parent_ids: id === 0 ? [] : [0], operator: id === 0 ? 'draft' : 'improve',
   idea: { operator: id === 0 ? 'draft' : 'improve', params: { x: 3 - metric }, rationale: '' },
-  metric, status: 'evaluated',
+  metric, status: 'evaluated', feasible: true,
 })
 const snapshot = (seq, state = {}) => ({
   generation: GENERATION, seq, event_count: seq + 1,
@@ -148,6 +148,28 @@ async function openWorkspace(server) {
   localStorage.clear()
   return harness.mount(RunView, { runId: RUN, onBack() {} })
 }
+
+test('Overview opens the Report workspace and clears the overlay in one route change', async () => {
+  await Promise.all(['/src/panels.jsx', '/src/Report.jsx'].map(path => harness.load(path)))
+  const server = runServer()
+  const view = await openWorkspace(server)
+  try {
+    await until(() => view.container.querySelector('[data-workspace-control="overview"]'), 'workspace controls')
+    await React.act(async () => view.container.querySelector('[data-workspace-control="overview"]')
+      .dispatchEvent(new window.MouseEvent('click', { bubbles: true })))
+    await until(() => view.container.querySelector('.overview-panel'), 'Overview panel')
+    assert.match(read(view, '.ov-best'), /Selected result.*evaluation score/s)
+    const button = [...view.container.querySelectorAll('.overview-panel button')]
+      .find(item => item.textContent === 'Read Report')
+    assert.ok(button)
+    await React.act(async () => button.dispatchEvent(new window.MouseEvent('click', { bubbles: true })))
+    await until(() => view.container.querySelector('.report-view'), 'Report workspace')
+    assert.equal(view.container.querySelector('.overview-panel'), null)
+    assert.equal(view.container.querySelector('[data-workspace-control="report"]').getAttribute('aria-pressed'), 'true')
+    assert.equal(server.fetch.calls.filter(call => call.method !== 'GET').length, 0,
+      'navigation never submits a command or model request')
+  } finally { await view.unmount() }
+})
 
 test('external main status is visible on the workspace and disappears in history and review', async () => {
   const server = runServer({ external: true })

@@ -16,7 +16,8 @@ test('Overview prioritizes measured state and keeps long hints available in a di
     const { OverviewPanel } = await vite.ssrLoadModule('/src/panels.jsx')
     const state = {
       task_id: 'toy', label: 'Toy experiment', goal: 'Minimize loss', direction: 'min', phase: 'finished',
-      nodes: { 1: { id: 1, metric: 0.5 }, 2: { id: 2, status: 'failed' }, 3: { id: 3, metric: 0.4 } },
+      nodes: { 1: { id: 1, metric: 0.5, status: 'evaluated', feasible: true },
+        2: { id: 2, status: 'failed' }, 3: { id: 3, metric: 0.4, status: 'evaluated', feasible: true } },
       best_node_id: 3, total_eval_seconds: 90, llm_cost: { total_tokens: 1200 },
       reward_hacks: [{}], pending_hints: [{ text: 'First **idea**' }, { text: 'Latest **idea**' }],
       active_strategy: { policy: 'greedy', rationale: 'Measured result supports it.' },
@@ -51,7 +52,7 @@ test('Overview prioritizes measured state and keeps long hints available in a di
       { state: { nodes: {}, total_eval_seconds: 0 }, maxEval: null })))
     try {
       assert.equal(noLimit.window.document.querySelector('[role="progressbar"]'), null)
-      assert.match(noLimit.window.document.body.textContent, /No measured result yet/)
+      assert.match(noLimit.window.document.body.textContent, /No eligible result selected/)
       assert.match(noLimit.window.document.body.textContent, /Evaluation-time limit unavailable/)
     } finally { noLimit.window.close() }
 

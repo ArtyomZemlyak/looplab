@@ -3,6 +3,12 @@ import { nodeIsActive } from './nodeProjection.js'
 import { objectiveMetricSource, objectiveSourceCaveated } from './trustSemantics.js'
 import { nodeBase } from './baseRevision.js'
 
+// The numeric frontier and selected result use the engine's current eligible population.
+export const eligibleMeasuredResult = (node, state) => nodeIsActive(node, state)
+  && node.status === 'evaluated' && node.feasible === true
+  && Number.isFinite(node.confirmed_mean ?? node.metric)
+  && !(state?.breed_excluded || []).some(id => Number(id) === Number(node.id))
+
 // A score comparison never compares confirmation means or certifies statistical significance.
 export function scoreDifference(node, other, state) {
   if (!state || sourceIncomplete(state) || state.objective_key

@@ -3,8 +3,11 @@ import { fmt, operatorMeta } from './util.js'
 import { ChartFrame } from './accessibility.jsx'
 import { nodeTheme } from './conceptId.js'
 import { nodeIsActive } from './nodeProjection.js'
+import { eligibleMeasuredResult } from './scoreComparison.js'
+import { resultMeasurement } from './resultMeasurement.js'
 
 const AX = 'var(--fg-mut)', GRID = 'var(--line)'
+const FRONTIER_HELP = 'Recorded values may mix evaluation scores and confirmation means. Numeric changes do not establish comparable improvement.'
 const MARK_SHAPES = ['circle', 'square', 'diamond', 'triangle', 'triangle-down', 'pentagon',
   'hexagon', 'star', 'plus', 'cross', 'bar-horizontal', 'bar-vertical']
 
@@ -86,15 +89,16 @@ function ChartLegend({ items, active = null, onPick = null }) {
 
 // Best-metric-over-time + all-node scatter. Pass `steps` (from report.improvements) to annotate
 // the nodes that moved the frontier with a marker + a "what changed" label — so the chart shows
-// not just the metric curve but WHICH improvement caused each drop/rise.
+// not just the numeric curve but WHICH recorded result moved it; this is not a comparison verdict.
 // `onPick(id)` (optional) makes every point + frontier marker clickable to drill into that node.
-// Points are coloured BY OPERATOR (grouping), with a legend; the frontier keeps its green line + a
+// Points are coloured BY OPERATOR (grouping), with a legend; the frontier uses a blue line + a
 // soft area fill under it.
 export function Trajectory({
   nodes, direction, state = null, width = 760, height = 220,
   steps = null, onPick = null, selected = null,
 }) {
-  const evald = nodes.filter(n => nodeIsActive(n, state) && (n.metric ?? null) !== null)
+  const evald = nodes.filter(n => nodeIsActive(n, state) && n.status === 'evaluated'
+    && Number.isFinite(n.confirmed_mean ?? n.metric))
     .sort((a, b) => a.id - b.id)
   const [logY, setLogY] = React.useState(false)   // interactivity: log-scale toggle (e.g. loss curves)
   const [detailY, setDetailY] = React.useState(true)
@@ -123,7 +127,8 @@ export function Trajectory({
   const core = iqr > 0 ? ys.filter(v => direction === 'min' ? v <= fence : v >= fence) : ys
   const coreMin = Math.min(...core), coreMax = Math.max(...core)
   const fullSpan = maxY - minY, coreSpan = coreMax - coreMin
-  const canFocus = core.length < ys.length && coreSpan > 0 && fullSpan > coreSpan * 3
+  const knownDirection = ['min', 'max'].includes(direction)
+  const canFocus = knownDirection && core.length < ys.length && coreSpan > 0 && fullSpan > coreSpan * 3
   const shownMin = canFocus && detailY ? coreMin : minY
   const shownMax = canFocus && detailY ? coreMax : maxY
   const clipped = canFocus && detailY ? ys.length - core.length : 0
@@ -142,18 +147,20 @@ export function Trajectory({
     return best
   }
   const hn = hoverId != null ? evald.find(n => n.id === hoverId) : null
-  // running best — exclude infeasible (constraint-violating) nodes, mirroring engine selection
-  // (replay.fold ranks only feasible nodes), so the line never claims a best the engine rejected.
+  // Only current eligible results move the numeric frontier. Keep other recorded values as points.
   let best = null; let bestNodeId = null; const bestPts = []; const tableRows = []
   evald.forEach(n => {
     const v = n.confirmed_mean ?? n.metric
-    if (n.feasible !== false && (best === null || (direction === 'min' ? v < best : v > best))) {
+    if (knownDirection && eligibleMeasuredResult(n, state)
+      && (best === null || (direction === 'min' ? v < best : v > best))) {
       best = v
       bestNodeId = n.id
     }
     if (best !== null) bestPts.push([X(n.id), Y(best)])
     tableRows.push({ node: n.id, operator: n.operator || '—', theme: themeOf(n) || 'untagged',
-      metric: v, best, feasible: n.feasible === false ? 'infeasible' : n.feasible === true ? 'feasible' : 'not reported' })
+      metric: v, measurement: resultMeasurement(n.confirmed_mean != null).label, best,
+      eligibility: eligibleMeasuredResult(n, state) ? 'eligible' : 'excluded or unknown',
+      feasible: n.feasible === false ? 'infeasible' : n.feasible === true ? 'feasible' : 'not reported' })
   })
   const observedBestFlagged = bestNodeId != null
     && (state?.reward_hacks || []).some(h => String(h.node_id) === String(bestNodeId))
@@ -188,12 +195,13 @@ export function Trajectory({
     { key: 'node', label: 'Node', firstColumnHeader: true,
       render: (value) => pick ? <button type="button" className="btn xs ghost" onClick={() => pick(value)}>#{value}</button> : `#${value}` },
     { key: 'operator', label: 'Operator' }, { key: 'theme', label: 'Primary concept axis' },
-    { key: 'metric', label: 'Metric', numeric: true },
-    { key: 'best', label: 'Best observed so far', numeric: true }, { key: 'feasible', label: 'Constraint status' },
+    { key: 'metric', label: 'Recorded value', numeric: true }, { key: 'measurement', label: 'Measurement' },
+    { key: 'best', label: 'Eligible numeric frontier', numeric: true },
+    { key: 'eligibility', label: 'Selection status' }, { key: 'feasible', label: 'Constraint status' },
   ]
   return (
     <ChartFrame className="chart" title="Metric trajectory"
-      description={`Evaluated experiments and running ${direction === 'min' ? 'minimum' : 'maximum'}; markers group nodes and rings show constraints.${pick ? ' Click the plot for the nearest node; keyboard users can use View data.' : ''}`}
+      description={`${FRONTIER_HELP} ${knownDirection ? 'Line: eligible numeric frontier.' : 'Unknown direction: no frontier.'} Markers group nodes; rings show constraints.${pick ? ' Click the plot for the nearest node; keyboard users can use View data.' : ''}`}
       columns={columns} rows={tableRows} csvName="metric-trajectory.csv">
     {({ labelledBy }) => <>
     <div className="chart-tools">
@@ -219,7 +227,7 @@ export function Trajectory({
          onPointerMove={e => { const n = nearest(eventX(e)); setHoverId(n ? n.id : null) }}
          onPointerLeave={() => setHoverId(null)}>
       <defs><linearGradient id="ll-traj-fill" x1="0" y1="0" x2="0" y2="1">
-        <stop offset="0%" stopColor="#2ecc71" stopOpacity=".20" /><stop offset="100%" stopColor="#2ecc71" stopOpacity="0" />
+        <stop offset="0%" stopColor="#4aa3ff" stopOpacity=".20" /><stop offset="100%" stopColor="#4aa3ff" stopOpacity="0" />
       </linearGradient></defs>
       {[0, .25, .5, .75, 1].map((t, i) => {
         const y = plotTop + t * (plotBottom - plotTop)
@@ -247,27 +255,27 @@ export function Trajectory({
           x={X(n.id)} y={Y(v)} size={n.id === selected ? 5 : 4} color={c}
           shape={outside ? (v > shownMax ? 'triangle' : 'triangle-down') : marker.shape} variant={marker.variant}
           feasibility={status} opacity={dim ? .12 : .88}
-          title={`#${n.id} ${n.operator || ''}${theme ? ` (${theme})` : ''} → ${fmt(v)}${outside ? ' · outside detail scale' : ''} · ${status === 'unknown' ? 'constraint status not reported' : status}`} />
+          title={`#${n.id} ${n.operator || ''}${theme ? ` (${theme})` : ''} → ${fmt(v)} · ${resultMeasurement(n.confirmed_mean != null).label}${outside ? ' · outside detail scale' : ''} · ${status === 'unknown' ? 'constraint status not reported' : status}${!eligibleMeasuredResult(n, state) ? ' · selection excluded or unknown' : ''}`} />
       })}
       <path d={line} fill="none" stroke="var(--fg)" strokeWidth="4" opacity=".78" />
-      <path d={line} fill="none" stroke="var(--ok)" strokeWidth="2.2" />
+      <path d={line} fill="none" stroke="#4aa3ff" strokeWidth="2.2" />
       {marks.map((s, i) => {
         const v = s.to, x = X(s.id), y = Y(v)
         return <g key={i} className={pick ? 'chart-mark pick' : 'chart-mark'}>
           <circle cx={x} cy={y} r="5" fill="none" stroke="var(--fg)" strokeWidth="3.2" opacity=".78" />
-          <circle cx={x} cy={y} r="5" fill="none" stroke="var(--ok)" strokeWidth="1.6" />
+          <circle cx={x} cy={y} r="5" fill="none" stroke="#4aa3ff" strokeWidth="1.6" />
           {markLabels.has(i) && <>
             <line x1={x} x2={x} y1={y - 6} y2={Math.max(14, y - 20)} stroke="var(--fg)" strokeWidth="2.4" opacity=".78" />
-            <line x1={x} x2={x} y1={y - 6} y2={Math.max(14, y - 20)} stroke="var(--ok)" strokeWidth="1" />
-            <text className="trajectory-step-label" x={x} y={Math.max(11, y - 22)} fill="var(--ok)" fontSize="9.5" textAnchor="middle">#{s.id}</text>
+            <line x1={x} x2={x} y1={y - 6} y2={Math.max(14, y - 20)} stroke="#4aa3ff" strokeWidth="1" />
+            <text className="trajectory-step-label" x={x} y={Math.max(11, y - 22)} fill="#4aa3ff" fontSize="9.5" textAnchor="middle">#{s.id}</text>
           </>}
-          <title>{`#${s.id} ${s.operator || ''}${s.theme ? ` (${s.theme})` : ''} → ${fmt(v)}${s.delta != null ? ` (Δ ${fmt(s.delta)})` : ' baseline'}`}</title>
+          <title>{`#${s.id} ${s.operator || ''}${s.theme ? ` (${s.theme})` : ''} → ${fmt(v)} · ${s.measurement || 'measurement not recorded'}${s.delta != null ? ` (numeric change ${fmt(s.delta)})` : ' first eligible'}`}</title>
         </g>
       })}
       {hn && (() => {   // hover crosshair + tooltip tracking the nearest node
         const v = hn.confirmed_mean ?? hn.metric, hx = X(hn.id), hy = Y(v)
-        const label = `#${hn.id} ${hn.operator || ''} → ${fmt(v)}`
-        const tw = Math.max(64, label.length * 6.0), tx = Math.min(w - 10 - tw, Math.max(pad, hx - tw / 2))
+        const label = `#${hn.id} → ${fmt(v)} · ${resultMeasurement(hn.confirmed_mean != null).label}`
+        const tw = Math.min(w - pad - 10, Math.max(64, label.length * 6)), tx = Math.min(w - 10 - tw, Math.max(pad, hx - tw / 2))
         return <g pointerEvents="none">
           <line x1={hx} x2={hx} y1={plotTop} y2={plotBottom} stroke={AX} strokeDasharray="3 3" opacity=".6" />
           <circle cx={hx} cy={hy} r="5" fill="none" stroke="var(--fg)" strokeWidth="1.5" />
@@ -275,7 +283,7 @@ export function Trajectory({
           <text x={tx + tw / 2} y={13} fill="var(--fg)" fontSize="10.5" textAnchor="middle">{label}</text>
         </g>
       })()}
-      <text x={pad} y={12} fill={AX} fontSize="11">best observed: {fmt(best)}{observedBestFlagged ? ' · flagged' : ''}{useLog ? ' · log Y' : ''}</text>
+      <text x={pad} y={12} fill={AX} fontSize="11">eligible frontier: {fmt(best)}{observedBestFlagged ? ' · flagged' : ''}{useLog ? ' · log Y' : ''}</text>
       <text x={pad} y={h - 8} fill={AX} fontSize="11">node id →</text>
     </svg>
     <ChartLegend items={groupsPresent.map(g => ({ key: g, label: grpLabel(g), color: grpSwatch(g), ...groupMarker(g) }))}
@@ -290,18 +298,17 @@ export function Trajectory({
   )
 }
 
-// Waterfall of the key improvements: each bar is the metric the frontier reached at that step;
-// the baseline is the first best, and each subsequent bar's coloured segment is the gain it added.
+// Numeric frontier changes, including mixed measurement types and unknown comparison conditions.
 export function ImprovementWaterfall({ steps, direction, width = 760 }) {
   const [showLater, setShowLater] = React.useState(true)
-  if (!steps || !steps.length) return <Empty>no improvement steps yet</Empty>
+  if (!steps || !steps.length) return <Empty>no eligible frontier values yet</Empty>
   // Bound only the visual layer: the named table and CSV below retain every exact row. Keeping the
   // baseline plus the latest 99 steps gives long runs a useful endpoint without an unbounded SVG.
   const change = step => Number.isFinite(step?.from) && Number.isFinite(step?.to)
     ? step.to - step.from : 0
   const firstChange = change(steps[1])
   const laterMax = steps.slice(2).reduce((max, step) => Math.max(max, Math.abs(change(step))), 0)
-  const firstImproved = direction === 'min' ? firstChange < 0 : firstChange > 0
+  const firstImproved = direction === 'min' ? firstChange < 0 : direction === 'max' && firstChange > 0
   const canFocus = steps.length >= 4 && firstImproved && laterMax > 0
     && Math.abs(firstChange) > laterMax * 3
   const focused = canFocus && showLater
@@ -317,30 +324,28 @@ export function ImprovementWaterfall({ steps, direction, width = 760 }) {
   const Y = (v) => hi === lo ? (base + 16) / 2
     : 16 + (1 - (v - lo) / (hi - lo)) * (base - 16)
   const rows = steps.map(step => ({ node: step.id, operator: step.operator || '—',
-    from: step.from, to: step.to, delta: step.delta }))
+    from: step.from, to: step.to, measurement: step.measurement || 'not recorded', delta: step.delta }))
   const displayMetric = value => fmt(value)
   const columns = [
     { key: 'node', label: 'Node', firstColumnHeader: true, render: value => `#${value}` },
     { key: 'operator', label: 'Operator' }, { key: 'from', label: 'Previous', numeric: true, render: displayMetric },
-    { key: 'to', label: 'Metric', numeric: true, render: displayMetric },
-    { key: 'delta', label: 'Delta', numeric: true, render: displayMetric },
+    { key: 'to', label: 'Recorded value', numeric: true, render: displayMetric },
+    { key: 'measurement', label: 'Measurement' },
+    { key: 'delta', label: 'Numeric change', numeric: true, render: displayMetric },
   ]
   const baselineOnly = steps.length === 1 && steps[0].from == null
   const labelEvery = Math.max(1, Math.ceil(48 / slot))
   const labelled = i => i === 0 || i === shown.length - 1
     || (i % labelEvery === 0 && i * slot >= 48 && (shown.length - 1 - i) * slot >= 48)
   return (
-    <ChartFrame title={baselineOnly ? 'Metric baseline' : 'Improvement waterfall'}
-      description={baselineOnly
-        ? 'First feasible metric; no improvement is recorded yet.'
-        : focused ? 'Later frontier changes on their own metric scale; baseline and first gain are noted below.'
-          : `Frontier changes for a ${direction === 'min' ? 'minimization' : 'maximization'} objective.`}
-      columns={columns} rows={rows} csvName="improvement-waterfall.csv">
+    <ChartFrame title={baselineOnly ? 'First eligible value' : 'Numeric frontier changes'}
+      description={FRONTIER_HELP}
+      columns={columns} rows={rows} csvName="numeric-frontier.csv">
     {({ labelledBy }) => <>
       {canFocus && <div className="chart-tools"><button type="button" className="btn xs ghost"
-        onClick={() => setShowLater(value => !value)}>{focused ? 'All steps' : 'Later gains'}</button></div>}
+        onClick={() => setShowLater(value => !value)}>{focused ? 'All steps' : 'Later changes'}</button></div>}
       {focused && <div className="waterfall-context" role="note">
-        Baseline #{steps[0].id} {fmt(steps[0].to)} → first gain #{steps[1].id} {fmt(steps[1].to)} (Δ {fmt(firstChange)}). Bars below use the later metric range.
+        First eligible #{steps[0].id} {fmt(steps[0].to)} → next frontier #{steps[1].id} {fmt(steps[1].to)} (numeric change {fmt(firstChange)}). Bars below use the later metric range.
       </div>}
       {shown.length < candidates.length && <div className="muted" role="note">
         {focused ? `Showing latest 100 of ${candidates.length} later steps` : `Showing the baseline and latest 99 of ${steps.length} steps`}; View data and CSV include all {steps.length}.
@@ -355,20 +360,19 @@ export function ImprovementWaterfall({ steps, direction, width = 760 }) {
         const x = pad + i * slot + (slot - bw) / 2
         const yTo = Y(s.to), yFrom = s.from == null ? base : Y(s.from)
         const top = Math.min(yTo, yFrom), hgt = Math.max(3, Math.abs(yTo - yFrom))
-        const improved = s.delta == null || (direction === 'min' ? s.delta < 0 : s.delta > 0)
+        const rising = s.delta > 0
         return <g key={i}>
           <rect className="waterfall-bar" x={x} y={s.from == null ? yTo : top} width={bw}
                 height={s.from == null ? Math.max(3, base - yTo) : hgt} rx="3"
-                fill={s.from == null ? '#4aa3ff' : (improved ? '#2ecc71' : '#ef4444')}
+                fill="#4aa3ff"
                 stroke="var(--fg)" strokeWidth=".75" opacity={s.from == null ? .72 : .9} />
-          {/* A shape cue (▲ improved / ▼ regression) redundant with the green/red fill, so the sign of
-              each step is legible without colour perception (WCAG 1.4.1 use-of-colour). */}
+          {/* Arrows show the numeric sign, never a comparison verdict. */}
           {labelled(i) && <>
             <text className="waterfall-step-label" x={x + bw / 2} y={Math.max(11, top - 4)} fill="var(--fg-dim)" fontSize="9.5" textAnchor="middle">
-              {s.from == null ? '' : improved ? '▲ ' : '▼ '}#{s.id}</text>
+              {s.from == null || !s.delta ? '' : rising ? '↑ ' : '↓ '}#{s.id}</text>
             <text x={x + bw / 2} y={base + 12} fill={AX} fontSize="9.5" textAnchor="middle">{fmt(s.to)}</text>
           </>}
-          <title>{`#${s.id} ${s.operator || ''} → ${fmt(s.to)}${s.delta != null ? ` (Δ ${fmt(s.delta)}, ${improved ? 'improved' : 'regressed'})` : ' (baseline)'}`}</title>
+          <title>{`#${s.id} ${s.operator || ''} → ${fmt(s.to)} · ${s.measurement || 'measurement not recorded'}${s.delta != null ? ` (numeric change ${fmt(s.delta)})` : ' (first eligible)'}`}</title>
         </g>
       })}
       </svg>

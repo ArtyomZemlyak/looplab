@@ -13,7 +13,9 @@ import {
 } from './conceptShelf.js'
 import { Bars, MultiTrajectory, ParallelCoords, Scatter } from './charts.jsx'
 import { EXTRA_METRIC_CHANNEL_HELP, unverifiedExtraMetricKeys } from './extraMetrics.js'
-import { hyperImportance } from './report.js'
+import { hyperImportance, analyze, verdict } from './report.js'
+import { activeNodeMap } from './nodeProjection.js'
+import { resultMeasurement } from './resultMeasurement.js'
 import { sensitivityBars } from './sensitivityModel.js'
 import Markdown, { stripMd } from './markdown.jsx'
 import { OpIcon } from './icons.jsx'
@@ -434,11 +436,14 @@ function usePanelResource(loader, normalize = value => value, key = '', pollMs =
 
 
 // At-a-glance run facts derive from the folded state; RunView supplies the authoritative eval ceiling.
-export function OverviewPanel({ state, maxEval, phase, runState, onClose, onOpenPanel }) {
-  const nodes = Object.values(state.nodes || {})
-  const evaluated = nodes.filter(n => n.metric != null).length
+export function OverviewPanel({ state, maxEval, phase, runState, onClose, onOpenPanel, onReadReport }) {
+  const nodes = Object.values(activeNodeMap(state.nodes || {}, state))
+  const analysis = analyze(state)
+  const result = verdict(state, analysis)
+  const evaluated = analysis.nEval
   const failed = nodes.filter(n => n.status === 'failed').length
-  const best = state.best_node_id != null ? (state.nodes || {})[state.best_node_id] : null
+  const best = result.best
+  const measurement = resultMeasurement(best?.confirmed_mean != null, best?.confirmed_seeds)
   const evalSec = Number.isFinite(state.total_eval_seconds) && state.total_eval_seconds >= 0
     ? state.total_eval_seconds : null
   const evalLimit = Number.isFinite(maxEval) && maxEval >= 0 ? maxEval : null
@@ -461,9 +466,9 @@ export function OverviewPanel({ state, maxEval, phase, runState, onClose, onOpen
       <UpstreamPanel state={state} onClose={onClose} />
       <div className="ov-summary">
         <div className="ov-best">
-          <span className="ov-label">Best metric</span>
+          <span className="ov-label">Selected result</span>
           <strong>{best ? fmt(best.confirmed_mean ?? best.metric) : '—'}</strong>
-          <span className="ov-sub">{best ? `Node #${best.id ?? state.best_node_id} · ${best.confirmed_mean != null ? 'confirmed mean' : 'observed result'}` : 'No measured result yet'}
+          <span className="ov-sub">{best ? `Node #${best.id} · ${measurement.label}` : 'No eligible result selected'}
             {state.direction && ` · ${state.direction === 'min' ? 'minimize' : state.direction === 'max' ? 'maximize' : state.direction}`}</span>
         </div>
         <div className="ov-run-facts">
@@ -473,6 +478,11 @@ export function OverviewPanel({ state, maxEval, phase, runState, onClose, onOpen
           <div><span className="ov-label">Failures</span><strong>{failed}</strong></div>
         </div>
       </div>
+      <section className="ov-section" aria-label="Result interpretation">
+        <h3>Result interpretation</h3><p>{result.headline}</p>
+        <p className="muted">{result.nextStep}</p>
+        {onReadReport && <button type="button" className="btn xs ghost" onClick={onReadReport}>Read Report</button>}
+      </section>
       <section className="ov-section ov-budget" aria-label="Evaluation time">
         <div className="ov-section-head"><h3>Evaluation time</h3>
           <strong>{evalSec == null ? '—' : fmtElapsedSeconds(evalSec)}{evalLimit != null && ` / ${fmtElapsedSeconds(evalLimit)}`}</strong></div>

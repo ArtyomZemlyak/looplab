@@ -253,7 +253,10 @@ export const DEFAULT_BUDGETS = Object.freeze({
       // Same shared-component extraction: measured 266,639 B JS; route boundaries hold.
       // 2026-10-03 doc 72 §20.4: 267,158 -> 267,468 B (+310 B) for shared comparison
       // guards used by lineage arrows. Keep owner exclusions and cycle checks; 261.5 KiB leaves 308 B.
-      limits: { js: { gzip: 261.5 * KIB }, css: { gzip: 41 * KIB } },
+      // 2026-10-03 doc 72 §20.5: 267,468 -> 268,210 B (+742 B) for shared selection
+      // eligibility and explicit chart measurement/coverage copy. Total grows only 325 B;
+      // CSS falls 20 B. 262.25 KiB leaves 334 B; owner and cycle exclusions are unchanged.
+      limits: { js: { gzip: 262.25 * KIB }, css: { gzip: 41 * KIB } },
     },
     {
       name: 'owner Concepts route',

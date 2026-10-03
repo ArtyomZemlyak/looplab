@@ -492,7 +492,6 @@ export default function ReportView({ state, runId, onOpenPanel, canOpenPanel, on
       : !refreshRetryAllowed
         ? (refreshError || 'This paid refresh cannot be resumed safely yet.')
         : ''
-  const impr = s => s.delta == null || (state.direction === 'min' ? s.delta < 0 : s.delta > 0)
   const exportContext = { generation: expectedGeneration, snapshotSeq: observedSeq }
   const modelCard = () => JSON.stringify(buildModelCard({ ...state, report: rep }, best, exportContext), null, 2)
   const reportSections = [
@@ -572,14 +571,15 @@ export default function ReportView({ state, runId, onOpenPanel, canOpenPanel, on
         <Trajectory nodes={Object.values(state.nodes)} direction={state.direction} state={state}
           steps={a.steps} onPick={onPickNode} />
         <ImprovementWaterfall steps={a.steps} direction={state.direction} />
-        <DataTable caption="Metric trajectory steps" card={false}><table className="tbl report-steps-table"><thead><tr><th>#</th><th>node</th><th>operator</th><th>metric</th><th>Δ</th><th>base</th><th>what changed</th></tr></thead><tbody>
+        <DataTable caption="Metric trajectory steps" card={false}><table className="tbl report-steps-table"><thead><tr><th>#</th><th>node</th><th>operator</th><th>recorded value</th><th>measurement</th><th>numeric change</th><th>base</th><th>what changed</th></tr></thead><tbody>
           {a.steps.map((s, i) => <tr key={s.id}>
             <td>{i + 1}</td><td>#{s.id}</td><td><span className="report-step-kind" aria-hidden="true">
               {s.operator || 'unknown operator'}
               {s.theme && s.theme !== s.operator && <span className="pill report-step-theme">{s.theme}</span>}
             </span><span className="sr-only">{reportStepIdentity(s.operator, s.theme)}</span></td>
             <td>{fmt(s.to)}</td>
-            <td className={`report-delta ${s.delta == null ? 'baseline' : (impr(s) ? 'improved' : 'regressed')}`}>{s.delta == null ? 'baseline' : fmt(s.delta)}</td>
+            <td>{s.measurement}</td>
+            <td className="report-delta">{s.delta == null ? 'first eligible' : fmt(s.delta)}</td>
             <td><BaseRevision node={state.nodes[s.id]} state={state} compact /></td>
             <td className="muted">{s.diff.length > 2
               ? <details className="report-step-changes"><summary>{s.diff.length} parameter changes</summary>

@@ -81,7 +81,7 @@ test('every analytical chart renders its non-empty data path', async t => {
   try {
     const charts = await vite.ssrLoadModule('/src/charts.jsx')
     const fixtures = [
-      ['Trajectory', { nodes: [{ id: 1, metric: 0.7, operator: 'draft', feasible: true,
+      ['Trajectory', { nodes: [{ id: 1, status: 'evaluated', metric: 0.7, operator: 'draft', feasible: true,
         idea: { theme: 'baseline' } }], direction: 'min', onPick() {} }],
       ['ImprovementWaterfall', { steps: [{ id: 1, operator: 'draft', from: 0.8, to: 0.7, delta: -0.1 }],
         direction: 'min' }],
@@ -101,7 +101,7 @@ test('every analytical chart renders its non-empty data path', async t => {
         { step: 2, value: 0.7, wall_time: 2 }] }],
     ]
     const expected = {
-      Trajectory: 'Metric trajectory', ImprovementWaterfall: 'Improvement waterfall',
+      Trajectory: 'Metric trajectory', ImprovementWaterfall: 'Numeric frontier changes',
       Bars: 'Value comparison', Gantt: 'Execution span timeline',
       ParallelCoords: 'Parameter relationships', Scatter: 'Metric by Learning rate',
       Spark: 'Trend across 2 values', MultiTrajectory: 'Cross-run trajectories',
@@ -129,7 +129,7 @@ test('dense trajectory and waterfall visuals stay legible while exact data remai
   try {
     const { Trajectory, ImprovementWaterfall } = await vite.ssrLoadModule('/src/charts.jsx')
     const nodes = Array.from({ length: 100 }, (_, index) => ({
-      id: index + 1, metric: 100 - index, operator: 'improve', feasible: true,
+      id: index + 1, status: 'evaluated', metric: 100 - index, operator: 'improve', feasible: true,
     }))
     const steps = nodes.map((node, index) => ({
       id: node.id, operator: node.operator, from: index ? 102 - index : null,
@@ -186,7 +186,7 @@ test('dense trajectory and waterfall visuals stay legible while exact data remai
     }))
     assert.match(later, /Bars below use the later metric range/)
     assert.equal((later.match(/class="waterfall-bar"/g) || []).length, 7)
-    assert.match(later, /Baseline #0 0\.0626 → first gain #1 0\.05929/)
+    assert.match(later, /First eligible #0 0\.0626 → next frontier #1 0\.05929/)
     const laterMax = renderToStaticMarkup(React.createElement(ImprovementWaterfall, {
       steps: lateSteps.map(step => ({ ...step, from: step.from == null ? null : -step.from,
         to: -step.to, delta: step.delta == null ? null : -step.delta })), direction: 'max',
@@ -221,7 +221,7 @@ test('dense charts pick the nearest node and keep every row in the keyboard data
     ])
     root = createRoot(document.getElementById('root'))
     const nodes = Array.from({ length: 100 }, (_, index) => ({
-      id: index + 1, metric: 100 - index, operator: 'improve', feasible: true,
+      id: index + 1, status: 'evaluated', metric: 100 - index, operator: 'improve', feasible: true,
     }))
     const picked = []
     await act(async () => root.render(React.createElement(Trajectory, {
@@ -239,14 +239,14 @@ test('dense charts pick the nearest node and keep every row in the keyboard data
       /nearest node; keyboard users can use View data/)
 
     const outlierNodes = [.062, .060, .058, .061, .063, .059, .064, .246].map((metric, index) => ({
-      id: index + 1, metric, operator: 'improve', feasible: true,
+      id: index + 1, status: 'evaluated', metric, operator: 'improve', feasible: true,
     }))
     await act(async () => root.render(React.createElement(Trajectory, {
       nodes: outlierNodes, direction: 'min', onPick: id => picked.push(id),
     })))
     assert.match(document.querySelector('.chart-scale-note').textContent, /1 worse result shown as triangles at the top edge/)
     assert.equal(document.querySelectorAll('.chart-pt-clipped').length, 1)
-    assert.match(document.querySelector('.chart-pt-clipped title').textContent, /0\.246 · outside detail scale/)
+    assert.match(document.querySelector('.chart-pt-clipped title').textContent, /0\.246 · evaluation score · outside detail scale/)
     assert.equal(document.querySelectorAll('.data-table tbody tr').length, 0,
       'the exact-data table stays collapsed until requested')
     await act(async () => document.querySelector('button[aria-label="View Metric trajectory data"]')
@@ -277,7 +277,7 @@ test('dense charts pick the nearest node and keep every row in the keyboard data
     await act(async () => root.render(React.createElement(ImprovementWaterfall, {
       steps, direction: 'min',
     })))
-    const viewData = document.querySelector('button[aria-label="View Improvement waterfall data"]')
+    const viewData = document.querySelector('button[aria-label="View Numeric frontier changes data"]')
     assert.ok(viewData)
     await act(async () => viewData.dispatchEvent(new dom.window.MouseEvent('click', { bubbles: true })))
     assert.equal(document.querySelectorAll('.data-table tbody tr').length, 150)
@@ -290,7 +290,7 @@ test('dense charts pick the nearest node and keep every row in the keyboard data
       key: 'later-gains', steps: lateSteps, direction: 'min',
     })))
     assert.equal(document.querySelectorAll('.waterfall-bar').length, 7)
-    await act(async () => document.querySelector('button[aria-label="View Improvement waterfall data"]')
+    await act(async () => document.querySelector('button[aria-label="View Numeric frontier changes data"]')
       .dispatchEvent(new dom.window.MouseEvent('click', { bubbles: true })))
     assert.equal(document.querySelectorAll('.data-table tbody tr').length, 9,
       'the focused visual does not remove baseline or first gain from the data table')
@@ -302,7 +302,7 @@ test('dense charts pick the nearest node and keep every row in the keyboard data
     assert.equal(document.querySelectorAll('.waterfall-bar').length, 9)
     assert.equal(document.querySelector('.waterfall-context'), null)
     assert.ok([...document.querySelectorAll('.chart-tools button')]
-      .some(button => button.textContent === 'Later gains'))
+      .some(button => button.textContent === 'Later changes'))
   } finally {
     if (root) {
       const { act } = await import('react')
