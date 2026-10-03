@@ -1,0 +1,215 @@
+{
+  "observed_at_utc": "2026-10-03T09:06:03.017998+00:00",
+  "source_sha": "912798d52c0815cc5dd96882f7ab905abd4ac70f",
+  "platform": "win32",
+  "python": "3.11.14",
+  "local_mcp_sdk": "2.2.0",
+  "replay_first": "193 passed in 3.48s",
+  "selected_guards": {
+    "selectors": [
+      "tests/test_a_line_is_not_an_event_everywhere.py",
+      "tests/test_role_module_split.py",
+      "tests/test_judge_prompt_truths.py",
+      "tests/test_package_layout.py",
+      "tests/test_mcp_remote_install.py",
+      "tests/test_package_layering.py",
+      "tests/test_agents_search_direction.py",
+      "tests/test_cross_package_private_seams.py",
+      "tests/test_upstream_probe_helpers.py"
+    ],
+    "result": "950 passed, 1 skipped in 34.88s"
+  },
+  "original_ci_failures": {
+    "source": "docs/assets/72-review-19-11/ci-evidence.json",
+    "seventeen_direct_selectors": "17 passed in 15.11s",
+    "alarm_control_selector": "tests/test_every_alarm_is_wired_to_something.py::test_every_named_test_passes_in_the_throwaway_tree",
+    "alarm_control_result": "1 passed in 14.13s",
+    "scope": "All 18 original failing test IDs passed these selected local checks. Not a full suite or current-SHA CI verdict."
+  },
+  "clean_install": {
+    "environment": "Fresh private venv, no inherited system site packages",
+    "profile": "pip install -e .[dev]",
+    "exit_code": 0,
+    "mcp_sdk": "2.3.0",
+    "remote_discovery_selector": "tests/test_mcp_remote_install.py",
+    "remote_discovery_result": "5 passed in 5.41s",
+    "ui_server_imports": "FastAPI and Uvicorn imports deliberately refused in every discovery test",
+    "cli_harness_exit_code": 0,
+    "scope": "Dev test profile, not clean harness-only or UI Assistant onboarding acceptance"
+  },
+  "verbatim_extraction": {
+    "hash_scope": "Original comment/constants/function block through the final return newline, excluding inter-definition blank separators. Verified against source SHA.",
+    "block_sha256": "af48ddea85093d7fb0abf432ac1c5f162cc8d16531656c3d0ed9d53169fddbf6",
+    "old_state_brief_lines": 654,
+    "new_state_brief_lines": 622,
+    "ceiling_unchanged": 646
+  },
+  "real_mcp_smokes": {
+    "asha": {
+      "command": "python -m benchmarks.external_asha_smoke --out <new private directory>",
+      "exit_code": 0,
+      "cases": [
+        {
+          "case": "same_resource_stop",
+          "model_judgment_tested": false,
+          "same_question_after_mcp_ui_restart": true,
+          "protected_scorer_unchanged": true,
+          "score_executions": 3,
+          "inspect_replay": "passed"
+        },
+        {
+          "case": "missing_resource",
+          "model_judgment_tested": false,
+          "protected_scorer_unchanged": true,
+          "score_executions": 3,
+          "inspect_replay": "passed"
+        },
+        {
+          "case": "unmatched_rung",
+          "model_judgment_tested": false,
+          "protected_scorer_unchanged": true,
+          "score_executions": 3,
+          "inspect_replay": "passed"
+        },
+        {
+          "case": "retarget",
+          "model_judgment_tested": false,
+          "protected_scorer_unchanged": true,
+          "score_executions": 3,
+          "inspect_replay": "passed"
+        },
+        {
+          "case": "retarget_open",
+          "model_judgment_tested": false,
+          "same_question_after_mcp_ui_restart": true,
+          "protected_scorer_unchanged": true,
+          "score_executions": 3,
+          "inspect_replay": "passed"
+        }
+      ]
+    },
+    "deadline": {
+      "command": "python -m benchmarks.external_deadline_smoke --out <new private directory>",
+      "exit_code": 0,
+      "cases": [
+        {
+          "case": "completed_extend",
+          "cap_seconds": 15,
+          "verdict": "extend",
+          "model_judgment_tested": false,
+          "checkpoint_questions": 1,
+          "terminal_events": 1,
+          "score_executions": 1,
+          "protected_scorer_unchanged": true,
+          "inspect_replay": "passed"
+        },
+        {
+          "case": "stop",
+          "cap_seconds": 1,
+          "verdict": "stop",
+          "model_judgment_tested": false,
+          "checkpoint_questions": 1,
+          "terminal_events": 1,
+          "score_executions": 1,
+          "protected_scorer_unchanged": true,
+          "inspect_replay": "passed"
+        },
+        {
+          "case": "capped_extend",
+          "cap_seconds": 1,
+          "verdict": "extend",
+          "model_judgment_tested": false,
+          "checkpoint_questions": 1,
+          "terminal_events": 1,
+          "score_executions": 1,
+          "protected_scorer_unchanged": true,
+          "inspect_replay": "passed"
+        },
+        {
+          "case": "disabled",
+          "cap_seconds": 0,
+          "verdict": null,
+          "model_judgment_tested": false,
+          "checkpoint_questions": 0,
+          "terminal_events": 1,
+          "score_executions": 1,
+          "protected_scorer_unchanged": true,
+          "inspect_replay": "passed"
+        }
+      ]
+    },
+    "monitor": {
+      "command": "python -m benchmarks.external_live_monitor_smoke --out <new private directory>",
+      "exit_code": 0,
+      "cases": [
+        {
+          "case": "improving",
+          "model_judgment_tested": false,
+          "protected_sources_unchanged": true,
+          "stage_executions": [
+            "train",
+            "score"
+          ],
+          "inspect_replay": "passed"
+        },
+        {
+          "case": "frozen_stop",
+          "model_judgment_tested": false,
+          "protected_sources_unchanged": true,
+          "stage_executions": [
+            "train"
+          ],
+          "inspect_replay": "passed"
+        },
+        {
+          "case": "checkpoint_validation",
+          "model_judgment_tested": false,
+          "protected_sources_unchanged": true,
+          "stage_executions": [
+            "train",
+            "score"
+          ],
+          "inspect_replay": "passed"
+        }
+      ]
+    }
+  },
+  "scope": "Private offline CPU fixtures and scripted external MCP clients; no paid model judgment, UI human acceptance, owner runs or other-worktree integration.",
+  "documentation": {
+    "selectors": [
+      "tests/test_documentation_contracts.py",
+      "tests/test_documented_entry_points_resolve.py",
+      "tests/test_merge_history_integrity.py",
+      "tests/test_doc_surface_budgets.py",
+      "tests/test_architecture_diagram_geometry.py",
+      "tests/test_golden_replay.py",
+      "tests/test_replay_families.py",
+      "tests/test_pin_budget.py"
+    ],
+    "result": "63 passed in 27.41s",
+    "mkdocs_strict_exit_code": 0,
+    "diff_check_exit_code": 0
+  },
+  "source_ci": {
+    "linux_run_id": 37110534322,
+    "conclusion": "failure",
+    "failed_ids": [
+      "tests/test_a_line_is_not_an_event_everywhere.py::test_no_benchmark_tool_filters_events_by_type_without_the_rule",
+      "tests/test_every_alarm_is_wired_to_something.py::test_every_named_test_passes_in_the_throwaway_tree",
+      "tests/test_mcp_remote_install.py::test_remote_phase_discovery_without_fastapi_or_uvicorn[genesis]",
+      "tests/test_mcp_remote_install.py::test_remote_phase_discovery_without_fastapi_or_uvicorn[implementation]",
+      "tests/test_mcp_remote_install.py::test_remote_phase_discovery_without_fastapi_or_uvicorn[recovery]",
+      "tests/test_mcp_remote_install.py::test_remote_phase_discovery_without_fastapi_or_uvicorn[report]",
+      "tests/test_mcp_remote_install.py::test_remote_phase_discovery_without_fastapi_or_uvicorn[research]",
+      "tests/test_role_module_split.py::test_roles_is_no_longer_a_god_module",
+      "tests/test_upstream_probe_helpers.py::test_regression_cannot_mask_an_added_capability_helper[case_probe]",
+      "tests/test_upstream_probe_helpers.py::test_regression_cannot_mask_an_added_capability_helper[case_recipe]",
+      "tests/test_upstream_probe_helpers.py::test_regression_cannot_mask_an_added_capability_helper[case_recipe_deleted]"
+    ],
+    "docs_run_id": 37110534364,
+    "docs_conclusion": "success",
+    "windows_run_id": 37110534303,
+    "windows_status_at_read": "in_progress",
+    "scope": "Source SHA only. All 11 remaining failed IDs belong to repaired clusters; no current-patch full CI verdict."
+  }
+}

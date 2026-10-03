@@ -81,7 +81,7 @@ plane is deterministic, and the Search / Memory / Knowledge stores feed the loop
 pip install -e .                 # core engine + CLI
 pip install -e ".[ui]"           # + live React UI and local TUI auto-start (FastAPI/uvicorn)
 pip install -e ".[otel]"         # + OpenTelemetry span export
-pip install -e ".[dev]"          # + test deps (pytest, httpx, FastAPI/uvicorn)
+pip install -e ".[dev]"          # + test deps (pytest, httpx, FastAPI/uvicorn, MCP SDK)
 ```
 
 Requires **Python ≥ 3.11**. The core dependency set is small and ships prebuilt wheels on common

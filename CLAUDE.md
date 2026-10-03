@@ -10,7 +10,7 @@ Design docs live in `docs/` (see `docs/02-architecture.md`, ADRs in
 ## Commands
 
 ```bash
-pip install -e ".[dev,ui]"        # dev deps; [ui] needed for server/assistant/TUI tests (fastapi)
+pip install -e ".[dev,ui]"        # offline suite deps, including UI server and MCP SDK
 python -m pytest                  # full suite (18,863 collected, ~40 min; addopts already has -q)
 python -m pytest tests/test_events_replay.py           # targeted run — always do this first
 python -m pytest -o addopts="" -q ...                  # if you need to override the default -q

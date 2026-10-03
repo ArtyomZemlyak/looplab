@@ -21,6 +21,7 @@ silently re-hides the failures», — и разворачивает любую �
 """
 from __future__ import annotations
 
+import ast
 import json
 import re
 import sys
@@ -68,6 +69,38 @@ def _reads_events_by_type(src: str) -> bool:
     return "events.jsonl" in src and bool(re.search(r'get\("type"\)|\["type"\]', src))
 
 
+def _all_event_paths_use_eventstore(src: str) -> bool:
+    """Narrow AST exception for direct canonical reads, not a file-name allowlist.
+
+    Checkpoint sidecars also have `type` fields. A file may use JSON for those
+    and EventStore for events. Every event path literal must be inside the actual
+    `EventStore(...).read_all()` call; an extra raw reader revokes the exception.
+    This proves source structure, not arbitrary alias/data-flow correctness.
+    """
+    tree = ast.parse(src)
+    bindings = {alias.asname or alias.name for node in ast.walk(tree)
+                if isinstance(node, ast.ImportFrom) and node.module == "looplab.events.eventstore"
+                for alias in node.names if alias.name == "EventStore"}
+    parents = {child: node for node in ast.walk(tree) for child in ast.iter_child_nodes(node)}
+    paths = [node for node in ast.walk(tree)
+             if isinstance(node, ast.Constant) and node.value == "events.jsonl"]
+    if not paths or not bindings:
+        return False
+    for path in paths:
+        node, found = path, False
+        while node in parents:
+            node = parents[node]
+            if (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
+                    and node.func.attr == "read_all" and isinstance(node.func.value, ast.Call)
+                    and isinstance(node.func.value.func, ast.Name)
+                    and node.func.value.func.id in bindings):
+                found = True
+                break
+        if not found:
+            return False
+    return True
+
+
 def test_no_benchmark_tool_filters_events_by_type_without_the_rule():
     """Класс, а не два файла: новый наивный читатель должен краснеть здесь, а не через месяц в
     отчёте. Собственный читатель разрешён, только если он знает про часового."""
@@ -77,6 +110,8 @@ def test_no_benchmark_tool_filters_events_by_type_without_the_rule():
             continue
         src = path.read_text(encoding="utf-8", errors="replace")
         if not _reads_events_by_type(src):
+            continue
+        if _all_event_paths_use_eventstore(src):
             continue
         # УПОМИНАНИЕ модуля недостаточно: файл может импортировать его для другого и читать
         # события собственным циклом рядом. Нужен ВЫЗОВ.
@@ -90,6 +125,18 @@ def test_no_benchmark_tool_filters_events_by_type_without_the_rule():
         # в описании, не может провалиться по делу (§297 про то же).
         offenders.append(path.name)
     assert not offenders, f"читают события по типу мимо общего правила: {offenders}"
+
+
+@pytest.mark.parametrize("name", ["external_asha_smoke.py", "external_deadline_smoke.py",
+                                 "external_live_monitor_smoke.py"])
+def test_canonical_reader_does_not_hide_an_added_raw_event_reader(name):
+    source = (BENCH / name).read_text(encoding="utf-8")
+    assert _all_event_paths_use_eventstore(source)
+    raw = '\nrows = [json.loads(line) for line in Path("events.jsonl").read_text().splitlines()]\n'
+    assert not _all_event_paths_use_eventstore(source + raw)
+    assert not _all_event_paths_use_eventstore(source.replace('.read_all()', '.read_text()'))
+    assert not _all_event_paths_use_eventstore(source.replace(
+        'from looplab.events.eventstore import EventStore', '# no canonical reader import'))
 
 
 def test_the_corpus_really_holds_packets():

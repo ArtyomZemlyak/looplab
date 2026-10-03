@@ -477,6 +477,8 @@ to it. This checks catalog structure, not every OpenAPI/domain schema constraint
 
 For a remote client, `[harness]` is sufficient for all local metadata tools,
 including every `phase_info`, entity schemas and curated `setting_info`.
+The `[dev]` profile includes the MCP SDK for the offline test suite, alongside
+its UI test dependencies. Remote phase tests forbid UI server imports during discovery.
 Command request/server-derived fields live in the UI-free protocol; server
 validation imports and re-exports the same objects. Metadata discovery does not
 load the server validator or start a local UI. The MCP SDK may install Uvicorn

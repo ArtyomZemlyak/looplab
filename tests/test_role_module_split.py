@@ -137,6 +137,15 @@ def test_every_name_a_re_exported_sibling_defines_is_the_same_object_through_rol
     assert not copies, f"{sibling.__name__} names that are COPIES through `roles`, not aliases: {copies}"
 
 
+def test_concept_authoring_lines_and_filter_keep_the_same_objects():
+    from looplab.agents import concept_brief
+
+    for name in ("CONCEPT_AUTHORING_UNSAFE_LINE", "CONCEPT_AUTHORING_CONTEXT_LINE",
+                 "drop_concept_authoring"):
+        assert getattr(state_brief, name) is getattr(concept_brief, name)
+        assert getattr(roles, name) is getattr(concept_brief, name)
+
+
 def test_roles_re_exports_nothing_it_also_defines():
     """A re-exported name that `roles.py` ALSO defines would resolve to whichever came last — the
     two-module drift the split is supposed to make impossible."""

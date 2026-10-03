@@ -19,6 +19,11 @@ def helper_fixture(tmp_path, mask):
             "artifacts": ["predictions.json"]}]}
     lane, store, generation, body = fixture(tmp_path, upstream_policy=policy)
     lane.task.edit_surface.append(helper)
+    if mask.startswith("case_"):
+        # Linux's surface matching is case-sensitive. Authorize both spellings
+        # explicitly so this case reaches the portable anti-masking boundary;
+        # do not widen production edit permissions to satisfy the test.
+        lane.task.edit_surface.append(helper.upper())
     (lane.rd / "task.snapshot.json").write_text(lane.task.model_dump_json(), encoding="utf8")
     body["files"].update({helper: bad, "train.py": GENERAL.replace(
         'MOMENTUM = float(settings.get("MOMENTUM", "0.0"))',
@@ -52,6 +57,17 @@ def test_regression_cannot_mask_an_added_capability_helper(tmp_path, mask):
     assert checked["status"] == "failed"
     assert next(c for c in checked["result"]["checks"] if c["kind"] == "regression")["passed"] is False
     assert checked["result"]["checks"][-1]["passed"] is True
+
+
+def test_a_helper_outside_the_surface_is_refused_before_any_claim(tmp_path):
+    lane, store, _, body = helper_fixture(tmp_path, "probe")
+    lane.task.edit_surface.remove("runner_support.py")
+    before = store.path.read_bytes()
+    with pytest.raises(UpstreamRefusal) as refusal:
+        lane.propose(body)
+    assert refusal.value.code == "upstream_patch_forbidden"
+    assert "outside_surface" in str(refusal.value)
+    assert store.path.read_bytes() == before and not (lane.rd / "upstream").exists()
 
 
 @pytest.mark.parametrize("operation", ["check", "advance"])

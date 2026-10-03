@@ -31,6 +31,7 @@ dev = [
     "pytest-split>=0.10", # deterministic CI shards keep portability gates bounded.
     "ruff>=0.6",          # the BLE001 census only (`[tool.ruff]` below); no style rule is enabled.
     "numpy>=1.26",       # the AlgoTune bench tests import it unconditionally (doc 57: 22 red without it).
+    "mcp>=1.20",         # remote harness tests are part of the offline dev/CI suite.
 ]
 # Documentation site (MkDocs + Material). `mkdocs serve` for a live preview; CI builds & deploys it.
 docs = ["mkdocs-material>=9.5,<10", "pymdown-extensions>=10"]

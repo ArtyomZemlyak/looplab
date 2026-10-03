@@ -40,16 +40,16 @@
 активная очередь и граница закрытия — §19.4, диагностические свидетельства — §19.4.1;
 связанный пользовательский путь — §19.10;
 новые отказы CI и проверка RU/handoff — §19.11.
-Реализованный первый блок интеграционных исправлений — §20.18. §19.5–19.8
+Реализованные блоки интеграционных исправлений — §20.18–20.19. §19.5–19.8
 описывают предыдущие проходы; их очереди и Git-срезы не заменяют свежий план.
 Главные оставшиеся препятствия: понять вывод, продолжить после потери клиента
 и получить проверенный код в нужном репозитории. Количество API и закрытые WP
 сами по себе не показывают, насколько легко пользователь проходит этот путь.
 
-| Что нужно сейчас | Состояние последнего прохода (§20.18) | Где остаток |
+| Что нужно сейчас | Состояние последнего прохода (§20.19) | Где остаток |
 |---|---|---|
 | Измерение и upstream протокол | Реализованы в opt-in scope; ограничения сохраняются | §18.4, §20 |
-| Доставка текущей ветки LoopLab | Исходный master `ba946a671` доставлен, его Linux CI красный; первый блок шести отказов исправлен локально, общий вердикт нового SHA ожидается | O1: остальные CI-кластеры и проверка итогового SHA; §20.18 |
+| Доставка текущей ветки LoopLab | Исходный master `912798d52` доставлен; все 18 исходных CI IDs проходят выбранными наборами, полный вердикт нового SHA ожидается | O1: общий Linux/Windows CI итогового SHA; §20.18–20.19 |
 | Сохранность всей работы | Inventory есть; решения по WIP и неясным патчам ещё OPEN | O2 |
 | Первый запуск и понятное продолжение | Есть handoff, typed reads и recovery receipts; цельный пользовательский путь ещё OPEN | O3/O4/O8/O9/O11/O13 |
 | Понятный результат | Измерение и сравнимость существенно исправлены; краткость и usability ещё OPEN | O5/O9/O10 |
@@ -1970,7 +1970,7 @@ GitHub CI и branch protection в этом проходе не проверял�
 
 | Очередь | OPEN | Следующий законченный результат | Что блокирует закрытие |
 |---|---|---|---|
-| 0A, P0 | O1 | Разобранный repair batch по красному CI: причины, исправления, guards и общий вердикт исправленного SHA | Первый блок шести отказов исправлен в §20.18; остальные CI-кластеры §19.11 и общий вердикт итогового SHA остаются OPEN |
+| 0A, P0 | O1 | Разобранный repair batch по красному CI: причины, исправления, guards и общий вердикт исправленного SHA | Все 18 исходных CI IDs проходят локальными выбранными проверками (§20.18–20.19); общий CI опубликованного SHA и новые выявленные отказы ещё требуют вердикта |
 | 0B, P0 | O2 | Сохранённая работа и обоснованный disposition каждого WIP/неясного range | Inventory не содержит резервных копий; срез §19.9 с 35 unmatched и 26 patch-equivalent HEAD требует разных проверок, merge commits и ignored артефакты ещё не разобраны |
 | 1, P1 | O4/O8/O11/O13 | Один понятный вход из Assistant в продолжение того же run; минимальный клиент сохраняет original request до write | Lost reply, новый процесс, два клиента, stale identity, pending checkpoint и unavailable source должны иметь определённый исход без случайного второго training |
 | 2, P1 | O3/O9/O10/O13 | Первый CPU результат из Assistant/external client с понятными setup, правами и RU/EN | Раздельная приёмка готового окружения и чистой установки; отдельный клиент получает явный язык, unknown runtime не объявляется текущим |
@@ -2005,6 +2005,9 @@ optional task hook и degraded run row; dependency/platform/smoke/module-cap
 Первый блок выполнен в §20.18: зарегистрированы реальные контракты и исправлен
 runtime fold seam, актуализирован guard намеренно извлечённого протокола;
 ограничения и ceilings не ослаблены. Это закрывает slice, не весь O1.
+Остальные исходные кластеры разобраны в §20.19: все 18 прежних failing IDs
+проходят выбранными локальными наборами, включая clean dev installation и
+вложенную control-проверку alarm-tests. Полный CI итогового SHA остаётся отдельным gate.
 
 **Приёмка:** указаны исходные SHA, итоговый SHA и способ интеграции; проверены
 Python/UI/build/package/docs на итоговом дереве и новые upstream/recovery cases;
@@ -4097,3 +4100,68 @@ layout, launch и Git worktree guards — **1004 passed, 1 skipped**.
 dependency/platform/smoke/role-size кластеры. O2 и пользовательские приёмки
 O3–O14 этим блоком не закрываются. UI/browser acceptance, платная модель,
 автоматическое восстановление внешнего клиента и интеграция чужого WIP не выполнялись.
+
+### 20.19 72.O1: оставшиеся исходные CI-кластеры и реальная MCP-проверка (2026-10-03)
+
+Исходное дерево — `912798d52`. Локально до правки воспроизведены guard отказ
+smoke readers и переполнение `state_brief`: **2 failed, 3 passed, 1 skipped**.
+Пять remote MCP tests в подготовленном venv не могли доказать прежний чистый
+CI install: SDK там уже был. Поэтому установка проверена в новом private venv.
+Завершившийся Linux CI этого исходного SHA (`37110534322`) подтвердил 11
+оставшихся failing IDs из тех же MCP/smoke/case-helper/role-size групп, включая
+nested alarm control. Новых групп в его failed logs нет; docs CI зелёный,
+Windows CI ещё выполнялся на момент чтения. Все 11 входят в выбранные проверки ниже.
+
+**Причины и исправления:**
+
+1. `[dev]` не объявлял MCP SDK, хотя offline suite безусловно запускает remote
+   phase discovery. SDK добавлен в dev dependencies; core/UI пользовательские
+   профили не расширены. Свежий `pip install -e ".[dev]"` прошёл, installed
+   `looplab harness` работает. Пять discovery tests прошли при запрете импортов
+   FastAPI/Uvicorn. Это dev/CI install, не закрытие UI-first onboarding O3.
+2. Три smoke scripts уже читали лог через канонический `EventStore.read_all()`.
+   Старый guard соединял `events.jsonl` с любым dict `type` во всём файле,
+   включая отдельный checkpoint sidecar, и выдавал ложный отказ. Добавлено узкое
+   AST-разрешение прямого canonical reader: каждый literal event path должен
+   находиться в реальном `EventStore(...).read_all()`. Дополнительный сырой reader,
+   потеря canonical import или замена read method снимают разрешение; проверено
+   на изменённых строках всех трёх реальных scripts без изменения рабочего дерева.
+   Общая проверка не выключена, file-name allowlist не создан.
+3. Case-variant helper fixtures на Linux останавливались на `outside_surface`
+   до anti-masking guard. Fixture теперь явно разрешает обе case-формы пути,
+   чтобы исходная проверка проверяла именно masking. Production edit surface
+   не расширен; отдельная негативная проверка запрещённого helper подтверждает
+   отказ до claim/worktree. Exact retries и historical masked proposals проверены.
+4. Из `state_brief.py` извлечены concept-authoring constants и schema-aware
+   filter в `agents/concept_brief.py`. Весь перенесённый block byte-identical
+   (`sha256` в evidence); state_brief/roles возвращают те же objects. Prompt
+   contracts и judge-schema проверки проходят. Размер **654 → 622** при прежнем
+   ceiling **646**; лимит не повышен и why-комментарии сохранены.
+
+**Проверено:** выбранные guard/prompt/import/layer/MCP/upstream наборы —
+**950 passed, 1 skipped**. Все **18 исходных failing CI IDs** прошли локально:
+**17 passed** прямыми selectors и **1 passed** control arm nested alarm-tests
+в throwaway tree. Это полный разбор исходного списка, не весь тестовый suite.
+Replay-first — **193 passed**. В чистом dev venv remote discovery — **5 passed**;
+версия SDK записана отдельно от SDK основного тестового окружения.
+Документация, entry points, merge history, архитектурная схема, golden/family
+replay и pin budgets — **63 passed**.
+Строгая сборка MkDocs и `git diff --check` прошли.
+
+Дополнительно выполнены **12 реальных private CPU/MCP scenarios**, без модели:
+
+- ASHA — `same_resource_stop`, `missing_resource`, `unmatched_rung`, `retarget`,
+  `retarget_open`; сохранена pending question при MCP/UI restart.
+- Deadline — `completed_extend`, `stop`, `capped_extend`, `disabled`.
+- Live monitor — `improving`, `frozen_stop`, `checkpoint_validation`.
+
+Все три smoke commands завершились с exit 0; scorer/protected sources остались
+неизменными, `inspect` и replay прошли во всех 12 случаях. Это scripted external
+clients и реальные команды/evidence на синтетической CPU-задаче; не model judgment,
+не human UX acceptance и не гарантия работы всех live ML задач.
+[Selectors, clean install, block hash и краткие smoke receipts](assets/72-repair-20-19/validation.json).
+
+**Граница:** O1 остаётся OPEN до полного Linux/Windows CI опубликованного SHA.
+Новые отказы общего прогона должны быть разобраны отдельно. Ограничения глубоких
+Windows cwd/worktree из §20.18, WIP disposition O2 и UX-приёмки O3–O14 остаются.
+Defaults, settings, domain events, engine waits и ownership модели не менялись.
