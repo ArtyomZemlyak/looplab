@@ -40,6 +40,7 @@ from looplab.events.eventstore import (
     EventStore, integrity_wire, iter_event_jsonl, log_integrity)
 from looplab.events.replay import fold
 from looplab.events.types import EV_NODE_CREATED
+from looplab.serve.node_comparison import public_parent_comparison
 from looplab.serve.deletion_transaction import (
     DELETE_IDENTITY_PREFIX, DELETE_QUARANTINE_PREFIX, DELETE_RECEIPT_PREFIX)
 from looplab.serve.engine_proc import _engine_liveness
@@ -771,11 +772,13 @@ class AppState:
         better = (lambda a, b: a < b) if st.direction == "min" else (lambda a, b: a > b)
         from looplab.core.redact import redact_secrets
         for node_id, n in d.get("nodes", {}).items():
+            n["parent_comparison"] = None
             # ``pending`` is not an execution phase. Publish the generation-scoped build/admission
             # evidence the fold already holds so every browser surface can distinguish building,
             # evaluating, and waiting without scanning a bounded timeline or guessing by node id.
             try:
                 n["activity"] = public_node_activity(st, int(node_id), withheld=withheld)
+                n["parent_comparison"] = public_parent_comparison(st.nodes.get(int(node_id)))
             except (TypeError, ValueError, OverflowError):
                 # Pydantic's JSON dump produces integer/string integer keys, but keep this light
                 # public projection robust to a hand-built RunState with an exotic mapping key.

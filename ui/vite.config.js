@@ -136,7 +136,9 @@ export default defineConfig({
               name: 'analysis-support',
               // Reports, charts and their evidence semantics form one lazy analysis workspace.
               // Keep it separate from the run shell so concepts and report routes stay bounded.
-              test: /[/\\]src[/\\](report|reportModel|researchMemoModel|trustSemantics|charts|CodeViewer|lineDiff)\.(js|jsx)$/,
+              // scoreComparison imports Trust semantics and is consumed by report: grouping them
+              // together keeps the shared comparison boundary acyclic for DAG and report readers.
+              test: /[/\\]src[/\\](report|reportModel|researchMemoModel|trustSemantics|scoreComparison|charts|CodeViewer|lineDiff)\.(js|jsx)$/,
               includeDependenciesRecursively: false,
             },
             {

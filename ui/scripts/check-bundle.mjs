@@ -148,7 +148,10 @@ export const DEFAULT_BUDGETS = Object.freeze({
     // 2026-10-03 doc 72 §20.3: 629,289 B -> 629,716 B (+427 B) for shared measurement
     // labels/repeat caveats and Trust-gated report selection. Keep 615 KiB (44 B left).
     // Initial shell is 83,044 B; CSS is 59,598 B. All ceilings are unchanged.
-    js: { gzip: 615 * KIB },
+    // 2026-10-03 doc 72 §20.4: 629,716 -> 630,264 B (+548 B) buys comparison coverage
+    // and shared primary-score/base/parent-attempt guards. Initial shell is 83,036 B;
+    // CSS stays 59,598 B. 616 KiB leaves 520 B; structural exclusions remain enforced.
+    js: { gzip: 616 * KIB },
     css: { gzip: 58.25 * KIB },
   },
   individual: {
@@ -248,7 +251,9 @@ export const DEFAULT_BUDGETS = Object.freeze({
       // 2026-09-29 merge of master into the branch: measured 264,378 B JS.
       // 2026-09-30 first-run model status: measured 265,441 B JS in this closure.
       // Same shared-component extraction: measured 266,639 B JS; route boundaries hold.
-      limits: { js: { gzip: 261 * KIB }, css: { gzip: 41 * KIB } },
+      // 2026-10-03 doc 72 §20.4: 267,158 -> 267,468 B (+310 B) for shared comparison
+      // guards used by lineage arrows. Keep owner exclusions and cycle checks; 261.5 KiB leaves 308 B.
+      limits: { js: { gzip: 261.5 * KIB }, css: { gzip: 41 * KIB } },
     },
     {
       name: 'owner Concepts route',

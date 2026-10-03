@@ -500,6 +500,7 @@ export default function ReportView({ state, runId, onOpenPanel, canOpenPanel, on
     best && ['report-section-champion', 'Selected'],
     a.steps.length > 0 && ['report-section-trajectory', 'Trajectory'],
     (memos.length || imp.length) && ['report-section-learnings', 'Learnings'],
+    a.nEval > 0 && ['report-section-comparisons', 'Comparisons'],
     ['report-section-failures', 'Failures'],
     best && ['report-section-solution', 'Solution'],
     rep && ['agent-report-heading', 'Agent narrative'],
@@ -609,12 +610,26 @@ export default function ReportView({ state, runId, onOpenPanel, canOpenPanel, on
         </div>}
       </> : null}
 
-      <h2 id="report-section-failures" tabIndex={-1} className="section-h">What didn't work</h2>
+      {a.nEval > 0 && <>
+        <h2 id="report-section-comparisons" tabIndex={-1} className="section-h">Parent comparison coverage</h2>
+        <p className="muted">Only evaluation scores under matching recorded conditions count as better.
+          Not compared includes first experiments and missing evidence; it does not mean failure.</p>
+        <DataTable caption="Parent comparison coverage" card={false}><table className="tbl"><thead><tr>
+          <th>Operator</th><th>Evaluated</th><th>Compared with parent</th><th>Better score</th>
+          <th>Not compared</th><th>Numeric frontier</th></tr></thead><tbody>
+          {a.operators.map(row => <tr key={row.key}><td>{row.key}</td><td>{row.evaluated}</td>
+            <td>{row.compared}</td><td>{row.improved}</td><td>{row.uncompared}</td>
+            <td>{fmt(row.best)}{row.best != null && <span className="muted">
+              {' · '}{resultMeasurement(row.bestConfirmed).label}</span>}</td></tr>)}
+        </tbody></table></DataTable>
+      </>}
+
+      <h2 id="report-section-failures" tabIndex={-1} className="section-h">Recorded failures</h2>
       <div className="cardgrid" style={{ marginBottom: 10 }}>
         {Object.entries(a.failures).map(([r, ns]) => <div key={r} className="stat"><div className="n">{ns.length}</div><div className="l">failed · {r}</div></div>)}
-        {a.regressions.length > 0 && <div className="stat"><div className="n">{a.regressions.length}</div><div className="l">regressions</div></div>}
+        {a.regressions.length > 0 && <div className="stat"><div className="n">{a.regressions.length}</div><div className="l">worse evaluation scores</div></div>}
         {a.infeasible.length > 0 && <div className="stat"><div className="n">{a.infeasible.length}</div><div className="l">infeasible</div></div>}
-        {!Object.keys(a.failures).length && !a.regressions.length && !a.infeasible.length && <div className="stat"><div className="n">0</div><div className="l">nothing notably failed</div></div>}
+        {!Object.keys(a.failures).length && !a.regressions.length && !a.infeasible.length && <div className="stat"><div className="n">0</div><div className="l">recorded failures or comparable regressions</div></div>}
       </div>
 
       {best && <><h2 id="report-section-solution" tabIndex={-1} className="section-h">Reproduce — selected solution</h2>

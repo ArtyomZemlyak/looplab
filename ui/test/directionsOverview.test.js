@@ -6,10 +6,14 @@ import { GROUP_MODES, computeGroups } from '../src/grouping.js'
 
 const node = (id, metric, direction, parentIds = []) => ({
   id, metric, parent_ids: parentIds, feasible: true, status: 'evaluated', operator: 'improve',
+  attempt: 0, parent_comparison: parentIds.length === 1 ? { version: 1, node_id: parentIds[0], attempt: 0 } : null,
+  metric_provenance: { comparability: { keys: { measured: 'matching-inputs' } } },
   idea: { theme: direction, params: {} },
 })
 const conceptNode = (id, metric, concept, parentIds = []) => ({
   id, metric, parent_ids: parentIds, feasible: true, status: 'evaluated', operator: 'improve',
+  attempt: 0, parent_comparison: parentIds.length === 1 ? { version: 1, node_id: parentIds[0], attempt: 0 } : null,
+  metric_provenance: { comparability: { keys: { measured: 'matching-inputs' } } },
   idea: { theme: null, concepts: [concept], params: {} },
 })
 

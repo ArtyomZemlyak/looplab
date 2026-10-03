@@ -4,6 +4,7 @@ import { delta } from '../src/lineageDelta.js'
 
 const node = (id, metric, digest = 'a'.repeat(64), extra = {}) => ({
   id, attempt: 0, status: 'evaluated', feasible: true, metric, parent_ids: id ? [0] : [],
+  parent_comparison: id ? { version: 1, node_id: 0, attempt: 0 } : null,
   metric_provenance: {
     comparability: { keys: { measured: 'same-inputs' } },
     base_revision: { version: 1, complete: true, digest, node_id: id, generation: 0,
@@ -30,6 +31,10 @@ test('lineage arrows require comparable measured scores on the recorded base', (
     state(node(1, NaN)), state(undefined, { direction: null }),
     state(undefined, { source_integrity: { complete: false } }),
     state(undefined, { objective_key: 'accuracy' }),
+    state(undefined, { breed_excluded: [1] }), state(undefined, { breed_excluded: [0] }),
+    state(node(1, 7, undefined, { parent_comparison: { version: 1, node_id: 0, attempt: 1 } })),
+    state(node(1, 7, undefined, { parent_comparison: undefined })),
+    state(node(1, 7, undefined, { parent_ids: [0, 2] })),
   ]) assert.equal(delta(run.nodes[1], run), null)
 })
 

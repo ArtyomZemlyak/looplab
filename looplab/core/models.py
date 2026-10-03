@@ -1666,7 +1666,7 @@ class Node(BaseModel):
     parent_ids: list[int] = Field(default_factory=list)
     # Fold-internal lineage receipt: the exact parent lifecycles this node was built from. Node ids
     # survive reset, so looking up a parent's CURRENT attempt later can silently rewrite history.
-    # Public state keeps its compact parent_ids projection; the W3C-PROV export consumes this sidecar.
+    # Public state derives a bounded parent-comparison DTO; W3C-PROV consumes the full sidecar.
     parent_generations: dict[str, int] = Field(default_factory=dict, exclude=True)
     operator: str
     idea: Idea

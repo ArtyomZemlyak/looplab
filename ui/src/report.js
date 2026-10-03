@@ -9,7 +9,8 @@ import { activeNodeMap, nodeIsActive } from './nodeProjection.js'
 import { normalizeRunReport, reportCoverageText, reportNarrativeCoverage } from './reportModel.js'
 import { OBJECTIVE_SOURCE_LABEL, objectiveMetricSource,
   objectiveSourceCaveated } from './trustSemantics.js'
-import { nodeComparabilityStatus, sourceIncomplete } from './runIndex.js'
+import { sourceIncomplete } from './runIndex.js'
+import { scoreDifference, parentScoreDifference } from './scoreComparison.js'
 
 const metricOf = (n) => (n.confirmed_mean ?? n.metric)
 const isEvaluated = (n) => n.status === 'evaluated' && metricOf(n) != null
@@ -40,7 +41,8 @@ export function paramDiffLabel(diff) {
 // The frontier walk: in node-id order, every FEASIBLE node that set a new best is one improvement
 // "step". Returns the ordered list with the delta it contributed and what changed vs its parent.
 export function improvements(nodes, direction, state = null) {
-  const dir = direction || 'min'
+  const dir = direction
+  if (!['min', 'max'].includes(dir)) return []
   const bt = better(dir)
   const ev = Object.values(nodes).filter(isEvaluated).sort((a, b) => a.id - b.id)
   const steps = []
@@ -64,17 +66,18 @@ export function improvements(nodes, direction, state = null) {
   return steps
 }
 
-// Per-operator and per-theme productivity: how many nodes each produced, how many evaluated, how
-// many actually beat their parent (a real improvement), and the best metric it reached.
+// Count comparison coverage separately from outcomes. Numeric frontiers may mix measurement types.
 function rollup(nodes, direction, keyFn, state = null) {
-  const dir = direction || 'min'
+  const context = state || { direction, nodes }
+  const dir = context.direction
   const bt = better(dir)
   // Agent-authored direction names are data, not prototype-bearing object properties.
   const out = Object.create(null)
   Object.values(nodes).forEach(n => {
     const key = keyFn(n)
     if (key == null) return
-    const e = (out[key] ||= { key, count: 0, evaluated: 0, improved: 0, failed: 0, best: null })
+    const e = (out[key] ||= { key, count: 0, evaluated: 0, compared: 0, uncompared: 0,
+      improved: 0, failed: 0, best: null, bestId: null, bestConfirmed: null })
     e.count++
     if (n.status === 'failed') e.failed++
     if (isEvaluated(n)) {
@@ -83,11 +86,16 @@ function rollup(nodes, direction, keyFn, state = null) {
       // Only a FEASIBLE result may define `best` — same rule the frontier walk (`improvements`) and the
       // `improved` count below apply, and the module invariant at the top ("never credit a result the
       // engine itself rejected"). Otherwise a constraint-violating node's raw metric would inflate this
-      // operator/theme's reported best and, through `directionProfit`, its treemap gain.
-      if (eligibleResult(n, state) && (e.best === null || bt(v, e.best))) e.best = v
-      const parent = (n.parent_ids || []).map(p => nodes[p]).find(Boolean)
-      const pm = parent ? metricOf(parent) : null
-      if (eligibleResult(n, state) && eligibleResult(parent, state) && pm != null && bt(v, pm)) e.improved++
+      // operator/theme's numeric frontier and the directionProfit compatibility projection.
+      if (['min', 'max'].includes(dir) && eligibleResult(n, context) && (e.best === null || bt(v, e.best))) {
+        e.best = v; e.bestId = n.id; e.bestConfirmed = n.confirmed_mean != null
+      }
+      const d = parentScoreDifference(n, nodes, context)
+      if (d == null) e.uncompared++
+      else {
+        e.compared++
+        if (dir === 'min' ? d < 0 : d > 0) e.improved++
+      }
     }
   })
   return Object.values(out).sort((a, b) => b.improved - a.improved || b.evaluated - a.evaluated)
@@ -99,21 +107,24 @@ export const operatorEffectiveness = (nodes, dir, state = null) => rollup(nodes,
 export const themeEffectiveness = (nodes, dir, state = null) =>
   rollup(nodes, dir, node => nodeTheme(node, state), state)
 
-// Per-direction profit for the Directions overview. `idea.theme` remains the legacy wire field, but
-// this UI projection calls the concept a direction. Controls stay in first-discovery order: live gain
-// is evidence shown inside a control, never an implicit ranking that makes controls jump underhand.
+// Compatibility projection with no current rendered consumer. Keep first-discovery order and
+// distinguish the robust numeric frontier from a comparable primary-score gain.
 export function directionProfit(state) {
   const nodes = activeNodeMap(state.nodes || {}, state)
-  const dir = state.direction || 'min'
-  const baseline = (improvements(nodes, dir, state)[0] || {}).to ?? null   // first feasible frontier value
+  const dir = state.direction
+  const byId = new Map(Object.values(nodes).map(n => [n.id, n]))
+  const first = Object.values(nodes).filter(n => eligibleResult(n, state)).sort((a, b) => a.id - b.id)[0]
+  const baseline = Number.isFinite(first?.metric) ? first.metric : null
   const byDirection = new Map(themeEffectiveness(nodes, dir, state).map(row => [row.key, row]))
   const directions = [...new Set(Object.values(nodes).sort((a, b) => a.id - b.id)
     .map(node => nodeTheme(node, state)).filter(Boolean))]
   return directions.map(direction => {
     const t = byDirection.get(direction)
-    let gain = null
-    if (baseline != null && t.best != null) gain = dir === 'min' ? baseline - t.best : t.best - baseline
-    return { ...t, direction, gain, baseline }
+    const selected = byId.get(t.bestId)
+    const d = scoreDifference(selected, first, state)
+    const gain = d == null ? null : dir === 'min' ? -d : d
+    return { ...t, direction, gain, baseline, baselineId: first?.id ?? null,
+      comparisonMetric: d == null ? null : selected.metric, gainBasis: 'evaluation_score' }
   })
 }
 
@@ -223,15 +234,14 @@ export function nodeChip(node, nodes, state = null) {
 
 // Nodes that ran but made things worse than their parent (regressions) — the "tried, didn't help".
 export function regressions(nodes, direction, state = null) {
-  const dir = direction || 'min'
-  const bt = better(dir)
+  const context = state || { direction, nodes }
   const out = []
   Object.values(nodes).filter(isEvaluated).forEach(n => {
-    const parent = (n.parent_ids || []).map(p => nodes[p]).find(Boolean)
-    const pm = parent ? metricOf(parent) : null
-    if (pm != null && !bt(metricOf(n), pm) && metricOf(n) !== pm) {
-      out.push({ id: n.id, operator: n.operator, metric: metricOf(n), parentId: parent.id,
-                 parentMetric: pm, diff: paramDiff(n, parent), theme: nodeTheme(n, state) })
+    const d = parentScoreDifference(n, nodes, context)
+    if (d != null && (context.direction === 'min' ? d > 0 : d < 0)) {
+      const parent = nodes[n.parent_ids[0]]
+      out.push({ id: n.id, operator: n.operator, metric: n.metric, parentId: parent.id,
+                 parentMetric: parent.metric, diff: paramDiff(n, parent), theme: nodeTheme(n, state) })
     }
   })
   return out.sort((a, b) => a.id - b.id)
@@ -254,6 +264,8 @@ export function analyze(state) {
   const steps = improvements(nodes, dir, state)
   const evald = Object.values(nodes).filter(isEvaluated)
   const infeasible = evald.filter(n => n.feasible === false)
+  const operators = operatorEffectiveness(nodes, dir, state)
+  const compared = operators.reduce((count, row) => count + row.compared, 0)
   return {
     steps,
     firstBest: steps.length ? steps[0].to : null,
@@ -265,12 +277,13 @@ export function analyze(state) {
           ? steps[steps.length - 1].to - steps[0].to
           : steps[0].to - steps[steps.length - 1].to)
       : 0,
-    operators: operatorEffectiveness(nodes, dir, state),
+    operators,
     themes: themeEffectiveness(nodes, dir, state),
     regressions: regressions(nodes, dir, state),
     failures: failureBreakdown(nodes),
     infeasible,
     nEval: evald.length,
+    compared, uncompared: evald.length - compared,
   }
 }
 
@@ -348,14 +361,9 @@ export function verdict(state, a) {
   }
   const first = Object.values(state.nodes || {}).filter(eligible).sort((x, y) => x.id - y.id)[0]
   const baseline = finite(first?.metric) ? first.metric : null
-  const comparable = !sourceIncomplete(state) && !state.objective_key
-    && ['min', 'max'].includes(dir) && best.feasible === true && first?.feasible === true
-    && baseline != null && finite(best.metric)
-    && !objectiveSourceCaveated(objectiveMetricSource(best))
-    && !objectiveSourceCaveated(objectiveMetricSource(first))
-    && nodeComparabilityStatus(first, best) === 'same'
   // Base-evaluation receipts describe scores. They do not certify comparability of confirmation means.
-  const gain = comparable ? best.metric - baseline : null
+  const gain = scoreDifference(best, first, state)
+  const comparable = gain != null
   const outcome = first?.id === best.id ? 'baseline' : !comparable ? 'uncompared'
     : gain === 0 ? 'flat' : (dir === 'min' ? gain < 0 : gain > 0) ? 'improved' : 'regressed'
   const repeated = finite(best.confirmed_mean) && Number.isSafeInteger(best.confirmed_seeds)
@@ -496,16 +504,17 @@ export function toMarkdown(state, _best, context = {}) {
   L.push('## What didn\'t work')
   const fr = Object.entries(a.failures)
   if (fr.length) { L.push('\n**Failures by reason:** ' + fr.map(([r, ns]) => `${r} (${ns.length})`).join(', ')) }
-  if (a.regressions.length) { L.push(`\n**Regressions:** ${a.regressions.length} node(s) ran but did not beat their parent.`) }
+  if (a.regressions.length) { L.push(`\n**Worse evaluation scores:** ${a.regressions.length} under matching recorded parent conditions.`) }
   if (a.infeasible.length) { L.push(`\n**Infeasible:** ${a.infeasible.length} node(s) violated a constraint and were excluded.`) }
   const deadThemes = a.themes.filter(t => t.improved === 0)
-  if (deadThemes.length) L.push(`\n**Primary concept axes that didn't pay off:** ${deadThemes.map(t => t.key).join(', ')}.`)
-  if (!fr.length && !a.regressions.length && !a.infeasible.length && !deadThemes.length) L.push('\n_Nothing notably failed._')
+  if (deadThemes.length) L.push(`\n**Primary concept axes without a comparable score improvement:** ${deadThemes.map(t => t.key).join(', ')}. Absence of an improvement is not evidence that an axis failed.`)
+  if (!fr.length && !a.regressions.length && !a.infeasible.length) L.push('\n_No recorded failures or comparable regressions._')
   L.push('')
-  L.push('## Operator effectiveness')
+  L.push('## Parent comparison coverage')
+  L.push(`\n${a.compared} compared; ${a.uncompared} not compared. First experiments and missing evidence are not failed experiments. Only evaluation scores are compared; the numeric frontier may include confirmation means.`)
   L.push('')
-  L.push('| operator | nodes | evaluated | improved | best |')
-  L.push('|---|---|---|---|---|')
-  a.operators.forEach(o => L.push(`| ${o.key} | ${o.count} | ${o.evaluated} | ${o.improved} | ${fmt(o.best)} |`))
+  L.push('| operator | nodes | evaluated | compared with parent | better score | not compared | numeric frontier |')
+  L.push('|---|---|---|---|---|---|---|')
+  a.operators.forEach(o => L.push(`| ${o.key} | ${o.count} | ${o.evaluated} | ${o.compared} | ${o.improved} | ${o.uncompared} | ${fmt(o.best)}${o.best != null ? o.bestConfirmed ? ' (confirmation mean)' : ' (evaluation score)' : ''} |`))
   return L.join('\n')
 }

@@ -79,6 +79,11 @@ and LoopLab's internal research roles. For setup from a fresh checkout, use
    **evaluation score** separately from a **confirmation mean**. A recorded mean with
    no valid repeat count does not establish multiple successful checks. Check the spread,
    matching evaluation conditions and Trust evidence before relying on the result.
+   **Report → Comparisons** shows how many evaluations could be compared with their
+   recorded parent and how many had a **Better score**. **Not compared** includes first
+   experiments and missing or changed comparison evidence; it does not mean failure.
+   Comparisons use evaluation scores. The separately labelled numeric frontier may
+   contain confirmation means and is not evidence of a comparable improvement.
 
 ## Reuse a useful code change
 
