@@ -141,7 +141,11 @@ export const DEFAULT_BUDGETS = Object.freeze({
     // Russian copy and the whole LaunchCard now load only for a proposal; owner List falls to
     // 211,023 B and DAG to 394,776 B. Keep every route ceiling and add required deferral targets.
     // 614 KiB leaves 726 B above the measured sum; initial shell remains 83,032 B JS.
-    js: { gzip: 614 * KIB },
+    // 2026-10-03 doc 72 §20.2: validated cost UI baseline 628,720 B -> 629,289 B
+    // (+569 B) buys bounded result pages, evidence-bound cursors and explicit navigation.
+    // Initial shell is 83,029 B; CSS and route/reachability ceilings are unchanged.
+    // This measured rebaseline leaves 471 B at 615 KiB.
+    js: { gzip: 615 * KIB },
     css: { gzip: 58.25 * KIB },
   },
   individual: {

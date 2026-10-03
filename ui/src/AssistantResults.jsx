@@ -6,17 +6,25 @@ import { hashWithRunRouteState } from './runRouteState.js'
 import { resultCaveatText, resultNoticeQuestion, resultNoticeText, validResultNotices } from './resultNoticeModel.js'
 import './assistant-run-result.css'
 
-export default function AssistantResults({ runId, generation, onOpen, onReady, onAsk, askDisabled, askDisabledReason }) {
+// Reset the navigation trail synchronously when the run incarnation changes.
+export default function AssistantResults(props) {
+  return <ResultPages key={`${props.runId}:${props.generation}`} {...props} />
+}
+
+function ResultPages({ runId, generation, onOpen, onReady, onAsk, askDisabled, askDisabledReason }) {
   const [language] = useAssistantLanguage()
-  const [limit, setLimit] = useState(50)
+  const [cursors, setCursors] = useState([])
+  const cursor = cursors.at(-1) || null
   const resource = useScopedResource(signal => get(runApiPath(runId, '/result-notices')
-    + `?expected_generation=${generation}&limit=${limit}`, { signal, cache: 'no-store' }), {
-    scope: `${runId}:${generation}:${limit}`, pollMs: 5000, timeout: 8000,
-    validate: value => validResultNotices(value, generation) ? '' : 'Invalid result notices',
+    + `?expected_generation=${generation}&limit=50${cursor ? `&cursor=${encodeURIComponent(cursor)}` : ''}`, { signal, cache: 'no-store' }), {
+    scope: `${runId}:${generation}:${cursor || 'latest'}`, pollMs: 5000, timeout: 8000,
+    validate: value => validResultNotices(value, generation, cursor, 50) ? '' : 'Invalid result notices',
+    classifyFailure: ({ error }) => ({ error: error?.code === 'result_notice_cursor_changed' ? 'cursor_changed' : '' }),
   })
   const rows = resource.status === 'ready' ? resource.data.items : []
   const identity = rows.map(r => r.id + ':' + r.evidence_token + ':' + (r.commentary || '')).join('|')
-  useEffect(() => { if (identity) onReady?.() }, [identity, onReady])
+  // Reading older pages must not trigger the transcript's new-result autoscroll.
+  useEffect(() => { if (identity && !cursor) onReady?.() }, [identity, onReady, cursor])
   const ru = language === 'ru'
   const render = row => {
     const text = resultNoticeText(row, language)
@@ -48,22 +56,34 @@ export default function AssistantResults({ runId, generation, onOpen, onReady, o
   }
   return <section className="asst-result-feed" aria-label={ru ? 'Итоги экспериментов в чате' : 'Experiment results in chat'}>
     <div className="asst-result-feed-head"><span>{ru ? 'Краткие итоги · без вызова модели' : 'Completion briefs · no model call'}</span></div>
+    <div className="asst-run-result-actions" aria-busy={resource.status === 'loading'}>
+      {cursor && <>
+        <button className="btn sm ghost" onClick={() => setCursors(current => current.slice(0, -1))}>
+          {ru ? 'Новее' : 'Newer'}</button>
+        <button className="btn sm ghost" onClick={() => setCursors([])}>
+          {ru ? 'К последним итогам' : 'Latest results'}</button>
+      </>}
+      <button className="btn sm ghost" disabled={resource.status !== 'ready' || !resource.data.has_more}
+        onClick={() => setCursors(current => (current.at(-1) || null) === cursor
+          ? [...current, resource.data.next_cursor] : current)}>{ru ? 'Раньше' : 'Earlier'}</button>
+      {resource.status === 'ready' && <span className="muted">
+        {cursor ? ru ? 'Предыдущая страница' : 'Earlier page' : ru ? 'Последние итоги' : 'Latest page'}
+        {' · '}{rows.length} / {resource.data.total}</span>}
+    </div>
     {onAsk && rows.length > 0 && <p className="muted">
       {ru ? 'Кнопка подготовит вопрос в поле сообщения. Отправьте его, когда будете готовы.'
         : 'The button prepares a question in the composer. Send it when you are ready.'}</p>}
     {['error', 'stale'].includes(resource.status) && <p role="status">
-      {ru ? 'Не удалось обновить итоги. Проверьте состояние run.' : 'Could not refresh results. Check run state.'}{' '}
+      {resource.error === 'cursor_changed'
+        ? ru ? 'Записи изменились. Вернитесь к последним итогам.' : 'Results changed. Return to latest results.'
+        : ru ? 'Не удалось обновить итоги. Проверьте состояние run.' : 'Could not refresh results. Check run state.'}{' '}
       <button className="btn sm ghost" onClick={() => resource.retry()} disabled={!!resource.pending}>
         {ru ? 'Повторить' : 'Retry'}</button></p>}
     {rows.length === 0 && resource.status === 'ready' && <p className="muted">
-      {ru ? 'Итог появится после завершения оценки эксперимента.' : 'A brief appears after an experiment finishes evaluation.'}</p>}
-    {rows.length > 3 && <details><summary>{ru ? 'Предыдущие итоги' : 'Earlier results'} · {rows.length - 3}</summary>
+      {cursor ? ru ? 'Более ранних текущих итогов нет.' : 'No earlier current results.'
+        : ru ? 'Итог появится после завершения оценки эксперимента.' : 'A brief appears after an experiment finishes evaluation.'}</p>}
+    {rows.length > 3 && <details open={!!cursor}><summary>{ru ? 'Предыдущие итоги' : 'Earlier results'} · {rows.length - 3}</summary>
       {rows.slice(0, -3).map(render)}</details>}
     {rows.slice(-3).map(render)}
-    {resource.status === 'ready' && resource.data.has_more && <p className="muted">
-      {ru ? 'Показано' : 'Showing'} {rows.length} / {resource.data.total}.{' '}
-      {limit < 200 ? <button className="btn sm ghost" onClick={() => setLimit(200)}>
-        {ru ? 'Показать до 200' : 'Show up to 200'}</button>
-        : ru ? 'Полная история — в Events.' : 'Full history is in Events.'}</p>}
   </section>
 }

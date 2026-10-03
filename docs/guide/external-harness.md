@@ -118,9 +118,13 @@ owner chat-log/model-workflow access. It stores bounded commentary beside the
 run, never executes actions, and does not fulfill reports or checkpoints. It
 adds **no admission/finalization gate or hidden engine wait**. If the agent
 disconnects, automatic measured briefs remain readable. The chat initially
-shows the latest three briefs; earlier loaded results can be expanded. Reads
-are bounded to 50 items (up to 200 explicitly); the full event history remains
-in Events. Incomplete event/commentary sources produce an explicit error.
+shows the latest three briefs; earlier loaded results can be expanded. **Earlier**,
+**Newer** and **Latest results** navigate current receipts and interpretations in
+50-item pages, including runs with more than 200 receipts. Older pages refresh
+their evidence; an invalidated cursor requires returning to the latest results.
+Generation changes reset navigation. API/MCP reads allow up to 200 items per page.
+Events holds the domain event history, not the separate commentary sidecar.
+Incomplete event/commentary sources produce an explicit error.
 
 #### Recover earlier results after reconnect
 

@@ -50,3 +50,30 @@ test('incomplete, wrong generation, duplicate and invalid scalar receipts are re
     assert.equal(validResultNotices(value, generation), false)
   }
 })
+
+test('result pages require explicit pagination and a cursor bound to the oldest returned evidence', () => {
+  const scope = 'd'.repeat(64)
+  const cursor = `rn1.${scope}.${node.id}.${node.evidence_token}`
+  const page = { ...payload([node]), total: 205, has_more: true, next_cursor: cursor }
+  assert.equal(validResultNotices(page, generation), true)
+  for (const changed of [
+    { ...page, next_cursor: undefined }, { ...page, next_cursor: null }, { ...page, next_cursor: 'bad' },
+    { ...page, next_cursor: cursor.replace(node.evidence_token, 'e'.repeat(64)) },
+    { ...page, next_cursor: cursor.replace('node:2:1', 'node:1:1') },
+    { ...page, items: [] }, { ...page, total: 1 }, { ...page, has_more: false },
+    { ...payload([node]), next_cursor: undefined },
+    { ...payload([node]), total: 205 },
+  ]) assert.equal(validResultNotices(changed, generation), false)
+  const missing = payload([node]); delete missing.next_cursor
+  assert.equal(validResultNotices(missing, generation), false)
+  assert.equal(validResultNotices(page, generation, cursor), false, 'older reads cannot loop back to their input cursor')
+  const input = `rn1.${'e'.repeat(64)}.node:5:0.${'f'.repeat(64)}`
+  assert.equal(validResultNotices(page, generation, input), false, 'cursor scope cannot change across pages')
+  assert.equal(validResultNotices(payload([node]), generation, cursor), false, 'input anchor is exclusive')
+  assert.equal(validResultNotices(payload([null]), generation, cursor), false, 'malformed rows refuse without throwing')
+  assert.equal(validResultNotices(payload([{ ...node, parents: [null] }]), generation), false)
+  assert.equal(validResultNotices({ ...payload([node]), total: 205 }, generation,
+    `rn1.${scope}.node:5:0.${'f'.repeat(64)}`), true, 'oldest page still has a larger run total')
+  const oversized = Array.from({ length: 51 }, (_, id) => ({ ...node, node_id: id, id: `node:${id}:1` }))
+  assert.equal(validResultNotices(payload(oversized), generation, null, 50), false, 'respect the requested page bound')
+})

@@ -72,6 +72,9 @@ and LoopLab's internal research roles. For setup from a fresh checkout, use
    In an experiment's **Overview**, **Experiment result** separates its evaluation score
    from repeat checks and explains whether parent evaluation conditions match.
    An unconfirmed score remains exploratory; a confirmation mean alone does not prove reliability.
+   In chat, **Earlier / Раньше**, **Newer / Новее** and **Latest results / К последним итогам**
+   navigate free completion briefs and external-agent interpretations in 50-item pages.
+   These reflect current evidence; changed attempts or measurements withdraw old interpretations.
 
 ## Reuse a useful code change
 

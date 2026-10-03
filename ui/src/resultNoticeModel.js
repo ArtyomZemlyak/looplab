@@ -15,10 +15,25 @@ export function resultCaveatText(code, language = 'en') {
     || (language === 'ru' ? `Неизвестное ограничение: ${code}` : `Unrecognized caveat: ${code}`)
 }
 
-export function validResultNotices(value, generation) {
+export function validResultNotices(value, generation, cursor = null, limit = 200) {
   if (value?.version !== 1 || value.generation !== generation || !token(generation)
-      || !integer(value.total) || !Array.isArray(value.items) || value.items.length > 200
+      || !integer(value.total) || !Array.isArray(value.items) || value.items.length > limit
       || value.total < value.items.length || typeof value.has_more !== 'boolean') return false
+  if (cursor ? value.total <= value.items.length
+    : value.has_more !== (value.total > value.items.length)) return false
+  if (!Object.hasOwn(value, 'next_cursor')) return false
+  if (value.has_more) {
+    const next = typeof value.next_cursor === 'string'
+      && /^rn1\.([0-9a-f]{64})\.(run|node:[0-9]+:[0-9]+)\.([0-9a-f]{64})$/.exec(value.next_cursor)
+    const first = value.items[0]
+    if (!next || !first || next[2] !== first.id || next[3] !== first.evidence_token
+        || value.total <= value.items.length || value.next_cursor === cursor) return false
+  } else if (value.next_cursor !== null) return false
+  if (cursor) {
+    const scope = cursor.split('.')[1]
+    if (value.next_cursor && value.next_cursor.split('.')[1] !== scope
+        || value.items.some(row => row && cursor === `rn1.${scope}.${row.id}.${row.evidence_token}`)) return false
+  }
   const ids = new Set()
   return value.items.every(row => {
     if (!row || ids.has(row.id) || !token(row.evidence_token) || !metric(row.score)
@@ -36,7 +51,7 @@ export function validResultNotices(value, generation) {
       && typeof row.feasible === 'boolean' && typeof row.trust_flagged === 'boolean' && typeof row.salvaged === 'boolean' && integer(row.violations)
       && typeof row.failure === 'string' && row.failure.length <= 160
       && Array.isArray(row.parents) && row.parents.length <= 8
-      && row.parents.every(p => integer(p.node_id) && integer(p.attempt) && metric(p.score)
+      && row.parents.every(p => p && integer(p.node_id) && integer(p.attempt) && metric(p.score)
         && ['same', 'different', 'unknown'].includes(p.comparability))
   })
 }
