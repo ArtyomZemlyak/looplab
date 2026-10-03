@@ -2035,7 +2035,8 @@ Events не выдаются за хранилище отдельной commenta
 актуальность Trust-сигналов после reset — §20.8;
 advisory Trust в чатовых итогах узла и сравнениях — §20.9;
 предупреждение выбранной попытки в итогах всего run — §20.10;
-основная оценка и разброс повторов в чатовых итогах — §20.11.
+основная оценка и разброс повторов в чатовых итогах — §20.11;
+причины отказа сравнения и ссылки на исходные попытки — §20.12.
 Полная приёмка единого вывода во всех видах остаётся OPEN.
 
 #### 72.O6 — P1 / OPEN: результат repo-задачи, который можно взять и воспроизвести
@@ -3191,3 +3192,54 @@ strict MkDocs и `git diff --check` прошли перед локальным �
 всего маршрута. Следующий review должен проверять причины отказа сравнения и
 доступность исходных измерений в общей истории пользователя. Полный product
 suite, живое ML обучение, browser приёмка и доставка в master не заявляются.
+
+### 20.12 72.O5: причины отказа сравнения и исходные попытки в чате (2026-10-03)
+
+**Найдено:** completion brief терял `ineligible` reason, когда у записанного
+родителя отсутствовала метрика: общий fallback сообщал только, что нет пригодной
+оценки. Root и недоступная попытка родителя также имели одинаковую подпись.
+Число родителя показывалось без attempt и прямой ссылки на исходные измерения.
+Отдельная функция prose comparison могла объявить gain для self-parent input,
+хотя валидаторы страниц UI/MCP уже отвергали self/duplicate parents. Это дефект
+защиты formatter, а не доказанный обход проверки HTTP страницы.
+
+**Сделано:** RU/EN completion brief явно отличает root и недоступную записанную
+попытку, сохраняет причину `ineligible` при отсутствующей метрике. Сравнение с
+доступным единственным родителем подписывает его attempt. В Assistant доступны
+Metrics ссылки на записанные parent IDs/attempts с generation запуска, включая
+каждого доступного родителя merge. Они не создают общий baseline merge.
+Сброшенная, failed или aborted попытка не получает ссылку на новый результат:
+используется прежний server receipt, который уже фильтровал эти случаи.
+Parent shape/identity checks перенесены в общий `validComparison`: и page
+validation, и prose guard отвергают self/duplicate references. API, DTO,
+engine selection и события не изменены; чтение делает только GET, ссылки
+навигационные, вопрос готовится без запуска эксперимента.
+
+**Проверено:** общий `parent_result_cases_v1.json` проходит реальные synthetic
+event folds → HTTP `/result-notices` → typed MCP и mounted RU/EN Assistant.
+Десять случаев: root, сравнимый родитель, отсутствующая метрика, failed parent,
+reset с новым score, abort, разные code bases, разные evaluation conditions,
+merge и merge с reset одного родителя. Проверяются первичные числа, сравнение,
+точные IDs/attempts/generation вкладки Metrics, callback открытия и подготовка
+вопроса без POST. Отдельно проверены self/duplicate input; при refresh после
+reset прежняя parent link снимается, invalid page убирает весь устаревший brief,
+explicit Retry восстанавливает только current evidence.
+
+Replay-first — **193 passed**; result comparison/receipt/paging/repeat и MCP —
+**197 passed**; UI result/language/Trust/lifecycle, route, Report/Overview,
+Inspector, accessibility, resource/command и bundle regressions — **157 passed**
+(`--test-concurrency=4`). Staging build прошёл. Первый bundle gate выявил только
+total JS excess **266 B**; весь JS gzip **632 283 → 632 586 B** (**+303 B**),
+CSS **59 578 B** без изменения. Числа купили ссылки на исходные попытки и
+различимые причины отказа; shared guard убрал дублирование parent validation.
+Общий target перемерен с **617.5 → 618 KiB**, запас **246 B**. Initial shell
+**83 043 B**, review DAG **268 501 B**, Concepts **257 912 B**; все прежние route,
+CSS, reachability и cycle ceilings сохранены. Повторный bundle gate прошёл.
+Документационные/API/merge и layer contracts — **96 passed**; strict MkDocs
+и `git diff --check` прошли перед локальным коммитом.
+
+**O5 остаётся OPEN:** автоматические сценарии подтверждают связь текста и
+исходных попыток, но не заменяют пользовательскую приёмку всего маршрута по
+§19.4. Следующий review — переход из чата в Metrics/Report с объяснением причины
+несопоставимости и сохранением контекста после возврата. Полный product suite,
+живое ML обучение, browser приёмка и доставка в master не заявляются.

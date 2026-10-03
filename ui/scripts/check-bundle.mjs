@@ -164,7 +164,12 @@ export const DEFAULT_BUDGETS = Object.freeze({
     // 2026-10-03 doc 72 §20.9: 631,618 -> 631,993 B (+375 B) carries advisory
     // attempt/parent warnings to completion chat in RU/EN. 617.5 KiB leaves 327 B;
     // all route, CSS and structural limits remain unchanged.
-    js: { gzip: 617.5 * KIB },
+    // 2026-10-03 doc 72 §20.12: 632,283 -> 632,586 B (+303 B) adds exact-attempt
+    // parent metric links and explicit root/unavailable comparison reasons in Assistant.
+    // Parent identity checks are shared by page validation and prose. Initial shell is
+    // 83,043 B; CSS and every route/reachability/cycle ceiling remain unchanged.
+    // 618 KiB leaves 246 B above the measured total; old target was 617.5 KiB.
+    js: { gzip: 618 * KIB },
     css: { gzip: 58.25 * KIB },
   },
   individual: {

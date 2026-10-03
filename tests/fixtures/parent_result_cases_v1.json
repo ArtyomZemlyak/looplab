@@ -1,0 +1,15 @@
+{
+  "version": 1,
+  "cases": [
+    {"name":"root", "status":"no_parent", "parents":[]},
+    {"name":"same", "status":"same", "parents":[{"node_id":0,"attempt":0,"score":1.0,"comparability":"same"}]},
+    {"name":"missing_metric", "status":"ineligible", "parents":[{"node_id":0,"attempt":0,"score":null,"comparability":"same"}]},
+    {"name":"failed_parent", "status":"parent_unavailable", "parents":[]},
+    {"name":"reset_parent", "status":"parent_unavailable", "parents":[]},
+    {"name":"aborted_parent", "status":"parent_unavailable", "parents":[]},
+    {"name":"different_base", "status":"base_different", "parents":[{"node_id":0,"attempt":0,"score":1.0,"comparability":"same"}]},
+    {"name":"different_conditions", "status":"different", "parents":[{"node_id":0,"attempt":0,"score":1.0,"comparability":"different"}]},
+    {"name":"merge", "status":"multiple_parents", "parents":[{"node_id":0,"attempt":0,"score":1.0,"comparability":"same"},{"node_id":9,"attempt":0,"score":2.0,"comparability":"same"}]},
+    {"name":"partial_merge", "status":"multiple_parents", "parents":[{"node_id":0,"attempt":0,"score":1.0,"comparability":"same"}]}
+  ]
+}

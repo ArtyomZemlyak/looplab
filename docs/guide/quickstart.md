@@ -96,6 +96,10 @@ and LoopLab's internal research roles. For setup from a fresh checkout, use
    code base, evaluation conditions and eligibility support it. A parent's current score
    alone does not establish a comparison. Reset or missing evidence explains why comparison
    is unavailable; repeat means and Trust exclusions are labelled separately.
+   Chat shows the recorded parent attempt and provides **Metrics #… · attempt …**
+   links to its evidence. A reset or unavailable parent never substitutes its newer
+   attempt. An experiment without a parent is identified explicitly; it does not
+   establish improvement. For a parent without a metric, check eligibility and source.
    Completion briefs also show advisory Trust warnings for the current attempt
    or its comparison parents. A numeric gain and repeated seeds do not clear a
    warning. Advisory warnings and exclusion from selection are stated separately.

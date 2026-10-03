@@ -32,6 +32,8 @@ function ResultPages({ runId, generation, onOpen, onReady, onAsk, askDisabled, a
     const href = hashWithRunRouteState(base, row.kind === 'run' ? { generation, view: 'report' }
       : { generation, nodeId: row.node_id, nodeGeneration: row.attempt,
         inspectTab: ['failed', 'aborted'].includes(row.status) ? 'Trace' : 'Metrics' })
+    const link = (target, label, key) => <a key={key} className="btn sm ghost" href={target}
+      onClick={onOpen ? event => onOpen(event, target) : undefined}>{label}</a>
     return <article key={row.id} className="asst-result-notice">
       <div className="asst-run-result-head"><strong>{text.title}</strong>
         <span className={`asst-result-status ${row.status}`}>{text.stateLabel}</span></div>
@@ -50,7 +52,10 @@ function ResultPages({ runId, generation, onOpen, onReady, onAsk, askDisabled, a
           onClick={() => onAsk(resultNoticeQuestion(row, language))}>
           {ru ? row.status === 'failed' ? 'Разобрать ошибку в чате' : row.status === 'aborted' ? 'Разобрать остановку в чате' : 'Объяснить результат в чате'
             : row.status === 'failed' ? 'Discuss failure in chat' : row.status === 'aborted' ? 'Discuss stop in chat' : 'Explain result in chat'}</button>}
-        <a className="btn sm ghost" href={href} onClick={onOpen ? event => onOpen(event, href) : undefined}>{text.actionLabel}</a>
+        {link(href, text.actionLabel)}
+        {row.kind === 'node' && row.parents.map(parent => link(hashWithRunRouteState(base, {
+          generation, nodeId: parent.node_id, nodeGeneration: parent.attempt, inspectTab: 'Metrics',
+        }), `${ru ? 'Метрики' : 'Metrics'} #${parent.node_id} · ${ru ? 'попытка' : 'attempt'} ${parent.attempt}`, parent.node_id))}
       </div>
     </article>
   }

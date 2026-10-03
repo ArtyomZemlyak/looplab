@@ -136,6 +136,12 @@ External agents should add a short interpretation after each completion:
    (which may be a confirmation mean). Interpret scores, means, spread and repeat
    counts separately. Spread alone does not prove multiple successful repeats,
    statistical significance, comparable conditions or Trust coverage.
+   Assistant briefs identify the recorded comparison-parent attempt and link to
+   its Metrics using the same run generation. Roots and unavailable parents have
+   distinct explanations. A failed, aborted or reset parent is not replaced by
+   a newer score or link. For multiple parents, available attempts are linked
+   individually without inventing a combined baseline. These links only navigate;
+   reading or preparing a discussion never submits a repair or starts evaluation.
 2. Copy the item's `id` and `evidence_token`. Submit through MCP `api_request`:
 
    ```json

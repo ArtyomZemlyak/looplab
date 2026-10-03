@@ -6,6 +6,10 @@ const integer = value => Number.isSafeInteger(value) && value >= 0
 
 function validComparison(row) {
   const c = row.score_comparison, parents = row.parents
+  if (!Array.isArray(parents) || parents.length > 8
+      || parents.some(p => !p || !integer(p.node_id) || p.node_id === row.node_id
+        || !integer(p.attempt) || !metric(p.score) || !['same', 'different', 'unknown'].includes(p.comparability))
+      || new Set(parents.map(p => p.node_id)).size !== parents.length) return false
   if (c?.version !== 1 || !integer(c.parent_count) || c.parent_count < parents.length) return false
   if (c.status === 'no_parent') return c.parent_count === 0
   if (c.status === 'multiple_parents') return c.parent_count > 1
@@ -19,6 +23,8 @@ function validComparison(row) {
 }
 
 const COMPARISON_HELP = {
+  no_parent: ['This experiment has no parent; improvement is not established.', 'У эксперимента нет родителя; улучшение не установлено.'],
+  parent_unavailable: ['The recorded parent attempt is unavailable; its newer result cannot replace it.', 'Записанная попытка родителя недоступна; её нельзя заменить новым результатом.'],
   base_different: ['Copied code bases differ.', 'Базы кода экспериментов отличаются.'],
   base_unknown: ['Recorded code bases cannot be matched.', 'Совпадение баз кода не подтверждено.'],
   retargeted: ['The objective changed; re-evaluation is needed.', 'Цель оценки изменена; нужна повторная оценка.'],
@@ -86,11 +92,7 @@ export function validResultNotices(value, generation, cursor = null, limit = 200
       && typeof row.trust_advisory === 'boolean' && typeof row.parent_trust_advisory === 'boolean'
       && !(row.trust_flagged && row.trust_advisory) && (!row.parent_trust_advisory || row.parents?.length > 0)
       && typeof row.failure === 'string' && row.failure.length <= 160
-      && Array.isArray(row.parents) && row.parents.length <= 8
-      && row.parents.every(p => p && integer(p.node_id) && integer(p.attempt) && metric(p.score)
-        && ['same', 'different', 'unknown'].includes(p.comparability))
-      && new Set(row.parents.map(p => p.node_id)).size === row.parents.length
-      && row.parents.every(p => p.node_id !== row.node_id) && validComparison(row)
+      && validComparison(row)
   })
 }
 
@@ -141,17 +143,18 @@ export function resultNoticeText(row, language = 'en') {
     if (row.salvaged && row.score !== null) outcome += ru
       ? ' Метрика восстановлена после ошибки; проверьте источник.' : 'Metric recovered after failure; review provenance.'
     const comparisonStatus = row.score_comparison?.status
+    const help = COMPARISON_HELP[comparisonStatus]?.[ru ? 1 : 0]
     const parent = row.score_comparison?.parent_count === 1 && row.parents.length === 1 ? row.parents[0] : null
+    const parentLabel = parent && `#${parent.node_id} · ${ru ? 'попытка' : 'attempt'} ${parent.attempt}`
     if (row.status === 'evaluated' && parent && row.score !== null && parent.score !== null) {
       if (comparisonStatus === 'same' && validComparison(row) && ['min', 'max'].includes(row.direction)) {
         const gain = (row.score - parent.score) * (row.direction === 'min' ? -1 : 1)
-        comparison = ru ? `Основная оценка ${number(row.score)} ${gain === 0 ? 'такая же, как' : gain > 0 ? 'лучше, чем' : 'хуже, чем'} у исходного эксперимента #${parent.node_id} (${number(parent.score)}).`
-          : `Evaluation score ${number(row.score)} ${gain === 0 ? 'ties' : gain > 0 ? 'improves on' : 'is worse than'} parent #${parent.node_id} (${number(parent.score)}).`
+        comparison = ru ? `Основная оценка ${number(row.score)} ${gain === 0 ? 'такая же, как' : gain > 0 ? 'лучше, чем' : 'хуже, чем'} у исходного эксперимента ${parentLabel} (${number(parent.score)}).`
+          : `Evaluation score ${number(row.score)} ${gain === 0 ? 'ties' : gain > 0 ? 'improves on' : 'is worse than'} parent ${parentLabel} (${number(parent.score)}).`
       } else {
-        comparison = ru ? `Исходный эксперимент #${parent.node_id}: оценка ${number(parent.score)}; улучшение не установлено.`
-        : `Parent #${parent.node_id}: score ${number(parent.score)}; improvement not established.`
-        const help = COMPARISON_HELP[comparisonStatus]
-        const reason = help ? ` ${help[ru ? 1 : 0]}` : parent.comparability === 'different'
+        comparison = ru ? `Исходный эксперимент ${parentLabel}: оценка ${number(parent.score)}; улучшение не установлено.`
+        : `Parent ${parentLabel}: score ${number(parent.score)}; improvement not established.`
+        const reason = help ? ` ${help}` : parent.comparability === 'different'
           ? ru ? ' Условия оценки отличаются.' : ' Evaluation conditions differ.'
           : parent.comparability === 'unknown'
             ? ru ? ' Сопоставимость условий оценки не подтверждена.' : 'Comparable evaluation conditions are not established.'
@@ -167,6 +170,7 @@ export function resultNoticeText(row, language = 'en') {
         : row.score_comparison?.parent_count > 1 || row.parents.length > 1
         ? ru ? 'Несколько исходных экспериментов. Единой оценки для сравнения нет.' : 'Multiple parents; no single comparison baseline.'
         : ru ? 'Нет пригодной оценки исходного эксперимента для сравнения.' : 'No usable parent score is available for comparison.'
+      if (help) comparison += ` ${help}`
     }
     if (row.parent_trust_advisory) comparison += ru
       ? ' У исходного эксперимента есть предупреждение Trust; числовое сравнение не подтверждает надёжность результата.'
