@@ -99,6 +99,10 @@ and LoopLab's internal research roles. For setup from a fresh checkout, use
    Completion briefs also show advisory Trust warnings for the current attempt
    or its comparison parents. A numeric gain and repeated seeds do not clear a
    warning. Advisory warnings and exclusion from selection are stated separately.
+   The final run brief and **Run result** card retain warnings for the selected
+   attempt, including soft signals. A warning from an earlier attempt or another
+   experiment is not a warning about that selected result. Read **Trust** for
+   the full signal history; the short result is not a detector-coverage certificate.
    Trust warnings in the selected result, Overview, chart and workspace header
    refer to active node attempts. A signal from before a reset remains in
    **Trust → Reward-hacking signal history**, with its attempt and scope; it

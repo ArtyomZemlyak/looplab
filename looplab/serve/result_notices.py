@@ -28,6 +28,7 @@ from looplab.engine.finalize import incomplete_finalize_scope
 from looplab.serve.engine_proc import _engine_liveness
 from looplab.serve.http import refusal
 from looplab.serve.node_comparison import completion_score_comparison
+from looplab.serve.run_result_summary import current_trust_signals
 from looplab.core.redact import redact_secrets
 
 _MAX_BYTES = 2 * 1024 * 1024
@@ -73,23 +74,6 @@ def _measurement(node):
         "error", "error_reason", "tombstoned"})
 
 
-def _current_trust_signals(state):
-    """Advisory evidence is distinct from selection exclusion, and bound to the attempt."""
-    signals = {}
-    for record in state.reward_hacks:
-        node = state.nodes.get(record.get("node_id"))
-        if (node is None or node.tombstoned or node.id in state.aborted_nodes
-                or record.get("generation", 0) != node.attempt):
-            continue
-        named = [s for s in record.get("signals", [])
-                 if isinstance(s.get("signal"), str) and s["signal"].strip()]
-        if named:
-            # Bind the full folded record, including audit version/code digest;
-            # identical warning text does not imply identical evidence.
-            signals.setdefault(node.id, []).append(record)
-    return signals
-
-
 def _receipts(srv, rd: Path, expected_generation: str) -> tuple[str, list[dict]]:
     from looplab.harness.obligations import evidence_revision
 
@@ -105,7 +89,7 @@ def _receipts(srv, rd: Path, expected_generation: str) -> tuple[str, list[dict]]
         raise HTTPException(503, "result event source incomplete")
     state = fold(events)
     flagged = set(flagged_node_ids(state))
-    trust_signals = _current_trust_signals(state)
+    trust_signals = current_trust_signals(state)
     advisory = set(trust_signals) - flagged
     terminal_seq = {}
     for event in events:
@@ -161,6 +145,7 @@ def _receipts(srv, rd: Path, expected_generation: str) -> tuple[str, list[dict]]
                "score": _score(best) if best else None,
                "confirmed_mean": best.confirmed_mean if best and is_usable_metric(best.confirmed_mean) else None,
                "confirmed_seeds": best.confirmed_seeds if best else None,
+               "trust_advisory": best.id in advisory if best else False,
                "caveats": champion_metric_caveats(state), "evidence_revision": evidence_revision(state)}
         row["evidence_token"] = _digest({"receipt": row, "nodes": [r["evidence_token"] for r in rows]})
         rows.append(row)

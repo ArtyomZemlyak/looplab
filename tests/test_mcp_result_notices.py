@@ -206,11 +206,37 @@ def test_valid_terminal_pages_preserve_evidence_and_extra_fields(status):
     if status in {"failed", "aborted"}:
         row["score"] = None
     if status == "finished":
-        row.update(id="run", kind="run", attempt=None, selected_node=None, score=None)
+        row.update(id="run", kind="run", attempt=None, selected_node=None, score=None,
+                   evaluated=0, failed=0, direction="min", objective="loss", caveats=[])
         del row["node_id"]
     api = HarnessAPI("http://localhost", transport=httpx.MockTransport(
         lambda request: httpx.Response(200, json=page)))
     assert api.result_notices("demo", GEN) == {"status": 200, "body": page}
+
+
+@pytest.mark.parametrize("change", [
+    {"trust_advisory": None}, {"trust_advisory": 0}, {"trust_advisory": "false"},
+    {"selected_node": None, "attempt": None}, {"selected_node": None, "attempt": 0, "score": None},
+    {"selected_node": True}, {"attempt": True}, {"score": None},
+    {"evaluated": True}, {"failed": -1}, {"direction": "unknown"},
+    {"objective": None}, {"caveats": None}, {"caveats": [None]},
+    {"caveats": ["trust_flagged"], "trust_advisory": False},
+])
+def test_run_receipt_refuses_incomplete_or_inconsistent_selected_evidence(change):
+    page = _page()
+    page["items"][0].update(id="run", kind="run", status="finished", selected_node=0, attempt=0,
+                            evaluated=1, failed=0, direction="min", objective="loss", caveats=[])
+    page["items"][0].update(change)
+    _refused_page(page)
+
+
+@pytest.mark.parametrize("field", ["trust_advisory", "selected_node", "attempt", "evaluated", "failed", "caveats"])
+def test_run_receipt_does_not_default_missing_evidence_to_clean(field):
+    page = _page()
+    page["items"][0].update(id="run", kind="run", status="finished", selected_node=0, attempt=0,
+                            evaluated=1, failed=0, direction="min", objective="loss", caveats=[])
+    del page["items"][0][field]
+    _refused_page(page)
 
 
 def test_older_page_may_end_before_total_without_automatic_paging():

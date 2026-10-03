@@ -352,7 +352,9 @@ class HarnessAPI:
                               (row["score"] is None and row["confirmed_mean"] is None))
                          and valid_score_comparison(row) and valid_trust_evidence(row))
             elif valid:
-                valid = row.get("kind") == "run" and rid == "run" and row.get("status") == "finished"
+                from looplab.harness.result_receipts import valid_run_result
+                valid = (row.get("kind") == "run" and rid == "run" and row.get("status") == "finished"
+                         and valid_run_result(row))
             if not valid:
                 break
             identities.add(rid)

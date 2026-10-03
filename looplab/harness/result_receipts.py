@@ -9,6 +9,20 @@ def valid_trust_evidence(row):
             and (not row["parent_trust_advisory"] or bool(row.get("parents"))))
 
 
+def valid_run_result(row):
+    selected, attempt = row.get("selected_node"), row.get("attempt")
+    return (all(type(row.get(k)) is int and row[k] >= 0 for k in ("evaluated", "failed"))
+            and row.get("direction") in ("min", "max")
+            and isinstance(row.get("objective"), str) and len(row["objective"]) <= 256
+            and type(row.get("trust_advisory")) is bool
+            and isinstance(row.get("caveats"), list) and all(isinstance(c, str) for c in row["caveats"])
+            and (("selected_node" in row and "attempt" in row and selected is None and attempt is None
+                  and row.get("score") is None and row.get("confirmed_mean") is None and not row["trust_advisory"])
+                 or (type(selected) is int and selected >= 0 and type(attempt) is int and attempt >= 0
+                     and is_usable_metric(row.get("score"))))
+            and ("trust_flagged" not in row["caveats"] or row["trust_advisory"]))
+
+
 def valid_score_comparison(row):
     comparison, parents = row.get("score_comparison"), row.get("parents")
     if (not isinstance(comparison, dict) or type(comparison.get("version")) is not int

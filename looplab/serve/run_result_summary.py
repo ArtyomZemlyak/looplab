@@ -1,5 +1,23 @@
 """Small measured result receipt for Assistant, derived from the cached run-list fold."""
 from looplab.core.fitness import counts_toward_best, is_usable_metric
+from looplab.events.replay import flagged_node_ids
+
+
+def current_trust_signals(state):
+    """Advisory evidence is distinct from selection exclusion, and bound to the attempt."""
+    signals = {}
+    for record in state.reward_hacks:
+        node = state.nodes.get(record.get("node_id"))
+        if (node is None or node.tombstoned or node.id in state.aborted_nodes
+                or record.get("generation", 0) != node.attempt):
+            continue
+        named = [s for s in record.get("signals", [])
+                 if isinstance(s.get("signal"), str) and s["signal"].strip()]
+        if named:
+            # Bind the full folded record, including audit version/code digest;
+            # identical warning text does not imply identical evidence.
+            signals.setdefault(node.id, []).append(record)
+    return signals
 
 
 def run_result_summary(state, trajectory):
@@ -16,6 +34,7 @@ def run_result_summary(state, trajectory):
     first = state.nodes.get(trajectory["points"][0][2])
     if first is None:
         return None
+    advisory = set(current_trust_signals(state)) - flagged_node_ids(state)
 
     def measurement(node):
         value = node.confirmed_mean if node.confirmed_mean is not None else node.metric
@@ -25,6 +44,7 @@ def run_result_summary(state, trajectory):
             "node_id": node.id, "attempt": node.attempt, "value": float(value),
             "confirmed": node.confirmed_mean is not None,
             "seeds": node.confirmed_seeds if node.confirmed_mean is not None else None,
+            "trust_advisory": node.id in advisory,
         }
 
     return {"first": measurement(first), "selected": measurement(best)}

@@ -55,7 +55,7 @@ test('measured, stopped and run summaries separate comparison, reliability and n
     score_comparison: { version: 1, parent_count: 1, status: 'same' },
     parents: [{ ...node.parents[0], comparability: 'same' }] }
   const finished = { id: 'run', kind: 'run', status: 'finished', objective: 'accuracy', direction: 'max',
-    evaluated: 1, failed: 1, selected_node: 2, attempt: 1, score: 0.3, confirmed_mean: 0.8,
+    evaluated: 1, failed: 1, selected_node: 2, attempt: 1, score: 0.3, confirmed_mean: 0.8, trust_advisory: false,
     confirmed_seeds: 3, caveats: ['mixed_comparability'], reason: 'done', commentary: null,
     evidence_token: 'd'.repeat(64) }
   const backend = fetchStub({ 'GET /api/runs/demo/result-notices': payload([measured, stopped, finished]) })

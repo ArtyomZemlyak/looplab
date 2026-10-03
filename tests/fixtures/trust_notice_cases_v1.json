@@ -9,5 +9,16 @@
     {"name":"gate_parent_hard","mode":"gate","target":0,"signal":"protected_missing","reset":false,"trust_flagged":false,"trust_advisory":false,"parent_trust_advisory":false,"comparison":"ineligible"},
     {"name":"old_child_hard","mode":"audit","target":1,"signal":"protected_missing","reset":true,"trust_flagged":false,"trust_advisory":false,"parent_trust_advisory":false,"comparison":"same"},
     {"name":"empty_signal","mode":"audit","target":1,"signal":" ","reset":false,"trust_flagged":false,"trust_advisory":false,"parent_trust_advisory":false,"comparison":"same"}
-  ]
+  ],
+  "run_expected": {
+    "audit_child_hard": {"selected_node":1,"trust_advisory":true,"caveats":["trust_flagged"]},
+    "gate_child_hard": {"selected_node":0,"trust_advisory":false,"caveats":[]},
+    "block_child_hard": {"selected_node":0,"trust_advisory":false,"caveats":[]},
+    "gate_child_soft": {"selected_node":1,"trust_advisory":true,"caveats":[]},
+    "audit_parent_hard": {"selected_node":1,"trust_advisory":false,"caveats":[]},
+    "gate_parent_soft": {"selected_node":1,"trust_advisory":false,"caveats":[]},
+    "gate_parent_hard": {"selected_node":1,"trust_advisory":false,"caveats":[]},
+    "old_child_hard": {"selected_node":1,"trust_advisory":false,"caveats":[]},
+    "empty_signal": {"selected_node":1,"trust_advisory":false,"caveats":[]}
+  }
 }

@@ -38,6 +38,10 @@ export function resultCaveatText(code, language = 'en') {
     || (language === 'ru' ? `Неизвестное ограничение: ${code}` : `Unrecognized caveat: ${code}`)
 }
 
+
+export const resultTrustAdvisoryText = (language = 'en') => language === 'ru'
+  ? 'Есть предупреждение Trust для этой попытки; оно не исключает результат из отбора. Проверьте Trust перед продолжением.'
+  : 'A Trust warning is recorded for this attempt; it does not exclude the result from selection. Review Trust before continuing.'
 export function validResultNotices(value, generation, cursor = null, limit = 200) {
   if (value?.version !== 1 || value.generation !== generation || !token(generation)
       || !integer(value.total) || !Array.isArray(value.items) || value.items.length > limit
@@ -66,8 +70,12 @@ export function validResultNotices(value, generation, cursor = null, limit = 200
     ids.add(row.id)
     if (row.kind === 'run') return row.id === 'run' && row.status === 'finished'
       && integer(row.evaluated) && integer(row.failed)
-      && (row.selected_node === null || integer(row.selected_node) && integer(row.attempt))
+      && typeof row.trust_advisory === 'boolean'
+      && (row.selected_node === null && row.attempt === null && row.score === null
+          && row.confirmed_mean === null && !row.trust_advisory
+        || integer(row.selected_node) && integer(row.attempt) && Number.isFinite(row.score))
       && Array.isArray(row.caveats) && row.caveats.every(c => typeof c === 'string')
+      && (!row.caveats.includes('trust_flagged') || row.trust_advisory)
     return row.kind === 'node' && integer(row.node_id) && integer(row.attempt)
       && row.id === `node:${row.node_id}:${row.attempt}`
       && ['evaluated', 'failed', 'aborted'].includes(row.status)
@@ -111,6 +119,7 @@ export function resultNoticeText(row, language = 'en') {
     if (row.selected_node !== null && row.confirmed_mean !== null && row.score !== null) outcome += ru
       ? ` Основная оценка: ${number(row.score)}.` : ` Evaluation score: ${number(row.score)}.`
     if (row.reason) outcome += ru ? ` Причина остановки: ${{ aborted: 'завершено вручную', done: 'задача завершена', error: 'ошибка', budget: 'лимит ресурсов' }[row.reason] || row.reason}.` : ` Stop reason: ${row.reason}.`
+    if (row.trust_advisory) outcome += ` ${resultTrustAdvisoryText(language)}`
     next = ru ? 'Откройте Report: итог, ограничения и файлы решения.' : 'Open Report for the result, caveats and solution files.'
   } else {
     title = ru ? `Эксперимент #${row.node_id} · попытка ${row.attempt}` : `Experiment #${row.node_id} · attempt ${row.attempt}`
@@ -126,9 +135,7 @@ export function resultNoticeText(row, language = 'en') {
       ? ' Нарушены ограничения; проверьте допустимость.' : 'Constraints violated; check eligibility.'
     if (row.trust_flagged) outcome += ru
       ? ' Исключён из отбора политикой Trust.' : 'Excluded from selection by the Trust policy.'
-    else if (row.trust_advisory) outcome += ru
-      ? ' Есть предупреждение Trust для этой попытки; оно не исключает результат из отбора. Проверьте Trust перед продолжением.'
-      : 'A Trust warning is recorded for this attempt; it does not exclude the result from selection. Review Trust before continuing.'
+    else if (row.trust_advisory) outcome += ` ${resultTrustAdvisoryText(language)}`
     if (row.salvaged && row.score !== null) outcome += ru
       ? ' Метрика восстановлена после ошибки; проверьте источник.' : 'Metric recovered after failure; review provenance.'
     const comparisonStatus = row.score_comparison?.status

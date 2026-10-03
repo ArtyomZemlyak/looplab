@@ -2033,7 +2033,8 @@ Events не выдаются за хранилище отдельной commenta
 сравнение и свежесть evidence в Inspector — §20.6;
 границы сравнения в чатовых completion briefs — §20.7;
 актуальность Trust-сигналов после reset — §20.8;
-advisory Trust в чатовых итогах узла и сравнениях — §20.9.
+advisory Trust в чатовых итогах узла и сравнениях — §20.9;
+предупреждение выбранной попытки в итогах всего run — §20.10.
 Полная приёмка единого вывода во всех видах остаётся OPEN.
 
 #### 72.O6 — P1 / OPEN: результат repo-задачи, который можно взять и воспроизвести
@@ -3075,3 +3076,58 @@ strict MkDocs и diff check прошли. Изменения сохраняют�
 все мягкие предупреждения всего run. Следующий review должен проверить эту
 границу в итоговой истории пользователя. Полный product suite, живое ML обучение,
 browser приёмка и доставка в master этим проходом не заявляются.
+
+### 20.10 72.O5: предупреждение выбранной попытки сохраняется в итоге run (2026-10-03)
+
+**Найдено:** после §20.9 node brief показывал soft advisory, но finalized run
+brief и Assistant Run result card его теряли: они читали только hard champion
+caveats. Успешная confirmation могла визуально соседствовать с итогом без этого
+предупреждения. Typed MCP проверял `kind/status` run receipt, но не его selected
+identity, caveats и обязательные сведения об итоговом предупреждении.
+
+**Сделано:** finalized run receipt требует `trust_advisory` выбранной попытки.
+`run_result_summary` добавляет такое же поле к measured first/selected values
+в cached `/api/runs` projection. Чистая общая функция `current_trust_signals`
+перенесена из result notices в модуль result summary; оба читателя используют
+одно правило current generation, active node и nonempty named signal. Отбор
+не переписан: soft signal остаётся advisory при audit/gate/block, а прежний
+`caveats=trust_flagged` сохраняет high-precision meaning. Сигнал другого узла
+или старой попытки не приклеивается к выбранной. Без выбранного результата
+receipt несёт null identity/attempt/measurement и false advisory.
+
+Оба вида результата в Assistant используют общий RU/EN текст предупреждения
+из `resultNoticeModel`, который уже используется node brief. Evaluation score
+и confirmation mean остаются разными числами. Карточка не требует detail read,
+а подготовка вопроса не отправляет его и не запускает работу. Старые summary
+rows без нового metadata сохраняют existing unknown-coverage notice; отсутствие
+поля не выдается за проведённый Trust pass. Typed run pages строже: отсутствующие,
+неверно типизированные и contradictory selected/caveat/advisory fields дают
+unavailable; неполный HTTP 200 не становится чистым завершённым результатом.
+
+**Проверено как связанный сценарий:** тот же JSON fixture расширен ожидаемым
+selected result для audit/gate/block, hard/soft, child/parent, reset и blank signal.
+Реальные synthetic event folds проверяются через HTTP `/result-notices` и
+`/api/runs`, затем через typed MCP: выбранные ID/attempt, score/mean, warning
+и прежние hard caveats совпадают. Отдельно проверены no winner после abort,
+отзыв run commentary и cursor после новой advisory записи, отказ fresh publication
+по старому token и exact retry первоначального body. Mounted chat feed и Run
+result card на RU/EN показывают одно предупреждение и снимают его при замене
+результата; чтение делает только GET, кнопки готовят вопросы без запуска.
+
+Replay-first — **193 passed**; result/MCP, lifecycle, champion caveats, trust gate
+и trajectory contracts — **218 passed**; выбранные UI result/language,
+Report/Overview, Inspector, live state, accessibility и command regressions —
+**176 passed** (`--test-concurrency=4`). Staging build и bundle gate прошли с
+прежними ceilings: JS gzip total **631 993 → 631 981 B** (**−12 B**) после общего
+RU/EN reader text; CSS **59 578 B** без изменения, initial shell **83 045 B**,
+review DAG **268 376 B**, Concepts **257 910 B**. Total JS target **617.5 KiB**
+не повышен, запас **339 B**; route/CSS/reachability/cycle gates не изменены.
+Документационные/API/merge и layer contracts — **96 passed**;
+strict MkDocs и diff check прошли. Изменения сохраняются локальным коммитом.
+
+**O5 остаётся OPEN:** mixed-base/retarget/repeat пользовательский маршрут и
+объяснение результата человеком по §19.4 ещё не приняты. Завершённый run brief
+описывает выбранную попытку, а не все предупреждения в истории или полноту
+проверок. Следующий review должен проверять это различие вместе с причинами
+несопоставимости результатов. Полный product suite, живое ML обучение, browser
+приёмка и доставка в master этим проходом не заявляются.

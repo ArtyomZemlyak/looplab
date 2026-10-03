@@ -116,6 +116,16 @@ External agents should add a short interpretation after each completion:
    the score and warning booleans are unchanged; exact publication retries still
    acknowledge the original receipt. An old-attempt signal does not warn about
    the replacement attempt.
+   A finalized `run` receipt also requires `trust_advisory`: it describes the
+   selected attempt, including soft signals, rather than every warning in the
+   run. It is false when no result is selected. The selected identity, attempt,
+   score and caveats must be consistent; incomplete run receipts are unavailable
+   through typed MCP/UI reads. `caveats=trust_flagged` retains its existing
+   high-precision meaning and requires the selected advisory warning; soft
+   warnings do not become hard caveats or change the winner. The cached
+   `/api/runs` summary carries the same boolean on `result_summary.selected`
+   for the Assistant result card. Older summary rows retain the existing
+   unknown-coverage notice; absence of metadata does not prove clean results.
 2. Copy the item's `id` and `evidence_token`. Submit through MCP `api_request`:
 
    ```json

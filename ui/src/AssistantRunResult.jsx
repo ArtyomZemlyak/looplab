@@ -2,7 +2,7 @@ import React from 'react'
 import { fmt } from './util.js'
 import { terminalReady, sourceIncomplete, sourceIntegrityNotice,
   bestMetricCaveats, bestMetricCaveatNotice } from './runIndex.js'
-import { resultCaveatText } from './resultNoticeModel.js'
+import { resultCaveatText, resultTrustAdvisoryText } from './resultNoticeModel.js'
 import { hashWithRunRouteState } from './runRouteState.js'
 import { useAssistantLanguage } from './useAssistantLanguage.js'
 import { resultMeasurement } from './resultMeasurement.js'
@@ -51,6 +51,7 @@ export default function AssistantRunResult({ run, onOpen, onAsk, onReady, askDis
             'Разные типы измерений; улучшение не установлено. В отчёте сравните основные оценки отдельно от повторных запусков.')
           : text('Read Report to compare values, conditions and repeat checks.', 'В отчёте сравните значения, условия оценки и повторы.')}</p>
       <p className="asst-run-result-caution">{measurement.reliability}</p>
+      {selected.trust_advisory === true && <p className="asst-run-result-caution">{resultTrustAdvisoryText(language)}</p>}
       <p className="asst-run-result-caution">{text('First eligible is not necessarily the task baseline; detector coverage is not fully verified.',
         'Первый допустимый эксперимент не обязательно является базовым решением задачи; полнота проверок Trust не подтверждена.')}</p>
       {caveats.length > 0 && <p className="asst-run-result-caution" title={bestMetricCaveatNotice(run)}>
