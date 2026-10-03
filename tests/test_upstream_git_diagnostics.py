@@ -32,23 +32,27 @@ def test_git_failure_classification_does_not_reflect_stderr(tmp_path, monkeypatc
         assert "Do not move this run or repeat training automatically" in str(refused.value)
 
 
-@pytest.mark.parametrize("kind", ["posix_length", "windows_length", "missing_git", "permission"])
-def test_git_spawn_only_classifies_explicit_path_length_errors(tmp_path, monkeypatch, kind):
+@pytest.mark.parametrize("kind", ["posix_length", "windows_length", "missing_git", "permission", "other_io"])
+def test_git_spawn_only_classifies_explicit_process_errors(tmp_path, monkeypatch, kind):
     error = (OSError(errno.ENAMETOOLONG, "private-secret") if kind == "posix_length" else
              FileNotFoundError(errno.ENOENT, "private-secret") if kind == "missing_git" else
-             PermissionError(errno.EACCES, "private-secret") if kind == "permission" else OSError("private-secret"))
+             PermissionError(errno.EACCES, "private-secret") if kind == "permission" else
+             OSError(errno.EIO, "private-secret") if kind == "other_io" else OSError("private-secret"))
     if kind == "windows_length":
         error.winerror = 206
     def fail(*args, **kwargs):
         raise error
     monkeypatch.setattr(subprocess, "run", fail)
-    with pytest.raises(UpstreamRefusal if kind.endswith("length") else type(error)) as refused:
+    with pytest.raises(type(error) if kind == "other_io" else UpstreamRefusal) as refused:
         upstream_workspace.git_at(tmp_path, "init", "--template=")
     if kind.endswith("length"):
         assert refused.value.code == "upstream_git_path_unavailable"
         assert "private-secret" not in str(refused.value)
-    else:
+    elif kind == "other_io":
         assert refused.value is error
+    else:
+        assert refused.value.code == "upstream_git_process_unavailable"
+        assert "private-secret" not in str(refused.value)
 
 
 @pytest.mark.parametrize("operation", ["cwd", "worktree"])

@@ -1553,6 +1553,17 @@ reviewing the task/base and required evaluation. Do not move or rewrite the
 existing run: its recorded selectors may name absolute archive paths. This
 diagnostic grants no automatic training retry, gate pass, base advancement or
 resume; an unfinished claim still requires the explicit recovery described above.
+A Git command deadline returns `upstream_git_timeout_unavailable`; partial
+staging/worktree changes may remain. Inspect upstream history and the original
+action receipt before any retry. If the server cannot start Git because the
+executable is missing or denied, `upstream_git_process_unavailable` identifies
+the **UI/engine process environment** to repair. The remote MCP client's PATH
+does not install Git on the server. Both refusals are retained in a failed proposal
+receipt; exact recovery reads that refusal without rerunning Git or evaluation.
+HTTP 503 is still an unknown write acknowledgement until the original receipt
+has been read. Assistant reports these operator diagnostics without raw
+exception argv/output or host paths. A failed proposal supports no gate pass;
+new work after explicit environment repair requires a new action ID.
 After operator abandonment, an exact retry of an unfinished proposal/check returns
 `upstream_claim_abandoned`: inspect its history and use a new `action_id` for new
 work. It does not ask for another abandonment or engine wait, and starts no work.

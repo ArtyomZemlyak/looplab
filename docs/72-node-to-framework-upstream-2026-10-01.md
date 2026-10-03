@@ -43,14 +43,15 @@
 Реализованные блоки интеграционных исправлений — §20.18–20.19. §19.5–19.8
 описывают предыдущие проходы; их очереди и Git-срезы не заменяют свежий план.
 Диагностика подтверждённых Windows Git path limits — §20.20; это частичный O13.
+Отказы запуска/таймаута Git и exact recovery через Assistant/MCP — §20.21.
 Главные оставшиеся препятствия: понять вывод, продолжить после потери клиента
 и получить проверенный код в нужном репозитории. Количество API и закрытые WP
 сами по себе не показывают, насколько легко пользователь проходит этот путь.
 
-| Что нужно сейчас | Состояние последнего прохода (§20.20) | Где остаток |
+| Что нужно сейчас | Состояние последнего прохода (§20.21) | Где остаток |
 |---|---|---|
 | Измерение и upstream протокол | Реализованы в opt-in scope; ограничения сохраняются | §18.4, §20 |
-| Доставка текущей ветки LoopLab | Исходный master `74ae1a600` доставлен; все 18 исходных CI IDs прошли выбранными наборами, полный вердикт текущего SHA ожидается | O1: общий Linux/Windows CI итогового SHA; §20.18–20.20 |
+| Доставка текущей ветки LoopLab | Исходный master `62f0d4d0a` доставлен; Linux CI `74ae1a600` зелёный, общий Linux/Windows вердикт текущего SHA ожидается | O1: общий Linux/Windows CI итогового SHA; §20.18–20.21 |
 | Сохранность всей работы | Inventory есть; решения по WIP и неясным патчам ещё OPEN | O2 |
 | Первый запуск и понятное продолжение | Есть handoff, typed reads и recovery receipts; цельный пользовательский путь ещё OPEN | O3/O4/O8/O9/O11/O13 |
 | Понятный результат | Измерение и сравнимость существенно исправлены; краткость и usability ещё OPEN | O5/O9/O10 |
@@ -1971,7 +1972,7 @@ GitHub CI и branch protection в этом проходе не проверял�
 
 | Очередь | OPEN | Следующий законченный результат | Что блокирует закрытие |
 |---|---|---|---|
-| 0A, P0 | O1 | Разобранный repair batch по красному CI: причины, исправления, guards и общий вердикт исправленного SHA | Все 18 исходных CI IDs проходят локальными выбранными проверками (§20.18–20.19); общий CI опубликованного SHA и новые выявленные отказы ещё требуют вердикта |
+| 0A, P0 | O1 | Разобранный repair batch по красному CI: причины, исправления, guards и общий вердикт исправленного SHA | Linux CI `74ae1a600` прошёл; Windows и общий CI актуального опубликованного SHA остаются отдельными gates (§20.21) |
 | 0B, P0 | O2 | Сохранённая работа и обоснованный disposition каждого WIP/неясного range | Inventory не содержит резервных копий; срез §19.9 с 35 unmatched и 26 patch-equivalent HEAD требует разных проверок, merge commits и ignored артефакты ещё не разобраны |
 | 1, P1 | O4/O8/O11/O13 | Один понятный вход из Assistant в продолжение того же run; минимальный клиент сохраняет original request до write | Lost reply, новый процесс, два клиента, stale identity, pending checkpoint и unavailable source должны иметь определённый исход без случайного второго training |
 | 2, P1 | O3/O9/O10/O13 | Первый CPU результат из Assistant/external client с понятными setup, правами и RU/EN | Раздельная приёмка готового окружения и чистой установки; отдельный клиент получает явный язык, unknown runtime не объявляется текущим |
@@ -4216,3 +4217,51 @@ fold и containment — **1116 passed**. Replay-first — **193 passed**;
 или всех локализованных Git errors. Автоматический перенос run, переписывание
 recorded absolute selectors, повтор обучения и интеграция чужого WIP не выполнялись.
 Полный CI итогового SHA и остальные O1–O14 сохраняют отдельные критерии приёмки.
+
+### 20.21 72.O4/O13: Git timeout/startup refusal вместо fault и неверного recovery (2026-10-03)
+
+Исходное дерево — опубликованный `62f0d4d0a`. Linux CI предыдущего `74ae1a600`
+завершился успешно (`37112078750`), его docs CI также зелёный. Это подтверждение
+общего Linux прогона исходных repairs, не Windows/current-SHA verdict и не закрытие O1.
+
+**Анализ и baseline:** девять новых selectors отказали до исправления. Git deadline
+поднимал необработанный `TimeoutExpired` через HTTP и Assistant; отсутствие или
+запрет executable выдавались за недоступные task/config/events. Между тем штатный
+proposal transaction уже записывал failed claim, но с общим `upstream_proposal_failed`.
+Потерянный первый reply не давал агенту сохранённой конкретной причины.
+
+**Исправление:** `engine/upstream_workspace.py::git_at` переводит timeout в
+`upstream_git_timeout_unavailable`, а `FileNotFoundError`/`PermissionError` запуска
+процесса — в `upstream_git_process_unavailable`. Сообщение направляет оператора
+проверять установку/права Git именно в UI/engine process environment. Клиентский
+PATH не объявляется серверным. Deadline и per-call Git isolation не меняются.
+Exception argv/output/stderr не отражаются; произвольные ошибки I/O и ошибки
+программы не содержатся этим boundary. Path-length остаётся отдельным refusal.
+
+Штатный failed proposal сохраняет конкретный код. Первая запись через HTTP даёт
+503 с диагностикой; typed MCP сохраняет `outcome=unknown` до чтения original
+receipt. Assistant получает operator diagnostic. Exact body/action recovery
+возвращает failed receipt с тем же кодом; HTTP 200 не означает успешную proposal.
+Оба клиента читают одинаковый результат и history без повторного Git/scoring.
+Partial staging/worktree остаётся для inspection; отказ не даёт pass, advancement
+или resume. Новое действие после явного environment repair требует нового ID.
+
+**Проверено:** **25 passed** diagnostics/recovery tests. Три вида отказа воспроизведены
+с первым запросом через HTTP и через Assistant; повтор/чтение через оба клиента
+не добавляют событий и новых вызовов Git. Owner/scorer bytes неизменны, retained
+staging существует. Отдельно проверены настоящий executable lookup с пустым
+private PATH и настоящий `subprocess.run` timeout приватного sleeping CPU child.
+В последней пробе тестовый deadline 0.05s, production Git deadline остаётся 30s;
+это process-timeout mechanism, не утверждение о реальном Git, зависшем на 30s.
+Ошибки кода и посторонний EIO остаются видимыми ошибками.
+Все upstream test files, MCP transport recovery, единый engine fold, private seams,
+containment и golden/family replay — **329 passed**. Replay-first — **193 passed**.
+Документация/entry points/merge history, схема и pin budgets — **50 passed**;
+строгая сборка MkDocs и `git diff --check` прошли.
+[Selectors, среда и границы доказательств](assets/72-repair-20-21/validation.json).
+
+**Граница:** это process/refusal recovery, не цельный UI путь продолжения внешнего
+агента и не автоматическое исправление server PATH/permissions. O4/O13 остаются
+OPEN; source/runtime/build identity, unknown snapshot schema, остановка клиента
+при живой тренировке и UI first-entry имеют собственные критерии приёмки.
+Нет переноса run, повторного обучения, takeover, платной модели или интеграции WIP.

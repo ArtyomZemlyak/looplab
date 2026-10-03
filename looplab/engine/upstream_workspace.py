@@ -89,11 +89,26 @@ def git_at(root, *argv):
                                  "-c", "core.attributesFile=" + os.devnull,
                                  "-C", str(root), *argv], env=env,
                                 capture_output=True, timeout=30)
+    except subprocess.TimeoutExpired as exc:
+        # subprocess.run has stopped waiting; partial private Git changes may
+        # remain. Persist a failed proposal, not a server fault or permission to
+        # repeat evaluation. Never reflect exception argv/stdout/stderr.
+        raise UpstreamRefusal("upstream_git_timeout_unavailable",
+            "Maintainer Git exceeded its command deadline. Inspect upstream history and retained staging/worktree; "
+            "read the original action receipt before any exact retry. Partial Git changes may remain; "
+            "no automatic training retry, gate pass, base advancement or resume is granted") from exc
     except OSError as exc:
-        # The process may fail before Git prints stderr. Classify only the OS's
-        # path-length verdict, not permissions, missing executables or other I/O.
+        # The process may fail before Git prints stderr. A named path-length
+        # verdict wins over startup subclasses; unclassified I/O stays an error.
         if exc.errno == errno.ENAMETOOLONG or getattr(exc, "winerror", None) == 206:
             raise git_path_refusal() from exc
+        if isinstance(exc, (FileNotFoundError, PermissionError)):
+            # -C is an argv operand, not Popen's cwd: these are executable
+            # startup failures. Do not send the operator to repair snapshots.
+            raise UpstreamRefusal("upstream_git_process_unavailable",
+                "The server could not start Maintainer Git. Check Git installation and executable permissions "
+                "in the UI/engine process environment; preserve upstream history and staging/worktree. "
+                "Read the original action receipt before starting new work") from exc
         raise
     if result.returncode:
         # core.longpaths fixes ref locks, not every Git cwd/worktree limit

@@ -1,0 +1,115 @@
+{
+  "observed_at_utc": "2026-10-03T09:38:14.181375+00:00",
+  "source_sha": "62f0d4d0a4516d22998663594a0f7d1fcf4a36e9",
+  "platform": "win32",
+  "python": "3.11.14",
+  "git_version": "git version 2.52.0.windows.1",
+  "baseline": "9 failed in 6.51s before repair",
+  "replay_first": "193 passed in 3.52s",
+  "diagnostics": {
+    "selectors": [
+      "tests/test_upstream_git_process_recovery.py",
+      "tests/test_upstream_git_diagnostics.py"
+    ],
+    "result": "25 passed in 7.10s",
+    "native_process_mechanisms": "Empty private PATH executable lookup; actual sleeping Python CPU child killed/waited by subprocess.run timeout=0.05. Production Git timeout=30 unchanged; not a real Git stall.",
+    "client_scenarios": "Timeout/missing/permission; first write through HTTP or Assistant; exact original body/action recovery through typed HarnessAPI and Assistant; same failed receipt/code/history; one Git call and unchanged event bytes",
+    "negative_authority": "Owner/scorer bytes unchanged; staging retained; no new score, gate pass, advance, resume or automatic retry; EIO and programming errors propagate"
+  },
+  "regression": {
+    "selectors": [
+      "tests/test_upstream_api.py",
+      "tests/test_upstream_candidate_binding.py",
+      "tests/test_upstream_candidate_page_receipts.py",
+      "tests/test_upstream_candidate_pages.py",
+      "tests/test_upstream_creation_basis.py",
+      "tests/test_upstream_environment.py",
+      "tests/test_upstream_gate_admission.py",
+      "tests/test_upstream_gate_claims.py",
+      "tests/test_upstream_git_diagnostics.py",
+      "tests/test_upstream_git_process_recovery.py",
+      "tests/test_upstream_initialization_recovery.py",
+      "tests/test_upstream_integrity.py",
+      "tests/test_upstream_lane.py",
+      "tests/test_upstream_live_budget.py",
+      "tests/test_upstream_materialization_snapshot.py",
+      "tests/test_upstream_multibase.py",
+      "tests/test_upstream_objective.py",
+      "tests/test_upstream_overlay_intent.py",
+      "tests/test_upstream_probe_helpers.py",
+      "tests/test_upstream_receipt_evidence.py",
+      "tests/test_upstream_recovery_api.py",
+      "tests/test_upstream_refusals.py",
+      "tests/test_upstream_repairs.py",
+      "tests/test_upstream_source_advice.py",
+      "tests/test_upstream_worktrees.py",
+      "tests/test_mcp_transport_recovery.py",
+      "tests/test_engine_fold_seam.py",
+      "tests/test_cross_package_private_seams.py",
+      "tests/test_containment_census.py",
+      "tests/test_golden_replay.py",
+      "tests/test_replay_families.py"
+    ],
+    "result": "329 passed in 401.08s"
+  },
+  "documentation": {
+    "selectors": [
+      "tests/test_documentation_contracts.py",
+      "tests/test_documented_entry_points_resolve.py",
+      "tests/test_merge_history_integrity.py",
+      "tests/test_doc_surface_budgets.py",
+      "tests/test_architecture_diagram_geometry.py",
+      "tests/test_pin_budget.py"
+    ],
+    "result": "50 passed in 16.76s",
+    "mkdocs_strict_exit_code": 0,
+    "diff_check_exit_code": 0
+  },
+  "source_ci_at_read": [
+    {
+      "conclusion": "",
+      "databaseId": 37112951276,
+      "name": "tests-windows",
+      "status": "in_progress",
+      "url": "https://github.com/ArtyomZemlyak/looplab/actions/runs/37112951276"
+    },
+    {
+      "conclusion": "",
+      "databaseId": 37112951283,
+      "name": "tests",
+      "status": "in_progress",
+      "url": "https://github.com/ArtyomZemlyak/looplab/actions/runs/37112951283"
+    },
+    {
+      "conclusion": "success",
+      "databaseId": 37112951332,
+      "name": "docs",
+      "status": "completed",
+      "url": "https://github.com/ArtyomZemlyak/looplab/actions/runs/37112951332"
+    }
+  ],
+  "prior_74ae1a600_ci_at_read": [
+    {
+      "conclusion": "",
+      "databaseId": 37112078754,
+      "name": "tests-windows",
+      "status": "in_progress",
+      "url": "https://github.com/ArtyomZemlyak/looplab/actions/runs/37112078754"
+    },
+    {
+      "conclusion": "success",
+      "databaseId": 37112078747,
+      "name": "docs",
+      "status": "completed",
+      "url": "https://github.com/ArtyomZemlyak/looplab/actions/runs/37112078747"
+    },
+    {
+      "conclusion": "success",
+      "databaseId": 37112078750,
+      "name": "tests",
+      "status": "completed",
+      "url": "https://github.com/ArtyomZemlyak/looplab/actions/runs/37112078750"
+    }
+  ],
+  "scope": "Server Git process diagnosis and durable failed-proposal recovery; not client takeover, human UI acceptance, real 30s Git stall, environment repair, current-SHA full CI or WIP integration."
+}
