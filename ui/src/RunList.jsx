@@ -10,6 +10,7 @@ import EnergyToggle from './EnergyToggle.jsx'
 import DensityToggle from './DensityToggle.jsx'
 import GlobalMenu from './GlobalMenu.jsx'
 import { OpIcon } from './icons.jsx'
+import { runMeasurement } from './resultMeasurement.js'
 import {
   ALL_RUNS as ALL, SELECTION_MAX, UNASSIGNED_RUNS as UNASSIGNED,
   bestMetricCaveatLabel, bestMetricCaveatNotice, bestMetricCaveats, comparisonScope, filterRuns,
@@ -2907,7 +2908,10 @@ export default function RunList({ onOpen, onGlobalNavigate,
                     it in the same order a sighted reader does. */}
                 {sourceIncomplete(r) && <div className="pill warn" role="status"
                   title={sourceIntegrityNotice(r)}>incomplete record</div>}
-                <div>best <b>{fmt(r.best_confirmed ?? r.best_metric)}</b></div>
+                <div>selected <b>{fmt(r.best_confirmed ?? r.best_metric)}</b></div>
+                <div className="muted">{runMeasurement(r).label}</div>
+                {(r.best_confirmed ?? r.best_metric) != null && <div className="muted">
+                  {runMeasurement(r).reliability}</div>}
                 {/* WHAT KIND OF NUMBER that is — touching the value it qualifies, above the
                     `nodes · direction` line rather than at the end of the card, because an operator
                     scanning this column is deciding which configuration to reuse and a caveat they

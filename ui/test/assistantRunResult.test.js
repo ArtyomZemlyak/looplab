@@ -26,10 +26,11 @@ test('result is free to read, and navigation retains generation and exact node a
   try {
     const { container } = mounted
     assert.match(container.textContent, /higher is better/)
-    assert.match(container.textContent, /mean from 3 seeds/)
-    assert.match(container.textContent, /evaluation conditions, and confirmation/)
-    assert.match(container.textContent, /different measurement types.*do not establish improvement/)
-    assert.doesNotMatch(container.textContent, /Improvement:|robust|verified/)
+    assert.match(container.textContent, /confirmation mean.*3 repeat checks/)
+    assert.match(container.textContent, /Different measurement types.*improvement is not established/)
+    assert.match(container.textContent, /scores and repeat checks separately/)
+    assert.match(container.textContent, /detector coverage is not fully verified/)
+    assert.doesNotMatch(container.textContent, /Improvement:|robust/)
     const code = [...container.querySelectorAll('a')].find(a => a.textContent === 'Open selected code')
     const target = parseRunRouteState(code.getAttribute('href')).state
     assert.equal(target.generation, generation)
@@ -45,8 +46,14 @@ test('result is free to read, and navigation retains generation and exact node a
     assert.match(container.textContent, /salvaged.*new_flag/)
     await mounted.rerender({ run: { ...row, result_summary: {
       ...receipt, selected: { ...receipt.selected, confirmed: false, seeds: null } } } })
-    assert.match(container.textContent, /no multi-seed confirmation/)
-    assert.doesNotMatch(container.textContent, /different measurement types/)
+    assert.match(container.textContent, /No multi-seed confirmation/)
+    assert.doesNotMatch(container.textContent, /Different measurement types/)
+    await React.act(async () => window.dispatchEvent(new CustomEvent('looplab:language', { detail: 'ru' })))
+    await mounted.rerender({ run: { ...row, result_summary: { first: receipt.first, selected: receipt.first } } })
+    assert.match(container.textContent, /Первый допустимый эксперимент/)
+    assert.doesNotMatch(container.textContent, /пригодный для сравнения/)
+    assert.match(container.textContent, /улучшение не установлено/)
+    assert.match(container.textContent, /не обязательно является базовым решением задачи/)
   } finally { await mounted.unmount() }
 })
 

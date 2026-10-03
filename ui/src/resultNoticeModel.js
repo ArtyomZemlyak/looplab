@@ -1,3 +1,5 @@
+import { resultMeasurement } from './resultMeasurement.js'
+
 const token = value => typeof value === 'string' && /^[0-9a-f]{64}$/.test(value)
 const metric = value => value === null || typeof value === 'number' && Number.isFinite(value)
 const integer = value => Number.isSafeInteger(value) && value >= 0
@@ -60,7 +62,8 @@ export function resultNoticeText(row, language = 'en') {
   const ru = language === 'ru'
   const number = value => new Intl.NumberFormat(ru ? 'ru' : 'en', { maximumSignificantDigits: 6 }).format(value)
   const score = row.confirmed_mean ?? row.score
-  const label = row.confirmed_mean !== null ? ru ? 'среднее повторных запусков' : 'confirmation mean' : ru ? 'оценка' : 'score'
+  const measurement = resultMeasurement(row.confirmed_mean !== null, row.confirmed_seeds, language)
+  const label = measurement.label
   const direction = row.direction === 'min' ? ru ? 'меньше лучше' : 'lower is better' : ru ? 'больше лучше' : 'higher is better'
   let title, outcome, next, comparison = ''
   const stateLabel = row.kind === 'run' ? ru ? 'Завершён' : 'Finished'
@@ -126,11 +129,7 @@ export function resultNoticeText(row, language = 'en') {
     next = ['failed', 'aborted'].includes(row.status) ? ru ? 'Проверьте логи и причину остановки перед повторным запуском.' : 'Review logs and the stop cause before retrying.'
       : ru ? 'Откройте Metrics и Trust; следующий эксперимент выбирает агент.' : 'Review Metrics and Trust; the agent chooses the next experiment.'
   }
-  const caution = score !== null && row.status !== 'aborted' ? row.confirmed_mean === null
-    ? ru ? 'Нет подтверждения повторными запусками с разной случайной инициализацией; результат предварительный.' : 'No multi-seed confirmation; exploratory result.'
-    : Number.isSafeInteger(row.confirmed_seeds) && row.confirmed_seeds >= 2
-      ? ru ? `Успешных повторных запусков: ${row.confirmed_seeds}; проверьте разброс оценок.` : `${row.confirmed_seeds} confirmation seeds; check spread.`
-      : ru ? 'Среднее записано; несколько успешных повторных запусков не подтверждены.' : 'Mean recorded; multiple successful seeds not established.' : ''
+  const caution = score !== null && row.status !== 'aborted' ? measurement.reliability : ''
   return { title, stateLabel, actionLabel, outcome, comparison, caution, next }
 }
 

@@ -13,6 +13,10 @@ import { nodeComparabilityStatus, sourceIncomplete } from './runIndex.js'
 
 const metricOf = (n) => (n.confirmed_mean ?? n.metric)
 const isEvaluated = (n) => n.status === 'evaluated' && metricOf(n) != null
+// Mirror counts_toward_best over the current population, including the Trust gate exclusion set.
+const eligibleResult = (node, state) => nodeIsActive(node, state) && node.status === 'evaluated'
+  && node.feasible === true && Number.isFinite(metricOf(node))
+  && !(state?.breed_excluded || []).some(id => Number(id) === Number(node.id))
 const better = (dir) => (a, b) => (dir === 'min' ? a < b : a > b)
 
 // The parameters that changed between a node and its first parent (the "what changed" of a step).
@@ -42,7 +46,7 @@ export function improvements(nodes, direction, state = null) {
   const steps = []
   let best = null
   ev.forEach(n => {
-    if (n.feasible === false) return
+    if (!eligibleResult(n, state)) return
     const v = metricOf(n)
     if (best === null || bt(v, best.v)) {
       const parent = (n.parent_ids || []).map(p => nodes[p]).find(Boolean)
@@ -62,7 +66,7 @@ export function improvements(nodes, direction, state = null) {
 
 // Per-operator and per-theme productivity: how many nodes each produced, how many evaluated, how
 // many actually beat their parent (a real improvement), and the best metric it reached.
-function rollup(nodes, direction, keyFn) {
+function rollup(nodes, direction, keyFn, state = null) {
   const dir = direction || 'min'
   const bt = better(dir)
   // Agent-authored direction names are data, not prototype-bearing object properties.
@@ -80,20 +84,20 @@ function rollup(nodes, direction, keyFn) {
       // `improved` count below apply, and the module invariant at the top ("never credit a result the
       // engine itself rejected"). Otherwise a constraint-violating node's raw metric would inflate this
       // operator/theme's reported best and, through `directionProfit`, its treemap gain.
-      if (n.feasible !== false && (e.best === null || bt(v, e.best))) e.best = v
+      if (eligibleResult(n, state) && (e.best === null || bt(v, e.best))) e.best = v
       const parent = (n.parent_ids || []).map(p => nodes[p]).find(Boolean)
       const pm = parent ? metricOf(parent) : null
-      if (n.feasible !== false && pm != null && bt(v, pm)) e.improved++
+      if (eligibleResult(n, state) && eligibleResult(parent, state) && pm != null && bt(v, pm)) e.improved++
     }
   })
   return Object.values(out).sort((a, b) => b.improved - a.improved || b.evaluated - a.evaluated)
 }
 
-export const operatorEffectiveness = (nodes, dir) => rollup(nodes, dir, n => n.operator || 'unknown')
+export const operatorEffectiveness = (nodes, dir, state = null) => rollup(nodes, dir, n => n.operator || 'unknown', state)
 // Keep this compatibility projection aligned with events/digest.py::node_theme: new Ideas author
 // concepts rather than the legacy `theme`, so their first concept axis becomes the coarse direction.
 export const themeEffectiveness = (nodes, dir, state = null) =>
-  rollup(nodes, dir, node => nodeTheme(node, state))
+  rollup(nodes, dir, node => nodeTheme(node, state), state)
 
 // Per-direction profit for the Directions overview. `idea.theme` remains the legacy wire field, but
 // this UI projection calls the concept a direction. Controls stay in first-discovery order: live gain
@@ -154,7 +158,7 @@ export function hyperImportance(state) {
   // lifecycle-retired rows remain in the append-only fold for audit, but every current
   // report projection must use the same active population as analyze/DAG/Concepts.
   const nodes = Object.values(activeNodeMap(state.nodes || {}, state))
-    .filter(n => n.status === 'evaluated' && n.metric != null && n.feasible !== false)
+    .filter(n => eligibleResult(n, state) && Number.isFinite(n.metric))
   const keys = new Set()
   nodes.forEach(n => Object.entries(n.idea?.params || {}).forEach(([k, v]) => { if (typeof v === 'number') keys.add(k) }))
   const rows = []
@@ -261,7 +265,7 @@ export function analyze(state) {
           ? steps[steps.length - 1].to - steps[0].to
           : steps[0].to - steps[steps.length - 1].to)
       : 0,
-    operators: operatorEffectiveness(nodes, dir),
+    operators: operatorEffectiveness(nodes, dir, state),
     themes: themeEffectiveness(nodes, dir, state),
     regressions: regressions(nodes, dir, state),
     failures: failureBreakdown(nodes),
@@ -328,8 +332,7 @@ export function verdict(state, a) {
   const dir = state.direction
   const candidate = state.best_node_id != null ? state.nodes?.[state.best_node_id] : null
   const finite = value => typeof value === 'number' && Number.isFinite(value)
-  const eligible = node => nodeIsActive(node, state) && node.status === 'evaluated'
-    && node.feasible !== false && finite(metricOf(node))
+  const eligible = node => eligibleResult(node, state)
   const best = eligible(candidate) ? candidate : null
   const caveats = trustCaveats(state, best)
   if (sourceIncomplete(state)) caveats.unshift({ kind: 'incomplete-record', severity: 'alarm',

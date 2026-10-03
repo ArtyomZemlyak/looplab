@@ -5,6 +5,7 @@ import { terminalReady, sourceIncomplete, sourceIntegrityNotice,
 import { resultCaveatText } from './resultNoticeModel.js'
 import { hashWithRunRouteState } from './runRouteState.js'
 import { useAssistantLanguage } from './useAssistantLanguage.js'
+import { resultMeasurement } from './resultMeasurement.js'
 import './assistant-run-result.css'
 
 const measured = value => value && Number.isSafeInteger(value.node_id) && value.node_id >= 0
@@ -29,6 +30,7 @@ export default function AssistantRunResult({ run, onOpen, onAsk, onReady, askDis
   const direction = run.direction === 'min' ? text('lower is better', 'меньше — лучше')
     : run.direction === 'max' ? text('higher is better', 'больше — лучше') : text('direction not recorded', 'направление не указано')
   const sameNode = first && first.node_id === selected.node_id && first.attempt === selected.attempt
+  const measurement = selected && resultMeasurement(selected.confirmed, selected.seeds, language)
   const nodeHref = node => hashWithRunRouteState(base, {
     generation, nodeId: node.node_id, nodeGeneration: node.attempt, inspectTab: 'Code',
   })
@@ -41,18 +43,16 @@ export default function AssistantRunResult({ run, onOpen, onAsk, onReady, askDis
       : text('Review the recorded result before planning another experiment.', 'Проверьте полученный результат перед следующим экспериментом.')}</p>
     {selected ? <>
       <div className="asst-run-result-metric">{run.objective_key || text('Objective', 'Целевая метрика')} · {direction}</div>
-      <dl><div><dt>{text('First eligible experiment', 'Первый пригодный для сравнения эксперимент')} · #{first.node_id} · {first.confirmed ? text('mean', 'среднее') : text('score', 'оценка')}</dt><dd>{fmt(first.value)}</dd></div>
-        <div><dt>{text('Selected result', 'Выбранный результат')} · #{selected.node_id} · {selected.confirmed ? text('mean', 'среднее') : text('score', 'оценка')}</dt><dd>{fmt(selected.value)}</dd></div></dl>
-      <p>{sameNode ? text('The selected result is the first eligible experiment.', 'Выбран результат первого пригодного для сравнения эксперимента.')
+      <dl><div><dt>{text('First eligible experiment', 'Первый допустимый эксперимент')} · #{first.node_id} · {resultMeasurement(first.confirmed, first.seeds, language).label}</dt><dd>{fmt(first.value)}</dd></div>
+        <div><dt>{text('Selected result', 'Выбранный результат')} · #{selected.node_id} · {measurement.label}</dt><dd>{fmt(selected.value)}</dd></div></dl>
+      <p>{sameNode ? text('The selected result is the first eligible experiment; it does not establish improvement.', 'Выбран первый допустимый эксперимент; улучшение не установлено.')
         : first.confirmed !== selected.confirmed
-          ? text('These values use different measurement types: an evaluation score and a confirmation mean. They do not establish improvement. Read Report for evaluation conditions, and confirmation.',
-            'Здесь разные типы измерений: основная оценка и среднее повторных запусков. По этим числам улучшение не установлено. Проверьте условия оценки в отчёте.')
-          : text('Read Report to compare these values, their evaluation conditions, and confirmation.', 'В отчёте сравните значения, условия оценки и подтверждение результата.')}</p>
-      <p className="asst-run-result-caution">{selected.confirmed
-        ? Number.isSafeInteger(selected.seeds) && selected.seeds >= 2
-          ? text(`Selected mean from ${selected.seeds} seeds. Check spread and trust evidence in Report.`, `Среднее по ${selected.seeds} случайным инициализациям. Проверьте разброс и надёжность оценки в отчёте.`)
-          : text('Confirmation mean recorded; multiple successful seeds are not established.', 'Среднее сохранено; несколько успешных случайных инициализаций не подтверждены.')
-        : text('Selected result has no multi-seed confirmation. Treat it as exploratory.', 'Результат не подтверждён на нескольких случайных инициализациях. Это предварительная оценка.')}</p>
+          ? text('Different measurement types; improvement is not established. Compare evaluation scores and repeat checks separately in Report.',
+            'Разные типы измерений; улучшение не установлено. В отчёте сравните основные оценки отдельно от повторных запусков.')
+          : text('Read Report to compare values, conditions and repeat checks.', 'В отчёте сравните значения, условия оценки и повторы.')}</p>
+      <p className="asst-run-result-caution">{measurement.reliability}</p>
+      <p className="asst-run-result-caution">{text('First eligible is not necessarily the task baseline; detector coverage is not fully verified.',
+        'Первый допустимый эксперимент не обязательно является базовым решением задачи; полнота проверок Trust не подтверждена.')}</p>
       {caveats.length > 0 && <p className="asst-run-result-caution" title={bestMetricCaveatNotice(run)}>
         {text('Recorded caveats:', 'Ограничения:')} {caveats.map(code => resultCaveatText(code, language)).join(' · ')}. {text('Review Report and Trust.', 'Проверьте отчёт и раздел Trust.')}
       </p>}

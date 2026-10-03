@@ -77,3 +77,26 @@ test('missing, excluded, retired and nonfinite selected results do not become wi
     assert.equal(buildModelCard(state).champion, null)
   }
 })
+
+test('Trust gate exclusions and unknown feasibility cannot define the first eligible result or a winner', () => {
+  for (const direction of ['min', 'max']) {
+    const rejected = direction === 'min' ? 100 : -100
+    const state = run({ direction, best_node_id: 2, breed_excluded: [0], nodes: {
+      0: node(0, rejected), 1: node(1, 50, { feasible: null }), 2: node(2, 7),
+    } })
+    const v = result(state)
+    assert.equal(v.first.id, 2, 'the first eligible node matches engine selection rules')
+    assert.equal(v.outcome, 'baseline')
+    assert.equal(v.gain, 0)
+    assert.doesNotMatch(v.headline, /better by|worse by/)
+    const analysis = analyze(state)
+    assert.deepEqual(analysis.steps.map(row => row.id), [2])
+    assert.equal(analysis.nEval, 3, 'excluded evaluations still count as performed work')
+    assert.equal(analysis.operators[0].best, 7)
+    assert.equal(analysis.operators[0].improved, 0, 'an excluded parent does not support an improvement')
+    const excludedWinner = result({ ...state, best_node_id: 0 })
+    assert.equal(excludedWinner.outcome, 'none')
+    assert.equal(buildModelCard({ ...state, best_node_id: 0 }).champion, null)
+    assert.doesNotMatch(toMarkdown({ ...state, best_node_id: 0 }), /\*\*Best:\*\* node #0/)
+  }
+})

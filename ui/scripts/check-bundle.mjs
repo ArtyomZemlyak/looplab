@@ -145,6 +145,9 @@ export const DEFAULT_BUDGETS = Object.freeze({
     // (+569 B) buys bounded result pages, evidence-bound cursors and explicit navigation.
     // Initial shell is 83,029 B; CSS and route/reachability ceilings are unchanged.
     // This measured rebaseline leaves 471 B at 615 KiB.
+    // 2026-10-03 doc 72 §20.3: 629,289 B -> 629,716 B (+427 B) for shared measurement
+    // labels/repeat caveats and Trust-gated report selection. Keep 615 KiB (44 B left).
+    // Initial shell is 83,044 B; CSS is 59,598 B. All ceilings are unchanged.
     js: { gzip: 615 * KIB },
     css: { gzip: 58.25 * KIB },
   },

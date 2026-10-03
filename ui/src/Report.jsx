@@ -17,6 +17,7 @@ import { normalizeReportNodeDetail, normalizeRunReport, reportCoverageText,
 import { nodeTheme } from './conceptId.js'
 import { nodeIsActive } from './nodeProjection.js'
 import { readOnlyLabel } from './runMode.js'
+import { resultMeasurement } from './resultMeasurement.js'
 import './report-trust-polish.css'
 
 const TRUST_CLASS = { unverified: 'neutral', caveats: 'warn', suspect: 'alarm' }
@@ -159,16 +160,20 @@ function ChampionCard({ best, state }) {
   // here would put this card back in disagreement with the Trust tab, one vocabulary over.
   const objective = objectiveMetricSource(best)
   const objectiveCaveated = objectiveSourceCaveated(objective)
+  const measurement = resultMeasurement(best.confirmed_mean != null, best.confirmed_seeds)
   return (
     <div className="champion-card">
       <div className="kv">
-        <div className="k">champion</div><div className="v">#{best.id} · {best.operator}
+        <div className="k">selected</div><div className="v">#{best.id} · {best.operator}
           {direction ? ` · primary concept axis ${direction}` : ''}</div>
-        <div className="k">metric</div><div className="v"><b>{fmt(m)}</b>{best.confirmed_mean != null
-          ? <span className="muted"> ±{fmt(best.confirmed_std)} over {best.confirmed_seeds} seed{best.confirmed_seeds === 1 ? '' : 's'}</span>
-          : <span className="muted"> (single-seed)</span>}
+        <div className="k">{measurement.label}</div><div className="v"><b>{fmt(m)}</b>{best.confirmed_mean != null
+          ? <span className="muted">{Number.isFinite(best.confirmed_std) && best.confirmed_std >= 0
+            ? ` ±${fmt(best.confirmed_std)}` : ' · spread not recorded'}</span>
+          : null}
           {objectiveCaveated && <span className="warn" title={objectiveSourceHelp(objective)}>
             {' · '}{OBJECTIVE_SOURCE_LABEL[objective.channel]}</span>}</div>
+        {best.confirmed_mean != null && <><div className="k">evaluation score</div><div className="v">{fmt(best.metric)}</div></>}
+        <div className="k">repeat evidence</div><div className="v">{measurement.reliability}</div>
         <div className="k">params</div><div className="v">{params.length
           ? <details className="champion-params">
               <summary>{params.length} parameters · <span className="champion-params-show">show values</span><span className="champion-params-hide">hide values</span></summary>
