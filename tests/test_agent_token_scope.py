@@ -361,11 +361,13 @@ _SAMPLE = {"{run_id}": "demo", "{kind}": "skills", "{name}": "agent.md",
            "{operation_id}": "op-1"}
 
 
-def test_the_phase_index_s_write_access_is_what_the_middleware_enforces(tmp_path, monkeypatch):
+def test_the_phase_index_s_write_access_is_what_authorization_enforces(tmp_path, monkeypatch):
     """Critic crit_v62 F2 (driven): the harness phase index advertised the authoring write as the
     agent's after the middleware had closed it. Every HTTP write of the index, sent with the agent
-    token: an `operator` one meets the middleware's denial, an `external_agent` one does not (the
-    route may still refuse its body — that is the route's own answer, not the credential's)."""
+    token: an `operator` one meets a credential denial, an `external_agent` one does not (the
+    route may still refuse its body — that is the route's own answer, not the credential's).
+    Upstream recovery checks the credential in its typed handler, after body validation;
+    a 422 on an empty body does not exercise that authorization boundary."""
     from looplab.harness.phases import PHASES, OPERATOR_WRITES
     client = _client(tmp_path, monkeypatch, external=True)
     seen = set()
@@ -379,8 +381,22 @@ def test_the_phase_index_s_write_access_is_what_the_middleware_enforces(tmp_path
             path = template
             for placeholder, value in _SAMPLE.items():
                 path = path.replace(placeholder, value)
-            response = client.request(method, path, json={}, headers=AGENT)
+            body = {}
+            upstream_recovery = ref == "POST /api/runs/{run_id}/upstream/recover"
+            if upstream_recovery:
+                body = {"expected_generation": http_run_generation(client, headers=OWNER),
+                        "action_id": "access-check", "claim_action_id": "interrupted-claim",
+                        "reason": "Verify the operator credential boundary"}
+            response = client.request(method, path, json=body, headers=AGENT)
             denied = response.status_code == 403 and _MIDDLEWARE_DENIAL in response.text
+            if upstream_recovery:
+                denied = response.status_code == 403 and response.json().get(
+                    "detail", {}).get("code") == "operator_required"
+                # The same valid body reaches the owner route's task checks. This
+                # fixture has no upstream task; it must not be denied as an agent.
+                owner_response = client.request(method, path, json=body, headers=OWNER)
+                assert owner_response.status_code == 503, owner_response.text
+                assert owner_response.json()["detail"]["code"] == "upstream_source_unavailable"
             assert denied is (who == "operator") is (ref in OPERATOR_WRITES), (ref, response.text)
     assert "PUT /api/{kind}/{name}/operations/{operation_id}" in seen
     # The authoring phase names what is left to the agent beside the write it may not make (critic

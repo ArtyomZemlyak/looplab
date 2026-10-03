@@ -1,0 +1,152 @@
+{
+  "version": 1,
+  "head": "e2a32cb8a5113457922979767017dee62316a042",
+  "scope": "Private synthetic HTTP fixture; no model, score command or live-run recovery.",
+  "healthy_stopped_engine": {
+    "http_status": 200,
+    "complete": true,
+    "engine_running": false,
+    "next_step": {
+      "code": "inspect_lifecycle",
+      "title": "Engine stopped · inspect idle run",
+      "detail": "No live engine owner was observed. No unsettled experiment is recorded. Inspect state and original command receipts before submitting another candidate or choosing explicit resume or finalization. Reading or reconnecting starts no work; no internal agent takeover is automatic. Engine last observed: stopped. Agent connection: not measured.",
+      "owner": "external_agent",
+      "reads": [
+        "GET /api/runs/{run_id}/state?observe_only=true",
+        "GET /api/runs/{run_id}/events",
+        "GET /api/runs/{run_id}/command-receipt?expected_generation=TOKEN&command_id={command_id}"
+      ],
+      "action": null,
+      "phase_id": "recovery"
+    },
+    "source_health": {
+      "events": {
+        "complete": true,
+        "read_complete": true
+      },
+      "decisions": {
+        "read_complete": true,
+        "source_lines": 0,
+        "accepted_rows": 0,
+        "invalid_lines": 0,
+        "malformed_lines": 0,
+        "invalid_shape_lines": 0,
+        "file_present": false,
+        "invalid_record_rows": 0
+      },
+      "reviews": {
+        "read_complete": true,
+        "source_lines": 0,
+        "accepted_rows": 0,
+        "invalid_lines": 0,
+        "malformed_lines": 0,
+        "invalid_shape_lines": 0,
+        "file_present": false,
+        "invalid_record_rows": 0
+      },
+      "checkpoints": {
+        "read_complete": true,
+        "source_lines": 0,
+        "accepted_rows": 0,
+        "invalid_lines": 0,
+        "malformed_lines": 0,
+        "invalid_shape_lines": 0,
+        "file_present": false,
+        "invalid_record_rows": 0
+      }
+    },
+    "run_files_unchanged": true
+  },
+  "damaged_event_source": {
+    "http_status": 200,
+    "complete": false,
+    "engine_running": false,
+    "next_step": {
+      "code": "inspect_sources",
+      "title": "Check incomplete sources",
+      "detail": "A missing receipt is not proof that no action occurred. Inspect source_health and ask the operator to recover damaged journals before trusting missing receipts. Engine last observed: stopped. Agent connection: not measured.",
+      "owner": "external_agent",
+      "reads": [
+        "GET /api/runs/{run_id}/harness-progress?expected_generation=TOKEN",
+        "GET /api/runs/{run_id}/events"
+      ],
+      "action": null,
+      "phase_id": null
+    },
+    "source_health": {
+      "events": {
+        "complete": false,
+        "good_records": 5,
+        "corrupt_line": 6,
+        "dropped_lines": 0,
+        "read_complete": false
+      },
+      "decisions": {
+        "read_complete": true,
+        "source_lines": 0,
+        "accepted_rows": 0,
+        "invalid_lines": 0,
+        "malformed_lines": 0,
+        "invalid_shape_lines": 0,
+        "file_present": false,
+        "invalid_record_rows": 0
+      },
+      "reviews": {
+        "read_complete": true,
+        "source_lines": 0,
+        "accepted_rows": 0,
+        "invalid_lines": 0,
+        "malformed_lines": 0,
+        "invalid_shape_lines": 0,
+        "file_present": false,
+        "invalid_record_rows": 0
+      },
+      "checkpoints": {
+        "read_complete": true,
+        "source_lines": 0,
+        "accepted_rows": 0,
+        "invalid_lines": 0,
+        "malformed_lines": 0,
+        "invalid_shape_lines": 0,
+        "file_present": false,
+        "invalid_record_rows": 0
+      }
+    },
+    "run_files_unchanged": true
+  },
+  "saved_receipt": {
+    "http_status": 200,
+    "terminal": false,
+    "returned_command_fields": [
+      "error_code",
+      "event_seq",
+      "event_type",
+      "id",
+      "retryable",
+      "status"
+    ],
+    "original_data_returned": false,
+    "key_or_digest_returned": false,
+    "run_files_unchanged": true
+  },
+  "phase_write_access": {
+    "recovery": {
+      "command:pause": "external_agent",
+      "command:resume": "external_agent",
+      "command:run_abort": "external_agent",
+      "POST /api/runs/{run_id}/commands/{command_id}/retry": "external_agent",
+      "POST /api/runs/{run_id}/resolve-activity-claims": "operator"
+    },
+    "upstream": {
+      "POST /api/runs/{run_id}/upstream/proposals": "external_agent",
+      "POST /api/runs/{run_id}/upstream/check": "external_agent",
+      "POST /api/runs/{run_id}/upstream/advance": "external_agent",
+      "POST /api/runs/{run_id}/upstream/recover": "operator"
+    }
+  },
+  "scoped_operator_route_status": {
+    "upstream/recover": 403,
+    "resolve-activity-claims": 403
+  },
+  "denied_requests_run_files_unchanged": true
+}
