@@ -1,0 +1,20 @@
+{
+  "nodes": {
+    "0": {"id": 0, "attempt": 0, "status": "evaluated", "feasible": true, "metric": 1.0,
+      "parent_ids": [], "parent_comparison": null},
+    "1": {"id": 1, "attempt": 1, "status": "evaluated", "feasible": true, "metric": 0.25,
+      "parent_ids": [0], "parent_comparison": {"version": 1, "node_id": 0, "attempt": 0},
+      "confirmed_mean": 0.2, "confirmed_std": 0.01, "confirmed_seeds": 3}
+  },
+  "cases": [
+    {"name": "old_attempt", "current_nodes": 0,
+      "records": [{"node_id": 1, "generation": 0, "signals": [{"signal": "protected_missing"}]}]},
+    {"name": "current_attempt", "current_nodes": 1,
+      "records": [{"node_id": 1, "generation": 0, "signals": [{"signal": "protected_missing"}]},
+        {"node_id": 1, "generation": 1, "signals": [{"signal": "protected_missing"}]}]},
+    {"name": "duplicate_current_records", "current_nodes": 1,
+      "records": [{"node_id": 1, "generation": 0, "signals": [{"signal": "protected_missing"}]},
+        {"node_id": 1, "generation": 1, "signals": [{"signal": "protected_missing"}]},
+        {"node_id": 1, "generation": 1, "signals": [{"signal": "protected_changed"}]}]}
+  ]
+}

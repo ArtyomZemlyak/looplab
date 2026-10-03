@@ -7,6 +7,23 @@ export function nodeIsActive(node, state = null, aborted = null) {
   return !excluded.has(Number(node.id))
 }
 
+// Keep the full ledger for audit. A signal on an old attempt cannot flag or abort its replacement.
+// Legacy records without a lifecycle bind only to attempt zero, never to a reset attempt.
+export function currentRewardHacks(state = {}) {
+  const rows = Array.isArray(state?.reward_hacks) ? state.reward_hacks : []
+  const aborted = new Set((state?.aborted_nodes || []).map(Number))
+  return rows.filter(row => {
+    const node = row && state?.nodes?.[row.node_id]
+    if (!nodeIsActive(node, state, aborted) || !Number.isSafeInteger(node.id) || node.id < 0
+        || String(node.id) !== String(row.node_id)) return false
+    const attempt = Object.hasOwn(node, 'attempt') ? node.attempt : 0
+    const generation = Object.hasOwn(row, 'generation') ? row.generation : 0
+    return Number.isSafeInteger(attempt) && attempt >= 0 && generation === attempt
+  })
+}
+
+export const rewardHackNodeCount = rows => new Set(rows.map(row => String(row.node_id))).size
+
 export function activeNodeMap(nodes = {}, state = null) {
   const out = {}
   const aborted = new Set((state?.aborted_nodes || []).map(Number))

@@ -19,7 +19,7 @@ test('Overview prioritizes measured state and keeps long hints available in a di
       nodes: { 1: { id: 1, metric: 0.5, status: 'evaluated', feasible: true },
         2: { id: 2, status: 'failed' }, 3: { id: 3, metric: 0.4, status: 'evaluated', feasible: true } },
       best_node_id: 3, total_eval_seconds: 90, llm_cost: { total_tokens: 1200 },
-      reward_hacks: [{}], pending_hints: [{ text: 'First **idea**' }, { text: 'Latest **idea**' }],
+      reward_hacks: [{ node_id: 3, generation: 0 }], pending_hints: [{ text: 'First **idea**' }, { text: 'Latest **idea**' }],
       active_strategy: { policy: 'greedy', rationale: 'Measured result supports it.' },
     }
     const dom = new JSDOM(renderToStaticMarkup(React.createElement(OverviewPanel,

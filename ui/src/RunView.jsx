@@ -32,7 +32,7 @@ import {
   captureMergeIntent, mergeIntentCommand, mergeIntentMatches, selectMergeTarget,
 } from './mergeIntent.js'
 import { GLOBAL_DESTINATIONS, INSTALLATION_ROUTE_VIEWS } from './globalNav.js'
-import { nodeIsActive } from './nodeProjection.js'
+import { nodeIsActive, currentRewardHacks, rewardHackNodeCount } from './nodeProjection.js'
 import { conceptPaneTarget } from './conceptInspect.js'
 import { createInspectorDraftStore } from './inspectorDraftStore.js'
 import {
@@ -2050,6 +2050,7 @@ export default function RunView({ runId, onBack, reviewMode = false, reviewMeta 
     </main>
   </RunScreen>
   const state = historyActive ? hist : live
+  const rewardFlags = rewardHackNodeCount(currentRewardHacks(state))
   const displayedPhase = historyActive ? phaseLabel(state) : lifecyclePhaseLabel(live)
   const evalSec = state.total_eval_seconds || 0
   // The hook already fences the resource to the current key, so there is no second `activeResource`
@@ -2272,10 +2273,10 @@ export default function RunView({ runId, onBack, reviewMode = false, reviewMeta 
           title={historyActive ? 'Historical mode — return live to open Overview' : 'tokens — open Overview'}
           onClick={event => { panelReturnFocusRef.current = event.currentTarget; setPanel('overview') }}>
           <span className="k">tokens</span> {fmtInt(cost.total_tokens)}</button>}
-        {state.reward_hacks?.length > 0 && <button type="button" className="chip alarm run-metric-chip" disabled={historyActive}
+        {rewardFlags > 0 && <button type="button" className="chip alarm run-metric-chip" disabled={historyActive}
           title={historyActive ? 'Historical mode — return live to open Trust' : 'suspicious wins flagged (B5) — open Trust'}
           onClick={event => { panelReturnFocusRef.current = event.currentTarget; setPanel('trust') }}>
-          <span className="k"><OpIcon name="alert" size={11} /> hack?</span> {state.reward_hacks.length}</button>}
+          <span className="k"><OpIcon name="alert" size={11} /> hack?</span> {rewardFlags}</button>}
         {finalizing
           ? <span className="chip warn"><OpIcon name="stop" size={11} />
               {lifecycle.mode === 'finalization-stalled' ? 'finalization stalled'

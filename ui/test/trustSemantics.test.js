@@ -19,7 +19,9 @@ test('missing leakage evidence is unknown, never a clean success', () => {
 
 test('detector-off and flag-absence remain semantically distinct', () => {
   assert.deepEqual(rewardHackStatus([], { reward_hack_detect: false }, 4).tone, 'unknown')
-  assert.equal(rewardHackStatus([], { reward_hack_detect: true }, 4).tone, 'ok')
+  const absent = rewardHackStatus([], { reward_hack_detect: true }, 4)
+  assert.equal(absent.tone, 'unknown')
+  assert.match(absent.detail, /does not prove each attempt was inspected/)
   assert.equal(rewardHackStatus([{ node_id: 2 }], { reward_hack_detect: true }, 4).tone, 'alarm')
 })
 

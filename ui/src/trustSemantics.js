@@ -1,5 +1,6 @@
 // Pure trust-state wording shared by the run-wide Trust panel and the node Inspector.
 // Absence of a recorded flag is deliberately NOT treated as proof that a detector ran.
+import { rewardHackNodeCount } from './nodeProjection.js'
 
 const result = (tone, label, detail) => ({ tone, label, detail })
 
@@ -57,7 +58,7 @@ export function driftStatus(drifts, config, evaluatedCount = 0) {
 export function rewardHackStatus(hacks, config, evaluatedCount = 0) {
   if ((hacks || []).length) return result(
     'alarm',
-    `${hacks.length} suspicious node${hacks.length === 1 ? '' : 's'} flagged`,
+    `${rewardHackNodeCount(hacks)} suspicious node${rewardHackNodeCount(hacks) === 1 ? '' : 's'} flagged`,
     'Review the recorded signals before trusting or promoting the result.',
   )
   if (!config) return result(
@@ -76,9 +77,9 @@ export function rewardHackStatus(hacks, config, evaluatedCount = 0) {
     'The detector is enabled, but it has no evaluated node to inspect yet.',
   )
   return result(
-    'ok',
-    'No suspicious signals found',
-    `The enabled detector inspected ${evaluatedCount} evaluated node${evaluatedCount === 1 ? '' : 's'} without recording a flag.`,
+    'unknown',
+    'No current suspicious signals recorded',
+    `Detection is enabled now; ${evaluatedCount} evaluations have no current-attempt signal. This does not prove each attempt was inspected.`,
   )
 }
 

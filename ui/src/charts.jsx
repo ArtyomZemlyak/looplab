@@ -2,7 +2,7 @@ import React from 'react'
 import { fmt, operatorMeta } from './util.js'
 import { ChartFrame } from './accessibility.jsx'
 import { nodeTheme } from './conceptId.js'
-import { nodeIsActive } from './nodeProjection.js'
+import { nodeIsActive, currentRewardHacks } from './nodeProjection.js'
 import { eligibleMeasuredResult } from './scoreComparison.js'
 import { resultMeasurement } from './resultMeasurement.js'
 
@@ -163,7 +163,7 @@ export function Trajectory({
       feasible: n.feasible === false ? 'infeasible' : n.feasible === true ? 'feasible' : 'not reported' })
   })
   const observedBestFlagged = bestNodeId != null
-    && (state?.reward_hacks || []).some(h => String(h.node_id) === String(bestNodeId))
+    && currentRewardHacks(state).some(h => String(h.node_id) === String(bestNodeId))
   const line = bestPts.map((p, i) => (i ? 'L' : 'M') + p[0] + ' ' + p[1]).join(' ')
   const area = bestPts.length > 1
     ? `${line} L ${bestPts[bestPts.length - 1][0]} ${plotBottom} L ${bestPts[0][0]} ${plotBottom} Z` : ''

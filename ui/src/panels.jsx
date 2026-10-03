@@ -14,7 +14,7 @@ import {
 import { Bars, MultiTrajectory, ParallelCoords, Scatter } from './charts.jsx'
 import { EXTRA_METRIC_CHANNEL_HELP, unverifiedExtraMetricKeys } from './extraMetrics.js'
 import { hyperImportance, analyze, verdict } from './report.js'
-import { activeNodeMap } from './nodeProjection.js'
+import { activeNodeMap, currentRewardHacks, rewardHackNodeCount } from './nodeProjection.js'
 import { resultMeasurement } from './resultMeasurement.js'
 import { sensitivityBars } from './sensitivityModel.js'
 import Markdown, { stripMd } from './markdown.jsx'
@@ -455,7 +455,7 @@ export function OverviewPanel({ state, maxEval, phase, runState, onClose, onOpen
   const latestHint = hintText(hints.at(-1))
   const latestHintPlain = stripMd(latestHint).trim()
   const latestHintLead = overviewHintPreview(latestHint)
-  const rewardFlags = state.reward_hacks?.length || 0
+  const rewardFlags = rewardHackNodeCount(currentRewardHacks(state))
   const duplicates = state.novelty_events?.length || 0
   const discuss = () => {
     onClose?.()
@@ -646,8 +646,9 @@ export function TrustPanel({ state, runId, onClose, onSelect, onToast, readOnly 
   // there is never last-good config to keep: both read as "loading", exactly as before.
   const configLoading = configResource.status === 'loading' || !!configResource.pending
   const cfg = configResource.data
-  const quarantine = async (id) => {   // U6: act on a flagged node — remove it from the search
-    await submitCommand(CONTROL.nodeAbort(runId, id, state.nodes?.[id]?.attempt), {
+  const quarantine = async (record) => {   // Act only on the lifecycle explicitly named by this signal.
+    const id = record.node_id
+    await submitCommand(CONTROL.nodeAbort(runId, id, record.generation), {
       success: `Quarantined #${id}`, noop: `#${id} was already settled`,
       executing: `Quarantine of #${id} requested — waiting for the run`, failure: `Could not quarantine #${id}`,
     }, onToast)
@@ -660,9 +661,11 @@ export function TrustPanel({ state, runId, onClose, onSelect, onToast, readOnly 
   const leak = state.leakage
   const leakState = leakageStatus(leak)
   const driftState = driftStatus(state.drifts, cfg, evald.length)
-  const hackState = rewardHackStatus(state.reward_hacks, cfg, evald.length)
+  const currentHacks = currentRewardHacks(state)
+  const currentHackRecords = new Set(currentHacks)
+  const hackState = rewardHackStatus(currentHacks, cfg, evald.length)
   const rewardSignalsRef = useRef(null)
-  const flaggedCount = state.reward_hacks?.length || 0
+  const flaggedCount = rewardHackNodeCount(currentHacks)
   const trustSummaryTone = [leakState, driftState, hackState].some(item => item.tone === 'alarm')
     ? 'alarm' : !state.host_grading || robust?.confirmed_mean == null
       || [leakState, driftState, hackState].some(item => item.tone !== 'ok')
@@ -741,7 +744,7 @@ export function TrustPanel({ state, runId, onClose, onSelect, onToast, readOnly 
           {state.drifts.map((d, i) => <tr key={i}><td className="flag">#{d.node_id}</td><td>{fmt(d.primary)}</td><td>{fmt(d.cross)}</td><td>{fmt(d.tolerance)}</td></tr>)}</tbody></table></DataTable>
         : null}
 
-      <div className="section-h" ref={rewardSignalsRef}>Reward-hacking monitor (B5) {(state.reward_hacks || []).length > 0 && <span className="chip alarm">{state.reward_hacks.length} flagged</span>}</div>
+      <div className="section-h" ref={rewardSignalsRef}>Reward-hacking monitor (B5) {flaggedCount > 0 && <span className="chip alarm">{flaggedCount} currently flagged</span>}</div>
       <TrustState value={hackState} />
       {/* Folded state is the enforcement truth (it applies trust_gate_changed events);
           the config snapshot alone can claim a gate the fold never engages. */}
@@ -752,14 +755,22 @@ export function TrustPanel({ state, runId, onClose, onSelect, onToast, readOnly 
         {' '}Only high-precision signals gate; broad critic/perfect-score warnings stay advisory, except
         <code> critic:hardcoded_metric</code>, which is classified as high precision.</div>}
       {(state.reward_hacks || []).length
-        ? <DataTable caption="Reward-hacking signals" card={false}><table className="tbl"><thead><tr><th>node</th><th>signal</th><th>detail</th><th>action</th></tr></thead><tbody>
-          {state.reward_hacks.map((h, i) => <tr key={i}>
-            <td className="flag"><button className="btn xs ghost" onClick={() => { onSelect && onSelect(h.node_id); onClose() }}>#{h.node_id}</button></td>
+        ? <DataTable caption="Reward-hacking signal history" card={false}><table className="tbl"><thead><tr><th>node</th><th>attempt</th><th>scope</th><th>signal</th><th>detail</th><th>action</th></tr></thead><tbody>
+          {state.reward_hacks.map((h, i) => {
+            const current = currentHackRecords.has(h)
+            const actionable = current && Number.isSafeInteger(h.generation)
+              && Number.isSafeInteger(state.nodes?.[h.node_id]?.attempt)
+            return <tr key={i}>
+            <td className="flag"><button className="btn xs ghost" title="Open the current experiment; the signal's attempt is listed separately"
+              disabled={!state.nodes?.[h.node_id]} onClick={() => { onSelect && onSelect(h.node_id); onClose() }}>#{h.node_id}</button></td>
+            <td>{Number.isSafeInteger(h.generation) && h.generation >= 0 ? h.generation : 'not recorded'}</td>
+            <td>{current ? 'Current attempt' : 'Historical or unavailable'}</td>
             <td>{(h.signals || []).map(s => s.signal).join(', ')}</td>
             <td className="muted">{(h.signals || []).map(s => s.detail).filter(Boolean).join(' · ')}</td>
-            <td>{!readOnly && <button className="btn xs ghost" title="quarantine: abort this node so it can't be selected"
-              onClick={() => quarantine(h.node_id)}>quarantine</button>}</td>
-          </tr>)}</tbody></table></DataTable>
+            <td>{!readOnly && <button className="btn xs ghost" disabled={!actionable}
+              title={actionable ? "quarantine: abort this node so it can't be selected" : 'This signal does not identify the current active attempt'}
+              onClick={() => quarantine(h)}>quarantine</button>}</td>
+          </tr>})}</tbody></table></DataTable>
         : null}
       </div>
     </Panel>

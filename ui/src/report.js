@@ -5,7 +5,7 @@
 
 import { costPricing, fmt, isSweep, operatorMeta } from './util.js'
 import { nodeTheme } from './conceptId.js'
-import { activeNodeMap } from './nodeProjection.js'
+import { activeNodeMap, currentRewardHacks, rewardHackNodeCount } from './nodeProjection.js'
 import { normalizeRunReport, reportCoverageText, reportNarrativeCoverage } from './reportModel.js'
 import { OBJECTIVE_SOURCE_LABEL, objectiveMetricSource,
   objectiveSourceCaveated } from './trustSemantics.js'
@@ -289,11 +289,11 @@ export function analyze(state) {
 // infeasibility. Each is a chip with a deep-link to the panel that explains it. Pure (from state).
 export function trustCaveats(state, best) {
   const out = []
-  const hacks = state.reward_hacks || []
+  const hacks = currentRewardHacks(state)
   if (best && hacks.some(h => h.node_id === best.id))
     out.push({ kind: 'reward-hack', severity: 'alarm', text: 'champion flagged as a possible reward-hack', panel: 'trust' })
   else if (hacks.length)
-    out.push({ kind: 'reward-hack', severity: 'warn', text: `${hacks.length} node(s) flagged as possible reward-hacks`, panel: 'trust' })
+    out.push({ kind: 'reward-hack', severity: 'warn', text: `${rewardHackNodeCount(hacks)} node(s) flagged as possible reward-hacks`, panel: 'trust' })
   if (state.leakage?.leak)
     out.push({ kind: 'leakage', severity: 'alarm', text: 'data-leakage scan flagged this run', panel: 'data' })
   if ((state.drifts || []).length)

@@ -241,6 +241,30 @@ test('the workspace follows a live run: the probe paints it and a delta frame mo
     }
   })
 
+test('a reset withdraws the workspace Trust alarm; duplicate current records still count one node', async () => {
+  const server = runServer()
+  const view = await openWorkspace(server)
+  try {
+    await until(() => server.streams.length === 1, 'the owner stream')
+    const { stream } = server.streams[0]
+    await frame(stream, 'state', snapshot(3), 3)
+    await frame(stream, 'state_delta', SUSPICIOUS_WIN, 4)
+    await until(() => alarm(view) === 'hack? 1', 'current signal alarm')
+    await frame(stream, 'state_delta', { version: 1, base_seq: 4, seq: 5, ops: [
+      ['set', ['seq'], 5], ['set', ['event_count'], 6],
+      ['set', ['state', 'nodes', '2', 'attempt'], 1],
+    ] }, 5)
+    await until(() => alarm(view) === null, 'old-attempt alarm withdrawn')
+    const signal = { node_id: 2, generation: 1, signals: [{ signal: 'protected_missing' }] }
+    await frame(stream, 'state_delta', { version: 1, base_seq: 5, seq: 6, ops: [
+      ['set', ['seq'], 6], ['set', ['event_count'], 7],
+      ['set', ['state', 'reward_hacks'], [signal, signal]],
+    ] }, 6)
+    await until(() => alarm(view) === 'hack? 1', 'one currently flagged node')
+    assert.equal(server.fetch.calls.some(request => request.method !== 'GET'), false)
+  } finally { await view.unmount() }
+})
+
 test('a delta against a snapshot the connection does not hold is refused, unpainted, and resynced',
   async t => {
     const server = runServer()

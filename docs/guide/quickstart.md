@@ -96,6 +96,12 @@ and LoopLab's internal research roles. For setup from a fresh checkout, use
    code base, evaluation conditions and eligibility support it. A parent's current score
    alone does not establish a comparison. Reset or missing evidence explains why comparison
    is unavailable; repeat means and Trust exclusions are labelled separately.
+   Trust warnings in the selected result, Overview, chart and workspace header
+   refer to active node attempts. A signal from before a reset remains in
+   **Trust → Reward-hacking signal history**, with its attempt and scope; it
+   cannot quarantine the replacement attempt. Several signal records for one
+   current node count as one flagged node. Enabled detector settings alone do
+   not prove that every evaluation was inspected.
 
 ## Reuse a useful code change
 

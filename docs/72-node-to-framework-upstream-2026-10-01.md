@@ -2031,7 +2031,8 @@ Events не выдаются за хранилище отдельной commenta
 сопоставимые primary-score rollups и покрытие сравнений — §20.4;
 нейтральные подписи графиков и общий вывод Overview/Report — §20.5;
 сравнение и свежесть evidence в Inspector — §20.6;
-границы сравнения в чатовых completion briefs — §20.7.
+границы сравнения в чатовых completion briefs — §20.7;
+актуальность Trust-сигналов после reset — §20.8.
 Полная приёмка единого вывода во всех видах остаётся OPEN.
 
 #### 72.O6 — P1 / OPEN: результат repo-задачи, который можно взять и воспроизвести
@@ -2945,3 +2946,75 @@ target переизмерен до **616.75 KiB**, запас **215 B**; route, 
 проверить result surfaces как один сценарий и отделить оставшиеся несогласованные
 подписи/выводы от уже подтверждённых сравнений. Публикация в master и полный
 scope других OPEN тем остаются отдельными шагами.
+
+### 20.8 72.O5: Trust-сигнал относится к попытке, не ко всем будущим результатам (2026-10-03)
+
+**Найдено:** Report проверял reward-hack записи по node ID без generation.
+После reset сигнал старой попытки делал новый выбранный результат suspect,
+хотя engine и run completion receipt относили его к предыдущей попытке.
+График, Overview и workspace badge тоже читали всю историю как текущие флаги;
+повторные записи одного узла увеличивали число «подозрительных результатов».
+В Trust строка старого сигнала позволяла карантинировать текущую попытку.
+Отдельно отсутствие сигналов вместе с включённой сейчас настройкой детектора
+выдавало утверждение, что все evaluations уже проверены; такого свидетельства
+в этих данных нет.
+
+**Сделано:** общий `nodeProjection.currentRewardHacks` связывает запись с
+generation активного узла, используя прежний `nodeIsActive` для aborted/tombstone.
+Report/verdict, Overview, график и live header используют эту проекцию;
+`rewardHackNodeCount` считает разные узлы, а не записи журнала. Смена попытки
+убирает старый сигнал из текущего вывода; новый сигнал на новой попытке снова
+показывается. Legacy запись без generation применима только к attempt zero,
+не подставляется к новому attempt после reset. Неизвестная/некорректная попытка
+не разрешает текущее действие. Это display/read правило: engine trust gate,
+отбор победителя, измеренные оценки и команды не переписаны.
+
+**История и действия:** Trust сохраняет все строки и показывает отдельные
+колонки attempt/scope. Historical/unavailable запись не может карантинировать
+замещающую попытку; read-only по-прежнему не показывает mutation controls.
+Переход из строки явно открывает текущий experiment, а не обещает код/логи
+старой попытки. Текущий quarantine использует прежний `CONTROL.nodeAbort`
+с generation fence записи; legacy warning без явного lifecycle не даёт
+quarantine. Дополнительного выполнения или ожидания не добавлено.
+Отсутствие текущих сигналов — unknown coverage, не completed detector pass.
+Включённая настройка не превращает прошлые evaluations в проверенные.
+
+**Проверено как связанный сценарий:** общий JSON fixture для Python/UI задаёт
+старую попытку, reset, новую evaluation/confirmation, свежий сигнал и повторную
+запись сигнала. Python сверяет fixture с реальным `/state` из folded synthetic
+events и finalized result notice: старый сигнал остаётся в ledger, выбранная
+попытка/score/mean точны, `trust_flagged` caveat зависит от текущего hard signal.
+UI сравнивает headline и Trust status в Report, Overview, chart и обоих exports;
+separately labelled score и mean не меняют семантику. Live SSE delta убирает
+старый alarm после reset и считает два новых сигнала как один узел. Trust mount
+сохраняет историю, блокирует старую кнопку и не отправляет POST при её нажатии.
+При reset во время lifecycle-запроса quarantine сохраняет generation исходного
+сигнала; сервер отказывает устаревшему действию, новая попытка не подставляется.
+Missing node, aborted/tombstone, malformed generations, legacy и read-only
+проверены отдельно. Читать состояние/результаты и открывать таблицу бесплатно;
+модельных запросов эти действия не добавляют.
+
+**Свежие проверки:** replay-first — **193 passed**; result/MCP, lifecycle,
+champion caveats и trust-gate contracts — **150 passed**; UI result/language,
+Report/Overview, chart, Inspector, live resources, accessibility и command
+regressions — **170 passed** (`--test-concurrency=4`). Первый массово параллельный
+UI прогон получил **168/169**: существующая проверка retry 5xx с deadline 100 ms
+вернула accepted под нагрузкой. Она прошла **59/59** в isolated command suite,
+затем весь выбранный набор прошёл с четырьмя worker processes. Production
+timeouts и semantics не менялись, тестовые assertions не ослаблены. Полный
+product suite, живое ML обучение и пользовательская browser приёмка не заявляются.
+
+Первый staging build обнаружил лишний static import всей analysis группы в
+Concepts через RunView. Чистые lifecycle readers перенесены в уже загружаемый
+shared-support; финальный Concepts route — **257 907 B JS gzip**. JS gzip total
+**631 337 → 631 618 B** (**+281 B**), CSS **59 578 B** без изменения; initial shell
+**83 044 B**, review DAG **268 378 B**. Только total JS target переизмерен до
+**617 KiB**, запас **190 B**. Route, reachability, cycle и CSS gates сохранены.
+Staging build и bundle gate прошли; документационные/API/merge contracts —
+**37 passed**, strict MkDocs и diff check прошли. Изменения сохранены локально.
+
+**O5 остаётся OPEN:** общий mixed-base/retarget/repeat маршрут и объяснение
+результата человеком по §19.4 не приняты. Следующий проход должен проверить
+передачу advisory Trust-сигналов в node chat briefs: gate exclusions и audit
+caveats имеют разный смысл и не должны смешиваться. Полный scope других OPEN
+тем и доставка изменений в master остаются отдельными шагами.
