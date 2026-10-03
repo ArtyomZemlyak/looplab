@@ -1,0 +1,42 @@
+{
+  "observed_at_utc": "2026-10-03T08:05:07.451985+00:00",
+  "source_sha": "7a69d94ec1c11ffe0df94b490c61fa9a3de6fb85",
+  "platform": "Windows",
+  "interpreter": ".venv/Scripts/python.exe",
+  "scope": "Selected integration failures reproduced before documentation edits; no production fix, ML evaluation or full suite.",
+  "replay": {
+    "selectors": [
+      "tests/test_events_replay.py",
+      "tests/test_golden_replay.py",
+      "tests/test_replay_families.py"
+    ],
+    "passed": 206,
+    "seconds": 15.65
+  },
+  "integration": {
+    "failed": 6,
+    "seconds": 8.73,
+    "exit_code": 1,
+    "selectors": [
+      "tests/test_engine_fold_seam.py::test_no_engine_module_binds_the_replay_fold_itself",
+      "tests/test_memory_stores.py::test_every_bare_jsonl_literal_is_a_registered_store_or_a_declared_run_file",
+      "tests/test_package_layout.py::test_no_module_missing_from_layout",
+      "tests/test_serve_module_seams.py::test_the_five_control_tables_are_declared_in_exactly_one_module",
+      "tests/test_task_adapter_contract.py::test_every_task_probe_names_a_registered_hook",
+      "tests/test_refusal_vocabulary.py::test_an_unreadable_event_log_keeps_its_run_in_the_list_and_says_why"
+    ]
+  },
+  "source_diff": {
+    "unreadable_run_stub_missing": [
+      "external_harness"
+    ]
+  },
+  "reproduction": {
+    "pytest_args": [
+      "-o",
+      "addopts=",
+      "-q"
+    ],
+    "basetemp": "Use an existing private parent and a new per-run directory."
+  }
+}
