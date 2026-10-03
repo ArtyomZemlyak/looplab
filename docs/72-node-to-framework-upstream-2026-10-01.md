@@ -39,7 +39,8 @@
 список OPEN — §19.4; свежий обзор со скриншотами и inventory — §19.9;
 активная очередь и граница закрытия — §19.4, диагностические свидетельства — §19.4.1;
 связанный пользовательский путь — §19.10;
-новые отказы CI и проверка RU/handoff — §19.11.
+новые отказы CI и проверка RU/handoff — §19.11;
+актуальное сквозное ревью, свежая сборка UI, CI и worktrees — **§19.12**.
 Реализованные блоки интеграционных исправлений — §20.18–20.19. §19.5–19.8
 описывают предыдущие проходы; их очереди и Git-срезы не заменяют свежий план.
 Диагностика подтверждённых Windows Git path limits — §20.20; это частичный O13.
@@ -50,11 +51,11 @@
 и получить проверенный код в нужном репозитории. Количество API и закрытые WP
 сами по себе не показывают, насколько легко пользователь проходит этот путь.
 
-| Что нужно сейчас | Состояние последнего прохода (§20.23) | Где остаток |
+| Что нужно сейчас | Состояние последнего review-среза (§19.12) | Где остаток |
 |---|---|---|
 | Измерение и upstream протокол | Реализованы в opt-in scope; ограничения сохраняются | §18.4, §20 |
-| Доставка текущей ветки LoopLab | Исходный master `cb72620f2` доставлен; полный CI `74ae1a600` зелёный; два Windows отказа `62f0d4d0a` разобраны в §20.23, общий вердикт текущего SHA ожидается | O1: общий Linux/Windows CI итогового SHA; §20.18–20.23 |
-| Сохранность всей работы | Inventory есть; решения по WIP и неясным патчам ещё OPEN | O2 |
+| Доставка текущей ветки LoopLab | На входе HEAD/master/origin совпали на `efde354cd`: Linux/docs зелёные, Windows красный; предыдущий `cb72620f2` прошёл все три workflow | O1: bounded control search и общий CI исправленного SHA; §19.12 |
+| Сохранность всей работы | Свежий inventory: 99 регистраций, 8 tracked-dirty каталогов; 35 ranges с unmatched nonmerge commits. Сохранение и disposition ещё OPEN | O2; §19.12 |
 | Первый запуск и понятное продолжение | Есть handoff, typed reads и recovery receipts; цельный пользовательский путь ещё OPEN | O3/O4/O8/O9/O11/O13 |
 | Понятный результат | Измерение и сравнимость существенно исправлены; краткость и usability ещё OPEN | O5/O9/O10 |
 | Воспроизвести и забрать код | Upstream base update реализован; доставка результата в owner repo ещё OPEN | O6/O7/O12/O14 |
@@ -1974,9 +1975,10 @@ GitHub CI и branch protection в этом проходе не проверял�
 
 | Очередь | OPEN | Следующий законченный результат | Что блокирует закрытие |
 |---|---|---|---|
-| 0A, P0 | O1 | Разобранный repair batch по красному CI: причины, исправления, guards и общий вердикт исправленного SHA | Полный CI `74ae1a600` прошёл; два свежих Windows отказа `62f0d4d0a` разобраны (§20.23); общий CI актуального SHA остаётся отдельным gate |
-| 0B, P0 | O2 | Сохранённая работа и обоснованный disposition каждого WIP/неясного range | Inventory не содержит резервных копий; срез §19.9 с 35 unmatched и 26 patch-equivalent HEAD требует разных проверок, merge commits и ignored артефакты ещё не разобраны |
-| 1, P1 | O4/O8/O11/O13 | Один понятный вход из Assistant в продолжение того же run; минимальный клиент сохраняет original request до write | Lost reply, новый процесс, два клиента, stale identity, pending checkpoint и unavailable source должны иметь определённый исход без случайного второго training |
+| 0A, P0 | O1 | Разобранный repair batch по красному CI: причины, исправления, guards и общий вердикт исправленного SHA | `cb72620f2` полностью зелёный; у `efde354cd` Windows падает на `test_no_reachable_control_state_is_absorbing`: pause истекла до intent. Incident repair §20.23 не покрывал bounded search; §19.12 |
+| 0B, P0 | O2 | Сохранённая работа и обоснованный disposition каждого WIP/неясного range | Свежий §19.12: 8 tracked-dirty, 35 unmatched и 26 only-patch-equivalent ranges; в текущих ranges 0 unreachable merge commits. Inventory не является backup; untracked/ignored и смысл патчей ещё не приняты |
+| 1A, P1 | O13 | Единый strict config policy для semantic reads/publications/recovery | §19.12: bootstrap отказывает unknown schema, selection reader ещё принимает её lenient; unavailable не должен выдавать gate/verdict/ACK по отброшенным obligations |
+| 1B, P1 | O4/O8/O11/O13 | Один понятный вход из Assistant в продолжение того же run; минимальный клиент сохраняет original request до write | Lost reply, новый процесс, два клиента, stale identity, pending checkpoint и unavailable source должны иметь определённый исход без случайного второго training |
 | 2, P1 | O3/O9/O10/O13 | Первый CPU результат из Assistant/external client с понятными setup, правами и RU/EN | Раздельная приёмка готового окружения и чистой установки; отдельный клиент получает явный язык, unknown runtime не объявляется текущим |
 | 3, P1 | O5/O6/O9/O14 | Краткий вывод и проверяемый пакет выбранной попытки, который можно воспроизвести и передать в task repo | Понимание mixed-base/Trust/repeats, точная материализация, зависимости и target diff; disabled export получает причину и доступный следующий шаг |
 | 4, P1 | O7/O12/O10 | Через чат обобщена возможность с сохранённым default, явными checks/ценой и новой базой | Upstream gate не доказывает научный выигрыш или owner-repo merge; enabled policy/obligations и resume остаются явными |
@@ -1998,7 +2000,7 @@ OPEN и не закрывать весь O-пункт по одному slice. �
 публикация остаётся явным действием. Сохранность остальных worktrees — отдельная O2.
 CI следующего опубликованного `5e9659451` прочитан в §19.10: docs/UI/package
 успешны, общий Linux/Windows вердикт в зафиксированный момент ещё не завершён.
-**Актуальный остаток — §19.11:** Linux CI этого SHA завершился с failure.
+**Исторический отказ — §19.11:** Linux CI этого SHA завершился с failure.
 Сначала разобрать и исправить названные интеграционные отказы, подтвердить
 соответствующие guards и общий CI на исправленном дереве. Доставка не равна
 прошедшей проверке; локальные выбранные наборы не заменяют этот отрицательный verdict.
@@ -2012,6 +2014,12 @@ runtime fold seam, актуализирован guard намеренно изв�
 Остальные исходные кластеры разобраны в §20.19: все 18 прежних failing IDs
 проходят выбранными локальными наборами, включая clean dev installation и
 вложенную control-проверку alarm-tests. Полный CI итогового SHA остаётся отдельным gate.
+
+**Актуальный остаток — §19.12:** `cb72620f2` прошёл Linux/Windows/docs;
+`efde354cd` доставлен, Linux/docs прошли, Windows отказал bounded control search.
+Восстановить воспроизводимость проверки pause при задержанном worker, сохранив
+invariant, реальный submit/get/fold и отдельное покрытие deadline. Не закрывать
+O1 по повторному локальному pass или зелёному CI предыдущего дерева.
 
 **Приёмка:** указаны исходные SHA, итоговый SHA и способ интеграции; проверены
 Python/UI/build/package/docs на итоговом дереве и новые upstream/recovery cases;
@@ -2297,6 +2305,12 @@ UI build и удалённый клиент. Недоступные поля я�
 `upstream_git_path_unavailable`, который сохраняется в history/failed receipt.
 Native Windows cwd/worktree и exact HTTP/MCP recovery проверены; это диагностика
 реального предела, не поддержка произвольной глубины и не закрытие runtime/build identity.
+§20.21 добавил диагностику process start/timeout; §20.22 — strict config для
+bootstrap. Свежая §19.12 проба показывает остаток: bootstrap отказывает неизвестному
+setting, `selection.status` ещё читает его lenient. Проверить единый strict policy
+для всех semantic reads/writes и exact recovery, отдельно от обычного config diagnostic.
+В том же проходе unstamped локальный UI был заменён только в private preview
+свежей сборкой: видимая версия runtime/build остаётся самостоятельным deliverable.
 
 #### 72.O14 — P1 / OPEN: передача результата в owner repo относительно реальной базы
 
@@ -3072,6 +3086,227 @@ keyboard/accessibility и 2K этой визуальной пробой не п�
 merge-history), strict MkDocs и `git diff --check` прошли. Производственный код
 не менялся; CI repair и приёмка двух живых клиентов остаются OPEN. Эти локальные
 проверки документации не пересматривают перечисленные отказы интеграционного CI.
+
+### 19.12 Сквозное ревью: от первого сообщения до принятого кода (2026-10-03)
+
+**Исходный срез:** `efde354cdee677bae9d9bf65ea66d886cd2b36d2`; task HEAD,
+основной master и fetched origin/master совпали, tracked changes в этих двух
+checkout отсутствовали. Это новый review действующих O1–O14, без нового O15.
+WP1–WP3 и 72.1–72.7 сохраняют ограниченную приёмку §18; ниже оценивается
+завершённость пользовательского пути. Число исправленных guards не измеряет
+понятность интерфейса, а отсутствие human acceptance не отменяет работающий протокол.
+
+#### Проверенные поверхности и границы доказательства
+
+Прочитаны README, quickstart, external-harness guide, актуальные handoff,
+selection/config readers, result surfaces и Git/CI. Порт пользовательского UI
+8775 отказал соединению. Визуальное ревью выполнено на отдельном loopback preview
+8876 с private-копией прежнего завершённого CPU/MCP smoke, без engine, нового
+training, модельных запросов, resume и новых commentary publications.
+Это проверка отображения записанного результата, не повторная ML-приёмка.
+
+У исходного `ui/dist` отсутствовал build stamp. Он не использован как свидетельство
+текущего UI: Vite собрал исходники данного SHA в private `ui-dist`, preview явно
+получил `LOOPLAB_UI_DIST`, страница загружена заново. Приняты только новые снимки
+этой сборки; JPEG сохранены без правок и просмотрены с диска. Размеры — FHD
+1920×1080 и 2K 2560×1440; горизонтального overflow страницы при этих просмотрах
+не наблюдалось. Скриншот API без fullPage обрезал кадр: это дефект capture, не UI;
+в доказательства включены полные кадры. Журнал preview byte-identical исходному.
+Preview остановлен, временный viewport сброшен. [Метаданные и config probe](assets/72-review-19-12/review-evidence.json).
+
+#### Пять шагов UI: что уже ясно, где пользователь ещё должен догадаться
+
+**1. Найти основной вход — частично хорошо.** Assistant занимает видимое место;
+контекст следующего сообщения, язык и Plan/«Обсуждение» показаны рядом с composer.
+Карточка run уже пишет `selected`, `evaluation score` и отсутствие multi-seed
+confirmation, поэтому прежний `best` не предлагается как новый баг этого дерева.
+Однако четыре равноправных chat prompts и полный набор portfolio filters не
+выделяют первый запуск и подключение своего агента. **O3/O9:** дать в Assistant
+короткий вход «Запустить эксперимент / Подключить или продолжить своим агентом»;
+advanced filters раскрывать по необходимости, сохранив доступ к portfolio.
+
+![Первый экран свежей сборки, RU Assistant, FHD](assets/72-review-19-12/01-start-ru-fhd-current.jpg)
+
+**2. Подготовить запуск — понятная подсказка, неполная сквозная приёмка.** Три
+нужных факта, серверные пути, отдельный денежный бюджет и подготовка сообщения
+уже объяснены. Start prompt не исполняет работу; обсуждение и launch review
+различимы. Но здесь не виден законченный путь выбора internal/external роли и
+готовности клиента. **O3/O9/O10/O13:** до первого write показать проверенные
+setup steps и одного следующего ответственного; не объявлять отсутствие owner
+model blocker для независимого внешнего клиента. Модельная карточка, её отказ,
+Validate/Start и чистая установка в этом просмотре не выполнены.
+
+![Подготовка первого запуска, без Send и запуска модели](assets/72-review-19-12/02-launch-ru-fhd-current.jpg)
+
+**3. Подключить внешнего агента — технически аккуратно, слишком много ручной
+сборки.** Agent cycle доступен прямо из run status; handoff разделяет серверные
+пути, MCP client, scoped credential и реальную проверку `connection_check`.
+Отсутствующий scoped credential назван явно, значение секрета не копируется,
+Copy не запускает работу. На RU экране handoff остаётся English; статус установки,
+trust/restart клиента и runtime identity пользователь собирает сам. **O3/O9/O13:**
+пошаговое подключение из Assistant с результатом каждого проверяемого шага,
+явной границей operator/client и RU/EN. Серверный readiness не может подтвердить
+executable/PATH удалённого клиента; unavailable остаётся unavailable.
+
+![Подключение Codex из Agent cycle при выбранном RU, 2K](assets/72-review-19-12/04-handoff-ru-2k-current.jpg)
+
+**4. Продолжить после потери агента — правила верны, память о запросе ручная.**
+Recovery отдельно объясняет original identity, observation и явное продолжение;
+engine probe, наблюдённые обращения и неизвестная живость клиента не смешиваются.
+Форма предлагает read saved receipt, но key хранится только в памяти формы и
+оператор должен принести его сам. **O4/O8/O11:** минимальный durable client плюс
+один recovery entry из чата. До write сохранять original body/key/action ID,
+generation и evidence revision; после нового процесса находить исходный запрос,
+показывать known/unknown effects и следующую допустимую операцию. Два клиента
+различают передачу одного намерения и независимые эксперименты. Quiet timeout
+не выдаёт право takeover, retry, resume или обход checkpoint. Сбой клиента и
+HTTP lost reply этим визуальным просмотром не воспроизводились.
+
+![Раскрытое восстановление: исходная квитанция и следующий ответственный](assets/72-review-19-12/05-recovery-ru-2k-current.jpg)
+
+**5. Понять итог и получить код — evidence яснее, результат ещё растянут.**
+Краткие итоги в Assistant появляются без модели, различают engine numbers и
+сохранённую интерпретацию агента, объясняют отсутствие родителя и repeat evidence.
+Report не объявляет числовую разницу доказанным улучшением. Ссылки ведут к
+выбранному node #1 / attempt 0. Это сильная часть текущей реализации.
+На FHD три completion cards занимают большую часть transcript; вывод и caveats
+повторяются, Report рядом остаётся English. **O5/O9:** закрепить последний итог
+с 2–3 строками «измерено / можно ли сравнить / что дальше», подробности и историю
+раскрывать, сохранять точную квитанцию и исходную commentary. Не переписывать
+старую публикацию при переключении языка и не скрывать обязательный checkpoint.
+
+![Report и бесплатные краткие итоги в Assistant на FHD](assets/72-review-19-12/03-result-ru-fhd-current.jpg)
+
+В этом fixture нет `solution.py`: Report объясняет отсутствие source, download
+Solution disabled; Code показывает helper `config.json`. Это допустимая форма
+cmd/repo задачи, не доказательство потери решения. Но переход к исходной базе,
+overlay, зависимостям и owner-repo delivery требует отдельного законченного
+маршрута **O6/O14**. Читатель должен получить точную materialization выбранной
+попытки или конкретную причину невозможности, затем reviewable change set для
+реального target. Upstream базы будущих экспериментов и merge в task repo
+должны иметь разные состояния. Полная repo-задача и применение патча не проверены.
+
+![Report: comparison coverage и отсутствие solution.py в этой задаче](assets/72-review-19-12/06-reproduce-ru-2k-current.jpg)
+
+![Выбранная попытка #1, Code и helper config; owner-repo delivery здесь не выполняется](assets/72-review-19-12/07-code-ru-2k-current.jpg)
+
+**Видимые риски доступности:** мелкие вторичные тексты/controls и длинные English
+инструкции увеличивают нагрузку; граф/inspector при широком Assistant оставляют
+мало ширины строкам кода. Нужны отдельная проверка читаемости при реальном zoom,
+keyboard focus/порядка обхода и contrast measurement. Наличие AX labels и
+keyboard альтернатив графика полезно, но не закрывает WCAG или screen-reader
+приёмку. Мобильная компоновка не входит в этот план; desktop остаётся основным.
+
+#### Протокол: следующий ремонт целостности, затем компактный клиент
+
+**Config compatibility — измеренный частичный разрыв O13.** На копии terminal
+event/config файлов добавлено одно неизвестное поле. Общий
+`harness/snapshot_settings.py::read_harness_settings` правильно отказал `503
+harness_config_incompatible` с источником `config.snapshot.json`; прямой
+`harness/selection.py::status` вернул обычный объект, прочитав snapshot lenient.
+`hypotheses`, `decisions`, `reviews`, `checkpoints` также ещё имеют прямые lenient
+reads — это результат чтения кода, не исполненная проба каждого endpoint.
+Bootstrap repairs §20.22 работают в своём scope; отказ bootstrap не доказывает
+такой же отказ всех последующих semantic calls уже подключённого клиента.
+
+Следующий slice: один strict policy для reads и publications, которые выводят
+obligations/разрешение действовать, включая recovery/ACK. Обычный `/config`
+остаётся diagnostic. Приёмка: unknown schema и повреждённый snapshot дают
+источник и unavailable до semantic verdict; bytes/event history не меняются,
+owner recovery не становится approval. Отдельно проверить exact retry после
+смены сборки и journal damage. Здесь не воспроизведён live API bypass и не
+менялись protection, event/schema contracts или production defaults.
+
+**Durable client O8** должен быть runnable примером, а не ещё одним списком
+MCP methods. Его private record сохраняется до network write, не содержит
+credential, связывает request с run/generation/evidence и имеет явный исход
+unknown ответа. Он использует существующие gates, не вводит автоматическое
+ожидание commentary, нового автора кандидатов или скрытый resume. Acceptance
+проверяет checkpoint после быстрого training, paged notices, потерянный ответ,
+новый процесс и два клиента; simple CPU happy path один этого не доказывает.
+
+#### Документация: чего сокращать, чего не прятать
+
+В исходном срезе README — **317 строк**, quickstart — **167**, external-harness
+guide — **1677**, сам doc72 до этого дополнения — **4377**. Это измерение размера,
+не тест понятности. Quickstart уже разделяет chat draft/launch и experimental
+score/confirmation, но шаг результата стал длинным справочником условий.
+Новый пользователь должен знать следующий шаг раньше, чем весь протокол.
+
+**O9 deliverable:** короткая стартовая страница с двумя маршрутами — Assistant
+и внешний клиент — и тремя ролями (operator, agent, integrator). Для каждого:
+что нужно сейчас, одно действие, ожидаемый проверяемый результат, один вход
+в восстановление; protocol details — по ссылкам рядом. Не дублировать full
+settings и фазовые требования в README. Формулировки «best verified» и
+«merges best candidates» объяснять через наблюдённый evaluation/confirmation
+и область merge: поиск внутри run не обещает научную надёжность или owner Git merge.
+Doc72 остаётся журналом/планом; текущий backlog и очередь в §19.4 — единственная
+активная очередь, исторические очереди не требуют повторной реализации.
+
+#### Доставка LoopLab и сохранность worktrees: новый срез
+
+| Проверка исходного SHA | Linux | Windows | Docs | Вывод |
+|---|---|---|---|---|
+| `cb72620f2` | [success](https://github.com/ArtyomZemlyak/looplab/actions/runs/37114998866) | [success](https://github.com/ArtyomZemlyak/looplab/actions/runs/37114998815) | [success](https://github.com/ArtyomZemlyak/looplab/actions/runs/37114998860) | Завершённый зелёный CI предыдущего дерева |
+| `efde354cd` | [success](https://github.com/ArtyomZemlyak/looplab/actions/runs/37115885822) | [failure](https://github.com/ArtyomZemlyak/looplab/actions/runs/37115885845) | [success](https://github.com/ArtyomZemlyak/looplab/actions/runs/37115885881) | Текущий исходный master доставлен; O1 приёмка красная |
+
+[CI snapshot](assets/72-review-19-12/ci-evidence.json). Windows shard 1:
+**1 failed, 5587 passed, 214 skipped**; failing ID —
+`tests/test_control_plane_liveness.py::test_no_reachable_control_state_is_absorbing`.
+Путь `root0.engine_stalls.steer`, pause trail:
+`timed_out/deadline_passed_before_intent → timed_out → healed:timed_out`.
+§20.23 исправлял incident fixture, но bounded search оставил окна .12/.2s.
+Лог доказывает отказ до intent; причина scheduling этого runner не установлена.
+O1: воспроизвести именно этот путь при контролируемой задержке, отделить deadline
+test от healthy liveness recovery и сохранить succeeded/non-vacuous invariants.
+Не лечить skip/xfail, ослаблением assertion или изменением production timeout
+без доказанного runtime бага. Затем нужен общий CI точного исправленного SHA.
+
+Read-only [worktree inventory](assets/72-review-19-12/worktree-inventory.json):
+**99 регистраций, 98 доступных каталогов, 1 отсутствующий**. Tracked status
+прочитан во всех 98; **8 dirty**, включая **5 с HEAD-предком master**.
+Из доступных HEAD **37 предки**, **61 непредки**: **26** имеют только
+patch-equivalent nonmerge ranges, **35** имеют unmatched nonmerge commits.
+Сумма unmatched по ranges — 88 с повторами; уникальных commit IDs — **58**,
+это не число потерянных фичей и не число независимых патчей. Unreachable merge
+commits в этих текущих ranges — **0**. `git cherry` не сравнивает WIP и не
+доказывает семантическую эквивалентность переписанной интеграции.
+
+Dirty каталоги: `autornd-bundle-fix-20260720`, `autornd-card-ui-lifecycle-20260721`,
+`autornd-concept-cache-20260717`, `autornd-delta-missing-base-20260718`,
+`autornd-empty-concept-delta-20260717`, `vigilant-saha-d21ba6`,
+`.codex-review-sweep`, `.codex-ui-next`. Untracked/ignored байты в этом новом
+проходе не инвентаризированы и не сохранены. Параллельные read-only наблюдения
+не являются атомарным snapshot. **O2:** backup нужных байтов, владелец и решение
+по каждому range/WIP, затем адресная интеграция/проверка. Ancestry не разрешает
+очистку; unmatched не разрешает слепой cherry-pick. Этот review не удаляет,
+не сбрасывает и не сливает чужую незавершённую работу.
+
+#### Уточнённые законченные результаты в действующих OPEN
+
+| Порядок | Тема / основной владелец | Следующий deliverable | Что должно закрыть slice |
+|---|---|---|---|
+| P0 | O1 — integrator | Устойчивый bounded liveness guard и общий verdict | Исходный CI path + worker delay, invariants сохранены, Linux/Windows/docs исправленного SHA |
+| P0 | O2 — integrator/авторы WIP | Backup и disposition 8 WIP + 35 unmatched ranges | Восстановимые bytes, адресные решения и content/scenario evidence; equivalent ranges тоже имеют решение |
+| P1, целостность | O13 — harness | Единый strict semantic config policy | Unknown schema/damage/recovery не выдают gates или ACK по отброшенным settings |
+| P1, продолжение | O4/O8/O11/O13 — harness/client/chat | Durable client + одно recovery действие из Assistant | Lost reply, новый процесс, два клиента и pending checkpoint дают понятный исход без duplicate work |
+| P1, вход | O3/O9/O10/O13 — onboarding/docs | Первый CPU результат через два коротких маршрута | Свежая установка отдельно от готовой среды; operator/client setup, RU/EN и runtime unknown ясны |
+| P1, результат | O5/O6/O9/O14 — results/delivery | Последний краткий итог + точная попытка + target change set | Пользователь верно объясняет сравнимость/repeats, воспроизводит код и видит локальный/published/merged статус выбранного repo |
+| P1, обобщение | O7/O12/O10 — Maintainer/chat | Reusable improvement через существующий review/gate | Recorded base изменена только после checks; цена/полномочия явны; owner repo отдельно |
+
+Все 14 O-тем остаются OPEN; таблица уточняет slices, не добавляет новые роли
+поиска, переключатели, фоновые takeover или implicit waits. Следующий проход
+реализации берёт первый незавершённый результат очереди §19.4 и сохраняет четыре
+состояния: реализация / contract check / human acceptance / delivery. Новый
+общий review нужен при новом свидетельстве или изменении цели, а не вместо работы
+по уже определённым критериям.
+
+Проверки этого документального прохода: replay-first — **193 passed**;
+documentation contracts, entry points и merge history — **34 passed**;
+strict MkDocs, существование всех новых local links и `git diff --check` прошли.
+Private UI build завершился. Production/tests не изменены; перечисленный красный
+Windows CI остаётся отрицательным свидетельством до отдельного repair и общего
+verdict. Проверки документации не закрывают human acceptance, WIP или O1–O14.
 
 ## 20. Реализация OPEN: выполненные шаги
 

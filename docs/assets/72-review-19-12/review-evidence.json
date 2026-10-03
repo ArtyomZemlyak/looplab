@@ -1,0 +1,91 @@
+{
+  "source_sha": "efde354cdee677bae9d9bf65ea66d886cd2b36d2",
+  "collected_at": "2026-10-03T14:12:01.475013+00:00",
+  "ui": {
+    "source_digest": "a03cd6c69cbc211d31170260130c45c8b5fb62c74d9650db046bceca5f54d9bd",
+    "build": "private Vite build of current source; served via LOOPLAB_UI_DIST on loopback 8876",
+    "user_port_8775": "connection refused; user environment not accepted",
+    "data": "private copy of prior completed CPU/MCP protocol smoke, not fresh training or human acceptance",
+    "screenshots": [
+      {
+        "file": "01-start-ru-fhd-current.jpg",
+        "sha256": "3402dd5a4c1e7ca9986164b0fc7478cb23c93ba4ebf7e5d2a55449b5ae1f77da",
+        "viewport": [
+          1920,
+          1080
+        ]
+      },
+      {
+        "file": "02-launch-ru-fhd-current.jpg",
+        "sha256": "b9e227e73d754fce81683ac8a480148aea9e2da0d0abb83d5ef8395f6e62d02d",
+        "viewport": [
+          1920,
+          1080
+        ]
+      },
+      {
+        "file": "03-result-ru-fhd-current.jpg",
+        "sha256": "60f6b9ad6cf8d4ba881f28dde7e42ab53e11b214317b93de0dfe964d0cec6cee",
+        "viewport": [
+          1920,
+          1080
+        ]
+      },
+      {
+        "file": "04-handoff-ru-2k-current.jpg",
+        "sha256": "60ea3344aaa7dee864ec2027332760644752d76d645de486fcc79db4e68bfd13",
+        "viewport": [
+          2560,
+          1440
+        ]
+      },
+      {
+        "file": "05-recovery-ru-2k-current.jpg",
+        "sha256": "526010a7056bf7ea22577ab2c295d51feaf958a0faab52791158aabdcc465f95",
+        "viewport": [
+          2560,
+          1440
+        ]
+      },
+      {
+        "file": "06-reproduce-ru-2k-current.jpg",
+        "sha256": "91f728c35d7201a33a92c8d83acb13962fd8d0813fc53239495175f9ac7aa930",
+        "viewport": [
+          2560,
+          1440
+        ]
+      },
+      {
+        "file": "07-code-ru-2k-current.jpg",
+        "sha256": "61221273a6b2883e1ad4dd169e00b9b32152c0bd0b9b759ceff5510f60e51724",
+        "viewport": [
+          2560,
+          1440
+        ]
+      }
+    ],
+    "limits": [
+      "model configuration/send/start/resume not exercised",
+      "no credential values copied",
+      "no full keyboard, contrast or screen-reader audit"
+    ]
+  },
+  "compatibility_probe": {
+    "mode": "direct service reads on copied terminal event/config files; no commands or writes to a live run",
+    "bootstrap": {
+      "status": 503,
+      "code": "harness_config_incompatible",
+      "source": "config.snapshot.json"
+    },
+    "selection_status_returned_object": true,
+    "selection_fields": [
+      "evidence_revision",
+      "requested_samples",
+      "selection_contract",
+      "tie_groups",
+      "value_candidates",
+      "value_weight"
+    ]
+  },
+  "preview_event_bytes_equal_to_source": true
+}

@@ -1,0 +1,56 @@
+[
+  {
+    "conclusion": "failure",
+    "createdAt": "2026-10-03T10:16:46Z",
+    "databaseId": 37115885845,
+    "headSha": "efde354cdee677bae9d9bf65ea66d886cd2b36d2",
+    "status": "completed",
+    "url": "https://github.com/ArtyomZemlyak/looplab/actions/runs/37115885845",
+    "workflowName": "tests-windows"
+  },
+  {
+    "conclusion": "success",
+    "createdAt": "2026-10-03T10:16:46Z",
+    "databaseId": 37115885881,
+    "headSha": "efde354cdee677bae9d9bf65ea66d886cd2b36d2",
+    "status": "completed",
+    "url": "https://github.com/ArtyomZemlyak/looplab/actions/runs/37115885881",
+    "workflowName": "docs"
+  },
+  {
+    "conclusion": "success",
+    "createdAt": "2026-10-03T10:16:46Z",
+    "databaseId": 37115885822,
+    "headSha": "efde354cdee677bae9d9bf65ea66d886cd2b36d2",
+    "status": "completed",
+    "url": "https://github.com/ArtyomZemlyak/looplab/actions/runs/37115885822",
+    "workflowName": "tests"
+  },
+  {
+    "conclusion": "success",
+    "createdAt": "2026-10-03T10:01:22Z",
+    "databaseId": 37114998815,
+    "headSha": "cb72620f25788bdf1c9dd2a3304bb5e2b339fe5c",
+    "status": "completed",
+    "url": "https://github.com/ArtyomZemlyak/looplab/actions/runs/37114998815",
+    "workflowName": "tests-windows"
+  },
+  {
+    "conclusion": "success",
+    "createdAt": "2026-10-03T10:01:22Z",
+    "databaseId": 37114998866,
+    "headSha": "cb72620f25788bdf1c9dd2a3304bb5e2b339fe5c",
+    "status": "completed",
+    "url": "https://github.com/ArtyomZemlyak/looplab/actions/runs/37114998866",
+    "workflowName": "tests"
+  },
+  {
+    "conclusion": "success",
+    "createdAt": "2026-10-03T10:01:22Z",
+    "databaseId": 37114998860,
+    "headSha": "cb72620f25788bdf1c9dd2a3304bb5e2b339fe5c",
+    "status": "completed",
+    "url": "https://github.com/ArtyomZemlyak/looplab/actions/runs/37114998860",
+    "workflowName": "docs"
+  }
+]

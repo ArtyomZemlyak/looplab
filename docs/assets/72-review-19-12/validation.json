@@ -1,0 +1,26 @@
+{
+  "source_sha": "efde354cdee677bae9d9bf65ea66d886cd2b36d2",
+  "scope": "documentation review and evidence only; no production or test code changes",
+  "replay_first": {
+    "selector": "tests/test_events_replay.py",
+    "passed": 193
+  },
+  "documentation_checks": {
+    "selectors": [
+      "tests/test_documentation_contracts.py",
+      "tests/test_documented_entry_points_resolve.py",
+      "tests/test_merge_history_integrity.py"
+    ],
+    "passed": 34
+  },
+  "strict_mkdocs": "passed on final document",
+  "private_ui_build": "passed; current source; saved and inspected 7 exact screenshots",
+  "new_link_targets": "10 present before validation manifest addition",
+  "git_diff_check": "passed",
+  "acceptance_limits": [
+    "source master Windows CI remains failed; local document checks do not repair it",
+    "UI is a private copy of a prior CPU/MCP smoke; no new training or model request",
+    "no fresh human first-install, two-client, owner-repo integration or accessibility acceptance",
+    "worktree inventory is not a backup, content disposition or delivery of WIP"
+  ]
+}
