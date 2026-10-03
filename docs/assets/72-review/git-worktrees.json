@@ -1,0 +1,1491 @@
+{
+  "refs": {
+    "HEAD": "7091d902e3597fb52fad8be142b4a4b7ca074f00",
+    "master": "1103ba87b22cd3c02dcae80db87473d0c8ae8374",
+    "origin/master": "cdebb964c0a7ca5df73ffaabc1e97e7cbe4015d8"
+  },
+  "worktrees": [
+    {
+      "path": "C:/Users/artyo/Documents/autornd",
+      "head": "1103ba87b22cd3c02dcae80db87473d0c8ae8374",
+      "branch": "refs/heads/master",
+      "exists": true,
+      "prunable": false,
+      "contained": {
+        "HEAD": true,
+        "master": true,
+        "origin/master": true
+      },
+      "status_available": true,
+      "tracked_changes": 0,
+      "untracked_entries": 51
+    },
+    {
+      "path": "C:/tmp/autornd-advisory-honesty-20260717",
+      "head": "69ba7f9f3eea8f95ee5ad5613e3b354de0b7a45d",
+      "branch": null,
+      "exists": true,
+      "prunable": false,
+      "contained": {
+        "HEAD": false,
+        "master": false,
+        "origin/master": false
+      },
+      "status_available": true,
+      "tracked_changes": 0,
+      "untracked_entries": 0
+    },
+    {
+      "path": "C:/tmp/autornd-asha-bundle-base-20260720",
+      "head": "7556a61abda988dbb9faa6ab3d008d1a2433e2bc",
+      "branch": null,
+      "exists": true,
+      "prunable": false,
+      "contained": {
+        "HEAD": true,
+        "master": true,
+        "origin/master": true
+      },
+      "status_available": true,
+      "tracked_changes": 0,
+      "untracked_entries": 0
+    },
+    {
+      "path": "C:/tmp/autornd-asha-watchdog-fix-20260720",
+      "head": "83c0ebbdd212c5c1f7ef6df4ae1713ac35f36bde",
+      "branch": null,
+      "exists": true,
+      "prunable": false,
+      "contained": {
+        "HEAD": false,
+        "master": false,
+        "origin/master": false
+      },
+      "status_available": true,
+      "tracked_changes": 0,
+      "untracked_entries": 0
+    },
+    {
+      "path": "C:/tmp/autornd-atlas-fix-20260718",
+      "head": "6ff67b7842d4f76a811bf18534c21c4f8d8bb57a",
+      "branch": null,
+      "exists": true,
+      "prunable": false,
+      "contained": {
+        "HEAD": false,
+        "master": false,
+        "origin/master": false
+      },
+      "status_available": true,
+      "tracked_changes": 0,
+      "untracked_entries": 0
+    },
+    {
+      "path": "C:/tmp/autornd-atlas-parent-size-20260720",
+      "head": "2d9e2bac5bbe40e60ab38acf4e399173d01b655f",
+      "branch": null,
+      "exists": true,
+      "prunable": false,
+      "contained": {
+        "HEAD": false,
+        "master": false,
+        "origin/master": false
+      },
+      "status_available": true,
+      "tracked_changes": 0,
+      "untracked_entries": 0
+    },
+    {
+      "path": "C:/tmp/autornd-bundle-fix-20260720",
+      "head": "1d1569578b5e0a4ab4148aa8c5ed549e1b8b488a",
+      "branch": null,
+      "exists": true,
+      "prunable": false,
+      "contained": {
+        "HEAD": false,
+        "master": false,
+        "origin/master": false
+      },
+      "status_available": true,
+      "tracked_changes": 1,
+      "untracked_entries": 0
+    },
+    {
+      "path": "C:/tmp/autornd-capsule-completeness-20260720",
+      "head": "905ca37f10c84ebf0ca2bd220aca54dcc182f248",
+      "branch": null,
+      "exists": true,
+      "prunable": false,
+      "contained": {
+        "HEAD": false,
+        "master": false,
+        "origin/master": false
+      },
+      "status_available": true,
+      "tracked_changes": 0,
+      "untracked_entries": 0
+    },
+    {
+      "path": "C:/tmp/autornd-card-concept-truth-20260721",
+      "head": "82439c4eadfe58213fa3d29f90ed8f9789d2dbaa",
+      "branch": null,
+      "exists": true,
+      "prunable": false,
+      "contained": {
+        "HEAD": false,
+        "master": false,
+        "origin/master": false
+      },
+      "status_available": true,
+      "tracked_changes": 0,
+      "untracked_entries": 0
+    },
+    {
+      "path": "C:/tmp/autornd-card-journal-bounds-20260721",
+      "head": "7db1e03b45d6595c14111d9e362076eb20bdee9e",
+      "branch": null,
+      "exists": true,
+      "prunable": false,
+      "contained": {
+        "HEAD": false,
+        "master": false,
+        "origin/master": false
+      },
+      "status_available": true,
+      "tracked_changes": 0,
+      "untracked_entries": 0
+    },
+    {
+      "path": "C:/tmp/autornd-card-projection-meta-20260721",
+      "head": "4682b349fd88a2601d2cbc75a88fbf33d96557ce",
+      "branch": null,
+      "exists": true,
+      "prunable": false,
+      "contained": {
+        "HEAD": false,
+        "master": false,
+        "origin/master": false
+      },
+      "status_available": true,
+      "tracked_changes": 0,
+      "untracked_entries": 0
+    },
+    {
+      "path": "C:/tmp/autornd-card-public-20260721",
+      "head": "fb33554f14c2b996e99231c860dde222f72dcae4",
+      "branch": null,
+      "exists": true,
+      "prunable": false,
+      "contained": {
+        "HEAD": false,
+        "master": false,
+        "origin/master": false
+      },
+      "status_available": true,
+      "tracked_changes": 0,
+      "untracked_entries": 0
+    },
+    {
+      "path": "C:/tmp/autornd-card-selection-guard-20260721",
+      "head": "31f27fe14cd4bd3e89ae9b0c3d7d772372f17538",
+      "branch": null,
+      "exists": true,
+      "prunable": false,
+      "contained": {
+        "HEAD": false,
+        "master": false,
+        "origin/master": false
+      },
+      "status_available": true,
+      "tracked_changes": 0,
+      "untracked_entries": 0
+    },
+    {
+      "path": "C:/tmp/autornd-card-ui-lifecycle-20260721",
+      "head": "cb46a3f5f688976e31581fbb87ff270fbc9ea565",
+      "branch": "refs/heads/codex/card-ui-lifecycle-20260721",
+      "exists": true,
+      "prunable": false,
+      "contained": {
+        "HEAD": true,
+        "master": true,
+        "origin/master": true
+      },
+      "status_available": true,
+      "tracked_changes": 5,
+      "untracked_entries": 2
+    },
+    {
+      "path": "C:/tmp/autornd-cards-integrity-20260720",
+      "head": "4fedd87234b9cd4467540699d64d47587533dd12",
+      "branch": null,
+      "exists": true,
+      "prunable": false,
+      "contained": {
+        "HEAD": false,
+        "master": false,
+        "origin/master": false
+      },
+      "status_available": true,
+      "tracked_changes": 0,
+      "untracked_entries": 0
+    },
+    {
+      "path": "C:/tmp/autornd-classifier-provenance-20260718",
+      "head": "d824d1306355e687245feccf74c9be809040d9f6",
+      "branch": null,
+      "exists": true,
+      "prunable": false,
+      "contained": {
+        "HEAD": false,
+        "master": false,
+        "origin/master": false
+      },
+      "status_available": true,
+      "tracked_changes": 0,
+      "untracked_entries": 0
+    },
+    {
+      "path": "C:/tmp/autornd-comment-review-20260721",
+      "head": "49383cf8f95ab95fb96a60b849bc16f38ecdd6b3",
+      "branch": null,
+      "exists": true,
+      "prunable": false,
+      "contained": {
+        "HEAD": true,
+        "master": true,
+        "origin/master": true
+      },
+      "status_available": true,
+      "tracked_changes": 0,
+      "untracked_entries": 0
+    },
+    {
+      "path": "C:/tmp/autornd-concept-cache-20260717",
+      "head": "ca40a675e54b0e8d9b43ace0a50f411494751d76",
+      "branch": null,
+      "exists": true,
+      "prunable": false,
+      "contained": {
+        "HEAD": true,
+        "master": true,
+        "origin/master": true
+      },
+      "status_available": true,
+      "tracked_changes": 4,
+      "untracked_entries": 1
+    },
+    {
+      "path": "C:/tmp/autornd-concept-cache-latest-20260718",
+      "head": "7fd044b176117f4e458ba4b1c8aa17421c75eb03",
+      "branch": null,
+      "exists": true,
+      "prunable": false,
+      "contained": {
+        "HEAD": true,
+        "master": true,
+        "origin/master": true
+      },
+      "status_available": true,
+      "tracked_changes": 0,
+      "untracked_entries": 0
+    },
+    {
+      "path": "C:/tmp/autornd-concept-corruption-docs-20260718",
+      "head": "1744b5236f98cc669cd563b940d63130eaac2719",
+      "branch": "refs/heads/codex/ui-concept-corruption-docs-20260718",
+      "exists": true,
+      "prunable": false,
+      "contained": {
+        "HEAD": false,
+        "master": false,
+        "origin/master": false
+      },
+      "status_available": true,
+      "tracked_changes": 0,
+      "untracked_entries": 0
+    },
+    {
+      "path": "C:/tmp/autornd-concept-frame-determinism-20260718",
+      "head": "0fb0ae0c1f792fa5b9b2c48afb8365865f81547c",
+      "branch": null,
+      "exists": true,
+      "prunable": false,
+      "contained": {
+        "HEAD": false,
+        "master": false,
+        "origin/master": false
+      },
+      "status_available": true,
+      "tracked_changes": 0,
+      "untracked_entries": 0
+    },
+    {
+      "path": "C:/tmp/autornd-concept-id-fix-20260716",
+      "head": "204f7b29ed808909ab9457926898a0350c58ae17",
+      "branch": null,
+      "exists": true,
+      "prunable": false,
+      "contained": {
+        "HEAD": true,
+        "master": true,
+        "origin/master": true
+      },
+      "status_available": true,
+      "tracked_changes": 0,
+      "untracked_entries": 0
+    },
+    {
+      "path": "C:/tmp/autornd-concept-provenance-20260717",
+      "head": "4baa2c745c4413635f29927c0d6bba55c49e5d79",
+      "branch": null,
+      "exists": true,
+      "prunable": false,
+      "contained": {
+        "HEAD": false,
+        "master": false,
+        "origin/master": false
+      },
+      "status_available": true,
+      "tracked_changes": 0,
+      "untracked_entries": 0
+    },
+    {
+      "path": "C:/tmp/autornd-concept-relations-a11y-20260718",
+      "head": "9df60ea61bc2378c1774416ae7ad5d3dc0389a67",
+      "branch": "refs/heads/codex/ui-concept-relations-a11y-20260718",
+      "exists": true,
+      "prunable": false,
+      "contained": {
+        "HEAD": false,
+        "master": false,
+        "origin/master": false
+      },
+      "status_available": true,
+      "tracked_changes": 0,
+      "untracked_entries": 0
+    },
+    {
+      "path": "C:/tmp/autornd-concept-tools-review-20260717",
+      "head": "25355adb4f75dfc3921533218003eb1d4e377950",
+      "branch": null,
+      "exists": true,
+      "prunable": false,
+      "contained": {
+        "HEAD": false,
+        "master": false,
+        "origin/master": false
+      },
+      "status_available": true,
+      "tracked_changes": 0,
+      "untracked_entries": 0
+    },
+    {
+      "path": "C:/tmp/autornd-d8-lifecycle-20260720",
+      "head": "43d1cec5a4823bf75538e933a34f83f3e9337504",
+      "branch": null,
+      "exists": true,
+      "prunable": false,
+      "contained": {
+        "HEAD": false,
+        "master": false,
+        "origin/master": false
+      },
+      "status_available": true,
+      "tracked_changes": 0,
+      "untracked_entries": 0
+    },
+    {
+      "path": "C:/tmp/autornd-delta-audit-26f408d",
+      "head": "26f408d3a6106f56f6c6fccf3fafc469978fefcb",
+      "branch": null,
+      "exists": true,
+      "prunable": false,
+      "contained": {
+        "HEAD": true,
+        "master": true,
+        "origin/master": true
+      },
+      "status_available": true,
+      "tracked_changes": 0,
+      "untracked_entries": 0
+    },
+    {
+      "path": "C:/tmp/autornd-delta-consumers-20260718",
+      "head": "a5aa06e877dd0988098e8fb80ee5d10258edd2b1",
+      "branch": null,
+      "exists": true,
+      "prunable": false,
+      "contained": {
+        "HEAD": false,
+        "master": false,
+        "origin/master": false
+      },
+      "status_available": true,
+      "tracked_changes": 0,
+      "untracked_entries": 0
+    },
+    {
+      "path": "C:/tmp/autornd-delta-core-fixes-20260718",
+      "head": "43247204b609b5820da7ba0e69c3c3493960f623",
+      "branch": null,
+      "exists": true,
+      "prunable": false,
+      "contained": {
+        "HEAD": false,
+        "master": false,
+        "origin/master": false
+      },
+      "status_available": true,
+      "tracked_changes": 0,
+      "untracked_entries": 0
+    },
+    {
+      "path": "C:/tmp/autornd-delta-integrity-20260718",
+      "head": "5a56f1213a44f9ee87abe7f6112773f2a774033e",
+      "branch": null,
+      "exists": true,
+      "prunable": false,
+      "contained": {
+        "HEAD": false,
+        "master": false,
+        "origin/master": false
+      },
+      "status_available": true,
+      "tracked_changes": 0,
+      "untracked_entries": 0
+    },
+    {
+      "path": "C:/tmp/autornd-delta-latest-integration-20260718",
+      "head": "28bb39f3d72c45139dc207393f32a4b69115346c",
+      "branch": null,
+      "exists": true,
+      "prunable": false,
+      "contained": {
+        "HEAD": false,
+        "master": false,
+        "origin/master": false
+      },
+      "status_available": true,
+      "tracked_changes": 0,
+      "untracked_entries": 0
+    },
+    {
+      "path": "C:/tmp/autornd-delta-missing-base-20260718",
+      "head": "b871755601cd17cb7fe99ea99e0ab7823884f3c2",
+      "branch": null,
+      "exists": true,
+      "prunable": false,
+      "contained": {
+        "HEAD": false,
+        "master": false,
+        "origin/master": false
+      },
+      "status_available": true,
+      "tracked_changes": 6,
+      "untracked_entries": 0
+    },
+    {
+      "path": "C:/tmp/autornd-doc17-integration",
+      "head": "e5ca709778322b9b819e1969bc9bd8d5d4916ad6",
+      "branch": "refs/heads/integration/doc17-master-20260712",
+      "exists": true,
+      "prunable": false,
+      "contained": {
+        "HEAD": true,
+        "master": true,
+        "origin/master": true
+      },
+      "status_available": true,
+      "tracked_changes": 0,
+      "untracked_entries": 0
+    },
+    {
+      "path": "C:/tmp/autornd-empty-concept-delta-20260717",
+      "head": "0531767b7722e7ceed75aee740ac76899676cdb5",
+      "branch": null,
+      "exists": true,
+      "prunable": false,
+      "contained": {
+        "HEAD": true,
+        "master": true,
+        "origin/master": true
+      },
+      "status_available": true,
+      "tracked_changes": 11,
+      "untracked_entries": 0
+    },
+    {
+      "path": "C:/tmp/autornd-final-backend-boundary-20260719",
+      "head": "a9480cf13460a13e85609ca114550a063a55c665",
+      "branch": null,
+      "exists": true,
+      "prunable": false,
+      "contained": {
+        "HEAD": false,
+        "master": false,
+        "origin/master": false
+      },
+      "status_available": true,
+      "tracked_changes": 0,
+      "untracked_entries": 0
+    },
+    {
+      "path": "C:/tmp/autornd-final-backend-boundary-rebased-20260720",
+      "head": "8453b788ba0b782649329698fdb90697ebb5f494",
+      "branch": null,
+      "exists": true,
+      "prunable": false,
+      "contained": {
+        "HEAD": false,
+        "master": false,
+        "origin/master": false
+      },
+      "status_available": true,
+      "tracked_changes": 0,
+      "untracked_entries": 0
+    },
+    {
+      "path": "C:/tmp/autornd-final-crossrun-security-20260718",
+      "head": "373cd4005d97ffdf770ccd45641b5c917026c831",
+      "branch": null,
+      "exists": true,
+      "prunable": false,
+      "contained": {
+        "HEAD": false,
+        "master": false,
+        "origin/master": false
+      },
+      "status_available": true,
+      "tracked_changes": 0,
+      "untracked_entries": 0
+    },
+    {
+      "path": "C:/tmp/autornd-final-integration-evidence-20260720",
+      "head": "0358389a3d147e0c821d8dcd8d20508d1549e099",
+      "branch": null,
+      "exists": true,
+      "prunable": false,
+      "contained": {
+        "HEAD": true,
+        "master": true,
+        "origin/master": true
+      },
+      "status_available": true,
+      "tracked_changes": 0,
+      "untracked_entries": 0
+    },
+    {
+      "path": "C:/tmp/autornd-final-master-20260718",
+      "head": "814b5146db0afbbca88d246fb9bd81b4697162b2",
+      "branch": null,
+      "exists": true,
+      "prunable": false,
+      "contained": {
+        "HEAD": false,
+        "master": false,
+        "origin/master": false
+      },
+      "status_available": true,
+      "tracked_changes": 0,
+      "untracked_entries": 0
+    },
+    {
+      "path": "C:/tmp/autornd-final-ui-receipt-audit-20260718",
+      "head": "c136b0d88728843ec49ea80e4bd22837a8226f8b",
+      "branch": null,
+      "exists": true,
+      "prunable": false,
+      "contained": {
+        "HEAD": false,
+        "master": false,
+        "origin/master": false
+      },
+      "status_available": true,
+      "tracked_changes": 0,
+      "untracked_entries": 0
+    },
+    {
+      "path": "C:/tmp/autornd-fingerprint-receipt-20260718",
+      "head": "aa7431d36c2aa453af073ddb5974011eaab5c421",
+      "branch": null,
+      "exists": true,
+      "prunable": false,
+      "contained": {
+        "HEAD": false,
+        "master": false,
+        "origin/master": false
+      },
+      "status_available": true,
+      "tracked_changes": 0,
+      "untracked_entries": 0
+    },
+    {
+      "path": "C:/tmp/autornd-govcli-20260720",
+      "head": "3ade210ed6cf9d9ebb07e1594525b5fdc9155bc6",
+      "branch": null,
+      "exists": true,
+      "prunable": false,
+      "contained": {
+        "HEAD": false,
+        "master": false,
+        "origin/master": false
+      },
+      "status_available": true,
+      "tracked_changes": 0,
+      "untracked_entries": 0
+    },
+    {
+      "path": "C:/tmp/autornd-governance-followup-20260717",
+      "head": "0531767b7722e7ceed75aee740ac76899676cdb5",
+      "branch": null,
+      "exists": true,
+      "prunable": false,
+      "contained": {
+        "HEAD": true,
+        "master": true,
+        "origin/master": true
+      },
+      "status_available": true,
+      "tracked_changes": 0,
+      "untracked_entries": 0
+    },
+    {
+      "path": "C:/tmp/autornd-governance-health-20260719",
+      "head": "5dcaa8f1f8ba6cac2930ccaa702ca150d5f1f8a5",
+      "branch": null,
+      "exists": true,
+      "prunable": false,
+      "contained": {
+        "HEAD": false,
+        "master": false,
+        "origin/master": false
+      },
+      "status_available": true,
+      "tracked_changes": 0,
+      "untracked_entries": 0
+    },
+    {
+      "path": "C:/tmp/autornd-governance-health-final-20260719",
+      "head": "bd53b0dc88d165b283adbf57099c9ec9f9709ae9",
+      "branch": null,
+      "exists": true,
+      "prunable": false,
+      "contained": {
+        "HEAD": false,
+        "master": false,
+        "origin/master": false
+      },
+      "status_available": true,
+      "tracked_changes": 0,
+      "untracked_entries": 0
+    },
+    {
+      "path": "C:/tmp/autornd-governance-health-integrated-20260720",
+      "head": "a738251be3f54b6dab8c3df038e114989a1f9636",
+      "branch": null,
+      "exists": true,
+      "prunable": false,
+      "contained": {
+        "HEAD": false,
+        "master": false,
+        "origin/master": false
+      },
+      "status_available": true,
+      "tracked_changes": 0,
+      "untracked_entries": 0
+    },
+    {
+      "path": "C:/tmp/autornd-governance-health-rebase-20260719",
+      "head": "0522a49b24a05bcedb2d9833e387e218379742f7",
+      "branch": null,
+      "exists": true,
+      "prunable": false,
+      "contained": {
+        "HEAD": false,
+        "master": false,
+        "origin/master": false
+      },
+      "status_available": true,
+      "tracked_changes": 0,
+      "untracked_entries": 0
+    },
+    {
+      "path": "C:/tmp/autornd-head-baseline",
+      "head": "06852ae17e98908d4fd44a551b0a13d77bc1230d",
+      "branch": null,
+      "exists": true,
+      "prunable": false,
+      "contained": {
+        "HEAD": true,
+        "master": true,
+        "origin/master": true
+      },
+      "status_available": true,
+      "tracked_changes": 0,
+      "untracked_entries": 0
+    },
+    {
+      "path": "C:/tmp/autornd-latest-master-20260720",
+      "head": "0bc1a75fd43c7e518a899d154f48525f83e8a7d8",
+      "branch": null,
+      "exists": true,
+      "prunable": false,
+      "contained": {
+        "HEAD": false,
+        "master": false,
+        "origin/master": false
+      },
+      "status_available": true,
+      "tracked_changes": 0,
+      "untracked_entries": 0
+    },
+    {
+      "path": "C:/tmp/autornd-layer2-contract-20260721",
+      "head": "312cddefaeb5dc8be56d85c96164db85ce1938bf",
+      "branch": null,
+      "exists": true,
+      "prunable": false,
+      "contained": {
+        "HEAD": false,
+        "master": false,
+        "origin/master": false
+      },
+      "status_available": true,
+      "tracked_changes": 0,
+      "untracked_entries": 0
+    },
+    {
+      "path": "C:/tmp/autornd-legacy-card-completeness-20260718",
+      "head": "05d492d7d780368c7a8014cde5e7adabc61cbaa0",
+      "branch": null,
+      "exists": true,
+      "prunable": false,
+      "contained": {
+        "HEAD": false,
+        "master": false,
+        "origin/master": false
+      },
+      "status_available": true,
+      "tracked_changes": 0,
+      "untracked_entries": 0
+    },
+    {
+      "path": "C:/tmp/autornd-llm-broker-20260721",
+      "head": "6d457513e9901f1e0c1031ebad7a4015595c87cf",
+      "branch": null,
+      "exists": true,
+      "prunable": false,
+      "contained": {
+        "HEAD": false,
+        "master": false,
+        "origin/master": false
+      },
+      "status_available": true,
+      "tracked_changes": 0,
+      "untracked_entries": 0
+    },
+    {
+      "path": "C:/tmp/autornd-master-cross-run-review-019f6073",
+      "head": "4cf0721f18e5389af6a76c505101d6c3aa1e3638",
+      "branch": null,
+      "exists": true,
+      "prunable": false,
+      "contained": {
+        "HEAD": true,
+        "master": true,
+        "origin/master": true
+      },
+      "status_available": true,
+      "tracked_changes": 0,
+      "untracked_entries": 0
+    },
+    {
+      "path": "C:/tmp/autornd-master-review-20260718",
+      "head": "4c3019ce04162bbea051bd4031563f975e31df56",
+      "branch": null,
+      "exists": true,
+      "prunable": false,
+      "contained": {
+        "HEAD": true,
+        "master": true,
+        "origin/master": true
+      },
+      "status_available": true,
+      "tracked_changes": 0,
+      "untracked_entries": 0
+    },
+    {
+      "path": "C:/tmp/autornd-mega-review-019f558e",
+      "head": "9bf24d5b0244cfd7f1f59e9fa436b2edc7b48954",
+      "branch": "refs/heads/claude/part-iv-keystones-phases-k7tloi",
+      "exists": true,
+      "prunable": false,
+      "contained": {
+        "HEAD": true,
+        "master": true,
+        "origin/master": true
+      },
+      "status_available": true,
+      "tracked_changes": 0,
+      "untracked_entries": 0
+    },
+    {
+      "path": "C:/tmp/autornd-mega-review2-20260724-30",
+      "head": "f690086d532f797cb860cc80f181b866fbc4f179",
+      "branch": null,
+      "exists": true,
+      "prunable": false,
+      "contained": {
+        "HEAD": true,
+        "master": true,
+        "origin/master": true
+      },
+      "status_available": true,
+      "tracked_changes": 0,
+      "untracked_entries": 0
+    },
+    {
+      "path": "C:/tmp/autornd-memory-lifecycle-20260720",
+      "head": "8a11bea933df88fe925ce12c7d216fff8c6909ed",
+      "branch": null,
+      "exists": true,
+      "prunable": false,
+      "contained": {
+        "HEAD": false,
+        "master": false,
+        "origin/master": false
+      },
+      "status_available": true,
+      "tracked_changes": 0,
+      "untracked_entries": 0
+    },
+    {
+      "path": "C:/tmp/autornd-native-batch-identity-20260720",
+      "head": "2ecb3691e32e5eff85319878e9d753fff60dfa38",
+      "branch": null,
+      "exists": true,
+      "prunable": false,
+      "contained": {
+        "HEAD": false,
+        "master": false,
+        "origin/master": false
+      },
+      "status_available": true,
+      "tracked_changes": 0,
+      "untracked_entries": 0
+    },
+    {
+      "path": "C:/tmp/autornd-native-card-mint-20260721",
+      "head": "a528ddaa2cfb278d52a0a301dbfa2a7b5156cd18",
+      "branch": null,
+      "exists": true,
+      "prunable": false,
+      "contained": {
+        "HEAD": false,
+        "master": false,
+        "origin/master": false
+      },
+      "status_available": true,
+      "tracked_changes": 0,
+      "untracked_entries": 0
+    },
+    {
+      "path": "C:/tmp/autornd-novelty-gate-fix-20260720",
+      "head": "0641e8e519d6739783083d97ca69e541dad34962",
+      "branch": null,
+      "exists": true,
+      "prunable": false,
+      "contained": {
+        "HEAD": false,
+        "master": false,
+        "origin/master": false
+      },
+      "status_available": true,
+      "tracked_changes": 0,
+      "untracked_entries": 0
+    },
+    {
+      "path": "C:/tmp/autornd-paid-background-fix-20260720",
+      "head": "63fc633d6928beea6de56431e1a8c5d49073ee9b",
+      "branch": null,
+      "exists": true,
+      "prunable": false,
+      "contained": {
+        "HEAD": false,
+        "master": false,
+        "origin/master": false
+      },
+      "status_available": true,
+      "tracked_changes": 0,
+      "untracked_entries": 0
+    },
+    {
+      "path": "C:/tmp/autornd-part-iv-cross-runs",
+      "head": "3fb56fd53308276a4ba1ca72a7566077810058d4",
+      "branch": "refs/heads/codex/part-iv-cross-runs-validation-20260715",
+      "exists": true,
+      "prunable": false,
+      "contained": {
+        "HEAD": false,
+        "master": false,
+        "origin/master": false
+      },
+      "status_available": true,
+      "tracked_changes": 0,
+      "untracked_entries": 0
+    },
+    {
+      "path": "C:/tmp/autornd-part-v-cross-run-20260721",
+      "head": "d9df49a334e7c9a313bf8b1b33106591bf2a05d4",
+      "branch": "refs/heads/codex/audit-part-v-cross-run-20260721",
+      "exists": true,
+      "prunable": false,
+      "contained": {
+        "HEAD": false,
+        "master": false,
+        "origin/master": false
+      },
+      "status_available": true,
+      "tracked_changes": 0,
+      "untracked_entries": 0
+    },
+    {
+      "path": "C:/tmp/autornd-post-integration-health-review-20260720",
+      "head": "af154ad5d2eb5d431c53986fd5249abac3da59dc",
+      "branch": null,
+      "exists": true,
+      "prunable": false,
+      "contained": {
+        "HEAD": false,
+        "master": false,
+        "origin/master": false
+      },
+      "status_available": true,
+      "tracked_changes": 0,
+      "untracked_entries": 0
+    },
+    {
+      "path": "C:/tmp/autornd-postpush-crossrun-audit-20260717",
+      "head": "937a075e7acad0fcf15bac4b646a235aa2420675",
+      "branch": null,
+      "exists": true,
+      "prunable": false,
+      "contained": {
+        "HEAD": true,
+        "master": true,
+        "origin/master": true
+      },
+      "status_available": true,
+      "tracked_changes": 0,
+      "untracked_entries": 0
+    },
+    {
+      "path": "C:/tmp/autornd-provenance-push-20260716",
+      "head": "cf6717a4d5366b1d57a9e43308f3771ddbfbdf52",
+      "branch": null,
+      "exists": true,
+      "prunable": false,
+      "contained": {
+        "HEAD": true,
+        "master": true,
+        "origin/master": true
+      },
+      "status_available": true,
+      "tracked_changes": 0,
+      "untracked_entries": 0
+    },
+    {
+      "path": "C:/tmp/autornd-push-core-20260718",
+      "head": "b41c7ecda888365eb280a5cd114b09ac26c0204a",
+      "branch": null,
+      "exists": true,
+      "prunable": false,
+      "contained": {
+        "HEAD": false,
+        "master": false,
+        "origin/master": false
+      },
+      "status_available": true,
+      "tracked_changes": 0,
+      "untracked_entries": 0
+    },
+    {
+      "path": "C:/tmp/autornd-review-comment-triage-20260717",
+      "head": "dcadfc1746a34876cf733114fc35107122eb2a2b",
+      "branch": null,
+      "exists": true,
+      "prunable": false,
+      "contained": {
+        "HEAD": true,
+        "master": true,
+        "origin/master": true
+      },
+      "status_available": true,
+      "tracked_changes": 0,
+      "untracked_entries": 0
+    },
+    {
+      "path": "C:/tmp/autornd-runtime-recovery-20260720",
+      "head": "6caebf15bbf333230443d15d7eb01a67af01e355",
+      "branch": null,
+      "exists": true,
+      "prunable": false,
+      "contained": {
+        "HEAD": false,
+        "master": false,
+        "origin/master": false
+      },
+      "status_available": true,
+      "tracked_changes": 0,
+      "untracked_entries": 0
+    },
+    {
+      "path": "C:/tmp/autornd-scope-backend-integrate-20260716",
+      "head": "c6c9d9498291ef288d5370e148408ba96c1781d6",
+      "branch": null,
+      "exists": true,
+      "prunable": false,
+      "contained": {
+        "HEAD": true,
+        "master": true,
+        "origin/master": true
+      },
+      "status_available": true,
+      "tracked_changes": 0,
+      "untracked_entries": 0
+    },
+    {
+      "path": "C:/tmp/autornd-scope-publish-20260716",
+      "head": "97db514ab3181b19c6e386329698003edec36616",
+      "branch": null,
+      "exists": true,
+      "prunable": false,
+      "contained": {
+        "HEAD": true,
+        "master": true,
+        "origin/master": true
+      },
+      "status_available": true,
+      "tracked_changes": 0,
+      "untracked_entries": 0
+    },
+    {
+      "path": "C:/tmp/autornd-scope-quarantine-ui-20260716",
+      "head": "189f49a8fd6c46e53a42fbd2633c11c1ca7eeb26",
+      "branch": "refs/heads/codex/scope-quarantine-ui-20260716",
+      "exists": true,
+      "prunable": false,
+      "contained": {
+        "HEAD": true,
+        "master": true,
+        "origin/master": true
+      },
+      "status_available": true,
+      "tracked_changes": 0,
+      "untracked_entries": 0
+    },
+    {
+      "path": "C:/tmp/autornd-scope-round2-20260716",
+      "head": "f94f3cbb9a337959e6cfb2644ed690c5d6c396df",
+      "branch": null,
+      "exists": true,
+      "prunable": false,
+      "contained": {
+        "HEAD": false,
+        "master": false,
+        "origin/master": false
+      },
+      "status_available": true,
+      "tracked_changes": 0,
+      "untracked_entries": 0
+    },
+    {
+      "path": "C:/tmp/autornd-scope-ui-baseline-20260716",
+      "head": "f8cac2418437aed6b67645fed7139d75f9a1b239",
+      "branch": null,
+      "exists": true,
+      "prunable": false,
+      "contained": {
+        "HEAD": false,
+        "master": false,
+        "origin/master": false
+      },
+      "status_available": true,
+      "tracked_changes": 0,
+      "untracked_entries": 0
+    },
+    {
+      "path": "C:/tmp/autornd-scope-ui-push-20260716",
+      "head": "cb498d03f971a52d470cd4cad563b0437dbb2381",
+      "branch": null,
+      "exists": true,
+      "prunable": false,
+      "contained": {
+        "HEAD": true,
+        "master": true,
+        "origin/master": true
+      },
+      "status_available": true,
+      "tracked_changes": 0,
+      "untracked_entries": 0
+    },
+    {
+      "path": "C:/tmp/autornd-second-pass-docs-contracts-20260720",
+      "head": "5832ce66be84f92cb6188595db1457c49ee5f1d8",
+      "branch": null,
+      "exists": true,
+      "prunable": false,
+      "contained": {
+        "HEAD": false,
+        "master": false,
+        "origin/master": false
+      },
+      "status_available": true,
+      "tracked_changes": 0,
+      "untracked_entries": 0
+    },
+    {
+      "path": "C:/tmp/autornd-second-pass-evidence-20260720",
+      "head": "fd352e4a3f83133199b46eed3f461c2801c58ff6",
+      "branch": null,
+      "exists": true,
+      "prunable": false,
+      "contained": {
+        "HEAD": false,
+        "master": false,
+        "origin/master": false
+      },
+      "status_available": true,
+      "tracked_changes": 0,
+      "untracked_entries": 0
+    },
+    {
+      "path": "C:/tmp/autornd-second-pass-runtime-ui-20260720",
+      "head": "ee3bb58d8f405b58fe61a878b20ad38df56c7819",
+      "branch": null,
+      "exists": true,
+      "prunable": false,
+      "contained": {
+        "HEAD": false,
+        "master": false,
+        "origin/master": false
+      },
+      "status_available": true,
+      "tracked_changes": 0,
+      "untracked_entries": 0
+    },
+    {
+      "path": "C:/tmp/autornd-similar-runs-scope-20260718",
+      "head": "2fdede15e154b511d7db35ae9c6b6b7e0e651097",
+      "branch": null,
+      "exists": true,
+      "prunable": false,
+      "contained": {
+        "HEAD": false,
+        "master": false,
+        "origin/master": false
+      },
+      "status_available": true,
+      "tracked_changes": 0,
+      "untracked_entries": 0
+    },
+    {
+      "path": "C:/tmp/autornd-strict-publish-20260716",
+      "head": "64b2387e5ec3c73542ca790c18f09c00a5a8ef66",
+      "branch": null,
+      "exists": true,
+      "prunable": false,
+      "contained": {
+        "HEAD": true,
+        "master": true,
+        "origin/master": true
+      },
+      "status_available": true,
+      "tracked_changes": 0,
+      "untracked_entries": 0
+    },
+    {
+      "path": "C:/tmp/autornd-trace-detail-20260717",
+      "head": "43dd30aeed1ffb7a5a38b7db1e6e28e801cd6154",
+      "branch": null,
+      "exists": true,
+      "prunable": false,
+      "contained": {
+        "HEAD": true,
+        "master": true,
+        "origin/master": true
+      },
+      "status_available": true,
+      "tracked_changes": 0,
+      "untracked_entries": 0
+    },
+    {
+      "path": "C:/tmp/autornd-ui-atlas-20260720",
+      "head": "8d76dd055919024d241d2fbea460569e9d3c7bac",
+      "branch": null,
+      "exists": true,
+      "prunable": false,
+      "contained": {
+        "HEAD": false,
+        "master": false,
+        "origin/master": false
+      },
+      "status_available": true,
+      "tracked_changes": 0,
+      "untracked_entries": 0
+    },
+    {
+      "path": "C:/tmp/autornd-ui-bundle-fix-20260721",
+      "head": "9b55e05ef5dc8791282903de27e3c25efd57d679",
+      "branch": null,
+      "exists": true,
+      "prunable": false,
+      "contained": {
+        "HEAD": false,
+        "master": false,
+        "origin/master": false
+      },
+      "status_available": true,
+      "tracked_changes": 0,
+      "untracked_entries": 0
+    },
+    {
+      "path": "C:/tmp/autornd-watchdog-nonfinite-20260720",
+      "head": "2e606c712e9a990d1ddc3c3fed1a5f24e13f7cea",
+      "branch": "refs/heads/codex/watchdog-nonfinite",
+      "exists": true,
+      "prunable": false,
+      "contained": {
+        "HEAD": false,
+        "master": false,
+        "origin/master": false
+      },
+      "status_available": true,
+      "tracked_changes": 0,
+      "untracked_entries": 0
+    },
+    {
+      "path": "C:/tmp/autornd-win-durable-20260716",
+      "head": "389ad5f26ad117d1ceee406f001026e4a4b84e57",
+      "branch": null,
+      "exists": true,
+      "prunable": false,
+      "contained": {
+        "HEAD": true,
+        "master": true,
+        "origin/master": true
+      },
+      "status_available": true,
+      "tracked_changes": 0,
+      "untracked_entries": 0
+    },
+    {
+      "path": "C:/tmp/looplab-master-uibase",
+      "head": "a90f8e87eaca8ba54fab5f43e57e87740a84ff06",
+      "branch": null,
+      "exists": true,
+      "prunable": false,
+      "contained": {
+        "HEAD": true,
+        "master": true,
+        "origin/master": true
+      },
+      "status_available": true,
+      "tracked_changes": 0,
+      "untracked_entries": 0
+    },
+    {
+      "path": "C:/Users/artyo/.codex/worktrees/65af/autornd",
+      "head": "5304a5723ade67f8de7c2c891b0a23eb742dcac8",
+      "branch": null,
+      "exists": true,
+      "prunable": false,
+      "contained": {
+        "HEAD": true,
+        "master": true,
+        "origin/master": true
+      },
+      "status_available": true,
+      "tracked_changes": 0,
+      "untracked_entries": 0
+    },
+    {
+      "path": "C:/Users/artyo/.codex/worktrees/7052/autornd",
+      "head": "a00e179fcf7644bf57d5612d3ce984e3e32f3473",
+      "branch": "refs/heads/codex/docs19-ide-remote-analysis",
+      "exists": true,
+      "prunable": false,
+      "contained": {
+        "HEAD": true,
+        "master": true,
+        "origin/master": true
+      },
+      "status_available": true,
+      "tracked_changes": 0,
+      "untracked_entries": 0
+    },
+    {
+      "path": "C:/Users/artyo/.codex/worktrees/ea3c/autornd",
+      "head": "7091d902e3597fb52fad8be142b4a4b7ca074f00",
+      "branch": "refs/heads/codex/external-agent-harness-verified",
+      "exists": true,
+      "prunable": false,
+      "contained": {
+        "HEAD": true,
+        "master": false,
+        "origin/master": false
+      },
+      "status_available": true,
+      "tracked_changes": 0,
+      "untracked_entries": 2
+    },
+    {
+      "path": "C:/Users/artyo/AppData/Local/Temp/tmp.bwur9qiiTu",
+      "head": "93afff31701e02c7294bcba0eda85c2b238b9311",
+      "branch": null,
+      "exists": false,
+      "prunable": true,
+      "contained": {
+        "HEAD": true,
+        "master": true,
+        "origin/master": true
+      }
+    },
+    {
+      "path": "C:/Users/artyo/Documents/autornd/.claude/worktrees/codex-chatgpt-context-extraction-cde22c",
+      "head": "938fde38bfe0b14a290d6453abbfc2156e8a1a55",
+      "branch": null,
+      "exists": true,
+      "prunable": false,
+      "contained": {
+        "HEAD": false,
+        "master": false,
+        "origin/master": false
+      },
+      "status_available": true,
+      "tracked_changes": 0,
+      "untracked_entries": 0
+    },
+    {
+      "path": "C:/Users/artyo/Documents/autornd/.claude/worktrees/vigilant-saha-d21ba6",
+      "head": "f0ea1303a8622d8bcbb9d8810736bd2b04a7e04e",
+      "branch": "refs/heads/claude/vigilant-saha-d21ba6",
+      "exists": true,
+      "prunable": false,
+      "contained": {
+        "HEAD": true,
+        "master": true,
+        "origin/master": true
+      },
+      "status_available": true,
+      "tracked_changes": 3,
+      "untracked_entries": 0
+    },
+    {
+      "path": "C:/Users/artyo/Documents/autornd/.codex-remote-review-fix",
+      "head": "dcadfc1746a34876cf733114fc35107122eb2a2b",
+      "branch": null,
+      "exists": true,
+      "prunable": false,
+      "contained": {
+        "HEAD": true,
+        "master": true,
+        "origin/master": true
+      },
+      "status_available": true,
+      "tracked_changes": 0,
+      "untracked_entries": 0
+    },
+    {
+      "path": "C:/Users/artyo/Documents/autornd/.codex-review-sweep",
+      "head": "57db53c8e1ecd427cc92e8b7aedae766ade7b904",
+      "branch": null,
+      "exists": true,
+      "prunable": false,
+      "contained": {
+        "HEAD": false,
+        "master": false,
+        "origin/master": false
+      },
+      "status_available": true,
+      "tracked_changes": 12,
+      "untracked_entries": 2
+    },
+    {
+      "path": "C:/Users/artyo/Documents/autornd/.codex-scope-fix",
+      "head": "1695793d92301d9f2b3585487c01671fdb4b07c3",
+      "branch": null,
+      "exists": true,
+      "prunable": false,
+      "contained": {
+        "HEAD": true,
+        "master": true,
+        "origin/master": true
+      },
+      "status_available": true,
+      "tracked_changes": 0,
+      "untracked_entries": 0
+    },
+    {
+      "path": "C:/Users/artyo/Documents/autornd/.codex-settings-push",
+      "head": "4c36a52b1290386fe54011063039d9fcc31218fe",
+      "branch": null,
+      "exists": true,
+      "prunable": false,
+      "contained": {
+        "HEAD": false,
+        "master": false,
+        "origin/master": false
+      },
+      "status_available": true,
+      "tracked_changes": 0,
+      "untracked_entries": 0
+    },
+    {
+      "path": "C:/Users/artyo/Documents/autornd/.codex-strict-fsync-fix-20260716",
+      "head": "18c6d1d302743f3adcca8828f35d21a9660a2128",
+      "branch": null,
+      "exists": true,
+      "prunable": false,
+      "contained": {
+        "HEAD": true,
+        "master": true,
+        "origin/master": true
+      },
+      "status_available": true,
+      "tracked_changes": 0,
+      "untracked_entries": 0
+    },
+    {
+      "path": "C:/Users/artyo/Documents/autornd/.codex-ui-next",
+      "head": "ce5a02696dd8541cd565bb99bfeb9c79032a3a04",
+      "branch": null,
+      "exists": true,
+      "prunable": false,
+      "contained": {
+        "HEAD": true,
+        "master": true,
+        "origin/master": true
+      },
+      "status_available": true,
+      "tracked_changes": 3,
+      "untracked_entries": 0
+    },
+    {
+      "path": "C:/Users/artyo/Documents/autornd/.codex-ui-push",
+      "head": "10ceb523fc70e1364e57f795cb52e7a262ac501e",
+      "branch": "refs/heads/codex/ui-durability-integration",
+      "exists": true,
+      "prunable": false,
+      "contained": {
+        "HEAD": true,
+        "master": true,
+        "origin/master": true
+      },
+      "status_available": true,
+      "tracked_changes": 0,
+      "untracked_entries": 1
+    }
+  ]
+}
