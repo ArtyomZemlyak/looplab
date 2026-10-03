@@ -117,6 +117,9 @@ def _receipts(srv, rd: Path, expected_generation: str) -> tuple[str, list[dict]]
                "score": _score(node) if not aborted and node.status == "evaluated" else None, "feasible": bool(node.feasible),
                "objective": state.objective_key or "task metric", "direction": state.direction,
                "confirmed_mean": node.confirmed_mean if not aborted and node.status == "evaluated" and is_usable_metric(node.confirmed_mean) else None,
+               "confirmed_std": (node.confirmed_std if not aborted and node.status == "evaluated"
+                                 and is_usable_metric(node.confirmed_mean) and is_usable_metric(node.confirmed_std)
+                                 and node.confirmed_std >= 0 else None),
                "confirmed_seeds": node.confirmed_seeds, "parents": parents,
                "score_comparison": completion_score_comparison(node, parents, state, flagged),
                "trust_flagged": node.id in flagged, "violations": len(node.violations),
@@ -144,6 +147,8 @@ def _receipts(srv, rd: Path, expected_generation: str) -> tuple[str, list[dict]]
                "selected_node": best.id if best else None, "attempt": best.attempt if best else None,
                "score": _score(best) if best else None,
                "confirmed_mean": best.confirmed_mean if best and is_usable_metric(best.confirmed_mean) else None,
+               "confirmed_std": (best.confirmed_std if best and is_usable_metric(best.confirmed_mean)
+                                 and is_usable_metric(best.confirmed_std) and best.confirmed_std >= 0 else None),
                "confirmed_seeds": best.confirmed_seeds if best else None,
                "trust_advisory": best.id in advisory if best else False,
                "caveats": champion_metric_caveats(state), "evidence_revision": evidence_revision(state)}

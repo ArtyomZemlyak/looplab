@@ -341,7 +341,9 @@ class HarnessAPI:
                          and all(key in row and (row[key] is None or
                              (type(row[key]) in (int, float)
                               and -float("inf") < row[key] < float("inf")))
-                             for key in ("score", "confirmed_mean")))
+                             for key in ("score", "confirmed_mean", "confirmed_std"))
+                         and (row["confirmed_std"] is None or
+                              row["confirmed_std"] >= 0 and row["confirmed_mean"] is not None))
             if valid and row.get("kind") == "node":
                 from looplab.harness.result_receipts import valid_score_comparison, valid_trust_evidence
                 nid, attempt = row.get("node_id"), row.get("attempt")
@@ -349,7 +351,7 @@ class HarnessAPI:
                          and rid == f"node:{nid}:{attempt}"
                          and row.get("status") in ("evaluated", "failed", "aborted")
                          and (row["status"] == "evaluated" or
-                              (row["score"] is None and row["confirmed_mean"] is None))
+                              (row["score"] is None and row["confirmed_mean"] is None and row["confirmed_std"] is None))
                          and valid_score_comparison(row) and valid_trust_evidence(row))
             elif valid:
                 from looplab.harness.result_receipts import valid_run_result

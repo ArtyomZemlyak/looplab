@@ -126,6 +126,16 @@ External agents should add a short interpretation after each completion:
    `/api/runs` summary carries the same boolean on `result_summary.selected`
    for the Assistant result card. Older summary rows retain the existing
    unknown-coverage notice; absence of metadata does not prove clean results.
+   Node and run receipts require nullable `confirmed_std`, the recorded repeat
+   standard deviation. A numeric spread must be finite, nonnegative and accompanied
+   by a confirmation mean; failed/aborted nodes carry null. A zero is recorded
+   evidence, while null means no spread was recorded. Missing, string, boolean,
+   negative or nonfinite fields make the typed page unavailable; update an older
+   server and read again explicitly. `result_summary.first/selected` also carry
+   the primary `score` and `confirmed_std`, separate from their displayed `value`
+   (which may be a confirmation mean). Interpret scores, means, spread and repeat
+   counts separately. Spread alone does not prove multiple successful repeats,
+   statistical significance, comparable conditions or Trust coverage.
 2. Copy the item's `id` and `evidence_token`. Submit through MCP `api_request`:
 
    ```json

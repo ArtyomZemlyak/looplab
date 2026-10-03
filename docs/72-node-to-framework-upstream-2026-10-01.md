@@ -2034,7 +2034,8 @@ Events не выдаются за хранилище отдельной commenta
 границы сравнения в чатовых completion briefs — §20.7;
 актуальность Trust-сигналов после reset — §20.8;
 advisory Trust в чатовых итогах узла и сравнениях — §20.9;
-предупреждение выбранной попытки в итогах всего run — §20.10.
+предупреждение выбранной попытки в итогах всего run — §20.10;
+основная оценка и разброс повторов в чатовых итогах — §20.11.
 Полная приёмка единого вывода во всех видах остаётся OPEN.
 
 #### 72.O6 — P1 / OPEN: результат repo-задачи, который можно взять и воспроизвести
@@ -3131,3 +3132,62 @@ strict MkDocs и diff check прошли. Изменения сохраняют�
 проверок. Следующий review должен проверять это различие вместе с причинами
 несопоставимости результатов. Полный product suite, живое ML обучение, browser
 приёмка и доставка в master этим проходом не заявляются.
+
+### 20.11 72.O5: основная оценка не скрывается за средним повторов (2026-10-03)
+
+**Найдено:** Assistant Run result card подписывала confirmation mean корректно,
+но её value-only receipt скрывал evaluation score и recorded spread. При среднем
+лучше первого результата и primary score хуже родителя нельзя было увидеть
+расхождение без перехода в Report. Node/run completion briefs тоже отправляли
+пользователя проверять разброс, не показывая записанный std. Проверка общего
+comparison wording не выявила необоснованного improvement claim: карточка уже
+просит проверить условия в Report. Исправляется конкретная потеря чисел.
+
+**Сделано:** cached `run_result_summary` сохраняет `score` и `confirmed_std`
+отдельно от displayed `value`. Card показывает primary score под confirmation
+mean для первого и выбранного результата, а для выбранного — recorded spread.
+Node/run receipts также несут nullable `confirmed_std`; общий RU/EN
+`resultSpreadText` даёт одну подпись в карточке и completion briefs. Zero spread
+отображается как 0; missing/nonfinite/negative/string/boolean не становятся
+нулём. Legacy summary без metadata явно показывает missing score/spread,
+сохраняя измеренное displayed value и прежнюю unknown-coverage оговорку.
+
+Typed MCP/UI completion pages требуют явное поле std, finite nonnegative scalar
+или null и связь с confirmation mean. Missing/inconsistent HTTP 200 даёт
+unavailable. Failed/aborted не могут нести completed confirmation spread. Нет
+нового способа mint confirmation: прежний fold по-прежнему атомарно отказывает
+partial/stale certificates. Scores, selection, comparison gates, Trust,
+checkpoints, команды и частота чтения не меняются. Std не называется confidence
+interval, повторные проверки не становятся доказанной статистической значимостью.
+
+**Проверено как связанный сценарий:** общий JSON fixture связан с реальными
+synthetic event folds, HTTP `/api/runs` и `/result-notices`, typed MCP и mounted
+RU/EN card/chat. Сценарии: mean лучше, primary score хуже; std=0; один repeat;
+partial certificate; stale confirmation после reset; разные copied code bases;
+retargeted objective. Score/mean/std/attempt согласованы, выбранный узел остаётся
+engine winner. Numeric comparison использует primary scores; разные базы и
+retarget не превращаются в улучшение, mean не заменяет score. Legacy UI inputs
+проверены отдельно: bool/string/missing/nonfinite metadata не печатает ложные
+score или zero spread; чтение не вызывает модель или detail fetch.
+
+Replay-first — **193 passed**; result/MCP, lifecycle, champion caveats, Trust и
+trajectory contracts — **239 passed**; выбранные UI result/language,
+Report/Overview, Inspector, live state, accessibility и command regressions —
+**180 passed** (`--test-concurrency=4`). Первые четыре negative-wire теста
+упёрлись в strict JSON encoder самого test transport, до reader; транспорт
+исправлен на raw response bytes, assertions не ослаблены, MCP suite — **138 passed**.
+Staging build и bundle gate прошли. Первый build был выше total target на 20 B;
+устранены два лишних type checks перед `Number.isFinite`, который не делает
+coercion. Invalid-type проверки сохранены и прошли. Финальный JS gzip total
+**631 981 → 632 283 B** (**+302 B**), CSS **59 578 B** без изменения; initial shell
+**83 038 B**, review DAG **268 490 B**, Concepts **257 902 B**. Прежний total
+target **617.5 KiB**, запас **37 B**; route/CSS/reachability/cycle ceilings
+не повышены. Документационные/API/merge и layer contracts — **96 passed**;
+strict MkDocs и `git diff --check` прошли перед локальным коммитом.
+
+**O5 остаётся OPEN:** mixed-base/retarget/repeat пользовательский маршрут и
+объяснение результата человеком по §19.4 ещё не приняты. Этот fixture доказывает
+связность измеренных чисел и отказов сравнения, а не человеческую понятность
+всего маршрута. Следующий review должен проверять причины отказа сравнения и
+доступность исходных измерений в общей истории пользователя. Полный product
+suite, живое ML обучение, browser приёмка и доставка в master не заявляются.

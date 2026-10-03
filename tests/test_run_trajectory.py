@@ -118,8 +118,8 @@ def test_the_summary_row_carries_the_series_and_none_without_a_measured_node(tmp
         "points": [[0, 0.5, 1], [1, 0.8, 2]]}
     assert rows["bare"]["trajectory"] is None
     assert rows["measured"]["result_summary"] == {
-        "first": {"node_id": 1, "attempt": 0, "value": 0.5, "confirmed": False, "seeds": None, "trust_advisory": False},
-        "selected": {"node_id": 2, "attempt": 0, "value": 0.8, "confirmed": False, "seeds": None, "trust_advisory": False},
+        "first": {"node_id": 1, "attempt": 0, "value": 0.5, "confirmed": False, "seeds": None, "trust_advisory": False, "score": 0.5, "confirmed_std": None},
+        "selected": {"node_id": 2, "attempt": 0, "value": 0.8, "confirmed": False, "seeds": None, "trust_advisory": False, "score": 0.8, "confirmed_std": None},
     }
     assert rows["bare"]["result_summary"] is None
 
@@ -142,5 +142,5 @@ def test_assistant_result_uses_the_engine_winner_and_skips_rejected_first_scores
     st = _state(rd)
     result = run_result_summary(st, running_best(st))
     assert result["selected"] == {
-        "node_id": 2, "attempt": 0, "value": 0.6, "confirmed": True, "seeds": 3, "trust_advisory": False}
+        "node_id": 2, "attempt": 0, "value": 0.6, "confirmed": True, "seeds": 3, "trust_advisory": False, "score": 0.8, "confirmed_std": 0.01}
     assert set(result) == {"first", "selected"}, "a receipt of values is not a comparison verdict"

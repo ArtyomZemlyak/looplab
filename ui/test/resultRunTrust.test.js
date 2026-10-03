@@ -10,13 +10,14 @@ const rowFor = item => {
   const expected = fixture.run_expected[item.name], child = expected.selected_node === 1
   return { id: 'run', kind: 'run', status: 'finished', direction: 'min', objective: 'task metric',
     evaluated: 2, failed: 0, reason: 'done', attempt: child && item.reset ? 1 : 0,
-    score: child ? .5 : 1, confirmed_mean: child ? .4 : null, confirmed_seeds: child ? 3 : null,
+    score: child ? .5 : 1, confirmed_mean: child ? .4 : null, confirmed_std: child ? .01 : null, confirmed_seeds: child ? 3 : null,
     evidence_token: 'b'.repeat(64), commentary: null, ...expected }
 }
 const summaryFor = item => {
   const row = rowFor(item)
   const selected = { node_id: row.selected_node, attempt: row.attempt, value: row.confirmed_mean ?? row.score,
-    confirmed: row.confirmed_mean !== null, seeds: row.confirmed_seeds, trust_advisory: row.trust_advisory }
+    confirmed: row.confirmed_mean !== null, seeds: row.confirmed_seeds, trust_advisory: row.trust_advisory,
+    score: row.score, confirmed_std: row.confirmed_std }
   return { run_id: item.name, generation, finished: true, phase: 'finished', engine_running: false,
     direction: row.direction, source_integrity: { complete: true }, best_metric_caveats: row.caveats,
     result_summary: { selected, first: item.name === 'gate_parent_hard' ? selected
@@ -42,10 +43,10 @@ test('missing or contradictory run evidence cannot become a clean selected resul
     { trust_advisory: undefined }, { trust_advisory: null }, { trust_advisory: 0 }, { trust_advisory: 'false' },
     { selected_node: null }, { selected_node: true }, { attempt: undefined }, { score: null },
     { caveats: ['trust_flagged'], trust_advisory: false },
-    { selected_node: null, attempt: null, score: null, confirmed_mean: null, trust_advisory: true },
+    { selected_node: null, attempt: null, score: null, confirmed_mean: null, confirmed_std: null, trust_advisory: true },
   ]) assert.equal(validResultNotices(payload([{ ...row, ...changed }]), generation), false)
   assert.equal(validResultNotices(payload([{ ...row, selected_node: null, attempt: null, score: null,
-    confirmed_mean: null, trust_advisory: false, caveats: [] }]), generation), true)
+    confirmed_mean: null, confirmed_std: null, trust_advisory: false, caveats: [] }]), generation), true)
 })
 
 test('both Assistant result views retain selected warnings in RU/EN and withdraw them on replacement', async () => {

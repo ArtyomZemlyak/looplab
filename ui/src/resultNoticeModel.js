@@ -1,4 +1,4 @@
-import { resultMeasurement } from './resultMeasurement.js'
+import { resultMeasurement, resultSpreadText } from './resultMeasurement.js'
 
 const token = value => typeof value === 'string' && /^[0-9a-f]{64}$/.test(value)
 const metric = value => value === null || typeof value === 'number' && Number.isFinite(value)
@@ -64,7 +64,9 @@ export function validResultNotices(value, generation, cursor = null, limit = 200
   const ids = new Set()
   return value.items.every(row => {
     if (!row || ids.has(row.id) || !token(row.evidence_token) || !metric(row.score)
-        || !metric(row.confirmed_mean) || !['min', 'max'].includes(row.direction)
+        || !metric(row.confirmed_mean) || !metric(row.confirmed_std)
+        || row.confirmed_std !== null && (row.confirmed_std < 0 || row.confirmed_mean === null)
+        || !['min', 'max'].includes(row.direction)
         || typeof row.objective !== 'string' || row.objective.length > 256
         || !(row.commentary === null || typeof row.commentary === 'string' && row.commentary.length <= 700)) return false
     ids.add(row.id)
@@ -79,7 +81,7 @@ export function validResultNotices(value, generation, cursor = null, limit = 200
     return row.kind === 'node' && integer(row.node_id) && integer(row.attempt)
       && row.id === `node:${row.node_id}:${row.attempt}`
       && ['evaluated', 'failed', 'aborted'].includes(row.status)
-      && (row.status === 'evaluated' || row.score === null && row.confirmed_mean === null)
+      && (row.status === 'evaluated' || row.score === null && row.confirmed_mean === null && row.confirmed_std === null)
       && typeof row.feasible === 'boolean' && typeof row.trust_flagged === 'boolean' && typeof row.salvaged === 'boolean' && integer(row.violations)
       && typeof row.trust_advisory === 'boolean' && typeof row.parent_trust_advisory === 'boolean'
       && !(row.trust_flagged && row.trust_advisory) && (!row.parent_trust_advisory || row.parents?.length > 0)
@@ -172,7 +174,8 @@ export function resultNoticeText(row, language = 'en') {
     next = ['failed', 'aborted'].includes(row.status) ? ru ? 'Проверьте логи и причину остановки перед повторным запуском.' : 'Review logs and the stop cause before retrying.'
       : ru ? 'Откройте Metrics и Trust; следующий эксперимент выбирает агент.' : 'Review Metrics and Trust; the agent chooses the next experiment.'
   }
-  const caution = score !== null && row.status !== 'aborted' ? measurement.reliability : ''
+  const caution = score !== null && row.status !== 'aborted' ? measurement.reliability
+    + (row.confirmed_mean !== null ? ` ${resultSpreadText(row.confirmed_std, language)}` : '') : ''
   return { title, stateLabel, actionLabel, outcome, comparison, caution, next }
 }
 

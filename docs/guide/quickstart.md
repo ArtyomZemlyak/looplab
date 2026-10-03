@@ -99,6 +99,11 @@ and LoopLab's internal research roles. For setup from a fresh checkout, use
    Completion briefs also show advisory Trust warnings for the current attempt
    or its comparison parents. A numeric gain and repeated seeds do not clear a
    warning. Advisory warnings and exclusion from selection are stated separately.
+   **Run result** shows the evaluation score beside a recorded confirmation mean.
+   Chat completion briefs and the result card show recorded **Spread (std)**;
+   zero is a value, while **Spread not recorded** means missing evidence.
+   A better mean can coexist with a worse evaluation score. A single repeat or
+   zero spread does not establish reliability or remove Trust warnings.
    The final run brief and **Run result** card retain warnings for the selected
    attempt, including soft signals. A warning from an earlier attempt or another
    experiment is not a warning about that selected result. Read **Trust** for

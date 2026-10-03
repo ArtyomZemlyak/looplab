@@ -5,7 +5,7 @@ import { terminalReady, sourceIncomplete, sourceIntegrityNotice,
 import { resultCaveatText, resultTrustAdvisoryText } from './resultNoticeModel.js'
 import { hashWithRunRouteState } from './runRouteState.js'
 import { useAssistantLanguage } from './useAssistantLanguage.js'
-import { resultMeasurement } from './resultMeasurement.js'
+import { resultMeasurement, resultSpreadText } from './resultMeasurement.js'
 import './assistant-run-result.css'
 
 const measured = value => value && Number.isSafeInteger(value.node_id) && value.node_id >= 0
@@ -36,6 +36,10 @@ export default function AssistantRunResult({ run, onOpen, onAsk, onReady, askDis
   })
   const link = (href, text) => <a className="btn sm" href={href}
     onClick={onOpen ? event => onOpen(event, href) : undefined}>{text}</a>
+  const value = node => <dd>{fmt(node.value)}{node.confirmed && <div className="muted"><small>
+    {Number.isFinite(node.score)
+      ? `${text('Evaluation score', 'Основная оценка')}: ${fmt(node.score)}`
+      : text('Evaluation score not recorded.', 'Основная оценка не записана.')}</small></div>}</dd>
   return <section className="asst-run-result" aria-label={text('Run result summary', 'Итог запуска')}>
     <div className="asst-run-result-head"><strong>{text('Run result', 'Итог запуска')}</strong>
       <span>{text('Free to read', 'Без вызова модели')}</span></div>
@@ -43,14 +47,15 @@ export default function AssistantRunResult({ run, onOpen, onAsk, onReady, askDis
       : text('Review the recorded result before planning another experiment.', 'Проверьте полученный результат перед следующим экспериментом.')}</p>
     {selected ? <>
       <div className="asst-run-result-metric">{run.objective_key || text('Objective', 'Целевая метрика')} · {direction}</div>
-      <dl><div><dt>{text('First eligible experiment', 'Первый допустимый эксперимент')} · #{first.node_id} · {resultMeasurement(first.confirmed, first.seeds, language).label}</dt><dd>{fmt(first.value)}</dd></div>
-        <div><dt>{text('Selected result', 'Выбранный результат')} · #{selected.node_id} · {measurement.label}</dt><dd>{fmt(selected.value)}</dd></div></dl>
+      <dl><div><dt>{text('First eligible experiment', 'Первый допустимый эксперимент')} · #{first.node_id} · {resultMeasurement(first.confirmed, first.seeds, language).label}</dt>{value(first)}</div>
+        <div><dt>{text('Selected result', 'Выбранный результат')} · #{selected.node_id} · {measurement.label}</dt>{value(selected)}</div></dl>
       <p>{sameNode ? text('The selected result is the first eligible experiment; it does not establish improvement.', 'Выбран первый допустимый эксперимент; улучшение не установлено.')
         : first.confirmed !== selected.confirmed
           ? text('Different measurement types; improvement is not established. Compare evaluation scores and repeat checks separately in Report.',
             'Разные типы измерений; улучшение не установлено. В отчёте сравните основные оценки отдельно от повторных запусков.')
           : text('Read Report to compare values, conditions and repeat checks.', 'В отчёте сравните значения, условия оценки и повторы.')}</p>
       <p className="asst-run-result-caution">{measurement.reliability}</p>
+      {selected.confirmed && <p className="asst-run-result-caution">{resultSpreadText(selected.confirmed_std, language)}</p>}
       {selected.trust_advisory === true && <p className="asst-run-result-caution">{resultTrustAdvisoryText(language)}</p>}
       <p className="asst-run-result-caution">{text('First eligible is not necessarily the task baseline; detector coverage is not fully verified.',
         'Первый допустимый эксперимент не обязательно является базовым решением задачи; полнота проверок Trust не подтверждена.')}</p>

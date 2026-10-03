@@ -1,4 +1,12 @@
 // Shared wording for recorded values; repeat counts never certify generalization or Trust.
+export function resultSpreadText(value, language = 'en') {
+  const ru = language === 'ru'
+  if (!Number.isFinite(value) || value < 0)
+    return ru ? 'Разброс не записан.' : 'Spread not recorded.'
+  const number = new Intl.NumberFormat(ru ? 'ru' : 'en', { maximumSignificantDigits: 6 }).format(value)
+  return ru ? `Разброс (std): ${number}.` : `Spread (std): ${number}.`
+}
+
 export function resultMeasurement(confirmed, seeds, language = 'en') {
   const ru = language === 'ru'
   const repeated = confirmed && Number.isSafeInteger(seeds) && seeds >= 2

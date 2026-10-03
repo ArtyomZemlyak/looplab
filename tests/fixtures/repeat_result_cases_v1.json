@@ -1,0 +1,11 @@
+{
+  "cases": [
+    {"name":"primary_worse_repeat_better","std":0.1,"seeds":3,"reset":false,"base_different":false,"retarget":false,"confirmed":true,"selected_node":1,"score":1.2,"parent_score":1,"comparison":"same"},
+    {"name":"zero_spread","std":0,"seeds":3,"reset":false,"base_different":false,"retarget":false,"confirmed":true,"selected_node":1,"score":1.2,"parent_score":1,"comparison":"same"},
+    {"name":"single_repeat","std":0,"seeds":1,"reset":false,"base_different":false,"retarget":false,"confirmed":true,"selected_node":1,"score":1.2,"parent_score":1,"comparison":"same"},
+    {"name":"partial_certificate","std":null,"seeds":3,"reset":false,"base_different":false,"retarget":false,"confirmed":false,"selected_node":0,"score":1.2,"parent_score":1,"comparison":"same"},
+    {"name":"stale_after_reset","std":0.1,"seeds":3,"reset":true,"base_different":false,"retarget":false,"confirmed":false,"selected_node":1,"score":0.9,"parent_score":1,"comparison":"same"},
+    {"name":"different_bases","std":0.1,"seeds":3,"reset":false,"base_different":true,"retarget":false,"confirmed":true,"selected_node":1,"score":1.2,"parent_score":1,"comparison":"base_different"},
+    {"name":"retargeted","std":0.1,"seeds":3,"reset":false,"base_different":false,"retarget":true,"confirmed":true,"selected_node":1,"score":1.2,"parent_score":2,"comparison":"retargeted"}
+  ]
+}

@@ -44,6 +44,9 @@ def run_result_summary(state, trajectory):
             "node_id": node.id, "attempt": node.attempt, "value": float(value),
             "confirmed": node.confirmed_mean is not None,
             "seeds": node.confirmed_seeds if node.confirmed_mean is not None else None,
+            "score": float(node.metric) if is_usable_metric(node.metric) else None,
+            "confirmed_std": (node.confirmed_std if node.confirmed_mean is not None
+                              and is_usable_metric(node.confirmed_std) and node.confirmed_std >= 0 else None),
             "trust_advisory": node.id in advisory,
         }
 

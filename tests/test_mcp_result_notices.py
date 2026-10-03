@@ -80,7 +80,7 @@ def test_lost_or_incomplete_page_is_unavailable_not_empty_results(fault):
 def _page():
     return {"version": 1, "generation": GEN, "total": 1, "has_more": False, "next_cursor": None,
         "items": [{"id": "node:0:0", "kind": "node", "node_id": 0, "attempt": 0,
-                   "status": "evaluated", "score": .25, "confirmed_mean": None,
+                   "status": "evaluated", "score": .25, "confirmed_mean": None, "confirmed_std": None,
                    "trust_flagged": False, "trust_advisory": False, "parent_trust_advisory": False,
                    "parents": [], "score_comparison": {"version": 1, "parent_count": 0, "status": "no_parent"},
                    "evidence_token": "b" * 64}]}
@@ -97,7 +97,9 @@ def _refused_page(page):
     seen = []
     def handler(request):
         seen.append(request)
-        return httpx.Response(200, json=page)
+        # Raw bytes let malformed JSON numeric extensions reach the reader,
+        # rather than fail in the test transport's strict JSON encoder.
+        return httpx.Response(200, content=json.dumps(page).encode(), headers={"Content-Type": "application/json"})
     api = HarnessAPI("http://localhost", transport=httpx.MockTransport(handler))
     result = api.result_notices("demo", GEN)
     assert result["status"] == 200 and result["code"] == "response_incomplete"
@@ -239,6 +241,31 @@ def test_run_receipt_does_not_default_missing_evidence_to_clean(field):
     _refused_page(page)
 
 
+@pytest.mark.parametrize("kind", ["node", "run"])
+@pytest.mark.parametrize("std", ["missing", True, "0.1", -.1, float("inf"), float("nan")])
+def test_spread_requires_explicit_nullable_finite_nonnegative_evidence(kind, std):
+    page = _page()
+    row = page["items"][0]
+    row.update(confirmed_mean=.2)
+    if kind == "run":
+        row.update(id="run", kind="run", status="finished", selected_node=0, attempt=0,
+                   evaluated=1, failed=0, direction="min", objective="loss", caveats=[])
+    if std == "missing":
+        del row["confirmed_std"]
+    else:
+        row["confirmed_std"] = std
+    _refused_page(page)
+
+
+@pytest.mark.parametrize("kind", ["node", "run"])
+def test_spread_without_confirmation_mean_is_unavailable(kind):
+    page = _page()
+    row = page["items"][0]
+    row["confirmed_std"] = 0
+    if kind == "run":
+        row.update(id="run", kind="run", status="finished", selected_node=0, attempt=0,
+                   evaluated=1, failed=0, direction="min", objective="loss", caveats=[])
+    _refused_page(page)
 def test_older_page_may_end_before_total_without_automatic_paging():
     page = _page()
     page["total"] = 20
