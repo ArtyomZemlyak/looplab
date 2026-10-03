@@ -4,6 +4,8 @@ import { diffLines } from './lineDiff.js'
 import { nodeCodeModel } from './nodeCodeModel.js'
 import { useInspectorDraftField } from './inspectorDraftStore.js'
 import { useAssistantLanguage } from './useAssistantLanguage.js'
+import { nodeBase } from './baseRevision.js'
+import RecordedSeedFiles from './RecordedSeedFiles.jsx'
 
 function FileEditCode({ row, comparing, language, draftStore, draftScope }) {
   // Live state refreshes must not recompute the LCS of every unchanged source file.
@@ -14,7 +16,7 @@ function FileEditCode({ row, comparing, language, draftStore, draftScope }) {
     maxHeight={300} draftStore={draftStore} draftScope={draftScope} />
 }
 
-export default function NodeCode({ n, state, draftStore, draftScope }) {
+export default function NodeCode({ n, state, runId, expectedGeneration, allowBaseRead = false, draftStore, draftScope }) {
   const [language] = useAssistantLanguage()
   const ru = language === 'ru'
   const [diff, setDiff] = useInspectorDraftField(
@@ -33,9 +35,13 @@ export default function NodeCode({ n, state, draftStore, draftScope }) {
   const mainDiff = useMemo(() => comparing && model.mainChanged
     ? diffLines(model.oldCode, model.code) : null, [comparing, model.mainChanged, model.oldCode, model.code])
   const main = comparing ? mainDiff : model.code
+  const current = state?.nodes?.[n.id]
+  const canReadBase = allowBaseRead && runId && expectedGeneration && model.base
+    && n.status === 'evaluated' && current?.status === 'evaluated' && current.attempt === n.attempt
+    && nodeBase(current)?.digest === model.base.digest
   return <section aria-label={ru ? 'Код эксперимента' : 'Experiment code'}>
     <p className="muted">{ru
-      ? `Сохранённые правки опыта #${n.id}, попытка ${n.attempt ?? '?'}. Унаследованные файлы базы здесь не включены.`
+      ? `Сохранённые правки опыта #${n.id}, попытка ${n.attempt ?? '?'}. Унаследованные файлы базы в правки не включены.`
       : `Saved edits of experiment #${n.id}, attempt ${n.attempt ?? '?'}. Inherited base files are not included here.`}</p>
     {model.base && <p className="muted">{ru ? 'Записанная база' : 'Recorded base'}: <code title={model.base.digest}>{model.base.digest.slice(0, 12)}</code></p>}
     <div className="toolbar code-toolbar">
@@ -75,5 +81,8 @@ export default function NodeCode({ n, state, draftStore, draftScope }) {
     {!main && rows.length === 0 && <p className="notice compact" role="status">{comparing
       ? (ru ? 'Сохранённые правки не отличаются. Это не доказывает совпадение полных программ.' : 'Saved edits are unchanged. This does not establish that the full programs match.')
       : (ru ? 'Текст правок отсутствует. Это не означает, что у repo-задачи нет кода.' : 'No edit text recorded. This does not mean the repo task has no code.')}</p>}
+    {canReadBase && <RecordedSeedFiles key={`${runId}:${expectedGeneration}:${n.id}:${n.attempt}:${model.base.digest}`}
+      runId={runId} node={n} generation={expectedGeneration} baseDigest={model.base.digest}
+      language={language} draftStore={draftStore} draftScope={draftScope} />}
   </section>
 }

@@ -1,0 +1,102 @@
+{
+  "version": 1,
+  "date": "2026-10-03",
+  "increment": "doc72 section 20.25, O6 recorded inherited base browsing",
+  "source_parent_commit": "bb216430ccf6089b3ffba3051e118d27613d9076",
+  "suites": [
+    {
+      "selectors": [
+        "tests/test_events_replay.py"
+      ],
+      "passed": 193,
+      "skipped": 0,
+      "failed": 0,
+      "seconds": 3.81,
+      "order": "replay first"
+    },
+    {
+      "selectors": [
+        "tests/test_recorded_seed_files.py",
+        "tests/test_seed_archive.py",
+        "tests/test_node_code_overlay.py",
+        "tests/test_read_fence_takes_no_write_lock.py",
+        "tests/test_api_reference.py",
+        "tests/test_serve_module_seams.py"
+      ],
+      "passed": 78,
+      "skipped": 1,
+      "failed": 0,
+      "seconds": 8.25,
+      "skip_reason": "POSIX executable-bit semantics are unavailable on Windows"
+    },
+    {
+      "selectors": [
+        "test/recordedSeedFiles.test.js",
+        "test/nodeCode.test.js",
+        "test/inspectorNodeSwitchStaleness.test.js",
+        "test/inspectorDetailResource.test.js",
+        "test/inspectorResultEvidence.test.js",
+        "test/reviewCapability.test.js",
+        "test/sourceTreeCompiles.test.js",
+        "test/sourceControlBytes.test.js"
+      ],
+      "cwd": "ui",
+      "passed": 16,
+      "skipped": 0,
+      "failed": 0,
+      "seconds": 2.63,
+      "notes": "Existing node-switch drive emits React act/deprecation warnings; final browser console has no errors"
+    }
+  ],
+  "browser": {
+    "fresh_vite_build": true,
+    "fixture": "Existing real CPU SGD measurements from doc72 section 19.14; no new training",
+    "run": "run",
+    "node_id": 2,
+    "attempt": 0,
+    "viewport": [
+      1920,
+      1080
+    ],
+    "language": "ru",
+    "verified_inventory_files": 4,
+    "verified_selected_path": "train.py",
+    "selected_file_sha256": "b301cf726db23b039197e41b19b17cb5ae15cd4856883ac6da98dd304968c7b5",
+    "screenshot": "inherited-code-fhd.jpg",
+    "screenshot_sha256": "71d5e63d0732ac501690ce2e52b1720f2f016d7f9041775e0a9f2715a44169b3",
+    "capture_method": "current viewport screenshot, fullPage false; native capture clips some surrounding right/bottom content. Full-page capture changed layout and remounted the transient preview, so it is not used as proof of an open file",
+    "model_requests": 0,
+    "new_training_executions": 0,
+    "events_sha256_before_and_after": "721850e6849652301cd3c042232e072d74ae2118164173cdc35cd61fee91b7e2",
+    "console_errors": 0,
+    "private_server_stopped": true,
+    "created_tab_closed": true,
+    "viewport_reset": true
+  },
+  "remaining_open": [
+    "Full materialized measured program with node edits, runtime inputs and dependencies",
+    "Compare full materialized programs across different bases",
+    "Target-aware delivery into the task repository and composition of independent runs",
+    "Human usability and full CI acceptance"
+  ],
+  "documentation_validation": {
+    "status": "passed",
+    "selectors": [
+      "tests/test_documentation_contracts.py",
+      "tests/test_documented_entry_points_resolve.py",
+      "tests/test_merge_history_integrity.py"
+    ],
+    "passed": 34,
+    "skipped": 0,
+    "failed": 0,
+    "seconds": 6.0,
+    "mkdocs_strict": "passed",
+    "git_diff_check": "passed"
+  },
+  "totals": {
+    "passed": 321,
+    "skipped": 1,
+    "failed": 0,
+    "scope": "selected relevant suites, not full CI; no duplicate reruns counted"
+  }
+}

@@ -52,6 +52,18 @@ ready to apply to your repository. If the parent attempt has changed or its sour
 is unavailable, the comparison is unavailable; refresh details to check again.
 Reading or comparing code makes no model request and runs no experiment.
 
+For a completed experiment with a stored base archive, **Open base files / Открыть
+файлы базы** reads its inherited source separately from its edits. Browse the paged
+file list, sizes and hashes, then select a file to read its verified UTF-8 text
+(up to 256 KiB). Binary and larger files have an explicit preview limitation.
+These are the recorded seed files **before node edits and runtime mounts/task
+assets**, not a complete runnable export. The read is bound to the current run
+generation, node attempt and base receipt; reset or unavailable/corrupt evidence
+refuses the read without substituting your live repository. The complete event
+source must fit the existing 32 MiB verified-read limit. This owner-plane browser
+is unavailable in historical and shared review views, which retain their existing
+source access limits. Opening it does not execute code or invoke a model.
+
 The chat needs a configured model. Open **LoopLab → Settings → Essential → Model** to check the saved
 model and endpoint. **Test active LLM** makes one provider request and may be billed.
 Essential also shows experiment resources and time/model budgets. **All** and search

@@ -1680,6 +1680,50 @@ def build_router(srv) -> APIRouter:
         and every file under it is then read through `read_bounded_regular_file`."""
         return node_workdir(rd, nid)
 
+    @router.get("/api/runs/{run_id}/nodes/{nid}/seed-files")
+    def node_seed_files(run_id: str, nid: int, expected_generation: str,
+                        attempt: int = Query(..., ge=0), offset: int = Query(0, ge=0),
+                        limit: int = Query(100, ge=1, le=200),
+                        path: Optional[str] = Query(None, max_length=4096)):
+        """Verified pre-overlay base inventory/text, explicitly read for one current measured attempt."""
+        from looplab.core.errors import UpstreamRefusal
+        from looplab.engine.upstream_state import events_for
+        from looplab.serve.seed_files import SeedFilesUnavailable, seed_files
+        rd = _run_dir(run_id)
+        generation = _assert_historical_generation(rd, expected_generation)
+        try:
+            events = events_for(rd)
+        except UpstreamRefusal as exc:
+            raise HTTPException(409, {"code": "seed_archive_unavailable",
+                "message": "events.jsonl is incomplete, unreadable or exceeds the 32 MiB verified-read limit."}) from exc
+        node = fold(events).nodes.get(nid)
+        if node is None:
+            raise HTTPException(404, "no such node")
+        if node.attempt != attempt:
+            raise _attempt_cas_409(nid, attempt, node.attempt,
+                                   "The node was reset before its recorded base was read.")
+        try:
+            result = seed_files(rd, node, events, offset=offset, limit=limit, path=path)
+        except SeedFilesUnavailable as exc:
+            raise HTTPException(409, {"code": "seed_archive_unavailable", "message": str(exc),
+                                     "remediation": "Inspect the recorded archive and attempt; no live-source fallback is used."}) from exc
+        _assert_historical_generation(rd, expected_generation)
+        try:
+            current = fold(events_for(rd)).nodes.get(nid)
+        except UpstreamRefusal as exc:
+            raise HTTPException(409, {"code": "seed_archive_unavailable",
+                "message": "events.jsonl became unavailable while the recorded base was read."}) from exc
+        if current is None or current.attempt != attempt or current.tombstoned:
+            raise _attempt_cas_409(nid, attempt, current.attempt if current else None,
+                                   "The node changed while its recorded base was read.")
+        if (current.status != node.status or (current.metric_provenance or {}).get("base_revision")
+                != (node.metric_provenance or {}).get("base_revision")):
+            raise HTTPException(409, {"code": "seed_archive_unavailable",
+                "message": "The recorded base evidence changed while it was read."})
+        _assert_historical_generation(rd, expected_generation)
+        result["run_generation"] = generation
+        return result
+
     @router.get("/api/runs/{run_id}/nodes/{nid}/logs")
     def node_logs(run_id: str, nid: int, tail: int = 200_000,
                   attempt: Optional[int] = Query(default=None, ge=0),

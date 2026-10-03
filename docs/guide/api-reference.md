@@ -10,7 +10,7 @@ vocabulary a client may append is `serve/protocol.py::CONTROL_EVENTS`.
 
 <!-- generated: api routes -->
 
-159 routes on 141 paths; 10 deprecated; 27 with a declared response model.
+160 routes on 142 paths; 10 deprecated; 27 with a declared response model.
 
 ### `/api`
 
@@ -211,6 +211,7 @@ vocabulary a client may append is `serve/protocol.py::CONTROL_EVENTS`.
 | `GET` | `/api/runs/{run_id}/nodes/{nid}/episodes` | THE MAP of one node's trace: every episode (band) it recorded, with none of their contents. | — |  |
 | `GET` | `/api/runs/{run_id}/nodes/{nid}/logs` | Live training/eval logs for a node — the streamed stdout/stderr of its eval + setup | — |  |
 | `GET` | `/api/runs/{run_id}/nodes/{nid}/metrics` | Online metric SERIES a node's training logged — every scalar (loss, each recall@k, grad | — |  |
+| `GET` | `/api/runs/{run_id}/nodes/{nid}/seed-files` | Verified pre-overlay base inventory/text, explicitly read for one current measured attempt. | — |  |
 | `GET` | `/api/runs/{run_id}/nodes/{nid}/trace` | The LIGHT trace tree for ONE node — the hot path for expanding a node's trace card. Reads | — |  |
 | `POST` | `/api/runs/{run_id}/novelty-preview` | Compare an idea with tried nodes using LoopLab's pure graded novelty rubric. | — |  |
 | `POST` | `/api/runs/{run_id}/project` | *Assign Run* (no docstring) | — |  |

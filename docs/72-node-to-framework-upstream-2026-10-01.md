@@ -2223,6 +2223,8 @@ different-base и отсутствующая исходная попытка. П
 
 **Выполненный increment — §20.24:** файлы и удаления видны в Code; сравнение
 saved overlays включает recipe-only правки и не подменяет reset родителя.
+**Следующий increment — §20.25:** отдельно доступны файлы проверенного архива
+базы до overlay и runtime inputs; можно прочитать inherited runner/scorer.
 Полная материализация inherited программы, её сравнение между базами и доставка
 в target repo остаются OPEN.
 
@@ -5194,3 +5196,62 @@ diff check прошли. Итого **345 passed**, без skips. Selectors и �
 Inherited runner/scorer, зависимости и target-aware Git change set всё ещё
 нуждаются в отдельной реализации и приёмке. Этот increment не закрывает весь
 O6 и не сертифицирует пользовательский merge или scientific improvement.
+
+### 20.25 72.O6: чтение унаследованного кода из записанной базы (2026-10-03)
+
+**Проблема.** После §20.24 recipe-only опыт показывает свои edits, но его
+унаследованный `train.py` нельзя открыть в Code. Человек видит рецепт без
+программы, которая его использовала. Простое объединение base и edits также
+нельзя назвать точной runnable программой: materialization подключает task
+assets и данные отдельно, а окружение не входит в seed archive.
+
+**Реализация.** `looplab/serve/seed_files.py::seed_files` возвращает version-1
+inventory и выбранный файл из проверенного run-owned архива. Scope явно задан:
+`recorded_seed_before_mounts_and_overlay`. Список отсортирован и разбит на страницы
+по 100 файлов (API максимум 200); рядом размер, SHA-256 и executable flag.
+UTF-8 preview ограничен 256 КиБ; binary/large получают явный статус без
+подстановки текста. Verifier отдаёт те же байты, которые хеширует, и проверяет
+весь архив перед публикацией ответа. Неполный/испорченный архив не даёт частичный
+успешный список и не заменяется текущим checkout/workdir.
+
+GET `/api/runs/{run_id}/nodes/{nid}/seed-files` требует run generation и attempt.
+Base receipt связан с предшествующим `workspace_seeded` и terminal событием
+именно этого узла/попытки. Generation, current attempt и base evidence проверяются
+повторно после чтения. Полный events.jsonl читается через существующий bounded
+strict reader `looplab/engine/upstream_state.py::events_for` до и после проверки
+архива; повреждённый хвост или превышение 32 МиБ дают unavailable, а не успешный
+восстановимый prefix. Чтение не берёт command sequencer, не пишет событие и
+не меняет состояние Maintainer или task repo.
+
+`ui/src/RecordedSeedFiles.jsx::RecordedSeedFiles` открывает базу только по явному
+нажатию. Обязательные поля, pagination, identities, byte length и текстовый
+SHA-256 проверяются в браузере. Смена node/attempt/base/run generation убирает
+прежний просмотр и отменяет незавершённый запрос. Ошибка очищает старый preview;
+повторное чтение явное. Owner Code показывает archive отдельно от edits;
+historical/review UI не получает нового archive доступа. RU/EN, поиск и перенос
+строк сохраняют принятый язык. Нет вызова модели, запуска программы или нового
+скрытого ожидания движка.
+
+**Desktop-проверка.** Свежая production UI-сборка, requested viewport 1920×1080,
+русский Assistant. На уже измеренном CPU SGD опыте #2 из §19.14 открыты четыре
+файла базы и унаследованный `train.py` с поддержкой `LEARNING_RATE`. Рецепт
+`MOMENTUM=0.3` остаётся отдельной правкой; это не объявляется полным экспортом.
+Журнал events до/после одинаков. Новое обучение и model requests отсутствуют;
+browser console errors не обнаружены. Screenshot сохранён из текущего viewport:
+full-page capture менял layout и сбрасывал непостоянный просмотр. Поэтому он
+не использован как доказательство открытого файла.
+
+![Code: архив базы и унаследованный train.py рядом с Assistant](assets/72-recorded-seed-files/inherited-code-fhd.jpg)
+
+Проверки: replay-first, archive/source binding, повреждение журнала до/во время
+чтения, reset race, replacement receipt, binary/large/path refusal, owner overlay,
+API reference/module seams, UI identity/hash/refetch/reset/review separation,
+node switch/result cache, compilation и документальные контракты. Точные selectors,
+итоги, ограничения и hash screenshot —
+[validation.json](assets/72-recorded-seed-files/validation.json).
+
+**O6/O14 остаются OPEN.** Архив + сохранённые edits теперь читаемы, но полный
+materialized result с runtime inputs/dependencies, сравнение двух таких программ
+и target-aware доставка в пользовательский repo ещё требуют реализации и приёмки.
+Наличие архива не подтверждает научное улучшение, повторяемость на новом target
+или merge в пользовательскую ветку.

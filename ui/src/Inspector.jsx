@@ -500,7 +500,8 @@ export default function Inspector({ runId, nodeId, state, live, tab, setTab, onT
             return reason === 'retry' ? retryDetail() : requestDetail('refresh')
           }} />}
         {activeTab === 'Code' && (['ready', 'stale'].includes(visibleDetailStatus)
-          ? <NodeCode n={n} state={state} draftStore={draftStore}
+          ? <NodeCode n={n} state={state} runId={runId} expectedGeneration={expectedGeneration}
+              allowBaseRead={!readOnly} draftStore={draftStore}
               draftScope={`code:${runId}@${expectedGeneration || '?'}:${n.id}:${n.attempt ?? '?'}`} />
           : visibleDetailStatus === 'error'
             ? <div className="insp-empty">Code is unavailable because full node details failed to load.</div>
