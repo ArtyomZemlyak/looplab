@@ -10,12 +10,11 @@ import { themeFilteredGroupAggregate } from './grouping.js'
 import { mergeSummary, nodeChip } from './report.js'
 import { OpIcon } from './icons.jsx'
 import Markdown from './markdown.jsx'
-import CodeViewer from './CodeViewer.jsx'
 import ExperimentResult from './ExperimentResult.jsx'
 import BaseRevision from './BaseRevision.jsx'
 import { currentResultNode, confirmationSeedResults } from './resultEvidence.js'
 import { resultMeasurement } from './resultMeasurement.js'
-import { diffLines } from './lineDiff.js'
+import NodeCode from './NodeCode.jsx'
 import { nodeFeasibilityStatus, isSalvagedMetricViolation,
   OBJECTIVE_SOURCE_LABEL, objectiveMetricSource, objectiveSourceCaveated,
   objectiveSourceHelp } from './trustSemantics.js'
@@ -501,7 +500,7 @@ export default function Inspector({ runId, nodeId, state, live, tab, setTab, onT
             return reason === 'retry' ? retryDetail() : requestDetail('refresh')
           }} />}
         {activeTab === 'Code' && (['ready', 'stale'].includes(visibleDetailStatus)
-          ? <Code n={n} draftStore={draftStore}
+          ? <NodeCode n={n} state={state} draftStore={draftStore}
               draftScope={`code:${runId}@${expectedGeneration || '?'}:${n.id}:${n.attempt ?? '?'}`} />
           : visibleDetailStatus === 'error'
             ? <div className="insp-empty">Code is unavailable because full node details failed to load.</div>
@@ -2717,31 +2716,6 @@ export function Trace({ n, runId, expectedGeneration, expectedTraceRevision, liv
     // after the bounded tree, which avoids lying about its ARIA parent or pinning a large non-span
     // card inside the virtual list.
     footer={agent ? <AgentReport r={agent} /> : null} />
-}
-
-function Code({ n, draftStore, draftScope }) {
-  const [diff, setDiff] = useInspectorDraftField(
-    draftStore, draftScope, 'diff', false, { disposable: true })
-  const files = n.files || {}
-  const codeDiff = useMemo(
-    () => diff && n.parent_code != null ? diffLines(n.parent_code, n.code) : null,
-    [diff, n.parent_code, n.code])
-  return <>
-    <div className="toolbar code-toolbar">
-      {n.parent_code != null && <button className={'btn sm' + (diff ? ' primary' : '')} onClick={() => setDiff(d => !d)}>diff vs parent #{n.parent_id_diffed}</button>}
-    </div>
-    {codeDiff
-      ? <CodeViewer diff={codeDiff} copyText={n.code || ''} label={`Node ${n.id} diff`}
-          draftStore={draftStore} draftScope={`${draftScope}:main`} />
-      : <CodeViewer code={n.code || '(no solution.py — repo task or no code)'} label={`Node ${n.id} code`}
-          draftStore={draftStore} draftScope={`${draftScope}:main`} />}
-    {Object.keys(files).length > 0 && <>
-      <div className="section-h">Helper files <span className="pill">{Object.keys(files).length}</span></div>
-      {Object.entries(files).map(([fn, c]) => <div key={fn}><div className="muted helper-file-label">{fn}</div>
-        <CodeViewer code={c} label={fn} maxHeight={300}
-          draftStore={draftStore} draftScope={`${draftScope}:file:${fn}`} /></div>)}
-    </>}
-  </>
 }
 
 // Live online metric curves (loss, recall@k, lr, grad norms, …) read from the node's TensorBoard

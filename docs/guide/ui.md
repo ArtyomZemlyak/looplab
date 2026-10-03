@@ -41,6 +41,17 @@ Stopped attempts link to logs and offer **Discuss stop in chat** without claimin
 question about that exact attempt. They preserve an existing draft; sending is explicit.
 For a complete first-run example, see the [Assistant quickstart](quickstart.md#assistant-in-the-web-ui).
 
+In an experiment's **Code** tab, **Experiment files / Файлы эксперимента** shows its
+saved file edits and explicit deletions, including repo recipes without a `solution.py`.
+**Compare edits with parent / Сравнить правки с родителем** compares the main code
+and file overlays against the first parent's recorded attempt. It distinguishes
+an explicit deletion from removing an override and returning to a base file.
+The recorded base identities are shown when available; different or unknown bases
+are explained. This is an overlay diff, not the full inherited program or a patch
+ready to apply to your repository. If the parent attempt has changed or its source
+is unavailable, the comparison is unavailable; refresh details to check again.
+Reading or comparing code makes no model request and runs no experiment.
+
 The chat needs a configured model. Open **LoopLab → Settings → Essential → Model** to check the saved
 model and endpoint. **Test active LLM** makes one provider request and may be billed.
 Essential also shows experiment resources and time/model budgets. **All** and search

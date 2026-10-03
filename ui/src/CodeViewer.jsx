@@ -16,8 +16,9 @@ function highlighted(text, query) {
 
 export default function CodeViewer({
   code = '', diff = null, label = 'Code', maxHeight = 420, copyText = null,
-  draftStore: sharedDraftStore = null, draftScope = null,
+  draftStore: sharedDraftStore = null, draftScope = null, language = 'en', allowCopy = true,
 }) {
+  const ru = language === 'ru'
   const fallbackDraftStoreRef = useRef(null)
   if (!fallbackDraftStoreRef.current) fallbackDraftStoreRef.current = createInspectorDraftStore()
   const draftStore = sharedDraftStore || fallbackDraftStoreRef.current
@@ -39,14 +40,14 @@ export default function CodeViewer({
   }
   return <div className={'code-viewer' + (wrap ? ' wrap' : '') + (diff ? ' has-diff' : '')} style={{ '--code-max-h': `${maxHeight}px` }}>
     <div className="code-tools">
-      <label className="code-search"><span className="sr-only">Search {label}</span>
-        <input value={query} onChange={event => setQuery(event.target.value)} placeholder={`Search ${label.toLowerCase()}…`} />
+      <label className="code-search"><span className="sr-only">{ru ? 'Поиск' : 'Search'} {label}</span>
+        <input value={query} onChange={event => setQuery(event.target.value)} placeholder={`${ru ? 'Поиск' : 'Search'} ${label.toLowerCase()}…`} />
       </label>
       {query && <span className="muted">{matches} line{matches === 1 ? '' : 's'}</span>}
       <span className="spacer" />
       <button className={'btn sm ghost' + (wrap ? ' on' : '')} onClick={() => setWrap(value => !value)}
-              aria-pressed={wrap}>Wrap</button>
-      <button className="btn sm ghost" onClick={copy}>{copied ? 'Copied' : 'Copy'}</button>
+              aria-pressed={wrap}>{ru ? 'Перенос строк' : 'Wrap'}</button>
+      {allowCopy && <button className="btn sm ghost" onClick={copy}>{copied ? (ru ? 'Скопировано' : 'Copied') : (ru ? 'Копировать' : 'Copy')}</button>}
     </div>
     <div className="code-lines" role="region" aria-label={label} tabIndex={0}>
       {rows.map((row, index) => <div key={index} className={'code-line ' + (row.cls || '')}>

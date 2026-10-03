@@ -1,0 +1,47 @@
+{
+  "version": 1,
+  "date": "2026-10-03",
+  "increment": "doc72 section 20.24, O6 saved overlay comparison",
+  "source_parent_commit": "ea9fd7101a8e09e49d9458060084147b475e2089",
+  "suites": [
+    {"selectors": ["tests/test_events_replay.py"], "passed": 193, "skipped": 0, "failed": 0, "seconds": 3.26, "order": "replay first"},
+    {"selectors": ["tests/test_node_code_overlay.py", "tests/test_public_parent_comparison.py", "tests/test_review_capabilities.py"], "passed": 29, "skipped": 0, "failed": 0, "seconds": 4.23},
+    {"selectors": ["test/nodeCode.test.js", "test/lineDiff.test.js", "test/inspectorResultEvidence.test.js", "test/inspectorNodeSwitchStaleness.test.js", "test/retainedWork.test.js", "test/reviewCapability.test.js", "test/sourceTreeCompiles.test.js", "test/sourceControlBytes.test.js"], "cwd": "ui", "passed": 42, "skipped": 0, "failed": 0, "seconds": 2.31},
+    {"selectors": ["tests/test_api_reference.py", "tests/test_serve_module_seams.py"], "passed": 47, "skipped": 0, "failed": 0, "seconds": 6.73}
+  ],
+  "browser": {
+    "fresh_vite_build": true,
+    "fixture": "Existing real CPU SGD measurements and two upstream advances from section 19.14",
+    "run": "run",
+    "node_id": 2,
+    "attempt": 0,
+    "viewport": [1920, 1080],
+    "language": "ru",
+    "screenshot": "code-diff-fhd.jpg",
+    "screenshot_sha256": "8b7203104997552cb1e1a4da69fc00fabc1d257e85a17d8c7940245000d3dce8",
+    "capture_stage": "Before final unchanged-file LCS memoization; final live Inspector and source compilation checks verify the same behavior after that optimization",
+    "model_requests": 0,
+    "new_training_executions": 0,
+    "events_sha256_before_and_after": "721850e6849652301cd3c042232e072d74ae2118164173cdc35cd61fee91b7e2",
+    "console_errors": 0,
+    "private_server_stopped": true,
+    "created_tab_closed": true,
+    "viewport_reset": true
+  },
+  "remaining_open": [
+    "Materialize full measured repo with inherited base files and dependencies",
+    "Compare materialized programs across different bases",
+    "Target-aware delivery and composition of independent runs",
+    "Fresh human usability, accessibility and full CI acceptance"
+  ],
+  "documentation_validation": {
+    "status": "passed",
+    "selectors": ["tests/test_documentation_contracts.py", "tests/test_documented_entry_points_resolve.py", "tests/test_merge_history_integrity.py"],
+    "passed": 34,
+    "skipped": 0,
+    "failed": 0,
+    "seconds": 6.32,
+    "mkdocs_strict": "passed",
+    "git_diff_check": "passed"
+  }
+}

@@ -30,7 +30,7 @@ from looplab.core.config import (
 from looplab.core.node_evidence import (
     node_attempt, node_workdir, read_bounded_regular_file)
 from looplab.core.models import Idea, NodeStatus, idea_field_carried
-from looplab.serve.node_comparison import public_parent_comparison
+from looplab.serve.node_comparison import public_parent_comparison, public_parent_edit
 from looplab.core.trace_files import (
     TraceFileIdentity, iter_bounded_trace_jsonl_lines, open_private_trace_file)
 from looplab.core.run_deletion import (RunDeletionFenceError, RunDeletionStorageError, assert_run_deletion_write_allowed)
@@ -1638,6 +1638,7 @@ def build_router(srv) -> APIRouter:
                                            else srv.event_store(rd).read_all())
         out["activity"] = public_node_activity(st, nid, withheld=withheld)
         out["parent_comparison"] = public_parent_comparison(n)
+        out["parent_edit"] = public_parent_edit(n, st)
         out["annotations"] = st.annotations.get(nid, [])
         out["confirm_seeds_detail"] = st.confirm_seed_results.get(nid, {})
         # parent diff (vs the first parent's solution.py) — files-as-truth lineage

@@ -13,6 +13,27 @@ def public_parent_comparison(node):
     return {"version": 1, "node_id": parent_id, "attempt": attempt}
 
 
+def public_parent_edit(node, state):
+    """First parent's recorded overlay, only while its creation-bound attempt remains readable.
+
+    This is source comparison, not score comparison or materialization of inherited base files.
+    A reset must not silently substitute the parent's new implementation for the original one.
+    Historical callers pass their prefix fold, so no current workdir or sidecar is read here.
+    """
+    if node is None or not node.parent_ids:
+        return None
+    parent_id = node.parent_ids[0]
+    parent = state.nodes.get(parent_id)
+    attempt = node.parent_generations.get(str(parent_id))
+    if (parent is None or parent.tombstoned or type(attempt) is not int
+            or attempt < 0 or parent.attempt != attempt):
+        return None
+    return {"version": 1, "scope": "node_edit_overlay", "node_id": parent.id,
+            "attempt": parent.attempt, "code": parent.code or "", "files": dict(parent.files),
+            "deleted": list(parent.deleted),
+            "base_revision": (parent.metric_provenance or {}).get("base_revision")}
+
+
 def completion_score_comparison(node, parents, state, flagged):
     """Describe whether primary scores support a single-parent comparison.
 

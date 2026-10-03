@@ -2221,6 +2221,11 @@ reviewer bundle не подменяет запуск этой программы
 different-base и отсутствующая исходная попытка. Пустое поле code не означает
 отсутствия изменений в программе; missing source не заменяется текущим workdir.
 
+**Выполненный increment — §20.24:** файлы и удаления видны в Code; сравнение
+saved overlays включает recipe-only правки и не подменяет reset родителя.
+Полная материализация inherited программы, её сравнение между базами и доставка
+в target repo остаются OPEN.
+
 #### 72.O7 — P1 / OPEN: перенос общего улучшения через диалог без ручной сборки контракта
 
 **Основание:** §18 и шаг 2, `UpstreamPanel`/Maintainer/external-harness guide.
@@ -5136,3 +5141,56 @@ Replay-first — **193 passed**. Production код, defaults, prompts и API н�
 если он повторится, нужен разбор нового terminal error, а не ещё больший cap.
 Это ремонт воспроизводимости проверок, не новая функциональность внешнего агента.
 O1–O14, source/runtime identity, human UI acceptance и WIP disposition остаются OPEN.
+
+### 20.24 72.O6: читаемые repo-файлы и сравнение сохранённых правок (2026-10-03)
+
+**Воспроизведённая проблема — §19.14.** Code сравнивал только `parent_code` и
+`code`. У recipe-only опыта оба поля пустые, поэтому изменённый `recipe.env`
+оставался за пределами diff. Файлы repo-задачи подписывались Helper files рядом
+с «no solution.py». Кроме того, legacy parent_code брал текущий код родителя
+без проверки его исходной попытки.
+
+**Изменение.** Code использует `ui/src/NodeCode.jsx::NodeCode` и
+`ui/src/nodeCodeModel.js::nodeCodeModel`: текст основных правок, файлы и explicit
+deletions. Diff включает main code и files/deleted overlay. Снятая правка —
+«возврат к файлу базы»; она не объявляется удалением inherited файла. Пустой
+main code не создаёт фиктивный solution.py или пустое успешное сравнение.
+При известных receipt identities видны базы опыта и родителя; различающиеся
+или неизвестные базы сопровождаются объяснением scope.
+
+Owner и opt-in evidence review возвращают одинаковый version-1 `parent_edit`
+со scope `node_edit_overlay`, ID/attempt, code/files/deleted и base receipt.
+`looplab/serve/node_comparison.py::public_parent_edit` разрешает его только для
+первого родителя с creation-bound attempt из `parent_generations`. Reset,
+tombstone или недоступная попытка дают unavailable; исторический запрос берёт
+свой prefix fold. UI также проверяет попытку текущего state, чтобы кешированные
+детали не показывали прежний diff после reset. Legacy parent_code сохранён
+для совместимости, но новое сравнение его не использует. Review evidence
+проходит прежний secret scrub; summary bearer не получает source evidence.
+
+Поиск, перенос строк и копирование Code следуют RU/EN выбору. У снятой/удалённой
+правки нет кнопки копирования пустого replacement. Эти чтения не отправляют
+команду, не вызывают модель и не меняют событие или score.
+
+**Проверка в браузере.** Свежая production-сборка на частном loopback-сервере,
+1920×1080, русский Assistant. Открыт уже измеренный CPU SGD опыт #2 из §19.14:
+видны `MOMENTUM=0.2 → 0.3`, снятый overlay `train.py` и разные записанные базы.
+Это свежая проверка представления существующего реального результата; обучение
+повторно не запускалось. Журнал events до/после одинаков; browser console errors
+не обнаружены. Частный сервер остановлен, созданная вкладка закрыта и viewport
+восстановлен.
+
+![Code: изменённый рецепт и возврат к базе рядом с Assistant, Full HD](assets/72-code-overlay-fix/code-diff-fhd.jpg)
+
+Replay-first — **193 passed**. Owner/history/review overlay, parent comparison
+и review capabilities — **29 passed**. UI model/real Inspector, node switch,
+retained drafts, review route, line diff и compilation/control-byte checks —
+**42 passed**. API reference/module seams — **47 passed**. Документальные
+контракты/entry points/merge history — **34 passed**, строгая сборка MkDocs и
+diff check прошли. Итого **345 passed**, без skips. Selectors и границы —
+[validation.json](assets/72-code-overlay-fix/validation.json).
+
+**Остаток O6/O14:** сохранённые edits не являются полным materialized repo.
+Inherited runner/scorer, зависимости и target-aware Git change set всё ещё
+нуждаются в отдельной реализации и приёмке. Этот increment не закрывает весь
+O6 и не сертифицирует пользовательский merge или scientific improvement.
