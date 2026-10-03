@@ -13,6 +13,7 @@ test.after(async () => { await harness?.close() })
 test.beforeEach(() => { localStorage.clear(); sessionStorage.clear() })
 const records = () => Array.from({ length: 205 }, (_, id) => ({ ...node, id: `node:${id}:0`,
   node_id: id, attempt: 0, score: id, evidence_token: (id + 1).toString(16).padStart(64, '0'),
+  parents: [], score_comparison: { version: 1, parent_count: 0, status: 'no_parent' },
   commentary: `Interpretation ${id}` }))
 const scope = 'd'.repeat(64)
 const anchor = row => `rn1.${scope}.${row.id}.${row.evidence_token}`

@@ -27,6 +27,7 @@ from looplab.events.run_generation import run_generation_token
 from looplab.engine.finalize import incomplete_finalize_scope
 from looplab.serve.engine_proc import _engine_liveness
 from looplab.serve.http import refusal
+from looplab.serve.node_comparison import completion_score_comparison
 from looplab.core.redact import redact_secrets
 
 _MAX_BYTES = 2 * 1024 * 1024
@@ -114,6 +115,7 @@ def _receipts(srv, rd: Path, expected_generation: str) -> tuple[str, list[dict]]
                "objective": state.objective_key or "task metric", "direction": state.direction,
                "confirmed_mean": node.confirmed_mean if not aborted and node.status == "evaluated" and is_usable_metric(node.confirmed_mean) else None,
                "confirmed_seeds": node.confirmed_seeds, "parents": parents,
+               "score_comparison": completion_score_comparison(node, parents, state, flagged),
                "trust_flagged": node.id in flagged, "violations": len(node.violations),
                "salvaged": bool((node.metric_provenance or {}).get("salvaged"))
                if isinstance(node.metric_provenance, dict) else False,

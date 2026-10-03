@@ -81,6 +81,7 @@ def _page():
     return {"version": 1, "generation": GEN, "total": 1, "has_more": False, "next_cursor": None,
         "items": [{"id": "node:0:0", "kind": "node", "node_id": 0, "attempt": 0,
                    "status": "evaluated", "score": .25, "confirmed_mean": None,
+                   "parents": [], "score_comparison": {"version": 1, "parent_count": 0, "status": "no_parent"},
                    "evidence_token": "b" * 64}]}
 
 
@@ -132,6 +133,47 @@ def test_page_refuses_unbound_or_nonterminal_receipts(changes):
 def test_page_refuses_duplicate_receipts():
     page = _page()
     page.update(total=2, items=page["items"] * 2)
+    _refused_page(page)
+
+
+@pytest.mark.parametrize("comparison,parents", [
+    (None, []), ({}, []), ({"version": True, "parent_count": 0, "status": "no_parent"}, []),
+    ({"version": 1, "parent_count": -1, "status": "no_parent"}, []),
+    ({"version": 1, "parent_count": True, "status": "no_parent"}, []),
+    ({"version": 1, "parent_count": 0, "status": "future"}, []),
+    ({"version": 1, "parent_count": 1, "status": "same"}, []),
+    ({"version": 1, "parent_count": 2, "status": "same"}, []),
+    ({"version": 1, "parent_count": 0, "status": "no_parent"}, [None]),
+    ({"version": 1, "parent_count": 1, "status": "same"},
+     [{"node_id": 1, "attempt": 0, "score": .5, "comparability": "same"}]),
+])
+def test_incomplete_or_inconsistent_comparison_is_unavailable(comparison, parents):
+    page = _page()
+    page["items"][0].update(score_comparison=comparison, parents=parents)
+    _refused_page(page)
+
+
+def test_missing_comparison_metadata_is_not_legacy_permission_to_compare():
+    page = _page()
+    del page["items"][0]["score_comparison"]
+    _refused_page(page)
+
+
+@pytest.mark.parametrize("change", [
+    {"feasible": False}, {"feasible": 1}, {"trust_flagged": True}, {"salvaged": True},
+    {"violations": True}, {"violations": 1}, {"direction": "unknown"},
+    {"score": None}, {"score": 1e308, "parents": [{"node_id": 1, "attempt": 0, "score": -1e308, "comparability": "same"}]},
+    {"parents": [{"node_id": 1, "attempt": 0, "score": .5, "comparability": "unknown"}]},
+])
+def test_positive_comparison_requires_complete_consistent_evidence(change):
+    page = _page()
+    row = page["items"][0]
+    row.update(feasible=True, trust_flagged=False, salvaged=False, violations=0, direction="min",
+               parents=[{"node_id": 1, "attempt": 0, "score": .5, "comparability": "same"}],
+               score_comparison={"version": 1, "parent_count": 1, "status": "same"})
+    api = HarnessAPI("http://localhost", transport=httpx.MockTransport(lambda req: httpx.Response(200, json=page)))
+    assert api.result_notices("demo", GEN) == {"status": 200, "body": page}
+    row.update(change)
     _refused_page(page)
 
 

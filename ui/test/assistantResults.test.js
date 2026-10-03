@@ -50,8 +50,9 @@ test('measured, stopped and run summaries separate comparison, reliability and n
   const harness = await mountLive()
   const { default: Results } = await harness.load('/src/AssistantResults.jsx')
   const stopped = { ...node, id: 'node:3:0', node_id: 3, attempt: 0, status: 'aborted', score: null,
-    confirmed_mean: null, parents: [] }
+    confirmed_mean: null, parents: [], score_comparison: { version: 1, parent_count: 0, status: 'no_parent' } }
   const measured = { ...node, confirmed_mean: 0.8, confirmed_seeds: 3, score: 0.3,
+    score_comparison: { version: 1, parent_count: 1, status: 'same' },
     parents: [{ ...node.parents[0], comparability: 'same' }] }
   const finished = { id: 'run', kind: 'run', status: 'finished', objective: 'accuracy', direction: 'max',
     evaluated: 1, failed: 1, selected_node: 2, attempt: 1, score: 0.3, confirmed_mean: 0.8,
@@ -77,4 +78,32 @@ test('measured, stopped and run summaries separate comparison, reliability and n
     assert.match(asked[1], /прочитай Report.*не смешивай основные оценки/)
     assert.equal(backend.calls.some(call => call.method !== 'GET'), false)
   } finally { await mounted.unmount(); await harness.close() }
+})
+
+test('chat explains guarded comparison outcomes in both languages without executing work', async () => {
+  const harness = await mountLive()
+  const { default: Results } = await harness.load('/src/AssistantResults.jsx')
+  const statuses = ['base_different', 'base_unknown', 'retargeted', 'ineligible', 'multiple_parents']
+  const rows = statuses.map((status, index) => ({ ...node, id: `node:${index + 2}:1`, node_id: index + 2,
+    parents: [{ ...node.parents[0], comparability: 'same' }],
+    score_comparison: { version: 1, status, parent_count: status === 'multiple_parents' ? 2 : 1 } }))
+  const backend = fetchStub({ 'GET /api/runs/demo/result-notices': payload(rows) })
+  globalThis.fetch = backend
+  try {
+    for (const language of ['en', 'ru']) {
+      localStorage.clear(); sessionStorage.clear(); localStorage.setItem('looplab.language', language)
+      const view = await harness.mount(Results, { runId: 'demo', generation })
+      try {
+        await until(() => view.container.querySelectorAll('article').length === 5, 'guarded result briefs')
+        const text = view.container.textContent
+        assert.match(text, language === 'ru' ? /Базы кода.*отличаются/ : /code bases differ/)
+        assert.match(text, language === 'ru' ? /баз кода не подтверждено/ : /code bases cannot be matched/)
+        assert.match(text, language === 'ru' ? /Цель оценки изменена/ : /objective changed/)
+        assert.match(text, language === 'ru' ? /обоих экспериментов/ : /both experiments/)
+        assert.match(text, language === 'ru' ? /Несколько исходных/ : /Multiple parents/)
+        assert.doesNotMatch(text, /improves on|лучше, чем/)
+      } finally { await view.unmount() }
+    }
+    assert.equal(backend.calls.some(call => call.method !== 'GET'), false)
+  } finally { await harness.close() }
 })

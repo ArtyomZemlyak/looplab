@@ -4,6 +4,27 @@ const token = value => typeof value === 'string' && /^[0-9a-f]{64}$/.test(value)
 const metric = value => value === null || typeof value === 'number' && Number.isFinite(value)
 const integer = value => Number.isSafeInteger(value) && value >= 0
 
+function validComparison(row) {
+  const c = row.score_comparison, parents = row.parents
+  if (c?.version !== 1 || !integer(c.parent_count) || c.parent_count < parents.length) return false
+  if (c.status === 'no_parent') return c.parent_count === 0
+  if (c.status === 'multiple_parents') return c.parent_count > 1
+  if (c.parent_count !== 1) return false
+  if (c.status === 'parent_unavailable') return parents.length === 0
+  if (parents.length !== 1 || !['same', 'different', 'unknown', 'base_different', 'base_unknown', 'ineligible', 'retargeted'].includes(c.status)) return false
+  return c.status !== 'same' || row.status === 'evaluated' && row.feasible && !row.trust_flagged
+    && !row.salvaged && row.violations === 0 && Number.isFinite(row.score)
+    && Number.isFinite(parents[0].score) && Number.isFinite(row.score - parents[0].score)
+    && parents[0].comparability === 'same'
+}
+
+const COMPARISON_HELP = {
+  base_different: ['Copied code bases differ.', 'Базы кода экспериментов отличаются.'],
+  base_unknown: ['Recorded code bases cannot be matched.', 'Совпадение баз кода не подтверждено.'],
+  retargeted: ['The objective changed; re-evaluation is needed.', 'Цель оценки изменена; нужна повторная оценка.'],
+  ineligible: ["Check both experiments' eligibility and metric source.", 'Проверьте допустимость и источник оценки обоих экспериментов.'],
+}
+
 const CAVEAT_TEXT = {
   salvaged: ['metric salvaged after a failed evaluation', 'метрика восстановлена после неудачной оценки'],
   trust_flagged: ['possible data leakage or reward hacking', 'есть сигнал утечки данных или обхода оценки'],
@@ -50,11 +71,14 @@ export function validResultNotices(value, generation, cursor = null, limit = 200
     return row.kind === 'node' && integer(row.node_id) && integer(row.attempt)
       && row.id === `node:${row.node_id}:${row.attempt}`
       && ['evaluated', 'failed', 'aborted'].includes(row.status)
+      && (row.status === 'evaluated' || row.score === null && row.confirmed_mean === null)
       && typeof row.feasible === 'boolean' && typeof row.trust_flagged === 'boolean' && typeof row.salvaged === 'boolean' && integer(row.violations)
       && typeof row.failure === 'string' && row.failure.length <= 160
       && Array.isArray(row.parents) && row.parents.length <= 8
       && row.parents.every(p => p && integer(p.node_id) && integer(p.attempt) && metric(p.score)
         && ['same', 'different', 'unknown'].includes(p.comparability))
+      && new Set(row.parents.map(p => p.node_id)).size === row.parents.length
+      && row.parents.every(p => p.node_id !== row.node_id) && validComparison(row)
   })
 }
 
@@ -100,16 +124,18 @@ export function resultNoticeText(row, language = 'en') {
       ? ' Есть ограничения или сигналы Trust; проверьте допустимость.' : 'Constraints or Trust signals recorded; check eligibility.'
     if (row.salvaged && row.score !== null) outcome += ru
       ? ' Метрика восстановлена после ошибки; проверьте источник.' : 'Metric recovered after failure; review provenance.'
-    const parent = row.parents.length === 1 ? row.parents[0] : null
+    const comparisonStatus = row.score_comparison?.status
+    const parent = row.score_comparison?.parent_count === 1 && row.parents.length === 1 ? row.parents[0] : null
     if (row.status === 'evaluated' && parent && row.score !== null && parent.score !== null) {
-      if (parent.comparability === 'same' && row.feasible && !row.trust_flagged && !row.salvaged && row.violations === 0) {
+      if (comparisonStatus === 'same' && validComparison(row) && ['min', 'max'].includes(row.direction)) {
         const gain = (row.score - parent.score) * (row.direction === 'min' ? -1 : 1)
         comparison = ru ? `Основная оценка ${number(row.score)} ${gain === 0 ? 'такая же, как' : gain > 0 ? 'лучше, чем' : 'хуже, чем'} у исходного эксперимента #${parent.node_id} (${number(parent.score)}).`
           : `Evaluation score ${number(row.score)} ${gain === 0 ? 'ties' : gain > 0 ? 'improves on' : 'is worse than'} parent #${parent.node_id} (${number(parent.score)}).`
       } else {
         comparison = ru ? `Исходный эксперимент #${parent.node_id}: оценка ${number(parent.score)}; улучшение не установлено.`
         : `Parent #${parent.node_id}: score ${number(parent.score)}; improvement not established.`
-        const reason = parent.comparability === 'different'
+        const help = COMPARISON_HELP[comparisonStatus]
+        const reason = help ? ` ${help[ru ? 1 : 0]}` : parent.comparability === 'different'
           ? ru ? ' Условия оценки отличаются.' : ' Evaluation conditions differ.'
           : parent.comparability === 'unknown'
             ? ru ? ' Сопоставимость условий оценки не подтверждена.' : 'Comparable evaluation conditions are not established.'
@@ -122,7 +148,7 @@ export function resultNoticeText(row, language = 'en') {
     } else if (row.status === 'evaluated' && score !== null) {
       comparison = row.score === null
         ? ru ? 'Основная оценка этой попытки отсутствует; сравнение с исходным экспериментом невозможно.' : 'This attempt has no evaluation score to compare with its parent.'
-        : row.parents.length > 1
+        : row.score_comparison?.parent_count > 1 || row.parents.length > 1
         ? ru ? 'Несколько исходных экспериментов. Единой оценки для сравнения нет.' : 'Multiple parents; no single comparison baseline.'
         : ru ? 'Нет пригодной оценки исходного эксперимента для сравнения.' : 'No usable parent score is available for comparison.'
     }

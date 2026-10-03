@@ -91,6 +91,19 @@ External agents should add a short interpretation after each completion:
    `reason=invalid_result_page`, without its body. This is not an empty result list.
    Read again explicitly after checking the server; the tool does not repair,
    retry or follow pages. Extra fields are retained for compatible server additions.
+   Each node also carries required `score_comparison` v1: `parent_count` is the
+   declared lineage size, even when the bounded `parents` list omits unavailable
+   or reset parents. `status=same` permits comparing primary evaluation scores
+   only for one recorded, current parent attempt, eligible measurements on both
+   sides, matching evaluation conditions and matching recorded code bases when
+   a base is stamped or upstream is enabled. It does not establish statistical
+   significance. Other statuses explain the boundary: `different`/`unknown`
+   evaluation conditions, `base_different`/`base_unknown`, `ineligible`,
+   `retargeted`, `no_parent`, `multiple_parents` or `parent_unavailable`.
+   Retargeted metrics are displayed but do not authorize an improvement claim.
+   Missing or inconsistent comparison metadata makes a typed read unavailable;
+   update an older server and read again explicitly. Parent eligibility/base
+   changes invalidate the evidence token and withdraw attached commentary.
 2. Copy the item's `id` and `evidence_token`. Submit through MCP `api_request`:
 
    ```json

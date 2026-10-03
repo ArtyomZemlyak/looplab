@@ -75,6 +75,10 @@ and LoopLab's internal research roles. For setup from a fresh checkout, use
    In chat, **Earlier / Раньше**, **Newer / Новее** and **Latest results / К последним итогам**
    navigate free completion briefs and external-agent interpretations in 50-item pages.
    These reflect current evidence; changed attempts or measurements withdraw old interpretations.
+   A chat brief claims a better score only against one eligible recorded parent,
+   with matching evaluation conditions and code base. Otherwise it explains the
+   missing comparison evidence. A changed objective or a merge with several
+   parents cannot become an improvement claim against one surviving parent.
    Run cards, the selected experiment in Report, and the Assistant summary label an
    **evaluation score** separately from a **confirmation mean**. A recorded mean with
    no valid repeat count does not establish multiple successful checks. Check the spread,

@@ -10,7 +10,7 @@ from looplab.events.run_generation import run_generation_token
 from looplab.serve.server import make_app
 
 
-def _run(tmp_path, monkeypatch, external=True):
+def _run(tmp_path, monkeypatch, external=True, run_fields=None):
     monkeypatch.setenv("LOOPLAB_UI_TOKEN", "owner-secret")
     monkeypatch.setenv("LOOPLAB_HARNESS_TOKEN", "agent-secret")
     rd = tmp_path / "demo"
@@ -18,7 +18,7 @@ def _run(tmp_path, monkeypatch, external=True):
     (rd / "config.snapshot.json").write_text(Settings(backend="toy", external_harness=external).model_dump_json())
     (rd / "task.snapshot.json").write_text('{"kind":"quadratic","goal":"g","direction":"min"}')
     store = EventStore(rd / "events.jsonl")
-    store.append("run_started", {"run_id": "demo", "run_uid": "one", "task_id": "task", "goal": "g", "direction": "min"})
+    store.append("run_started", {"run_id": "demo", "run_uid": "one", "task_id": "task", "goal": "g", "direction": "min", **(run_fields or {})})
     store.append("node_created", {"node_id": 0, "parent_ids": [], "operator": "draft", "idea": {"operator": "draft"}, "code": "print(1)"})
     client = TestClient(make_app(tmp_path))
     return rd, store, client, run_generation_token(store.read_all())

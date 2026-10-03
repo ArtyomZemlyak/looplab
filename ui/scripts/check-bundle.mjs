@@ -155,7 +155,10 @@ export const DEFAULT_BUDGETS = Object.freeze({
     // attempt/base/Trust comparisons and current result projection without terminal detail polls.
     // Initial shell is 83,045 B; CSS stays 59,578 B. 616.5 KiB leaves 343 B;
     // every route, cycle and forbidden-reachability ceiling is unchanged.
-    js: { gzip: 616.5 * KIB },
+    // 2026-10-03 doc 72 §20.7: 630,953 -> 631,337 B (+384 B) buys guarded
+    // completion comparisons and explicit RU/EN caveats. 616.75 KiB leaves 215 B;
+    // all route, reachability, cycle and CSS targets remain unchanged.
+    js: { gzip: 616.75 * KIB },
     css: { gzip: 58.25 * KIB },
   },
   individual: {

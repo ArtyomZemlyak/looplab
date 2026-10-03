@@ -2030,7 +2030,8 @@ Events не выдаются за хранилище отдельной commenta
 общие подписи типа измерения/повторов и eligibility отчёта — §20.3;
 сопоставимые primary-score rollups и покрытие сравнений — §20.4;
 нейтральные подписи графиков и общий вывод Overview/Report — §20.5;
-сравнение и свежесть evidence в Inspector — §20.6.
+сравнение и свежесть evidence в Inspector — §20.6;
+границы сравнения в чатовых completion briefs — §20.7.
 Полная приёмка единого вывода во всех видах остаётся OPEN.
 
 #### 72.O6 — P1 / OPEN: результат repo-задачи, который можно взять и воспроизвести
@@ -2884,3 +2885,63 @@ merge/push в master этим increment не выполнялся.
 включая retarget и несколько родителей, из которых доступен лишь один. Полная
 mixed-base/retarget/repeat приёмка и объяснение пользователем своими словами
 по §19.4 также не завершены.
+
+### 20.7 72.O5: чатовые итоги проверяют родителя и базу (2026-10-03)
+
+**Найдено:** node result notice проверял input comparability и ограничения
+ребёнка, но мог назвать улучшением результат относительно непригодного родителя,
+другой/неизвестной базы или переназначенной цели. Из bounded списка `parents`
+пропадали reset/недоступные родители; слияние с одним оставшимся родителем
+выглядело как обычный single-parent эксперимент.
+
+**Сделано:** каждый node receipt получает `score_comparison` v1 с реальным
+`parent_count` и явным `status`. `same` требует одного записанного родителя той
+же попытки, пригодных primary scores обеих сторон, matching evaluation keys,
+общей eligibility через `counts_toward_best`, отсутствия salvage и retarget.
+При upstream или наличии base stamp требуется полный receipt общей базы,
+привязанный к node/attempt. Reader использует `seed_archive_digest` и проверяет
+дополнительные lifecycle/complete поля; текущий checkout не подставляется вместо
+исторической базы, архивы при каждом чтении не переоцениваются. Legacy пара без
+base stamps допустима только при подтверждённых evaluation keys и выключенном
+upstream. Неизвестные ключи остаются `unknown`, переполнение разницы не даёт
+положительного вывода. Это числовое сравнение, не статистическое доказательство.
+
+**Chat и MCP:** UI разрешает better/tie/worse только по явному single-parent
+`same`; mean остаётся отдельно подписанным. RU/EN объясняют разные/неизвестные
+базы, retarget и непригодность обеих сторон. Даже один доступный parent у
+multi-parent узла не становится baseline. Typed MCP и UI отказывают при
+отсутствии/повреждении нового comparison DTO, неверной arity, неизвестной версии
+или противоречащем `same`. HTTP 200 с неполными данными остаётся unavailable;
+нужно обновить старый сервер и явно перечитать страницу. Envelope остаётся v1,
+прочие новые поля сохраняются. Команды, модельные вызовы и engine waits не добавлены.
+
+**Свежесть:** DTO входит в evidence token. Изменение пригодности родителя
+withdraws старую commentary и cursor при неизменном score ребёнка. Точный retry
+сохранённого body/action ID возвращает прежнюю квитанцию, не оживляет старую
+интерпретацию. Новый action ID со старым token получает конфликт.
+
+**Проверено:** реальные HTTP reads из folded test events и тот же payload через
+typed MCP; same/different/missing/partial базы, lifecycle mismatch, boolean и
+небезопасные целые в receipt, upstream без stamp, ограничения и Trust exclusions
+обеих сторон, salvage, отсутствие primary metric, retarget с реально доступной
+declared extra metric, reset/abort родителя, частично доступное слияние.
+RU/EN Assistant mount показывает причины без положительных утверждений и делает
+только GET. Paging/reconnect, exact retry и старые result/resource views проверены.
+
+**Свежие проверки:** replay-first — **193 passed**; result notice, typed MCP,
+parent/base/comparability contracts — **191 passed, 3 skipped**; chat, language,
+Inspector, Report/Overview, graphs, accessibility и bundle contracts — **99 UI
+tests passed**; documentation/entry-point/API/merge contracts — **37 passed**.
+Strict MkDocs, staging build, bundle gate и `git diff --check` прошли. Полный
+product suite, живое обучение, human browser review и remote CI не заявляются.
+
+JS gzip **630 953 → 631 337 B** (**+384 B**), CSS **59 578 B** без изменения.
+Initial shell — **83 045 B JS gzip**, review DAG — **268 211 B**. Только total JS
+target переизмерен до **616.75 KiB**, запас **215 B**; route, reachability, cycle
+и CSS ceilings сохранены. Master merge/push в этом increment не выполняется.
+
+**O5 остаётся OPEN:** общий пользовательский сценарий mixed-base/retarget/repeat
+и объяснение результата человеком по §19.4 ещё не приняты. Следующий шаг —
+проверить result surfaces как один сценарий и отделить оставшиеся несогласованные
+подписи/выводы от уже подтверждённых сравнений. Публикация в master и полный
+scope других OPEN тем остаются отдельными шагами.
