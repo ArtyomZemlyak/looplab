@@ -4,7 +4,8 @@ import { conditionalGet, costPricing, deadlineGet, get, fmt, fmtInt, isSweep, CO
   retryRunCommand, runApiPath, runNodeApiPath, submitCommand, traceDeadlineGet, traceGenerationMatches,
   traceReadQuery, activityKey, nodeActivityStatus, nodeActivityView, NODE_ACTIVITY } from './util.js'
 import { useNodeSpanWindow, usePoll, useScopedResource, useTraceRetry, useTraceScroll } from './hooks.js'
-import { Trajectory, ParallelCoords, Scatter, MetricLines } from './charts.jsx'
+import { Trajectory, ParallelCoords, Scatter } from './charts.jsx'
+import { MetricLines } from './MetricLines.jsx'
 import { themeFilteredGroupAggregate } from './grouping.js'
 import { mergeSummary, nodeChip } from './report.js'
 import { OpIcon } from './icons.jsx'

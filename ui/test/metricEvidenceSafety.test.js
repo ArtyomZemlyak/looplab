@@ -37,7 +37,7 @@ test('legacy confirmation metadata never infers successful repeats from individu
 test('metric tag prefixes cannot collide with object prototype properties', async () => {
   const h = await mountLive({ visible: true })
   try {
-    const { MetricLines } = await h.load('/src/charts.jsx')
+    const { MetricLines } = await h.load('/src/MetricLines.jsx')
     const names = ['constructor', '__proto__', 'toString', 'hasOwnProperty', 'train']
     const series = Object.fromEntries(names.map(name => [`${name}/loss`, [{ step: 1, value: .5 }]]))
     const view = await h.mount(MetricLines, { series })

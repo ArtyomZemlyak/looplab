@@ -101,11 +101,14 @@ export function DataTable({ caption, columns = null, rows = [], rowKey = null,
 }
 
 export function ChartFrame({ title, description, columns = [], rows = [], csvName,
-  children, className = '' }) {
+  children, className = '', pageSize = 0 }) {
   const generated = useId().replaceAll(':', '')
   const titleId = `chart-title-${generated}`
   const descriptionId = `chart-description-${generated}`
   const [showData, setShowData] = useState(false)
+  const [page, setPage] = useState(0)
+  const pages = pageSize > 0 ? Math.max(1, Math.ceil(rows.length / pageSize)) : 1
+  const currentPage = Math.min(page, pages - 1), start = currentPage * pageSize
   const labelledBy = `${titleId} ${descriptionId}`
   return <figure className={`accessible-chart ${className}`.trim()}>
     <figcaption>
@@ -127,7 +130,16 @@ export function ChartFrame({ title, description, columns = [], rows = [], csvNam
         onClick={() => downloadTableCsv(csvName, columns, rows)}>Export CSV</button>}
     </div>
     {showData && <div id={`chart-data-${generated}`}>
-      <DataTable caption={`${title} data`} columns={columns} rows={rows} card csvName={null} />
+      {pages > 1 && <div className="accessible-chart-actions" role="group" aria-label={`${title} data pages`}>
+        {[['First', 0], ['Previous', currentPage - 1], ['Next', currentPage + 1], ['Last', pages - 1]]
+          .map(([name, target]) => <button key={name} type="button" className="btn xs ghost"
+            aria-label={`${name} ${title} data page`} aria-controls={`chart-data-${generated}`}
+            disabled={target === currentPage || target < 0 || target >= pages}
+            onClick={() => setPage(target)}>{name}</button>)}
+        <span role="status">{start + 1}–{Math.min(start + pageSize, rows.length)} of {rows.length} rows</span>
+      </div>}
+      <DataTable caption={`${title} data`} columns={columns}
+        rows={pageSize > 0 ? rows.slice(start, start + pageSize) : rows} card csvName={null} />
     </div>}
   </figure>
 }

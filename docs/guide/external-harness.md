@@ -156,6 +156,11 @@ External agents should add a short interpretation after each completion:
    A malformed series refuses the page, retaining explicitly stale prior curves
    only within the same identity. Individual seed rows never fill in a missing
    successful-repeat count; the result interpretation shows recorded count/spread.
+   Dense online curves reduce only the visual plot to at most 1024 recorded
+   points, preserving endpoints and bucket extremes without averaging. The caption
+   discloses the reduction. Exact data is paged locally, 100 rows per page, and CSV
+   exports all returned measurements, not just the displayed page. These controls
+   issue no extra API reads or engine commands; a curve is not an evaluation score.
 2. Copy the item's `id` and `evidence_token`. Submit through MCP `api_request`:
 
    ```json

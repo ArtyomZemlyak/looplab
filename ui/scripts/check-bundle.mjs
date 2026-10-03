@@ -169,7 +169,9 @@ export const DEFAULT_BUDGETS = Object.freeze({
     // Parent identity checks are shared by page validation and prose. Initial shell is
     // 83,043 B; CSS and every route/reachability/cycle ceiling remain unchanged.
     // 618 KiB leaves 246 B above the measured total; old target was 617.5 KiB.
-    js: { gzip: 618 * KIB },
+    // Doc 72 §20.16: dense metric plots + exact data paging, separated from review charts.
+    // Measured total 633,746 B; 619.125 KiB leaves 238 B. Route ceilings stay fixed.
+    js: { gzip: 619.125 * KIB },
     css: { gzip: 58.25 * KIB },
   },
   individual: {

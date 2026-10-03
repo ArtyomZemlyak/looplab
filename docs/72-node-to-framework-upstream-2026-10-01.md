@@ -2039,7 +2039,8 @@ advisory Trust в чатовых итогах узла и сравнениях �
 причины отказа сравнения и ссылки на исходные попытки — §20.12;
 свежесть Metrics и проверка попытки в detail response — §20.13;
 generation fence для графиков метрик — §20.14;
-безопасное чтение серий и неизвестных repeat counts — §20.15.
+безопасное чтение серий и неизвестных repeat counts — §20.15;
+длинные training curves и полный экспорт точных данных — §20.16.
 Полная приёмка единого вывода во всех видах остаётся OPEN.
 
 #### 72.O6 — P1 / OPEN: результат repo-задачи, который можно взять и воспроизвести
@@ -3407,4 +3408,51 @@ Concepts **257 924 B**, total headroom **47 B**. Quickstart и external guide
 
 **O5 остаётся OPEN:** воспроизведение этих багов и автоматические регрессии не
 заменяют human acceptance общего mixed-base/retarget/repeat пути по §19.4.
+Реальное ML обучение и browser приёмка этим increment не заявляются.
+
+### 20.16 72.O5: длинные training curves не ломают Metrics (2026-10-03)
+
+**Найдено:** TensorBoard reader сохраняет до 100 000 scalar points на event
+folder и объединяет несколько folders. MiniLine передавал весь массив в
+`Math.min/max(...values)` и строил SVG/hover по всем точкам. На 250 001
+корректной точке воспроизведён `RangeError: Maximum call stack size exceeded`.
+View data создавал строку на каждое измерение; на 251 точке регрессия ожидала
+100 строк и получила 251. На длинном логе это создаёт неограниченный DOM.
+
+**Сделано:** bounds вычисляются итеративно по полной серии. Чистая visual
+projection оставляет максимум 1024 исходных points: начало, конец и min/max
+каждого bucket в recorded order. Значения не усредняются; latest и диапазон
+берутся из полной серии. Caption явно сообщает сокращение графика. Hover
+работает по показанным points и сбрасывается при смене projection, чтобы
+старый индекс не становился подсказкой нового измерения.
+
+Таблица показывает по 100 точных строк с First/Previous/Next/Last и диапазоном;
+при укорочении серии текущая страница ограничивается доступным диапазоном.
+CSV получает всю исходную серию независимо от страницы. Pager локальный,
+без новых GET, commands или ожиданий engine. Другие charts сохраняют прежние
+таблицы. MetricLines вынесен из общего charts module: review DAG не получает
+код графиков online training через общий static dependency.
+
+**Проверено:** оба red-before сценария прошли после исправления. Проверены
+сохранение исходных endpoints, положительного/отрицательного spike и порядка,
+неизменность данных, constant series, пустая и single-point серия; устаревший
+hover при refresh. Mounted таблица проходит first/next/last, отключённые границы
+и сокращение серии. Нажатие настоящего Export CSV на последней странице
+сохраняет все 251 rows, включая первую и последнюю.
+
+Replay-first — **193 passed**. UI dense curves, result/parent/repeat,
+Inspector resource/fences, live routes, retarget, accessibility и bundle checker —
+**94 passed**. Documentation/entry-point/merge, layer и doc-surface contracts —
+**55 passed**; strict MkDocs и `git diff --check` прошли.
+
+Staging build и bundle gate прошли: JS gzip **632 785 → 633 746 B** (+961 B),
+CSS **59 578 B** без изменения. Total target переизмерен с 618 до **619.125 KiB**
+(238 B свободно) для bounded plot/pager и отделения metric charts. Initial shell
+**83 041 → 83 280 B**; review DAG **268 515 → 267 805 B** (−710 B); Concepts
+**257 924 → 258 169 B**. Route ceilings, forbidden reachability и cycle gates
+сохранены. Live `ui/dist` не заменялся; API, evaluator и measured scores не менялись.
+Quickstart и external guide описывают visual reduction, точную таблицу и полный CSV.
+
+**O5 остаётся OPEN:** автоматические сценарии на синтетических series не
+заменяют human acceptance mixed-base/retarget/repeat пути по §19.4.
 Реальное ML обучение и browser приёмка этим increment не заявляются.

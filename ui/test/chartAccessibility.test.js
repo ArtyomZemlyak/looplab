@@ -19,9 +19,9 @@ const exportedFunction = (sourceText, name, nextName) => {
 
 test('analytical charts expose named table and CSV alternatives', async () => {
   const charts = await source('charts.jsx')
-  const ordered = ['Trajectory', 'ImprovementWaterfall', 'Bars', 'Gantt', 'ParallelCoords', 'Scatter', 'Spark', 'MultiTrajectory', 'MetricLines']
+  const ordered = ['Trajectory', 'ImprovementWaterfall', 'Bars', 'Gantt', 'ParallelCoords', 'Scatter', 'Spark', 'MultiTrajectory']
   for (const [index, name] of ordered.entries()) {
-    if (name === 'Spark' || name === 'MetricLines') continue
+    if (name === 'Spark') continue
     const body = exportedFunction(charts, name, ordered[index + 1])
     assert.match(body, /<ChartFrame[\s\S]*?columns=\{columns\}[\s\S]*?rows=\{/,
       `${name} must publish exact chart data`)
@@ -38,7 +38,7 @@ test('analytical charts expose named table and CSV alternatives', async () => {
     /render: value => onPick[\s\S]*?<button type="button" className="btn xs ghost"/)
   assert.match(charts, /const _RUN_DASHES = \[/)
   assert.match(charts, /strokeDasharray=\{_RUN_DASHES/)
-  assert.match(charts, /className="metric-group-toggle" aria-expanded=\{open\}/)
+  assert.match(await source('MetricLines.jsx'), /className="metric-group-toggle" aria-expanded=\{open\}/)
   assert.match(charts, /\{ key: 'theme', label: 'Primary concept axis' \}/,
     'the legacy theme wire key must disclose the lossy primary-axis projection')
   assert.match(charts, /groupDimensionLabel\(g\)/,
@@ -79,7 +79,8 @@ test('list and map use native links for the primary open-run action', async () =
 test('every analytical chart renders its non-empty data path', async t => {
   const vite = await sharedVite()
   try {
-    const charts = await vite.ssrLoadModule('/src/charts.jsx')
+    const charts = { ...await vite.ssrLoadModule('/src/charts.jsx'),
+      ...await vite.ssrLoadModule('/src/MetricLines.jsx') }
     const fixtures = [
       ['Trajectory', { nodes: [{ id: 1, status: 'evaluated', metric: 0.7, operator: 'draft', feasible: true,
         idea: { theme: 'baseline' } }], direction: 'min', onPick() {} }],

@@ -120,6 +120,10 @@ and LoopLab's internal research roles. For setup from a fresh checkout, use
    old curves; unavailable evidence offers **Retry**, never an invented empty chart.
    Malformed series or nonnumeric points are unavailable evidence; they cannot
    become zero values or break the Metrics tab.
+   Long training curves show at most 1024 recorded points, retaining endpoints
+   and bucket extremes. The caption discloses this visual reduction. **View data**
+   pages through exact measurements, 100 rows at a time; **Export CSV** includes
+   every returned point, regardless of the current page.
    The final run brief and **Run result** card retain warnings for the selected
    attempt, including soft signals. A warning from an earlier attempt or another
    experiment is not a warning about that selected result. Read **Trust** for
