@@ -1,0 +1,173 @@
+{
+  "observed_at_utc": "2026-10-03T07:36:30.623311+00:00",
+  "scope": "Only the eight tracked-dirty directories in the prior inventory; no file contents, owners or ignored-artifact survey.",
+  "worktrees": [
+    {
+      "worktree": "C:/tmp/autornd-bundle-fix-20260720",
+      "head": "1d1569578b5e0a4ab4148aa8c5ed549e1b8b488a",
+      "status": [
+        " M ui/vite.config.js"
+      ],
+      "diff_head_stat": [],
+      "disposition": "needs_review"
+    },
+    {
+      "worktree": "C:/tmp/autornd-card-ui-lifecycle-20260721",
+      "head": "cb46a3f5f688976e31581fbb87ff270fbc9ea565",
+      "status": [
+        " M ui/src/RunView.jsx",
+        " M ui/src/panels.jsx",
+        " M ui/src/runRouteState.js",
+        " M ui/src/styles.css",
+        " M ui/test/runRouteState.test.js"
+      ],
+      "diff_head_stat": [
+        " ui/src/RunView.jsx            |  5 +++--",
+        " ui/src/panels.jsx             | 47 ++++++++++++++++++++++++++++++++++---------",
+        " ui/src/runRouteState.js       |  2 +-",
+        " ui/src/styles.css             |  4 ++++",
+        " ui/test/runRouteState.test.js | 10 ++++++++-",
+        " 5 files changed, 55 insertions(+), 13 deletions(-)"
+      ],
+      "disposition": "needs_review"
+    },
+    {
+      "worktree": "C:/tmp/autornd-concept-cache-20260717",
+      "head": "ca40a675e54b0e8d9b43ace0a50f411494751d76",
+      "status": [
+        " M looplab/events/replay.py",
+        " M looplab/serve/routers/runs.py",
+        " M tests/test_concepts_endpoint.py",
+        " M tests/test_golden_replay.py"
+      ],
+      "diff_head_stat": [
+        " looplab/events/replay.py        |  64 ++++++++--",
+        " looplab/serve/routers/runs.py   | 277 ++++++++++++++++++++++++++++++++++------",
+        " tests/test_concepts_endpoint.py |  24 ++--",
+        " tests/test_golden_replay.py     |  54 +++++++-",
+        " 4 files changed, 357 insertions(+), 62 deletions(-)"
+      ],
+      "disposition": "needs_review"
+    },
+    {
+      "worktree": "C:/tmp/autornd-delta-missing-base-20260718",
+      "head": "b871755601cd17cb7fe99ea99e0ab7823884f3c2",
+      "status": [
+        " M looplab/agents/strategist.py",
+        " M looplab/core/models.py",
+        " M looplab/engine/strategy.py",
+        " M looplab/events/digest.py",
+        " M looplab/search/coverage.py",
+        " M looplab/tools/run_tools.py"
+      ],
+      "diff_head_stat": [
+        " looplab/agents/strategist.py | 19 +++++++++--",
+        " looplab/core/models.py       | 52 ++++++++++++++++++++++++++++++",
+        " looplab/engine/strategy.py   | 12 +++++--",
+        " looplab/events/digest.py     | 29 +++++++++++++----",
+        " looplab/search/coverage.py   | 26 ++++++++++++---",
+        " looplab/tools/run_tools.py   | 77 ++++++++++++++++++--------------------------",
+        " 6 files changed, 155 insertions(+), 60 deletions(-)"
+      ],
+      "disposition": "needs_review"
+    },
+    {
+      "worktree": "C:/tmp/autornd-empty-concept-delta-20260717",
+      "head": "0531767b7722e7ceed75aee740ac76899676cdb5",
+      "status": [
+        " M docs/guide/concepts.md",
+        " M looplab/agents/agent.py",
+        " M looplab/agents/roles.py",
+        " M looplab/core/models.py",
+        " M looplab/events/replay.py",
+        " M looplab/events/types.py",
+        " M looplab/search/concept_graph.py",
+        " M looplab/serve/routers/boss.py",
+        " M tests/data/golden_run_state.json",
+        " M tests/test_prompt_capability_sync.py",
+        " M tests/test_run_base_delta.py"
+      ],
+      "diff_head_stat": [
+        " docs/guide/concepts.md               |  34 +++++--",
+        " looplab/agents/agent.py              |  13 ++-",
+        " looplab/agents/roles.py              |  54 ++++++++---",
+        " looplab/core/models.py               |  19 ++--",
+        " looplab/events/replay.py             | 113 ++++++++++++++++++----",
+        " looplab/events/types.py              |   3 +-",
+        " looplab/search/concept_graph.py      |  21 +++-",
+        " looplab/serve/routers/boss.py        |   9 +-",
+        " tests/data/golden_run_state.json     |  10 +-",
+        " tests/test_prompt_capability_sync.py |  16 +++-",
+        " tests/test_run_base_delta.py         | 179 ++++++++++++++++++++++++++++++++---",
+        " 11 files changed, 396 insertions(+), 75 deletions(-)"
+      ],
+      "disposition": "needs_review"
+    },
+    {
+      "worktree": "C:/Users/artyo/Documents/autornd/.claude/worktrees/vigilant-saha-d21ba6",
+      "head": "f0ea1303a8622d8bcbb9d8810736bd2b04a7e04e",
+      "status": [
+        " M looplab/dataset_task.py",
+        " M looplab/run_tools.py",
+        " M tests/test_dataset_task.py"
+      ],
+      "diff_head_stat": [
+        " looplab/dataset_task.py    | 79 ++++++++++++++++++++++++++++++++++++++",
+        " looplab/run_tools.py       | 38 +++++++++++++------",
+        " tests/test_dataset_task.py | 94 +++++++++++++++++++++++++++++++++++++++++++++-",
+        " 3 files changed, 198 insertions(+), 13 deletions(-)"
+      ],
+      "disposition": "needs_review"
+    },
+    {
+      "worktree": "C:/Users/artyo/Documents/autornd/.codex-review-sweep",
+      "head": "57db53c8e1ecd427cc92e8b7aedae766ade7b904",
+      "status": [
+        " M looplab/core/models.py",
+        " M looplab/engine/proposal_cues.py",
+        " M looplab/engine/strategy.py",
+        " M looplab/events/digest.py",
+        " M looplab/events/replay.py",
+        " M looplab/search/concept_graph.py",
+        " M looplab/search/coverage.py",
+        " M looplab/serve/concept_frame.py",
+        " M looplab/tools/run_tools.py",
+        " M tests/test_concept_edges.py",
+        " M tests/test_coverage.py",
+        " M tests/test_run_tools.py"
+      ],
+      "diff_head_stat": [
+        " looplab/core/models.py          |   9 +++",
+        " looplab/engine/proposal_cues.py |   2 +-",
+        " looplab/engine/strategy.py      | 146 +++++++++++++++++-------------------",
+        " looplab/events/digest.py        |  31 +-------",
+        " looplab/events/replay.py        | 162 ++++++++++++++++++++++++++++++++++++++--",
+        " looplab/search/concept_graph.py |  52 +++++++------",
+        " looplab/search/coverage.py      |  37 ++++++---",
+        " looplab/serve/concept_frame.py  |  39 +++-------",
+        " looplab/tools/run_tools.py      |  42 +++++------",
+        " tests/test_concept_edges.py     | 103 ++++++++++++++++++++++++-",
+        " tests/test_coverage.py          |  39 +++++++++-",
+        " tests/test_run_tools.py         |  48 ++++++++++--",
+        " 12 files changed, 503 insertions(+), 207 deletions(-)"
+      ],
+      "disposition": "needs_review"
+    },
+    {
+      "worktree": "C:/Users/artyo/Documents/autornd/.codex-ui-next",
+      "head": "ce5a02696dd8541cd565bb99bfeb9c79032a3a04",
+      "status": [
+        " M docs/18-desktop-concepts-ui-ux-review-2026-07-16.md",
+        " M docs/guide/ui.md",
+        " M docs/infographic/agent-architecture.html"
+      ],
+      "diff_head_stat": [
+        " .../18-desktop-concepts-ui-ux-review-2026-07-16.md | 30 +++++++++++++---------",
+        " docs/guide/ui.md                                   | 10 ++++++++",
+        " docs/infographic/agent-architecture.html           |  2 +-",
+        " 3 files changed, 29 insertions(+), 13 deletions(-)"
+      ],
+      "disposition": "needs_review"
+    }
+  ]
+}

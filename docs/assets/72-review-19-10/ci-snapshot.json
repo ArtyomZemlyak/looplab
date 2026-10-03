@@ -1,0 +1,104 @@
+{
+  "observed_at_utc": "2026-10-03T07:36:30.623311+00:00",
+  "runs": [
+    {
+      "conclusion": "success",
+      "headSha": "5e9659451721c353dc3fecd93c9b2bb307dcbfb7",
+      "jobs": [
+        {
+          "name": "build",
+          "status": "completed",
+          "conclusion": "success",
+          "url": "https://github.com/ArtyomZemlyak/looplab/actions/runs/37106642674/job/111156361785"
+        },
+        {
+          "name": "deploy",
+          "status": "completed",
+          "conclusion": "success",
+          "url": "https://github.com/ArtyomZemlyak/looplab/actions/runs/37106642674/job/111156463235"
+        }
+      ],
+      "status": "completed",
+      "url": "https://github.com/ArtyomZemlyak/looplab/actions/runs/37106642674",
+      "workflowName": "docs"
+    },
+    {
+      "conclusion": "",
+      "headSha": "5e9659451721c353dc3fecd93c9b2bb307dcbfb7",
+      "jobs": [
+        {
+          "name": "package",
+          "status": "completed",
+          "conclusion": "success",
+          "url": "https://github.com/ArtyomZemlyak/looplab/actions/runs/37106642669/job/111156361703"
+        },
+        {
+          "name": "pytest (2)",
+          "status": "in_progress",
+          "conclusion": "",
+          "url": "https://github.com/ArtyomZemlyak/looplab/actions/runs/37106642669/job/111156361854"
+        },
+        {
+          "name": "pytest (3)",
+          "status": "in_progress",
+          "conclusion": "",
+          "url": "https://github.com/ArtyomZemlyak/looplab/actions/runs/37106642669/job/111156361864"
+        },
+        {
+          "name": "ui",
+          "status": "completed",
+          "conclusion": "success",
+          "url": "https://github.com/ArtyomZemlyak/looplab/actions/runs/37106642669/job/111156361866"
+        },
+        {
+          "name": "pytest (4)",
+          "status": "in_progress",
+          "conclusion": "",
+          "url": "https://github.com/ArtyomZemlyak/looplab/actions/runs/37106642669/job/111156361885"
+        },
+        {
+          "name": "pytest (1)",
+          "status": "in_progress",
+          "conclusion": "",
+          "url": "https://github.com/ArtyomZemlyak/looplab/actions/runs/37106642669/job/111156361915"
+        }
+      ],
+      "status": "in_progress",
+      "url": "https://github.com/ArtyomZemlyak/looplab/actions/runs/37106642669",
+      "workflowName": "tests"
+    },
+    {
+      "conclusion": "",
+      "headSha": "5e9659451721c353dc3fecd93c9b2bb307dcbfb7",
+      "jobs": [
+        {
+          "name": "pytest-windows (1)",
+          "status": "in_progress",
+          "conclusion": "",
+          "url": "https://github.com/ArtyomZemlyak/looplab/actions/runs/37106642702/job/111156361646"
+        },
+        {
+          "name": "pytest-windows (2)",
+          "status": "in_progress",
+          "conclusion": "",
+          "url": "https://github.com/ArtyomZemlyak/looplab/actions/runs/37106642702/job/111156361774"
+        },
+        {
+          "name": "pytest-windows (3)",
+          "status": "in_progress",
+          "conclusion": "",
+          "url": "https://github.com/ArtyomZemlyak/looplab/actions/runs/37106642702/job/111156361789"
+        },
+        {
+          "name": "pytest-windows (4)",
+          "status": "in_progress",
+          "conclusion": "",
+          "url": "https://github.com/ArtyomZemlyak/looplab/actions/runs/37106642702/job/111156361809"
+        }
+      ],
+      "status": "in_progress",
+      "url": "https://github.com/ArtyomZemlyak/looplab/actions/runs/37106642702",
+      "workflowName": "tests-windows"
+    }
+  ]
+}
