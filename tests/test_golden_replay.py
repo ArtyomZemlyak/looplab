@@ -64,6 +64,10 @@ the diff that justified it:
 * 2026-10-01 — `Node.activation` (`core/models.py`, the graded activation check's record;
   minionerec-lora-v1 node 2). The diff was 8 insertions and 0 deletions — one `"activation": null`
   per node, what a `node_evaluated` row with no record folds to — and no shared leaf changed.
+* 2026-10-03 — `RunState.upstream_base`, `upstream_enabled`, `upstream_history` (doc 72).
+  The snapshot missed the three additive defaults: null, false and [] for this legacy log
+  without upstream events. All 146 existing root entries, including every nested value,
+  were compared unchanged before regeneration; the diff adds 3 lines with no deletions.
 """
 from __future__ import annotations
 

@@ -21,3 +21,12 @@ export function metricCurveProjection(points) {
   plotted.push(points.at(-1))
   return { points: plotted, bounds }
 }
+
+// Inputs are finite recorded values. Avoid a fake minimum range for tiny metrics,
+// and halve operands only when opposite finite extremes overflow their difference.
+export function metricCurvePosition(value, low, high) {
+  if (low === high) return 0.5
+  const span = high - low
+  return Number.isFinite(span) ? (value - low) / span
+    : (value / 2 - low / 2) / (high / 2 - low / 2)
+}

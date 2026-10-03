@@ -1,7 +1,7 @@
 import React from 'react'
 import { fmt } from './util.js'
 import { ChartFrame } from './accessibility.jsx'
-import { metricCurveProjection } from './metricCurveProjection.js'
+import { metricCurveProjection, metricCurvePosition } from './metricCurveProjection.js'
 
 const AX = 'var(--fg-mut)', GRID = 'var(--line)'
 function Empty({ children }) { return <div className="muted" style={{ padding: 20 }}>{children}</div> }
@@ -45,14 +45,14 @@ function MetricGroup({ name, tags, series, cols }) {
 }
 
 export function MiniLine({ label, pts, width = 340, height = 130 }) {
-  const [hi, setHi] = React.useState(null)   // hovered point index (tooltip + dot)
+  const [hi, setHi] = React.useState(null)   // hover belongs to this projection (tooltip + dot)
   const projection = React.useMemo(() => metricCurveProjection(pts), [pts])
   const plotted = projection.points
   const [minX, maxX, minY, maxY] = projection.bounds
   if (!pts.length) return <Empty>no metric points recorded</Empty>
   const pad = 30, w = width, h = height
-  const X = v => pad + (v - minX) / Math.max(1e-9, maxX - minX) * (w - pad - 8)
-  const Y = v => h - pad - (v - minY) / Math.max(1e-9, maxY - minY) * (h - pad - 16)
+  const X = v => pad + metricCurvePosition(v, minX, maxX) * (w - pad - 8)
+  const Y = v => h - pad - metricCurvePosition(v, minY, maxY) * (h - pad - 16)
   const d = plotted.map((p, i) => (i ? 'L' : 'M') + X(p.step).toFixed(1) + ' ' + Y(p.value).toFixed(1)).join(' ')
   const last = pts.at(-1).value
   const nearestIdx = (px) => {   // pixel x -> nearest point index (hover)
@@ -80,6 +80,7 @@ export function MiniLine({ label, pts, width = 340, height = 130 }) {
         {[0, .5, 1].map((t, i) => { const y = pad / 2 + t * (h - pad - 16); return <line key={i} x1={pad} x2={w - 8} y1={y} y2={y} stroke={GRID} /> })}
         <path d={d} fill="none" stroke="var(--fg)" strokeWidth="3.8" opacity=".78" />
         <path d={d} fill="none" stroke="var(--ok)" strokeWidth="1.8" />
+        {pts.length === 1 && <circle cx={X(pts[0].step)} cy={Y(last)} r="3" fill="var(--ok)" />}
         {hp && <><line x1={X(hp.step)} x2={X(hp.step)} y1={pad / 2} y2={h - pad} stroke={AX} strokeDasharray="3 3" opacity=".6" />
           <circle cx={X(hp.step)} cy={Y(hp.value)} r="3.5" fill="none" stroke="var(--fg)" strokeWidth="1.4" /></>}
         <text x={2} y={pad / 2 + 4} fill={AX} fontSize="9">{fmt(maxY)}</text>

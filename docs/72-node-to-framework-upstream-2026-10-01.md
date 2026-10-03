@@ -2040,7 +2040,8 @@ advisory Trust в чатовых итогах узла и сравнениях �
 свежесть Metrics и проверка попытки в detail response — §20.13;
 generation fence для графиков метрик — §20.14;
 безопасное чтение серий и неизвестных repeat counts — §20.15;
-длинные training curves и полный экспорт точных данных — §20.16.
+длинные training curves и полный экспорт точных данных — §20.16;
+масштаб маленьких метрик, одиночные точки и golden replay — §20.17.
 Полная приёмка единого вывода во всех видах остаётся OPEN.
 
 #### 72.O6 — P1 / OPEN: результат repo-задачи, который можно взять и воспроизвести
@@ -3454,5 +3455,44 @@ CSS **59 578 B** без изменения. Total target переизмерен 
 Quickstart и external guide описывают visual reduction, точную таблицу и полный CSV.
 
 **O5 остаётся OPEN:** автоматические сценарии на синтетических series не
+заменяют human acceptance mixed-base/retarget/repeat пути по §19.4.
+Реальное ML обучение и browser приёмка этим increment не заявляются.
+
+### 20.17 72.O5: корректный масштаб curves и актуальный golden replay (2026-10-03)
+
+**Найдено:** MiniLine подменял любой диапазон меньше `1e-9` этим floor.
+Изменение loss/lr на `1e-12` становилось почти горизонтальной линией;
+маленький step range также сжимался. Допустимые finite values противоположных
+знаков возле `Number.MAX_VALUE` переполняли разность, давая `NaN` в SVG.
+Единственный point создавал только move-команду path без видимого рисунка.
+
+**Сделано:** координаты нормализуются по реальному ненулевому range, без
+искусственного epsilon. Только при overflow разности finite bounds операнды
+делятся пополам до вычитания. Constant axis центрируется; одиночное измерение
+рисуется отдельным marker и остаётся доступным без hover. Bounds, latest,
+точные table/CSV values и ограниченная visual projection не меняются.
+
+Replay-first дополнительно включил golden suite и обнаружил прежний stale
+snapshot: отсутствовали `upstream_base=null`, `upstream_enabled=false`,
+`upstream_history=[]`, добавленные по doc 72. Перед обновлением сравнены все
+146 старых root entries со всеми nested values: изменений нет. Snapshot
+получил ровно три строки, без удалений; история regeneration записана возле
+самого golden test. Runtime fold и формат событий не менялись.
+
+**Проверено:** до исправления tiny/subnormal ranges сжимались, extreme range
+создавал `LNaN NaN`, single point не имел marker; ordinary negative control
+проходил. После исправления проверены tiny positive/negative и nonzero ranges,
+subnormal, extreme endpoints и midpoint, constant series, empty/single-point,
+dense curves, exact CSV/paging и очистка stale hover.
+
+Replay including golden после обновления snapshot — **206 passed**.
+UI scale/dense/resource/generation/accessibility regressions — **42 passed**.
+Documentation/entry-point/merge, layer и doc-surface contracts — **55 passed**;
+strict MkDocs и `git diff --check` прошли. Staging build и bundle gate прошли
+без изменения ceilings: JS gzip **633 746 → 633 806 B** (+60 B; 178 B свободно),
+CSS **59 578 B**, initial shell **83 280 B** и review DAG **267 805 B** без изменения.
+Live `ui/dist` не заменялся; API, measured scores и engine waits не менялись.
+
+**O5 остаётся OPEN:** синтетические curve fixtures и актуализация golden не
 заменяют human acceptance mixed-base/retarget/repeat пути по §19.4.
 Реальное ML обучение и browser приёмка этим increment не заявляются.

@@ -984,6 +984,9 @@
   "task_id": "toy_quadratic",
   "total_eval_seconds": 0.273,
   "trust_gate": "audit",
+  "upstream_base": null,
+  "upstream_enabled": false,
+  "upstream_history": [],
   "verifier_ci_tie": false,
   "workspace": {},
   "workspace_changed": false
