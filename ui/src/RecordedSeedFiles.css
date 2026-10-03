@@ -1,0 +1,3 @@
+.recorded-seed-list { max-height: 260px; overflow: auto; padding-left: 22px; }
+.recorded-seed-list li { padding: 3px 0; overflow-wrap: anywhere; }
+.recorded-seed-list button[aria-pressed="true"] { color: var(--accent-text); border-color: var(--accent); }

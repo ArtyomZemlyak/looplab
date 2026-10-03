@@ -2225,6 +2225,8 @@ different-base и отсутствующая исходная попытка. П
 saved overlays включает recipe-only правки и не подменяет reset родителя.
 **Следующий increment — §20.25:** отдельно доступны файлы проверенного архива
 базы до overlay и runtime inputs; можно прочитать inherited runner/scorer.
+**Уточнение версий — §20.26:** архивный файл явно отличён от правки опыта и
+от удаления; выбранный preview доступен перед ограниченным списком файлов.
 Полная материализация inherited программы, её сравнение между базами и доставка
 в target repo остаются OPEN.
 
@@ -5255,3 +5257,49 @@ materialized result с runtime inputs/dependencies, сравнение двух 
 и target-aware доставка в пользовательский repo ещё требуют реализации и приёмки.
 Наличие архива не подтверждает научное улучшение, повторяемость на новом target
 или merge в пользовательскую ветку.
+
+### 20.26 72.O6: различимые версии базы и правки опыта (2026-10-03)
+
+**Находка после §20.25.** Code показывал сохранённый recipe опыта и архивный
+recipe базы с одинаковым названием просмотра. В CPU SGD опыте #2 это разные
+тексты; открыть архив ещё не значит открыть итоговый файл программы. Список
+до 100 файлов также отодвигал выбранный preview ниже видимой области.
+
+**Исправлено.** `ui/src/nodeCodeModel.js::recordedFileOverlay` различает отсутствие
+отдельной правки, override (включая пустой текст), явное deletion и неизвестные
+правки. Это классификация сохранённого overlay, не доказательство применения
+его к защищённому/task-owned файлу. `ui/src/RecordedSeedFiles.jsx::RecordedSeedFiles`
+показывает этот контекст в списке и рядом с выбранным файлом. Base preview
+подписан «База: имя» и связан с ID/attempt/digest; saved preview — «Правка #ID: имя».
+Переключатели «Версия базы / Правка опыта» меняют уже прочитанные тексты без
+HTTP или model request. Archive deletion не предлагает фиктивную восстановленную
+правку; missing overlay не объявляется unchanged. Оговорка о protected files и
+task assets остаётся видна.
+
+Preview теперь стоит перед списком. Список имеет ограниченную высоту и отдельную
+прокрутку; текущий файл отмечен `aria-pressed`. После явного чтения heading файла
+получает фокус и раскрывается в области Inspector. Если человек за время чтения
+перешёл в другой input, ответ не забирает у него фокус. Reset, generation/base
+change и ошибка чтения сохраняют прежнее очищение preview и отмену запроса.
+Wire validator теперь всегда возвращает boolean и отвергает UTF-8 с NUL,
+необоснованный too-large status и selected file вне возвращённого inventory.
+
+**Проверка.** Replay-first. Component Inspector drive читает base `MOMENTUM=0.2`,
+переключается на saved `MOMENTUM=0.3`, возвращается без нового запроса, читает
+явно удалённый архивный файл, проверяет hash refusal и reset. Отдельный delayed
+read сохраняет фокус стороннего input и неизвестный overlay. Свежий production
+UI проверен на сохранённом реальном CPU SGD опыте #2: base `MOMENTUM=0.0`,
+saved `MOMENTUM=0.3`, RU, desktop viewport 1920×1080.
+Это проверка представления существующих измерений; обучение не повторялось.
+Selectors, итоги и screenshot —
+[validation.json](assets/72-file-version-context/validation.json).
+
+![Code: версия базы и сохранённая правка опыта](assets/72-file-version-context/recipe-version-desktop.jpg)
+
+**Вывод по материализации.** `looplab/engine/workspace.py::WorkspaceSeeder.materialize`
+после seed применяет node files и затем task assets; protected names и runtime
+inputs имеют собственные правила. Поэтому простая сумма base archive + raw
+files/deleted не принимается за точную runnable программу. Полный materialized
+manifest, сохранённые runtime inputs/dependencies и target-aware доставка остаются
+OPEN O6/O14. Этот фикс снижает риск перепутать версии при чтении существующего
+результата и не закрывает весь экспорт/интеграцию task repo.

@@ -1,6 +1,6 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { nodeCodeModel } from '../src/nodeCodeModel.js'
+import { nodeCodeModel, recordedFileOverlay } from '../src/nodeCodeModel.js'
 import { mountLive, until, click } from './_mount.js'
 
 const generation = 'a'.repeat(64)
@@ -17,6 +17,15 @@ const child = { id: 1, attempt: 0, status: 'evaluated', feasible: true, metric: 
     files: { 'recipe.env': 'MOMENTUM=0.2\n', 'old.py': "print('old')\n", 'inherited.py': 'override\n' },
     deleted: ['disabled.py'], base_revision: base(0, 'a'.repeat(64)) } }
 const state = { run_id: 'r', direction: 'min', nodes: { 0: parent, 1: child } }
+
+test('archived file context distinguishes empty edits, deletion and unavailable overlay evidence', () => {
+  assert.deepEqual(recordedFileOverlay(child, 'recipe.env'), { kind: 'override', text: 'MOMENTUM=0.3\n' })
+  assert.deepEqual(recordedFileOverlay({ ...child, files: { 'recipe.env': '' } }, 'recipe.env'), { kind: 'override', text: '' })
+  assert.deepEqual(recordedFileOverlay({ ...child, files: { 'old.py': 'conflicting edit' } }, 'old.py'), { kind: 'deleted', text: null })
+  assert.equal(recordedFileOverlay(child, 'train.py').kind, 'inherited')
+  assert.equal(recordedFileOverlay({ ...child, files: undefined }, 'train.py').kind, 'unknown')
+  assert.equal(recordedFileOverlay({ ...child, deleted: undefined }, 'train.py').kind, 'unknown')
+})
 
 test('file comparison distinguishes removed overrides from explicit deletion and includes recipe-only edits', () => {
   const model = nodeCodeModel(child, state)

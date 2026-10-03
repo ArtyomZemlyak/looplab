@@ -1,0 +1,35 @@
+{
+  "version": 1,
+  "date": "2026-10-03",
+  "increment": "doc72 section 20.26, O6 file version context",
+  "source_parent_commit": "caf426f126c20451357b9b0231a913a70a41068e",
+  "replay": {"selectors": ["tests/test_events_replay.py"], "passed": 193, "skipped": 0, "failed": 0, "seconds": 3.38, "order": "first"},
+  "ui": {
+    "selectors": ["test/recordedSeedFiles.test.js", "test/nodeCode.test.js", "test/inspectorNodeSwitchStaleness.test.js", "test/inspectorDetailResource.test.js", "test/inspectorResultEvidence.test.js", "test/reviewCapability.test.js", "test/sourceTreeCompiles.test.js", "test/sourceControlBytes.test.js"],
+    "passed": 18, "skipped": 0, "failed": 0, "seconds": 3.55,
+    "build": {"status": "passed", "tool": "Vite production", "modules": 419, "seconds": 16.62},
+    "warnings": "Existing Inspector tests emit React act/deprecation warnings; browser error console is empty."
+  },
+  "api": {"selectors": ["tests/test_recorded_seed_files.py", "tests/test_node_code_overlay.py"], "passed": 9, "skipped": 0, "failed": 0, "seconds": 3.36},
+  "documentation": {
+    "selectors": ["tests/test_documentation_contracts.py", "tests/test_documented_entry_points_resolve.py", "tests/test_merge_history_integrity.py"],
+    "passed": 34, "skipped": 0, "failed": 0, "seconds": 7.84,
+    "strict_build": {"status": "passed", "seconds": 7.92}
+  },
+  "browser": {
+    "status": "passed", "language": "ru", "viewport": {"width": 1920, "height": 1080},
+    "scenario": "Read-only existing measured CPU SGD run; experiment 2 attempt 0. No training or model request.",
+    "base_text": "MOMENTUM=0.0", "saved_edit_text": "MOMENTUM=0.3",
+    "observations": ["Explicit base inventory read", "Archive recipe and saved edit have distinct labels and buttons", "File heading receives focus after explicit read", "Selected edit remains in the accessibility tree while Inspector is scrolled"],
+    "console_errors": [],
+    "events_sha256_before_and_after": "721850e6849652301cd3c042232e072d74ae2118164173cdc35cd61fee91b7e2",
+    "screenshot": "recipe-version-desktop.jpg",
+    "screenshot_sha256": "9257a7b80a24440a9f7af6dd8c9e5903f91b5da4d00c1703fc635d89db96d799",
+    "capture_limitation": "Native capture is 1920x1059 with display scaling and clips the right/bottom of the CSS viewport. It shows context and version controls; complete selected text is confirmed by the accessibility tree. Full-page capture resized/remounted the Inspector, so that image was not retained as proof.",
+    "cleanup": "Temporary tab closed, viewport override reset, only the verified private preview process on port 8880 stopped."
+  },
+  "total_passed": 254,
+  "git_diff_check": "passed",
+  "coverage": "Targeted regression checks, not the full repository CI suite.",
+  "remaining_open": ["Full materialized result manifest and runtime inputs/dependencies", "Target-aware task repository delivery", "Human usability and full CI acceptance"]
+}

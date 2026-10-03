@@ -64,6 +64,16 @@ source must fit the existing 32 MiB verified-read limit. This owner-plane browse
 is unavailable in historical and shared review views, which retain their existing
 source access limits. Opening it does not execute code or invoke a model.
 
+Each base file identifies whether a separate edit or deletion is recorded in the
+experiment. **Base version / Версия базы** and **Experiment edit / Правка опыта**
+let you read those two source versions without another request. A base recipe
+can differ from the experiment's saved recipe. A deleted file remains readable
+as an explicitly labelled archived file; it is not restored into the experiment.
+Missing overlay evidence says **Edits unavailable**, not "unchanged". These labels
+describe saved edits: protected files and task assets may override them at runtime.
+The selected preview appears above the bounded file list and receives focus after
+an explicit file read, unless you moved focus to another input while it was loading.
+
 The chat needs a configured model. Open **LoopLab → Settings → Essential → Model** to check the saved
 model and endpoint. **Test active LLM** makes one provider request and may be billed.
 Essential also shows experiment resources and time/model budgets. **All** and search

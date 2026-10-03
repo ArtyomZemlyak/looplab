@@ -5,6 +5,14 @@ const textFiles = value => value && typeof value === 'object' && !Array.isArray(
   && Object.values(value).every(body => typeof body === 'string')
 const paths = value => Array.isArray(value) && value.every(path => typeof path === 'string')
 
+// Describes the saved overlay only. Protected/task-owned files may override it at runtime.
+export function recordedFileOverlay(node, path) {
+  if (!textFiles(node?.files) || !paths(node?.deleted)) return { kind: 'unknown', text: null }
+  if (node.deleted.includes(path)) return { kind: 'deleted', text: null }
+  if (Object.hasOwn(node.files, path)) return { kind: 'override', text: node.files[path] }
+  return { kind: 'inherited', text: null }
+}
+
 // These are saved overlays, not complete Git trees. Removing an override may restore an inherited
 // file; it must never be reported as deletion of that file from the materialized program.
 export function nodeCodeModel(node, state) {
