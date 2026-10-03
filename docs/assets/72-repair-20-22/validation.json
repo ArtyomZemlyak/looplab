@@ -1,0 +1,204 @@
+{
+  "observed_at_utc": "2026-10-03T09:57:16.689842+00:00",
+  "source_sha": "d5f91e106cc63273aefcc19514514ff0945839db",
+  "platform": "win32",
+  "python": "3.11.14",
+  "git_version": "git version 2.52.0.windows.1",
+  "baseline": "16 failed, 2 passed in 3.31s before repair",
+  "replay_first": {
+    "selectors": [
+      "tests/test_events_replay.py"
+    ],
+    "result": "193 passed in 4.19s"
+  },
+  "diagnostics": {
+    "selectors": [
+      "tests/test_harness_snapshot_compatibility.py",
+      "tests/test_harness_handoff.py",
+      "tests/test_external_progress.py",
+      "tests/test_external_idle_recovery.py"
+    ],
+    "result": "39 passed in 7.38s",
+    "scope": "Three HTTP bootstrap reads; typed HarnessAPI through real HTTP/TestClient bridge, explicit operator restore and fresh connection/progress. Supported current/legacy/retired snapshots. No source rewrite or secret echo."
+  },
+  "regression": {
+    "selectors": [
+      "tests/test_external_idle_recovery.py",
+      "tests/test_external_progress.py",
+      "tests/test_harness_auth_configuration.py",
+      "tests/test_harness_connection.py",
+      "tests/test_harness_event_source.py",
+      "tests/test_harness_handoff.py",
+      "tests/test_harness_journal_health.py",
+      "tests/test_harness_journal_retry.py",
+      "tests/test_harness_mcp.py",
+      "tests/test_harness_phase_contract.py",
+      "tests/test_harness_snapshot_compatibility.py",
+      "tests/test_mcp_cache_key.py",
+      "tests/test_mcp_command_receipt_shape.py",
+      "tests/test_mcp_discovery_recovery.py",
+      "tests/test_mcp_evidence_fence.py",
+      "tests/test_mcp_incomplete_responses.py",
+      "tests/test_mcp_principal_config.py",
+      "tests/test_mcp_progress_shape.py",
+      "tests/test_mcp_read_identity.py",
+      "tests/test_mcp_remote_install.py",
+      "tests/test_mcp_result_notices.py",
+      "tests/test_mcp_transport_recovery.py",
+      "tests/test_package_layout.py",
+      "tests/test_package_layering.py",
+      "tests/test_cross_package_private_seams.py",
+      "tests/test_containment_census.py",
+      "tests/test_config.py"
+    ],
+    "result": "1522 passed in 61.55s",
+    "intermediate_failure": "Unnecessary new legacy layout alias caught by package layout guard and removed; no guard relaxation or new flat alias."
+  },
+  "documentation": {
+    "selectors": [
+      "tests/test_documentation_contracts.py",
+      "tests/test_documented_entry_points_resolve.py",
+      "tests/test_merge_history_integrity.py",
+      "tests/test_doc_surface_budgets.py",
+      "tests/test_architecture_diagram_geometry.py",
+      "tests/test_golden_replay.py",
+      "tests/test_replay_families.py",
+      "tests/test_pin_budget.py"
+    ],
+    "result": "63 passed in 25.85s",
+    "mkdocs_strict_exit_code": 0,
+    "diff_check_exit_code": 0
+  },
+  "implemented_contract_cli_exit_code": 0,
+  "live_smokes": [
+    {
+      "case": "agent_loss",
+      "model_judgment_tested": false,
+      "agent_connection": "not_measured",
+      "read_steps": [
+        "choose_direction",
+        "choose_direction",
+        "choose_direction"
+      ],
+      "response_fault": "invalid_json",
+      "read_fault": "incomplete_progress",
+      "failed_read_changed_no_work": true,
+      "failed_read_tool": "run_progress",
+      "quiet_hold_seconds": 0,
+      "quiet_activity_changed_no_work": true,
+      "ui_restart_forgot_contact": true,
+      "reconnect_reads_started_no_work": true,
+      "protected_scorer_unchanged": true,
+      "score_executions": 2,
+      "engine_processes": 1,
+      "inspect_replay": "passed",
+      "commentary_count": 3,
+      "commentary_exact_retry": true,
+      "lost_write": {
+        "status": 200,
+        "code": "request_outcome_unknown",
+        "outcome": "unknown",
+        "reason": "invalid_json"
+      },
+      "lost_read": {
+        "status": 200,
+        "code": "response_incomplete",
+        "outcome": "unavailable",
+        "reason": "invalid_progress"
+      },
+      "lost_commentary": {
+        "status": 200,
+        "code": "request_outcome_unknown",
+        "outcome": "unknown",
+        "reason": "invalid_json"
+      },
+      "incomplete_progress_connection_refused": {
+        "ok": false,
+        "status": 200,
+        "code": "invalid_response",
+        "at": "context"
+      }
+    },
+    {
+      "case": "engine_loss",
+      "model_judgment_tested": false,
+      "agent_connection": "not_measured",
+      "read_steps": [
+        "inspect_lifecycle",
+        "inspect_lifecycle",
+        "inspect_lifecycle"
+      ],
+      "quiet_hold_seconds": 0,
+      "quiet_activity_changed_no_work": true,
+      "ui_restart_forgot_contact": true,
+      "reconnect_reads_started_no_work": true,
+      "protected_scorer_unchanged": true,
+      "score_executions": 2,
+      "engine_processes": 2,
+      "inspect_replay": "passed"
+    }
+  ],
+  "smoke_commands": [
+    "python -m benchmarks.external_idle_recovery_smoke --out PRIVATE/agent-proof --case agent_loss --drop-command-response --response-fault invalid_json --read-fault incomplete_progress",
+    "python -m benchmarks.external_idle_recovery_smoke --out PRIVATE/engine-proof --case engine_loss"
+  ],
+  "source_ci_at_read": [
+    {
+      "conclusion": "",
+      "databaseId": 37113933675,
+      "headSha": "d5f91e106cc63273aefcc19514514ff0945839db",
+      "status": "in_progress",
+      "url": "https://github.com/ArtyomZemlyak/looplab/actions/runs/37113933675",
+      "workflowName": "tests-windows"
+    },
+    {
+      "conclusion": "success",
+      "databaseId": 37113933676,
+      "headSha": "d5f91e106cc63273aefcc19514514ff0945839db",
+      "status": "completed",
+      "url": "https://github.com/ArtyomZemlyak/looplab/actions/runs/37113933676",
+      "workflowName": "docs"
+    },
+    {
+      "conclusion": "success",
+      "databaseId": 37113933638,
+      "headSha": "d5f91e106cc63273aefcc19514514ff0945839db",
+      "status": "completed",
+      "url": "https://github.com/ArtyomZemlyak/looplab/actions/runs/37113933638",
+      "workflowName": "tests"
+    }
+  ],
+  "earlier_full_green_ci": [
+    {
+      "conclusion": "success",
+      "databaseId": 37112078747,
+      "headSha": "74ae1a600d3f03e0bada1631e203f6383cb20e13",
+      "status": "completed",
+      "url": "https://github.com/ArtyomZemlyak/looplab/actions/runs/37112078747",
+      "workflowName": "docs"
+    },
+    {
+      "conclusion": "success",
+      "databaseId": 37112078754,
+      "headSha": "74ae1a600d3f03e0bada1631e203f6383cb20e13",
+      "status": "completed",
+      "url": "https://github.com/ArtyomZemlyak/looplab/actions/runs/37112078754",
+      "workflowName": "tests-windows"
+    },
+    {
+      "conclusion": "success",
+      "databaseId": 37112078750,
+      "headSha": "74ae1a600d3f03e0bada1631e203f6383cb20e13",
+      "status": "completed",
+      "url": "https://github.com/ArtyomZemlyak/looplab/actions/runs/37112078750",
+      "workflowName": "tests"
+    }
+  ],
+  "limits": [
+    "Not full current-SHA Linux/Windows CI acceptance.",
+    "Bootstrap config reads only; other semantic reads/writes unchanged.",
+    "Private real CPU/stdio MCP clients on supported snapshots, not live damaged-config smoke.",
+    "Quiet hold 0 seconds; no 120-second silence acceptance, model judgment or human UX acceptance.",
+    "No user UI restart, owner/scorer edit, automatic resume or unrelated worktree integration. O1-O14 remain open."
+  ]
+}

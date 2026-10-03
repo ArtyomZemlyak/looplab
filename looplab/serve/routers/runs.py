@@ -1049,6 +1049,7 @@ def build_router(srv) -> APIRouter:
         """Effective choices and enforced task constraints for this run incarnation."""
         from looplab.adapters.tasks import load_task
         from looplab.harness.obligations import run_obligations
+        from looplab.harness.snapshot_settings import read_harness_settings
 
         rd = _run_dir(run_id)
         events = EventStore(rd / "events.jsonl").read_all()
@@ -1056,7 +1057,7 @@ def build_router(srv) -> APIRouter:
         if not generation:
             raise HTTPException(409, "run has not started")
         try:
-            settings = settings_from_snapshot(json.loads((rd / "config.snapshot.json").read_bytes()))
+            settings = read_harness_settings(rd)
             task = load_task(rd / "task.snapshot.json", existing_run=True)
         except (OSError, ValueError, KeyError) as exc:
             raise refusal("config_snapshot_unreadable") from exc

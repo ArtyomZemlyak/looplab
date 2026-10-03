@@ -61,6 +61,17 @@ LoopLab's provider-cost ledger. The scoped token cannot launch a run or change
 global settings. The full `harness` contract and the live progress endpoint
 remain authoritative if enabled obligations require more steps than this sketch.
 
+The contract, handoff and progress bootstrap reads require a configuration this
+server build understands. HTTP 503 with `harness_config_unavailable` names a
+missing/unreadable/invalid `config.snapshot.json`; ask the operator to restore
+the original snapshot. `harness_config_incompatible` names an unsupported format
+or unknown setting; verify the server version and use a compatible build.
+Do not delete unknown settings to bypass obligations. The ordinary config view
+remains available for diagnostics when readable, but does not approve actions.
+After operator repair, explicitly refresh bootstrap reads. These refusals do not
+rewrite snapshots, retry commands or resume training; supported legacy and retired
+settings remain readable.
+
 ### Brief results in Assistant chat
 
 The Assistant transcript for the attached run shows a free completion brief

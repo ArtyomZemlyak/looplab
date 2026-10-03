@@ -3700,9 +3700,11 @@ class Settings(BaseSettings):
 #   * a KEY this build does not know (`unknown_snapshot_keys`: not a `Settings` field, not the
 #     document's own marker, not a setting this build RETIRED) is refused on the paths that SPEND
 #     the run's money — resume, finalize and its recovery, Replay — through
-#     `settings_from_snapshot(..., refuse_unknown=True)`, and read leniently everywhere else (the
+#     `settings_from_snapshot(..., refuse_unknown=True)`, and read leniently for diagnostics (the
 #     server's config view, the diagnostics that only need the recorded endpoint), where nothing
 #     depends on what is dropped and refusing would make a run unreadable;
+#   * effective harness bootstrap reads also refuse unknown keys: their obligation gates depend
+#     on those settings. The ordinary config view stays lenient (doc 72 §20.22);
 #   * so the number is bumped only for a FORMAT change or a changed MEANING of an existing key. A
 #     NEW key needs no bump from v3 on: every v3+ reader refuses it where it matters.
 #
@@ -4463,7 +4465,9 @@ def settings_from_snapshot(data: dict, *, refuse_unknown: bool = False) -> Setti
     `CONFIG_SNAPSHOT_SCHEMA` (review 2026-09-22, CORE-03): a key `unknown_snapshot_keys` names is
     refused rather than dropped. The format marker alone could not do this — it has to be bumped by
     hand, and 53 fields went in after v2 without one, so a v2 snapshot's number said nothing about
-    `llm_cost_limit`. Resume, finalize and Replay pass it; read-only callers leave it off."""
+    `llm_cost_limit`. Resume, finalize and Replay pass it; diagnostic config readers leave it off.
+    Effective harness bootstrap reads also pass it because their obligation gates depend on
+    these settings (doc 72 §20.22)."""
     found = config_snapshot_schema(data)
     if found > CONFIG_SNAPSHOT_SCHEMA:
         raise ConfigSnapshotVersionError(

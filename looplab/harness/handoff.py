@@ -11,7 +11,7 @@ from pathlib import Path
 from fastapi import HTTPException
 
 from looplab.adapters.tasks import load_task
-from looplab.core.config import read_config_snapshot
+from looplab.harness.snapshot_settings import read_harness_settings
 from looplab.core.redact import redact_persisted_identity, redact_persisted_text
 from looplab.engine.run_lifecycle import engine_liveness
 from looplab.events.eventstore import EventStore, log_integrity
@@ -31,7 +31,7 @@ def snapshot(rd: Path, expected_generation: str, *, credential_configured: bool)
     if not integrity["complete"]:
         raise HTTPException(409, "run event history is incomplete; inspect source health first")
     try:
-        settings = read_config_snapshot(rd / "config.snapshot.json")
+        settings = read_harness_settings(rd)
         task = load_task(rd / "task.snapshot.json", existing_run=True)
     except (OSError, ValueError, KeyError) as exc:
         raise HTTPException(503, "run task or settings snapshot is unavailable") from exc

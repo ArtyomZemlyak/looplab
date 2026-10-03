@@ -44,14 +44,15 @@
 описывают предыдущие проходы; их очереди и Git-срезы не заменяют свежий план.
 Диагностика подтверждённых Windows Git path limits — §20.20; это частичный O13.
 Отказы запуска/таймаута Git и exact recovery через Assistant/MCP — §20.21.
+Проверка совместимости config при bootstrap внешнего агента — §20.22.
 Главные оставшиеся препятствия: понять вывод, продолжить после потери клиента
 и получить проверенный код в нужном репозитории. Количество API и закрытые WP
 сами по себе не показывают, насколько легко пользователь проходит этот путь.
 
-| Что нужно сейчас | Состояние последнего прохода (§20.21) | Где остаток |
+| Что нужно сейчас | Состояние последнего прохода (§20.22) | Где остаток |
 |---|---|---|
 | Измерение и upstream протокол | Реализованы в opt-in scope; ограничения сохраняются | §18.4, §20 |
-| Доставка текущей ветки LoopLab | Исходный master `62f0d4d0a` доставлен; Linux CI `74ae1a600` зелёный, общий Linux/Windows вердикт текущего SHA ожидается | O1: общий Linux/Windows CI итогового SHA; §20.18–20.21 |
+| Доставка текущей ветки LoopLab | Исходный master `d5f91e106` доставлен; полный Linux/Windows/docs CI `74ae1a600` зелёный, общий вердикт текущего SHA ожидается | O1: общий Linux/Windows CI итогового SHA; §20.18–20.22 |
 | Сохранность всей работы | Inventory есть; решения по WIP и неясным патчам ещё OPEN | O2 |
 | Первый запуск и понятное продолжение | Есть handoff, typed reads и recovery receipts; цельный пользовательский путь ещё OPEN | O3/O4/O8/O9/O11/O13 |
 | Понятный результат | Измерение и сравнимость существенно исправлены; краткость и usability ещё OPEN | O5/O9/O10 |
@@ -1972,7 +1973,7 @@ GitHub CI и branch protection в этом проходе не проверял�
 
 | Очередь | OPEN | Следующий законченный результат | Что блокирует закрытие |
 |---|---|---|---|
-| 0A, P0 | O1 | Разобранный repair batch по красному CI: причины, исправления, guards и общий вердикт исправленного SHA | Linux CI `74ae1a600` прошёл; Windows и общий CI актуального опубликованного SHA остаются отдельными gates (§20.21) |
+| 0A, P0 | O1 | Разобранный repair batch по красному CI: причины, исправления, guards и общий вердикт исправленного SHA | Полный Linux/Windows/docs CI `74ae1a600` прошёл; общий CI актуального опубликованного SHA остаётся отдельным gate (§20.22) |
 | 0B, P0 | O2 | Сохранённая работа и обоснованный disposition каждого WIP/неясного range | Inventory не содержит резервных копий; срез §19.9 с 35 unmatched и 26 patch-equivalent HEAD требует разных проверок, merge commits и ignored артефакты ещё не разобраны |
 | 1, P1 | O4/O8/O11/O13 | Один понятный вход из Assistant в продолжение того же run; минимальный клиент сохраняет original request до write | Lost reply, новый процесс, два клиента, stale identity, pending checkpoint и unavailable source должны иметь определённый исход без случайного второго training |
 | 2, P1 | O3/O9/O10/O13 | Первый CPU результат из Assistant/external client с понятными setup, правами и RU/EN | Раздельная приёмка готового окружения и чистой установки; отдельный клиент получает явный язык, unknown runtime не объявляется текущим |
@@ -4265,3 +4266,60 @@ containment и golden/family replay — **329 passed**. Replay-first — **193 p
 OPEN; source/runtime/build identity, unknown snapshot schema, остановка клиента
 при живой тренировке и UI first-entry имеют собственные критерии приёмки.
 Нет переноса run, повторного обучения, takeover, платной модели или интеграции WIP.
+
+### 20.22 72.O13: совместимость bootstrap config и явное восстановление (2026-10-03)
+
+Исходное дерево — опубликованный `d5f91e106`. Полный Linux/Windows/docs CI
+`74ae1a600` завершился успешно; Linux/docs `62f0d4d0a` также зелёные.
+На последнем чтении Linux/docs исходного дерева зелёные, Windows ещё выполняется.
+Это подтверждение исходных интеграционных repairs, не закрытие O1 для нового SHA.
+
+**Анализ и baseline:** новые проверки дали **16 failed, 2 passed**. Повреждённый
+или отсутствующий config возвращал 500 либо общий отказ без причины. Неизвестный
+ключ snapshot от более новой сборки молча отбрасывался: progress мог вернуть 200
+и объявить обязательства по неполным settings. Диагностическое чтение config
+и эффективные gates требуют разных правил совместимости.
+
+**Исправление:** `harness/snapshot_settings.py::read_harness_settings` читает
+snapshot с `refuse_unknown=True`; общий reader используют contract, handoff и
+progress. Отсутствие/повреждение config даёт 503 `harness_config_unavailable`,
+неподдерживаемый формат или неизвестный ключ — 503 `harness_config_incompatible`.
+Оба ответа называют `config.snapshot.json` и действие оператора. Исключение,
+значения и неизвестные ключи не отражаются: они могут содержать секреты.
+Нельзя удалить новые настройки ради обхода обязательств; нужна совместимая
+сборка и сохранение исходного snapshot/archives. Обычный config GET остаётся
+диагностическим чтением и не разрешает действия.
+
+Legacy snapshot без schema marker, текущая схема и известные retired settings
+остаются поддержанными. После явного восстановления оригинального snapshot
+оператором нужны свежие bootstrap reads. Старый отказ не превращается в разрешение.
+Reader не меняет config, events или sidecars, не повторяет команды, не запускает
+обучение и не добавляет ожидание. Контракт успешного ответа не изменён.
+
+**Проверено:** **39 passed** в snapshot/handoff/progress/idle наборе. Матрица
+проверяет три bootstrap endpoint на invalid JSON, неверном типе, отсутствии,
+будущем формате и неизвестном ключе; сравнивает все run source bytes. Typed MCP
+через HTTP подтверждает отказ connection/progress, диагностический config 200
+и явное восстановление со свежим чтением. В fixture используются различные
+operator/scoped credentials; production границы полномочий не расширены.
+Harness/MCP/config/import/layer/private-seam/containment guards — **1522 passed**;
+replay-first — **193 passed**. Собственная попытка добавить legacy alias нового
+модуля была поймана layout guard и удалена: canonical harness package не требует
+новой flat alias. Guard и namespace compatibility не ослаблены.
+
+Два реальных private CPU/stdio MCP сценария завершились успешно: потерянный ответ
+принятой команды с invalid JSON и неполным progress; остановка engine и restart UI.
+В обоих scorer неизменён, score executions ровно два, `inspect` и replay прошли;
+exact recovery/reconnect не запустили повторную оценку. Это проверка живого клиента
+на поддерживаемом snapshot. Повреждённый config проверялся HTTP/typed tests выше,
+а не отдельным live smoke. `quiet_hold_seconds=0`: длительная тишина здесь не
+доказывается. Model judgment и human UX acceptance не выполнялись.
+Документация/entry points/merge history, архитектурная схема, golden/family replay
+и pin budgets — **63 passed**. Строгая сборка MkDocs прошла.
+[Selectors, среда, CI срез и краткие CPU/MCP receipts](assets/72-repair-20-22/validation.json).
+
+**Граница:** O13 остаётся OPEN для целого runtime/build/server/client контекста.
+Этот блок охватывает три bootstrap reads; остальные semantic reads/writes не
+объявляются мигрированными на новый reader. Остальные O1–O14, WIP disposition,
+UI first-entry и доставка результата в owner repo сохраняют критерии приёмки.
+Defaults, prompt bytes, schema version и ownership модели не менялись.

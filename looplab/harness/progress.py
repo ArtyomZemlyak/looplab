@@ -13,7 +13,7 @@ from pathlib import Path
 
 from fastapi import HTTPException
 
-from looplab.core.config import read_config_snapshot
+from looplab.harness.snapshot_settings import read_harness_settings
 from looplab.events.eventstore import EventStore, log_integrity
 from looplab.events.eval_occupancy import withheld_lifecycles
 from looplab.events.replay import fold
@@ -76,7 +76,7 @@ def snapshot(rd: Path, expected_generation: str, *, activity_reader,
     generation = run_generation_token(events)
     if not generation or generation != expected_generation.lower():
         raise HTTPException(409, "run generation changed")
-    settings = read_config_snapshot(rd / "config.snapshot.json")
+    settings = read_harness_settings(rd)
     if not settings.external_harness:
         raise HTTPException(409, "this run uses the built-in agent cycle")
     state = fold(events)
