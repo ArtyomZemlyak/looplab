@@ -2038,7 +2038,8 @@ advisory Trust в чатовых итогах узла и сравнениях �
 основная оценка и разброс повторов в чатовых итогах — §20.11;
 причины отказа сравнения и ссылки на исходные попытки — §20.12;
 свежесть Metrics и проверка попытки в detail response — §20.13;
-generation fence для графиков метрик — §20.14.
+generation fence для графиков метрик — §20.14;
+безопасное чтение серий и неизвестных repeat counts — §20.15.
 Полная приёмка единого вывода во всех видах остаётся OPEN.
 
 #### 72.O6 — P1 / OPEN: результат repo-задачи, который можно взять и воспроизвести
@@ -3356,3 +3357,54 @@ total target **618 KiB** — **24 B**. Первые builds превышали to
 **O5 остаётся OPEN:** это проверка identity и freshness графиков, а не человеческая
 приёмка общего mixed-base/retarget/repeat маршрута по §19.4. Browser приёмка,
 живое ML обучение и полностью зелёный product suite этим increment не заявляются.
+
+### 20.15 72.O5: неизвестные повторы и повреждённые графики не становятся результатом (2026-10-03)
+
+**Найдено:** отдельный блок Metrics `mean ± std over N seeds` подставлял число
+per-seed строк, если aggregate не содержал recorded count. Верхний ExperimentResult
+при этом правильно сообщал, что несколько успешных повторов не установлены.
+Получались два противоречащих вывода на одной вкладке; malformed count также
+мог печататься как число повторов.
+
+Curve reader проверял только object envelope, но принимал string/null/object
+вместо point array и нечисловые points. Открытие группы могло вызвать render error
+или получить ложные координаты из JS coercion. Даже корректная серия с prefix
+`constructor`/`__proto__`/`toString`/`hasOwnProperty` ломала группировку: ordinary
+object dictionary находил inherited property вместо массива и вызывал `.push`.
+
+**Сделано:** убран дублирующий aggregate block; общий ExperimentResult уже
+показывает mean, recorded count/reliability и recorded spread с явным unknown.
+Индивидуальные измерения остаются доступными, но не восстанавливают успешный
+count. Reader принимает только arrays с finite numeric step/value в каждой
+точке. Invalid response становится unavailable; прежние curves сохраняются
+только как явно stale в том же identity scope. Terminal Retry остаётся явным.
+Группы используют dictionary без prototype, сохраняя реальные имена метрик.
+Evaluation scores, engine selection, confirmation fold, API и cadence не меняются.
+
+**Проверено:** три новых mounted сценария были красными до исправления:
+`over 2 seeds` при missing count, `.push is not a function` на корректном имени
+метрики, принятие string series. После исправления они прошли. Checked missing,
+string, boolean, negative, fractional и nonfinite counts; один repeat с std=0;
+recorded count=3/std=0.1; доступность индивидуальных seed rows. Для графиков
+проверены null/object/string series, null point и нечисловые step/value, explicit
+Retry и восстановление на zero/negative finite values. Все пять групп с именами,
+включая prototype property names, раскрываются с правильными SVG. Прежний
+resource regression теперь дополнительно проверяет stale last-good на malformed
+HTTP 200; транспортный отказ, очередь, late replies и attempt/generation fences
+сохраняют отдельные проверки.
+
+Replay-first — **193 passed**; selected Python result/parent/repeat, confirmation,
+metrics attempt/generation и shared read contracts — **59 passed, 1 skipped**;
+optional TensorBoard fixture skipped, потому что в этой venv не установлен torch.
+UI result/source/retarget, Inspector, live route, chat repeats/parents, chart
+accessibility и resource contracts — **76 passed**. Staging build и bundle gate
+прошли с прежними ceilings: JS gzip **632 808 → 632 785 B** (**−23 B**), CSS
+**59 578 B** без изменения; initial shell **83 041 B**, review DAG **268 515 B**,
+Concepts **257 924 B**, total headroom **47 B**. Quickstart и external guide
+обновлены в той же доработке.
+Документационные/API/entry-point/merge, layer и doc-surface contracts —
+**54 passed**; strict MkDocs и `git diff --check` прошли.
+
+**O5 остаётся OPEN:** воспроизведение этих багов и автоматические регрессии не
+заменяют human acceptance общего mixed-base/retarget/repeat пути по §19.4.
+Реальное ML обучение и browser приёмка этим increment не заявляются.

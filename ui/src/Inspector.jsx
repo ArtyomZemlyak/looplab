@@ -2766,6 +2766,8 @@ function MetricCurveResource({ runId, nodeId, attempt = 0, status, expectedGener
       if (!d?.metrics || typeof d.metrics !== 'object' || Array.isArray(d.metrics)
           || !traceGenerationMatches(d, expectedGeneration)) throw 0
       if (d.node_id !== nodeId || d.attempt !== metricAttempt) throw 0
+      if (!Object.values(d.metrics).every(points => Array.isArray(points)
+          && points.every(p => Number.isFinite(p?.step) && Number.isFinite(p?.value)))) throw 0
       if (alive()) setResource(d.metrics)
     }).catch(() => {
       if (alive()) setResource(r => r
@@ -3016,11 +3018,6 @@ export function Metrics({ n: detailNode, detail, state, runId, expectedGeneratio
         which is coarser than the objective. Two nodes equal on a reconstructed row are not known to
         be equal.
       </div>)}
-    {n.confirmed_mean != null && <div className="kv confirmed-metric">
-      {/* Same rule as the `|| 'Multiple'` above: `||` falls through on a real 0 and would quietly
-          substitute the sample length for a recorded count of zero — a different number presented as
-          the recorded one. Only an ABSENT count may fall back. */}
-      <KV k="confirmation mean ± std" v={`${fmt(n.confirmed_mean)} ± ${fmt(n.confirmed_std)} over ${typeof n.confirmed_seeds === 'number' ? n.confirmed_seeds : vals.length} seeds`} /></div>}
     {vals.length > 0 && <>
       <div className="section-h">Per-seed confirmation</div>
       <DataTable caption="Per-seed confirmation metrics" card={false}><table className="tbl"><thead><tr><th>seed</th><th>metric</th></tr></thead>

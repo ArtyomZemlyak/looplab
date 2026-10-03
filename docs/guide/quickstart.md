@@ -106,6 +106,8 @@ and LoopLab's internal research roles. For setup from a fresh checkout, use
    **Run result** shows the evaluation score beside a recorded confirmation mean.
    Chat completion briefs and the result card show recorded **Spread (std)**;
    zero is a value, while **Spread not recorded** means missing evidence.
+   Repeat counts come from the recorded result, never the number of individual
+   seed rows. Missing counts remain unknown, even when those rows are available.
    A better mean can coexist with a worse evaluation score. A single repeat or
    zero spread does not establish reliability or remove Trust warnings.
    **Metrics** shows the same result interpretation and code-base receipt as
@@ -116,6 +118,8 @@ and LoopLab's internal research roles. For setup from a fresh checkout, use
    current-node selection can still follow a repair that is ahead of the state stream.
    Metric curves also check the run generation and attempt. A replaced run clears
    old curves; unavailable evidence offers **Retry**, never an invented empty chart.
+   Malformed series or nonnumeric points are unavailable evidence; they cannot
+   become zero values or break the Metrics tab.
    The final run brief and **Run result** card retain warnings for the selected
    attempt, including soft signals. A warning from an earlier attempt or another
    experiment is not a warning about that selected result. Read **Trust** for

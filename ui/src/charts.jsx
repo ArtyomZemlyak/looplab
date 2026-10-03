@@ -667,7 +667,8 @@ export function MetricLines({ series, cols = 2 }) {
   // Group by the tag prefix before the first '/' (TensorBoard convention: train/loss, val/recall@100,
   // …); a tag with no slash falls into "other". Each group is an independent COLLAPSIBLE section so a
   // run that logs dozens of scalars isn't one endless wall of charts.
-  const groups = {}
+  // Prefixes come from logged tags; even constructor or __proto__ is a real group name.
+  const groups = Object.create(null)
   for (const t of tags) {
     const i = t.indexOf('/')
     const g = i > 0 ? t.slice(0, i) : 'other'

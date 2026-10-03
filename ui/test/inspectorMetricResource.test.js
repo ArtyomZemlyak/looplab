@@ -83,7 +83,8 @@ test('metric curves distinguish loading, empty, failed, stale, and serialize ref
     assert.doesNotMatch(document.body.textContent, /old.*1 metric/)
 
     await poll()
-    await reply(requests[5], { detail: 'offline' }, 503)
+    await reply(requests[5], { node_id: 1, attempt: 0,
+      metrics: { 'broken/loss': [{ step: 1, value: true }] } })
     assert.match(document.querySelector('[role="status"]')?.textContent || '', /Last loaded metric curves; refresh failed.*Retry/)
     assert.match(document.body.textContent, /eval.*1 metric/)
 

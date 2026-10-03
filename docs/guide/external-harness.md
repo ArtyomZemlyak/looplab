@@ -152,6 +152,10 @@ External agents should add a short interpretation after each completion:
    generation before and after reading sidecars, even for legacy unfenced reads.
    Replacing a run clears settled curves; invalid or unavailable replies require
    explicit Retry for a terminal node, rather than implying no metrics were logged.
+   Each series must be an array with finite numeric `step` and `value` fields.
+   A malformed series refuses the page, retaining explicitly stale prior curves
+   only within the same identity. Individual seed rows never fill in a missing
+   successful-repeat count; the result interpretation shows recorded count/spread.
 2. Copy the item's `id` and `evidence_token`. Submit through MCP `api_request`:
 
    ```json
