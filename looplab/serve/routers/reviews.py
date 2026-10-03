@@ -14,6 +14,7 @@ from looplab.core.node_evidence import node_attempt
 from looplab.serve.http import (
     comment_cursor_error, comment_filter_invalid, generation_conflict, refusal)
 from looplab.serve.metrics_adapters import fenced_node_metrics
+from looplab.serve.node_comparison import public_parent_comparison
 from looplab.events.comment_projection import (
     CommentCursorError, comments_page, project_comments)
 from looplab.events.replay import fold
@@ -596,6 +597,7 @@ def build_router(srv) -> APIRouter:
                                     if seq is not None else "no such node")
             dumped = node.model_dump(mode="json")
             out = {key: dumped[key] for key in _REVIEW_NODE_KEYS if key in dumped}
+            out["parent_comparison"] = public_parent_comparison(node)
             # Keep the same short failure summary already present in the light state projection; the
             # unbounded captured process output remains excluded below.
             # Redact BEFORE truncating: a secret straddling byte 160 would otherwise have its tail

@@ -2029,7 +2029,8 @@ Events не выдаются за хранилище отдельной commenta
 **Выполненные increments:** пагинация текущих итогов и интерпретаций в чате — §20.2;
 общие подписи типа измерения/повторов и eligibility отчёта — §20.3;
 сопоставимые primary-score rollups и покрытие сравнений — §20.4;
-нейтральные подписи графиков и общий вывод Overview/Report — §20.5.
+нейтральные подписи графиков и общий вывод Overview/Report — §20.5;
+сравнение и свежесть evidence в Inspector — §20.6.
 Полная приёмка единого вывода во всех видах остаётся OPEN.
 
 #### 72.O6 — P1 / OPEN: результат repo-задачи, который можно взять и воспроизвести
@@ -2808,3 +2809,78 @@ owner exclusions, cycle checks и lazy reachability gates сохранены.
 mixed-base/retarget/repeats и пользовательское объяснение своими словами по
 §19.4 ещё требуют приёмки. Следующий шаг — сверить Experiment result в Inspector
 с общим comparison helper, особенно после reset родителя и смены записанной базы.
+
+### 20.6 72.O5: Inspector сравнивает текущие подтверждённые пары (2026-10-03)
+
+**Найдено и исправлено:** Experiment result называл условия сравнения совпавшими
+по comparability keys, не проверяя записанную attempt родителя, code base,
+feasibility, Trust gate, incomplete source и известное направление. После reset
+родителя он мог объявить новую оценку родителя подходящей для старого ребёнка.
+Отдельная ветка отображала «Selected by the engine» даже для исключённого или
+неизвестно-допустимого узла. Некорректный seed count мог стать текстом об успешных
+повторах.
+
+Inspector теперь использует общие `parentScoreDifference`/`scoreDifference` и
+eligibility, как Report. Положительный вывод требует единственного записанного
+родителя, его точной текущей attempt, подходящих базы/условий, текущих допустимых
+узлов и основной конечной оценки. Текст объясняет better/worse/tie по **primary
+score**; confirmation mean в эту разницу не подставляется. Для нескольких
+родителей единственная baseline не выдумывается. Parent list явно показывает
+**current evaluation scores**, которые сами по себе не поддерживают сравнение.
+Устаревшая/неизвестная attempt, разные условия, retarget, неполный event source
+и другие недостающие доказательства получают объяснение вместо «matching».
+
+Детали могут отставать от state или опережать его. Отдельный Experiment result
+не заимствует текущую ссылку родителя для отсутствующего detail receipt;
+разные id/attempt/status/primary score/parent list не поддерживают selection
+badge или сравнение. Для comparison нужны согласованные доказательства detail
+и current state. В реальном Inspector, если attempt/status совпадают, результат
+и соседняя Base revision берутся **целиком** из текущего state. Так обновляются
+primary score, confirmation, provenance и база, пока terminal detail остаётся
+закэшированным; полей разных попыток не склеиваем и новый detail polling не
+добавляем. Если detail относится к другой lifecycle/status, его измерение
+не превращается в доказанное сравнение с текущим state.
+
+Trust-исключение явно подписано, неизвестная feasibility не получает winner
+badge. Confirmation mean отделён от evaluation score и использует общий словарь
+повторов; ноль, один, строка, дробный/отрицательный/неизвестный count не
+подтверждают несколько успешных повторов. Неизвестные parent references не
+становятся утверждением об отсутствии родителей. Metrics/Trust navigation
+сохранена, команды и вызовы модели не добавлены. Вид остаётся английским.
+
+**Wire integration:** owner и historical `/nodes/{nid}` теперь возвращают тот же
+bounded `parent_comparison` v1, что `/state`; building — `null`. Evidence-scoped
+review detail получает этот DTO после прежней проверки capability. Internal
+`parent_generations` остаётся закрытым, summary-only review по-прежнему получает
+403 на detail. HTTP historical read требует generation token; тест использует
+существующий fence, не обходит его. Reset не освежает старую parent reference.
+
+**Проверено:** min/max, primary tie, misleading mean, same/different/missing base,
+reset и неверная версия/отсутствие ссылки, multi-parent, неизвестное направление,
+retarget, incomplete source, failed/aborted/непригодный parent и Trust exclusions
+обеих сторон. Live Inspector mount загружает detail один раз, затем parent reset
+убирает сравнение, а state updates меняют score/mean/base и Trust badge без
+дополнительного detail request. Все запросы GET. Owner/historical/review HTTP
+проверяют общий DTO и неизменность reference после reset, включая сохранение
+summary-only отказа. Python/UI используют общий fixture поля.
+
+**Свежие проверки:** replay-first — **193 passed**; public parent и review security
+contracts — **27 passed**; Inspector/resource/trace, Report, graph/result/chat
+regressions, accessibility и bundle contracts — **174 UI tests passed**;
+documentation/merge contracts — **30 passed**. Strict MkDocs, staging build,
+bundle gate и `git diff --check` прошли. Полный product suite, живое обучение,
+проверка человеком в браузере и remote CI не заявляются.
+
+JS gzip **630 589 → 630 953 B** (**+364 B**); CSS **59 578 B** без изменения.
+Initial shell — **83 045 B JS gzip**, review DAG — **268 219 B** (+9 B).
+Только total JS size target переизмерен до **616.5 KiB** (запас 343 B);
+route/reachability/cycle gates и CSS ceiling сохранены. Изменения локальные,
+merge/push в master этим increment не выполнялся.
+
+**O5 остаётся OPEN:** в `serve/result_notices.py` parent comparability пока строится
+по input keys без отдельной проверки base и eligibility родителя. Chat model
+смотрит constraints/Trust ребёнка; это не доказательство пригодности родителя.
+Следующий шаг — проверить и согласовать node completion briefs с этими границами,
+включая retarget и несколько родителей, из которых доступен лишь один. Полная
+mixed-base/retarget/repeat приёмка и объяснение пользователем своими словами
+по §19.4 также не завершены.

@@ -604,13 +604,17 @@ The normal control cycle is:
    `harness-progress` and relevant events/artifacts.
    Search `operations` for the exact read routes. Review the goal, evaluation
    command, allowed edit paths, parent generations, budget and prior results.
-   Public state nodes include `parent_comparison`: for a single recorded parent,
+   Public state nodes and node detail responses include `parent_comparison`: for a single recorded parent,
    `{"version": 1, "node_id": ID, "attempt": ATTEMPT}`, otherwise `null`.
    This is the parent's attempt recorded when the child was created, not its current
    attempt. Check it against the current parent's `attempt` before interpreting a
    parent-score difference; reset does not refresh the child's reference. The full
    internal `parent_generations` map remains private. A matching reference alone does
    not establish matching evaluation conditions or grant permission to submit a candidate.
+   The evidence-scoped reviewer node route uses the same DTO; summary-only access still
+   refuses node detail. Building nodes have no comparison receipt. For live Inspector reads,
+   details can lag or lead state: comparison requires coherent current result evidence,
+   not merely the presence of a parent score or matching input keys.
 2. Decide whether a proposal, stage split and plan help. The operator's declared
    `cmd.stages` wins. For a single command, an agent may put preceding stages in
    `looplab_stages.json` only if `edit_surface` allows that JSON path; LoopLab appends

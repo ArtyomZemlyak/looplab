@@ -88,6 +88,10 @@ and LoopLab's internal research roles. For setup from a fresh checkout, use
    **Read Report** opens its evidence. Trajectory and **Numeric frontier changes** label
    recorded measurement types; their arrows show numeric changes, not proven improvements.
    **View data** and **Export CSV** retain the recorded values and measurement labels.
+   **Experiment result** compares primary scores only when the recorded parent attempt,
+   code base, evaluation conditions and eligibility support it. A parent's current score
+   alone does not establish a comparison. Reset or missing evidence explains why comparison
+   is unavailable; repeat means and Trust exclusions are labelled separately.
 
 ## Reuse a useful code change
 

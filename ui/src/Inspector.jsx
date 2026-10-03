@@ -1043,6 +1043,10 @@ function DerivedMemory({ n, state, runId }) {
 
 function Overview({ n, state, runId, onToast, draftStore, expectedGeneration, onOpenCard,
   evalStages = null, onTab }) {
+  // Terminal details do not poll. Current state still updates confirmation/provenance; use its
+  // whole result record only for the same lifecycle/status, never splice fields across attempts.
+  const summary = state.nodes?.[n.id]
+  const resultNode = summary?.attempt === n.attempt && summary?.status === n.status ? summary : n
   const p = n.idea?.params || {}
   const uses = mergeSummary(n, state.nodes || {}, state)   // E3: for merges, which technique each parent fused
   const chg = nodeChip(n, state.nodes || {}, state)        // same chip as the card (sweep-aware; '' for merges)
@@ -1064,8 +1068,8 @@ function Overview({ n, state, runId, onToast, draftStore, expectedGeneration, on
     return note ? <span className="muted idea-attribution"> — {note}</span> : ''
   }
   return <>
-    <ExperimentResult node={n} state={state} onTab={onTab} />
-    <BaseRevision node={n} state={state} />
+    <ExperimentResult node={resultNode} state={state} onTab={onTab} />
+    <BaseRevision node={resultNode} state={state} />
     <div className="kv">
       <KV k="node" v={`#${n.id}`} />
       <KV k="operator" v={n.operator} />

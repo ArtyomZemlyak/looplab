@@ -151,7 +151,11 @@ export const DEFAULT_BUDGETS = Object.freeze({
     // 2026-10-03 doc 72 §20.4: 629,716 -> 630,264 B (+548 B) buys comparison coverage
     // and shared primary-score/base/parent-attempt guards. Initial shell is 83,036 B;
     // CSS stays 59,598 B. 616 KiB leaves 520 B; structural exclusions remain enforced.
-    js: { gzip: 616 * KIB },
+    // 2026-10-03 doc 72 §20.6: 630,589 -> 630,953 B (+364 B) buys Inspector's
+    // attempt/base/Trust comparisons and current result projection without terminal detail polls.
+    // Initial shell is 83,045 B; CSS stays 59,578 B. 616.5 KiB leaves 343 B;
+    // every route, cycle and forbidden-reachability ceiling is unchanged.
+    js: { gzip: 616.5 * KIB },
     css: { gzip: 58.25 * KIB },
   },
   individual: {
