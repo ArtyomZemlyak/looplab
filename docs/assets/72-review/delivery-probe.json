@@ -1,0 +1,76 @@
+{
+  "review_head": "bd54ac85214167bbaa35d9238a27148d82c8f013",
+  "remote_master": "cdebb964c0a7ca5df73ffaabc1e97e7cbe4015d8",
+  "run": "demo",
+  "generation": "b167c777c5cdbeb512f9157fbe42fe88e5f140955b6c9df1d7cbeaeabccaa05b",
+  "new_training_executions": 0,
+  "git_export_trees": {
+    "node-0": [
+      "recipe.env",
+      "train.py"
+    ],
+    "node-1": [
+      "recipe.env"
+    ]
+  },
+  "git_export_comparison": "M\trecipe.env\nD\ttrain.py",
+  "evaluated_node_1_files": [
+    ".looplab-manifest",
+    ".looplab-metrics-attempt.json",
+    "README.md",
+    "predictions.json",
+    "recipe.env",
+    "score.log",
+    "score.py",
+    "train.log",
+    "train.py"
+  ],
+  "bundle_seed_archives": {
+    "recorded_receipts": 8,
+    "exported_receipts": 8,
+    "unavailable_receipts": 0,
+    "archives": 2
+  },
+  "bundle_event_integrity": {
+    "EventsBefore": "E5667120444F81CC5F48D0B7B4001A38C65D8FDEF84E902CB6C6DC117F324BBA",
+    "EventsAfter": "E5667120444F81CC5F48D0B7B4001A38C65D8FDEF84E902CB6C6DC117F324BBA",
+    "Unchanged": true
+  },
+  "upstream_assistant_reads": [
+    {
+      "options": {},
+      "is_error": false,
+      "text_characters": 9842,
+      "text_json_complete": true,
+      "text_bounded_notice": false,
+      "structured_characters": 9842,
+      "structured_has_instruction": true,
+      "text_has_instruction": true,
+      "shared_model_cap": 4000,
+      "model_characters": 4000,
+      "model_has_instruction": false,
+      "model_truncated_notice": true
+    },
+    {
+      "options": {
+        "limit": 1,
+        "candidate_limit": 1,
+        "source_node_id": 0
+      },
+      "is_error": false,
+      "text_characters": 2049,
+      "text_json_complete": true,
+      "text_bounded_notice": false,
+      "structured_characters": 2049,
+      "structured_has_instruction": true,
+      "text_has_instruction": true,
+      "shared_model_cap": 4000,
+      "model_characters": 2049,
+      "model_has_instruction": true,
+      "model_truncated_notice": false
+    }
+  ],
+  "events_before": "e5667120444f81cc5f48d0b7b4001a38c65d8fdef84e902cb6c6dc117f324bba",
+  "events_after": "e5667120444f81cc5f48d0b7b4001a38c65d8fdef84e902cb6c6dc117f324bba",
+  "events_unchanged_by_upstream_reads": true
+}
