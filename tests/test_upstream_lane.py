@@ -88,7 +88,19 @@ def fixture(tmp_path, *, base_train=TRAIN, source_files=None, upstream_policy=No
     return lane, store, generation, proposal
 
 
-def test_real_sgd_gate_advance_overlay_rebase_and_exact_retries(tmp_path):
+def test_real_sgd_gate_advance_overlay_rebase_and_exact_retries(tmp_path, monkeypatch):
+    # The entire transaction must observe the engine's single fold seam, including
+    # protected gate execution and workspace rebasing. A direct replay import bypasses it.
+    from looplab.engine import orchestrator
+    real_fold, callers = orchestrator.fold, set()
+
+    def observed_fold(events):
+        frame = sys._getframe(1)
+        if frame.f_code.co_name == "engine_fold":
+            callers.add(frame.f_back.f_globals["__name__"])
+        return real_fold(events)
+
+    monkeypatch.setattr(orchestrator, "fold", observed_fold)
     lane, store, generation, body = fixture(tmp_path)
     original_score = fold(store.read_all()).nodes[0].metric
     proposed = lane.propose(body)
@@ -142,6 +154,8 @@ def test_real_sgd_gate_advance_overlay_rebase_and_exact_retries(tmp_path):
     # Re-materializing the same attempt does not resurrect the removed runner.
     again = seeder.materialize(fold(store.read_all()).nodes[2], lane.rd / "nodes" / "node_2")
     assert again["digest"] == actual["digest"]
+    assert {"looplab.engine.upstream", "looplab.engine.upstream_gate",
+            "looplab.engine.upstream_state", "looplab.engine.upstream_workspace"} <= callers
 
 
 @pytest.mark.parametrize("fault", ["scorer", "recipe", "nomination", "critic"])

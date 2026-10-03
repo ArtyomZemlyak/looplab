@@ -14,6 +14,8 @@ from __future__ import annotations
 import re
 from pathlib import Path
 
+import pytest
+
 from looplab.adapters.tasks import TASK_OPTIONAL_HOOKS
 
 _PKG = Path(__file__).resolve().parents[1] / "looplab"
@@ -107,6 +109,25 @@ def test_every_registered_hook_has_a_consumer():
     assert not orphaned, (
         f"registered TaskAdapter hook(s) {orphaned} have NO consumer probe/call left — a rename "
         "or removal on the consumer side; update TASK_OPTIONAL_HOOKS + the Protocol docstring.")
+
+
+@pytest.mark.parametrize("hook", [None, "callable", "noncallable"])
+def test_run_binding_is_optional_and_precedes_repo_spec(tmp_path, monkeypatch, hook):
+    from looplab.adapters.toytask import ToyTask
+    from tests.factories import make_engine
+
+    bound = []
+    if hook is not None:
+        value = (lambda self, rd: bound.append(rd)) if hook == "callable" else "not callable"
+        monkeypatch.setattr(ToyTask, "bind_run_directory", value, raising=False)
+
+    def repo_spec(self):
+        assert bool(bound) == (hook == "callable")
+        return {}
+
+    monkeypatch.setattr(ToyTask, "repo_spec", repo_spec, raising=False)
+    engine = make_engine(tmp_path / "run")
+    assert bound == ([engine.run_dir] if hook == "callable" else [])
 
 
 def test_shipped_adapters_only_implement_registered_hooks():

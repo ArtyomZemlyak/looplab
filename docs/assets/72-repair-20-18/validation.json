@@ -1,0 +1,64 @@
+{
+  "observed_at_utc": "2026-10-03T08:36:50.964731+00:00",
+  "source_sha": "ba946a67149c489a3a129931b003ca23a84a8783",
+  "platform": "win32",
+  "python": "3.11.14",
+  "git": "git version 2.52.0.windows.1",
+  "pytest_options": [
+    "-o",
+    "addopts=",
+    "-q",
+    "--basetemp=<existing private parent/new directory>"
+  ],
+  "replay_first": {
+    "selector": "tests/test_events_replay.py",
+    "result": "193 passed in 3.60s"
+  },
+  "final_guards": {
+    "selectors": [
+      "tests/test_upstream_worktrees.py",
+      "tests/test_engine_fold_seam.py",
+      "tests/test_memory_stores.py",
+      "tests/test_package_layout.py",
+      "tests/test_serve_module_seams.py",
+      "tests/test_task_adapter_contract.py",
+      "tests/test_refusal_vocabulary.py",
+      "tests/test_control_registry.py",
+      "tests/test_agent_factory_split.py",
+      "tests/test_run_proposal_schema.py"
+    ],
+    "result": "1004 passed, 1 skipped in 29.89s"
+  },
+  "layers_containment_and_golden": {
+    "selectors": [
+      "tests/test_package_layering.py",
+      "tests/test_cross_package_private_seams.py",
+      "tests/test_agents_search_direction.py",
+      "tests/test_containment_census.py",
+      "tests/test_golden_replay.py",
+      "tests/test_replay_families.py"
+    ],
+    "result": "104 passed in 39.72s"
+  },
+  "broad_windows_probe": {
+    "selectors": [
+      "tests/test_upstream*.py",
+      "tests/test_result_notices.py",
+      "tests/test_external_attention.py"
+    ],
+    "result": "1 failed, 209 passed in 340.63s",
+    "remaining_failure": "An added excessive-depth worktree probe reached Git for Windows $GIT_DIR too big. This is an O13 remainder; arbitrary cwd/worktree depth is not supported by the ref-lock fix.",
+    "final_regression": "Replaced that overbroad added probe with a digest ref-lock and non-persisted config guard, included in final_guards. All 209 existing cases passed, including measured CPU SGD, retries, protected scoring, base advancement and overlay rebasing."
+  },
+  "documentation_and_diagram": {
+    "selectors": [
+      "tests/test_documentation_contracts.py",
+      "tests/test_documented_entry_points_resolve.py",
+      "tests/test_merge_history_integrity.py",
+      "tests/test_doc_surface_budgets.py",
+      "tests/test_architecture_diagram_geometry.py"
+    ],
+    "result": "45 passed in 12.23s"
+  },
+  "scope": "Selected local validation on the repair tree. No full-suite/current-SHA CI verdict, paid model, browser acceptance, clean install or other-worktree integration."
+}

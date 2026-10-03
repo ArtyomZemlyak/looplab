@@ -447,7 +447,9 @@ def test_the_five_control_tables_are_declared_in_exactly_one_module():
     """The tables ARE the completeness mechanism (doc 25 SC-02): each is asserted equal to
     `CONTROL_EVENTS` at import. A second copy anywhere — including a `CONTROL_DATA_FIELDS = dict(...)`
     compat mapping left behind in the old module — is a copy a caller can read while the assertions
-    guard the other one, which is exactly the drift they exist to stop."""
+    guard the other one, which is exactly the drift they exist to stop. The UI-free protocol owns
+    wire fields shared with MCP; validation imports that SAME object and owns the behaviour tables.
+    """
     wanted = {"CONTROL_DATA_FIELDS", "_CONTROL_NORMALIZERS", "_CONTROL_PRECONDITIONS",
               "_CONTROL_DECISIONS", "_CONTROL_POLICIES", "CONTROL_SPECS"}
     owners: dict[str, list[str]] = {name: [] for name in wanted}
@@ -458,7 +460,11 @@ def test_the_five_control_tables_are_declared_in_exactly_one_module():
             for target in targets:
                 if isinstance(target, ast.Name) and target.id in wanted:
                     owners[target.id].append(path.relative_to(path.parents[2]).as_posix())
-    assert owners == {name: ["looplab/serve/control_validation.py"] for name in wanted}, owners
+    expected = {name: ["looplab/serve/control_validation.py"] for name in wanted}
+    expected["CONTROL_DATA_FIELDS"] = ["looplab/serve/protocol.py"]
+    assert owners == expected, owners
+    from looplab.serve import control_validation, protocol
+    assert control_validation.CONTROL_DATA_FIELDS is protocol.CONTROL_DATA_FIELDS
 
 
 def test_one_patch_of_the_gpu_envelope_is_observed_on_both_sides_of_the_split(tmp_path, monkeypatch):

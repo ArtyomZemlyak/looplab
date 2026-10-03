@@ -185,7 +185,7 @@ External agents should add a short interpretation after each completion:
 
 This path accepts the scoped harness token on external runs without giving it
 owner chat-log/model-workflow access. It stores bounded commentary beside the
-run, never executes actions, and does not fulfill reports or checkpoints. It
+run in `result_commentary.jsonl`, never executes actions, and does not fulfill reports or checkpoints. It
 adds **no admission/finalization gate or hidden engine wait**. If the agent
 disconnects, automatic measured briefs remain readable. The chat initially
 shows the latest three briefs; earlier loaded results can be expanded. **Earlier**,

@@ -15,7 +15,8 @@ from looplab.core.node_evidence import read_bounded_regular_file
 from looplab.core.pathsafe import contained_member, is_reparse
 from looplab.engine.seed_base import normalize_seed_base, pinned_editables, selected_seed_base, seed_pinned_workspace
 from looplab.engine.upstream_state import UpstreamRefusal, active_base, node_signature, source_node
-from looplab.events.replay import event_generation_binds, fold
+from looplab.events.replay import event_generation_binds
+from looplab.engine.shared import engine_fold as fold
 
 
 def owned_path(rd, relative):
@@ -71,7 +72,10 @@ def git_at(root, *argv):
     # or change the archived bytes. Keep the credential scrubber and identities.
     env = {k: v for k, v in git_subprocess_env().items() if not k.startswith("GIT_CONFIG_")}
     env.update(GIT_CONFIG_NOSYSTEM="1", GIT_CONFIG_GLOBAL=os.devnull, GIT_CONFIG_SYSTEM=os.devnull)
-    result = subprocess.run(["git", "-c", "commit.gpgsign=false", "-c", "core.autocrlf=false",
+    # Run-owned proposal paths plus a full digest ref can exceed Windows MAX_PATH.
+    # Enable long paths per invocation, without changing owner/global Git config.
+    result = subprocess.run(["git", "-c", "core.longpaths=true",
+                             "-c", "commit.gpgsign=false", "-c", "core.autocrlf=false",
                              "-c", "core.fsmonitor=false", "-c", "core.hooksPath=" + os.devnull,
                              "-c", "core.attributesFile=" + os.devnull,
                              "-C", str(root), *argv], env=env,

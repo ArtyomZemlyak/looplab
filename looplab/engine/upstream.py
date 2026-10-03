@@ -24,7 +24,7 @@ from looplab.engine.upstream_spec import normalize_request
 from looplab.engine.upstream_state import active_base, claimed_gate_executions, digest, events_for, node_signature, source_node, upstream_candidates
 from looplab.engine.upstream_workspace import checked_overlay, git_at, maintainer_worktree, snapshot_worktree, verify_approved_candidate, write_overlay, owned_path
 from looplab.events.eventstore import EventStore, interprocess_lock
-from looplab.events.replay import fold
+from looplab.engine.shared import engine_fold as fold
 from looplab.events.run_generation import run_generation_token
 
 

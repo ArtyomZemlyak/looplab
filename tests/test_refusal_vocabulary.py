@@ -336,6 +336,7 @@ def test_an_unreadable_event_log_keeps_its_run_in_the_list_and_says_why(tmp_path
     assert stub["source_integrity"]["unreadable"] is True
     assert stub["source_integrity"]["complete"] is False
     assert stub["nodes"] == 0 and stub["generation"] is None and stub["best_metric"] is None
+    assert stub["external_harness"] is None, "unreadable evidence must not assert internal mode"
     assert set(stub) == set(rows["readable"]), "the stub row's shape drifted from a folded row"
 
     healed = {row["run_id"]: row for row in client.get("/api/runs").json()}

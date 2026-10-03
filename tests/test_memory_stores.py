@@ -50,6 +50,7 @@ NOT_MEMORY_JSONL = {
     "harness_decisions.jsonl": "the run's idea-bound external decisions (run directory)",
     "harness_checkpoints.jsonl": "the run's external-agent checkpoint ledger (run directory)",
     "harness_reviews.jsonl": "the run's external knowledge reviews (run directory)",
+    "result_commentary.jsonl": "the run's evidence-bound result interpretations (run directory)",
 }
 
 # The closed vocabulary of calls that WRITE a store. Generic spellings (`add`, `save`, `write`) are

@@ -61,6 +61,7 @@ _LAYOUT = {
     "propose_receipts": "agents",  # the propose receipt scope, by call (doc 69 69.37)
     "developer_backends": "agents",  # the three developer-backend wirings `make_roles` composes (RA-01)
     "perception": "adapters",  # bounded on-disk data perception shared by dataset_task + repo_task
+    "task_warnings": "adapters",  # advisory submit rule, re-exported unchanged through tasks
     "task_schema": "adapters",  # the composable/legacy task-schema front-end `normalize_task`,
                                 # extracted from `tasks.py` on 2026-09-08 (doc 25 RA-01's cap)
     "mlebench_extras": "adapters",  # the two official MLE-bench extras as post-run instruments (doc 52 row 22)
@@ -201,6 +202,7 @@ _LAYOUT = {
     # the HTTP control-payload validator `run_commands.py` shed (doc 25 SC-01) — registered so the
     # package-layout audit sees it and the flat `looplab.control_validation` alias resolves
     "control_validation": "serve",
+    "node_comparison": "serve",  # generation-bound measured node comparisons, no evaluation
     "costs": "engine",
     # ONE money sentence in one place (§288). Named here rather than left on disk because
     # the layout map is what says a module exists on purpose; §313 found this one missing

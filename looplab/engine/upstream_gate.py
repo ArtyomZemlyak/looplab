@@ -22,7 +22,7 @@ from looplab.core.node_evidence import read_bounded_regular_file
 from looplab.core.scorer_boundary import BoundaryCapture
 from looplab.engine.seed_base import selected_seed_base
 from looplab.engine.upstream_state import digest, events_for, node_signature
-from looplab.events.replay import fold
+from looplab.engine.shared import engine_fold as fold
 from looplab.engine.upstream_workspace import checked_overlay, write_overlay, owned_path
 from looplab.engine.workspace_seed import seed_candidate_workspace, seeded_base_revision
 from looplab.runtime import command_eval

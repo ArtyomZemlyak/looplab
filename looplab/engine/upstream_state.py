@@ -15,7 +15,8 @@ from pathlib import Path
 from looplab.core.errors import UpstreamRefusal
 from looplab.core.node_evidence import read_bounded_regular_file
 from looplab.events.eventstore import decode_event_record, event_sequence_continues
-from looplab.events.replay import event_generation_binds, fold
+from looplab.events.replay import event_generation_binds
+from looplab.engine.shared import engine_fold as fold
 from looplab.events.run_generation import run_generation_token
 
 UPSTREAM_EVENTS = frozenset({"upstream_proposed", "upstream_gate_started", "upstream_gate_finished",

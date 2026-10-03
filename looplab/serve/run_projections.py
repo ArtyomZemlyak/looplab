@@ -85,7 +85,7 @@ def _unreadable_log_row(rd, stt) -> dict:
     return {
         "run_id": rd.name, "task_id": None, "goal": None, "run_uid": None,
         "generation": None, "deletion_generation": None, "seq": -1,
-        "direction": None, "finished": False, "phase": None,
+        "direction": None, "finished": False, "phase": None, "external_harness": None,
         "finalization_incomplete": False, "nodes": 0,
         "source_integrity": integrity_wire({"complete": False, "unreadable": True}),
         "best_metric": None, "best_confirmed": None, "best_metric_caveats": [],

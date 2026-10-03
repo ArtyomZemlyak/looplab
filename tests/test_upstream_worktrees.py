@@ -24,6 +24,23 @@ def seed(tmp_path, files):
         "run_dir": str(origin), "event_seq": event.seq, "digest": base["digest"]}
 
 
+def test_digest_ref_lock_can_exceed_windows_max_path_without_persisted_config(tmp_path):
+    # .git + full digest + .lock crosses MAX_PATH before Git's cwd limit. This
+    # guard exercises ref I/O, not arbitrary worktree/cwd depth (doc 72 §20.18).
+    root = tmp_path
+    while len(str(root)) < 200:
+        root = root / ("nested-" + "a" * 12)
+    assert len(str(root)) < 250
+    root.mkdir(parents=True)
+    git_at(root, "init", "--template=")
+    git_at(root, "-c", "user.name=LoopLab", "-c", "user.email=looplab@localhost",
+           "commit", "--allow-empty", "-m", "base")
+    ref = "refs/looplab/base/" + "a" * 64
+    git_at(root, "update-ref", ref, "HEAD")
+    assert git_at(root, "rev-parse", ref) == git_at(root, "rev-parse", "HEAD")
+    assert "longpaths" not in (root / ".git" / "config").read_text(encoding="utf8")
+
+
 @pytest.mark.parametrize("policy", ["ignore", "attributes", "ident", "encoding"])
 def test_first_and_sibling_worktrees_keep_all_recorded_bytes(tmp_path, policy):
     files = {"runner.txt": b"$Id$\r\noriginal\r\n", "recipe.env": b"MODE=old\n", "nested/recipe.env": b"MODE=nested\n"}

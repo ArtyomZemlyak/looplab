@@ -61,6 +61,12 @@ def test_the_llm_client_re_export_stayed_with_the_task_module():
         assert getattr(tasks, name) is getattr(llm, name), f"tasks.{name} is no longer re-exported"
 
 
+def test_submit_warnings_keeps_one_rule_after_extraction():
+    from looplab.adapters import task_warnings
+
+    assert tasks.submit_warnings is task_warnings.submit_warnings
+
+
 def test_the_task_module_no_longer_contains_the_agent_wiring():
     source = inspect.getsource(tasks)
     for marker in ("def make_roles", "def build_unified_agent", "def _shared_providers"):
