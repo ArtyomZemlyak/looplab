@@ -1,0 +1,116 @@
+{
+  "version": 1,
+  "review": "doc72 section 19.13",
+  "date": "2026-10-03",
+  "source_commit": "cb08cd5c1e5d4be214db86b8ec154bde0d07f836",
+  "scope": "LoopLab product: external agent, run-owned Maintainer worktrees, task repository, measured result and target delivery",
+  "changes": "Documentation and review evidence only; no production implementation in this pass",
+  "environment": {
+    "os": "Windows",
+    "python": ".venv/Scripts/python.exe",
+    "models": "No live model calls",
+    "pytest": "Separate private basetemp directories"
+  },
+  "suites": [
+    {
+      "selectors": [
+        "tests/test_events_replay.py"
+      ],
+      "passed": 193,
+      "failed": 0,
+      "skipped": 0,
+      "seconds": 3.8,
+      "order": "replay first"
+    },
+    {
+      "selectors": [
+        "tests/test_upstream_worktrees.py",
+        "tests/test_upstream_lane.py::test_real_sgd_gate_advance_overlay_rebase_and_exact_retries",
+        "tests/test_upstream_multibase.py",
+        "tests/test_upstream_initialization_recovery.py",
+        "tests/test_upstream_recovery_api.py",
+        "tests/test_upstream_materialization_snapshot.py",
+        "tests/test_upstream_overlay_intent.py"
+      ],
+      "passed": 35,
+      "failed": 0,
+      "skipped": 0,
+      "seconds": 74.77,
+      "execution": "Real CPU SGD training/scoring and real Git transactions, plus deliberate fault/recovery cases"
+    },
+    {
+      "selectors": [
+        "tests/test_bundle_seed_archives.py",
+        "tests/test_export_bundle.py"
+      ],
+      "passed": 24,
+      "failed": 0,
+      "skipped": 4,
+      "seconds": 5.01,
+      "skip_scope": [
+        "Windows host lacks directory symlink privilege",
+        "POSIX executable-bit semantics"
+      ]
+    }
+  ],
+  "confirmed": [
+    "Sequential accumulation of two shared capabilities",
+    "Independent scientific recipe preservation",
+    "Whole prior base retained on overlay conflict",
+    "Terminal confirmation retains original evaluated implementation/base",
+    "Exact command acknowledgements do not repeat measured executions",
+    "Explicit recovery after six initialization process-loss cuts preserves staging",
+    "Archive drift and stale materialization refusal",
+    "Reviewer bundle byte and event binding checks"
+  ],
+  "not_performed": [
+    "Fresh install acceptance",
+    "Live Codex and Claude client acceptance",
+    "Enabled upstream UI screenshot or human usability acceptance",
+    "Target owner repository integration/merge",
+    "Full CI suite",
+    "GPU or remote executor acceptance",
+    "Disk growth benchmark",
+    "WIP cleanup or backup"
+  ],
+  "source_symbols": [
+    "looplab/engine/upstream_workspace.py::maintainer_worktree",
+    "looplab/engine/upstream_workspace.py::materialization_plan",
+    "looplab/engine/upstream.py::UpstreamLane.check",
+    "looplab/engine/upstream.py::UpstreamLane.advance",
+    "looplab/engine/upstream.py::UpstreamLane.abandon",
+    "looplab/engine/seed_base.py::selected_seed_base",
+    "looplab/engine/bundle.py::export_bundle",
+    "looplab/engine/bundle_bases.py::export_seed_archives",
+    "looplab/agents/maintainer.py::Maintainer.validate"
+  ],
+  "open_topics": [
+    "O2 run-owned worktree lifecycle and retention",
+    "O3 first external client",
+    "O4/O8 reconnect and durable request recovery",
+    "O5 concise result interpretation",
+    "O6 exact attempt materialization",
+    "O7 chat driven sequential capability promotion",
+    "O9 Russian explanations and short docs route",
+    "O10 fresh whole journey acceptance",
+    "O11 next actor and run mode",
+    "O12 explicit check costs",
+    "O13 server/client/task code identity",
+    "O14 target repository delivery"
+  ],
+  "scope_correction": "Development checkout inventory in prior review sections is historical repository maintenance evidence, not product worktree acceptance. O1 remains a separate engineering release gate.",
+  "documentation_validation": {
+    "selectors": [
+      "tests/test_documentation_contracts.py",
+      "tests/test_documented_entry_points_resolve.py",
+      "tests/test_merge_history_integrity.py"
+    ],
+    "passed": 34,
+    "failed": 0,
+    "skipped": 0,
+    "seconds": 5.79,
+    "mkdocs_strict": "passed",
+    "git_diff_check": "passed",
+    "full_suite": "not run"
+  }
+}
