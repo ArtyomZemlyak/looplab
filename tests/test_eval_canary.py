@@ -126,20 +126,26 @@ def _script(ledger: Path, *, canary: str, full: str, warm: Path | None = None) -
     """A node program that appends what it ran to `ledger` (outside the run) and then does
     `canary` / `full` — each one of: a metric `METRIC: <n>`, `raise`, `nometric`, `sleep`, and the
     two COLD-CACHE kinds over the marker file `warm` (outside the run too): the first run creates it
-    and sleeps; a later one prints `METRIC: 0.1` (`cold`) or raises (`cold_raise`)."""
+    and waits for the engine to stop it; a later one prints `METRIC: 0.1` (`cold`) or raises
+    (`cold_raise`). `sleep` also waits for a real timeout or operator cancellation; it must never
+    finish by itself just because the observing worker was scheduled late."""
     def _body(kind: str) -> str:
         if kind in ("cold", "cold_raise"):
             after = ("    raise KeyError('history_item_sid')\n" if kind == "cold_raise"
                      else "    print('METRIC: ' + str(1 / 10))\n")
             return (f"    if not os.path.exists({str(warm)!r}):\n"
                     f"        open({str(warm)!r}, 'w').write('1')\n"
-                    "        import time; time.sleep(30)\n" + after)
+                    # A finite sleep can finish before a loaded runner schedules the clock/drain:
+                    # cold_raise then crashes on its FIRST round, defeating the retry fixture.
+                    # Only the real engine's timeout can end this cold round; the next process
+                    # sees the marker and exercises the ordinary pass/crash path (doc 72 §20.23).
+                    "        import threading; threading.Event().wait()\n" + after)
         if kind == "raise":
             return "    raise KeyError('history_item_sid')\n"
         if kind == "nometric":
             return "    print('done, forgot the metric')\n"
         if kind == "sleep":
-            return "    import time; time.sleep(30)\n"
+            return "    import threading; threading.Event().wait()\n"
         # Computed, so the number itself never appears in the node's source (the tests look for it
         # in the log and would otherwise find the code that prints it).
         return f"    print('METRIC: ' + str({round(float(kind) * 10**6)} / 10**6))\n"
@@ -484,7 +490,11 @@ def test_a_retry_that_fails_otherwise_takes_the_ordinary_crash_path(tmp_path):
     evs = _evaluate(eng)
     finished = _of(evs, EV_EVAL_CANARY_FINISHED)
     assert [(f.data["passed"], f.data["timed_out"], f.data.get("retry")) for f in finished] == [
-        (False, True, None), (False, False, 1)]
+        (False, True, None), (False, False, 1)], {
+            # A CI failure before the retry needs the candidate's error beside its verdict flags.
+            # These are this private fixture's logs, never an operator run or owner credentials.
+            "finished": [f.data for f in finished], "warm": warm.exists(),
+            "terminal_errors": [term.data.get("error") for term in _terminals(evs)]}
     (term,) = _terminals(evs)
     # The ENGINE's word is `crash`; the judge was asked and named no kind, so the row reads
     # `unclassified` beside it — the ordinary path, word for word.

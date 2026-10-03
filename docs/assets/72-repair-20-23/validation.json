@@ -1,0 +1,135 @@
+{
+  "observed_at_utc": "2026-10-03T10:12:14.392729+00:00",
+  "source_sha": "cb72620f25788bdf1c9dd2a3304bb5e2b339fe5c",
+  "platform": "win32",
+  "python": "3.11.14",
+  "ci_python": "3.12.10 Windows (failed run log)",
+  "baseline_local": {
+    "result": "2 passed in 3.22s",
+    "selectors": [
+      "tests/test_eval_canary.py::test_a_retry_that_fails_otherwise_takes_the_ordinary_crash_path",
+      "tests/test_control_plane_liveness.py::test_the_recorded_incident_now_has_a_way_out"
+    ]
+  },
+  "failed_windows_ci": {
+    "sha": "62f0d4d0a4516d22998663594a0f7d1fcf4a36e9",
+    "databaseId": 37112951276,
+    "url": "https://github.com/ArtyomZemlyak/looplab/actions/runs/37112951276",
+    "failures": [
+      {
+        "selector": "tests/test_control_plane_liveness.py::test_the_recorded_incident_now_has_a_way_out",
+        "observed": "first pause timed_out instead of succeeded; deadline 0.12, absolute window 0.2"
+      },
+      {
+        "selector": "tests/test_eval_canary.py::test_a_retry_that_fails_otherwise_takes_the_ordinary_crash_path",
+        "observed": "first finished row (False, False, None); expected initial expiry then retry crash",
+        "limit": "Candidate stderr and warm marker state not included in this assertion output; exact exit cause unproven."
+      }
+    ]
+  },
+  "worker_probe": {
+    "worker_start_delay_seconds": 0.35,
+    "baseline": {
+      "passed": false,
+      "status": "timed_out",
+      "code": "deadline_passed_before_intent"
+    },
+    "repaired": {
+      "passed": true,
+      "worker_start_delay": 0.35
+    },
+    "scope": "Real command service incident; injected delay before worker admission, baseline restored short fixture deadline versus repaired 10s incident deadline."
+  },
+  "cold_fixture_probe": {
+    "receipts": {
+      "baseline": {
+        "completed": true,
+        "exit_code": 1,
+        "warm_marker_written": true
+      },
+      "repaired": {
+        "completed": false,
+        "stopped_by_probe_deadline": true,
+        "warm_marker_written": true
+      }
+    },
+    "scope": "Actual Python subprocesses over original/current generated fixture. Only original finite sleep compressed 30s->0.05s; probe deadline 0.8s. Not engine timeout or exact CI reproduction."
+  },
+  "replay_first": {
+    "selectors": [
+      "tests/test_events_replay.py"
+    ],
+    "result": "193 passed in 3.52s"
+  },
+  "focused": {
+    "selectors": [
+      "tests/test_eval_canary.py",
+      "tests/test_control_plane_liveness.py"
+    ],
+    "result": "68 passed in 66.88s",
+    "after_failure_diagnostics": "Two baseline IDs: 2 passed in 4.36s"
+  },
+  "regression": {
+    "selectors": [
+      "tests/test_canary_failure_account.py",
+      "tests/test_command_intent_spent.py",
+      "tests/test_run_command_service.py",
+      "tests/test_command_monitor_cost.py",
+      "tests/test_harness_snapshot_compatibility.py",
+      "tests/test_external_idle_recovery.py",
+      "tests/test_package_layout.py",
+      "tests/test_package_layering.py",
+      "tests/test_cross_package_private_seams.py",
+      "tests/test_containment_census.py"
+    ],
+    "result": "1126 passed, 4 skipped in 80.60s",
+    "scope": "Run before final sleep-fixture hardening/extra assertion diagnostics; complete affected two files and two CI IDs verified afterward."
+  },
+  "documentation": {
+    "selectors": [
+      "tests/test_documentation_contracts.py",
+      "tests/test_documented_entry_points_resolve.py",
+      "tests/test_merge_history_integrity.py",
+      "tests/test_doc_surface_budgets.py",
+      "tests/test_architecture_diagram_geometry.py",
+      "tests/test_golden_replay.py",
+      "tests/test_replay_families.py",
+      "tests/test_pin_budget.py"
+    ],
+    "result": "63 passed in 28.86s",
+    "mkdocs_strict_exit_code": 0,
+    "diff_check_exit_code": 0
+  },
+  "source_ci_at_read": [
+    {
+      "conclusion": "",
+      "databaseId": 37114998815,
+      "headSha": "cb72620f25788bdf1c9dd2a3304bb5e2b339fe5c",
+      "status": "in_progress",
+      "url": "https://github.com/ArtyomZemlyak/looplab/actions/runs/37114998815",
+      "workflowName": "tests-windows"
+    },
+    {
+      "conclusion": "",
+      "databaseId": 37114998866,
+      "headSha": "cb72620f25788bdf1c9dd2a3304bb5e2b339fe5c",
+      "status": "in_progress",
+      "url": "https://github.com/ArtyomZemlyak/looplab/actions/runs/37114998866",
+      "workflowName": "tests"
+    },
+    {
+      "conclusion": "success",
+      "databaseId": 37114998860,
+      "headSha": "cb72620f25788bdf1c9dd2a3304bb5e2b339fe5c",
+      "status": "completed",
+      "url": "https://github.com/ArtyomZemlyak/looplab/actions/runs/37114998860",
+      "workflowName": "docs"
+    }
+  ],
+  "limits": [
+    "Only test fixtures/diagnostics changed; production deadlines, defaults, API and prompts unchanged.",
+    "Canary CI exit root cause limited by unavailable underlying stderr; finite-sleep race removed, exact runner cause unproven.",
+    "Local Python 3.11 native Windows; not complete current-SHA Python 3.12 Linux/Windows CI.",
+    "No skips/xfail or assertion relaxation introduced. No paid model, new user UI run or worktree WIP integration. O1-O14 remain open."
+  ]
+}

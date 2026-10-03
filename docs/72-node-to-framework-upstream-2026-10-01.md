@@ -45,14 +45,15 @@
 Диагностика подтверждённых Windows Git path limits — §20.20; это частичный O13.
 Отказы запуска/таймаута Git и exact recovery через Assistant/MCP — §20.21.
 Проверка совместимости config при bootstrap внешнего агента — §20.22.
+Свежие Windows CI отказы и устойчивость deadline/canary fixtures — §20.23.
 Главные оставшиеся препятствия: понять вывод, продолжить после потери клиента
 и получить проверенный код в нужном репозитории. Количество API и закрытые WP
 сами по себе не показывают, насколько легко пользователь проходит этот путь.
 
-| Что нужно сейчас | Состояние последнего прохода (§20.22) | Где остаток |
+| Что нужно сейчас | Состояние последнего прохода (§20.23) | Где остаток |
 |---|---|---|
 | Измерение и upstream протокол | Реализованы в opt-in scope; ограничения сохраняются | §18.4, §20 |
-| Доставка текущей ветки LoopLab | Исходный master `d5f91e106` доставлен; полный Linux/Windows/docs CI `74ae1a600` зелёный, общий вердикт текущего SHA ожидается | O1: общий Linux/Windows CI итогового SHA; §20.18–20.22 |
+| Доставка текущей ветки LoopLab | Исходный master `cb72620f2` доставлен; полный CI `74ae1a600` зелёный; два Windows отказа `62f0d4d0a` разобраны в §20.23, общий вердикт текущего SHA ожидается | O1: общий Linux/Windows CI итогового SHA; §20.18–20.23 |
 | Сохранность всей работы | Inventory есть; решения по WIP и неясным патчам ещё OPEN | O2 |
 | Первый запуск и понятное продолжение | Есть handoff, typed reads и recovery receipts; цельный пользовательский путь ещё OPEN | O3/O4/O8/O9/O11/O13 |
 | Понятный результат | Измерение и сравнимость существенно исправлены; краткость и usability ещё OPEN | O5/O9/O10 |
@@ -1973,7 +1974,7 @@ GitHub CI и branch protection в этом проходе не проверял�
 
 | Очередь | OPEN | Следующий законченный результат | Что блокирует закрытие |
 |---|---|---|---|
-| 0A, P0 | O1 | Разобранный repair batch по красному CI: причины, исправления, guards и общий вердикт исправленного SHA | Полный Linux/Windows/docs CI `74ae1a600` прошёл; общий CI актуального опубликованного SHA остаётся отдельным gate (§20.22) |
+| 0A, P0 | O1 | Разобранный repair batch по красному CI: причины, исправления, guards и общий вердикт исправленного SHA | Полный CI `74ae1a600` прошёл; два свежих Windows отказа `62f0d4d0a` разобраны (§20.23); общий CI актуального SHA остаётся отдельным gate |
 | 0B, P0 | O2 | Сохранённая работа и обоснованный disposition каждого WIP/неясного range | Inventory не содержит резервных копий; срез §19.9 с 35 unmatched и 26 patch-equivalent HEAD требует разных проверок, merge commits и ignored артефакты ещё не разобраны |
 | 1, P1 | O4/O8/O11/O13 | Один понятный вход из Assistant в продолжение того же run; минимальный клиент сохраняет original request до write | Lost reply, новый процесс, два клиента, stale identity, pending checkpoint и unavailable source должны иметь определённый исход без случайного второго training |
 | 2, P1 | O3/O9/O10/O13 | Первый CPU результат из Assistant/external client с понятными setup, правами и RU/EN | Раздельная приёмка готового окружения и чистой установки; отдельный клиент получает явный язык, unknown runtime не объявляется текущим |
@@ -4323,3 +4324,54 @@ exact recovery/reconnect не запустили повторную оценку
 объявляются мигрированными на новый reader. Остальные O1–O14, WIP disposition,
 UI first-entry и доставка результата в owner repo сохраняют критерии приёмки.
 Defaults, prompt bytes, schema version и ownership модели не менялись.
+
+### 20.23 72.O1: свежие Windows CI отказы без ослабления verdicts (2026-10-03)
+
+Исходное дерево — опубликованный `cb72620f2`. Его docs CI зелёный, общий Linux/
+Windows ещё выполняется. Завершившийся Windows CI `62f0d4d0a` (`37112951276`)
+дал два новых failing IDs: `test_the_recorded_incident_now_has_a_way_out` и
+`test_a_retry_that_fails_otherwise_takes_the_ordinary_crash_path`. Полный зелёный
+CI более раннего `74ae1a600` не отменяет эти отказы; O1 остаётся OPEN.
+
+**Анализ и воспроизведение:** оба IDs локально прошли до правки (**2 passed**).
+Pause incident использовал deadline 0.12s и absolute window 0.2s, хотя его предмет —
+живой engine и повторная pause после spent intent. Управляемая задержка запуска
+command worker на 0.35s воспроизвела отказ `timed_out` с
+`deadline_passed_before_intent`. Это корректное соблюдение engine deadline;
+крошечный deadline fixture делал проверку incident зависимой от скорости runner.
+
+Canary CI ожидал clock expiry и crash на повторе, но получил crash уже в первом
+finished row. Исходная cold fixture после конечного `sleep(30)` сама переходила
+к `KeyError`: запоздалый observer мог увидеть этот выход до своего timeout verdict.
+Это выявленная гонка fixture, а причина конкретного CI exit по трём booleans
+не доказана. В отдельной настоящей subprocess-пробе с сокращённым только
+fixture sleep до 0.05s первая cold-raise программа сама выходит 1. Эта проба
+проверяет семантику fixture, не воспроизводит scheduling того runner.
+
+**Правки:** только incident fixture получает command timeout 10s; обе реальные
+pause intents, live engine, spent intent, submit/get/fold и строгие succeeded
+assertions сохранены. Бounded search и отдельные deadline/legacy tests сохраняют
+собственные короткие границы. С той же worker delay 0.35s incident теперь проходит.
+Cold и sleep программы ждут `threading.Event().wait()` до реального timeout/cancel;
+первый процесс не может сам перейти к pass/crash. Warm marker остаётся снаружи
+scratch, поэтому второй процесс проверяет исходный pass либо crash. Engine caps
+и retry count не меняются. Standalone repaired cold process пишет warm marker и
+останавливается probe deadline; отдельно real Engine tests проверяют clock/retry.
+Неожиданный retry verdict теперь выводит finished rows, warm state и terminal
+error приватной fixture, чтобы следующий CI отказ можно было диагностировать.
+
+**Проверено:** весь canary/control-plane набор — **68 passed**. После добавления
+failure diagnostics два исходных failing IDs — **2 passed**. Связанные canary
+accounts, command intent/service/monitor, snapshot/idle recovery и
+layout/layer/private-seam/containment guards — **1126 passed, 4 skipped**.
+Replay-first — **193 passed**. Production код, defaults, prompts и API не менялись;
+тесты не skipped/xfail и verdict assertions не ослаблены.
+Документация/entry points/merge history, архитектурная схема, golden/family replay
+и pin budgets — **63 passed**; строгая сборка MkDocs прошла.
+[Selectors, CI срез и управляемые process probes](assets/72-repair-20-23/validation.json).
+
+**Граница:** окончательное подтверждение — общий Linux/Windows CI нового SHA.
+Случай конкретного canary CI exit остаётся ограничен доступной диагностикой;
+если он повторится, нужен разбор нового terminal error, а не ещё больший cap.
+Это ремонт воспроизводимости проверок, не новая функциональность внешнего агента.
+O1–O14, source/runtime identity, human UI acceptance и WIP disposition остаются OPEN.

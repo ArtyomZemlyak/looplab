@@ -555,7 +555,11 @@ def test_the_recorded_incident_now_has_a_way_out(tmp_path):
     Live is load-bearing: `paused_and_stopped` is satisfied the instant the engine process is gone,
     so with a dead engine the defect does not exist at all.
     """
-    world = _World(tmp_path / "runs")
+    # This incident checks spent intents and a live engine. The search's
+    # 0.12s/0.2s windows can expire before the worker's admission on a loaded Windows runner.
+    # Keep real submit/get/fold and the live-engine assertion, with time to admit both pauses.
+    # The bounded search and timeout/legacy cases below retain their own deadlines (doc 72 §20.23).
+    world = _World(tmp_path / "runs", command_timeout=10.0)
     srv = world.srv
     rd = world.seed("rubertlite", alive=True)
     try:
