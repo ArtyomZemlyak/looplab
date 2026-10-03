@@ -1,0 +1,34 @@
+{
+  "version": 1,
+  "date": "2026-10-03",
+  "increment": "doc72 section 20.27, O6/O14 Git export scope and reserved checkout aliases",
+  "source_parent_commit": "8ae64b6001f63e3cb5aff526bdf1b00d453518eb",
+  "replay": {"selectors": ["tests/test_events_replay.py"], "passed": 193, "skipped": 0, "failed": 0, "seconds": 3.71, "order": "first"},
+  "regressions": {
+    "status": "passed", "selectors": ["tests/test_export_git.py", "tests/test_event_types.py"],
+    "passed": 107, "skipped": 1, "failed": 0, "seconds": 18.24,
+    "skip_reason": "Windows WinError 1314: symlink creation privilege unavailable"
+  },
+  "documentation": {
+    "selectors": ["tests/test_documentation_contracts.py", "tests/test_documented_entry_points_resolve.py", "tests/test_merge_history_integrity.py", "tests/test_cli_reference.py", "tests/test_package_layering.py"],
+    "passed": 47, "skipped": 0, "failed": 0, "seconds": 21.23,
+    "strict_build": {"status": "passed", "seconds": 6.97}
+  },
+  "real_cpu_smoke": {
+    "status": "passed", "source": "Saved real CPU SGD run, read-only; no training repeated",
+    "node_id": 2, "attempt": 0, "tree": ["recipe.env"], "recipe": "MOMENTUM=0.3",
+    "base_reference": "sha256=1ab59a1a8da59b734a8212f53d1a4f334178f0cad2ed3b2b301611ab846b3a03; seed-event=42; content-not-exported",
+    "tree_scope": "saved-node-edits", "delivery": "not-performed-by-export", "fsck": "passed",
+    "events_sha256_before_and_after": "721850e6849652301cd3c042232e072d74ae2118164173cdc35cd61fee91b7e2"
+  },
+  "format_change": {
+    "reason": "Three explicit scope/base-reference/delivery trailers on every exported commit",
+    "golden_champion_before": "4fe54af1dff97f0cdecdbcccc42f17fe12141c99",
+    "golden_champion_after": "83abd6296087f95212bd2e4b41742caf2c291034"
+  },
+  "coverage": "Targeted real-Git regression checks, not full repository CI or task-target delivery acceptance",
+  "total_passed": 347,
+  "total_skipped": 1,
+  "git_diff_check": "passed",
+  "remaining_open": ["Full materialized result manifest and runtime inputs/dependencies", "Target-aware task repository delivery", "Human usability and full CI acceptance"]
+}

@@ -2227,6 +2227,8 @@ saved overlays включает recipe-only правки и не подменя�
 базы до overlay и runtime inputs; можно прочитать inherited runner/scorer.
 **Уточнение версий — §20.26:** архивный файл явно отличён от правки опыта и
 от удаления; выбранный preview доступен перед ограниченным списком файлов.
+**Уточнение Git export — §20.27:** сами коммиты называют saved-edit scope,
+event-bound ссылку на базу или unavailable и отсутствие доставки в task repo.
 Полная материализация inherited программы, её сравнение между базами и доставка
 в target repo остаются OPEN.
 
@@ -5303,3 +5305,44 @@ files/deleted не принимается за точную runnable прогр�
 manifest, сохранённые runtime inputs/dependencies и target-aware доставка остаются
 OPEN O6/O14. Этот фикс снижает риск перепутать версии при чтении существующего
 результата и не закрывает весь экспорт/интеграцию task repo.
+
+### 20.27 72.O6/O14: Git export не маскирует правки под полную программу (2026-10-03)
+
+**Находка.** `looplab export-git` объяснял ограничения в документации, но получатель
+отдельного Git repo видел checkout champion и метрику без явного tree scope.
+Два recipe-only опыта с одинаковым overlay и разными inherited базами дают пустой
+Git diff. Это не доказывает равенство программ; создание экспортного repo не
+доставляет изменения в пользовательскую ветку.
+
+**Исправлено.** `looplab/events/git_export.py::_message` добавляет к каждому
+commit `Looplab-Tree-Scope: saved-node-edits`, `Looplab-Delivery: not-performed-by-export`
+и `Looplab-Base-Reference`. `looplab/events/git_export.py::_recorded_base_reference`
+публикует только ссылку из текущего evaluated attempt: полный version-1 receipt,
+строгие числовые identity/count fields, SHA-256, matching workspace_seeded до
+terminal event той же попытки. Ссылка явно говорит content-not-exported; архив
+не открывается, его доступность и хеширование байтов не утверждаются. Missing,
+malformed, unbound, superseded и incomplete-prefix evidence дают unavailable.
+Старая попытка не заимствует базу новой.
+
+**Дополнительный баг.** Пропущенный task asset не резервировал свой checkout slot:
+`Grader.py` экспортировался рядом с исключённым `grader.py`, хотя Windows считает
+это одним именем. `looplab/events/git_export.py::lifecycle_tree` теперь отсекает
+case/Unicode-normalization aliases task assets и entrypoint и считает их portable
+checkout collisions. Это консервативный экспорт, поэтому Linux case variant не
+объявляется «never materialized»; исходный журнал сохраняет все правки.
+
+`looplab/cli/export_cmds.py::export_git` сообщает об исключённых base files,
+runtime inputs/environment и отсутствии доставки. Parents, tags, selection и
+метрики сохраняют прежнюю логику. Новые trailers намеренно меняют commit IDs;
+format golden обновлён явно. Новый формат остаётся детерминированным.
+
+**Проверка.** Replay-first; реальные Git repositories, recipe-only/different-base
+сценарий, reset и damaged-prefix, malformed/bool/stale receipt variants, fsck,
+hermetic environment и golden. Отдельный read-only smoke экспортирует сохранённый
+реальный CPU SGD run; это не повтор обучения и не merge в task repo.
+Точные selectors и результаты —
+[validation.json](assets/72-git-export-scope/validation.json).
+
+**Граница.** O6/O14 остаются OPEN: полного materialized manifest, переносимого
+окружения и target-aware доставки этот шаг не реализует. Теперь ограничение
+остаётся с Git repo, даже если получатель не видел UI или CLI.

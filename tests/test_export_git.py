@@ -140,6 +140,8 @@ def test_each_node_is_a_commit_its_parents_are_the_dag_and_the_best_is_checked_o
     result = _export(rd, repo)
     assert result.exit_code == 0, result.output
     assert "branch champion = node 3, checked out" in result.stdout
+    assert "saved node edits only" in result.stdout
+    assert "no delivery to the task repository was performed" in result.stdout
     commit = {nid: _git(repo, "rev-parse", f"node-{nid}^{{commit}}") for nid in range(5)}
     parents = {nid: _git(repo, "log", "-1", "--format=%P", commit[nid]).split() for nid in range(5)}
     assert parents[0] == [] and parents[1] == []
@@ -161,6 +163,10 @@ def test_each_node_is_a_commit_its_parents_are_the_dag_and_the_best_is_checked_o
     assert _trailer(repo, "node-3", "Looplab-Metric") == "0.9"
     assert _trailer(repo, "node-3", "Looplab-Generation") == "0"
     assert _trailer(repo, "node-3", "Looplab-Parents") == "node-1, node-2"
+    for nid in range(5):
+        assert _trailer(repo, f"node-{nid}", "Looplab-Tree-Scope") == "saved-node-edits"
+        assert _trailer(repo, f"node-{nid}", "Looplab-Base-Reference") == "unavailable"
+        assert _trailer(repo, f"node-{nid}", "Looplab-Delivery") == "not-performed-by-export"
     failed = _body(repo, "node-4")
     assert "Looplab-Status: failed" in failed and "Looplab-Error-Reason: crash" in failed
     assert "Looplab-Feasible" not in failed, "a failed node has no metric to receipt"
@@ -202,7 +208,8 @@ _GOLDEN_LOG = [
 # anything a commit object carries (the identity, a date, the `+0000` zone, a trailer, a path's
 # bytes, a parent's id) must move THIS string, and be seen moving it. Re-derive it only for a
 # deliberate format change, and say so in that commit.
-_GOLDEN_CHAMPION = "4fe54af1dff97f0cdecdbcccc42f17fe12141c99"
+# Doc 72 §20.27 deliberately adds tree-scope/base-reference/delivery trailers to EVERY commit.
+_GOLDEN_CHAMPION = "83abd6296087f95212bd2e4b41742caf2c291034"
 
 
 def test_a_fixed_log_exports_to_the_pinned_commit_id_whatever_the_callers_git_says(
@@ -921,3 +928,100 @@ def test_a_truncated_log_says_so_on_every_commit(tmp_path):
         note = _trailer(repo, f"node-{nid}", "Looplab-Log-Incomplete")
         assert note.startswith("[INCOMPLETE RECORD] run's event log stops being readable at line"), note
     assert "node-9" not in _git(repo, "tag")
+
+
+def _seeded_recipe(store, nid, digest, *, generation=0, parents=()):
+    _node(store, nid, list(parents), files={"recipe.env": "MOMENTUM=0.3\n"}, generation=generation)
+    base = {"version": 1, "scope": "seeded_editables_before_mounts_and_overlay", "complete": True,
+            "digest": digest, "file_count": 3, "bytes": 120}
+    seed = store.append("workspace_seeded", {"node_id": nid, "generation": generation, "base_revision": base})
+    return {**base, "node_id": nid, "generation": generation, "seed_event_seq": seed.seq}
+
+
+def test_omitted_task_asset_names_still_reserve_their_portable_checkout_slots(tmp_path):
+    rd, store = _store(tmp_path)
+    _started(store)
+    store.append("data_provenance", {"assets": {"grader.py": "digest", "caf\u00e9.py": "digest"}})
+    _node(store, 0, [], files={"Grader.py": "forged grader\n", "SOLUTION.PY": "forged entrypoint\n",
+                              "cafe\u0301.py": "normalized asset alias\n", "recipe.env": "MOMENTUM=0.3\n"})
+    _evaluated(store, 0, 0.5)
+    repo = tmp_path / "repo"
+    result = _export(rd, repo)
+    assert result.exit_code == 0, result.output
+    assert _tree(repo, "node-0") == ["recipe.env"]
+    assert _trailer(repo, "node-0", "Looplab-Skipped-Paths") == (
+        "3 (3 colliding with another name on some checkout; the log keeps every one)")
+    _git_run(repo, "fsck", "--strict")
+
+
+def test_recipe_only_export_names_different_recorded_bases_without_inventing_the_runner(tmp_path):
+    rd, store = _store(tmp_path)
+    _started(store)
+    a = _seeded_recipe(store, 0, "a" * 64)
+    _evaluated(store, 0, 0.5, metric_provenance={"base_revision": a})
+    b = _seeded_recipe(store, 1, "b" * 64, parents=[0])
+    _evaluated(store, 1, 0.6, metric_provenance={"base_revision": b})
+    before = (rd / "events.jsonl").read_bytes()
+    repo = tmp_path / "repo"
+    result = _export(rd, repo)
+    assert result.exit_code == 0, result.output
+    for nid, base in [(0, a), (1, b)]:
+        assert _tree(repo, f"node-{nid}") == ["recipe.env"]
+        assert _trailer(repo, f"node-{nid}", "Looplab-Base-Reference") == (
+            f"sha256={base['digest']}; seed-event={base['seed_event_seq']}; content-not-exported")
+    assert _git(repo, "diff", "node-0", "node-1") == "", "equal edits do not establish equal full programs"
+    assert "base files, runtime inputs and environment are not exported" in result.stdout
+    assert (rd / "events.jsonl").read_bytes() == before
+    _git_run(repo, "fsck", "--strict")
+
+
+@pytest.mark.parametrize("defect", ["missing", "digest", "node_id", "generation", "seed_event_seq",
+                                    "file_count", "bytes", "bool_version", "bool_count", "incomplete"])
+def test_unbound_base_receipts_are_unavailable_in_the_git_projection(tmp_path, defect):
+    from looplab.events.replay import fold
+    rd, store = _store(tmp_path)
+    _started(store)
+    receipt = _seeded_recipe(store, 0, "a" * 64)
+    if defect == "missing":
+        receipt.pop("seed_event_seq")
+    elif defect == "digest":
+        receipt["digest"] = "b" * 64
+    elif defect == "bool_version":
+        receipt["version"] = True
+    elif defect == "bool_count":
+        receipt["file_count"] = True
+    elif defect == "incomplete":
+        receipt["complete"] = False
+    else:
+        receipt[defect] += 1
+    _evaluated(store, 0, 0.5, metric_provenance={"base_revision": receipt})
+    events = store.read_all()
+    stream = git_export.fast_import_stream(events, fold(events)).stream
+    assert b"Looplab-Base-Reference: unavailable\n" in stream
+    assert b"content-not-exported" not in stream
+
+
+def test_reset_and_damaged_prefix_do_not_borrow_current_base_evidence(tmp_path):
+    rd, store = _store(tmp_path)
+    _started(store)
+    old = _seeded_recipe(store, 0, "a" * 64)
+    _evaluated(store, 0, 0.5, metric_provenance={"base_revision": old})
+    store.append("node_reset", {"node_id": 0, "generation": 0})
+    current = _seeded_recipe(store, 0, "b" * 64, generation=1)
+    _evaluated(store, 0, 0.6, generation=1, metric_provenance={"base_revision": current})
+    repo = tmp_path / "repo"
+    result = _export(rd, repo)
+    assert result.exit_code == 0, result.output
+    assert _trailer(repo, "node-0.g0", "Looplab-Base-Reference") == "unavailable"
+    assert "sha256=" + "b" * 64 in _trailer(repo, "node-0", "Looplab-Base-Reference")
+    with (rd / "events.jsonl").open("ab") as stream:
+        # A terminated malformed row is reader-reported corruption. An unterminated final
+        # row may be an in-flight append and EventStore deliberately leaves it uncommitted.
+        stream.write(b'{"broken":\n')
+    damaged = tmp_path / "damaged"
+    result = _export(rd, damaged)
+    assert result.exit_code == 0, result.output
+    assert "[INCOMPLETE RECORD]" in result.stderr
+    for ref in ["node-0", "node-0.g0"]:
+        assert _trailer(damaged, ref, "Looplab-Base-Reference") == "unavailable"
+        assert _trailer(damaged, ref, "Looplab-Tree-Scope") == "saved-node-edits"

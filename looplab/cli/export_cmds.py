@@ -281,8 +281,10 @@ def export_git(
     Each node's current lifecycle is tag `node-<id>`, one a reset or the holdout epoch's requeue
     superseded `node-<id>.g<gen>`; branch `champion` is the fold's best and is checked out, branch
     `promoted` the operator's promote alias when there is one. Read-only on the run; the export is a
-    projection of the log, never read back. The task's base tree is not in the log, so a commit holds
-    only the files the node itself wrote. Git runs hermetically — no GIT_* variable, no user or system
+    projection of the log, never read back. A commit holds saved node edits, not the task's base,
+    runtime inputs or environment. Scope and an available event-bound base reference ride in the
+    message; the export performs no delivery to the task repository. Git runs hermetically —
+    no GIT_* variable, no user or system
     config and no system gitattributes reach it — and the repository is built beside OUT and moved
     into place only once it is whole."""
     import shutil
@@ -385,6 +387,8 @@ def export_git(
         parts.append(f"branch promoted = node {export.promoted}")
     if export.skipped_paths:
         parts.append(f"{export.skipped_paths} path(s) left out, counted as Looplab-Skipped-Paths")
+    parts.append("saved node edits only: base files, runtime inputs and environment are not exported; "
+                 "no delivery to the task repository was performed")
     typer.echo("; ".join(parts))
 
 

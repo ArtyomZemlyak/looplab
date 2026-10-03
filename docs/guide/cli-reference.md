@@ -2983,13 +2983,17 @@ bundle and the UI crown — and is checked out. An operator's promote alias is p
 `promoted` and never checked out in the best's place (a promote checks no status, so it can name a
 weaker or a failed node). With no best yet, nothing is checked out.
 
-A commit's tree is the lifecycle's own files as its checkout held them: the `files` map — the whole
+A commit's tree is a projection of the lifecycle's saved edits: the `files` map — the whole
 edit set relative to the task's base tree, since every materialization seeds that base and writes
 `files` on top — where `solution.py` is always the node's `code` (the sandbox writes it from `code`
 and never from a `files["solution.py"]`), minus the names the materializer never writes from a node
 (the task's assets, a ratified onboarding adapter) and the names the node's own `deleted` list
-removes. The base tree itself is not in the log (doc 67 67.12), so it is not in the export; a node's
-`deleted` names are removals from that base and are listed in the message.
+removes. The base bytes are not part of this export, even if the run separately archived them;
+a node's `deleted` names are removals from that base and are listed in the message.
+Runtime inputs, task assets and the environment are also absent. Equal exported edit trees or
+an empty `git diff` do not establish equal materialized programs when their bases differ.
+The command's success message and every commit identify the export's scope. Creating or checking
+out `champion` performs no delivery to the user's task repository.
 
 A path a checkout or a receiving host could turn against its reader is left out: absolute or `..`;
 any name NTFS or HFS+ reads as `.git` (`.git.`, `GIT~1`, …) or that starts `.git` (`.gitattributes`,
@@ -2998,6 +3002,9 @@ any name NTFS or HFS+ reads as `.git` (`.git.`, `GIT~1`, …) or that starts `.g
 dot or space, a component over 255 bytes. Of two names one filesystem stores as one file
 (`dir\x` and `dir/x`, `A.py` and `a.py`, a file `a` and a file `a/b.py`) the first in sorted order is
 kept. Every name left out, for whatever reason, is counted by reason in `Looplab-Skipped-Paths`.
+An omitted task asset or `solution.py` still reserves its portable checkout name: case and
+Unicode-normalization aliases are counted as collisions, even when no file under that name
+appears in the exported edit tree.
 
 The message's `Looplab-*` trailers:
 
@@ -3005,6 +3012,9 @@ The message's `Looplab-*` trailers:
 |---|---|
 | `Looplab-Run`, `-Node`, `-Generation`, `-Operator` | the run, the node id, the lifecycle generation, the operator |
 | `Looplab-Parents` | the parents' tags (`node-2`, `node-0.g0`), or `none` |
+| `Looplab-Tree-Scope` | `saved-node-edits`; this checkout is not a complete materialized program |
+| `Looplab-Base-Reference` | `sha256=…; seed-event=…; content-not-exported` only for a current evaluated attempt with a complete, matching version-1 seed receipt bound to its seed event; otherwise `unavailable` |
+| `Looplab-Delivery` | `not-performed-by-export`; Git history export does not merge or publish the result to the task repository |
 | `Looplab-Status` | `evaluated`, `failed` or `pending` (with `tombstoned`, `aborted` or an awaited rebuild), or `superseded …` |
 | `Looplab-Metric` | the metric as Python's `repr` of the float, `none` without one; absent on a superseded lifecycle |
 | `Looplab-Feasible`, `-Violations`, `-Counts-Toward-Best` | beside a metric: whether it counts toward the best (`core/fitness.py::counts_toward_best`), and the violations that say why not |
@@ -3019,6 +3029,13 @@ A script reads them with `git log --format='%(trailers:key=Looplab-Metric,valueo
 read `Looplab-Counts-Toward-Best` beside it, because an infeasible or a trust-excluded node can carry
 the largest number. Every value is one line with control characters stripped, so no free-text field
 can forge a trailer or hide the ones after it.
+
+The base reference is a fact recorded in the log, not verification or inclusion of archive bytes.
+The export does not open the archive or the current task repository. A superseded lifecycle never
+borrows the current attempt's base; a damaged readable log prefix publishes no complete base
+reference. Use the run's recorded base reader or reviewer bundle to inspect archived bytes.
+The additional scope/reference/delivery trailers change exported commit IDs compared with the
+earlier format; determinism holds for repeated exports using this format.
 
 Git runs **hermetically**: every `GIT_*` variable is dropped (a `GIT_DIR` that a hook or a shell set
 cannot redirect the export onto another repository), no user or system config or system

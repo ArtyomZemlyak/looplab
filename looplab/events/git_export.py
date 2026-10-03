@@ -27,8 +27,8 @@ reset, and a script reading trailers must not count a candidate that no longer e
 WHAT A COMMIT'S TREE IS, AND IS NOT. Every materialization is the task's base tree seeded first, then
 the node's `files` written on top, then its `deleted` names removed, then the task's assets
 (`engine/workspace.py::WorkspaceSeeder.materialize`, `write_node_files`) — so `files` is the node's
-WHOLE edit set relative to that base, not a delta over its parent, and a tree is that set as the
-checkout held it (`lifecycle_tree`):
+WHOLE edit set relative to that base, not a delta over its parent, and the exported tree is a
+conservative portable projection of that set (`lifecycle_tree`):
 
   * `solution.py` is the node's `code` whenever it has one. The sandbox writes it from `code` and
     `write_node_files` never writes a `files["solution.py"]`, so letting that key win exported code
@@ -37,10 +37,17 @@ checkout held it (`lifecycle_tree`):
     fold's `data_provenance` pinned at setup) and a ratified onboarding adapter. A repo task's own
     `protect` list is NOT in the log — it is derived from the operator's source tree when the task
     loads — so it cannot be honoured here; the Developer's write gate refuses those names anyway.
+  * A case/normalization alias of an omitted task asset or entrypoint is still a portable checkout
+    collision; the protected name reserves its slot even though its bytes are not exported.
   * A name in both `files` and `deleted` is gone, as the write-then-delete order leaves it.
 
-The base tree itself is not in the log (doc 67 67.12, `repo-base-tree-not-archived`), so it is not
-here either; a node's `deleted` names are removals from that base and ride in the message.
+The base's bytes are not in this log projection, even when the run separately archived them
+(doc 72). Every commit says `Looplab-Tree-Scope: saved-node-edits`; a current evaluated lifecycle
+with a usable event-bound receipt also names its recorded base, WITHOUT verifying or exporting
+the archive. Missing, superseded or incomplete evidence stays unavailable. Runtime inputs,
+environment and target repository delivery are not supplied by this export. A node's `deleted`
+names are removals from its base and ride in the message; a Git diff between edit sets is not
+a diff between complete materialized programs.
 
 WHAT IT REFUSES, per path component (`safe_tree_path`). A clone may be made by someone who never saw
 the run, pushed to a host that runs `git fsck` on receipt, or checked out on Windows or a Mac, so a
@@ -99,7 +106,7 @@ from looplab.events.eventstore import integrity_sentence
 from looplab.events.replay import (FoldCursor, flagged_node_ids, hard_flagged_ids,
                                    promotion_eligible_nodes)
 from looplab.events.replay_ctx import event_timestamp
-from looplab.events.types import (DIAGNOSTIC_EVENTS, EV_NODE_CREATED, EV_NODE_RESET,
+from looplab.events.types import (DIAGNOSTIC_EVENTS, EV_NODE_CREATED, EV_NODE_RESET, EV_WORKSPACE_SEEDED,
                                   FENCE_NEUTRAL_EVENTS)
 
 GIT_IDENTITY = "LoopLab <looplab@invalid>"
@@ -196,6 +203,7 @@ def lifecycle_tree(code, files, deleted, *, skip=frozenset()) -> tuple[dict, Cou
     skipped: Counter = Counter()
     stored: set = set()             # the collision key of every kept file…
     directories: set = set()        # …and of every directory one sits under
+    excluded_keys = {_collision_key(path) for path in skip}
 
     def keep(path: str, data: bytes) -> bool:
         key = _collision_key(path)
@@ -220,6 +228,12 @@ def lifecycle_tree(code, files, deleted, *, skip=frozenset()) -> tuple[dict, Cou
             skipped["unsafe"] += 1
         elif safe in skip:
             skipped["engine"] += 1
+        elif _collision_key(safe) in excluded_keys:
+            # Task assets/entrypoint are omitted from the edit tree, but their names still
+            # reserve a checkout slot. A case/normalization alias must not appear as runnable
+            # candidate code on NTFS/HFS+. On a case-sensitive source it may have existed:
+            # count a portable-checkout collision, not "never materialized".
+            skipped["collision"] += 1
         elif not keep(safe, surrogate_safe(str(files[name])).encode("utf-8")):
             skipped["collision"] += 1
     # Deleted AFTER written, as `write_node_files` does it: a name in both is not in the checkout. A
@@ -518,6 +532,7 @@ class _Context:
     promoted: Optional[int]
     caveats: tuple
     incomplete: str
+    seed_events: dict
 
     def tag(self, node_id, generation) -> str:
         """The tag the lifecycle `(node_id, generation)` is published under."""
@@ -584,6 +599,39 @@ def _receipts(node, ctx: _Context) -> list:
     return out
 
 
+def _recorded_base_reference(lc: _Lifecycle, ctx: _Context) -> str:
+    """A log-bound reference, never a claim that the base bytes are present or verified here.
+
+    Superseded lifecycles deliberately have no current Node: borrowing its new receipt would
+    attach a new base to old edits. A damaged log prefix grants no complete evidence reference.
+    """
+    node = lc.node
+    if node is None or node.status is not NodeStatus.evaluated or ctx.incomplete:
+        return "unavailable"
+    source = node.metric_provenance
+    receipt = source.get("base_revision") if isinstance(source, dict) else None
+    if (not isinstance(receipt, dict) or type(receipt.get("version")) is not int
+            or receipt["version"] != 1 or receipt.get("complete") is not True
+            or receipt.get("scope") != "seeded_editables_before_mounts_and_overlay"
+            or not isinstance(receipt.get("digest"), str)
+            or re.fullmatch(r"[0-9a-f]{64}", receipt["digest"]) is None
+            or any(type(receipt.get(k)) is not int or receipt[k] < 0
+                   for k in ("node_id", "generation", "seed_event_seq", "file_count", "bytes"))
+            or receipt["node_id"] != lc.node_id or receipt["generation"] != lc.generation):
+        return "unavailable"
+    seed = ctx.seed_events.get(receipt["seed_event_seq"])
+    data = seed.data if seed is not None and isinstance(seed.data, dict) else {}
+    base = data.get("base_revision")
+    if (seed is None or type(node.terminal_event_seq) is not int or seed.seq >= node.terminal_event_seq
+            or type(data.get("node_id")) is not int or data["node_id"] != lc.node_id
+            or type(data.get("generation")) is not int or data["generation"] != lc.generation
+            or not isinstance(base, dict)
+            or any(type(base.get(k)) is not type(receipt[k]) or base[k] != receipt[k]
+                   for k in ("version", "scope", "complete", "digest", "file_count", "bytes"))):
+        return "unavailable"
+    return f"sha256={receipt['digest']}; seed-event={seed.seq}; content-not-exported"
+
+
 def _message(lc: _Lifecycle, ctx: _Context, skipped: Counter) -> str:
     idea = lc.idea
     operator = _one_line(lc.operator) or "(no operator)"
@@ -601,7 +649,10 @@ def _message(lc: _Lifecycle, ctx: _Context, skipped: Counter) -> str:
                 ("Looplab-Node", lc.node_id),
                 ("Looplab-Generation", lc.generation),
                 ("Looplab-Operator", operator),
-                ("Looplab-Parents", ", ".join(parents) or "none")]
+                ("Looplab-Parents", ", ".join(parents) or "none"),
+                ("Looplab-Tree-Scope", "saved-node-edits"),
+                ("Looplab-Base-Reference", _recorded_base_reference(lc, ctx)),
+                ("Looplab-Delivery", "not-performed-by-export")]
     if node is not None:
         trailers += _receipts(node, ctx)
     elif lc.requeued_at:
@@ -673,6 +724,7 @@ def fast_import_stream(events, state, *, champion_caveats: Iterable[str] = (),
         trust_gate=trust_gate, aborted=set(getattr(state, "aborted_nodes", None) or ()),
         champion=champion_id(state), promoted=promoted_id(state),
         caveats=tuple(str(c) for c in champion_caveats or ()),
+        seed_events={event.seq: event for event in events if event.type == EV_WORKSPACE_SEEDED},
         incomplete=integrity_sentence(log_integrity,
                                       run_label=str(getattr(state, "run_id", "") or "this run")))
     skip = _materializer_skips(state)
