@@ -1,0 +1,94 @@
+{
+  "version": 1,
+  "date": "2026-10-03",
+  "review": "doc72 section 19.14",
+  "source_commit": "8baaf9c0e16a318b5a5336d50d99e7b6e34b9442",
+  "scope": "LoopLab product, enabled upstream UI and task repository delivery",
+  "changes": "Documentation, exact fresh screenshots and review evidence only",
+  "suites": [
+    {
+      "selectors": [
+        "tests/test_events_replay.py"
+      ],
+      "passed": 193,
+      "failed": 0,
+      "skipped": 0,
+      "seconds": 3.28,
+      "order": "replay first"
+    },
+    {
+      "selectors": [
+        "tests/test_upstream_candidate_pages.py",
+        "tests/test_upstream_gate_claims.py",
+        "tests/test_upstream_api.py"
+      ],
+      "passed": 15,
+      "failed": 0,
+      "skipped": 0,
+      "seconds": 40.93,
+      "coverage": "Paged nominations beyond 200 hunks; HTTP/MCP/Assistant reads; matching preceding claims; delayed completion after abandonment; complete transaction and exact receipt recovery"
+    },
+    {
+      "selectors": [
+        "tests/test_upstream_live_budget.py::test_timeout_change_invalidates_gate_before_cas_but_preserves_exact_ack",
+        "tests/test_upstream_environment.py"
+      ],
+      "passed": 4,
+      "failed": 0,
+      "skipped": 0,
+      "seconds": 16.17,
+      "coverage": "Current timeout/environment drift refuses fresh CAS and does not invalidate historical exact acknowledgements"
+    }
+  ],
+  "ui": {
+    "fixture_evidence": "evidence.json",
+    "screenshots": 6,
+    "fresh_vite_build": true,
+    "model_requests": 0,
+    "ui_engine_mutations": 0,
+    "events_unchanged": true,
+    "viewports": [
+      [
+        1920,
+        1080
+      ],
+      [
+        2560,
+        1440
+      ]
+    ],
+    "primary_language": "ru",
+    "user_run_changed": false,
+    "private_server_stopped": true
+  },
+  "observed_open_gaps": [
+    "Pending pre-seed and missing evaluated provenance share unknown-base bucket",
+    "Active future base and selected evaluated base are not directly bound in Overview",
+    "Recipe-only main Code panel reports no solution.py and files as Helper files",
+    "Parent diff compares code only; changed recipe and inherited bases do not appear in that diff",
+    "Proposal/worktree/check lifecycle is not presented as a complete Assistant card"
+  ],
+  "proposed_acceptance_not_executed": [
+    "Two independent runs integrated into one task repo with target checks and composed new initial archive",
+    "Live Codex/Claude client handoff or multi-client recovery",
+    "Full declared flag-combination coverage matrix",
+    "Fresh installation",
+    "Human usability and full accessibility acceptance",
+    "GPU/remote execution",
+    "Full CI suite"
+  ],
+  "documentation_validation": {
+    "status": "passed",
+    "selectors": [
+      "tests/test_documentation_contracts.py",
+      "tests/test_documented_entry_points_resolve.py",
+      "tests/test_merge_history_integrity.py"
+    ],
+    "passed": 34,
+    "failed": 0,
+    "skipped": 0,
+    "seconds": 8.95,
+    "mkdocs_strict": "passed",
+    "git_diff_check": "passed"
+  }
+}

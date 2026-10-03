@@ -1,0 +1,72 @@
+{
+  "source_commit": "8baaf9c0e16a318b5a5336d50d99e7b6e34b9442",
+  "scenario": "Fresh existing test-helper CPU SGD scenario: two checked shared capabilities, independent recipes, whole-old-base conflict",
+  "upstream_enabled": true,
+  "engine_running": false,
+  "driver": "Existing Python fixture and measured UpstreamLane transactions; not a live LLM or human onboarding acceptance",
+  "base_advances": 2,
+  "gate_executions": 14,
+  "evaluated_extra_nodes": {
+    "2": 0.011466814110411847,
+    "3": 0.06190722931280721,
+    "5": 0.02682906844597624
+  },
+  "events_sha256_before_ui": "721850e6849652301cd3c042232e072d74ae2118164173cdc35cd61fee91b7e2",
+  "user_run_changed": false,
+  "events_sha256_after_ui": "721850e6849652301cd3c042232e072d74ae2118164173cdc35cd61fee91b7e2",
+  "events_unchanged_by_ui": true,
+  "ui_build": "Fresh Vite production build from this source commit into private dist; default ui/dist untouched",
+  "browser": "Codex in-app browser, private loopback server, stopped after read/draft-only capture",
+  "language": "Russian Assistant; recorded author summaries are English and were not translated",
+  "screenshots": [
+    {
+      "file": "01-lineage-chat.jpg",
+      "width": 1920,
+      "height": 1080,
+      "sha256": "c44b4b5cb42a638387db1867fe7e7e1fbe512c85c7e769cedb62fb1dee211e7e",
+      "accepted": "Saved exact screenshot opened and visually inspected; no image editing"
+    },
+    {
+      "file": "02-upstream-overview.jpg",
+      "width": 1920,
+      "height": 1080,
+      "sha256": "56136cec530facc86b4cc69eac1c8ba7b1fa3a601a480dfd51613a3f46ad42ac",
+      "accepted": "Saved exact screenshot opened and visually inspected; no image editing"
+    },
+    {
+      "file": "03-chat-reuse-draft.jpg",
+      "width": 1920,
+      "height": 1080,
+      "sha256": "92880dec63f1f6d14ba424092817ca232d935d972ddfd245f3d2884c23340e04",
+      "accepted": "Saved exact screenshot opened and visually inspected; no image editing"
+    },
+    {
+      "file": "04-conflict-inspector.jpg",
+      "width": 1920,
+      "height": 1080,
+      "sha256": "5abd6f55c2081b09bc1cb5c1aa3e47f66d3f11b1b2b92e00a41c1815049e8b6f",
+      "accepted": "Saved exact screenshot opened and visually inspected; no image editing"
+    },
+    {
+      "file": "05-recipe-only-code-2k.jpg",
+      "width": 2560,
+      "height": 1440,
+      "sha256": "4b9936c7e6fd567fadd273a3748c21efab94ffd0700f70a4531a005198cd8405",
+      "accepted": "Saved exact screenshot opened and visually inspected; no image editing"
+    },
+    {
+      "file": "06-empty-parent-diff-2k.jpg",
+      "width": 2560,
+      "height": 1440,
+      "sha256": "8779021aeb0363b11968af99d6abe6761baef1962fe067258822186d38d6a17b",
+      "accepted": "Saved exact screenshot opened and visually inspected; no image editing"
+    }
+  ],
+  "limitations": [
+    "Existing test helper builds the fixture; not a full production engine launch or client lifecycle test",
+    "No model requests, Start, resume, new commands or commentary submitted through UI",
+    "Fixture lacks full comparison-context stamps; no scientific improvement claim inferred from screenshots",
+    "No fresh installation, GPU/remote, full accessibility or human usability acceptance",
+    "No target user-repository merge or worktree cleanup performed"
+  ]
+}
