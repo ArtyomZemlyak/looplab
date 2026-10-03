@@ -2112,7 +2112,8 @@ export default function RunView({ runId, onBack, reviewMode = false, reviewMeta 
       traceClearRecoverySnapshot={traceClearRecoverySnapshot}
       publishTraceClearRecovery={publishTraceClearRecovery}
       readOnly={mutationReadOnlyMode} historySeq={history.resolvedSeq}
-      expectedGeneration={generation} commentsRevision={state?.comments_revision}
+      expectedGeneration={generation} expectedAttempt={routeState.nodeGeneration}
+      commentsRevision={state?.comments_revision}
       focusCommentId={commentAttemptMatches ? routeState.commentId : null}
       readOnlyReason={mutationReadOnlyReason} evidenceAvailable={!reviewMode || reviewEvidence} />
   </LazyBoundary>

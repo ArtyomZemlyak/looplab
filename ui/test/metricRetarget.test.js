@@ -267,7 +267,8 @@ test('the best column under a retarget reads the champion\'s own records', async
   const rowsOf = [...el.querySelectorAll('tr')]
   const star = rowsOf.find(tr => tr.textContent.includes('★'))
   const bestCell = star.querySelectorAll('td')[3]
-  assert.equal(bestCell.textContent.trim(), '0.45', 'no task-metric salvage caveat on the declared value')
+  assert.equal(bestCell.textContent.trim(), '0.45 evaluation score',
+    'the declared value retains its measurement label without a task-metric salvage caveat')
   const task = rowsOf.find(tr => tr.textContent.includes("task's own metric"))
   assert.equal(task.querySelectorAll('td')[3].textContent.trim(), '0.71',
     "the champion's task metric, not its 0.45 on `filtered`")

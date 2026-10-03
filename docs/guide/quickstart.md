@@ -108,6 +108,12 @@ and LoopLab's internal research roles. For setup from a fresh checkout, use
    zero is a value, while **Spread not recorded** means missing evidence.
    A better mean can coexist with a worse evaluation score. A single repeat or
    zero spread does not establish reliability or remove Trust warnings.
+   **Metrics** shows the same result interpretation and code-base receipt as
+   Overview. The ranked table labels evaluation scores and confirmation means
+   separately for this experiment and the selected one. New confirmation results
+   update from run state; cached per-seed details are used only for the same result.
+   A link naming an attempt refuses details from a newer attempt. An ordinary
+   current-node selection can still follow a repair that is ahead of the state stream.
    The final run brief and **Run result** card retain warnings for the selected
    attempt, including soft signals. A warning from an earlier attempt or another
    experiment is not a warning about that selected result. Read **Trust** for

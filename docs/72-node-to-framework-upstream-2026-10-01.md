@@ -2036,7 +2036,8 @@ Events не выдаются за хранилище отдельной commenta
 advisory Trust в чатовых итогах узла и сравнениях — §20.9;
 предупреждение выбранной попытки в итогах всего run — §20.10;
 основная оценка и разброс повторов в чатовых итогах — §20.11;
-причины отказа сравнения и ссылки на исходные попытки — §20.12.
+причины отказа сравнения и ссылки на исходные попытки — §20.12;
+свежесть Metrics и проверка попытки в detail response — §20.13.
 Полная приёмка единого вывода во всех видах остаётся OPEN.
 
 #### 72.O6 — P1 / OPEN: результат repo-задачи, который можно взять и воспроизвести
@@ -3242,4 +3243,64 @@ CSS, reachability и cycle ceilings сохранены. Повторный bundl
 исходных попыток, но не заменяют пользовательскую приёмку всего маршрута по
 §19.4. Следующий review — переход из чата в Metrics/Report с объяснением причины
 несопоставимости и сохранением контекста после возврата. Полный product suite,
+живое ML обучение, browser приёмка и доставка в master не заявляются.
+
+### 20.13 72.O5: Metrics читает текущий результат и сохраняет attempt ссылки (2026-10-03)
+
+**Найдено:** Overview уже выбирал обновлённый целый result record из run state,
+но Metrics продолжал читать cached terminal detail. Новые confirmation mean/std,
+primary score после retarget и source могли расходиться с чатовым receipt.
+Таблица ★ печатала mean вместо primary score без measurement label; per-seed
+таблица могла остаться от предыдущего confirmation результата.
+
+При проверке ссылки выявлен отдельный race: RunView проверял attempt по state,
+но Inspector разрешал более свежую detail attempt (`>=`), нужную для обычного
+live repair. Если state ещё на attempt 0, exact link на 0 открывал detail 1.
+Запрошенная identity проверялась только в одном из двух чтений.
+
+**Сделано:** pure `resultEvidence` выбирает целую запись той же id/attempt/status
+для Overview и Metrics, не смешивая поля разных попыток. Metrics показывает
+существующие ExperimentResult и BaseRevision: primary score, confirmation
+mean/std и границы сравнения доступны сразу после перехода из чата. Обе ★ cells
+подписывают свой measurement type отдельно, включая champion с другим типом.
+Per-seed values берутся из текущего run store либо matching detail result;
+устаревшие detail values не дополняют новый aggregate. Нечисловые seed metrics
+и нецелые seed IDs не попадают в таблицу.
+
+RunView передаёт `routeState.nodeGeneration` как `expectedAttempt`. Detail scope
+учитывает exact/live target, а validator требует exact attempt при наличии
+ссылки. Unpinned selection сохраняет приём более свежей detail attempt; historical
+reads сохраняют свой exact rule. Новых запросов, таймеров, команд или server/API
+изменений нет. Metrics не получает новый polling loop ради terminal confirmation.
+
+**Проверено:** mounted Inspector с одним cached detail read принимает новые
+confirmation aggregates и recorded seed values из state; stale seeds скрываются.
+Затем retarget меняет score/source и снимает старую confirmation таблицу без
+повторного detail GET. Pure tests проверяют whole-record selection при другой
+attempt/status/id, legacy missing attempt и запрет seeds нового lifecycle для
+старого. Mounted exact/unpinned переключение отвергает detail 1 для target 0 и
+затем принимает 1 в unpinned режиме, не утверждая engine selection на старом
+state. Реальный mounted RunView по `gen/node/attempt/tab=metrics` передаёт fence:
+newer detail не открывается. Все наблюдаемые запросы — GET.
+
+Replay-first — **193 passed**; Python HTTP/MCP parent/repeat fixtures, trajectory,
+confirm integration и CV confirmation — **50 passed**. Широкий UI прогон из
+289 проверок дал **288 passed**, один test expectation требовал прежний голый
+`0.45`. После добавления подписи `evaluation score` обновлён точный ожидаемый
+текст; source-caveat assertion не ослаблен. Повторный metric-retarget suite —
+**13 passed**. В прогоне проверены Inspector detail/activity/node switching,
+result/Trust/language, Metrics sources, Report/Overview, route, comments,
+accessibility и resource/command regressions.
+
+Staging build и bundle gate прошли с прежними ceilings: JS gzip total
+**632 586 → 632 791 B** (**+205 B**), CSS **59 578 B** без изменения; initial
+shell **83 039 B**, review DAG **268 495 B**, Concepts **257 909 B**. Прежний
+total target **618 KiB**, запас **41 B**; route/CSS/reachability/cycle targets
+не повышены. Документационные/API/merge и layer contracts — **96 passed**;
+strict MkDocs и `git diff --check` прошли перед локальным коммитом.
+
+**O5 остаётся OPEN:** воспроизводимые UI тесты не заменяют пользовательскую
+приёмку общего mixed-base/retarget/repeat маршрута по §19.4. Проверены конкретные
+переходы и freshness; сохранение пользовательского контекста при возврате в чат
+и объяснение результата человеком ещё требуют приёмки. Полный product suite,
 живое ML обучение, browser приёмка и доставка в master не заявляются.

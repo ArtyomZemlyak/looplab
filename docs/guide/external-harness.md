@@ -142,6 +142,11 @@ External agents should add a short interpretation after each completion:
    a newer score or link. For multiple parents, available attempts are linked
    individually without inventing a combined baseline. These links only navigate;
    reading or preparing a discussion never submits a repair or starts evaluation.
+   In Metrics, primary score, confirmation mean/spread and base evidence use the
+   same current lifecycle record as Overview. Per-seed values use current run
+   evidence or matching detail; a stale confirmation table is not merged into a
+   newer aggregate. Exact-attempt navigation also validates the detail response:
+   a response from a newer attempt is refused even if the state stream still lags.
 2. Copy the item's `id` and `evidence_token`. Submit through MCP `api_request`:
 
    ```json

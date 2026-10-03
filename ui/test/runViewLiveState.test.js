@@ -76,12 +76,14 @@ const SUSPICIOUS_WIN = {
 // The server. Everything the workspace reads is answered; the owner stream is a live body the test
 // writes frame by frame, recorded with the cursor its request carried (`Last-Event-ID`, absent on a
 // fresh connection). `holdProbe` keeps the `/state` probe unanswered until the test releases it.
-function runServer({ holdProbe = false, external = false } = {}) {
+function runServer({ holdProbe = false, external = false, initialState = {}, nodeDetail = null } = {}) {
   const streams = []
   let releaseProbe = () => {}
   const probe = holdProbe ? new Promise(resolve => { releaseProbe = resolve }) : null
   const fetch = fetchStub({
-    [`GET /api/runs/${RUN}/state`]: async () => { await probe; return snapshot(3) },
+    [`GET /api/runs/${RUN}/state`]: async () => { await probe; return snapshot(3, initialState) },
+    [`GET /api/runs/${RUN}/nodes/1`]: nodeDetail,
+    [`GET /api/runs/${RUN}/nodes/1/metrics`]: { node_id: 1, attempt: 0, metrics: {} },
     [`GET /api/runs/${RUN}/events`]: ({ init }) => {
       const stream = sseStream({ signal: init.signal })
       streams.push({ stream, cursor: init.headers?.['Last-Event-ID'] ?? null })
@@ -148,6 +150,25 @@ async function openWorkspace(server) {
   localStorage.clear()
   return harness.mount(RunView, { runId: RUN, onBack() {} })
 }
+
+test('a Metrics deep link preserves its exact attempt when detail is newer than state', async () => {
+  const nodes = { 0: { ...experiment(0, 1), attempt: 0 }, 1: { ...experiment(1, .5), attempt: 0 } }
+  const server = runServer({ initialState: { nodes }, nodeDetail: { ...nodes[1], attempt: 1, metric: 42,
+    run_generation: GENERATION, code: 'print(42)', files: {}, annotations: [], trace: { nodes: [] } } })
+  const previousHref = location.href
+  history.replaceState({}, '', `#/run/${RUN}?gen=${GENERATION}&node=1&attempt=0&tab=metrics`)
+  const view = await openWorkspace(server)
+  try {
+    await until(() => view.container.textContent.includes('attempt changed while details were loading'), 'exact linked attempt refuses fresher detail')
+    assert.doesNotMatch(view.container.textContent, /Evaluation score42/)
+    assert.equal(server.reads('/nodes/1'), 1)
+    assert.match(location.hash, /attempt=0/)
+    assert.ok(server.fetch.calls.every(call => call.method === 'GET'))
+  } finally {
+    await view.unmount()
+    history.replaceState({}, '', previousHref)
+  }
+})
 
 test('Overview opens the Report workspace and clears the overlay in one route change', async () => {
   await Promise.all(['/src/panels.jsx', '/src/Report.jsx'].map(path => harness.load(path)))

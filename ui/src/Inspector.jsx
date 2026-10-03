@@ -12,6 +12,8 @@ import Markdown from './markdown.jsx'
 import CodeViewer from './CodeViewer.jsx'
 import ExperimentResult from './ExperimentResult.jsx'
 import BaseRevision from './BaseRevision.jsx'
+import { currentResultNode, confirmationSeedResults } from './resultEvidence.js'
+import { resultMeasurement } from './resultMeasurement.js'
 import { diffLines } from './lineDiff.js'
 import { nodeFeasibilityStatus, isSalvagedMetricViolation,
   OBJECTIVE_SOURCE_LABEL, objectiveMetricSource, objectiveSourceCaveated,
@@ -178,7 +180,7 @@ function ResetBtn({ runId, id, generation, onToast }) {
 // a real question, and it is exactly the jump the concept tree used to make without being asked.
 export default function Inspector({ runId, nodeId, state, live, tab, setTab, onToast, readOnly = false,
   evalStages = null, onOpenLineage = null, onOpenCard = null,
-  historySeq = null, expectedGeneration = null, readOnlyReason = 'history', evidenceAvailable = true,
+  historySeq = null, expectedGeneration = null, expectedAttempt = null, readOnlyReason = 'history', evidenceAvailable = true,
   commentsRevision = null, focusCommentId = null, traceClearRecoveryStore: sharedClearStore = null,
   traceClearRecoverySnapshot: sharedClearSnapshot = null,
   publishTraceClearRecovery: publishSharedClearRecovery = null, draftStore: sharedDraftStore = null }) {
@@ -186,16 +188,18 @@ export default function Inspector({ runId, nodeId, state, live, tab, setTab, onT
   if (!fallbackDraftStoreRef.current) fallbackDraftStoreRef.current = createInspectorDraftStore()
   const draftStore = sharedDraftStore || fallbackDraftStoreRef.current
   const nodeAttempt = state?.nodes?.[nodeId]?.attempt
-  const detailScope = `${runId}@${expectedGeneration || '?'}:${nodeId ?? '-'}:${nodeAttempt ?? '?'}:${readOnly
+  const detailScope = `${runId}@${expectedGeneration || '?'}:${nodeId ?? '-'}:${nodeAttempt ?? '?'}:${expectedAttempt ?? 'current'}:${readOnly
     ? historySeq ?? readOnlyReason : 'live'}:${evidenceAvailable ? 1 : 0}`
   // Accept a detail payload whose attempt is >= the summary's: the /nodes endpoint is often FRESHER
   // than the lagging run-state poll (e.g. right after an inline repair bumps `attempt`), and showing
   // the current truth is correct — only a genuinely STALER payload (an old attempt's late response)
   // should be rejected. Exact-only matching here flashed a spurious "attempt changed" error banner
   // during normal live repairs until the next poll reconciled.
-  const detailMatchesAttempt = value => !Number.isSafeInteger(nodeAttempt)
+  // An exact link is different from an unpinned current-node selection: its target must not advance.
+  const detailMatchesAttempt = value => !Number.isSafeInteger(nodeAttempt) && expectedAttempt == null
     || (Number.isSafeInteger(value?.attempt)
-      && (readOnly ? value.attempt === nodeAttempt : value.attempt >= nodeAttempt))
+      && (expectedAttempt != null ? value.attempt === expectedAttempt
+        : readOnly ? value.attempt === nodeAttempt : value.attempt >= nodeAttempt))
   const detailMatchesNode = value => value != null && typeof value === 'object' && !Array.isArray(value)
     && String(value.id) === String(nodeId) && typeof value.status === 'string'
   const [traceClearedScopes, setTraceClearedScopes] = useState(() => new Set())
@@ -1045,8 +1049,7 @@ function Overview({ n, state, runId, onToast, draftStore, expectedGeneration, on
   evalStages = null, onTab }) {
   // Terminal details do not poll. Current state still updates confirmation/provenance; use its
   // whole result record only for the same lifecycle/status, never splice fields across attempts.
-  const summary = state.nodes?.[n.id]
-  const resultNode = summary?.attempt === n.attempt && summary?.status === n.status ? summary : n
+  const resultNode = currentResultNode(n, state)
   const p = n.idea?.params || {}
   const uses = mergeSummary(n, state.nodes || {}, state)   // E3: for merges, which technique each parent fused
   const chg = nodeChip(n, state.nodes || {}, state)        // same chip as the card (sweep-aware; '' for merges)
@@ -2786,7 +2789,8 @@ export function MetricCurves({ runId, nodeId, attempt = 0, status }) {
 
 // Exported for the same reason `MetricCurves` is: nothing in the suite MOUNTS `Inspector.jsx`, and
 // the objective row's label is a claim about a RECORD that has to be driven, not read off the source.
-export function Metrics({ n, detail, state, runId, onToast = null, canRetarget = false }) {
+export function Metrics({ n: detailNode, detail, state, runId, onToast = null, canRetarget = false }) {
+  const n = currentResultNode(detailNode, state)
   // THE OBJECTIVE AN OPERATOR MAY PUT IN FORCE (doc 68 68.2): a declared extra metric the whole run
   // is re-ranked by, offered only on a live view and only where the server would accept it
   // (`objectiveModel.js::retargetableKeys`); the ★ row names the key once one is in force.
@@ -2804,8 +2808,9 @@ export function Metrics({ n, detail, state, runId, onToast = null, canRetarget =
       }, onToast)
     } finally { setRetargeting(false) }
   }
-  const seeds = detail?.confirm_seeds_detail || {}
-  const vals = Object.entries(seeds).map(([s, v]) => ({ s: Number(s), v })).filter(x => x.v != null).sort((a, b) => a.s - b.s)
+  const seeds = confirmationSeedResults(n, detail, state)
+  const vals = Object.entries(seeds).map(([s, v]) => ({ s: Number(s), v }))
+    .filter(x => Number.isSafeInteger(x.s) && Number.isFinite(x.v)).sort((a, b) => a.s - b.s)
   // Every metric reported anywhere in the run (the objective ★ + all extras), shown for
   // THIS node and for the champion (the run's best node), so "the metrics you wanted to see overall"
   // are all visible + comparable. Only the objective drives selection; extras are audit-only.
@@ -2891,7 +2896,11 @@ export function Metrics({ n, detail, state, runId, onToast = null, canRetarget =
   // `bestCaveated` are both false there, so the sentence is printed only when some cell it
   // describes is actually on screen.
   const anyUnverified = rows.some(r => r.caveated || r.bestCaveated)
+  const ranked = (value, node) => <>{fmt(value)} <small className="muted">
+    {resultMeasurement(Number.isFinite(node?.confirmed_mean), node?.confirmed_seeds).label}</small></>
   return <>
+    <ExperimentResult node={n} state={state} />
+    <BaseRevision node={n} state={state} />
     <div className="section-h">Reported metrics{champ ? ` · best = #${champ.id}` : ''}</div>
     <DataTable caption="Node metric comparison" card={false}><table className="tbl"><thead><tr><th>metric</th><th>source</th><th>this node</th>{showChamp && <th>best #{champ.id}</th>}</tr></thead>
       <tbody>{rows.map(r => <tr key={r.k} className={r.star ? 'chosen-row' : ''}>
@@ -2910,14 +2919,14 @@ export function Metrics({ n, detail, state, runId, onToast = null, canRetarget =
               title={extraMetricSourceHelp(n, r.star ? objKey : r.k)}>
               {extraMetricSourceLabel(n, r.star ? objKey : r.k)}</span>
             : null}</td>
-        <td>{fmt(r.mine)}</td>
+        <td>{r.star ? ranked(r.mine, n) : fmt(r.mine)}</td>
         {showChamp && <td>{r.star && !objKey && objectiveSourceCaveated(champObjective)
           ? <span className="warn" title={objectiveSourceHelp(champObjective)}>
-            {fmt(r.best)} · {OBJECTIVE_SOURCE_LABEL[champObjective.channel]}</span>
+            {ranked(r.best, champ)} · {OBJECTIVE_SOURCE_LABEL[champObjective.channel]}</span>
           : r.bestCaveated
             ? <span className="warn" title={extraMetricSourceHelp(champ, r.star ? objKey : r.k)}>
-              {fmt(r.best)} · {extraMetricSourceLabel(champ, r.star ? objKey : r.k)}</span>
-            : fmt(r.best)}</td>}</tr>)}</tbody></table></DataTable>
+              {r.star ? ranked(r.best, champ) : fmt(r.best)} · {extraMetricSourceLabel(champ, r.star ? objKey : r.k)}</span>
+            : r.star ? ranked(r.best, champ) : fmt(r.best)}</td>}</tr>)}</tbody></table></DataTable>
     {/* The extras' footnote below exists because a tooltip is not discoverable — an operator
         scanning a table does not hover every cell. That argument is STRONGER for the ★ row, which
         is the number that drives selection, so the caveat is printed rather than only hovered. It
