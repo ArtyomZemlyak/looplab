@@ -522,6 +522,7 @@ def test_node_metrics_are_receipt_bound_to_current_attempt(tmp_path, monkeypatch
     assert current.status_code == 200
     assert current.json() == {
         "node_id": 0, "attempt": 1,
+        "run_generation": client.get("/api/runs/demo/state").json()["generation"],
         "metrics": {"loss": [{"step": 1, "value": 0.25, "wall_time": 124.0}]},
     }
     assert calls == [(str(node_dir), 123.0)]

@@ -29,9 +29,14 @@ test('result and seed projections retain complete lifecycle records rather than 
 })
 
 test('Metrics follows state evidence while a terminal detail read stays cached', async () => {
+  const curveGenerations = []
   const h = await mountLive({ visible: true, routes: {
     '/api/runs/r/nodes/1': cached,
-    '/api/runs/r/nodes/1/metrics': { node_id: 1, attempt: 0, metrics: {} },
+    '/api/runs/r/nodes/1/metrics': ({ url }) => {
+      curveGenerations.push(url.searchParams.get('expected_generation'))
+      return { node_id: 1, attempt: 0, run_generation: generation,
+        metrics: { 'train/loss': [{ step: 1, value: .5 }] } }
+    },
   } })
   try {
     const { default: Inspector } = await h.load('/src/Inspector.jsx')
@@ -42,8 +47,11 @@ test('Metrics follows state evidence while a terminal detail read stays cached',
     const table = caption => [...view.container.querySelectorAll('table')].find(table => table.querySelector('caption')?.textContent === caption)
     try {
       await until(() => result()?.textContent.includes('Confirmation mean0.9'), 'cached measured result')
+      await until(() => view.container.textContent.includes('train'), 'Inspector curve reads are generation bound')
+      assert.deepEqual(curveGenerations, [generation])
       const reads = () => h.fetch.calls.filter(call => call.path === '/api/runs/r/nodes/1').length
       assert.equal(reads(), 1)
+      assert.deepEqual(curveGenerations, [generation], 'terminal curves do not gain another polling loop')
       await view.rerender(props(stateFor(current)))
       assert.match(result().textContent, /Evaluation score1.2.*Confirmation mean0.8.*Standard deviation: 0.1/)
       assert.match(result().textContent, /Evaluation score is worse by 0.2/)

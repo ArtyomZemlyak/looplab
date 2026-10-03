@@ -2037,7 +2037,8 @@ advisory Trust в чатовых итогах узла и сравнениях �
 предупреждение выбранной попытки в итогах всего run — §20.10;
 основная оценка и разброс повторов в чатовых итогах — §20.11;
 причины отказа сравнения и ссылки на исходные попытки — §20.12;
-свежесть Metrics и проверка попытки в detail response — §20.13.
+свежесть Metrics и проверка попытки в detail response — §20.13;
+generation fence для графиков метрик — §20.14.
 Полная приёмка единого вывода во всех видах остаётся OPEN.
 
 #### 72.O6 — P1 / OPEN: результат repo-задачи, который можно взять и воспроизвести
@@ -3304,3 +3305,54 @@ strict MkDocs и `git diff --check` прошли перед локальным �
 переходы и freshness; сохранение пользовательского контекста при возврате в чат
 и объяснение результата человеком ещё требуют приёмки. Полный product suite,
 живое ML обучение, browser приёмка и доставка в master не заявляются.
+
+### 20.14 72.O5: графики метрик принадлежат поколению запуска (2026-10-03)
+
+**Найдено:** node detail уже проверял generation, но online metric curves
+передавали и проверяли только node ID/attempt. Замена всего run могла сохранить
+эти номера. Metrics endpoint не проверял generation до/после sidecar read, а UI
+сохранял уже загруженные графики при смене поколения без перемонтирования родителя.
+Поэтому правильная ссылка на результат могла сопровождаться чужими графиками.
+
+**Сделано:** owner metrics endpoint принимает optional `expected_generation`,
+использует существующий before/after generation CAS и reset-marker guard,
+возвращает `run_generation`. Даже legacy read без client fence отказывает при
+замене run внутри чтения. Attempt CAS сохранён. Inspector передаёт generation
+через Metrics в MetricCurves; ответ принимается только для запрошенных generation,
+node ID и attempt с object series map. Identity ключ самого curve resource
+сбрасывает settled данные при смене run/generation/node/attempt. Уже существующий
+`usePoll` сохраняет сериализацию, очередь, abort и stale/retry поведение внутри
+одного scope; его `alive` fence заменяет избыточный request counter. Графики
+завершённого узла читаются однократно; ошибка требует явного Retry. Никаких
+новых engine waits, команд, событий, моделей или расширения reviewer scope.
+
+**Проверено:** до исправления два mounted UI сценария воспроизводили принятие
+чужого поколения и сохранение старых графиков. После исправления проверены
+missing/wrong generation, чужие node/attempt, string/array вместо series map,
+Retry, смена поколения с теми же номерами и late response. Реальный mounted
+Inspector передаёт generation в metric query и не добавляет terminal polling.
+Synthetic HTTP tests проверяют generation echo, отказ до sidecar read, замену
+внутри чтения с client fence и без него, invalid generation и node reset.
+
+Replay-first — **193 passed**. Server/metrics adapters/reviewer contracts —
+**195 passed, 3 skipped, 3 failed**: все три failure происходят при создании
+symlink в прежних unrelated server fixtures, `WinError 1314` (нет Windows права),
+до проверки поведения. Assertions и platform gates не ослаблены. Проверки
+нового generation fence и прежнего attempt endpoint отдельно — **8 passed**.
+Связанные UI Metrics/Inspector, node switching, route/live state, source/retarget,
+parent/result contracts — **53 passed**. Это не полностью зелёный server suite.
+
+Staging build и bundle gate прошли с прежними ceilings. JS gzip total
+**632 791 → 632 808 B** (**+17 B**), CSS **59 578 B** без изменения; initial shell
+**83 043 B**, review DAG **268 506 B**, Concepts **257 920 B**. Запас до прежнего
+total target **618 KiB** — **24 B**. Первые builds превышали total на 38 и 4 B;
+убраны redundant counter и effect dependencies, уже покрытые full identity key
+и scope-owned scheduler. Source validation, serialization и late-response tests
+сохранены. Quickstart и external guide обновлены в той же доработке.
+Документационные/API/entry-point/merge, layer и doc-surface contracts —
+**54 passed**; strict MkDocs прошёл. Финальный curve/resource/Inspector прогон
+после удаления избыточных effect dependencies — **7 passed**.
+
+**O5 остаётся OPEN:** это проверка identity и freshness графиков, а не человеческая
+приёмка общего mixed-base/retarget/repeat маршрута по §19.4. Browser приёмка,
+живое ML обучение и полностью зелёный product suite этим increment не заявляются.

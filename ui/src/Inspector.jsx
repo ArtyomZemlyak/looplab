@@ -506,7 +506,7 @@ export default function Inspector({ runId, nodeId, state, live, tab, setTab, onT
             ? <div className="insp-empty">Code is unavailable because full node details failed to load.</div>
             : <div className="insp-empty">Loading code…</div>)}
         {activeTab === 'Metrics' && <Metrics n={n} detail={detail} state={state} runId={runId}
-          onToast={onToast} canRetarget={!readOnly} />}
+          expectedGeneration={expectedGeneration} onToast={onToast} canRetarget={!readOnly} />}
         {activeTab === 'Trust' && <Trust n={n} drifts={nodeDrifts} />}
         {activeTab === 'Cost' && <Cost state={state} />}
       </div>
@@ -2746,29 +2746,33 @@ function Code({ n, draftStore, draftScope }) {
 // Live online metric curves (loss, recall@k, lr, grad norms, …) read from the node's TensorBoard
 // events via the metrics adapters. Polls while the node is still running so the curves fill in as
 // training progresses; keyed on n.status so a repair-retrain (pending→failed→pending) re-arms the poll.
-export function MetricCurves({ runId, nodeId, attempt = 0, status }) {
+export function MetricCurves(props) {
+  // Identity changes must clear even already settled curves before another scope is read.
+  return <MetricCurveResource key={`${props.runId}:${props.expectedGeneration}:${props.nodeId}:${props.attempt}`} {...props} />
+}
+
+function MetricCurveResource({ runId, nodeId, attempt = 0, status, expectedGeneration }) {
   const done = ['evaluated', 'failed', 'confirmed'].includes(status)
   const metricAttempt = Number.isInteger(attempt) && attempt >= 0 ? attempt : 0
   const [resource, setResource] = useState(null)
   const [retryNonce, setRetryNonce] = useState(0)
-  const requestRef = useRef(0)
   // A terminal node's metrics are immutable — fetch ONCE (ms=null: immediate, no interval) instead of
   // polling every 15s forever. A running node still polls at 3s; a status change (via the `done` dep)
   // re-arms the effect, so a repair-retrain (pending→failed→pending) resumes live polling.
   usePoll((alive) => {
-    const request = ++requestRef.current
     const timed = deadlineGet(
-      runNodeApiPath(runId, nodeId, `/metrics?attempt=${metricAttempt}`))
+      runNodeApiPath(runId, nodeId, `/metrics${traceReadQuery(expectedGeneration, metricAttempt)}`))
     timed.promise.then(d => {
-      if (!d?.metrics || Array.isArray(d.metrics)) throw 0
+      if (!d?.metrics || typeof d.metrics !== 'object' || Array.isArray(d.metrics)
+          || !traceGenerationMatches(d, expectedGeneration)) throw 0
       if (d.node_id !== nodeId || d.attempt !== metricAttempt) throw 0
-      if (alive() && request === requestRef.current) setResource(d.metrics)
+      if (alive()) setResource(d.metrics)
     }).catch(() => {
-      if (alive() && request === requestRef.current) setResource(r => r
+      if (alive()) setResource(r => r
         ? Array.isArray(r) ? r : [r] : false)
     })
     return timed
-  }, done ? null : 3000, [runId, nodeId, metricAttempt, done, retryNonce],
+  }, done ? null : 3000, [done, retryNonce],
   { enabled: nodeId != null })
   const retry = () => {
     if (resource === false) setResource(null)
@@ -2789,7 +2793,7 @@ export function MetricCurves({ runId, nodeId, attempt = 0, status }) {
 
 // Exported for the same reason `MetricCurves` is: nothing in the suite MOUNTS `Inspector.jsx`, and
 // the objective row's label is a claim about a RECORD that has to be driven, not read off the source.
-export function Metrics({ n: detailNode, detail, state, runId, onToast = null, canRetarget = false }) {
+export function Metrics({ n: detailNode, detail, state, runId, expectedGeneration, onToast = null, canRetarget = false }) {
   const n = currentResultNode(detailNode, state)
   // THE OBJECTIVE AN OPERATOR MAY PUT IN FORCE (doc 68 68.2): a declared extra metric the whole run
   // is re-ranked by, offered only on a live view and only where the server would accept it
@@ -3024,7 +3028,7 @@ export function Metrics({ n: detailNode, detail, state, runId, onToast = null, c
     </>}
     <div className="section-h metric-curves-heading">Metric curves
       <span className="muted metric-curves-note">· live logged scalars · grouped</span></div>
-    <MetricCurves key={`${runId}:${n.id}:${n.attempt ?? 0}`} runId={runId} nodeId={n.id}
+    <MetricCurves runId={runId} nodeId={n.id} expectedGeneration={expectedGeneration}
       attempt={n.attempt ?? 0} status={n.status} />
   </>
 }

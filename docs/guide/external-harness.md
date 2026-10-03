@@ -147,6 +147,11 @@ External agents should add a short interpretation after each completion:
    evidence or matching detail; a stale confirmation table is not merged into a
    newer aggregate. Exact-attempt navigation also validates the detail response:
    a response from a newer attempt is refused even if the state stream still lags.
+   Online metric curves additionally send `expected_generation` and validate the
+   returned `run_generation`, node ID and attempt. The metrics endpoint checks
+   generation before and after reading sidecars, even for legacy unfenced reads.
+   Replacing a run clears settled curves; invalid or unavailable replies require
+   explicit Retry for a terminal node, rather than implying no metrics were logged.
 2. Copy the item's `id` and `evidence_token`. Submit through MCP `api_request`:
 
    ```json

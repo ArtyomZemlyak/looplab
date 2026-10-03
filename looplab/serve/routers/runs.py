@@ -1800,13 +1800,17 @@ def build_router(srv) -> APIRouter:
 
     @router.get("/api/runs/{run_id}/nodes/{nid}/metrics")
     def node_metrics(run_id: str, nid: int,
-                     attempt: Optional[int] = Query(default=None, ge=0)):
+                     attempt: Optional[int] = Query(default=None, ge=0),
+                     expected_generation: Optional[str] = Query(default=None)):
         """Online metric SERIES a node's training logged — every scalar (loss, each recall@k, grad
         norms, lr, …), not just the objective — read via the pluggable metrics adapters (TensorBoard
-        today). The response is fenced to ``node_id`` + lifecycle ``attempt``; reset-era points are
-        excluded by the engine's attempt receipt. Empty until current-attempt logs appear."""
+        today). The response is fenced to run generation + ``node_id`` + lifecycle ``attempt``;
+        reset-era points are excluded by the engine's attempt receipt. Empty until current-attempt
+        logs appear. A replaced run is refused before and after the adapter read."""
         from looplab.serve.metrics_adapters import fenced_node_metrics
         rd = _run_dir(run_id)
+        before_generation = _begin_trace_read(
+            rd, expected_generation, reading="metric evidence", subject="its metric evidence")
         current_attempt = _node_attempt(srv.state(rd), nid)
         if current_attempt is None:
             raise HTTPException(404, "no such node")
@@ -1819,10 +1823,12 @@ def build_router(srv) -> APIRouter:
         # 404 above rather than attempt zero, so it keeps its own re-read (see the settle note on
         # `_assert_attempt_unchanged`) and shares only the refusal body.
         after_attempt = _node_attempt(srv.state(rd), nid)
+        generation = _finish_trace_read(rd, before_generation, expected_generation)
         if after_attempt != current_attempt:
             raise _attempt_cas_409(nid, current_attempt, after_attempt,
                                    "The node was reset while its metric evidence was being read.")
-        return {"node_id": nid, "attempt": current_attempt, "metrics": m}
+        return {"node_id": nid, "attempt": current_attempt,
+                "run_generation": generation or None, "metrics": m}
 
     def _settle_window_anchor(rd: Path, before: Optional[str], *, nid: int,
                               generation: int) -> Optional[str]:
