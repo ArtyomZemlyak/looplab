@@ -51,13 +51,19 @@ and LoopLab's internal research roles. For setup from a fresh checkout, use
    With **Русский**, these actions are **Проверить — бесплатно** and **Начать запуск**;
    **Изменить параметры плана** opens the fields. The labels and cost warning also
    follow the language; task JSON, paths and server diagnostics keep their original text.
+   **Run LLM budget (USD)** can be edited under **Edit proposal details**. The review
+   shows its effective amount only after validation: the smaller positive value of
+   `llm_budget_usd` and `llm_cost_limit` applies; zero disables that field's limit.
+   Before validation, inherited limits remain unresolved. Chat, external-client models
+   and experiment/upstream compute are outside this limit. Missing prices leave spend
+   unknown, and calls can exceed the limit before settling.
    The card's **Next:** guidance (Russian: **Дальше:**) explains the current step in
    the Assistant language. **Detailed status / Подробный статус** retains the precise
    technical message. If the startup reply is lost, follow **Check startup / Проверить запуск** to read
    the already-submitted launch; an unknown reply does not prove that it failed.
    Chatting about a plan does not start a run. A live model or evaluator may incur cost;
    check the effective limits in the preview. Experiment and time limits alone do not cap
-   model spending; set run model budgets in Settings if needed.
+   model spending; set the run model budget on the card or defaults in Settings if needed.
 5. When the run finishes, Assistant shows a free **Run result** summary: the first eligible
    experiment, the engine's selected result, metric direction and confirmation caveats.
    The first eligible experiment is not necessarily a task baseline. **Read Report** opens

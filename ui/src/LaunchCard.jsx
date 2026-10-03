@@ -9,6 +9,7 @@ import {
   updateRuntimeValue,
 } from './launchDraft.js'
 import { launchStatusOutcome, pollLaunchStatus } from './launchRecovery.js'
+import { launchCostSummary } from './launchCostModel.js'
 import {
   getSnapshot as getSettingsLaunchGuard, subscribe as subscribeSettingsLaunchGuard,
 } from './settingsLaunchGuard.js'
@@ -732,6 +733,7 @@ export default function LaunchCard({
   const reviewedModel = reviewSettings?.backend === 'toy'
     ? t('Not used (toy backend)')
     : validatedCurrent && !reviewSettings?.llm_model ? t('Not configured') : reviewSetting('llm_model')
+  const costReview = launchCostSummary(reviewSettings, validatedCurrent, t)
   const reviewRows = [
     { label: 'Run', value: String((validatedCurrent ? preview.run_id : draft.run_id) || t('Missing run name')),
       invalid: !!errors.run_id },
@@ -743,6 +745,8 @@ export default function LaunchCard({
       invalid: reviewSettingsInvalid || !!errors['settings.backend'] },
     { label: 'Model', value: reviewedModel,
       invalid: reviewSettingsInvalid || !!errors['settings.llm_model'] },
+    { label: 'Run LLM budget (USD)', value: costReview.budget,
+      invalid: reviewSettingsInvalid || !!errors['settings.llm_budget_usd'] || !!errors['settings.llm_cost_limit'] },
     { label: 'Search', value: `${t('nodes')} ${reviewSetting('max_nodes')} · ${t('seeds')} ${reviewSetting('n_seeds')}`,
       invalid: reviewSettingsInvalid || !!errors['settings.max_nodes'] || !!errors['settings.n_seeds'] },
     { label: 'Parallel', value: `${t('eval')} ${evalParallelReview()} · LLM ${llmParallelReview()}`,
@@ -761,11 +765,6 @@ export default function LaunchCard({
   const settingsUnblockSettling = !settingsLaunchBlocked && settingsBlockedRef.current
   const guidanceNotice = ((!settingsLaunchBlocked && !settingsUnblockSettling)
     || unknownStart || startedRunId || damagedRecovery) ? notice : ''
-  const costDisclosure = validatedCurrent && reviewedBackend === 'toy'
-    ? t('The validated toy backend makes no model/provider call.')
-    : validatedCurrent
-      ? t('The validated LLM backend may incur provider cost. No monetary cap is configured.')
-      : t('If validation resolves to an LLM backend, Start may incur provider cost. No monetary cap is configured.')
   // Reveal the editable config on explicit request OR whenever there is a field error to fix (so a
   // collapsed field is never the reason an error can't be seen/focused).
   const showConfig = configOpen || hasFieldErrors
@@ -1001,8 +1000,9 @@ export default function LaunchCard({
     </div>
     {normalLaunchActions && <>
       <p className="asst-launch-cost"><strong>{t('Validate is free:')}</strong> {t('it makes no model/provider call and resolves inherited values in the review above.')}</p>
-      <p id={costId} className="asst-launch-cost"><strong>{t('Provider cost:')}</strong> {costDisclosure}
-        {' '}{t('Review the model, workload, parallelism, and time limits above.')}</p>
+      <p id={costId} className="asst-launch-cost"><strong>{t('Provider cost:')}</strong> {costReview.backend}</p>
+      <p className="asst-launch-cost">{costReview.scope}</p>
+      {validatedCurrent && reviewSettings?.backend === 'llm' && <p className="asst-launch-cost">{costReview.accounting}</p>}
     </>}
 
     <div className="asst-perm-actions asst-launch-actions">

@@ -8,6 +8,7 @@ from pathlib import Path
 import pytest
 
 from _posix_gates import NOFOLLOW_OPEN, POSIX_ONLY_OS_CALLS
+from _symlinks import create_symlink
 
 pytest.importorskip("fastapi")
 from fastapi.testclient import TestClient  # noqa: E402
@@ -42,7 +43,7 @@ def test_preflight_is_read_only_and_returns_effective_preview(tmp_path, monkeypa
     response = client.post("/api/start/preflight", json={
         "run_id": "preview-only",
         "task": _toy(),
-        "settings": {"max_nodes": 4},
+        "settings": {"max_nodes": 4, "llm_budget_usd": 2.0, "llm_cost_limit": 3.0},
     })
 
     assert response.status_code == 200
@@ -50,6 +51,8 @@ def test_preflight_is_read_only_and_returns_effective_preview(tmp_path, monkeypa
     assert body["ok"] is True and len(body["validation_token"]) == 64
     assert body["preview"]["task"]["kind"] == "quadratic"
     assert body["preview"]["settings"]["max_nodes"] == 4
+    assert body["preview"]["settings"]["llm_budget_usd"] == 2.0
+    assert body["preview"]["settings"]["llm_cost_limit"] == 3.0
     assert body["preview"]["source"] == "inline"
     assert sorted(path.name for path in tmp_path.iterdir()) == before
     assert not (tmp_path / "preview-only").exists()
@@ -365,7 +368,7 @@ def test_task_file_symlink_out_of_a_declared_root_is_refused(tmp_path):
     real = outside / "task.json"
     real.write_text(json.dumps(_toy()), encoding="utf-8")
     link = root / "innocent.json"
-    link.symlink_to(real)
+    create_symlink(real, link)
 
     response = TestClient(make_app(root)).post("/api/start/preflight", json={
         "run_id": "via-link", "task_file": str(link),
@@ -509,6 +512,11 @@ def test_task_file_that_becomes_a_symlink_after_containment_is_refused(tmp_path,
     root.mkdir()
     secret = tmp_path / "shadow"
     secret.write_text(_SECRET_LINE, encoding="utf-8")
+    # Probe on the test thread so unavailable Windows link privilege is a normal
+    # platform skip, rather than an exception raised inside the ASGI worker.
+    probe = root / "symlink-capability"
+    create_symlink(secret, probe)
+    probe.unlink()
     source = root / "innocent.json"
     source.write_text(json.dumps(_toy()), encoding="utf-8")
 

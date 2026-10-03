@@ -18,7 +18,7 @@ const preview = body => ({ ok: true, validation_token: 'checked-proposal', warni
   run_id: body.run_id, source: 'inline', source_task_file: null, task: body.task,
   referenced_paths: [], settings: { backend: 'toy', llm_model: 'local-model', max_nodes: 3,
     n_seeds: 1, max_parallel: 1, parallel_build: 0, eval_parallel: 1, llm_parallel: 1,
-    max_seconds: 30, max_eval_seconds: 10 },
+    max_seconds: 30, max_eval_seconds: 10, llm_budget_usd: 0, llm_cost_limit: 0 },
 } })
 const button = (mounted, name) => [...mounted.container.querySelectorAll('button')]
   .find(row => row.textContent === name)
@@ -166,7 +166,7 @@ test('Russian controls preserve raw contracts, boolean values, edits and LLM cos
     assert.deepEqual(JSON.parse(rawSettings).custom, proposal.settings.custom)
     await click(button(mounted, 'Проверить — бесплатно'))
     await until(() => button(mounted, 'Начать запуск')?.disabled === false, 'checked Russian plan')
-    assert.match(form.textContent, /Лимит расходов в деньгах не задан/)
+    assert.match(form.textContent, /Лимит модели в запуске не задан/)
     const sent = JSON.parse(calls.calls[0].body)
     assert.deepEqual(sent.task, proposal.task)
     assert.equal(sent.settings.backend, 'llm')
@@ -179,7 +179,7 @@ test('Russian controls preserve raw contracts, boolean values, edits and LLM cos
     assert.equal(settingsJson.value, rawSettings)
     assert.equal(form.querySelector('input[id$="-run_id"]').value, 'edited-russian-plan')
     assert.equal(button(mounted, 'Start run').disabled, false)
-    assert.match(form.textContent, /No monetary cap is configured/)
+    assert.match(form.textContent, /No run LLM limit configured/)
     assert.equal(calls.calls.length, 1, 'language switch sends no request or new startup')
   } finally { await mounted.unmount() }
 })
@@ -212,6 +212,63 @@ test('a Russian task-file card keeps its path and uses the authoritative resolve
     const sent = JSON.parse(calls.calls[0].body)
     assert.equal(sent.task_file, fileSpec.task_file)
     assert.equal(Object.hasOwn(sent, 'task'), false)
+    assert.equal(calls.calls.length, 1)
+  } finally { await mounted.unmount() }
+})
+
+test('launch budget follows inherited preflight values, edits and language without claiming a stale cap or starting', async () => {
+  const budgetSpec = { ...spec, settings: { backend: 'llm', llm_budget_usd: 2 } }
+  const calls = fetchStub({ 'POST /api/start/preflight': ({ init }) => {
+    const body = JSON.parse(init.body)
+    const checked = preview(body)
+    Object.assign(checked.preview.settings, { backend: 'llm', llm_budget_usd: body.settings.llm_budget_usd,
+      llm_cost_limit: .5 }) // inherited from server settings, not present in the draft
+    return checked
+  } })
+  globalThis.fetch = calls
+  const mounted = await harness.mount(Card, { spec: budgetSpec, language: 'ru' })
+  const budget = () => [...mounted.container.querySelectorAll('.asst-launch-review dl > div')]
+    .find(row => /Бюджет модели для запуска|Run LLM budget/.test(row.querySelector('dt')?.textContent))
+    ?.querySelector('dd')?.textContent
+  try {
+    await until(() => button(mounted, 'Проверить — бесплатно')?.disabled === false, 'budget card hydrated')
+    assert.match(budget(), /наследуемых настроек/)
+    assert.doesNotMatch(budget(), /\$2|не задан/)
+    await click(button(mounted, 'Проверить — бесплатно'))
+    await until(() => budget() === '$0.5', 'tighter inherited limit')
+    assert.match(mounted.container.textContent, /чат ассистента.*внешнего клиента.*вычисления/)
+    assert.match(mounted.container.textContent, /Без цен/)
+    assert.equal(button(mounted, 'Начать запуск').disabled, false)
+    await click(button(mounted, 'Изменить параметры плана'))
+    await edit(mounted.container.querySelector('input[id$="-settings-llm_budget_usd"]'), '0.25')
+    await until(() => button(mounted, 'Начать запуск').disabled, 'budget edit invalidates validation')
+    assert.match(budget(), /наследуемых настроек/)
+    assert.doesNotMatch(budget(), /\$0.5/)
+    await click(button(mounted, 'Проверить — бесплатно'))
+    await until(() => budget() === '$0.25', 'new effective limit')
+    await mounted.rerender({ spec: budgetSpec, language: 'en' })
+    assert.equal(budget(), '$0.25')
+    assert.match(mounted.container.textContent, /external-client models/)
+    assert.equal(button(mounted, 'Start run').disabled, false)
+    assert.deepEqual(calls.calls.map(row => `${row.method} ${row.path}`),
+      ['POST /api/start/preflight', 'POST /api/start/preflight'])
+  } finally { await mounted.unmount() }
+})
+
+test('an older cost preview stays visibly unknown instead of asserting that no budget exists', async () => {
+  const calls = fetchStub({ 'POST /api/start/preflight': ({ init }) => {
+    const checked = preview(JSON.parse(init.body))
+    delete checked.preview.settings.llm_cost_limit
+    return checked
+  } })
+  globalThis.fetch = calls
+  const mounted = await harness.mount(Card, { spec, language: 'en' })
+  try {
+    await until(() => button(mounted, 'Validate — free')?.disabled === false, 'legacy card hydrated')
+    await click(button(mounted, 'Validate — free'))
+    await until(() => button(mounted, 'Start run')?.disabled === false, 'validated legacy preview')
+    assert.match(mounted.container.textContent, /Run LLM limit unavailable/)
+    assert.doesNotMatch(mounted.container.textContent, /No run LLM limit configured/)
     assert.equal(calls.calls.length, 1)
   } finally { await mounted.unmount() }
 })

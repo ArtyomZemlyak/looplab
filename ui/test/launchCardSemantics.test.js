@@ -29,8 +29,6 @@ test('editable launch card gates Start on the exact validated fingerprint', asyn
   assert.match(card, /<strong>\{t\('Startup being observed'\)\}<\/strong><code>\{unknownStart\.runId\}<\/code>/,
     'reload recovery must show the saved run identity even when the proposal originally had another name')
   assert.match(card, /<strong>\{t\('Validate is free:'\)\}<\/strong>/)
-  assert.match(card, /Start may incur provider cost\. No monetary cap is configured\./,
-    'an unvalidated draft must warn that Start can cost money and that nothing caps it')
   assert.doesNotMatch(card, /did not reach Popen/)
 })
 

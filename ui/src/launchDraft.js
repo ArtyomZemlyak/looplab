@@ -6,6 +6,8 @@ export const LAUNCH_RUNTIME_FIELDS = Object.freeze([
   { key: 'profile', label: 'Profile', type: 'enum', options: ['default', 'fast', 'thorough'] },
   { key: 'backend', label: 'Backend', type: 'enum', options: ['toy', 'llm'] },
   { key: 'llm_model', label: 'Model', type: 'text', placeholder: 'inherit configured model' },
+  { key: 'llm_budget_usd', label: 'Run LLM budget (USD)', type: 'float', min: 0,
+    help: '0 = no limit. A lower llm_cost_limit still applies. Covers run LLM calls only.' },
   { key: 'policy', label: 'Policy', type: 'enum', options: ['greedy', 'evolutionary', 'mcts', 'asha', 'bohb'] },
   { key: 'card_driven_selection', label: 'Card queue selection', type: 'bool',
     help: 'Opt in to the Card scorer as the macro-action owner. Pinned at run start; when enabled it takes precedence over agent-driven actions.' },
