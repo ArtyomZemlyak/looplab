@@ -42,14 +42,15 @@
 новые отказы CI и проверка RU/handoff — §19.11.
 Реализованные блоки интеграционных исправлений — §20.18–20.19. §19.5–19.8
 описывают предыдущие проходы; их очереди и Git-срезы не заменяют свежий план.
+Диагностика подтверждённых Windows Git path limits — §20.20; это частичный O13.
 Главные оставшиеся препятствия: понять вывод, продолжить после потери клиента
 и получить проверенный код в нужном репозитории. Количество API и закрытые WP
 сами по себе не показывают, насколько легко пользователь проходит этот путь.
 
-| Что нужно сейчас | Состояние последнего прохода (§20.19) | Где остаток |
+| Что нужно сейчас | Состояние последнего прохода (§20.20) | Где остаток |
 |---|---|---|
 | Измерение и upstream протокол | Реализованы в opt-in scope; ограничения сохраняются | §18.4, §20 |
-| Доставка текущей ветки LoopLab | Исходный master `912798d52` доставлен; все 18 исходных CI IDs проходят выбранными наборами, полный вердикт нового SHA ожидается | O1: общий Linux/Windows CI итогового SHA; §20.18–20.19 |
+| Доставка текущей ветки LoopLab | Исходный master `74ae1a600` доставлен; все 18 исходных CI IDs прошли выбранными наборами, полный вердикт текущего SHA ожидается | O1: общий Linux/Windows CI итогового SHA; §20.18–20.20 |
 | Сохранность всей работы | Inventory есть; решения по WIP и неясным патчам ещё OPEN | O2 |
 | Первый запуск и понятное продолжение | Есть handoff, typed reads и recovery receipts; цельный пользовательский путь ещё OPEN | O3/O4/O8/O9/O11/O13 |
 | Понятный результат | Измерение и сравнимость существенно исправлены; краткость и usability ещё OPEN | O5/O9/O10 |
@@ -2289,6 +2290,10 @@ UI build и удалённый клиент. Недоступные поля я�
 Для Windows отдельно проверить длину run-owned cwd/worktree: исправление ref locks
 в §20.18 не снимает внутренних пределов Git. Неподдерживаемый путь должен иметь
 понятную диагностику и явный recovery, без автоматического повторения работы.
+Частичный результат §20.20: известные Git/OS path-length отказы получают
+`upstream_git_path_unavailable`, который сохраняется в history/failed receipt.
+Native Windows cwd/worktree и exact HTTP/MCP recovery проверены; это диагностика
+реального предела, не поддержка произвольной глубины и не закрытие runtime/build identity.
 
 #### 72.O14 — P1 / OPEN: передача результата в owner repo относительно реальной базы
 
@@ -4165,3 +4170,49 @@ clients и реальные команды/evidence на синтетическ�
 Новые отказы общего прогона должны быть разобраны отдельно. Ограничения глубоких
 Windows cwd/worktree из §20.18, WIP disposition O2 и UX-приёмки O3–O14 остаются.
 Defaults, settings, domain events, engine waits и ownership модели не менялись.
+
+### 20.20 72.O13: явная причина Git path limit и безопасное чтение отказа (2026-10-03)
+
+Исходное дерево — опубликованный `74ae1a600`. На начало прохода его Linux/Windows
+CI выполнялся; docs CI уже завершился успешно. O1 не закрывается по локальной проверке.
+
+**Воспроизведённый дефект:** на native Windows Git два private cwd длиной 282 и
+328 символов отказали с `Filename too long`, несмотря на per-call
+`core.longpaths=true`. Создание отдельного private worktree на глубоком пути
+отказало с `fatal: '$GIT_DIR' too big`. До правки LoopLab возвращал только
+`upstream_git_unavailable` и совет inspect worktree, не объясняя предел и recovery.
+Первый local regression выявил также quoted spelling `$GIT_DIR`; проверяются обе
+известные формы. Сам предел Git не устраняется и числовой cutoff не вводится.
+
+**Исправление:** `engine/upstream_workspace.py::git_at` различает явные
+`ENAMETOOLONG` / WinError 206 и известные Git path-limit stderr verdicts.
+Они получают `upstream_git_path_unavailable` с конкретным советом сохранить run,
+archives и историю, выбрать более короткий absolute server run root для нового
+запуска. Raw stderr, host path и submitted text в ответ не отражаются. Остальные
+Git failures сохраняют прежний код; missing Git/permissions не выдаются за длину пути.
+Per-call config isolation и byte-preserving attributes сохраняются.
+
+При неуспешной публикации штатный `upstream_proposal_failed` сохраняет новый код.
+Первая HTTP/MCP запись отвечает 503; exact body/action recovery возвращает исходный
+failed receipt с HTTP 200. Это восстановление отказа, не успешная proposal/gate.
+History показывает тот же код после lost reply. Повтор не запускает Git, scoring,
+resume или advancement. Changed body под прежним action ID остаётся конфликтом.
+Новый claim после явного исправления окружения требует нового action ID;
+неразрешённый interrupted claim по-прежнему требует operator recovery.
+
+**Проверено:** 12 новых tests включают native cwd/worktree probe, OS/spawn и stderr
+classification, отрицательные missing Git/permission cases, HTTP/typed MCP lost
+reply и real CPU SGD gate после явного исправления тестового окружения. Этот gate
+выполняет 7 измеренных legs; старый failed receipt остаётся failed, owner/scorer
+bytes неизменны, `base_advanced`/resume без отдельного запроса не появляются.
+Все upstream test files вместе с layout/layering, private seams, единым engine
+fold и containment — **1116 passed**. Replay-first — **193 passed**;
+документация/entry points/merge history, архитектурная схема, golden/family replay
+и pin budgets — **63 passed**. Строгая сборка MkDocs и `git diff --check` прошли.
+[Окружение, selectors и безопасные native receipts](assets/72-repair-20-20/validation.json).
+
+**Граница:** O13 остаётся OPEN для полного runtime/build/server/client/source
+контекста. Это диагностика известных path verdicts, не гарантия всех long paths
+или всех локализованных Git errors. Автоматический перенос run, переписывание
+recorded absolute selectors, повтор обучения и интеграция чужого WIP не выполнялись.
+Полный CI итогового SHA и остальные O1–O14 сохраняют отдельные критерии приёмки.

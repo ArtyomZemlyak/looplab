@@ -5,6 +5,7 @@ are authoritative. Git is a reviewable, reachable projection for this lane only.
 """
 from __future__ import annotations
 
+import errno
 import os
 from pathlib import Path
 import subprocess
@@ -66,6 +67,13 @@ def write_overlay(work, files, deleted=()):
         atomic_write_bytes(p, text.encode(), mode=0o600 | executable)
 
 
+def git_path_refusal():
+    """A path failure grants no relocation, re-execution or advancement authority."""
+    return UpstreamRefusal("upstream_git_path_unavailable",
+        "Git cannot use this run-owned path. Inspect upstream history and preserve this run and its archives; "
+        "use a shorter server run root for a new run. Do not move this run or repeat training automatically")
+
+
 def git_at(root, *argv):
     from looplab.runtime.sandbox import git_subprocess_env
     # A private review projection cannot inherit filters/config that execute code
@@ -74,13 +82,27 @@ def git_at(root, *argv):
     env.update(GIT_CONFIG_NOSYSTEM="1", GIT_CONFIG_GLOBAL=os.devnull, GIT_CONFIG_SYSTEM=os.devnull)
     # Run-owned proposal paths plus a full digest ref can exceed Windows MAX_PATH.
     # Enable long paths per invocation, without changing owner/global Git config.
-    result = subprocess.run(["git", "-c", "core.longpaths=true",
-                             "-c", "commit.gpgsign=false", "-c", "core.autocrlf=false",
-                             "-c", "core.fsmonitor=false", "-c", "core.hooksPath=" + os.devnull,
-                             "-c", "core.attributesFile=" + os.devnull,
-                             "-C", str(root), *argv], env=env,
-                            capture_output=True, timeout=30)
+    try:
+        result = subprocess.run(["git", "-c", "core.longpaths=true",
+                                 "-c", "commit.gpgsign=false", "-c", "core.autocrlf=false",
+                                 "-c", "core.fsmonitor=false", "-c", "core.hooksPath=" + os.devnull,
+                                 "-c", "core.attributesFile=" + os.devnull,
+                                 "-C", str(root), *argv], env=env,
+                                capture_output=True, timeout=30)
+    except OSError as exc:
+        # The process may fail before Git prints stderr. Classify only the OS's
+        # path-length verdict, not permissions, missing executables or other I/O.
+        if exc.errno == errno.ENAMETOOLONG or getattr(exc, "winerror", None) == 206:
+            raise git_path_refusal() from exc
+        raise
     if result.returncode:
+        # core.longpaths fixes ref locks, not every Git cwd/worktree limit
+        # (doc 72 §20.18). Do not reflect stderr: it may contain host paths or
+        # submitted text. The stable code survives a lost first reply in history.
+        errors = result.stderr.lower().splitlines()
+        if any(line.startswith((b"fatal: $git_dir too big", b"fatal: '$git_dir' too big")) or
+               line.rstrip().endswith(b": filename too long") for line in errors):
+            raise git_path_refusal()
         raise UpstreamRefusal("upstream_git_unavailable", "Maintainer git operation failed; inspect run-owned worktree")
     return result.stdout.decode("utf8").strip()
 

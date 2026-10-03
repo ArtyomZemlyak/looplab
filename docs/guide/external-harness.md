@@ -1540,6 +1540,19 @@ and ref are ready. After process loss, inspect the retained staging directory an
 resolve the claim explicitly; a fresh proposal uses a separate staging directory.
 Recovery never deletes that evidence or adopts an unfinished repository. Existing
 repositories damaged before this publication fix still require operator repair.
+Git ref locks use per-invocation `core.longpaths=true`; this does not remove
+every Windows Git cwd/worktree limit. An explicit OS path-length error, or Git's
+`Filename too long` / `$GIT_DIR too big` refusal, returns
+`upstream_git_path_unavailable`. Other Git failures retain their own diagnostic.
+The response does not expose raw stderr or host paths. A failed proposal records
+this code in upstream history, so an exact body/action retry recovers its failed
+receipt without repeating work. Inspect that history and preserve the run,
+archives and staging directories. For a path that Git cannot support, the
+operator can choose a shorter **absolute server run root for a new run** after
+reviewing the task/base and required evaluation. Do not move or rewrite the
+existing run: its recorded selectors may name absolute archive paths. This
+diagnostic grants no automatic training retry, gate pass, base advancement or
+resume; an unfinished claim still requires the explicit recovery described above.
 After operator abandonment, an exact retry of an unfinished proposal/check returns
 `upstream_claim_abandoned`: inspect its history and use a new `action_id` for new
 work. It does not ask for another abandonment or engine wait, and starts no work.

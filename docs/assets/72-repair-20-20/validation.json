@@ -1,0 +1,117 @@
+{
+  "observed_at_utc": "2026-10-03T09:21:05.010823+00:00",
+  "source_sha": "74ae1a600d3f03e0bada1631e203f6383cb20e13",
+  "platform": "win32",
+  "python": "3.11.14",
+  "native_git": {
+    "git_version": "git version 2.52.0.windows.1",
+    "probes": [
+      {
+        "operation": "cwd",
+        "cwd_chars": 282,
+        "original_exit": 128,
+        "original_code": "upstream_git_unavailable",
+        "known_native_error": "Filename too long",
+        "current_code": "upstream_git_path_unavailable",
+        "current_message": "Git cannot use this run-owned path. Inspect upstream history and preserve this run and its archives; use a shorter server run root for a new run. Do not move this run or repeat training automatically"
+      },
+      {
+        "operation": "cwd",
+        "cwd_chars": 328,
+        "original_exit": 128,
+        "original_code": "upstream_git_unavailable",
+        "known_native_error": "Filename too long",
+        "current_code": "upstream_git_path_unavailable",
+        "current_message": "Git cannot use this run-owned path. Inspect upstream history and preserve this run and its archives; use a shorter server run root for a new run. Do not move this run or repeat training automatically"
+      },
+      {
+        "operation": "worktree",
+        "target_chars": 327,
+        "current_code": "upstream_git_path_unavailable",
+        "current_message": "Git cannot use this run-owned path. Inspect upstream history and preserve this run and its archives; use a shorter server run root for a new run. Do not move this run or repeat training automatically"
+      }
+    ]
+  },
+  "replay_first": "193 passed in 3.81s",
+  "new_diagnostics": {
+    "selector": "tests/test_upstream_git_diagnostics.py",
+    "result": "12 passed in 3.83s",
+    "native_probes": "Real Git cwd and worktree operations, both OS spawn variants driven without changing platform globals",
+    "http_mcp": "TestClient HTTP through typed HarnessAPI; first 503, failed receipt exact recovery, history, body conflict, one failed Git invocation",
+    "explicit_environment_repair": "Simulated initial Git failure removed explicitly, fresh action ID, actual CPU SGD gate with 7 measured executions, old failure remains failed",
+    "negative_authority": "No automatic train/retry, resume or base advance; owner/scorer bytes unchanged; private failed staging retained"
+  },
+  "upstream_and_guards": {
+    "selectors": [
+      "tests/test_upstream_api.py",
+      "tests/test_upstream_candidate_binding.py",
+      "tests/test_upstream_candidate_page_receipts.py",
+      "tests/test_upstream_candidate_pages.py",
+      "tests/test_upstream_creation_basis.py",
+      "tests/test_upstream_environment.py",
+      "tests/test_upstream_gate_admission.py",
+      "tests/test_upstream_gate_claims.py",
+      "tests/test_upstream_git_diagnostics.py",
+      "tests/test_upstream_initialization_recovery.py",
+      "tests/test_upstream_integrity.py",
+      "tests/test_upstream_lane.py",
+      "tests/test_upstream_live_budget.py",
+      "tests/test_upstream_materialization_snapshot.py",
+      "tests/test_upstream_multibase.py",
+      "tests/test_upstream_objective.py",
+      "tests/test_upstream_overlay_intent.py",
+      "tests/test_upstream_probe_helpers.py",
+      "tests/test_upstream_receipt_evidence.py",
+      "tests/test_upstream_recovery_api.py",
+      "tests/test_upstream_refusals.py",
+      "tests/test_upstream_repairs.py",
+      "tests/test_upstream_source_advice.py",
+      "tests/test_upstream_worktrees.py",
+      "tests/test_package_layout.py",
+      "tests/test_package_layering.py",
+      "tests/test_cross_package_private_seams.py",
+      "tests/test_engine_fold_seam.py",
+      "tests/test_containment_census.py"
+    ],
+    "result": "1116 passed in 332.24s"
+  },
+  "documentation": {
+    "selectors": [
+      "tests/test_documentation_contracts.py",
+      "tests/test_documented_entry_points_resolve.py",
+      "tests/test_merge_history_integrity.py",
+      "tests/test_doc_surface_budgets.py",
+      "tests/test_architecture_diagram_geometry.py",
+      "tests/test_golden_replay.py",
+      "tests/test_replay_families.py",
+      "tests/test_pin_budget.py"
+    ],
+    "result": "63 passed in 27.56s",
+    "mkdocs_strict_exit_code": 0,
+    "diff_check_exit_code": 0
+  },
+  "source_ci_at_read": [
+    {
+      "conclusion": "",
+      "databaseId": 37112078754,
+      "name": "tests-windows",
+      "status": "in_progress",
+      "url": "https://github.com/ArtyomZemlyak/looplab/actions/runs/37112078754"
+    },
+    {
+      "conclusion": "",
+      "databaseId": 37112078750,
+      "name": "tests",
+      "status": "in_progress",
+      "url": "https://github.com/ArtyomZemlyak/looplab/actions/runs/37112078750"
+    },
+    {
+      "conclusion": "success",
+      "databaseId": 37112078747,
+      "name": "docs",
+      "status": "completed",
+      "url": "https://github.com/ArtyomZemlyak/looplab/actions/runs/37112078747"
+    }
+  ],
+  "scope": "Specific path failure diagnosis and safe failed-receipt recovery; not arbitrary long-path support, relocation, human UX, current-SHA full CI or WIP integration."
+}
