@@ -1,6 +1,7 @@
 """Recorded base browsing is bounded, generation/attempt fenced and never reads the live repo."""
 import hashlib
 import json
+import os
 
 import pytest
 
@@ -129,6 +130,37 @@ def test_executed_main_code_and_archived_entrypoint_remain_distinct_sources(tmp_
     assert file["text"] == base and detail["code"] == code
     assert detail["files"] == {} and detail["metric"] == result.metric
     assert hashlib.sha256((rd / "events.jsonl").read_bytes()).hexdigest() == before
+
+
+@pytest.mark.skipif(os.name != "nt", reason="native case/separator materialization requires Windows")
+@pytest.mark.parametrize("path, files, deleted, expected", [
+    ("Readme.md", {"README.md": "edited\n"}, [], b"edited\n"),
+    ("Readme.md", {}, ["README.md"], None),
+    ("pkg/recipe.env", {"pkg\\RECIPE.env": "edited\n"}, [], b"edited\n"),
+])
+def test_windows_alias_edits_change_workdir_without_changing_the_recorded_base(
+        tmp_path, path, files, deleted, expected):
+    from types import SimpleNamespace
+    from looplab.engine.seed_archive import verified_seed_archive
+    from looplab.engine.workspace import WorkspaceSeeder
+    src, rd, wd = tmp_path / "source", tmp_path / "run", tmp_path / "workdir"
+    for directory in (src, rd, wd):
+        directory.mkdir()
+        if directory != rd:
+            target = directory / path
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_bytes(b"base\n")
+    receipt = capture_seed_archive(src, rd / "base_snapshots")
+    WorkspaceSeeder(SimpleNamespace(_assets={}, _repo_spec={})).write_node_files(
+        SimpleNamespace(files=files, deleted=deleted), wd)
+    if expected is None:
+        assert not (wd / path).exists()
+    else:
+        assert (wd / path).read_bytes() == expected
+    seen = {}
+    assert verified_seed_archive(rd, receipt, on_file=lambda name, data, executable:
+        seen.__setitem__(name, data)) is not None
+    assert seen == {path: b"base\n"}, "the readable archive is not the final workdir file"
 
 
 def test_attempt_and_generation_are_required_and_reset_during_verification_is_refused(tmp_path, monkeypatch):

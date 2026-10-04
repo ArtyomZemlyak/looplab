@@ -38,6 +38,31 @@ test('archived solution.py identifies separately saved main code rather than cla
   assert.equal(recordedFileOverlay({ ...node, files: undefined }, 'solution.py').kind, 'unknown')
 })
 
+test('archive context refuses to choose a file version across different spellings of a path', () => {
+  const node = { ...child, code: '', files: {}, deleted: [] }
+  for (const [path, files, deleted] of [
+    ['Readme.md', { 'README.md': 'case variant' }, []],
+    ['Readme.md', {}, ['README.md']],
+    ['Readme.md', { 'Readme.md': 'exact', 'README.md': 'other' }, []],
+    ['Readme.md', { 'README.md': 'other' }, ['Readme.md']],
+    ['pkg/recipe.env', { 'pkg\\recipe.env': 'separator variant' }, []],
+    ['café.py', { 'cafe\u0301.py': 'normalization variant' }, []],
+    ['café.py', {}, ['cafe\u0301.py']],
+    ['Straße.py', { 'STRASSE.py': 'case expansion' }, []],
+  ]) {
+    assert.deepEqual(recordedFileOverlay({ ...node, files, deleted }, path),
+      { kind: 'path_ambiguity', text: null }, path)
+  }
+  assert.equal(recordedFileOverlay({ ...node, code: 'main' }, 'SOLUTION.PY').kind, 'path_ambiguity')
+  for (const path of ['pkg/Readme.md', 'Readme.md_extra', 'Readme.py']) {
+    assert.equal(recordedFileOverlay({ ...node, files: { 'README.md': 'unrelated' } }, path).kind, 'inherited')
+  }
+  assert.deepEqual(recordedFileOverlay({ ...node, files: { 'Readme.md': 'exact only' } }, 'Readme.md'),
+    { kind: 'override', text: 'exact only' })
+  assert.deepEqual(recordedFileOverlay({ ...node, deleted: ['Readme.md'] }, 'Readme.md'),
+    { kind: 'deleted', text: null })
+})
+
 test('file comparison distinguishes removed overrides from explicit deletion and includes recipe-only edits', () => {
   const model = nodeCodeModel(child, state)
   assert.equal(model.available, true)

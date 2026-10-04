@@ -1,0 +1,36 @@
+{
+  "version": 1,
+  "date": "2026-10-04",
+  "increment": "doc72 section 20.32, conservative path-spelling context for archived files",
+  "source_parent_commit": "36c99d102ed1ae35e3f556f77131fc7fd59bd272",
+  "replay": {"selectors": ["tests/test_events_replay.py"], "passed": 193, "skipped": 0, "failed": 0, "seconds": 4.35, "order": "first"},
+  "archive_and_materialization": {
+    "selectors": ["tests/test_recorded_seed_files.py"], "passed": 18, "skipped": 0, "failed": 0, "seconds": 3.34,
+    "platform": "Windows",
+    "native_cases": ["Case alias overwrite", "Case alias deletion", "Nested backslash and case alias overwrite"],
+    "other_platforms": "Three native Windows materialization cases explicitly skip; portable source-context and existing API cases still run."
+  },
+  "ui_component_regressions": {
+    "selectors": ["ui/test/recordedSeedFiles.test.js", "ui/test/nodeCode.test.js"],
+    "passed": 13, "skipped": 0, "failed": 0, "seconds": 3.67,
+    "scope": "Real React components under jsdom/Vite with fixture HTTP responses; not a browser screenshot or human acceptance."
+  },
+  "contracts": {
+    "selectors": ["tests/test_documentation_contracts.py", "tests/test_documented_entry_points_resolve.py", "tests/test_merge_history_integrity.py", "tests/test_cli_reference.py", "tests/test_package_layering.py"],
+    "passed": 47, "skipped": 0, "failed": 0, "seconds": 18.47
+  },
+  "production_ui_build": {"status": "passed", "modules": 419, "vite_seconds": 3.02},
+  "strict_documentation_build": {"status": "passed", "seconds": 8.33},
+  "total_passed": 271,
+  "total_skipped": 0,
+  "git_diff_check": "passed",
+  "reproduction": {
+    "case": "Readme.md in archive with README.md in saved files/deletions",
+    "before_fix": "Focused regression failed because the base was classified as inherited",
+    "after_fix": "Explicit path_ambiguity context; verified base stays readable; no arbitrary edit preview; exact-only context restores the existing switch",
+    "diagnostic_semantics": "Conservative case expansion, canonical Unicode normalization and separator comparison, not authoritative filesystem identity",
+    "source_archive_after_native_edits": "Verified bytes remain the original base after actual Windows workdir overwrite/deletion"
+  },
+  "coverage": "Focused source-view and native materializer regressions. Full CI, human acceptance and task repository delivery were not performed.",
+  "remaining_open": ["Authoritative materialized manifest and all filesystem alias/symlink rules", "Runtime dependencies", "Target-aware task repository delivery", "Human usability and full CI acceptance"]
+}

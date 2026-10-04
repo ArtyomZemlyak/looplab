@@ -5476,3 +5476,43 @@ Selectors и результаты —
 **Граница.** Case/Unicode path aliases, полная materialized программа, runtime
 dependencies и target-aware доставка не закрываются этим source-view фиксом.
 O6/O14 остаются OPEN.
+
+### 20.32 72.O6: другое написание пути не выдаётся за отсутствие правки (2026-10-04)
+
+**Воспроизведено.** Архивный `Readme.md` получал «Отдельной правки нет», когда
+node files содержал `README.md` или deletion ссылался на это другое написание.
+Regression сначала упал на inherited вместо предупреждения. На Windows реальный
+`looplab/engine/workspace.py::WorkspaceSeeder.write_node_files` перезаписывает
+или удаляет исходный файл через case alias; nested backslash spelling также
+меняет файл с forward-slash именем в архиве. Архив остаётся проверенным старым
+source, но его текст не определяет текущий materialized файл.
+
+**Исправлено.** `ui/src/nodeCodeModel.js::recordedFileOverlay` проверяет риск
+другого написания до выбора exact helper edit/deletion. Сравнение нормализует
+разделитель, canonical Unicode form и uppercase/lowercase expansion; это
+консервативная диагностика, не filesystem identity и не materializer.
+Она не переименовывает пути и не выбирает один из конфликтующих текстов.
+Случай exact edit плюс alias тоже остаётся неоднозначным; наличие отдельно
+сохранённого root main code сохраняет прежнюю самостоятельную версию.
+Обычные exact edit/deletion и unrelated sibling paths не меняют поведения.
+
+`ui/src/RecordedSeedFiles.jsx::RecordedSeedFiles` показывает в списке «Написание
+пути различается» и объясняет неопределённость рядом с base preview на RU/EN.
+Версия базы читается с прежними hash/identity checks; edit switch не предлагается
+для неоднозначного пути. Исходные имена и тексты остаются в saved edits выше.
+После обновления к единственной exact правке переключение снова доступно без
+дополнительного archive/model request.
+
+**Проверка.** Replay-first; case write/delete, exact плюс alias, nested separator,
+canonical Unicode и case-expansion scenarios, main-code и sibling regressions.
+Live component drive проверяет RU/EN warning, отсутствие произвольного edit
+preview и возвращение к exact edit. Native Windows cases применяют настоящие
+write/delete/separator edits и повторно проверяют неизменный архив; на другой
+платформе эти три materializer cases явно skip. Старые archive corruption/reset,
+Unicode и реальное короткое CPU execution checks также пройдены.
+Selectors и результаты —
+[validation.json](assets/72-archive-path-context/validation.json).
+
+**Граница.** Heuristic может предупредить о написаниях, которые конкретная исходная
+filesystem различает, и не является полным каталогом её path aliases или symlink
+правил. Точный materialized manifest и target-aware доставка остаются OPEN O6/O14.

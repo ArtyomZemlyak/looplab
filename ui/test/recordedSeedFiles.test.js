@@ -203,6 +203,45 @@ test('archived entrypoint offers base and separately saved main code without cla
   } finally { await h.close() }
 })
 
+test('base preview explains ambiguous path spellings and never presents an arbitrarily selected edit', async () => {
+  const baseText = 'base readme\n'
+  const file = { ...row, path: 'Readme.md', bytes: Buffer.byteLength(baseText),
+    sha256: createHash('sha256').update(baseText).digest('hex') }
+  const h = await mountLive({ visible: true, routes: {
+    '/api/runs/r/nodes/1/seed-files': ({ url }) => ({ ...page, files: [file],
+      file: url.searchParams.has('path') ? { ...file, text_status: 'utf8', text: baseText } : null }),
+  } })
+  try {
+    const { default: RecordedSeedFiles } = await h.load('/src/RecordedSeedFiles.jsx')
+    const props = (files, deleted = [], language = 'ru') => ({ runId: 'r',
+      node: { id: 1, attempt: 0, code: '', files, deleted }, generation, baseDigest, language })
+    const mounted = await h.mount(RecordedSeedFiles, props({ 'README.md': 'alias edit\n' }))
+    const button = name => [...mounted.container.querySelectorAll('button')].find(item => item.textContent === name)
+    await click(button('Открыть файлы базы'))
+    await until(() => button('Readme.md'), 'inventory with spelling warning')
+    assert.match(mounted.container.textContent, /Написание пути различается/)
+    assert.doesNotMatch(mounted.container.textContent, /Отдельной правки нет/)
+    await click(button('Readme.md'))
+    await until(() => mounted.container.querySelector('[aria-label="База: Readme.md"]'), 'verified base preview')
+    assert.match(mounted.container.textContent, /итоговый файл опыта не установлен/)
+    assert.equal(button('Правка опыта'), undefined)
+    const reads = h.fetch.calls.length
+    await mounted.rerender(props({ 'Readme.md': 'exact edit\n', 'README.md': 'alias edit\n' }))
+    assert.equal(button('Правка опыта'), undefined, 'an exact spelling does not resolve a second conflicting spelling')
+    assert.doesNotMatch(mounted.container.textContent, /exact edit|alias edit/)
+    await mounted.rerender(props({}, ['README.md'], 'en'))
+    assert.match(mounted.container.textContent, /Path spelling differs/)
+    assert.match(mounted.container.textContent, /final experiment file is not established/)
+    assert.equal(button('Experiment edit'), undefined)
+    assert.match(mounted.container.querySelector('[aria-label="Base: Readme.md"]').textContent, /base readme/)
+    await mounted.rerender(props({ 'Readme.md': 'exact edit\n' }, [], 'en'))
+    await click(button('Experiment edit'))
+    assert.match(mounted.container.querySelector('[aria-label="Edit #1: Readme.md"]').textContent, /exact edit/)
+    assert.equal(h.fetch.calls.length, reads, 'source context refresh and local version selection make no request')
+    assert.ok(h.fetch.calls.every(call => call.method === 'GET'))
+  } finally { await h.close() }
+})
+
 test('a delayed archive read does not take focus from another input; missing edits remain explicitly unknown', async () => {
   let finish
   const h = await mountLive({ visible: true, routes: {

@@ -94,6 +94,7 @@ export default function RecordedSeedFiles({ runId, node, generation, baseDigest,
     inherited: ru ? 'Отдельной правки нет' : 'No separate edit',
     override: ru ? 'Есть правка опыта' : 'Experiment edit recorded',
     main_code: ru ? 'Есть основной код опыта' : 'Main code recorded',
+    path_ambiguity: ru ? 'Написание пути различается' : 'Path spelling differs',
     deleted: ru ? 'Удаление в правках' : 'Deletion recorded',
     unknown: ru ? 'Правки не проверены' : 'Edits unavailable',
   })[kind]
@@ -137,6 +138,9 @@ export default function RecordedSeedFiles({ runId, node, generation, baseDigest,
       {overlay.kind === 'unknown' && <p className="notice compact" role="status">{ru
         ? 'Правки не проверены. Версию базы нельзя считать итоговым файлом опыта.'
         : 'Edits are unavailable. The base version cannot establish the final experiment file.'}</p>}
+      {overlay.kind === 'path_ambiguity' && <p className="notice compact" role="status">{ru
+        ? 'В правках есть другое написание этого пути. На разных файловых системах оно может означать тот же файл. Ниже — только версия базы; итоговый файл опыта не установлен. Проверьте имена в сохранённых правках выше.'
+        : 'Saved edits contain another spelling of this path. Depending on the filesystem it may name the same file. Below is the base version only; the final experiment file is not established. Check the names in the saved edits above.'}</p>}
       {version === 'edit' && hasEdit
       ? <CodeViewer code={overlay.text} label={mainCode
           ? (ru ? `Основной код #${node.id}: ${file.path}` : `Main code #${node.id}: ${file.path}`)

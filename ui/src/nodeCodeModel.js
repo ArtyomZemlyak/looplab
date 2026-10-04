@@ -5,13 +5,25 @@ const textFiles = value => value && typeof value === 'object' && !Array.isArray(
   && Object.values(value).every(body => typeof body === 'string')
 const paths = value => Array.isArray(value) && value.every(path => typeof path === 'string')
 
+// A conservative spelling-risk key, NOT an identity for any particular filesystem. Case
+// expansion (ß/SS), canonical Unicode forms and Windows separators may name one slot there.
+// Never use it to select an edit, rewrite a path or declare runtime deletion.
+const pathRiskKey = path => path.replace(/\\/g, '/').normalize('NFD')
+  .toUpperCase().toLowerCase().normalize('NFD')
+
 // Describes saved source versions, not applied runtime files or command execution.
 export function recordedFileOverlay(node, path) {
-  if (!textFiles(node?.files) || !paths(node?.deleted)) return { kind: 'unknown', text: null }
+  if (typeof path !== 'string' || !textFiles(node?.files) || !paths(node?.deleted)) return { kind: 'unknown', text: null }
   // Main code is stored outside files and the sandbox writes it separately. A protected
   // solution.py helper/deletion must not hide that independently saved version.
   if (path === 'solution.py' && typeof node.code === 'string' && node.code.length > 0) {
     return { kind: 'main_code', text: node.code }
+  }
+  const key = pathRiskKey(path)
+  const otherSpelling = candidate => candidate !== path && pathRiskKey(candidate) === key
+  if (Object.keys(node.files).some(otherSpelling) || node.deleted.some(otherSpelling)
+      || (typeof node.code === 'string' && node.code.length > 0 && otherSpelling('solution.py'))) {
+    return { kind: 'path_ambiguity', text: null }
   }
   if (node.deleted.includes(path)) return { kind: 'deleted', text: null }
   if (Object.hasOwn(node.files, path)) return { kind: 'override', text: node.files[path] }

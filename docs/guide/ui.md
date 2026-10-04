@@ -74,6 +74,11 @@ as an explicitly labelled archived file; it is not restored into the experiment.
 For an archived `solution.py`, **Experiment main code / Основной код опыта**
 opens separately saved main code when present, even if the file edit list is empty.
 It does not establish that a repo task's evaluation command executed this code.
+**Path spelling differs / Написание пути различается** warns when another saved
+spelling could address the same file through case, Unicode or separator handling.
+The verified base remains readable; no edit is selected across that ambiguity.
+Check the original names in the saved edits above. This warning does not prove
+that the source filesystem treats the names as identical.
 Missing overlay evidence says **Edits unavailable**, not "unchanged". These labels
 describe saved edits: protected files and task assets may override them at runtime.
 The selected preview appears above the bounded file list and receives focus after
