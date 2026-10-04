@@ -2231,6 +2231,8 @@ saved overlays включает recipe-only правки и не подменя�
 event-bound ссылку на базу или unavailable и отсутствие доставки в task repo.
 **Границы файлов — §20.28:** экспорт исключает ancestor/descendant collisions
 с task assets/adapter/entrypoint, сохраняя допустимые соседние пути.
+**Удаления — §20.29:** portable delete alias исключает неоднозначную правку
+и не оставляет в экспорте файл, удалённый на case-folding target.
 Полная материализация inherited программы, её сравнение между базами и доставка
 в target repo остаются OPEN.
 
@@ -5377,3 +5379,33 @@ selectors, результаты и ограничения —
 **Граница.** Фильтр экспортного edit tree не выполняет candidate admission,
 training или task-repo merge и не проверяет runtime dependencies. O6/O14 сохраняют
 OPEN для materialized program и target-aware доставки.
+
+### 20.29 72.O6: delete aliases не оставляют ложный файл в Git export (2026-10-04)
+
+**Воспроизведено на Windows.** `WorkspaceSeeder.write_node_files` с
+`files={"Readme.md": ...}` и `deleted=["README.md"]` оставляет пустой workdir,
+а прежний Git export оставлял `Readme.md`. Exact-string lookup в deletion pass
+расходился с portable-name comparison, который применялся при добавлении файлов.
+Из export можно было взять текст файла, отсутствующего после реальной материализации.
+
+**Исправлено.** `looplab/events/git_export.py::lifecycle_tree` сохраняет mapping
+portable key → exact kept spelling и использует его при удалениях. Exact match
+считается explicit deletion. Case/Unicode alias исключает неоднозначную правку
+как portable checkout collision: Linux мог оставить этот файл, поэтому удаление
+на каждой исходной платформе не утверждается. Protected names и их aliases
+проверяются до удаления: canonical `solution.py` из `node.code` сохраняется.
+Missing/duplicate deletion не создаёт лишнего skipped count; обычные соседние
+пути остаются. Lookup не перебирает все файлы для каждого deletion.
+
+**Проверка.** Replay-first. Реальный Windows materializer и реальный Git export
+дают пустую файловую проекцию для case-delete; отдельные real-Git сценарии
+проверяют Unicode alias, nested Windows separator, exact deletion, duplicate и
+missing deletion, protected entrypoint и siblings. Linux запускает portable
+regressions; Windows-only materializer scenario там явно skip. Полная экспортная
+регрессия сохраняет format golden, parents/reset/receipts и fsck.
+Точные selectors и результаты —
+[validation.json](assets/72-git-export-deletions/validation.json).
+
+**Граница.** Это консервативная файловая проекция saved edits. Фильтр не восстанавливает
+полную программу или runtime dependencies и не доставляет изменения в task repo.
+O6/O14 остаются OPEN для этих функций.

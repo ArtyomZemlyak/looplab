@@ -42,6 +42,9 @@ conservative portable projection of that set (`lifecycle_tree`):
     Its parent directories and file boundary are reserved too: a candidate file cannot replace
     a directory holding that asset, and a candidate directory cannot sit beneath the asset file.
   * A name in both `files` and `deleted` is gone, as the write-then-delete order leaves it.
+    A portable alias in `deleted` may remove a differently-spelled file only on some source
+    platforms. That ambiguous edit is omitted and counted as a checkout collision; it is not
+    claimed as a deletion on every source platform. Protected aliases never remove `code`.
 
 The base's bytes are not in this log projection, even when the run separately archived them
 (doc 72). Every commit says `Looplab-Tree-Scope: saved-node-edits`; a current evaluated lifecycle
@@ -205,6 +208,7 @@ def lifecycle_tree(code, files, deleted, *, skip=frozenset()) -> tuple[dict, Cou
     skipped: Counter = Counter()
     stored: set = set()             # the collision key of every kept file…
     directories: set = set()        # …and of every directory one sits under
+    kept_paths: dict[str, str] = {}  # portable name -> exact spelling, for ambiguous deletions
     excluded_keys = {_collision_key(path) for path in skip}
     excluded_directories = set()
     for key in excluded_keys:
@@ -229,6 +233,7 @@ def lifecycle_tree(code, files, deleted, *, skip=frozenset()) -> tuple[dict, Cou
         stored.add(key)
         directories.update(ancestors)
         tree[path] = data
+        kept_paths[key] = path
         return True
 
     if code:
@@ -254,9 +259,16 @@ def lifecycle_tree(code, files, deleted, *, skip=frozenset()) -> tuple[dict, Cou
     # name the materializer protects is never deleted (it skips those too), `solution.py` included.
     for name in (deleted if isinstance(deleted, (list, tuple)) else ()):
         safe = safe_tree_path(name)
-        if safe is not None and safe not in skip and safe in tree:
-            del tree[safe]
-            skipped["deleted"] += 1
+        if safe is None or safe in skip or excluded_collision(safe):
+            continue
+        key = _collision_key(safe)
+        kept = kept_paths.pop(key, None)
+        if kept is not None:
+            del tree[kept]
+            # Exact spelling is an explicit deletion. A portable alias deletes on NTFS/HFS+
+            # but may leave the file on Linux: omit that ambiguous edit as a collision, never
+            # claim that all source platforms removed it. Protected aliases were refused above.
+            skipped["deleted" if kept == safe else "collision"] += 1
     return tree, skipped
 
 

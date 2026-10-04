@@ -1000,6 +1000,62 @@ def test_reserved_entrypoint_children_are_refused_with_and_without_main_code(tmp
     assert "1 colliding" in _trailer(repo, "node-0", "Looplab-Skipped-Paths")
 
 
+def test_portable_deletion_aliases_do_not_export_files_absent_on_case_folding_targets(tmp_path):
+    rd, store = _store(tmp_path)
+    _started(store)
+    _node(store, 0, [], files={"Readme.md": "case-deleted\n", "caf\u00e9.py": "normalization-deleted\n",
+                              "lib\\Runner.py": "nested case-deleted\n", "exact.py": "exact deletion\n",
+                              "keep.py": "retained\n"},
+          deleted=["README.md", "cafe\u0301.py", "lib/runner.py", "exact.py", "KEEP2.py", "README.md"])
+    _evaluated(store, 0, 0.5)
+    before = (rd / "events.jsonl").read_bytes()
+    repo = tmp_path / "repo"
+    result = _export(rd, repo)
+    assert result.exit_code == 0, result.output
+    assert _tree(repo, "node-0") == ["keep.py"]
+    assert _trailer(repo, "node-0", "Looplab-Skipped-Paths") == (
+        "4 (3 colliding with another name on some checkout; 1 removed by the node's own deleted list; "
+        "the log keeps every one)")
+    assert "README.md" in _trailer(repo, "node-0", "Looplab-Deleted-From-Base")
+    assert (rd / "events.jsonl").read_bytes() == before
+    _git_run(repo, "fsck", "--strict")
+
+
+def test_deletion_aliases_never_remove_the_reserved_entrypoint_or_ordinary_siblings(tmp_path):
+    rd, store = _store(tmp_path)
+    _started(store)
+    store.append("data_provenance", {"assets": {"checks/grader.py": "digest"}})
+    _node(store, 0, [], code="print('canonical entrypoint')\n",
+          files={"checks/user.py": "sibling\n", "keep.py": "retained\n"},
+          deleted=["SOLUTION.PY", "Checks", "checks/GRADER.PY", "keep.py_extra"])
+    _evaluated(store, 0, 0.5)
+    repo = tmp_path / "repo"
+    result = _export(rd, repo)
+    assert result.exit_code == 0, result.output
+    assert _tree(repo, "node-0") == ["checks/user.py", "keep.py", "solution.py"]
+    assert _git(repo, "show", "node-0:solution.py") == "print('canonical entrypoint')"
+    assert _trailer(repo, "node-0", "Looplab-Skipped-Paths") == ""
+
+
+@pytest.mark.skipif(os.name != "nt", reason="case-folding materializer scenario requires Windows")
+def test_windows_case_deletion_matches_materialization_and_the_exported_edit_tree(tmp_path):
+    from looplab.engine.workspace import WorkspaceSeeder
+    rd, store = _store(tmp_path)
+    _started(store)
+    files, deleted = {"Readme.md": "candidate text"}, ["README.md"]
+    workdir = tmp_path / "materialized"
+    WorkspaceSeeder(SimpleNamespace(_assets={}, _repo_spec={})).write_node_files(
+        SimpleNamespace(files=files, deleted=deleted), workdir)
+    assert list(workdir.iterdir()) == [], "Windows materializer deleted the case alias"
+    _node(store, 0, [], files=files, deleted=deleted)
+    _evaluated(store, 0, 0.5)
+    repo = tmp_path / "repo"
+    result = _export(rd, repo)
+    assert result.exit_code == 0, result.output
+    assert _tree(repo, "node-0") == []
+    assert "1 colliding" in _trailer(repo, "node-0", "Looplab-Skipped-Paths")
+
+
 def test_recipe_only_export_names_different_recorded_bases_without_inventing_the_runner(tmp_path):
     rd, store = _store(tmp_path)
     _started(store)

@@ -3009,6 +3009,11 @@ The omitted file's parent directories and file boundary remain reserved too. For
 `checks` cannot be exported as a file when the omitted asset is `checks/grader.py`, and
 `grader.py/helper.py` cannot coexist with the omitted file `grader.py`. Ordinary siblings
 such as `checks/user.py` are retained; a shared text prefix alone is not a collision.
+Deletion aliases use the same portable comparison: `Readme.md` with `deleted=["README.md"]`
+is absent on a case-folding target but may remain on a case-sensitive source. The export omits
+that ambiguous edit and counts it as a checkout collision. An exact spelling is counted as a
+deletion. Repeated deletion aliases do not count the same omitted file twice, and aliases of
+protected names never delete the canonical `solution.py` from `node.code`.
 
 The message's `Looplab-*` trailers:
 

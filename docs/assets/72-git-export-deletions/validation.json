@@ -1,0 +1,28 @@
+{
+  "version": 1,
+  "date": "2026-10-04",
+  "increment": "doc72 section 20.29, portable deletion aliases in Git export",
+  "source_parent_commit": "92c72447990acb8619bc16a47a38a20bdc74d55f",
+  "replay": {"selectors": ["tests/test_events_replay.py"], "passed": 193, "skipped": 0, "failed": 0, "seconds": 3.48, "order": "first"},
+  "export_regressions": {
+    "selectors": ["tests/test_export_git.py", "tests/test_event_types.py"],
+    "passed": 112, "skipped": 1, "failed": 0, "seconds": 29.10,
+    "skip_reason": "Windows WinError 1314: symlink creation privilege unavailable. Windows materializer scenario passed."
+  },
+  "contracts": {
+    "selectors": ["tests/test_documentation_contracts.py", "tests/test_documented_entry_points_resolve.py", "tests/test_merge_history_integrity.py", "tests/test_cli_reference.py", "tests/test_package_layering.py"],
+    "passed": 47, "skipped": 0, "failed": 0, "seconds": 20.87
+  },
+  "strict_documentation_build": {"status": "passed", "seconds": 9.83},
+  "reproduction": {
+    "platform": "Windows", "files": {"Readme.md": "candidate text"}, "deleted": ["README.md"],
+    "actual_materialized_files": [], "old_exported_edit_files": ["Readme.md"],
+    "fixed_windows_materializer_and_real_git_scenario": "passed"
+  },
+  "golden_commit": "83abd6296087f95212bd2e4b41742caf2c291034",
+  "coverage": "Targeted real-Git and Windows materialization checks. Full repository CI, training and task-target delivery acceptance were not performed.",
+  "total_passed": 352,
+  "total_skipped": 1,
+  "git_diff_check": "passed",
+  "remaining_open": ["Full materialized program and runtime dependencies", "Target-aware task repository delivery", "Human usability and full CI acceptance"]
+}
