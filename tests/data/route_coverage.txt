@@ -108,12 +108,13 @@ GET /api/runs/{run_id}/log	tests/test_fork_from_seq.py tests/test_log_pages.py t
 GET /api/runs/{run_id}/log-page	tests/test_log_pages.py tests/test_refusal_vocabulary.py tests/test_seq_gap_visibility.py
 GET /api/runs/{run_id}/memory-attribution	tests/test_run_deletion_memory_cascade.py
 POST /api/runs/{run_id}/memory-purge	tests/test_run_deletion_memory_cascade.py
-GET /api/runs/{run_id}/nodes/{nid}	tests/test_live_trace.py tests/test_read_fence_takes_no_write_lock.py tests/test_refusal_vocabulary.py tests/test_server.py tests/test_span_index.py
+GET /api/runs/{run_id}/nodes/{nid}	tests/test_live_trace.py tests/test_read_fence_takes_no_write_lock.py tests/test_recorded_seed_files.py tests/test_refusal_vocabulary.py tests/test_server.py tests/test_span_index.py
 POST /api/runs/{run_id}/nodes/{nid}/clear_trace	tests/test_durable_op_kit.py tests/test_run_command_service.py tests/test_server.py tests/test_span_index.py
 GET /api/runs/{run_id}/nodes/{nid}/conversation	tests/test_server.py tests/test_span_index.py tests/test_trace_episode_seek.py tests/test_trace_facts_and_sse_offload.py tests/test_trace_file_security.py tests/test_trace_projection_security.py
 GET /api/runs/{run_id}/nodes/{nid}/episodes	tests/test_span_index.py tests/test_trace_episode_seek.py tests/test_trace_facts_and_sse_offload.py
 GET /api/runs/{run_id}/nodes/{nid}/logs	tests/test_node_sidecar_reads.py tests/test_serve_prompt_review.py tests/test_server.py tests/test_span_index.py tests/test_trace_facts_and_sse_offload.py tests/test_trace_projection_security.py
 GET /api/runs/{run_id}/nodes/{nid}/metrics	tests/test_node_sidecar_reads.py tests/test_server.py tests/test_span_index.py
+GET /api/runs/{run_id}/nodes/{nid}/seed-files	tests/test_recorded_seed_files.py
 GET /api/runs/{run_id}/nodes/{nid}/trace	tests/test_refusal_vocabulary.py tests/test_span_index.py tests/test_trace_episode_seek.py tests/test_trace_facts_and_sse_offload.py tests/test_trace_projection_security.py tests/test_trace_projection_transport.py
 POST /api/runs/{run_id}/novelty-preview	tests/test_external_run_mode.py
 POST /api/runs/{run_id}/project	tests/test_report.py tests/test_server.py
@@ -128,18 +129,19 @@ POST /api/runs/{run_id}/reviews	tests/test_card_public_projection.py tests/test_
 DELETE /api/runs/{run_id}/reviews/{link_id}	tests/test_review_capabilities.py
 POST /api/runs/{run_id}/skill-candidates	tests/test_external_run_mode.py
 GET /api/runs/{run_id}/spans/{sid}	tests/test_server.py tests/test_span_index.py tests/test_trace_delta.py tests/test_trace_file_security.py tests/test_trace_projection_security.py
-GET /api/runs/{run_id}/state	tests/test_admission_refuses_a_snapshot_the_child_would_refuse.py tests/test_campaign_runs.py tests/test_card_public_projection.py tests/test_collaboration.py tests/test_concept_tag_command.py tests/test_evidence_consumer_fences.py tests/test_external_run_mode.py tests/test_external_selection.py tests/test_fork_from_seq.py tests/test_log_pages.py tests/test_provider_error_redaction.py tests/test_refusal_vocabulary.py tests/test_report.py tests/test_request_fold_memo.py tests/test_review_capabilities.py tests/test_review_fixes.py tests/test_run_command_service.py tests/test_seq_gap_visibility.py tests/test_server.py tests/test_server_code_freshness.py tests/test_stalled_finalization_affordance.py tests/test_state_delta.py tests/test_tui.py tests/test_upstream_api.py
+GET /api/runs/{run_id}/state	tests/test_admission_refuses_a_snapshot_the_child_would_refuse.py tests/test_campaign_runs.py tests/test_card_public_projection.py tests/test_collaboration.py tests/test_concept_tag_command.py tests/test_evidence_consumer_fences.py tests/test_external_run_mode.py tests/test_external_selection.py tests/test_fork_from_seq.py tests/test_log_pages.py tests/test_provider_error_redaction.py tests/test_recorded_seed_files.py tests/test_refusal_vocabulary.py tests/test_report.py tests/test_request_fold_memo.py tests/test_review_capabilities.py tests/test_review_fixes.py tests/test_run_command_service.py tests/test_seq_gap_visibility.py tests/test_server.py tests/test_server_code_freshness.py tests/test_stalled_finalization_affordance.py tests/test_state_delta.py tests/test_tui.py tests/test_upstream_api.py
 POST /api/runs/{run_id}/suggest	tests/test_collaboration.py tests/test_provider_error_redaction.py tests/test_report.py tests/test_server.py
 POST /api/runs/{run_id}/supertask	tests/test_server.py
 GET /api/runs/{run_id}/trace	tests/test_server.py tests/test_span_index.py tests/test_trace_facts_and_sse_offload.py tests/test_trace_file_security.py tests/test_trace_projection_security.py tests/test_trace_projection_transport.py
 GET /api/runs/{run_id}/trace/by_trace/{trace_id}	tests/test_server.py tests/test_span_index.py tests/test_trace_conversation_by_trace.py tests/test_trace_file_security.py tests/test_trace_projection_security.py tests/test_trace_projection_transport.py
 GET /api/runs/{run_id}/trace/by_trace/{trace_id}/conversation	tests/test_trace_conversation_by_trace.py
 GET /api/runs/{run_id}/trace/tail	tests/test_refusal_vocabulary.py tests/test_server.py tests/test_trace_facts_and_sse_offload.py tests/test_trace_file_security.py tests/test_trace_projection_security.py
-GET /api/runs/{run_id}/upstream	tests/test_upstream_api.py
+GET /api/runs/{run_id}/upstream	tests/test_upstream_api.py tests/test_upstream_integrity.py
 POST /api/runs/{run_id}/upstream/advance	tests/test_upstream_api.py
 POST /api/runs/{run_id}/upstream/check	tests/test_upstream_api.py
-POST /api/runs/{run_id}/upstream/proposals	tests/test_upstream_api.py
-POST /api/runs/{run_id}/upstream/recover	tests/test_upstream_api.py
+POST /api/runs/{run_id}/upstream/proposals	tests/test_upstream_api.py tests/test_upstream_integrity.py
+POST /api/runs/{run_id}/upstream/recover	tests/test_upstream_api.py tests/test_upstream_integrity.py tests/test_upstream_request_read.py
+GET /api/runs/{run_id}/upstream/requests/{proposal_id}	tests/test_upstream_request_read.py
 GET /api/scope-report-actions/{action_id}	tests/test_report.py
 POST /api/scope-report-actions/{action_id}/abandon	tests/test_report.py
 GET /api/scope-report/{scope_type}/{scope_id:path}	tests/test_report.py
@@ -164,4 +166,4 @@ GET /api/{kind}/{name}/operations/{operation_id}	tests/test_server.py
 PUT /api/{kind}/{name}/operations/{operation_id}	tests/test_server.py
 GET /review	tests/test_static_delivery.py
 GET /review/	tests/test_static_delivery.py
-GET /{path:path}	tests/test_static_delivery.py
+GET /{path:path}	tests/test_route_coverage.py tests/test_static_delivery.py

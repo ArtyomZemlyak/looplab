@@ -1,0 +1,51 @@
+{
+  "version": 1,
+  "date": "2026-10-04",
+  "increment": "doc72 section 20.38: paged original proposal recovery and honest lifecycle/base-read guidance",
+  "source_parent_commit": "9ca525453ac7832ec66f7305b9333be878f43fec",
+  "platform": "Windows",
+  "replay_first": {"selector": "tests/test_events_replay.py", "passed": 193, "failed": 0, "seconds": 3.45},
+  "new_recovery_and_mcp": {
+    "selectors": ["tests/test_upstream_request_read.py", "tests/test_upstream_request_retention.py", "tests/test_harness_mcp.py"],
+    "passed": 63, "failed": 0, "seconds": 11.70,
+    "note": "The later third request-read test adds scoped authorization and generation reset during the read. All three were rerun in the recorded HTTP group."
+  },
+  "upstream_regressions": {
+    "selectors": ["tests/test_upstream_lane.py", "tests/test_upstream_worktrees.py", "tests/test_upstream_multibase.py", "tests/test_upstream_integrity.py", "tests/test_upstream_api.py", "tests/test_upstream_manifest_recovery.py", "tests/test_upstream_recovery_api.py", "tests/test_upstream_git_process_recovery.py", "tests/test_upstream_overlay_intent.py", "tests/test_upstream_gate_claims.py", "tests/test_upstream_candidate_binding.py", "tests/test_upstream_receipt_evidence.py"],
+    "initial_passed": 119, "initial_failed": 1, "seconds": 230.15,
+    "failure": "Old Plan inventory asserted exactly one read. Updated to require both upstream_status and upstream_request; writes remain refused. All integrity cases passed in the subsequent contract run."
+  },
+  "http_and_contracts": {
+    "initial_passed": 124, "initial_failed": 1, "seconds": 35.22,
+    "failure": "Recorded route coverage exposed the pre-existing missing seed-files route. Re-recorded real seed-files requests without changing the coverage guard.",
+    "recorded_selectors": ["tests/test_recorded_seed_files.py", "tests/test_upstream_request_read.py"],
+    "recorded_passed": 21, "recorded_failed": 0, "recorded_seconds": 8.63
+  },
+  "ui": {
+    "selectors": ["test/seedReadError.test.js", "test/recordedSeedFiles.test.js", "test/reportComparisonCoverage.test.js", "test/harnessProgressContract.test.js", "test/harnessHandoff.test.js"],
+    "passed": 22, "failed": 0, "seconds": 3.88,
+    "initial_failure": "Two live Inspector tests awaited the old generic archive error for integrity failures. Updated to await the explicit integrity refusal; no validation was removed.",
+    "production_build": {"status": "passed", "command": "node node_modules/vite/bin/vite.js build --outDir .dist.stage", "seconds": 2.73}
+  },
+  "final_documentation_contracts": {"status": "passed", "initial_passed": 132, "initial_failed": 1, "failure": "The validation link was checked before this receipt existed; after saving it all 21 documentation and route-coverage cases passed.", "repair_passed": 21, "repair_failed": 0, "repair_seconds": 2.79},
+  "final_request_and_containment": {"status": "passed", "selectors": ["tests/test_upstream_request_read.py", "tests/test_harness_mcp.py", "tests/test_containment_census.py"], "passed": 78, "failed": 0, "seconds": 22.71, "scope": "Includes complete single-page canonical body/content hash validation and a named invalid-continuation refusal."},
+  "strict_documentation_build": {"status": "passed", "command": ".venv/Scripts/python.exe -m mkdocs build --strict --site-dir .tmp/doc72-request-read/site", "seconds": 9.98},
+  "observed_guarantees": [
+    "Real CPU protected SGD source; private writer exit before Maintainer Git.",
+    "Proposal larger than 256 KiB restored byte-for-byte through explicit HTTP-to-typed-MCP pages, including Unicode across byte boundaries.",
+    "Fifteen incomplete or contradictory HTTP 200 pages refuse as unavailable and perform one transport read only.",
+    "Reads preserve request/event bytes and never buy a check, create a worktree, advance a base or resume an engine.",
+    "Unclaimed, unresolved, completed and abandoned requests remain diagnostic only.",
+    "Missing, damaged or changed sources refuse; inter-page content hash and generation reset fences are enforced.",
+    "Scoped token can read; operator abandonment remains forbidden to it.",
+    "Assistant pages fit the shared model result cap; oversized pages refuse explicitly.",
+    "Finished-run next-step guidance points to result notices; independent root captions do not claim task baseline.",
+    "RU/EN base-read errors distinguish transport, timeout, stale identity, unavailable archive and failed integrity without echoing arbitrary server text."
+  ],
+  "limitations": [
+    "Focused Windows tests, not a complete repository suite or real third-party client process restart.",
+    "No complete proposal/recovery chat card, writer coordination or retention policy.",
+    "No complete executed-program manifest or verified target-repository delivery; run-owned base advancement is not owner-repo merge/push.",
+    "Handoff and server next-step localization remain open in doc72."
+  ]
+}

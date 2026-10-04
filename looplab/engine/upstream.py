@@ -56,6 +56,11 @@ class UpstreamLane:
             "maintainer_instruction": Maintainer.instruction,
             "engine_running": engine_alive(self.rd)}
 
+    def request(self, expected_generation, proposal_id, expected_request_hash, *, offset=0, limit=2048, expected_content_hash=None):
+        from looplab.engine.upstream_requests import request_page
+        return request_page(self, expected_generation, proposal_id, expected_request_hash,
+                            offset=offset, limit=limit, content_hash=expected_content_hash)
+
     def _current(self, generation):
         events = events_for(self.rd)
         if not generation or run_generation_token(events) != generation:

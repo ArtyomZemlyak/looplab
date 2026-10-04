@@ -10,7 +10,7 @@ vocabulary a client may append is `serve/protocol.py::CONTROL_EVENTS`.
 
 <!-- generated: api routes -->
 
-160 routes on 142 paths; 10 deprecated; 27 with a declared response model.
+161 routes on 143 paths; 10 deprecated; 27 with a declared response model.
 
 ### `/api`
 
@@ -238,6 +238,7 @@ vocabulary a client may append is `serve/protocol.py::CONTROL_EVENTS`.
 | `POST` | `/api/runs/{run_id}/upstream/check` | Buy explicit real source repetitions, old-recipe artifact regressions and trigger tests. | — |  |
 | `POST` | `/api/runs/{run_id}/upstream/proposals` | Author a generalized capability in a run-owned Maintainer git worktree; no base switch. | — |  |
 | `POST` | `/api/runs/{run_id}/upstream/recover` | Operator abandonment of an interrupted claim, granting no pass and no resume. | — |  |
+| `GET` | `/api/runs/{run_id}/upstream/requests/{proposal_id}` | Read one fenced base64 page of the original proposal. Diagnostic only; starts no work. | — |  |
 
 ### `/api/scope-report`
 

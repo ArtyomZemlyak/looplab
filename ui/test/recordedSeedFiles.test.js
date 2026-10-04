@@ -81,7 +81,7 @@ test('real Inspector reads inherited files only on request, verifies text hash a
       && url.searchParams.get('attempt') === '0'))
     corrupt = true
     await click(fileButton())
-    await until(() => /Архив или его квитанция недоступны/.test(mounted.container.textContent), 'hash mismatch refused')
+    await until(() => /Ответ не прошёл проверку целостности/.test(mounted.container.textContent), 'hash mismatch refused')
     assert.doesNotMatch(mounted.container.textContent, /inherited broken|inherited runner/)
     corrupt = false
     await click(open())
@@ -147,7 +147,7 @@ test('archive text refuses encoder replacement even when its replacement bytes m
     await click(button('Открыть файлы базы'))
     await until(() => button('train.py'), 'inventory')
     await click(button('train.py'))
-    await until(() => /Архив или его квитанция недоступны/.test(mounted.container.textContent), 'malformed Unicode refused')
+    await until(() => /Ответ не прошёл проверку целостности/.test(mounted.container.textContent), 'malformed Unicode refused')
     assert.equal(mounted.container.querySelector('[aria-label="База: train.py"]'), null)
     for (const genuine of ['\ufffd', 'кириллица \ud83d\ude80\n', '\ufeffBOM\r\n', '']) {
       source = genuine; wire = genuine

@@ -195,7 +195,7 @@ function brief(text, max = 140) {
 // on a late LLM summary), and — by request — EVERY non-merge node carries a non-empty, explanatory
 // caption (the card is never left blank):
 //   • sweep  → what was SEARCHED (the grid), not the single best value (the old `p=2.5` bug);
-//   • draft / root (no parent) → `baseline` PLUS a brief description (its rationale/theme) so the
+//   • draft / root (no parent) → `initial experiment` PLUS a brief description (its rationale/theme) so the
 //       starting point is explained too, instead of a bare label;
 //   • param change → the agent's `change_summary` if it wrote one, else the param-diff vs the parent;
 //   • no param change (code-only edit / re-run / repair) → the agent's rationale if any, else the
@@ -221,7 +221,7 @@ export function nodeChip(node, nodes, state = null) {
   const parent = parents[0]
   if (!parent) {                                           // draft / root — nothing to diff against
     const what = brief(node.idea?.rationale) || brief(nodeTheme(node, state))
-    return what ? `baseline · ${what}` : 'baseline'        // describe the baseline, don't just label it
+    return what ? `initial experiment · ${what}` : 'initial experiment'
   }
   if (node.idea?.change_summary) return brief(node.idea.change_summary)
   const lbl = paramDiffLabel(paramDiff(node, parent))      // diff vs the resolved parent directly

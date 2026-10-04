@@ -66,10 +66,17 @@ def _next_step(progress: dict) -> dict:
     if any(lifecycle.values()):
         title = ("Inspect recorded finish" if lifecycle["finished"] else
                  "Inspect stop request" if lifecycle["stop_requested"] else "Run is paused")
+        detail = ("The run has a recorded finish. Read result notices and the final report; no resume or further finalization is suggested."
+                  if lifecycle["finished"] else
+                  "A stop was requested. Inspect state and command receipts to determine whether settlement and explicit finalization remain due."
+                  if lifecycle["stop_requested"] else
+                  "The run is paused. Read state and command receipts, then explicitly choose resume or finalization if required.")
+        reads = [f"GET {_RUN}/state?observe_only=true", f"GET {_RUN}/events",
+                 f"GET {_RUN}/command-receipt?expected_generation=TOKEN&command_id={{command_id}}"]
+        if lifecycle["finished"]:
+            reads.append(f"GET {_RUN}/result-notices?expected_generation=TOKEN")
         return _step("inspect_lifecycle", title,
-                     "Read live state and command receipts before deciding to resume or complete finalization. Journal state does not certify engine or agent liveness.",
-                     [f"GET {_RUN}/state?observe_only=true", f"GET {_RUN}/events",
-                      f"GET {_RUN}/command-receipt?expected_generation=TOKEN&command_id={{command_id}}"])
+                     detail + " Journal state does not certify engine or agent liveness.", reads)
     if progress["finish_pending_nodes"]:
         execution = progress["execution"]
         counts = execution["recorded_node_counts"]

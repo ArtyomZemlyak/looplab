@@ -71,8 +71,8 @@
 | Измерение и upstream протокол | Реализованы в opt-in scope; ограничения сохраняются | §18.4, §20 |
 | Worktrees LoopLab | Есть run-owned Git, отдельные предложения, проверка полных байтов и восстановление прерванного claim; нет цельного пользовательского управления их жизненным циклом | O2/O4/O7; §19.13 |
 | Накопление общего кода | Два последовательных переноса проверены на CPU SGD; конфликты сохраняют всю прежнюю базу, рецепты не становятся общим default | O7/O10/O13: видимые зависимости и объяснение конфликтов |
-| Первый запуск и понятное продолжение | Есть handoff, typed reads и recovery receipts; original proposal сохраняется до Git/claim, но новый удалённый клиент ещё не получает его через HTTP/MCP | O3/O4/O8/O9/O11/O13 |
-| Понятный результат | Бесплатные итоги и сопоставимость работают; остаются повторение оговорок, неоднозначный baseline в графе и связь результата с воспроизведением/доставкой | O5/O9/O10; §19.16 |
+| Первый запуск и понятное продолжение | Есть handoff, typed reads и recovery receipts; original proposal сохраняется до Git/claim и читается новым клиентом через fenced HTTP/MCP/Assistant pages (§20.38) | O3/O4/O8/O9/O11/O13: цельный чатовый recovery и согласование writer |
+| Понятный результат | Бесплатные итоги и сопоставимость работают; root caption больше не объявляет task baseline (§20.38); остаются повторение оговорок и связь результата с воспроизведением/доставкой | O5/O9/O10; §19.16 |
 | Воспроизвести и забрать код | Saved edits и чтение проверенной базы реализованы; это ещё не полная исполненная программа и не проверенная доставка в пользовательскую ветку | O6/O14 |
 | Качество выпуска самого LoopLab | CI и публикация исходников остаются отдельным инженерным gate, вне продуктовой приёмки Git worktrees | O1; исторический срез §19.12 |
 
@@ -82,7 +82,8 @@
 запросе пользователя и требует отдельной политики запуска. Для существующего
 измеренного run ближайший независимый increment — O5/O6: краткий вывод,
 manifest исполненной программы и содержательный diff. Для прерванного proposal
-следующий O2/O4/O8 slice — безопасное чтение retained request из нового клиента.
+следующий O2/O4/O8 slice — цельный чатовый recovery поверх чтения retained request,
+реализованного в §20.38.
 Следом O14 — проверенная передача
 в выбранный task repo. Первое измерение, общий код будущих опытов и доставка
 в ветку имеют отдельные критерии успеха; один зелёный статус их не заменяет.
@@ -2082,9 +2083,9 @@ merge guard проходит. После разрешённой публикац
 **Выполнено после исходного review:** §20.35 различает Git process failure и
 content conflict; §20.36 называет повреждённый proposal manifest; §20.37 сохраняет
 normalized proposal request до claim/Git. Это подтверждённые runtime increments.
-Pointer из history пока требует доступа к серверному файлу. По §19.16 ближайший
-slice — ограниченное identity-bound чтение original request через HTTP/MCP;
-затем карточка того же proposal и явное recovery. Политика хранения worktree,
+§20.38 добавляет ограниченное identity-bound чтение original request через
+HTTP/MCP/Assistant без прямого доступа к серверному файлу. Следующий slice —
+карточка того же proposal и явное recovery. Политика хранения worktree,
 manifest, request и измеренных архивов остаётся отдельным остатком O2.
 
 **Приёмка:** read-only view связывает run/generation, proposal/action ID, source
@@ -3945,7 +3946,7 @@ paused run; текущий статус должен вести к допуст�
 
 | Направление | Подтверждённый фундамент | Самый существенный остаток | Какой результат принимать |
 |---|---|---|---|
-| Внешний агент | Durable identities, gates, provenance, типизированные reads; original proposal сохраняется до claim/Git | Получение exact body новым удалённым клиентом и согласование следующего writer всё ещё ручные | Новый процесс читает тот же request/receipt, решает текущие obligations и не оплачивает неизвестную операцию второй раз: O2/O4/O8 |
+| Внешний агент | Durable identities, gates, provenance; original proposal сохраняется до claim/Git и читается через типизированные страницы (§20.38) | Цельный чатовый recovery и согласование следующего writer всё ещё ручные | Новый процесс читает тот же request/receipt, решает текущие obligations и не оплачивает неизвестную операцию второй раз: O2/O4/O8 |
 | Удобство и порог входа | Assistant draft, три входных факта, review/validation перед запуском; отдельная external guide | Первый external run распределён между операторским сервером, run CLI, token setup, клиентом и несколькими reads | Один короткий маршрут для каждого режима, с текущим blocker и явным ответственным; чистая установка и готовое окружение измерены отдельно: O3/O9/O11/O13 |
 | Чтение результатов | Бесплатные briefs, matching-condition сравнения, Trust и repeat caveats; saved edits и archive reader | Подробности повторяются, а программа/воспроизведение/доставка не связаны одним итогом | Пользователь объясняет допустимый вывод и открывает именно выбранную попытку без платного вопроса: O5/O6 |
 | Worktrees LoopLab | Private Git/archives, проверка bytes, сохранённый WIP и explicit recovery; процесс Git не считается content conflict | Нет цельной карточки proposal/worktree/request/check/base, lifecycle/retention остаётся техническим | Новая сессия видит retained, unresolved, failed, abandoned и superseded; cleanup не теряет необходимые bytes: O2/O4/O7/O13 |
@@ -3975,8 +3976,9 @@ target остаются OPEN, даже если каждый локальный 
 
 #### Что делать следующим: конкретные slices существующей очереди
 
-1. **O2/O4/O8 — получить сохранённый proposal новым клиентом.** Ближайший
-   независимый increment: bounded read-only HTTP/MCP выдача normalized request,
+1. **O2/O4/O8 — получить сохранённый proposal новым клиентом.** Read-only
+   HTTP/MCP/Assistant increment реализован в §20.38; далее цельный чатовый recovery.
+   Приёмка сохранённого чтения: bounded выдача normalized request,
    связанная с run generation, proposal/action ID и request hash. Typed response
    проверяет identity/health/полноту; legacy missing body — named unavailable,
    не пустой patch. Unclaimed retained file читается только как диагностика,
@@ -5883,3 +5885,60 @@ cut points Git initialization и manifest/API/recovery regressions также п
 карточка в чате остаются OPEN. Исторический unsaved body не реконструируется;
 retention/cleanup policy, checks/advance request recovery и полный multi-client
 handoff также остаются O2/O4/O8. Ни файл, ни его путь не дают gate/advance authority.
+
+### 20.38. Новый клиент получает original proposal; честные lifecycle и base-read подсказки — 2026-10-04
+
+**Исправлено O2/O4/O8.** `looplab/engine/upstream_requests.py::request_page`
+выдаёт исходные normalized proposal bytes через отдельный read-only HTTP route,
+типизированный MCP `upstream_request` и одноимённое чтение Assistant в Plan mode.
+Произвольный файловый путь не принимается: источник вычисляется по proposal ID.
+Generation проверяется до и после чтения без ожидания эксклюзивного sequencer.
+Request hash сверяется с исходным body и claim; action ID связывает proposal ID.
+Повреждённый, отсутствующий, oversized или нерегулярный источник даёт named
+`upstream_request_unavailable`; изменённая identity/страницы — отдельный отказ.
+Legacy missing source не становится пустым patch.
+
+**Полнота без увеличения model cap.** Источник ограничен 2 MiB, HTTP/MCP page —
+4096 bytes. Base64 сохраняет UTF-8 при границах внутри символа. Страница содержит
+общий и chunk SHA-256, total bytes, offset/next_offset, original request generation,
+claim/settlement seq и source health. Следующие страницы требуют исходный content
+hash. `looplab/harness/upstream_requests.py::valid_page` проверяет весь typed
+контракт; неконсистентный HTTP 200 — unavailable без body. Клиент явно собирает
+все страницы и сверяет canonical request hash перед решением об exact recovery.
+Assistant по умолчанию читает 1024 bytes; maximum вычислен из общего `RESULT_CAP`.
+Большая страница отказывается явно, а не обрезает chunk или continuation pointer.
+
+**Граница полномочий.** Все страницы — `diagnostic_only`, включая unclaimed file
+после неясной claim publication, unresolved, completed и abandoned proposal.
+Completed означает окончание авторства, не passing gate. Чтение не покупает checks,
+не создаёт worktree, не повторяет неизвестный write и не делает advance/resume.
+Scoped credential читает источник; operator recovery остаётся operator-only.
+Старая request generation не заменяется текущей внутри исходного body.
+
+**Исправлено O5/O9/O13.** `looplab/harness/progress_summary.py::_next_step`
+различает paused, stop requested и finished: finished ведёт к result notices и
+final report, не предлагает новое завершение или resume. Root/draft caption
+`ui/src/report.js::nodeChip` теперь «initial experiment», не утверждение task
+baseline. `ui/src/seedReadError.js::seedReadError` разделяет timeout, изменённую
+attempt/generation, недоступный архив, integrity/context mismatch и transport
+failure. Сообщения есть на RU/EN, не отражают произвольный parser/server text;
+настоящий Inspector сохраняет hash-проверку, отказ и explicit read recovery.
+
+**Проверка.** Реальный CPU protected SGD source, потеря writer до Git, большой
+proposal > MCP response cap: все страницы HTTP/MCP восстанавливают точные bytes
+и request hash, события не меняются. Проверены 15 malformed 200 вариантов без
+автоповтора, Plan tool с общей модельной границей, отсутствие original file,
+unclaimed/abandoned/completed reads, scoped auth, generation reset внутри чтения,
+изменение bytes между страницами, повреждённый request и events. Регрессии включают
+полный measured transaction, worktree, последовательные bases, overlay intent,
+manifest/Git recovery, gate claims и typed receipts. Новое чтение и ранее
+не записанный seed-files route добавлены в recorded route coverage через реальные
+HTTP dispatches. Проверки и команды —
+[validation.json](assets/72-upstream-request-read/validation.json).
+
+**Остаток.** O2/O4/O8 сохраняют OPEN для цельной proposal/recovery карточки,
+согласования writer и retention. O3/O9/O11/O13 — для короткого целого Assistant
+onboarding, включая локализацию handoff/next-step. O5/O6 — для manifest исполненной
+программы с inputs/stages/env/deps. O6/O10/O14 — для target-relative передачи
+совместимых возможностей в пользовательский repo с dirty/stale/conflict приёмкой.
+Run-owned base advance всё ещё не означает merge или push в этот repo.

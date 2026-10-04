@@ -2,6 +2,7 @@ import React, { useEffect, useRef, useState } from 'react'
 import { deadlineGet, runNodeApiPath } from './api.js'
 import CodeViewer from './CodeViewer.jsx'
 import { recordedFileOverlay } from './nodeCodeModel.js'
+import { seedReadError } from './seedReadError.js'
 import './RecordedSeedFiles.css'
 
 const digest = value => typeof value === 'string' && /^[0-9a-f]{64}$/.test(value)
@@ -72,17 +73,17 @@ export default function RecordedSeedFiles({ runId, node, generation, baseDigest,
     try {
       const result = await read.promise
       if (ticket !== serial.current) return
-      if (!validSeedFilesPage(result, { generation, nodeId: node.id, attempt: node.attempt, baseDigest }, offset, path)) throw 0
+      if (!validSeedFilesPage(result, { generation, nodeId: node.id, attempt: node.attempt, baseDigest }, offset, path)) throw { code: 'seed_page_invalid' }
       if (result.file?.text_status === 'utf8') {
         const bytes = new TextEncoder().encode(result.file.text)
         const hash = [...new Uint8Array(await crypto.subtle.digest('SHA-256', bytes))]
           .map(byte => byte.toString(16).padStart(2, '0')).join('')
-        if (hash !== result.file.sha256) throw 0
+        if (hash !== result.file.sha256) throw { code: 'seed_page_invalid' }
       }
       if (ticket !== serial.current) return
       setPage(result); setFile(result.file)
-    } catch {
-      if (ticket === serial.current) { setPage(null); setError(true) }
+    } catch (failure) {
+      if (ticket === serial.current) { setPage(null); setError(failure || {}) }
     } finally {
       if (ticket === serial.current) { setPending(false); request.current = null }
     }
@@ -105,9 +106,7 @@ export default function RecordedSeedFiles({ runId, node, generation, baseDigest,
       : 'Verified archive files before node edits. Data, mounts, task assets and environment are not added here. No model request.'}</p>
     <button className="btn sm" disabled={pending} onClick={() => load()}>
       {pending ? (ru ? 'Чтение…' : 'Reading…') : ru ? 'Открыть файлы базы' : 'Open base files'}</button>
-    {error && <p className="notice resource-warning" role="status">{ru
-      ? 'Архив или его квитанция недоступны. Обновите состояние и повторите чтение; код из текущего репозитория не подставляется.'
-      : 'Archive or its evidence is unavailable. Refresh state and retry; the current repository is not substituted.'}</p>}
+    {error && <p className="notice resource-warning" role="status">{seedReadError(error, ru)}</p>}
     {page && <>
       <p className="muted">{ru ? 'Файлы' : 'Files'} {page.total ? page.offset + 1 : 0}–{page.offset + page.files.length} / {page.total}</p>
       <div className="toolbar">

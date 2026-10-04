@@ -101,7 +101,7 @@ def test_scoped_token_refuses_internal_writes_and_operator_recovery(tmp_path, mo
 def test_assistant_plan_read_and_exact_full_body_approval_binding(tmp_path):
     lane, store, generation, proposal = fixture(tmp_path)
     planned = UpstreamTools(tmp_path, mode="plan")
-    assert len(planned.specs()) == 1
+    assert {row["function"]["name"] for row in planned.specs()} == {"upstream_status", "upstream_request"}
     assert planned.execute("upstream_status", {"run_id": "run", "expected_generation": generation}).structured["enabled"]
     assert planned.execute("upstream_propose", {"run_id": "run", "body": proposal}).is_error
     scopes = []

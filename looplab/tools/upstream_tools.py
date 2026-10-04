@@ -3,7 +3,11 @@ import json
 from pathlib import Path
 
 from looplab.core.errors import ConfigRefusal
-from looplab.tools._base import ToolCapability, ToolResult, fn_spec
+from looplab.tools._base import RESULT_CAP, ToolCapability, ToolResult, fn_spec
+
+# Base64 expands bytes by 4/3; reserve identity/hash/pagination metadata inside
+# the shared model result cap, rather than returning an amputated exact request.
+REQUEST_PAGE_LIMIT = min(4096, max(1, (RESULT_CAP - 1800) * 3 // 4))
 
 
 class UpstreamTools:
@@ -17,6 +21,13 @@ class UpstreamTools:
              "source_node_id": {"type": "integer", "minimum": 0},
              "candidate_offset": {"type": "integer", "minimum": 0},
              "candidate_limit": {"type": "integer", "minimum": 1, "maximum": 200}}, ["run_id", "expected_generation"])]
+        rows.append(fn_spec("upstream_request", "Read original proposal bytes as one bounded diagnostic base64 page. Follow next_offset explicitly with expected_content_hash=content_sha256; verify all bytes and request hash before exact recovery. Starts no work.",
+            {"run_id": {"type": "string"}, "expected_generation": {"type": "string"},
+             "proposal_id": {"type": "string"}, "expected_request_hash": {"type": "string"},
+             "offset": {"type": "integer", "minimum": 0},
+             "limit": {"type": "integer", "minimum": 1, "maximum": REQUEST_PAGE_LIMIT},
+             "expected_content_hash": {"type": "string"}},
+            ["run_id", "expected_generation", "proposal_id", "expected_request_hash"]))
         if self.mode != "plan":
             for operation, purpose in (
                 ("propose", "Generalize measured source_node_id and hunk_hashes in a run-owned worktree using Maintainer. Supply files/deleted, separate recipe_files/recipe_deleted, summary, documented flag {name,default,enabled}, documentation_path, named critic {verdict:pass,reason,reviewer}, expected_base_revision."),
@@ -28,9 +39,9 @@ class UpstreamTools:
 
     def capabilities(self):
         return [ToolCapability(name=(name := row["function"]["name"]), input_schema=row["function"]["parameters"],
-            effect="read" if name == "upstream_status" else "execute" if name == "upstream_check" else "control",
-            risk="low" if name == "upstream_status" else "high", idempotency="conditional",
-            approval="never" if name == "upstream_status" else "policy", concurrency_safe=True) for row in self.specs()]
+            effect="read" if name in ("upstream_status", "upstream_request") else "execute" if name == "upstream_check" else "control",
+            risk="low" if name in ("upstream_status", "upstream_request") else "high", idempotency="conditional",
+            approval="never" if name in ("upstream_status", "upstream_request") else "policy", concurrency_safe=True) for row in self.specs()]
 
     def execute(self, name, args):
         from looplab.adapters.tasks import load_task
@@ -54,6 +65,13 @@ class UpstreamTools:
                     candidate_limit=args.get("candidate_limit", 200))
                 from looplab.agents.maintainer import Maintainer
                 result["maintainer_instruction"] = Maintainer.instruction
+            elif name == "upstream_request":
+                limit = args.get("limit", min(1024, REQUEST_PAGE_LIMIT))
+                if type(limit) is not int or not 1 <= limit <= REQUEST_PAGE_LIMIT:
+                    return ToolResult(f"Use request byte limit 1..{REQUEST_PAGE_LIMIT}; larger pages would exceed the model result cap. No read or work started", is_error=True)
+                result = lane.request(args["expected_generation"], args["proposal_id"], args["expected_request_hash"],
+                    offset=args.get("offset", 0), limit=limit,
+                    expected_content_hash=args.get("expected_content_hash"))
             elif name in {row["function"]["name"] for row in self.specs()}:
                 body = args.get("body")
                 if not isinstance(body, dict):
@@ -71,6 +89,8 @@ class UpstreamTools:
             else:
                 return ToolResult("Unknown upstream tool", is_error=True)
             text = json.dumps(result, ensure_ascii=False, allow_nan=False)
+            if name == "upstream_request" and len(text) > RESULT_CAP:
+                return ToolResult("Request page metadata exceeds the model result cap. Explicitly request a smaller byte limit; no execution or retry occurred", is_error=True)
             if len(text) > 12000:
                 text = text[:11500] + "\n[Bounded view; read next upstream history page through API.]"
             return ToolResult(text, structured=result, receipt={k: result[k] for k in ("action_id", "seq", "status", "proposal_id", "evidence_token") if k in result}, is_error=result.get("status") == "failed")

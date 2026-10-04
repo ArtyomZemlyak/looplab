@@ -221,6 +221,11 @@ def test_progress_distinguishes_recorded_pause_and_finish_from_liveness(tmp_path
         assert compact["recorded_lifecycle"][key]
         assert compact["next_step"]["code"] == "inspect_lifecycle"
         assert "does not certify" in compact["next_step"]["detail"]
+        if key == "finished":
+            assert "no resume or further finalization" in compact["next_step"]["detail"]
+            assert any("/result-notices?" in ref for ref in compact["next_step"]["reads"])
+        else:
+            assert "explicitly choose resume or finalization" in compact["next_step"]["detail"]
         routes = client.get("/openapi.json").json()["paths"]
         for ref in compact["next_step"]["reads"]:
             method, path = ref.split(" ", 1)

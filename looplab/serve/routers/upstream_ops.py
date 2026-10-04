@@ -80,6 +80,22 @@ def build_router(srv):
         return call(run_id, "read", expected_generation, offset=offset, limit=limit,
                     source_node_id=source_node_id, candidate_offset=candidate_offset, candidate_limit=candidate_limit)
 
+    @router.get("/api/runs/{run_id}/upstream/requests/{proposal_id}")
+    def proposal_request(run_id: str, proposal_id: str, response: Response,
+                         expected_generation: str = Query(..., pattern=r"^[0-9a-f]{64}$"),
+                         expected_request_hash: str = Query(..., pattern=r"^[0-9a-f]{64}$"),
+                         offset: int = Query(0, ge=0, lt=2 * 1024 * 1024),
+                         limit: int = Query(2048, ge=1, le=4096),
+                         expected_content_hash: Optional[str] = Query(None, pattern=r"^[0-9a-f]{64}$")):
+        """Read one fenced base64 page of the original proposal. Diagnostic only; starts no work.
+
+        Preserve content_sha256 for subsequent pages, assemble all bytes and verify
+        both content and canonical request hashes before considering exact recovery.
+        """
+        response.headers["Cache-Control"] = "no-store"
+        return call(run_id, "request", expected_generation, proposal_id, expected_request_hash,
+                    offset=offset, limit=limit, expected_content_hash=expected_content_hash)
+
     @router.post("/api/runs/{run_id}/upstream/proposals")
     def propose(run_id: str, body: UpstreamProposal, request: Request):
         """Author a generalized capability in a run-owned Maintainer git worktree; no base switch."""

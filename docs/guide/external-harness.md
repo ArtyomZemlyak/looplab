@@ -1547,16 +1547,76 @@ New proposal requests are retained durably **before** the proposal claim and Git
 work in `upstream/requests/PROPOSAL_ID/request.json`. The started history row's
 optional `request_path` names that run-relative file; status does not inline its
 raw patch. It stores the normalized exact body, including defaults and action ID,
-whose canonical hash must match the claim's `request_hash`. Inspect it on the
-server when recovering original values; a retained request alone proves neither
+whose canonical hash must match the claim's `request_hash`. Read it through
+`upstream_request` when recovering original values; a retained request alone proves neither
 admission nor completed authoring. Legacy claims may have no retained request.
 A retention publication failure returns `upstream_request_unavailable` before
 claiming work. An exact explicit retry can confirm publication of identical values;
 a changed or damaged unclaimed request is preserved and refuses overwrite.
 Retention does not approve an interrupted claim: the operator must still resolve
 that claim before a new action ID starts work. Original requests and interrupted
-staging/worktrees remain after abandonment. HTTP/MCP retrieval of the raw retained
-body and a complete recovery UI remain separate work; the path is a diagnostic.
+staging/worktrees remain after abandonment. A complete recovery UI remains separate
+work; the path and read are diagnostics.
+
+#### Recover the original proposal from another client
+
+Read current generation and upstream history first. Use the proposal's original
+`proposal_id` and `request_hash`, not a new action ID or guessed patch. HTTP
+`GET /api/runs/{run_id}/upstream/requests/{proposal_id}` and MCP
+`upstream_request(run_id, expected_generation, proposal_id, expected_request_hash,
+offset=0, limit=2048, expected_content_hash=None)` return **one** version-1 page.
+Each page includes `source_health`, `authority: diagnostic_only`, original
+`action_id` / `request_generation`, claim status/sequence, exact byte length,
+content/chunk SHA-256, base64 bytes and explicit `next_offset`. The HTTP/MCP
+maximum is 4096 bytes per page, comfortably below the MCP response cap.
+Assistant exposes the same read in Plan mode with a smaller default (1024 bytes)
+and maximum derived from its shared model result cap. Oversized Assistant
+requests fail explicitly, rather than returning a truncated recovery body.
+This read does not relax the MCP client's existing 1 MiB write request cap:
+recovering a larger historical HTTP proposal does not make it writable through
+MCP. Preserve the exact body and inspect its receipts before choosing an explicit
+supported recovery route; do not shrink or rewrite the body under its original ID.
+
+Follow `next_offset` explicitly, preserving the first `content_sha256` as
+`expected_content_hash`. Do not decode individual UTF-8 chunks: a byte boundary
+can split a character. Assemble all base64-decoded chunks in order, check the
+full content SHA-256 and byte count, then parse JSON and verify its canonical
+request hash. For a `HarnessAPI` client, with the identities obtained above:
+
+```python
+import base64, hashlib, json
+
+data, offset, sha = bytearray(), 0, None
+while True:
+    result = api.upstream_request(run_id, generation, proposal_id, request_hash,
+                                  offset, 4096, sha)
+    if result["status"] != 200 or result.get("code"):
+        raise RuntimeError("Request read unavailable; refresh explicitly")
+    page = result["body"]
+    data.extend(base64.b64decode(page["chunk"], validate=True))
+    sha = page["content_sha256"]
+    if page["next_offset"] is None:
+        break
+    offset = page["next_offset"]
+assert len(data) == page["total_bytes"]
+assert hashlib.sha256(data).hexdigest() == sha
+original = json.loads(data)
+canonical = json.dumps(original, sort_keys=True, separators=(",", ":"),
+                       ensure_ascii=False, allow_nan=False).encode()
+assert hashlib.sha256(canonical).hexdigest() == request_hash
+```
+
+The typed client verifies each page's generation, identity, health, claim status,
+pagination, encoding and chunk hash; incomplete HTTP 200 is unavailable, never
+an empty patch. There is no automatic paging, retry, worktree creation, gate
+execution or resume. A missing legacy request is `upstream_request_unavailable`,
+not reconstruction from current source. An unclaimed file left by failed claim
+publication is readable as `unclaimed`, granting no admission authority.
+`unresolved`, `completed` and `abandoned` describe the original proposal claim,
+not gate success. Changed identity or inter-page bytes refuse the read. After a
+generation reset, an original request can remain diagnostic under its original
+`request_generation`; its old body does not become a fresh current-generation
+write. Inspect and explicitly resolve receipts before deciding what to submit.
 
 A started claim with no verdict is unresolved; inspect its logs before asking the
 operator to abandon it through

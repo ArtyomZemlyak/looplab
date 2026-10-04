@@ -366,6 +366,24 @@ class HarnessAPI:
                     "message": "Completion page is incomplete or inconsistent. Read it again explicitly before interpreting results; no paging, retry or engine work was made."}
         return result
 
+    def upstream_request(self, run_id: str, expected_generation: str, proposal_id: str,
+                         expected_request_hash: str, offset: int = 0, limit: int = 2048,
+                         expected_content_hash: str | None = None) -> dict:
+        self._run_identity(run_id, expected_generation)
+        from looplab.engine.upstream_requests import validate_selector
+        from looplab.harness.upstream_requests import valid_page
+        validate_selector(proposal_id, expected_request_hash, offset, limit, expected_content_hash)
+        query = {"expected_generation": expected_generation, "expected_request_hash": expected_request_hash,
+                 "offset": offset, "limit": limit}
+        if expected_content_hash is not None:
+            query["expected_content_hash"] = expected_content_hash
+        result = self._checked_generation(self.request("GET",
+            f"/api/runs/{quote(run_id, safe='')}/upstream/requests/{proposal_id}?{urlencode(query)}"), expected_generation)
+        if result.get("status") == 200 and not result.get("code") and not valid_page(
+                result["body"], expected_generation, proposal_id, expected_request_hash, offset, limit, expected_content_hash):
+            return self._read_refusal("invalid_upstream_request_page")
+        return result
+
     def upstream_status(self, run_id: str, expected_generation: str, offset: int = 0, limit: int = 40,
                         source_node_id: int | None = None, candidate_offset: int = 0, candidate_limit: int = 200) -> dict:
         self._run_identity(run_id, expected_generation)
@@ -635,6 +653,14 @@ def build_server(api: HarnessAPI):
             phase["entity_schema"] = (ResearchMemo if phase_id == "research"
                                       else Idea).model_json_schema()
         return phase
+
+    @mcp.tool(annotations=ToolAnnotations(readOnlyHint=True, destructiveHint=False, idempotentHint=True, openWorldHint=False))
+    def upstream_request(run_id: str, expected_generation: str, proposal_id: str,
+                         expected_request_hash: str, offset: int = 0, limit: int = 2048,
+                         expected_content_hash: str | None = None) -> dict:
+        """Read original proposal bytes, one diagnostic base64 page. Follow next_offset explicitly with content_sha256; assemble and verify all bytes before exact recovery. No work or retry starts."""
+        return api.upstream_request(run_id, expected_generation, proposal_id, expected_request_hash,
+                                    offset, limit, expected_content_hash)
 
     @mcp.tool(annotations=ToolAnnotations(readOnlyHint=True, destructiveHint=False, idempotentHint=True, openWorldHint=False))
     def upstream_status(run_id: str, expected_generation: str, offset: int = 0, limit: int = 40,
