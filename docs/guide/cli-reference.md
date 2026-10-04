@@ -3005,6 +3005,10 @@ kept. Every name left out, for whatever reason, is counted by reason in `Looplab
 An omitted task asset or `solution.py` still reserves its portable checkout name: case and
 Unicode-normalization aliases are counted as collisions, even when no file under that name
 appears in the exported edit tree.
+The omitted file's parent directories and file boundary remain reserved too. For example,
+`checks` cannot be exported as a file when the omitted asset is `checks/grader.py`, and
+`grader.py/helper.py` cannot coexist with the omitted file `grader.py`. Ordinary siblings
+such as `checks/user.py` are retained; a shared text prefix alone is not a collision.
 
 The message's `Looplab-*` trailers:
 

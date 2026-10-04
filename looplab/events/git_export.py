@@ -39,6 +39,8 @@ conservative portable projection of that set (`lifecycle_tree`):
     loads — so it cannot be honoured here; the Developer's write gate refuses those names anyway.
   * A case/normalization alias of an omitted task asset or entrypoint is still a portable checkout
     collision; the protected name reserves its slot even though its bytes are not exported.
+    Its parent directories and file boundary are reserved too: a candidate file cannot replace
+    a directory holding that asset, and a candidate directory cannot sit beneath the asset file.
   * A name in both `files` and `deleted` is gone, as the write-then-delete order leaves it.
 
 The base's bytes are not in this log projection, even when the run separately archived them
@@ -204,6 +206,16 @@ def lifecycle_tree(code, files, deleted, *, skip=frozenset()) -> tuple[dict, Cou
     stored: set = set()             # the collision key of every kept file…
     directories: set = set()        # …and of every directory one sits under
     excluded_keys = {_collision_key(path) for path in skip}
+    excluded_directories = set()
+    for key in excluded_keys:
+        parts = key.split("/")
+        excluded_directories.update("/".join(parts[:i]) for i in range(1, len(parts)))
+
+    def excluded_collision(path: str) -> bool:
+        key = _collision_key(path)
+        parts = key.split("/")
+        return (key in excluded_keys or key in excluded_directories
+                or any("/".join(parts[:i]) in excluded_keys for i in range(1, len(parts))))
 
     def keep(path: str, data: bytes) -> bool:
         key = _collision_key(path)
@@ -228,10 +240,12 @@ def lifecycle_tree(code, files, deleted, *, skip=frozenset()) -> tuple[dict, Cou
             skipped["unsafe"] += 1
         elif safe in skip:
             skipped["engine"] += 1
-        elif _collision_key(safe) in excluded_keys:
+        elif excluded_collision(safe):
             # Task assets/entrypoint are omitted from the edit tree, but their names still
             # reserve a checkout slot. A case/normalization alias must not appear as runnable
-            # candidate code on NTFS/HFS+. On a case-sensitive source it may have existed:
+            # candidate code on NTFS/HFS+. Neither a child beneath that FILE nor a file
+            # replacing one of its parent directories can coexist with the omitted asset.
+            # On a case-sensitive source an alias may have existed:
             # count a portable-checkout collision, not "never materialized".
             skipped["collision"] += 1
         elif not keep(safe, surrogate_safe(str(files[name])).encode("utf-8")):

@@ -954,6 +954,52 @@ def test_omitted_task_asset_names_still_reserve_their_portable_checkout_slots(tm
     _git_run(repo, "fsck", "--strict")
 
 
+def test_reserved_assets_and_adapters_keep_file_directory_boundaries_without_losing_siblings(tmp_path):
+    rd, store = _store(tmp_path)
+    _started(store)
+    store.append("data_provenance", {"assets": {"grader.py": "digest", "checks/grader.py": "digest",
+                                                 "caf\u00e9.py": "digest"}})
+    store.append("spec_proposed", {"adapter_files": {"adapter/run.py": "adapter source"}})
+    store.append("spec_approval_requested", {})
+    store.append("spec_approved", {})
+    _node(store, 0, [], files={
+        "grader.py/helper.py": "file cannot become a directory\n",
+        "GRADER.PY/nested/runner.py": "case alias cannot become a directory\n",
+        "checks": "directory cannot become a file\n",
+        "cafe\u0301.py/helper.py": "normalization alias cannot become a directory\n",
+        "adapter": "adapter directory cannot become a file\n",
+        "adapter/run.py/helper.py": "adapter file cannot become a directory\n",
+        "solution.py/helper.py": "reserved entrypoint cannot become a directory\n",
+        "checks/user.py": "valid sibling\n",
+        "adapter/user.py": "valid adapter sibling\n",
+        "grader.py_extra/user.py": "valid prefix sibling\n",
+    })
+    _evaluated(store, 0, 0.5)
+    before = (rd / "events.jsonl").read_bytes()
+    repo = tmp_path / "repo"
+    result = _export(rd, repo)
+    assert result.exit_code == 0, result.output
+    assert _tree(repo, "node-0") == ["adapter/user.py", "checks/user.py", "grader.py_extra/user.py"]
+    assert _trailer(repo, "node-0", "Looplab-Skipped-Paths") == (
+        "7 (7 colliding with another name on some checkout; the log keeps every one)")
+    assert (rd / "events.jsonl").read_bytes() == before
+    _git_run(repo, "fsck", "--strict")
+
+
+def test_reserved_entrypoint_children_are_refused_with_and_without_main_code(tmp_path):
+    rd, store = _store(tmp_path)
+    _started(store)
+    _node(store, 0, [], code="print('canonical entrypoint')\n",
+          files={"SOLUTION.PY/helper.py": "must not be exported\n", "safe.py": "sibling\n"})
+    _evaluated(store, 0, 0.5)
+    repo = tmp_path / "repo"
+    result = _export(rd, repo)
+    assert result.exit_code == 0, result.output
+    assert _tree(repo, "node-0") == ["safe.py", "solution.py"]
+    assert _git(repo, "show", "node-0:solution.py") == "print('canonical entrypoint')"
+    assert "1 colliding" in _trailer(repo, "node-0", "Looplab-Skipped-Paths")
+
+
 def test_recipe_only_export_names_different_recorded_bases_without_inventing_the_runner(tmp_path):
     rd, store = _store(tmp_path)
     _started(store)

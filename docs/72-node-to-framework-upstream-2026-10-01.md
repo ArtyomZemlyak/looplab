@@ -2229,6 +2229,8 @@ saved overlays включает recipe-only правки и не подменя�
 от удаления; выбранный preview доступен перед ограниченным списком файлов.
 **Уточнение Git export — §20.27:** сами коммиты называют saved-edit scope,
 event-bound ссылку на базу или unavailable и отсутствие доставки в task repo.
+**Границы файлов — §20.28:** экспорт исключает ancestor/descendant collisions
+с task assets/adapter/entrypoint, сохраняя допустимые соседние пути.
 Полная материализация inherited программы, её сравнение между базами и доставка
 в target repo остаются OPEN.
 
@@ -5346,3 +5348,32 @@ hermetic environment и golden. Отдельный read-only smoke экспор�
 **Граница.** O6/O14 остаются OPEN: полного materialized manifest, переносимого
 окружения и target-aware доставки этот шаг не реализует. Теперь ограничение
 остаётся с Git repo, даже если получатель не видел UI или CLI.
+
+### 20.28 72.O6: omitted assets сохраняют границы файл/каталог при Git export (2026-10-04)
+
+**Воспроизведено.** После §20.27 равные portable имена исключались, но отсутствующий
+в edit tree asset не резервировал родительские каталоги и собственную file boundary.
+`grader.py/helper.py` экспортировался под asset-файлом `grader.py`; файл `checks`
+экспортировался вместо каталога с task-owned `checks/grader.py`. Получатель edit
+repo получал конфликтующую файловую структуру. Такие же коллизии были у ratified
+adapter и у `solution.py` без основного code.
+
+**Исправлено.** `looplab/events/git_export.py::lifecycle_tree` строит portable keys
+исключённых файлов и множество их ancestor directories. Candidate path сверяется
+по компонентам: equal/ancestor/descendant collisions считаются в существующем
+`Looplab-Skipped-Paths`. Case/Unicode aliases проходят ту же проверку. Соседние
+`checks/user.py`, `adapter/user.py` и `grader.py_extra/user.py` остаются в tree;
+общий текстовый prefix не считается родством путей. Canonical `solution.py` из
+`node.code` сохраняется. Порядок обхода, node/attempt identity, метрики и текущий
+format golden не меняются.
+
+**Проверка.** Replay-first; реальные Git repositories и fsck, task assets,
+ratified adapter, empty/nonempty main code, nested case/Unicode aliases, siblings
+и неизменность исходного events.jsonl. Полная экспортная регрессия проверяет
+parents/reset, receipts, damaged-prefix и hermetic/deterministic export. Точные
+selectors, результаты и ограничения —
+[validation.json](assets/72-git-export-boundaries/validation.json).
+
+**Граница.** Фильтр экспортного edit tree не выполняет candidate admission,
+training или task-repo merge и не проверяет runtime dependencies. O6/O14 сохраняют
+OPEN для materialized program и target-aware доставки.
