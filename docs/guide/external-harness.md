@@ -1545,6 +1545,17 @@ evidence, including after resume. A started claim with no verdict is unresolved;
 inspect its logs before asking the operator to abandon it through
 `POST /api/runs/{run_id}/upstream/recover`. Recovery grants no pass or resume. A new
 check requires a new action ID. Damaged event sources refuse even old ACK reads.
+Fresh checks and advancement also require the retained proposal manifest.
+`upstream_manifest_unavailable` names the run-relative
+`upstream/proposals/PROPOSAL_ID/manifest.json` when it is absent, unreadable,
+oversized or cannot be decoded and hashed; a readable different body returns
+`upstream_manifest_changed`. Inspect that named source and restore the original
+manifest or author a new proposal. Do not repair task/config/events solely for
+this manifest diagnostic. The refusal precedes a new gate claim and starts no
+evaluation. Exact saved proposal/check ACKs remain historical reads if events
+are complete; they do not certify the damaged manifest. Restoring original bytes
+does not abandon a settled gate, advance the base or resume. Submit a fresh
+explicit action only after reviewing current source/base/gate validity.
 The initial private Git repository is built in a proposal-specific
 `upstream/.git-init-PROPOSAL_ID` directory and published only after its base commit
 and ref are ready. After process loss, inspect the retained staging directory and

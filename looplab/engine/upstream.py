@@ -132,13 +132,21 @@ class UpstreamLane:
         if event is None:
             raise UpstreamRefusal("upstream_proposal_missing", "Read a current proposed capability")
         p = event.data
-        path = owned_path(self.rd, "upstream/proposals/" + p["proposal_id"] + "/manifest.json")
+        relative = "upstream/proposals/" + p["proposal_id"] + "/manifest.json"
+        path = owned_path(self.rd, relative)
         raw = read_bounded_regular_file(path, 2 * 1024 * 1024 + 1)
         if raw is None or len(raw) > 2 * 1024 * 1024:
-            raise UpstreamRefusal("upstream_manifest_unavailable", "Restore the original proposal manifest")
-        manifest = json.loads(raw)
-        if digest(manifest) != p["manifest_hash"]:
-            raise UpstreamRefusal("upstream_manifest_changed", "Proposal manifest changed; publish a new proposal")
+            raise UpstreamRefusal("upstream_manifest_unavailable", f"Inspect {relative}: restore the original bounded regular proposal manifest before acting")
+        try:
+            manifest = json.loads(raw)
+            manifest_hash = digest(manifest)
+        except (ValueError, RecursionError) as exc:
+            # JSON/Unicode/nonfinite/depth failures concern this retained source,
+            # not the task/config or an unresolved bought check. Refuse before
+            # claiming new work; never return submitted bytes or parser output.
+            raise UpstreamRefusal("upstream_manifest_unavailable", f"Inspect {relative}: restore the original readable proposal manifest before acting") from exc
+        if manifest_hash != p["manifest_hash"]:
+            raise UpstreamRefusal("upstream_manifest_changed", f"Inspect {relative}: proposal manifest changed; restore the original or publish a new proposal")
         # Fresh checks/CAS must revalidate proposals recorded before an admission
         # fix. Exact ACK recovery returns earlier, preserving the saved receipt.
         self._validate_shared_patch(manifest, p["capability_paths"])

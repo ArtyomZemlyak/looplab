@@ -5629,3 +5629,41 @@ environment, startup/deadline refusals и границы conflict counts.
 OPEN для полного lifecycle/status/conflict UX, O6/O14 — для полного manifest,
 runtime dependencies и доставки в owner repo. Изоляция host config не исключает
 внешние изменения установленного Git executable или источников на сервере.
+
+### 20.36. Восстановление сохранённого предложения: названный manifest вместо общей ошибки — 2026-10-04
+
+**Проблема O2/O4/O8/O9.** `looplab/engine/upstream.py::UpstreamLane._proposal`
+не классифицировал ошибки декодирования/хеширования сохранённого manifest.
+При повреждении JSON или Unicode HTTP/Assistant направляли проверять
+task/config/events; слишком глубокая JSON-структура давала нетипизированный
+`RecursionError`. Уже распознанные missing/oversized/changed refusals не называли
+точный источник. Новая сессия получала неправильный маршрут восстановления.
+
+**Воспроизведение до правки.** Новый набор дал **8 failed**: обрыв JSON,
+невалидная encoding, lone surrogate, nonfinite value, чрезмерная глубина,
+отсутствующий/oversized файл и изменённое читаемое предложение. Для каждого
+первоначально создано настоящее предложение и passing CPU SGD gate; затем
+повреждался только его сохранённый manifest, без изменения измерений.
+
+**Исправление.** Ошибки JSON/Unicode/nonfinite/depth классифицируются в узкой
+границе decode/hash как `upstream_manifest_unavailable`. Все manifest refusals
+называют run-relative `upstream/proposals/PROPOSAL_ID/manifest.json`.
+Изменённый читаемый body сохраняет отдельный `upstream_manifest_changed`.
+Сообщение не отражает parser output или содержимое файла. Лимит 2 MiB,
+regular-file reader и сверка recorded manifest hash сохранены.
+
+**Проверка.** Восемь случаев проходят через engine lane, HTTP/typed MCP и
+Assistant. Отказ новых check/advance происходит до нового claim: event bytes
+не меняются, число execution остаётся 7, нет advance/resume. Exact proposal/check
+ACK через MCP возвращает первоначальную квитанцию, не перезапускает evaluation
+и не объявляет повреждённый manifest исправным. Восстановление original bytes
+само ничего не запускает; затем явно отправленный CAS использует прежний
+current passing gate и не повторяет обучение. Существующие API, operator
+recovery, authority/dispatch и candidate-binding проверки также пройдены.
+Результаты — [validation.json](assets/72-upstream-manifest-recovery/validation.json).
+
+**Граница.** Это источник и маршрут его отказа, не автоматический repair или
+новый recovery UI. При повреждённом events источнике старые ACK по-прежнему
+недоступны; stale base/source/environment всё ещё требует отдельной проверки.
+O2/O4/O8 сохраняют OPEN для полного продолжения работы через чат, retention
+и восстановления original requests после потери клиента до сохранения manifest.

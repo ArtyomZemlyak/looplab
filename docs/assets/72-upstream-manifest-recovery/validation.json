@@ -1,0 +1,31 @@
+{
+  "version": 1,
+  "date": "2026-10-04",
+  "increment": "doc72 section 20.36, named retained-manifest refusal and explicit recovery without reexecution",
+  "source_parent_commit": "22b9e16fdbbb07027d672a72e308b9428185ec0a",
+  "platform": "Windows",
+  "replay": {"selector": "tests/test_events_replay.py", "passed": 193, "failed": 0, "skipped": 0, "seconds": 3.98, "order": "first"},
+  "pre_fix_reproduction": {"selector": "tests/test_upstream_manifest_recovery.py", "failed": 8, "seconds": 31.05},
+  "upstream_regressions": {
+    "selectors": ["tests/test_upstream_manifest_recovery.py", "tests/test_upstream_recovery_api.py", "tests/test_upstream_api.py", "tests/test_upstream_integrity.py", "tests/test_upstream_candidate_binding.py"],
+    "passed": 28, "failed": 0, "skipped": 0, "seconds": 63.95
+  },
+  "contracts": {
+    "selectors": ["tests/test_documentation_contracts.py", "tests/test_documented_entry_points_resolve.py", "tests/test_merge_history_integrity.py", "tests/test_cli_reference.py", "tests/test_package_layering.py", "tests/test_containment_census.py"],
+    "passed": 71, "failed": 0, "skipped": 0, "seconds": 37.86
+  },
+  "strict_documentation_build": {"status": "passed", "seconds": 9.28},
+  "total_passed": 292,
+  "total_skipped": 0,
+  "git_diff_check": "passed",
+  "manifest_cases": ["Truncated JSON", "Invalid encoding", "Unpaired Unicode surrogate", "Nonfinite number", "Excessive JSON depth", "Missing file", "Over 2 MiB", "Changed readable proposal"],
+  "recovery_scenario": {
+    "basis": "Each case creates a real CPU SGD source and a measured seven-execution passing gate, then damages only its retained proposal manifest.",
+    "clients": ["Engine lane", "HTTP through typed MCP transport bridge", "Assistant UpstreamTools with explicit approval fixture"],
+    "refusal": "New check/advance names the run-relative manifest and exposes neither parser output nor corrupted source text. No claim, execution, advance or resume is appended.",
+    "exact_receipts": "Typed MCP proposal/check ACK recovery returns the original receipt while the manifest is damaged and events remain complete; no training repeats.",
+    "restoration": "Restoring original bytes leaves event bytes unchanged. An explicitly submitted advance then uses the original still-current gate; execution count stays 7."
+  },
+  "coverage": "Focused native Windows private CPU, engine/API/MCP/Assistant-tool and documentation checks. Not a whole UI chat/resume acceptance, full CI or owner-repository delivery.",
+  "remaining_open": ["Full chat recovery flow", "Run-owned worktree retention", "Original request recovery when the client is lost before manifest publication", "Full CI and user acceptance"]
+}
