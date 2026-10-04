@@ -1,0 +1,38 @@
+{
+  "version": 1,
+  "date": "2026-10-04",
+  "increment": "doc72 section 20.37, durable normalized proposal request before claim and Git work",
+  "source_parent_commit": "2b0cec2d0b3371873d470d2c9e8c123bf80ccf12",
+  "platform": "Windows",
+  "replay": {"selector": "tests/test_events_replay.py", "passed": 193, "failed": 0, "skipped": 0, "seconds": 3.48, "order": "first"},
+  "pre_fix_regressions": {"selector": "tests/test_upstream_request_retention.py", "failed": 10, "seconds": 2.77},
+  "upstream_regressions": {
+    "selectors": ["tests/test_upstream_request_retention.py", "tests/test_upstream_initialization_recovery.py", "tests/test_upstream_manifest_recovery.py", "tests/test_upstream_recovery_api.py", "tests/test_upstream_api.py"],
+    "passed": 29, "failed": 0, "skipped": 0, "seconds": 59.84
+  },
+  "history_client_verification": {
+    "selector": "tests/test_upstream_request_retention.py::test_process_loss_before_git_retains_exact_body_and_discoverable_path",
+    "passed": 1, "failed": 0, "seconds": 4.03,
+    "scope": "After the claim writer was made explicit, repeated the CPU loss/recovery/gate case with actual HTTP-to-typed-MCP and Assistant status reads. This is already one of the 29 distinct upstream cases."
+  },
+  "contracts": {
+    "initial_passed": 95, "initial_failed": 1, "initial_seconds": 34.53,
+    "initial_refusal": "Payload writer scan could not resolve a newly spread claim dictionary. The writer was changed to explicit fields; the guard and its opaque allowlist were not weakened.",
+    "selectors": ["tests/test_documentation_contracts.py", "tests/test_documented_entry_points_resolve.py", "tests/test_merge_history_integrity.py", "tests/test_cli_reference.py", "tests/test_package_layering.py", "tests/test_containment_census.py", "tests/test_event_payload_contract.py", "tests/test_event_types.py"],
+    "status": "passed", "passed": 96, "failed": 0, "skipped": 0, "seconds": 34.61
+  },
+  "strict_documentation_build": {"status": "passed", "seconds": 7.08},
+  "total_distinct_passed": 318,
+  "total_skipped": 0,
+  "git_diff_check": "passed",
+  "retention": {
+    "scope": "Normalized exact proposal body, including defaults, expected generation, source/base IDs, patch/recipe/flag/critic and action ID. The claim request_hash binds its values.",
+    "ordering": "Strict durable request publication precedes proposal claim and Maintainer Git.",
+    "indeterminate_write": "Exact explicit retry re-publishes identical values durably; file existence alone does not certify parent publication.",
+    "conflict": "Different, malformed or oversized unclaimed body is preserved and refused, with a named run-relative source.",
+    "discovery": "Optional started-claim request_path; raw patch is not inlined in status. Legacy rows remain readable.",
+    "authority": "Retained or orphan request proves no admission, authoring completion, gate pass, advancement or resume. Interrupted claim still needs explicit operator recovery."
+  },
+  "coverage": "Native Windows private CPU upstream fixtures and simulated process/publication losses; not real power-loss durability, a whole resumed engine/UI chat acceptance or full CI.",
+  "remaining_open": ["Bounded authenticated HTTP/MCP retrieval of raw retained request", "Complete Assistant recovery UI", "Historical missing original bodies", "Retention and cleanup policy", "Check/advance request recovery", "Multi-client handoff"]
+}

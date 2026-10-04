@@ -25,7 +25,8 @@ def event(row, kind):
         or not isinstance(row.get("proposal_id"), str) or re.fullmatch(r"up_[0-9a-f]{24}", row["proposal_id"]) is None):
         return False
     if kind in ("upstream_proposal_started",):
-        return True
+        return ("request_path" not in row or
+            row["request_path"] == "upstream/requests/" + row["proposal_id"] + "/request.json")
     if kind == "upstream_proposal_failed":
         return isinstance(row.get("code"), str) and bool(row["code"])
     if kind == "upstream_proposed":

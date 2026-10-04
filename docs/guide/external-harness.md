@@ -1541,8 +1541,25 @@ Three-way merging checks text compatibility, not scientific validity: inspect
 the resulting evaluation, including failures requiring repair.
 
 Exact body/action retries recover the original ACK without re-execution or fresh
-evidence, including after resume. A started claim with no verdict is unresolved;
-inspect its logs before asking the operator to abandon it through
+evidence, including after resume.
+
+New proposal requests are retained durably **before** the proposal claim and Git
+work in `upstream/requests/PROPOSAL_ID/request.json`. The started history row's
+optional `request_path` names that run-relative file; status does not inline its
+raw patch. It stores the normalized exact body, including defaults and action ID,
+whose canonical hash must match the claim's `request_hash`. Inspect it on the
+server when recovering original values; a retained request alone proves neither
+admission nor completed authoring. Legacy claims may have no retained request.
+A retention publication failure returns `upstream_request_unavailable` before
+claiming work. An exact explicit retry can confirm publication of identical values;
+a changed or damaged unclaimed request is preserved and refuses overwrite.
+Retention does not approve an interrupted claim: the operator must still resolve
+that claim before a new action ID starts work. Original requests and interrupted
+staging/worktrees remain after abandonment. HTTP/MCP retrieval of the raw retained
+body and a complete recovery UI remain separate work; the path is a diagnostic.
+
+A started claim with no verdict is unresolved; inspect its logs before asking the
+operator to abandon it through
 `POST /api/runs/{run_id}/upstream/recover`. Recovery grants no pass or resume. A new
 check requires a new action ID. Damaged event sources refuse even old ACK reads.
 Fresh checks and advancement also require the retained proposal manifest.

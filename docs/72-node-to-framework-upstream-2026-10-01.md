@@ -5667,3 +5667,47 @@ recovery, authority/dispatch и candidate-binding проверки также п
 недоступны; stale base/source/environment всё ещё требует отдельной проверки.
 O2/O4/O8 сохраняют OPEN для полного продолжения работы через чат, retention
 и восстановления original requests после потери клиента до сохранения manifest.
+
+### 20.37. Original request сохраняется до proposal claim и Git — 2026-10-04
+
+**Проблема O2/O4/O8.** Раньше `upstream_proposal_started` содержал только
+request hash; полный normalized body попадал в manifest после Git commit и
+snapshot. Потеря процесса до этого момента оставляла claim/WIP без серверной
+копии исходных patch/recipe/critic/flag. История не позволяла восстановить body
+по одному хешу. Это оставшийся случай, явно отмеченный в разделе 20.36 этого документа.
+
+**Воспроизведение.** Новый набор до реализации дал **10 failed**: ранний process
+loss не оставлял request file; не существовало барьера его durable publication
+перед Git; unclaimed body не сохранялся после отказа claim publication. Новый
+optional request path также требовал отдельной проверки typed readers.
+
+**Изменение.** `looplab/engine/upstream.py::UpstreamLane._retain_proposal_request`
+сохраняет approved normalized body в
+`upstream/requests/PROPOSAL_ID/request.json` до `upstream_proposal_started`.
+Ссылка `request_path` добавлена как optional поле старого event contract; старые
+claims остаются читаемыми. Она видна через paged upstream history в API/MCP и
+Assistant, без повторения raw patch в каждом status. Typed reader допускает
+только ожидаемый run-relative путь для данного proposal ID.
+
+**Publication/retry.** Запись должна получить strict durable receipt до claim.
+Ошибка до или после видимой публикации отказывает как
+`upstream_request_unavailable`, не вызывает Git и не добавляет claim. На явном
+exact retry существующие values сверяются с body hash и заново durably публикуются:
+`exists()` не подтверждает parent sync после interrupted write. Другой или
+повреждённый unclaimed body не затирается. Old ACK/claim recovery возвращается
+раньше и не переписывает request. Claim publication может отказать после записи:
+retained request в этом случае не является доказательством admission.
+
+**Проверка.** Ранний process loss, pre/post-write failure, claim failure и
+changed/truncated/surrogate/oversized orphan request проверены на private runs
+с реальным CPU source. После operator abandonment original request сохраняется;
+fresh proposal получает отдельный request, passing gate выполняет ровно семь
+реальных checks/evaluations. Нет автоматических advance/resume. Шесть прежних
+cut points Git initialization и manifest/API/recovery regressions также проходят.
+Результаты — [validation.json](assets/72-upstream-request-retention/validation.json).
+
+**Граница.** Это server-side сохранность и диагностический pointer. Raw body
+пока читается на сервере; безопасная ограниченная HTTP/MCP выдача и recovery
+карточка в чате остаются OPEN. Исторический unsaved body не реконструируется;
+retention/cleanup policy, checks/advance request recovery и полный multi-client
+handoff также остаются O2/O4/O8. Ни файл, ни его путь не дают gate/advance authority.

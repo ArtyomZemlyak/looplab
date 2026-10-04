@@ -1329,7 +1329,7 @@ class PayloadContract:
 
 EVENT_PAYLOAD_KEYS: dict[str, PayloadContract] = {
     "node_overlay_rebased": PayloadContract("A future lifecycle's effective overlay, after verified base migration or exact capability absorption.", required=("deleted", "files", "generation", "node_id", "selector"), optional=("attempt",)),
-    "upstream_proposal_started": PayloadContract("Durable claim before run-owned Maintainer work.", required=('action_id', 'proposal_id', 'request_hash'), stored_whole=True),
+    "upstream_proposal_started": PayloadContract("Durable claim before run-owned Maintainer work; optional pointer to the retained original request.", required=('action_id', 'proposal_id', 'request_hash'), optional=('request_path',), stored_whole=True),
     "upstream_proposal_failed": PayloadContract("A proposal failed; no gate permission.", required=('action_id', 'code', 'proposal_id', 'request_hash'), stored_whole=True),
     "upstream_proposed": PayloadContract("Generalized capability with immutable candidate archive and separate source recipe.", required=('action_id', 'base_revision', 'capability_paths', 'commit', 'critic', 'expected_base_revision', 'flag', 'hunk_hashes', 'manifest_hash', 'old_selector', 'proposal_id', 'repair_trigger_nodes', 'request_hash', 'selector', 'source_node_id', 'source_recipe', 'source_signature', 'summary'), stored_whole=True),
     "upstream_gate_started": PayloadContract("Claim before real equivalence/regression work; no implicit retry.", required=('action_id', 'input_identity', 'proposal_id', 'request_hash'), stored_whole=True),

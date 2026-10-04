@@ -23,7 +23,7 @@ The event type itself is the contract's identity and is never renamed or reused;
 
 <!-- generated: event types -->
 
-173 event types — 122 folded into `RunState`, 51 diagnostic; 1139 declared payload keys; 30 types whose whole payload is stored by the fold.
+173 event types — 122 folded into `RunState`, 51 diagnostic; 1140 declared payload keys; 30 types whose whole payload is stored by the fold.
 
 | type | fold | records | required keys | optional keys |
 |---|---|---|---|---|
@@ -195,7 +195,7 @@ The event type itself is the contract's identity and is never renamed or reused;
 | `upstream_gate_finished` | folded · whole | Measured gate verdict bound to actual source and inputs. | `action_id`, `evidence_token`, `proposal_id`, `request_hash`, `result` | — |
 | `upstream_gate_started` | folded · whole | Claim before real equivalence/regression work; no implicit retry. | `action_id`, `input_identity`, `proposal_id`, `request_hash` | — |
 | `upstream_proposal_failed` | folded · whole | A proposal failed; no gate permission. | `action_id`, `code`, `proposal_id`, `request_hash` | — |
-| `upstream_proposal_started` | folded · whole | Durable claim before run-owned Maintainer work. | `action_id`, `proposal_id`, `request_hash` | — |
+| `upstream_proposal_started` | folded · whole | Durable claim before run-owned Maintainer work; optional pointer to the retained original request. | `action_id`, `proposal_id`, `request_hash` | `request_path` |
 | `upstream_proposed` | folded · whole | Generalized capability with immutable candidate archive and separate source recipe. | `action_id`, `base_revision`, `capability_paths`, `commit`, `critic`, `expected_base_revision`, `flag`, `hunk_hashes`, `manifest_hash`, `old_selector`, `proposal_id`, `repair_trigger_nodes`, `request_hash`, `selector`, `source_node_id`, `source_recipe`, `source_signature`, `summary` | — |
 | `verifier_group_scored` | folded | One verifier round over a GROUP of nodes, keyed on the contract and evidence digests. | `contract`, `members`, `requested_samples`, `v` | `action_id`, `request_sha256` |
 | `workspace_changed` | folded | A re-entry read a workspace source unlike the last recorded reading of its kind, or a way it was never read before. | `now`, `was` | — |

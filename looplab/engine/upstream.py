@@ -113,6 +113,24 @@ class UpstreamLane:
         return [e for e in events if e.type in ("upstream_proposal_started", "upstream_gate_started") and e.data.get("action_id") not in completed | abandoned
                 and (proposal_id is None or e.data.get("proposal_id") == proposal_id)]
 
+    def _retain_proposal_request(self, body, proposal_id):
+        """Publish the original normalized body durably before claiming Git work."""
+        relative = "upstream/requests/" + proposal_id + "/request.json"
+        path = owned_path(self.rd, relative)
+        try:
+            if path.exists():
+                raw = read_bounded_regular_file(path, 2 * 1024 * 1024 + 1)
+                if raw is None or len(raw) > 2 * 1024 * 1024 or digest(json.loads(raw)) != digest(body):
+                    raise ValueError("Retained request differs or is unavailable")
+            # A prior write may have become visible without a confirmed parent
+            # sync. Re-publish identical values durably before admitting a claim;
+            # do not let mere file existence certify interrupted publication.
+            strict_atomic_write_bytes(path, json.dumps(body, ensure_ascii=False).encode())
+        except (OSError, ValueError, RecursionError) as exc:
+            raise UpstreamRefusal("upstream_request_unavailable",
+                f"Inspect {relative}: preserve and restore the original proposal request before retrying, or use a new action_id for a new proposal. No Git work was claimed") from exc
+        return relative
+
     def _validate_shared_patch(self, body, implementation):
         from looplab.engine.activation import is_config_path
         patch_paths = set(body["files"]) | set(body["deleted"])
@@ -208,7 +226,10 @@ class UpstreamLane:
                 raise UpstreamRefusal("upstream_recipe_changed", "Preserve source recipe deletions outside capability paths")
             proposal_id = "up_" + digest(body["action_id"])[:24]
             common = {"action_id": body["action_id"], "request_hash": digest(body), "proposal_id": proposal_id}
-            self._append("upstream_proposal_started", common)
+            request_path = self._retain_proposal_request(body, proposal_id)
+            self._append("upstream_proposal_started", {"action_id": common["action_id"],
+                "request_hash": common["request_hash"], "proposal_id": proposal_id,
+                "request_path": request_path})
             try:
                 work = maintainer_worktree(self.rd, spec, active["selector"], proposal_id)
                 write_overlay(work, body["files"], body["deleted"])
