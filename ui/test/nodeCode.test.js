@@ -27,6 +27,17 @@ test('archived file context distinguishes empty edits, deletion and unavailable 
   assert.equal(recordedFileOverlay({ ...child, deleted: undefined }, 'train.py').kind, 'unknown')
 })
 
+test('archived solution.py identifies separately saved main code rather than claiming no edit', () => {
+  const node = { ...child, code: 'print(2)\n', files: {}, deleted: [] }
+  assert.deepEqual(recordedFileOverlay(node, 'solution.py'), { kind: 'main_code', text: node.code })
+  assert.deepEqual(recordedFileOverlay({ ...node, files: { 'solution.py': 'ignored helper edit' },
+    deleted: ['solution.py'] }, 'solution.py'), { kind: 'main_code', text: node.code })
+  assert.equal(recordedFileOverlay(node, 'pkg/solution.py').kind, 'inherited')
+  assert.equal(recordedFileOverlay({ ...node, code: '' }, 'solution.py').kind, 'inherited')
+  assert.equal(recordedFileOverlay({ ...node, code: null }, 'solution.py').kind, 'inherited')
+  assert.equal(recordedFileOverlay({ ...node, files: undefined }, 'solution.py').kind, 'unknown')
+})
+
 test('file comparison distinguishes removed overrides from explicit deletion and includes recipe-only edits', () => {
   const model = nodeCodeModel(child, state)
   assert.equal(model.available, true)

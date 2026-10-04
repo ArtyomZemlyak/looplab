@@ -71,6 +71,9 @@ experiment. **Base version / Версия базы** and **Experiment edit / П�
 let you read those two source versions without another request. A base recipe
 can differ from the experiment's saved recipe. A deleted file remains readable
 as an explicitly labelled archived file; it is not restored into the experiment.
+For an archived `solution.py`, **Experiment main code / Основной код опыта**
+opens separately saved main code when present, even if the file edit list is empty.
+It does not establish that a repo task's evaluation command executed this code.
 Missing overlay evidence says **Edits unavailable**, not "unchanged". These labels
 describe saved edits: protected files and task assets may override them at runtime.
 The selected preview appears above the bounded file list and receives focus after

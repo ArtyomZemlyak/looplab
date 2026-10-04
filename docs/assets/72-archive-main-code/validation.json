@@ -1,0 +1,32 @@
+{
+  "version": 1,
+  "date": "2026-10-04",
+  "increment": "doc72 section 20.31, separately recorded main code beside archived entrypoint",
+  "source_parent_commit": "a9ef4774fc92a8659f2b6c8367582cc89964e09d",
+  "replay": {"selectors": ["tests/test_events_replay.py"], "passed": 193, "skipped": 0, "failed": 0, "seconds": 17.63, "order": "first"},
+  "archive_http_integration": {"selectors": ["tests/test_recorded_seed_files.py"], "passed": 15, "skipped": 0, "failed": 0, "seconds": 3.99},
+  "ui_component_regressions": {
+    "selectors": ["ui/test/recordedSeedFiles.test.js", "ui/test/nodeCode.test.js"],
+    "passed": 11, "skipped": 0, "failed": 0, "seconds": 3.35,
+    "scope": "Real React components under jsdom/Vite with fixture HTTP responses; not a browser screenshot or human acceptance."
+  },
+  "contracts": {
+    "selectors": ["tests/test_documentation_contracts.py", "tests/test_documented_entry_points_resolve.py", "tests/test_merge_history_integrity.py", "tests/test_cli_reference.py", "tests/test_package_layering.py"],
+    "passed": 47, "skipped": 0, "failed": 0, "seconds": 24.46
+  },
+  "production_ui_build": {"status": "passed", "modules": 419, "vite_seconds": 3.12},
+  "strict_documentation_build": {"status": "passed", "seconds": 9.48},
+  "total_passed": 266,
+  "total_skipped": 0,
+  "git_diff_check": "passed",
+  "reproduction": {
+    "case": "Archived solution.py with nonempty node.code and empty node.files",
+    "before_fix": "Focused regression failed: inherited classification omitted separately saved main code",
+    "after_fix": "Distinct main_code source and RU/EN switch alongside verified base; switching issues no request",
+    "real_cpu_execution": "SubprocessSandbox executes 100 quadratic minimization steps; terminal metric comes from RunResult. Workdir entrypoint differs from verified base; API preserves both sources.",
+    "limitations": "Private execution and API fixture, not an entire engine/agent run, MNIST training, or proof a repo command executed node.code",
+    "events_read_only": true
+  },
+  "coverage": "Focused source-view regression. Full CI and target repository delivery were not performed.",
+  "remaining_open": ["Case/Unicode path aliases in source context", "Full materialized program and runtime dependencies", "Target-aware task repository delivery", "Human usability and full CI acceptance"]
+}

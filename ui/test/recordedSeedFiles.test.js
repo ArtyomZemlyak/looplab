@@ -167,6 +167,42 @@ test('archive text refuses encoder replacement even when its replacement bytes m
   }
 })
 
+test('archived entrypoint offers base and separately saved main code without claiming command execution', async () => {
+  const baseText = 'print("base program")\n'
+  const mainText = 'print("experiment program")\n'
+  const file = { ...row, path: 'solution.py', bytes: Buffer.byteLength(baseText),
+    sha256: createHash('sha256').update(baseText).digest('hex') }
+  const h = await mountLive({ visible: true, routes: {
+    '/api/runs/r/nodes/1/seed-files': ({ url }) => ({ ...page, files: [file],
+      file: url.searchParams.has('path') ? { ...file, text_status: 'utf8', text: baseText } : null }),
+  } })
+  try {
+    const { default: RecordedSeedFiles } = await h.load('/src/RecordedSeedFiles.jsx')
+    const node = { id: 1, attempt: 0, code: mainText, files: {}, deleted: [] }
+    const props = language => ({ runId: 'r', node, generation, baseDigest, language })
+    const mounted = await h.mount(RecordedSeedFiles, props('ru'))
+    const button = name => [...mounted.container.querySelectorAll('button')].find(item => item.textContent === name)
+    await click(button('Открыть файлы базы'))
+    await until(() => button('solution.py'), 'entrypoint inventory')
+    assert.match(mounted.container.textContent, /Есть основной код опыта/)
+    await click(button('solution.py'))
+    await until(() => mounted.container.querySelector('[aria-label="База: solution.py"]'), 'archived base entrypoint')
+    assert.match(mounted.container.textContent, /не подтверждает.*запускала/)
+    assert.match(mounted.container.querySelector('[aria-label="База: solution.py"]').textContent, /base program/)
+    const reads = h.fetch.calls.length
+    await click(button('Основной код опыта'))
+    assert.match(mounted.container.querySelector('[aria-label="Основной код #1: solution.py"]').textContent, /experiment program/)
+    assert.equal(mounted.container.querySelector('[aria-label="База: solution.py"]'), null)
+    await mounted.rerender(props('en'))
+    assert.match(mounted.container.querySelector('[aria-label="Main code #1: solution.py"]').textContent, /experiment program/)
+    assert.match(mounted.container.textContent, /does not establish.*executed/)
+    await click(button('Base version'))
+    assert.match(mounted.container.querySelector('[aria-label="Base: solution.py"]').textContent, /base program/)
+    assert.equal(h.fetch.calls.length, reads, 'switching source versions makes no request')
+    assert.ok(h.fetch.calls.every(call => call.method === 'GET'))
+  } finally { await h.close() }
+})
+
 test('a delayed archive read does not take focus from another input; missing edits remain explicitly unknown', async () => {
   let finish
   const h = await mountLive({ visible: true, routes: {

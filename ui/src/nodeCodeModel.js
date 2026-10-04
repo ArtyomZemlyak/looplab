@@ -5,9 +5,14 @@ const textFiles = value => value && typeof value === 'object' && !Array.isArray(
   && Object.values(value).every(body => typeof body === 'string')
 const paths = value => Array.isArray(value) && value.every(path => typeof path === 'string')
 
-// Describes the saved overlay only. Protected/task-owned files may override it at runtime.
+// Describes saved source versions, not applied runtime files or command execution.
 export function recordedFileOverlay(node, path) {
   if (!textFiles(node?.files) || !paths(node?.deleted)) return { kind: 'unknown', text: null }
+  // Main code is stored outside files and the sandbox writes it separately. A protected
+  // solution.py helper/deletion must not hide that independently saved version.
+  if (path === 'solution.py' && typeof node.code === 'string' && node.code.length > 0) {
+    return { kind: 'main_code', text: node.code }
+  }
   if (node.deleted.includes(path)) return { kind: 'deleted', text: null }
   if (Object.hasOwn(node.files, path)) return { kind: 'override', text: node.files[path] }
   return { kind: 'inherited', text: null }

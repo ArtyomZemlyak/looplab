@@ -9,6 +9,7 @@ from fastapi.testclient import TestClient
 
 from looplab.engine.seed_archive import capture_seed_archive
 from looplab.events.eventstore import EventStore
+from looplab.runtime.sandbox import SubprocessSandbox
 from looplab.serve import seed_files as projection
 from looplab.serve.server import make_app
 
@@ -93,6 +94,41 @@ def test_archive_unicode_is_exact_or_explicitly_binary(tmp_path, data, status):
         assert file["text"].encode("utf-8") == data
     else:
         assert file["text"] is None, "invalid source bytes are never replaced with invented text"
+
+
+def test_executed_main_code_and_archived_entrypoint_remain_distinct_sources(tmp_path):
+    rd, src, wd = tmp_path / "entrypoint", tmp_path / "owner", tmp_path / "workdir"
+    for directory in (rd, src, wd):
+        directory.mkdir()
+    base = "print((0.0 - 3.0) ** 2)\n"
+    code = "import json\nx = 0.0\nfor _ in range(100):\n    x -= 0.2 * (x - 3.0)\nprint(json.dumps({'metric': (x - 3.0) ** 2}))\n"
+    (src / "solution.py").write_bytes(base.encode())
+    (wd / "solution.py").write_bytes(base.encode())
+    events = EventStore(rd / "events.jsonl")
+    events.append("run_started", {"run_id": "entrypoint", "task_id": "quadratic", "goal": "min quadratic", "direction": "min"})
+    events.append("node_created", {"node_id": 0, "parent_ids": [], "operator": "draft",
+        "code": code, "files": {}, "deleted": [],
+        "idea": {"operator": "draft", "params": {}, "rationale": ""}})
+    receipt = capture_seed_archive(src, rd / "base_snapshots")
+    seed = events.append("workspace_seeded", {"node_id": 0, "generation": 0, "base_revision": receipt})
+    receipt = {**receipt, "node_id": 0, "generation": 0, "seed_event_seq": seed.seq}
+    result = SubprocessSandbox().run(code, str(wd), timeout=10)
+    assert result.exit_code == 0 and not result.timed_out, result.stderr
+    assert result.metric is not None and 0 <= result.metric < 9
+    assert (wd / "solution.py").read_bytes() == code.encode()
+    events.append("node_evaluated", {"node_id": 0, "generation": 0, "metric": result.metric,
+        "metric_provenance": {"base_revision": receipt}})
+    before = hashlib.sha256((rd / "events.jsonl").read_bytes()).hexdigest()
+    client = TestClient(make_app(tmp_path))
+    generation = client.get("/api/runs/entrypoint/state").json()["generation"]
+    params = {"expected_generation": generation, "attempt": 0, "path": "solution.py"}
+    response = client.get("/api/runs/entrypoint/nodes/0/seed-files", params=params)
+    assert response.status_code == 200
+    file = response.json()["file"]
+    detail = client.get("/api/runs/entrypoint/nodes/0").json()
+    assert file["text"] == base and detail["code"] == code
+    assert detail["files"] == {} and detail["metric"] == result.metric
+    assert hashlib.sha256((rd / "events.jsonl").read_bytes()).hexdigest() == before
 
 
 def test_attempt_and_generation_are_required_and_reset_during_verification_is_refused(tmp_path, monkeypatch):

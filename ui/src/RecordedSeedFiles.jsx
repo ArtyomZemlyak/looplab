@@ -88,9 +88,12 @@ export default function RecordedSeedFiles({ runId, node, generation, baseDigest,
     }
   }
   const overlay = file ? recordedFileOverlay(node, file.path) : null
+  const mainCode = overlay?.kind === 'main_code'
+  const hasEdit = mainCode || overlay?.kind === 'override'
   const overlayLabel = kind => ({
     inherited: ru ? 'Отдельной правки нет' : 'No separate edit',
     override: ru ? 'Есть правка опыта' : 'Experiment edit recorded',
+    main_code: ru ? 'Есть основной код опыта' : 'Main code recorded',
     deleted: ru ? 'Удаление в правках' : 'Deletion recorded',
     unknown: ru ? 'Правки не проверены' : 'Edits unavailable',
   })[kind]
@@ -116,13 +119,16 @@ export default function RecordedSeedFiles({ runId, node, generation, baseDigest,
       <p className="muted">{ru
         ? `Опыт #${node.id} · попытка ${node.attempt} · база ${baseDigest.slice(0, 12)}. Показаны версии исходных файлов, не снимок работающей программы.`
         : `Experiment #${node.id} · attempt ${node.attempt} · base ${baseDigest.slice(0, 12)}. Source file versions, not a running-program snapshot.`}</p>
-      {overlay.kind === 'override' && <>
-        <p className="notice compact" role="status">{ru
+      {hasEdit && <>
+        <p className="notice compact" role="status">{mainCode ? (ru
+          ? 'Для solution.py сохранён основной код опыта. Версия базы не включает его. Наличие основного кода не подтверждает, что команда оценивания repo-задачи его запускала.'
+          : 'Main code is recorded separately for solution.py. The base version excludes it. Saved main code does not establish that the repo evaluation command executed it.') : ru
           ? 'Для этого файла есть отдельная правка опыта. Версия базы не включает её. Защищённые файлы и файлы задачи могут перекрывать правку при запуске.'
           : 'This file has a separate experiment edit. The base version excludes it. Protected files and task assets may override the edit at runtime.'}</p>
         <div className="toolbar" aria-label={ru ? 'Версия файла' : 'File version'}>
           <button className="btn sm" aria-pressed={version === 'base'} onClick={() => setVersion('base')}>{ru ? 'Версия базы' : 'Base version'}</button>
-          <button className="btn sm" aria-pressed={version === 'edit'} onClick={() => setVersion('edit')}>{ru ? 'Правка опыта' : 'Experiment edit'}</button>
+          <button className="btn sm" aria-pressed={version === 'edit'} onClick={() => setVersion('edit')}>{mainCode
+            ? (ru ? 'Основной код опыта' : 'Experiment main code') : (ru ? 'Правка опыта' : 'Experiment edit')}</button>
         </div>
       </>}
       {overlay.kind === 'deleted' && <p className="notice compact" role="status">{ru
@@ -131,9 +137,11 @@ export default function RecordedSeedFiles({ runId, node, generation, baseDigest,
       {overlay.kind === 'unknown' && <p className="notice compact" role="status">{ru
         ? 'Правки не проверены. Версию базы нельзя считать итоговым файлом опыта.'
         : 'Edits are unavailable. The base version cannot establish the final experiment file.'}</p>}
-      {version === 'edit' && overlay.kind === 'override'
-      ? <CodeViewer code={overlay.text} label={ru ? `Правка #${node.id}: ${file.path}` : `Edit #${node.id}: ${file.path}`}
-          language={language} draftStore={draftStore} draftScope={`${draftScope}:file:${file.path}`} />
+      {version === 'edit' && hasEdit
+      ? <CodeViewer code={overlay.text} label={mainCode
+          ? (ru ? `Основной код #${node.id}: ${file.path}` : `Main code #${node.id}: ${file.path}`)
+          : (ru ? `Правка #${node.id}: ${file.path}` : `Edit #${node.id}: ${file.path}`)}
+          language={language} draftStore={draftStore} draftScope={mainCode ? `${draftScope}:main` : `${draftScope}:file:${file.path}`} />
       : file.text_status === 'utf8'
       ? <CodeViewer code={file.text} label={ru ? `База: ${file.path}` : `Base: ${file.path}`} language={language}
           draftStore={draftStore} draftScope={`${draftScope}:base:${file.path}`} />

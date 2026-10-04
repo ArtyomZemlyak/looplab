@@ -5439,3 +5439,40 @@ invalid UTF-8, encoded surrogate и NUL явно помечаются binary б�
 
 **Граница.** Source-read fix не подтверждает полноту runnable программы, её runtime
 dependencies или доставку в task repo. O6/O14 остаются OPEN.
+
+### 20.31 72.O6: основной код не теряется в контексте архивного solution.py (2026-10-04)
+
+**Воспроизведено.** `ui/src/nodeCodeModel.js::recordedFileOverlay` смотрел только
+`files/deleted`. При непустом отдельно сохранённом `node.code` и пустом `files`
+архивный `solution.py` получал подпись «Отдельной правки нет» и не предлагал
+основной код опыта. Regression сначала упал: классификация была inherited.
+На solution-tier пути это особенно вводит в заблуждение:
+`looplab/runtime/sandbox.py::SubprocessSandbox.run` записывает именно `node.code`
+поверх `solution.py` перед выполнением.
+
+**Исправлено.** Для точного root path `solution.py` непустой основной код получает
+отдельный source kind main_code. Он не заимствуется из helper files и не теряется
+из-за противоречащей helper deletion. Неизвестная структура overlay сохраняет
+unknown; пустой/отсутствующий основной код не выдумывает правку. Вложенный
+`pkg/solution.py` остаётся обычным helper path.
+`ui/src/RecordedSeedFiles.jsx::RecordedSeedFiles` показывает «Есть основной код
+опыта», переключатель и отдельное название preview на RU/EN. Base и main source
+переключаются без HTTP/model request. Явная оговорка сохраняет границу: записанный
+основной код не доказывает, что команда оценивания repo-задачи его запускала.
+Это чтение двух сохранённых источников, не определение итоговой runnable программы.
+
+**Проверка.** Replay-first. Pure model cases проверяют отдельный main code,
+conflicting helper/deletion, nested path, empty/null code и incomplete overlay.
+Live React component drive открывает архивный entrypoint, переключает версии,
+меняет RU на EN и возвращается к базе без дополнительных запросов.
+HTTP integration case выполняет 100 шагов минимизации quadratic objective через
+настоящий локальный subprocess sandbox. Terminal metric взят из его результата;
+рабочий `solution.py` содержит новый основной код, archive read — прежний source,
+node detail — новый code и пустой files. Чтение не меняет events.jsonl.
+Это короткий CPU execution check, не MNIST training или полный engine/agent cycle.
+Selectors и результаты —
+[validation.json](assets/72-archive-main-code/validation.json).
+
+**Граница.** Case/Unicode path aliases, полная materialized программа, runtime
+dependencies и target-aware доставка не закрываются этим source-view фиксом.
+O6/O14 остаются OPEN.
