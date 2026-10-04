@@ -5516,3 +5516,36 @@ Selectors и результаты —
 **Граница.** Heuristic может предупредить о написаниях, которые конкретная исходная
 filesystem различает, и не является полным каталогом её path aliases или symlink
 правил. Точный materialized manifest и target-aware доставка остаются OPEN O6/O14.
+
+### 20.33 72.O6: «Скопировано» относится к выбранному источнику и последнему запросу (2026-10-04)
+
+**Воспроизведено.** После Copy базы переключение на правку оставляло «Скопировано»
+на её кнопке, хотя новый текст не копировали. `ui/src/CodeViewer.jsx::CodeViewer`
+хранил общий boolean и безусловно принимал любой clipboard completion. Старый
+отказ мог убрать новое подтверждение; старый success мог подтвердить более поздний
+failed request. Таймер от прежнего Copy мог преждевременно снять новую отметку.
+Live archive regression сначала упал при переключении base → edit.
+
+**Исправлено.** Подтверждение привязано к source scope, label и точному copy payload.
+Смена источника или доступности Copy очищает feedback и инвалидирует предыдущие
+запросы. Только последний запрос текущего источника может установить или снять
+подтверждение. Его timer заменяет прежний; cleanup инвалидирует запросы и снимает
+timer при unmount. Render также сверяет source identity, чтобы старая отметка
+не появлялась на новом тексте до effect cleanup. Search и wrap не меняют copy payload.
+
+**Проверка.** Replay-first. Настоящий React archive browser копирует базу,
+переключает edit, получает задержанный clipboard reply после возврата к базе
+и подтверждает только новое явное Copy. Отдельные component cases проверяют
+смену code/label/scope/copyText, diff full-file payload, empty copyText и disable/
+re-enable. Управляемые promises проверяют обе последовательности success/failure
+без real-time гонки. Production 1400 ms timeout проверяется mock clock на границе;
+таймер первого Copy не снимает подтверждение второго. Существующие file/version,
+path-ambiguity, Unicode, Inspector и ordered diff regressions также пройдены.
+API/source checks сохраняют Windows materializer и короткий реальный CPU execution
+сценарии. Selectors и результаты —
+[validation.json](assets/72-copy-source-feedback/validation.json).
+
+**Граница.** Clipboard writes не отменяются: фикс отсекает устаревший UI feedback,
+а не обещает отменить уже начатую запись или проверить содержимое clipboard после
+действий других приложений. Это не delivery receipt в task repo. Materialized
+manifest, runtime dependencies и target-aware доставка сохраняют OPEN O6/O14.

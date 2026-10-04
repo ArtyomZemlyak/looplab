@@ -1,6 +1,7 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import { createHash } from 'node:crypto'
+import React from 'react'
 import { mountLive, until, click } from './_mount.js'
 
 const generation = 'a'.repeat(64), baseDigest = 'b'.repeat(64)
@@ -240,6 +241,56 @@ test('base preview explains ambiguous path spellings and never presents an arbit
     assert.equal(h.fetch.calls.length, reads, 'source context refresh and local version selection make no request')
     assert.ok(h.fetch.calls.every(call => call.method === 'GET'))
   } finally { await h.close() }
+})
+
+test('copy feedback follows the selected source version and ignores a late reply for another version', async () => {
+  const edit = 'experiment text\n'
+  const h = await mountLive({ visible: true, routes: {
+    '/api/runs/r/nodes/1/seed-files': ({ url }) => ({ ...page,
+      file: url.searchParams.has('path') ? { ...row, text_status: 'utf8', text } : null }),
+  } })
+  const previous = Object.getOwnPropertyDescriptor(navigator, 'clipboard')
+  const writes = []
+  let finish = null
+  let delay = false
+  Object.defineProperty(navigator, 'clipboard', { configurable: true, value: {
+    writeText: value => {
+      writes.push(value)
+      return delay ? new Promise(resolve => { finish = resolve }) : Promise.resolve()
+    },
+  } })
+  try {
+    const { default: RecordedSeedFiles } = await h.load('/src/RecordedSeedFiles.jsx')
+    const mounted = await h.mount(RecordedSeedFiles, { runId: 'r',
+      node: { id: 1, attempt: 0, code: '', files: { 'train.py': edit }, deleted: [] },
+      generation, baseDigest, language: 'ru' })
+    const button = name => [...mounted.container.querySelectorAll('button')].find(item => item.textContent === name)
+    await click(button('Открыть файлы базы'))
+    await until(() => button('train.py'), 'inventory')
+    await click(button('train.py'))
+    await until(() => mounted.container.querySelector('[aria-label="База: train.py"]'), 'base source')
+    await click(button('Копировать'))
+    assert.equal(writes.at(-1), text)
+    assert.ok(button('Скопировано'))
+    await click(button('Правка опыта'))
+    assert.ok(button('Копировать'), 'copying the base cannot acknowledge the newly selected edit')
+    assert.equal(button('Скопировано'), undefined)
+    delay = true
+    await click(button('Копировать'))
+    assert.equal(writes.at(-1), edit)
+    await click(button('Версия базы'))
+    await React.act(async () => { finish() })
+    assert.ok(button('Копировать'), 'late edit acknowledgment must not mark the base copied')
+    assert.equal(button('Скопировано'), undefined)
+    delay = false
+    await click(button('Копировать'))
+    assert.equal(writes.at(-1), text)
+    assert.ok(button('Скопировано'), 'a fresh explicit base copy can be acknowledged')
+  } finally {
+    if (previous) Object.defineProperty(navigator, 'clipboard', previous)
+    else delete navigator.clipboard
+    await h.close()
+  }
 })
 
 test('a delayed archive read does not take focus from another input; missing edits remain explicitly unknown', async () => {

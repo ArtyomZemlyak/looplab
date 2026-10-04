@@ -83,6 +83,10 @@ Missing overlay evidence says **Edits unavailable**, not "unchanged". These labe
 describe saved edits: protected files and task assets may override them at runtime.
 The selected preview appears above the bounded file list and receives focus after
 an explicit file read, unless you moved focus to another input while it was loading.
+**Copied / Скопировано** acknowledges the current source's latest Copy request.
+Switching source versions clears that feedback; a late reply for the previous
+version does not mark the new version copied. In a diff, Copy uses the saved
+current file text rather than the rendered diff rows.
 
 The chat needs a configured model. Open **LoopLab → Settings → Essential → Model** to check the saved
 model and endpoint. **Test active LLM** makes one provider request and may be billed.

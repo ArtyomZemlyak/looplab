@@ -1,0 +1,34 @@
+{
+  "version": 1,
+  "date": "2026-10-04",
+  "increment": "doc72 section 20.33, source-bound and latest-request-bound clipboard feedback",
+  "source_parent_commit": "221aa77b41733b4d8fbf98045c6c5da1e9c2f92f",
+  "replay": {"selectors": ["tests/test_events_replay.py"], "passed": 193, "skipped": 0, "failed": 0, "seconds": 3.50, "order": "first"},
+  "archive_and_materialization": {
+    "selectors": ["tests/test_recorded_seed_files.py"], "passed": 18, "skipped": 0, "failed": 0, "seconds": 3.34,
+    "platform": "Windows", "native_materializer_cases": 3,
+    "other_platforms": "Three native Windows cases explicitly skip. This selector also runs the existing short real CPU subprocess/API case."
+  },
+  "ui_component_regressions": {
+    "selectors": ["ui/test/codeViewerCopy.test.js", "ui/test/recordedSeedFiles.test.js", "ui/test/nodeCode.test.js", "ui/test/lineDiff.test.js"],
+    "passed": 19, "skipped": 0, "failed": 0, "seconds": 3.77,
+    "scope": "Real React components under jsdom/Vite, fixture HTTP responses and clipboard stub. Controlled promises and a mock clock drive races; not a native clipboard or screenshot acceptance test."
+  },
+  "contracts": {
+    "selectors": ["tests/test_documentation_contracts.py", "tests/test_documented_entry_points_resolve.py", "tests/test_merge_history_integrity.py", "tests/test_cli_reference.py", "tests/test_package_layering.py"],
+    "passed": 47, "skipped": 0, "failed": 0, "seconds": 18.38
+  },
+  "production_ui_build": {"status": "passed", "modules": 419, "vite_seconds": 3.18},
+  "strict_documentation_build": {"status": "passed", "seconds": 8.42},
+  "total_passed": 277,
+  "total_skipped": 0,
+  "git_diff_check": "passed",
+  "reproduction": {
+    "case": "Copy base, then select experiment edit while the acknowledgment is visible",
+    "before_fix": "Live regression failed: edit still displayed Copied without copying that version",
+    "after_fix": "Copy acknowledgment is bound to scope/label/payload and the newest request; old responses and old timers cannot alter current feedback",
+    "additional_cases": ["Delayed response across source switch", "Old failure after new success", "Old success after new failure", "Overlapping acknowledgment timers", "Diff copies full current file", "Empty copyText", "Disable and re-enable Copy"]
+  },
+  "coverage": "Focused UI/source checks. Native clipboard integration, full CI, human acceptance and task repository delivery were not performed.",
+  "remaining_open": ["Full materialized program and runtime dependencies", "Target-aware task repository delivery", "Human usability and full CI acceptance"]
+}

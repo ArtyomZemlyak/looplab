@@ -1,4 +1,4 @@
-import React, { useMemo, useRef, useState } from 'react'
+import React, { useEffect, useMemo, useRef, useState } from 'react'
 import { createInspectorDraftStore, useInspectorDraftField } from './inspectorDraftStore.js'
 
 function highlighted(text, query) {
@@ -14,6 +14,9 @@ function highlighted(text, query) {
   return parts.length ? parts : (text || ' ')
 }
 
+const sameCopySource = (left, right) => left?.scope === right.scope
+  && left?.label === right.label && left?.text === right.text
+
 export default function CodeViewer({
   code = '', diff = null, label = 'Code', maxHeight = 420, copyText = null,
   draftStore: sharedDraftStore = null, draftScope = null, language = 'en', allowCopy = true,
@@ -27,16 +30,40 @@ export default function CodeViewer({
     draftStore, scope, 'query', '', { disposable: true })
   const [wrap, setWrap] = useInspectorDraftField(
     draftStore, scope, 'wrap', false, { disposable: true })
-  const [copied, setCopied] = useState(false)
+  const [copied, setCopied] = useState(null)
+  const copyTextValue = copyText ?? code
+  const copySource = { scope, label, text: copyTextValue }
+  const currentCopySource = useRef(copySource)
+  currentCopySource.current = copySource
+  const copySerial = useRef(0)
+  const copyTimer = useRef(null)
+  useEffect(() => {
+    setCopied(null)
+    return () => {
+      // Clipboard writes cannot be cancelled. Only a current source/request may acknowledge one.
+      copySerial.current += 1
+      clearTimeout(copyTimer.current)
+    }
+  }, [scope, label, copyTextValue, allowCopy])
   const rows = useMemo(() => diff || String(code || '').split('\n').map((line, index) => ({
     line, l: line, kind: 'same', cls: '', oldNo: null, newNo: index + 1,
   })), [code, diff])
   const matches = query ? rows.filter(row => String(row.line ?? row.l ?? '').toLowerCase().includes(query.toLowerCase())).length : 0
   const copy = async () => {
+    const ticket = ++copySerial.current
+    const source = currentCopySource.current
+    clearTimeout(copyTimer.current)
+    setCopied(null)
+    const current = () => ticket === copySerial.current
+      && sameCopySource(source, currentCopySource.current)
     try {
-      await navigator.clipboard.writeText(copyText ?? code)
-      setCopied(true); setTimeout(() => setCopied(false), 1400)
-    } catch { setCopied(false) }
+      await navigator.clipboard.writeText(source.text)
+      if (!current()) return
+      setCopied(source)
+      copyTimer.current = setTimeout(() => {
+        if (current()) setCopied(null)
+      }, 1400)
+    } catch { if (current()) setCopied(null) }
   }
   return <div className={'code-viewer' + (wrap ? ' wrap' : '') + (diff ? ' has-diff' : '')} style={{ '--code-max-h': `${maxHeight}px` }}>
     <div className="code-tools">
@@ -47,7 +74,7 @@ export default function CodeViewer({
       <span className="spacer" />
       <button className={'btn sm ghost' + (wrap ? ' on' : '')} onClick={() => setWrap(value => !value)}
               aria-pressed={wrap}>{ru ? 'Перенос строк' : 'Wrap'}</button>
-      {allowCopy && <button className="btn sm ghost" onClick={copy}>{copied ? (ru ? 'Скопировано' : 'Copied') : (ru ? 'Копировать' : 'Copy')}</button>}
+      {allowCopy && <button className="btn sm ghost" onClick={copy}>{sameCopySource(copied, copySource) ? (ru ? 'Скопировано' : 'Copied') : (ru ? 'Копировать' : 'Copy')}</button>}
     </div>
     <div className="code-lines" role="region" aria-label={label} tabIndex={0}>
       {rows.map((row, index) => <div key={index} className={'code-line ' + (row.cls || '')}>
