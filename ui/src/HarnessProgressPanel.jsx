@@ -3,7 +3,7 @@ import { get, runApiPath } from './util.js'
 import { useScopedResource } from './useScopedResource.js'
 import Panel from './PanelShell.jsx'
 import HarnessNextStep, { validHarnessNextStep } from './HarnessNextStep.jsx'
-import HarnessHandoff from './HarnessHandoff.jsx'
+import HarnessConnection from './HarnessConnection.jsx'
 import AgentActivity from './AgentActivity.jsx'
 import { invalidPanelPayload, isRecord, PANEL_REQUEST_TIMEOUT_MS, RUN_GENERATION_RE } from './panelPrimitives.js'
 import { PanelResourceNotice } from './PanelResourceNotice.jsx'
@@ -91,7 +91,7 @@ export function HarnessProgressPanel({ runId, expectedGeneration, seq, externalM
     {!validGeneration && <p className="muted" role="status">Waiting for a durable run generation…</p>}
     {scope && <PanelResourceNotice resource={resource} label="Agent cycle"
       onRetry={() => resource.retry()} />}
-    {scope && <HarnessHandoff runId={runId} generation={expectedGeneration} seq={seq} />}
+    {scope && <HarnessConnection runId={runId} generation={expectedGeneration} seq={seq} />}
     {progress && <>
       {!progress.complete && <div className="report-inline-state error" role="alert">
         An event, decision, review or checkpoint journal has damaged rows. History below may be partial;

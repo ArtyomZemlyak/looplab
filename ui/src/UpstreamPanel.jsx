@@ -3,6 +3,8 @@ import './baseRevision.css'
 import { baseChoices } from './baseRevision.js'
 import { upstreamCheckSummary } from './upstreamCheckModel.js'
 import { useAssistantLanguage } from './useAssistantLanguage.js'
+import { upstreamProposalSummary, upstreamRecoveryDraft } from './upstreamProposalModel.js'
+import UpstreamRecovery from './UpstreamRecovery.jsx'
 
 export default function UpstreamPanel({ state, onClose }) {
   const [language] = useAssistantLanguage()
@@ -12,9 +14,10 @@ export default function UpstreamPanel({ state, onClose }) {
   const history = Array.isArray(state.upstream_history) ? state.upstream_history : []
   const advances = history.filter(row => row?.type === 'base_advanced')
   const check = upstreamCheckSummary(history)
+  const proposal = upstreamProposalSummary(history)
   if (!enabled && !bases.some(row => row.digest !== 'unknown') && !history.length) return null
   const discuss = () => {
-    const text = enabled
+    const text = enabled && proposal ? upstreamRecoveryDraft(proposal, language) : enabled
       ? (ru
         ? 'Помоги выбрать изменение кода для следующих экспериментов. Прочитай upstream_status и инструкции Maintainer. Объясни пользу, прежнее поведение, проверки и стоимость. Предложи план: не запускай проверки, не меняй базу и не возобновляй запуск.'
         : 'Help choose a code change for future experiments. Read upstream_status and Maintainer instructions. Explain the benefit, original behavior, checks and cost. Propose a plan; do not execute checks, advance the base or resume.')
@@ -28,10 +31,13 @@ export default function UpstreamPanel({ state, onClose }) {
   return <section className="ov-section upstream-panel" aria-label={ru ? 'Код для следующих экспериментов' : 'Code for future experiments'}>
     <div className="ov-section-head"><h3>{ru ? 'Код для следующих экспериментов' : 'Code for future experiments'}</h3><span>{ru ? `Обновлений базы: ${advances.length}` : `${advances.length} recorded base updates`}</span></div>
     <p>{ru ? 'Полезное изменение из одного эксперимента можно проверить и добавить в общий исходный код следующих экспериментов.' : 'A useful change from one experiment can be checked and added to the shared starting code for future experiments.'}</p>
-    <p className="muted">{enabled
+    <p className="muted">{enabled && proposal
+      ? (ru ? 'Разберите записанный перенос с Assistant перед выбором следующего действия.' : 'Inspect recorded code reuse with Assistant before choosing the next action.') : enabled
       ? (ru ? 'Начните с Assistant: выберите изменение и обсудите проверки. Если результатов ещё нет, сначала оцените эксперимент.' : 'Start with Assistant: choose a change and discuss checks. If there are no results yet, evaluate an experiment first.')
       : (ru ? 'В этом запуске перенос кода не включён. Assistant поможет подготовить новый запуск с записанной исходной базой и нужными проверками.' : 'Code reuse is not enabled for this run. Assistant can help prepare a new run with a recorded starting base and the required checks.')}</p>
-    <button type="button" className="btn" onClick={discuss}>{enabled
+    <UpstreamRecovery proposal={proposal} ru={ru} />
+    <button type="button" className="btn" onClick={discuss}>{enabled && proposal
+      ? (ru ? 'Разобрать перенос с Assistant' : 'Inspect code reuse with Assistant') : enabled
       ? (ru ? 'Выбрать изменение с Assistant' : 'Choose a change with Assistant')
       : (ru ? 'Подготовить с Assistant' : 'Prepare with Assistant')}</button>
     <p className="muted">{ru ? 'Кнопка подготовит сообщение. Проверьте его и нажмите «Отправить» для обращения к модели; возможна оплата провайдеру.' : 'The button prepares a message. Review it and press Send to contact the model; provider charges may apply.'}</p>

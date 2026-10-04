@@ -4023,6 +4023,63 @@ fixtures и повтор receipts, но не живую сессию Codex/Claud
 [validation.json](assets/72-review-19-16/validation.json). Полный CI, новая
 установка, новая оценка пользовательского task repo и human acceptance не выполнены.
 
+### 19.17 Повторный desktop review и исправление пути восстановления (2026-10-04)
+
+**Область и метод.** Проверен LoopLab, включая его run-owned worktree и перенос
+общей базы. Исходное дерево — `96b73c8a0a6883e34a0aa7182416250bc9d03310`.
+Replay-first, чтение реализации и руководства, затем свежие FullHD снимки
+production UI с выбранным русским языком. Отдельный loopback сервер читал старый
+private CPU fixture `demo`: два terminal эксперимента, одна общая capability,
+79 событий. Это новая проверка интерфейса старых измерений, не новое обучение.
+Открытие панелей и подготовка вопроса не отправляли запрос модели или команду
+движку. Human acceptance, чистая установка, живой Codex/Claude MCP и owner-repo
+merge этим проходом не проверены.
+
+| Шаг | Наблюдение / оценка | Исправление или остаток |
+|---|---|---|
+| Выбрать RU и открыть Agent cycle → подключение | [До правки](assets/72-recovery-ui/01-handoff-before.jpg): инструкции, clipboard feedback и recovery form оставались английскими; путь требовал перевода технической инструкции пользователем | P2: RU/EN для этого пути, включая копируемый текст. [После правки](assets/72-recovery-ui/02-handoff-after.jpg). Серверный next-step и остальная панель пока английские: O9 OPEN |
+| Открыть перенос кода в Report | Общий призыв выбрать изменение не различал завершённую передачу, потерю автора и неоконченные проверки | P2: карточка последнего proposal и адресный Assistant draft. [Карточка и черновик](assets/72-recovery-ui/03-proposal-after.jpg). Полная история, diff, old default и retention остаются O2/O4/O8 |
+| Продолжить через Assistant | Исходное чтение уже реализовано в §20.38, но копируемая инструкция его не называла | Добавлен `upstream_request`, paging/hash checks и сохранение original generation. Это плановое чтение, не exact retry неизвестной записи |
+| Прочитать результат / доставить код | Briefs объясняют несовпадающие bases и Trust; карточка показывает run-base update | O5/O6/O14: manifest исполненной программы и target-relative доставка по-прежнему не реализованы целиком. Run-base update не означает merge/push |
+
+![Русская инструкция подключения после исправления](assets/72-recovery-ui/02-handoff-after.jpg)
+
+![Карточка записанного переноса и подготовленный вопрос](assets/72-recovery-ui/03-proposal-after.jpg)
+
+**Выводы по продукту.** Надёжность отдельных операций не снимает стоимость
+сборки всего пути пользователем. Последняя карточка должна показывать записанное
+состояние, а актуальную возможность продолжения получать с сервера. Нельзя
+трактовать 200 событий как полную историю или превращать late finish в разрешение
+после abandonment. Внешний агент остаётся ответственным за решения; UI готовит
+контекст разговора и не добавляет ожидание команды или takeover.
+
+**Существующая OPEN очередь после исправлений:**
+
+1. **O3/O9/O11/O13 — цельный вход через Assistant.** Путь подключения теперь
+   локализован, но next-step, условия checkpoints и схема владельцев должны
+   переводиться из того же серверного решения, без второго дерева разрешений
+   на клиенте. Приёмка: первый результат и восстановление на RU/EN, явные
+   operator/client approvals, текущий blocker и расходы до действия.
+2. **O2/O4/O8 — цельная worktree/recovery карточка.** Сводка latest proposal
+   сделана; нужны полная paged history, request/check/advance recovery, diff,
+   writer coordination и retention с доказанным восстановлением до cleanup.
+3. **O5/O6 — понятный итог и воспроизводимая программа.** Связать terminal
+   attempt с effective code, inputs, stages, environment и dependencies;
+   неизвестные составляющие назвать явно. Saved edits не являются manifest.
+4. **O6/O10/O14 — работа LoopLab над пользовательским repo.** Принимать
+   совместимые capabilities A+B относительно реального target SHA, объяснять
+   dirty/stale/conflict, выполнять target tests и отдельную явную доставку.
+   Развитие git checkout самого Codex не является проверкой этой функции.
+5. **O1 — размер production UI.** В исходной сборке уже четыре нарушения
+   bundle budgets. Новая локализация увеличивает total bytes; ленивый вход
+   подключения устранил добавленное превышение panel increment. Общие JS/CSS
+   и прежние DAG ceilings остаются red; пределы не повышены. Требуется отдельное
+   уменьшение и измерение closure, а не утверждение зелёного CI.
+
+Проверки записаны в [validation.json](assets/72-recovery-ui/validation.json),
+полные размеры и нарушения — в [bundles.json](assets/72-recovery-ui/bundles.json). Большие темы остаются
+**OPEN**; исправлены конкретные обнаруженные пробелы восстановления.
+
 ## 20. Реализация OPEN: выполненные шаги
 
 ### 20.1 72.O12 — первый increment: честный бюджет в карточке запуска
@@ -5942,3 +5999,44 @@ onboarding, включая локализацию handoff/next-step. O5/O6 — �
 программы с inputs/stages/env/deps. O6/O10/O14 — для target-relative передачи
 совместимых возможностей в пользовательский repo с dirty/stale/conflict приёмкой.
 Run-owned base advance всё ещё не означает merge или push в этот repo.
+
+### 20.39. Карточка переноса, адресный Assistant draft и русский handoff — 2026-10-04
+
+**O2/O4/O8.** `ui/src/upstreamProposalModel.js::upstreamProposalSummary`
+выводит записанное состояние последнего authoring claim из bounded fold.
+Проверяет порядок seq, identity и единственную settlement; orphan, duplicate
+и mismatched записи дают unavailable. Новый незавершённый proposal не наследует
+passing gate предшественника. Abandoned authoring/check остаётся отменённым
+после late completion. Для recorded advance нужна его passing gate в этой
+истории. Эти состояния не дают CAS authority и не измеряют жизнь автора.
+
+`ui/src/UpstreamRecovery.jsx` показывает источник и technical identity отдельно.
+`ui/src/UpstreamPanel.jsx` готовит адресный вопрос с proposal ID / request hash,
+требованием current state/status и полного исходного чтения. При unavailable
+identity требуется полная история; ключ и body не придумываются. Кнопка только
+подготавливает текст. Права следующего сообщения остаются выбранными пользователем;
+draft не выполняет checks/advance/resume и не отправляется модели автоматически.
+
+**O3/O9/O11/O13.** `ui/src/HarnessHandoff.jsx` и
+`ui/src/HarnessReceipt.jsx` используют общий выбор языка. RU переводит помощь,
+ошибки чтения, client approval, clipboard feedback и receipt recovery; смена языка
+сохраняет набранный ключ. `ui/src/harnessHandoff.js::harnessAgentInstruction`
+готовит RU/EN инструкцию с `upstream_request` и исходной generation. Известные
+серверные credential/scope/recovery clauses переведены точно; новые неизвестные
+restrictions остаются verbatim. Secret не попадает в config/instruction.
+`ui/src/HarnessConnection.jsx` загружает код помощи только после открытия;
+ошибка загрузки имеет явное повторное чтение. Без клика нет handoff HTTP read.
+
+**Проверка.** Replay — 193 passed. Серверные request-read/retention,
+manifest/API recovery, handoff и документальные contracts — 51 passed.
+UI recovery/language/progress/result regressions — 41 passed. Проверены настоящий
+mount и переключение языка, original identity в draft, отсутствие writes,
+stale/failed reads, clipped/duplicate/reordered history, newer unfinished claim,
+late abandoned completion и gate-bound advancement. Production build прошёл;
+снимки текущего интерфейса просмотрены с диска. Строгая сборка docs и окончательные
+контракты записаны в [validation.json](assets/72-recovery-ui/validation.json).
+
+**Граница.** Это UI recovery increment, не новая система retry, не полная
+локализация Agent cycle, не lifecycle/retention worktree и не target-repo delivery.
+Bundle budget проверка остаётся red; исходные и новые измерения указаны в §19.17.
+Полный CI и платная модельная сессия не запускались.

@@ -1154,6 +1154,24 @@ lost response**. Read by original key or command ID. Typing submits nothing;
 and a failed refresh hides the previous status. No resume, retry or candidate
 submission is automatic. The ordinary Events view can help locate a `command_id`.
 
+Connection help loads when you press **Connect external agent**, then reads its
+generation-fenced context. With Russian selected in Assistant, connection help,
+the copied instruction and the receipt form use Russian. Unknown server policy
+wording remains verbatim rather than being replaced with inferred permissions.
+The copied instruction includes `upstream_request` recovery and preserves the
+original request generation inside its body.
+
+In **Report / Overview → Code for future experiments**, the latest proposal card
+shows recorded authoring/check/advance status. **Inspect code reuse with Assistant**
+prepares a question with the original proposal ID and request hash; it does not
+send it. Review and explicitly send the question to contact the model. The card
+uses the last 200 upstream events: missing or inconsistent claims are unavailable,
+an unfinished newer proposal does not inherit an older passing check, and late
+completion does not revive an abandoned claim. Read current `upstream_status`
+and all `upstream_request` pages before deciding on recovery. Retained bytes and
+this UI history authorize no retry, checks, base advance or resume. Updating the
+run base does not merge or push to the user's repository.
+
 Save the exact request payload, original key and target run generation in your
 agent's private recovery record **before** submission. If the response was lost,
 an exact resubmission uses that same payload and key; a new key can create a second

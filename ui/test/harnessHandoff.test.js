@@ -3,6 +3,7 @@ import assert from 'node:assert/strict'
 import React from 'react'
 import { harnessAgentInstruction, harnessMcpDescriptor, harnessServerUrl, validHarnessHandoff } from '../src/harnessHandoff.js'
 import { fetchStub, jsonResponse, mountLive, until } from './_mount.js'
+import { harnessText } from '../src/harnessText.js'
 
 const generation = 'a'.repeat(64)
 const names = items => ({ items, total: items.length, truncated: false })
@@ -16,6 +17,85 @@ const handoff = {
   scope: 'This token is not restricted to one run. Use a separate server/root.',
   recovery: 'Read receipts and checkpoints before resubmitting to the same run.',
 }
+
+test('Russian handoff preserves permission boundaries, recovery identities and unknown server policies', () => {
+  const instruction = harnessAgentInstruction(handoff, 'http://localhost:8775/', 'ru')
+  assert.match(instruction, /^Продолжай этот существующий/)
+  assert.match(instruction, /connection_check.*generation_at_handoff/)
+  assert.match(instruction, /command_receipt/)
+  assert.match(instruction, /upstream_request.*expected_request_hash/)
+  assert.match(instruction, /expected_content_hash/)
+  assert.match(instruction, /Исходная generation внутри тела не заменяется текущей/)
+  assert.match(instruction, /diagnostic_only.*не разрешают/)
+  assert.match(instruction, /до 700 символов/)
+  assert.match(instruction, /score.py/)
+  assert.match(instruction, /This token is not restricted to one run/)
+  assert.match(harnessAgentInstruction(handoff, 'http://localhost/', 'en'), /upstream_request/)
+  assert.equal(harnessText('ru', 'Unknown future restriction'), 'Unknown future restriction')
+})
+
+test('language change updates copied feedback and receipt form without losing the recovery identity', async () => {
+  const harness = await mountLive({ visible: true })
+  const writes = []
+  const previous = Object.getOwnPropertyDescriptor(navigator, 'clipboard')
+  Object.defineProperty(navigator, 'clipboard', { configurable: true, value: { writeText: async value => writes.push(value) } })
+  try {
+    localStorage.setItem('looplab.language', 'ru')
+    const { default: HarnessHandoff } = await harness.load('/src/HarnessHandoff.jsx')
+    globalThis.fetch = fetchStub({ '/api/runs/demo/harness-handoff': handoff })
+    const view = await harness.mount(HarnessHandoff, { runId: 'demo', generation, seq: 12 })
+    await React.act(async () => { view.container.querySelector('summary').click() })
+    await until(() => view.container.textContent.includes('C:/Runs/demo'), 'Russian handoff')
+    assert.match(view.container.textContent, /Подключить внешнего агента/)
+    assert.match(view.container.textContent, /подключение агента не измеряется/)
+    assert.match(view.container.textContent, /Статус Connected подтверждает только процесс stdio/)
+    assert.match(view.container.textContent, /Продолжить работу после потери/)
+    assert.doesNotMatch(view.container.textContent, /Reconnect or recover|Copy agent instruction/)
+    await React.act(async () => {
+      [...view.container.querySelectorAll('button')].find(b => b.textContent === 'Скопировать инструкцию агенту').click()
+      const input = view.container.querySelector('.harness-recovery input')
+      Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value').set.call(input, 'original-key')
+      input.dispatchEvent(new window.Event('input', { bubbles: true }))
+    })
+    assert.match(writes[0], /^Продолжай/)
+    assert.match(view.container.textContent, /Инструкция скопирована/)
+    await React.act(async () => window.dispatchEvent(new CustomEvent('looplab:language', { detail: 'en' })))
+    assert.match(view.container.textContent, /Agent instruction copied/)
+    assert.equal(view.container.querySelector('.harness-recovery input').value, 'original-key')
+    assert.ok(globalThis.fetch.calls.every(call => call.method === 'GET'))
+  } finally {
+    localStorage.removeItem('looplab.language')
+    if (previous) Object.defineProperty(navigator, 'clipboard', previous)
+    else delete navigator.clipboard
+    await harness.close()
+  }
+})
+
+test('connection help loads after an explicit click and opens with one fenced read', async () => {
+  const harness = await mountLive({ visible: true })
+  try {
+    localStorage.setItem('looplab.language', 'ru')
+    const { default: HarnessConnection } = await harness.load('/src/HarnessConnection.jsx')
+    const reads = []
+    globalThis.fetch = fetchStub({ '/api/runs/demo/harness-handoff': request => {
+      reads.push(request.url)
+      return handoff
+    } })
+    const view = await harness.mount(HarnessConnection, { runId: 'demo', generation, seq: 12 })
+    assert.equal(globalThis.fetch.calls.length, 0)
+    assert.equal(view.container.querySelector('button').textContent, 'Подключить внешнего агента')
+    await React.act(async () => view.container.querySelector('button').click())
+    await until(() => view.container.textContent.includes('C:/Runs/demo'), 'loaded connection help')
+    assert.ok(view.container.querySelector('.harness-handoff').open)
+    assert.equal(globalThis.fetch.calls.length, 1)
+    assert.equal(reads[0].searchParams.get('expected_generation'), generation)
+    assert.match(view.container.textContent, /Продолжить работу после потери/)
+    assert.ok(globalThis.fetch.calls.every(call => call.method === 'GET'))
+  } finally {
+    localStorage.removeItem('looplab.language')
+    await harness.close()
+  }
+})
 
 test('handoff strips URL credentials/query/fragment, retains proxy and excludes unknown response fields', () => {
   const href = 'https://owner:private@host/user/u/proxy/8765/index.html?token=private#/run/demo'

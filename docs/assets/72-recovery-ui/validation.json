@@ -1,0 +1,61 @@
+{
+  "version": 1,
+  "date": "2026-10-04",
+  "base_commit": "96b73c8a0a6883e34a0aa7182416250bc9d03310",
+  "scope": "LoopLab UI proposal recovery and Russian external-agent handoff; doc72 review",
+  "checks": [
+    {
+      "command": ".venv/Scripts/python.exe -m pytest -o addopts='' -q tests/test_events_replay.py --basetemp=.tmp/doc72-recovery-ui/replay",
+      "passed": 193
+    },
+    {
+      "command": ".venv/Scripts/python.exe -m pytest -o addopts='' -q tests/test_upstream_request_read.py tests/test_upstream_request_retention.py tests/test_upstream_manifest_recovery.py tests/test_upstream_recovery_api.py tests/test_harness_handoff.py tests/test_documentation_contracts.py tests/test_doc_surface_budgets.py --basetemp=.tmp/doc72-recovery-ui/backend",
+      "passed": 51
+    },
+    {
+      "cwd": "ui",
+      "command": "node --test --test-timeout=30000 test/harnessHandoff.test.js test/harnessReceipt.test.js test/harnessProgressContract.test.js test/upstreamPanel.test.js test/upstreamProposal.test.js test/assistantRecovery.test.js test/assistantLanguage.test.js test/reportSelectedEvidence.test.js",
+      "passed": 41
+    },
+    {
+      "cwd": "ui",
+      "command": "npx vite build --outDir .dist.recovery-ui-final",
+      "exit_code": 0
+    },
+    {
+      "command": ".venv/Scripts/python.exe -m pytest -o addopts='' -q tests/test_documentation_contracts.py tests/test_doc_surface_budgets.py tests/test_architecture_diagram_geometry.py --basetemp=.tmp/doc72-recovery-ui/docs-final",
+      "passed": 25
+    },
+    {
+      "command": ".venv/Scripts/python.exe -m mkdocs build --strict --site-dir .tmp/doc72-recovery-ui/site",
+      "exit_code": 0
+    }
+  ],
+  "bundle_budget": {
+    "commands": [
+      "node scripts/check-bundle.mjs --dist .dist.stage",
+      "node scripts/check-bundle.mjs --dist .dist.recovery-ui-final"
+    ],
+    "baseline_exit_code": 1,
+    "final_exit_code": 1,
+    "baseline_js_gzip_bytes": 639970,
+    "final_js_gzip_bytes": 647650,
+    "baseline_css_gzip_bytes": 59654,
+    "final_css_gzip_bytes": 59809,
+    "violations_both": ["total JS gzip", "total CSS gzip", "owner DAG CSS gzip", "review DAG JS gzip"],
+    "new_panel_increment_violation_removed": true,
+    "budgets_changed": false
+  },
+  "browser": {
+    "viewport": [1920, 1080],
+    "language": "ru",
+    "fixture": "Existing private demo recorded 2026-10-02, 2 terminal nodes, 1 base advance, 79 events",
+    "screenshots": ["01-handoff-before.jpg", "02-handoff-after.jpg", "03-proposal-after.jpg"],
+    "screenshots_saved_verbatim_and_inspected": true,
+    "actions": ["open Report", "open Agent cycle", "open connection help", "prepare recovery draft without sending"],
+    "model_request_sent": false,
+    "engine_command_sent": false
+  },
+  "not_verified": ["full CI", "clean installation", "live Codex/Claude MCP connection", "human usability acceptance", "2K viewport", "owner repository delivery"],
+  "open": ["server next-step localization", "complete proposal history/diff/lifecycle/retention", "executed-program manifest", "target-relative repo delivery", "production bundle budgets"]
+}

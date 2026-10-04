@@ -1,0 +1,75 @@
+import test from 'node:test'
+import assert from 'node:assert/strict'
+import { upstreamProposalSummary as summary } from '../src/upstreamProposalModel.js'
+import { click, mountLive, until } from './_mount.js'
+
+const claim = { type: 'upstream_proposal_started', seq: 1, action_id: 'original',
+  proposal_id: `up_${'a'.repeat(24)}`, request_hash: 'b'.repeat(64) }
+const proposal = { ...claim, type: 'upstream_proposed', seq: 2, source_node_id: 4 }
+const check = { type: 'upstream_gate_started', seq: 3, action_id: 'check',
+  proposal_id: claim.proposal_id, request_hash: 'c'.repeat(64), input_identity: 'input' }
+const finish = { ...check, type: 'upstream_gate_finished', seq: 4,
+  result: { input_identity: 'input', passed: true } }
+
+test('latest proposal does not inherit the preceding passing check; late completion stays abandoned', () => {
+  const next = { ...claim, seq: 5, action_id: 'next', proposal_id: `up_${'d'.repeat(24)}` }
+  assert.equal(summary([claim, proposal, check, finish, next]).status, 'unfinished')
+  assert.equal(summary([claim, proposal, check, finish]).status, 'check_passed')
+  assert.equal(summary([claim, proposal, check]).status, 'check_unfinished')
+  assert.equal(summary([claim, { type: 'upstream_gate_abandoned', seq: 2,
+    claim_action_id: claim.action_id }, { ...proposal, seq: 3 }]).status, 'abandoned')
+  assert.equal(summary([claim, { ...proposal, type: 'upstream_proposal_failed' }]).status, 'failed')
+  assert.equal(summary([claim, proposal, check, { type: 'upstream_gate_abandoned', seq: 4,
+    proposal_id: claim.proposal_id, claim_action_id: check.action_id }, { ...finish, seq: 5 }]).status, 'check_abandoned')
+})
+
+test('clipped, inconsistent, duplicate or reordered proposal evidence cannot grant a usable identity', () => {
+  for (const rows of [[proposal], [claim, claim, proposal], [claim, proposal, proposal],
+    [proposal, claim], [claim, null, proposal], [claim, { ...proposal, request_hash: 'changed' }],
+    [{ ...claim, request_hash: 123 }], [claim, proposal, { ...proposal, seq: 5,
+      action_id: 'orphan', proposal_id: `up_${'d'.repeat(24)}` }]]) {
+    assert.deepEqual(summary(rows), { status: 'unknown' })
+  }
+  assert.equal(summary([]), null)
+  assert.equal(summary([claim, proposal, finish]).status, 'check_unknown')
+})
+
+test('recorded advancement requires its own passing gate, never a clipped or unrelated check', () => {
+  const advance = { type: 'base_advanced', seq: 5, proposal_id: claim.proposal_id, gate_seq: 4 }
+  assert.equal(summary([claim, proposal, check, finish, advance]).status, 'advanced')
+  assert.equal(summary([claim, proposal, advance]).status, 'unknown')
+  assert.equal(summary([claim, proposal, check, finish, { ...advance, gate_seq: 123 }]).status, 'unknown')
+  assert.equal(summary([claim, proposal, check, { ...finish, result: { input_identity: 'input', passed: false } }, advance]).status, 'unknown')
+})
+
+test('recovery handoff preserves original identity in a Russian draft and never calls the server', async () => {
+  const harness = await mountLive()
+  const received = []
+  const listener = event => received.push(event.detail.text)
+  window.addEventListener('ll:focus-assistant', listener)
+  try {
+    localStorage.setItem('looplab.language', 'ru')
+    const { default: UpstreamPanel } = await harness.load('/src/UpstreamPanel.jsx')
+    const view = await harness.mount(UpstreamPanel, {
+      state: { nodes: {}, upstream_enabled: true, upstream_history: [claim] },
+    })
+    assert.match(view.container.textContent, /Подготовка изменения не завершена/)
+    assert.match(view.container.textContent, /200 событий/)
+    await click(view.container.querySelector('button'))
+    await until(() => received.length === 1, 'recovery draft')
+    assert.match(received[0], /upstream_request/)
+    assert.match(received[0], new RegExp(claim.proposal_id))
+    assert.match(received[0], new RegExp(claim.request_hash))
+    assert.match(received[0], /не повторяй записи, не запускай проверки/)
+    await view.rerender({ state: { nodes: {}, upstream_enabled: true, upstream_history: [proposal] } })
+    await click(view.container.querySelector('button'))
+    await until(() => received.length === 2, 'unknown recovery draft')
+    assert.match(received[1], /не придумывай ключ или тело/)
+    assert.ok(!received[1].includes(claim.proposal_id))
+    assert.deepEqual(harness.fetch.calls, [])
+  } finally {
+    window.removeEventListener('ll:focus-assistant', listener)
+    localStorage.removeItem('looplab.language')
+    await harness.close()
+  }
+})
