@@ -1,0 +1,112 @@
+{
+  "date": "2026-10-04",
+  "source_parent": "b5ee480e001e59ccd99ce465abc514d040fa3988",
+  "scope": "doc72 O1: smaller production JSX, consolidated pure helpers and retired command suggestion CSS; remaining total JS excess explicit",
+  "tests": [
+    {
+      "command": ".venv/Scripts/python.exe -m pytest -o addopts=\"\" -q tests/test_events_replay.py --basetemp=.tmp/doc72-ui-budget/replay",
+      "passed": 193
+    },
+    {
+      "cwd": "ui",
+      "command": "node --test --test-timeout=30000 --test-concurrency=4 test/*.test.js",
+      "passed": 1944,
+      "failed": 0,
+      "skipped": 0,
+      "cancelled": 0
+    },
+    {
+      "cwd": "ui",
+      "command": "node --test --test-timeout=30000 test/productionJsxRuntime.test.js test/minifierBooleanGuards.test.js test/minifierComparisonGuards.test.js",
+      "passed": 10,
+      "note": "also included in the full UI suite; not additional unique tests"
+    },
+    {
+      "command": ".venv/Scripts/python.exe -m pytest -o addopts=\"\" -q tests/test_api_reference.py tests/test_documentation_contracts.py tests/test_doc_surface_budgets.py tests/test_architecture_diagram_geometry.py --basetemp=.tmp/doc72-ui-budget/docs-final",
+      "passed": 28
+    },
+    {
+      "command": ".venv/Scripts/python.exe -m mkdocs build --strict --site-dir .tmp/doc72-ui-budget/site-final",
+      "exit": 0
+    },
+    {
+      "command": "git diff --check",
+      "exit": 0
+    }
+  ],
+  "matrix": [
+    "real minified production SSR against automatic JSX runtime control",
+    "Theme/Energy/GlobalMenu closed false guards and real ARIA booleans",
+    "OpIcon SVG and ConceptView React binding",
+    "result reader with undefined, null, NaN, zero, negative, finite and nonnumeric metric",
+    "RU/EN ready/loading/stale/error resource states",
+    "React false/null/undefined/zero/array children and explicit/spread key order",
+    "full existing UI suite",
+    "manifest static cycle, forbidden routes, individual and closure budget checks",
+    "full Agent cycle body remains dynamically imported, absent from compact static closure"
+  ],
+  "production": {
+    "command": "node node_modules/vite/bin/vite.js build --outDir ../.tmp/doc72-ui-budget/ui-dist-final",
+    "build_exit": 0,
+    "budget_command": "node scripts/check-bundle.mjs --dist ../.tmp/doc72-ui-budget/ui-dist-final",
+    "budget_exit": 1,
+    "baseline_js_gzip": 652020,
+    "final_js_gzip": 647301,
+    "delta_js_gzip": -4719,
+    "baseline_css_gzip": 59809,
+    "final_css_gzip": 59635,
+    "delta_css_gzip": -174,
+    "baseline_violations": 4,
+    "final_violations": 1,
+    "remaining_total_js_excess": 13317,
+    "budgets_changed": false,
+    "details": "bundles.json"
+  },
+  "rejected_probes": [
+    "global focus selector grouping increased gzip; reverted",
+    "ascii-only and disabled mangling increased bytes",
+    "Oxc-only minification increased bytes",
+    "additional inspector/attention grouping introduced static cycle; not shipped",
+    "esbuild CSS probe unavailable without optional esbuild dependency; no installation or config change"
+  ],
+  "browser": {
+    "fixture": "existing private demo: 79 events, two terminal nodes, one run-base advance; no new training",
+    "generation": "c9c4a8536df883c4ed7c11fe91ce41523ec67d129252a8591c36bb423adf4f4d",
+    "actions": [
+      "read Report/recorded result briefs",
+      "read empty Concepts projection",
+      "read Lineage with two experiments",
+      "read full Russian Agent cycle",
+      "six Assistant slash suggestions, ArrowDown/Escape and draft clearing; no send"
+    ],
+    "dom_viewport": [
+      1920,
+      1080
+    ],
+    "dialog": {
+      "width": 1100,
+      "client_width": 1088,
+      "scroll_width": 1088
+    },
+    "console_errors_or_warnings": 0,
+    "screenshots": [
+      "01-assistant-commands.jpg",
+      "02-agent-cycle.jpg"
+    ],
+    "capture": "default 1280x720; FullHD DOM checked separately because enlarged viewport capture is cropped by the browser tool",
+    "viewport_reset": true,
+    "temporary_tab_closed": true,
+    "private_server_stopped": true
+  },
+  "limits": [
+    "bundle gate remains RED due to total JS",
+    "not a green full CI claim",
+    "production SSR equivalence covers the named matrix, not every possible UI state",
+    "no live external MCP client or new-user acceptance",
+    "no new ML training or model call",
+    "no LoopLab owner-repo delivery acceptance",
+    "worktree scope is LoopLab run-owned worktree",
+    "not completion of all doc72 OPEN topics"
+  ],
+  "total_unique_checks": 2165
+}

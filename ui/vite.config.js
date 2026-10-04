@@ -10,11 +10,15 @@ import react from '@vitejs/plugin-react'
 // served prefix at runtime (see apiUrl in src/util.js); together they make the UI proxy-agnostic.
 export default defineConfig({
   base: './',
-  plugins: [react()],
+  // React 18 supports both JSX runtimes. The classic calls avoid a separate children object/array
+  // wrapper for every element in this large reader UI (~4 KiB gzip on the doc 72 baseline).
+  // Components must import React; productionJsxRuntime.test.js executes shipped SSR output against
+  // the automatic-runtime control, including real controls, icons, concepts and result readers.
+  plugins: [react({ jsxRuntime: 'classic' })],
   build: {
     // Rolldown/Oxc performs graph-aware compression first (configured below); Terser then gives the
     // emitted chunks one final cross-statement pass. This is measurably smaller over gzip than either
-    // minifier alone and keeps the production budget green without weakening any route boundary.
+    // minifier alone. Size and route boundaries are checked separately by check:bundle.
     minify: 'terser',
     terserOptions: {
       ecma: 2022,
@@ -146,7 +150,9 @@ export default defineConfig({
               // These pure API/live/text/timeline helpers are jointly present on every run workspace.
               // One stream gives repeated node/run/evidence vocabulary one gzip dictionary while
               // keeping charts, graph libraries, settings and owner controls independently lazy.
-              test: /[/\\]src[/\\](?:format|urlSafety|util|hooks|runIndex|buildingModel|nodeActivity|conceptId|nodeProjection|conceptChips|conceptSearch|Highlight|markdown|dagViewport|dagProjection|grouping|timelineModel|timelineWindow|useTimeline|useRunRouteState|mergeIntent|traceProjection|traceScrollModel|crossRunPrior)\.(?:js|jsx)$|[/\\]src[/\\]VirtualTimeline\.jsx$/,
+              // Connection rules and panel payload primitives have the same pure dependency seam;
+              // keeping them here removes two tiny streams without admitting an owner UI surface.
+              test: /[/\\]src[/\\](?:format|urlSafety|util|hooks|runIndex|buildingModel|nodeActivity|conceptId|nodeProjection|conceptChips|conceptSearch|Highlight|markdown|dagViewport|dagProjection|grouping|timelineModel|timelineWindow|useTimeline|useRunRouteState|mergeIntent|traceProjection|traceScrollModel|crossRunPrior|runStateModel|panelPrimitives)\.(?:js|jsx)$|[/\\]src[/\\]VirtualTimeline\.jsx$/,
               includeDependenciesRecursively: false,
             },
             {

@@ -1268,6 +1268,16 @@ cd ui && npm install && npm run build
 prebuilt bundle” and is never rebuilt. For live HMR while hacking on the UI, run the Vite dev server
 (`cd ui && npm run dev`) against the API.
 
+`ui/vite.config.js` uses React's classic JSX runtime to reduce repeated element wrappers;
+JSX modules must import `React`. `ui/test/productionJsxRuntime.test.js` builds and executes
+minified SSR output against an automatic-runtime control, including real menu, icon,
+Concepts and result components. Boolean/unknown-number minifier guards remain separate.
+The pure connection and payload helpers share `run-support`; owner controls and full
+Agent cycle content retain their lazy boundaries. Assistant command suggestions use
+`AssistantBar.jsx::suggestionPop` and `.cmdbar-pop`, not the retired `.cmd-suggest` styles.
+Run `npm run check:bundle` after building: passing a route budget does not imply the
+total byte budget passed. Current measurements and remaining excess are in doc 72 §20.42.
+
 Production HTML and non-versioned assets revalidate. Only content-hashed files listed by Vite's build manifest
 receive long-lived immutable caching. Eligible ordinary responses can use gzip when the client accepts it;
 server-sent event streams are always excluded so live updates are not buffered by compression.

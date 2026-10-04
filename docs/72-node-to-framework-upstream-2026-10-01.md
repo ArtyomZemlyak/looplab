@@ -4071,11 +4071,12 @@ merge этим проходом не проверены.
    совместимые capabilities A+B относительно реального target SHA, объяснять
    dirty/stale/conflict, выполнять target tests и отдельную явную доставку.
    Развитие git checkout самого Codex не является проверкой этой функции.
-5. **O1 — размер production UI.** В исходной сборке уже четыре нарушения
-   bundle budgets. Новая локализация увеличивает total bytes; ленивый вход
-   подключения устранил добавленное превышение panel increment. Общие JS/CSS
-   и прежние DAG ceilings остаются red; пределы не повышены. Требуется отдельное
-   уменьшение и измерение closure, а не утверждение зелёного CI.
+5. **O1 — размер production UI.** В исходной сборке было четыре нарушения
+   bundle budgets. §20.42 снижает JS на 4719 B и CSS на 174 B: общая CSS,
+   DAG CSS и review DAG JS теперь проходят прежние пределы. Осталось
+   превышение total JS на 13317 B; потолки не повышены. Нужны дальнейшее
+   уменьшение исходного кода/повторов и полный CI. Один lazy import не снижает
+   сумму всех assets; нельзя выдавать route budget за зелёный общий gate.
 
 Проверки записаны в [validation.json](assets/72-recovery-ui/validation.json),
 полные размеры и нарушения — в [bundles.json](assets/72-recovery-ui/bundles.json). Большие темы остаются
@@ -6149,3 +6150,67 @@ approvals, технических diagnostics и реального нового
 O2/O4/O8 — lifecycle/retention worktree LoopLab; O5/O6 — effective manifest;
 O6/O10/O14 — проверенная target-relative доставка в пользовательский repo.
 Этот UI read не выполняет merge/push в него и не закрывает весь doc72.
+
+
+### 20.42. Уменьшение UI без повышения бюджетов — 2026-10-04
+
+**Ревью.** Исходное дерево — `b5ee480e001e59ccd99ce465abc514d040fa3988`.
+Четыре красных size gate нельзя считать «всё работает» только потому, что
+production build проходит. Общий JS уже превышал потолок на 18036 B; CSS —
+на 161 B, DAG CSS — на 43 B, review DAG JS — на 770 B. Защита lazy/public/review
+границ оставалась зелёной. Перенос в lazy chunk меняет загрузку страницы,
+но сам по себе не уменьшает сумму всех shipped assets.
+
+**Изменено.** `ui/vite.config.js` использует поддерживаемый React 18 classic
+JSX runtime: меньше element/children wrappers. Добавлены недостающие imports
+React в `ConceptView.jsx` и `icons.jsx`. `runStateModel` и `panelPrimitives`
+группируются с чистыми run helpers: два маленьких отдельных compression streams
+больше не нужны. Роли, runtime policy, измеренные результаты и full-cycle lazy
+boundary не изменены. Опасные `unsafe_comps` и `booleans_as_integers` остаются
+выключены; бюджеты и forbidden reachability checks не ослаблены.
+
+Из `styles.css` убраны десять правил старого command type-ahead, на которые
+нет ссылок в исходном дереве. Живые подсказки Assistant используют `cmdbar-pop`
+и `cmdbar-pop-item`; они проверены в браузере с клавиатурой. Глобальное объединение
+focus selectors было отвергнуто: raw CSS уменьшался, но gzip рос. Другие пробы
+с группировкой/форматированием не вошли в изменение, включая вариант с static
+cycle. Никакая новая зависимость не установлена.
+
+| Метрика gzip, B | До | После | Прежний предел | Результат |
+|---|---:|---:|---:|---|
+| Total JS | 652020 | 647301 | 633984 | RED, ещё 13317 B |
+| Total CSS | 59809 | 59635 | 59648 | проходит |
+| Owner DAG CSS | 47147 | 46973 | 47104 | проходит |
+| Review DAG JS | 269314 | 268268 | 268544 | проходит |
+
+Static compact Agent cycle JS: 121999 → 121506 B. Full body остаётся dynamic
+import и отсутствует в этом static closure. Циклы manifest, forbidden owner/public
+reachability и остальные route/individual ceilings проходят. **Общий bundle gate
+всё ещё красный**: O1 OPEN. Изменение экономит 4719 B JS / 174 B CSS, не закрывает
+полный doc72 или общий CI.
+
+**Проверка.** Replay-first — 193 passed. Полный UI suite — 1944 passed, без
+skip/cancel/fail, включая 10 minifier/production JSX checks (это часть suite,
+не дополнительный счёт). Новая `productionJsxRuntime.test.js` выполняет реальные
+minified SSR bundles обоих JSX runtime: меню, SVG icons, Concepts, result reader
+с undefined/null/NaN/числом/строкой, RU/EN resource states, falsy children и
+приоритет explicit/spread keys. Выводы совпали; закрытые меню не рисуют `0`,
+ARIA сохраняет `false`. Это проверка названной матрицы, не доказательство всех
+возможных пользовательских состояний production UI.
+
+В браузере прочитан прежний private `demo`: 79 events, два terminal nodes,
+один run-base advance. Проверены Report, пустая Concepts projection, Lineage,
+полный RU Agent cycle и шесть подсказок Assistant; ArrowDown/Escape, очистка
+черновика. При FullHD dialog 1100px, client/scroll width 1088px. Ошибок/warnings
+в console не получено. Сообщение модели не отправлялось, engine commands и
+новое обучение не запускались. Browser viewport возвращён, собственная вкладка
+закрыта. Снимки сохранены при штатном 1280×720; FullHD DOM проверен отдельно:
+[Assistant commands](assets/72-ui-budget/01-assistant-commands.jpg),
+[Agent cycle](assets/72-ui-budget/02-agent-cycle.jpg).
+
+Проверки и ограничения — [validation.json](assets/72-ui-budget/validation.json),
+размеры — [bundles.json](assets/72-ui-budget/bundles.json). Документальные проверки — 28 passed; strict MkDocs и diff-check проходят.
+Все большие темы §19.17 остаются OPEN, включая lifecycle/retention worktree **LoopLab**,
+effective program manifest, живой внешний клиент, human acceptance и
+проверенную target-relative доставку в пользовательский repo. Этот проход
+не является проверкой repo delivery LoopLab.

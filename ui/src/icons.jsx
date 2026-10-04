@@ -6,6 +6,7 @@
 // security restriction), so the previous external reference rendered every icon BLANK on Safari/iOS.
 // Fetching and injecting the symbols before referencing `<use href="#id">` keeps the final reference
 // same-document and works in every engine, including WebKit.
+import React from 'react'
 import spriteUrl from './looplab-icons-v1.svg?url&no-inline'
 
 const OP_ICON_NAMES = new Set(

@@ -1,4 +1,4 @@
-import { Fragment, useEffect, useMemo, useRef, useState } from 'react'
+import React, { Fragment, useEffect, useMemo, useRef, useState } from 'react'
 import { deadlineGet, fmt, runApiPath } from './util.js'
 import {
   abandonUnknownConceptLens, acquireConceptLensIntent, clearConceptLensIntent,
