@@ -1,0 +1,35 @@
+{
+  "version": 1,
+  "date": "2026-10-04",
+  "increment": "doc72 section 20.35, isolated Git merge and process refusal before pending-overlay materialization",
+  "source_parent_commit": "57e427464bed5ddd359430c26a91f393c953ceb2",
+  "platform": "Windows",
+  "replay": {"selectors": ["tests/test_events_replay.py"], "passed": 193, "failed": 0, "skipped": 0, "seconds": 3.44, "order": "first"},
+  "pre_fix_reproduction": {"selectors": ["tests/test_upstream_merge_process.py"], "failed": 9, "passed": 2, "seconds": 15.22},
+  "upstream_regressions": {
+    "selectors": ["tests/test_upstream_merge_process.py", "tests/test_upstream_git_process_recovery.py", "tests/test_upstream_git_diagnostics.py", "tests/test_upstream_worktrees.py", "tests/test_upstream_multibase.py", "tests/test_upstream_candidate_binding.py", "tests/test_upstream_overlay_intent.py", "tests/test_upstream_lane.py"],
+    "passed": 70, "failed": 0, "skipped": 0, "seconds": 107.52
+  },
+  "contracts": {
+    "selectors": ["tests/test_documentation_contracts.py", "tests/test_documented_entry_points_resolve.py", "tests/test_merge_history_integrity.py", "tests/test_cli_reference.py", "tests/test_package_layering.py", "tests/test_containment_census.py"],
+    "initial_passed": 70, "initial_failed": 1, "initial_seconds": 41.62,
+    "initial_refusal": "New documentation link preceded this validation artifact; test_all_relative_markdown_links_resolve refused its absent target.",
+    "repaired_link_verification": {"selector": "tests/test_documentation_contracts.py::test_all_relative_markdown_links_resolve", "passed": 1, "failed": 0, "seconds": 0.70},
+    "final_distinct_passed": 71,
+    "scope": "The other 70 contracts passed before this artifact was added; only the concrete missing-link refusal was rerun."
+  },
+  "strict_documentation_build": {"status": "passed", "seconds": 8.61},
+  "total_distinct_passed": 334,
+  "total_skipped": 0,
+  "git_diff_check": "passed",
+  "native_git": ["Independent merges despite broken global configuration", "Independent merges despite invalid GIT_CONFIG_COUNT protocol configuration", "Independent merges from a caller repository with broken local configuration", "Real overlapping content conflict", "Exact Unicode, emoji, CRLF and final blank lines"],
+  "process_boundary": ["Credential-scrubbed child environment", "10-second merge deadline", "Typed startup, permission and timeout errors", "Conflict exit counts 1 and 127", "Unavailable error exits 128, 255 and negative process return"],
+  "two_base_cpu_scenario": {
+    "training": "Real CPU SGD source evaluations and two measured seven-execution gates through the existing private upstream fixture; not a whole resumed engine/UI run.",
+    "failure": "Injected Git merge exit 128 refuses materialization before deleting the existing node workspace or appending a rebase event.",
+    "preserved": ["Exact events.jsonl bytes", "Pending node lifecycle", "Every ordinary file in the existing node_5 workspace"],
+    "explicit_recovery": "Materialization merges the shared learning-rate capability and independent training duration while retaining the momentum recipe; upstream_execution count stays 14."
+  },
+  "coverage": "Focused native Windows Git, CPU upstream transactions, materialization and documentation checks. UI unchanged. Full CI, Assistant/resume acceptance and target owner-repository delivery not performed.",
+  "remaining_open": ["Full run-owned worktree lifecycle and conflict UX", "Full program manifest and runtime dependencies", "Target-aware owner repository delivery", "Full CI and user acceptance"]
+}

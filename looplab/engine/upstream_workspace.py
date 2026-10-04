@@ -75,6 +75,10 @@ def git_path_refusal():
 
 
 def git_at(root, *argv):
+    return _run_git(root, *argv).stdout.decode("utf8").strip()
+
+
+def _run_git(root, *argv, timeout=30, conflict_counts=False):
     from looplab.runtime.sandbox import git_subprocess_env
     # A private review projection cannot inherit filters/config that execute code
     # or change the archived bytes. Keep the credential scrubber and identities.
@@ -88,7 +92,7 @@ def git_at(root, *argv):
                                  "-c", "core.fsmonitor=false", "-c", "core.hooksPath=" + os.devnull,
                                  "-c", "core.attributesFile=" + os.devnull,
                                  "-C", str(root), *argv], env=env,
-                                capture_output=True, timeout=30)
+                                capture_output=True, timeout=timeout)
     except subprocess.TimeoutExpired as exc:
         # subprocess.run has stopped waiting; partial private Git changes may
         # remain. Persist a failed proposal, not a server fault or permission to
@@ -110,7 +114,9 @@ def git_at(root, *argv):
                 "in the UI/engine process environment; preserve upstream history and staging/worktree. "
                 "Read the original action receipt before starting new work") from exc
         raise
-    if result.returncode:
+    # merge-file reports 1..127 conflicts; errors are negative exit values
+    # (usually 255 through the OS) or fatal 128, never a scientific verdict.
+    if result.returncode and not (conflict_counts and 1 <= result.returncode <= 127):
         # core.longpaths fixes ref locks, not every Git cwd/worktree limit
         # (doc 72 §20.18). Do not reflect stderr: it may contain host paths or
         # submitted text. The stable code survives a lost first reply in history.
@@ -119,7 +125,7 @@ def git_at(root, *argv):
                line.rstrip().endswith(b": filename too long") for line in errors):
             raise git_path_refusal()
         raise UpstreamRefusal("upstream_git_unavailable", "Maintainer git operation failed; inspect run-owned worktree")
-    return result.stdout.decode("utf8").strip()
+    return result
 
 
 def raw_git_attributes(rd, relative="upstream/git"):
@@ -220,8 +226,11 @@ def merge_text(old, new, overlay):
         paths = [Path(td) / str(i) for i in range(3)]
         for p, body in zip(paths, (overlay, old, new)):
             p.write_bytes(body)
-        result = subprocess.run(["git", "merge-file", "-p", *(str(p) for p in paths)],
-                                capture_output=True, timeout=10)
+        # Keep byte output, including final newlines. Isolate this read-only Git
+        # merge from the caller's repository/config and ambient credentials just
+        # like Maintainer worktree operations; process failure grants no rebase.
+        result = _run_git(td, "merge-file", "-p", *(str(p) for p in paths),
+                          timeout=10, conflict_counts=True)
         return result.stdout if result.returncode == 0 else None
 
 

@@ -1575,6 +1575,16 @@ HTTP 503 is still an unknown write acknowledgement until the original receipt
 has been read. Assistant reports these operator diagnostics without raw
 exception argv/output or host paths. A failed proposal supports no gate pass;
 new work after explicit environment repair requires a new action ID.
+Pending node overlays also use isolated Git when merging onto an advanced base:
+the server's global/environment Git configuration and caller repository are not
+merge inputs, and the child environment is credential-scrubbed. The merge has a
+10-second deadline. A genuine content conflict retains the node's original base
+and overlay for review. A missing/denied Git executable, timeout or other Git error
+is **unavailable materialization**, not a content conflict or permission to evaluate
+on an older base. The refusal occurs before replacing an existing node workspace
+or publishing `node_overlay_rebased`. Inspect the current node and server Git
+environment; after repair, retry materialization explicitly. This merge read has
+no proposal action receipt and does not itself train, advance the base or resume.
 After operator abandonment, an exact retry of an unfinished proposal/check returns
 `upstream_claim_abandoned`: inspect its history and use a new `action_id` for new
 work. It does not ask for another abandonment or engine wait, and starts no work.

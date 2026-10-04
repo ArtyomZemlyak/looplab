@@ -5585,3 +5585,47 @@ rows, без locale-specific casing или Unicode normalization. Он не по
 семантическое равенство программ, materialization или доставку в task repo.
 O6/O14 сохраняют OPEN для полного manifest, runtime dependencies и target-aware
 доставки.
+
+### 20.35. Git merge при переносе pending overlay: сбой не является конфликтом — 2026-10-04
+
+**Проблема O2/O4/O6.** `looplab/engine/upstream_workspace.py::merge_text`
+запускал `git merge-file` напрямую: с окружением сервера, global Git config и
+repository context вызывающего процесса. Любой ненулевой exit трактовался как
+конфликт научных правок. При ошибке Git это позволяло materialization выбрать
+старую базу как при настоящем конфликте; missing executable и timeout, наоборот,
+выходили нетипизированными исключениями. Это функционал LoopLab при миграции
+экспериментов после `base_advanced`, а не checkout разработки продукта.
+
+**Воспроизведение до правки.** Новый набор дал **9 failed, 2 passed**. Реальный
+Git с повреждённым global config вернул `None` для независимых правок вместо
+объединённых bytes. Exit 128/255 и отрицательный process return тоже давали
+`None`. Отдельный сценарий с двумя измеренными CPU SGD переносами и pending
+node подтвердил, что materialization не отказывала при Git exit 128.
+
+**Исправление.** `looplab/engine/upstream_workspace.py::_run_git` — общий
+запуск для `git_at` и `merge_text`: credential-scrubbed environment, без
+global/system/environment Git config, с прежними per-command параметрами.
+Merge выполняется из своего временного каталога, возвращает исходные bytes
+без `strip`/decode и сохраняет прежний deadline 10 секунд. Только exit 1..127
+считаются конфликтами; остальные ошибки получают существующий typed Git
+refusal. Граница exit codes соответствует
+[официальному контракту Git](https://git-scm.com/docs/git-merge-file).
+Настоящий конфликт по-прежнему сохраняет исходную базу и overlay для review.
+
+**Проверка сохранности.** Новый regression на двух реальных переносах и
+измеренном CPU SGD проверяет, что при сбое merge остаются прежними event bytes,
+pending lifecycle и все обычные файлы существующего workdir. Отказ происходит
+до удаления workdir и `node_overlay_rebased`. После явного восстановления
+materialization объединяет shared learning-rate capability, независимую
+длительность обучения и прежний momentum recipe. Число gate executions остаётся
+14: сам merge/retry не обучает и не запускает третий gate. Native Git отдельно
+проверяет повреждённые global/env/caller-repo configs, реальные конфликты,
+UTF-8/emoji, CRLF и конечные пустые строки; процессные tests — scrubbed child
+environment, startup/deadline refusals и границы conflict counts.
+Результаты — [validation.json](assets/72-upstream-merge-process/validation.json).
+
+**Граница.** Это проверка materialization и двух последовательных measured gates,
+не полная приёмка engine resume/Assistant или target repo delivery. O2 сохраняет
+OPEN для полного lifecycle/status/conflict UX, O6/O14 — для полного manifest,
+runtime dependencies и доставки в owner repo. Изоляция host config не исключает
+внешние изменения установленного Git executable или источников на сервере.
