@@ -4056,9 +4056,9 @@ merge этим проходом не проверены.
 **Существующая OPEN очередь после исправлений:**
 
 1. **O3/O9/O11/O13 — цельный вход через Assistant.** Путь подключения теперь
-   локализован, но next-step, условия checkpoints и схема владельцев должны
-   переводиться из того же серверного решения, без второго дерева разрешений
-   на клиенте. Приёмка: первый результат и восстановление на RU/EN, явные
+   локализован; §20.40 добавляет RU/EN next-step и условия checkpoints из того
+   же серверного решения. Полная панель требований/истории и схема владельцев
+   ещё требуют локализации. Приёмка: первый результат и восстановление на RU/EN, явные
    operator/client approvals, текущий blocker и расходы до действия.
 2. **O2/O4/O8 — цельная worktree/recovery карточка.** Сводка latest proposal
    сделана; нужны полная paged history, request/check/advance recovery, diff,
@@ -6040,3 +6040,56 @@ late abandoned completion и gate-bound advancement. Production build прошё
 локализация Agent cycle, не lifecycle/retention worktree и не target-repo delivery.
 Bundle budget проверка остаётся red; исходные и новые измерения указаны в §19.17.
 Полный CI и платная модельная сессия не запускались.
+
+### 20.40. Русский следующий шаг из того же серверного решения — 2026-10-04
+
+**Проблема O3/O9/O11/O13.** После русского handoff пользователь всё ещё переводил
+английские условия checkpoint, остановленного движка и завершения. Исходное дерево
+— `c5b59edb7506630732e986cbafd184bcf0babfed`. Нельзя решать это вторым деревом
+разрешений в UI: ранняя остановка, незавершённая оценка и восстановление должны
+следовать актуальным серверным требованиям.
+
+**Реализация.** `looplab/harness/progress_summary.py::next_step` выбирает EN/RU
+текст внутри прежних веток. GET `harness-progress` (full/brief) принимает
+`language=en|ru`, по умолчанию EN; новые ответы содержат `next_step.language`.
+`looplab/harness/mcp_server.py::HarnessAPI.run_progress` и одноимённый MCP tool
+передают RU одним GET; tool schema объявляет enum/default. Неверный или не совпадающий
+stamp делает HTTP 200 unavailable без body. Отсутствующий stamp старого сервера
+остаётся совместимым, UI явно называет исходный язык. Смена языка в
+`ui/src/HarnessProgressPanel.jsx` меняет scope чтения, сразу убирает прежнюю
+подсказку и не допускает запоздавший ответ другого языка.
+
+Переведены неполные источники, paused/finished/stop-requested, running/stopped/unknown
+engine, незавершённые эксперименты и все виды вопросов оценки. Deadline подсказка
+сохраняет явное ожидание ответа без автоматического таймаута; команда может работать,
+одно продление ограничено runtime. Для остановленного движка перечислены original
+receipts и обновление вопроса после resume. `abort` не появляется без полномочия
+конкретного checkpoint. Поля code/owner/phase, reads/action, generation и все
+требования одинаковы для обоих языков. Новая локализация не добавляет engine wait,
+automatic retry, takeover или команду.
+
+**Проверка.** Replay-first — 193 passed; сервер/HTTP/MCP — 208 passed; живые UI
+mounts и языковые регрессии — 14 passed. Матрица включает источники с повреждением,
+все lifecycle/engine состояния, queued/building/evaluating/pending, stage/monitor/
+ASHA/deadline, смену языка с поздним ответом и неверным stamp, legacy fallback,
+один GET и неизменные events. Production build прошёл. В браузере проверены
+RU → EN → RU для прежнего private fixture `demo` (79 событий, два terminal nodes),
+без вызовов модели и engine writes. DOM-проверка при 1920×1080: reading dialog
+1100px, без горизонтального overflow. Снимки сохранены при штатном размере браузера:
+инструмент захвата кадрировал увеличенный viewport; это не human acceptance и
+не новое обучение. [Русская карточка](assets/72-next-step-ru/02-agent-cycle-ru.jpg),
+[английская карточка](assets/72-next-step-ru/03-agent-cycle-en.jpg).
+
+![Следующий шаг на русском](assets/72-next-step-ru/02-agent-cycle-ru.jpg)
+
+Проверки и границы — [validation.json](assets/72-next-step-ru/validation.json),
+размеры — [bundles.json](assets/72-next-step-ru/bundles.json). JS gzip вырос
+647650 → 648036 B (+386), CSS остался 59809 B. Сохраняются прежние четыре
+bundle-budget нарушения; пределы не повышены. Это не зелёный общий CI.
+
+**Остаток.** O3/O9/O11/O13 остаются OPEN для полного Assistant onboarding,
+локализации таблиц требований/истории/диагностики, approvals и проверки нового
+пользователя с живым внешним клиентом. O2/O4/O8 — lifecycle/retention worktree
+LoopLab, O5/O6 — effective program manifest, O6/O10/O14 — target-relative
+доставка в пользовательский repo. Изменение run-owned базы по-прежнему не равно
+merge/push в него. O1 сохраняет отдельную работу по размеру UI и полному CI.

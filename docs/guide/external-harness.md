@@ -561,6 +561,19 @@ shows the same server-authored `next_step`. The owner run workspace also shows
 a compact status above its views; expand its title for the explanation or open
 **Agent cycle** for the full requirements. History and review omit live advice.
 
+For Russian guidance, call `run_progress(run_id, expected_generation, language="ru")`
+or add `language=ru` to either full or compact HTTP progress read. `en` is the
+default; other values are refused. `looplab/harness/progress_summary.py::next_step`
+selects the wording within the same decision branches: language changes only
+`next_step.title`, `detail` and its `language` stamp, never gates, allowed verdicts,
+identities or read/action references. The UI's Assistant language selector requests
+RU or EN and withdraws the previous guidance while that read completes; delayed
+responses from the old language cannot restore it. Typed MCP and UI reads refuse
+a present wrong/invalid language stamp. Older servers without the stamp remain
+readable; the UI labels their original-language fallback.
+Auto currently requests English for this server guidance. This does not translate
+recorded author text, source diagnostics or the rest of Agent cycle's history/gates.
+
 The summary prioritizes incomplete sources, then unanswered evaluation questions.
 It names the responsible external agent, detail reads, response route and MCP phase.
 `next_step.phase_id` resolves through `phase_info`: `evaluation` for a stage check,

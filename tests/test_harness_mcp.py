@@ -26,6 +26,10 @@ def test_mcp_advertises_run_controls_and_full_settings_discovery():
     hints = progress.annotations.model_dump(by_alias=True)
     assert hints["readOnlyHint"] and hints["idempotentHint"]
     assert not hints["destructiveHint"]
+    progress_schema = progress.model_dump(by_alias=True)["inputSchema"]
+    assert progress_schema["required"] == ["run_id", "expected_generation"]
+    assert progress_schema["properties"]["language"]["enum"] == ["en", "ru"]
+    assert progress_schema["properties"]["language"]["default"] == "en"
     receipt = next(tool for tool in tools if tool.name == "command_receipt")
     hints = receipt.annotations.model_dump(by_alias=True)
     assert hints["readOnlyHint"] and not hints["destructiveHint"]

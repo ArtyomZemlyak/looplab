@@ -19,81 +19,107 @@ def _step(code, title, detail, reads, *, action=None, phase_id=None):
             "action": action, "phase_id": phase_id}
 
 
-def next_step(progress: dict) -> dict:
-    step = _next_step(progress)
+def next_step(progress: dict, language: str = "en") -> dict:
+    if language not in ("en", "ru"):
+        raise ValueError("unsupported progress language")
+    step = _next_step(progress, language)
+    text = lambda en, ru: ru if language == "ru" else en
+    step["language"] = language
     execution = progress["execution"]
     alive = execution["engine_running"]
-    label = "running" if alive is True else "stopped" if alive is False else "unknown"
+    label = (text("running", "работает") if alive is True else
+             text("stopped", "остановлен") if alive is False else text("unknown", "неизвестно"))
     if step["code"] == "answer_checkpoint" and alive is False:
-        step["detail"] = ("This is a recorded question from a stopped engine. Inspect state and saved command receipts before choosing explicit recovery or cancellation. Resume may re-evaluate the interrupted attempt and supersede this question; refresh after resume before answering. "
+        step["detail"] = (text("This is a recorded question from a stopped engine. Inspect state and saved command receipts before choosing explicit recovery or cancellation. Resume may re-evaluate the interrupted attempt and supersede this question; refresh after resume before answering. ",
+                               "Это записанный вопрос остановленного движка. Перед явным восстановлением или отменой прочитайте состояние и сохранённые квитанции команд. Возобновление может повторить оценку прерванной попытки и заменить этот вопрос; после возобновления обновите данные перед ответом. ")
                           + step["detail"])
         step["reads"].append(f"GET {_RUN}/command-receipt?expected_generation=TOKEN&command_id={{command_id}}")
-    step["detail"] += f" Engine last observed: {label}. Agent connection: not measured."
+    step["detail"] += text(f" Engine last observed: {label}. Agent connection: not measured.",
+                           f" Последнее наблюдение движка: {label}. Подключение агента не измеряется.")
     if progress["complete"] and progress["finish_pending_nodes"]:
         counts = execution["recorded_node_counts"]
-        step["detail"] += (f" Recorded activity: {counts['evaluating']} admitted, "
+        step["detail"] += text(f" Recorded activity: {counts['evaluating']} admitted, "
                            f"{counts['queued']} queued, {counts['building']} building, "
-                           f"{counts['pending']} untracked.")
+                           f"{counts['pending']} untracked.",
+                           f" Записанная активность: допущено к оценке {counts['evaluating']}, "
+                           f"в очереди {counts['queued']}, готовится {counts['building']}, "
+                           f"не отслеживается {counts['pending']}.")
     return step
 
 
-def _next_step(progress: dict) -> dict:
+def _next_step(progress: dict, language: str = "en") -> dict:
+    # Wording is selected inside the same branches; locale creates no second
+    # decision tree and changes neither verdict authority nor read/action refs.
+    text = lambda en, ru: ru if language == "ru" else en
     if not progress["complete"]:
-        return _step("inspect_sources", "Check incomplete sources",
-                     "A missing receipt is not proof that no action occurred. Inspect source_health and ask the operator to recover damaged journals before trusting missing receipts.",
+        return _step("inspect_sources", text("Check incomplete sources", "Проверьте неполные источники"),
+                     text("A missing receipt is not proof that no action occurred. Inspect source_health and ask the operator to recover damaged journals before trusting missing receipts.",
+                          "Отсутствие квитанции не доказывает, что действие не выполнялось. Проверьте source_health и попросите оператора восстановить повреждённые журналы перед выводами об отсутствующих квитанциях."),
                      [f"GET {_RUN}/harness-progress?expected_generation=TOKEN", f"GET {_RUN}/events"])
     if progress["pending_checkpoint_count"]:
         q = progress["pending_checkpoints"][0]["question"]
-        title = {"stage_check": "Review the completed stage",
-                 "train_monitor": "Answer the training monitor",
-                 "deadline_grace": "Decide whether to extend the deadline"}.get(
-                     q["phase_id"], "Answer the evaluation question")
-        detail = "Evaluation has an unanswered checkpoint. Read live state, the full question and its allowed verdicts; evaluator completion alone does not settle the node."
-        detail += " Allowed verdicts: " + ", ".join(allowed_verdicts(q)) + "."
+        title = {"stage_check": text("Review the completed stage", "Проверьте завершённый этап"),
+                 "train_monitor": text("Answer the training monitor", "Ответьте на вопрос о тренировке"),
+                 "deadline_grace": text("Decide whether to extend the deadline", "Решите, продлевать ли время выполнения")}.get(
+                     q["phase_id"], text("Answer the evaluation question", "Ответьте на вопрос оценки"))
+        detail = text("Evaluation has an unanswered checkpoint. Read live state, the full question and its allowed verdicts; evaluator completion alone does not settle the node.",
+                      "У оценки есть вопрос без ответа. Прочитайте актуальное состояние, полный вопрос и допустимые ответы; завершение процесса оценки само по себе не завершает эксперимент.")
+        detail += text(" Allowed verdicts: ", " Допустимые ответы: ") + ", ".join(allowed_verdicts(q)) + "."
         if q["phase_id"] in ("train_monitor", "asha_live") and not q["kill_enabled"]:
-            detail += " This checkpoint does not grant abort authority."
+            detail += text(" This checkpoint does not grant abort authority.", " Этот вопрос не разрешает досрочную остановку через abort.")
         if q.get("stop_refusal") == "objective_retargeted":
-            detail += " The objective was retargeted; this ASHA curve remains on the task scale."
+            detail += text(" The objective was retargeted; this ASHA curve remains on the task scale.",
+                           " Целевая метрика изменена; эта кривая ASHA остаётся в шкале задачи.")
         if q["phase_id"] == "deadline_grace":
-            detail += " While waiting for a verdict, the command may keep running; this wait has no automatic timeout. The runtime caps one extension starting after extend is consumed."
+            detail += text(" While waiting for a verdict, the command may keep running; this wait has no automatic timeout. The runtime caps one extension starting after extend is consumed.",
+                           " Пока ожидается ответ, команда может продолжать работу; автоматического таймаута этого ожидания нет. Среда выполнения ограничивает одно продление, отсчитываемое после применения extend.")
         if progress["recorded_lifecycle"]["paused"]:
-            detail = "Run is paused for new work; its recorded in-flight evaluation still has this checkpoint. Answering does not resume search. " + detail
+            detail = text("Run is paused for new work; its recorded in-flight evaluation still has this checkpoint. Answering does not resume search. ",
+                          "Новая работа приостановлена; у уже начатой оценки остаётся этот вопрос. Ответ не возобновляет поиск. ") + detail
         return _step("answer_checkpoint", title, detail,
                      [f"GET {_RUN}/state?observe_only=true", f"GET {_RUN}/harness-checkpoints?expected_generation=TOKEN"],
                      action=f"POST {_RUN}/harness-checkpoints",
                      phase_id=CHECKPOINT_DECISION_PHASES.get(q["phase_id"]))
     lifecycle = progress["recorded_lifecycle"]
     if any(lifecycle.values()):
-        title = ("Inspect recorded finish" if lifecycle["finished"] else
-                 "Inspect stop request" if lifecycle["stop_requested"] else "Run is paused")
-        detail = ("The run has a recorded finish. Read result notices and the final report; no resume or further finalization is suggested."
+        title = (text("Inspect recorded finish", "Проверьте завершённый запуск") if lifecycle["finished"] else
+                 text("Inspect stop request", "Проверьте запрос остановки") if lifecycle["stop_requested"] else text("Run is paused", "Запуск на паузе"))
+        detail = (text("The run has a recorded finish. Read result notices and the final report; no resume or further finalization is suggested.",
+                       "В журнале записано завершение запуска. Прочитайте краткие итоги и финальный отчёт; возобновление или повторное завершение не предлагаются.")
                   if lifecycle["finished"] else
-                  "A stop was requested. Inspect state and command receipts to determine whether settlement and explicit finalization remain due."
+                  text("A stop was requested. Inspect state and command receipts to determine whether settlement and explicit finalization remain due.",
+                       "Запрошена остановка. Проверьте состояние и квитанции команд, чтобы выяснить, нужны ли завершение текущей работы и явная финализация.")
                   if lifecycle["stop_requested"] else
-                  "The run is paused. Read state and command receipts, then explicitly choose resume or finalization if required.")
+                  text("The run is paused. Read state and command receipts, then explicitly choose resume or finalization if required.",
+                       "Запуск на паузе. Прочитайте состояние и квитанции команд, затем явно выберите возобновление или завершение, если это требуется."))
         reads = [f"GET {_RUN}/state?observe_only=true", f"GET {_RUN}/events",
                  f"GET {_RUN}/command-receipt?expected_generation=TOKEN&command_id={{command_id}}"]
         if lifecycle["finished"]:
             reads.append(f"GET {_RUN}/result-notices?expected_generation=TOKEN")
         return _step("inspect_lifecycle", title,
-                     detail + " Journal state does not certify engine or agent liveness.", reads)
+                     detail + text(" Journal state does not certify engine or agent liveness.",
+                                   " Состояние журнала не доказывает, что движок или агент работает."), reads)
     if progress["finish_pending_nodes"]:
         execution = progress["execution"]
         counts = execution["recorded_node_counts"]
         alive = execution["engine_running"]
         if alive is False:
-            title = "Engine stopped · inspect submitted experiments"
-            detail = "No live engine owner was observed. Recorded evaluation starts do not mean training continues. Inspect state, checkpoints and original command receipts before choosing explicit recovery."
+            title = text("Engine stopped · inspect submitted experiments", "Движок остановлен · проверьте отправленные эксперименты")
+            detail = text("No live engine owner was observed. Recorded evaluation starts do not mean training continues. Inspect state, checkpoints and original command receipts before choosing explicit recovery.",
+                          "Работающий владелец движка не обнаружен. Запись о начале оценки не означает, что тренировка продолжается. Перед явным восстановлением проверьте состояние, вопросы оценки и исходные квитанции команд.")
         elif alive is None:
-            title = "Engine status unknown · inspect submitted experiments"
-            detail = "The engine lock probe is inconclusive. Recorded node activity does not prove live training. Inspect state and checkpoints before choosing recovery."
+            title = text("Engine status unknown · inspect submitted experiments", "Состояние движка неизвестно · проверьте отправленные эксперименты")
+            detail = text("The engine lock probe is inconclusive. Recorded node activity does not prove live training. Inspect state and checkpoints before choosing recovery.",
+                          "Проверка блокировки движка не дала однозначного результата. Записанная активность не доказывает, что тренировка идёт. Перед восстановлением проверьте состояние и вопросы оценки.")
         else:
-            title = ("Inspect evaluations already started" if counts["evaluating"] else
-                     "Submitted experiments are awaiting evaluation" if counts["queued"] else
-                     "Inspect submitted experiments")
-            detail = "LoopLab owns evaluation; poll checkpoints for questions and results. A live engine does not prove the agent is connected."
+            title = (text("Inspect evaluations already started", "Проверьте уже начатые оценки") if counts["evaluating"] else
+                     text("Submitted experiments are awaiting evaluation", "Отправленные эксперименты ожидают оценки") if counts["queued"] else
+                     text("Inspect submitted experiments", "Проверьте отправленные эксперименты"))
+            detail = text("LoopLab owns evaluation; poll checkpoints for questions and results. A live engine does not prove the agent is connected.",
+                          "LoopLab выполняет оценку; опрашивайте checkpoints для вопросов и результатов. Работающий движок не доказывает подключение агента.")
         return _step("inspect_pending", title,
-                     detail + " Finalization waits for settlement or explicit cancellation; further proposals have separate gates.",
+                     detail + text(" Finalization waits for settlement or explicit cancellation; further proposals have separate gates.",
+                                   " Финализация ожидает завершения текущей работы или явной отмены; для новых предложений действуют отдельные требования."),
                      [f"GET {_RUN}/state?observe_only=true", f"GET {_RUN}/harness-checkpoints?expected_generation=TOKEN",
                       f"GET {_RUN}/command-receipt?expected_generation=TOKEN&command_id={{command_id}}"])
     # A dead owner between candidates leaves no pending node or recorded pause.
@@ -101,17 +127,20 @@ def _next_step(progress: dict) -> dict:
     # probe distinct from death and let recovery choose resume explicitly.
     alive = progress["execution"]["engine_running"]
     if alive is not True:
-        title = ("Engine stopped · inspect idle run" if alive is False else
-                 "Engine status unknown · inspect idle run")
-        detail = ("No live engine owner was observed." if alive is False else
-                  "The engine lock probe is inconclusive; this does not prove engine death.")
+        title = (text("Engine stopped · inspect idle run", "Движок остановлен · проверьте ожидающий запуск") if alive is False else
+                 text("Engine status unknown · inspect idle run", "Состояние движка неизвестно · проверьте ожидающий запуск"))
+        detail = (text("No live engine owner was observed.", "Работающий владелец движка не обнаружен.") if alive is False else
+                  text("The engine lock probe is inconclusive; this does not prove engine death.",
+                       "Проверка блокировки движка не дала однозначного результата; это не доказывает гибель движка."))
         return _step("inspect_lifecycle", title,
-                     detail + " No unsettled experiment is recorded. Inspect state and original command receipts before submitting another candidate or choosing explicit resume or finalization. Reading or reconnecting starts no work; no internal agent takeover is automatic.",
+                     detail + text(" No unsettled experiment is recorded. Inspect state and original command receipts before submitting another candidate or choosing explicit resume or finalization. Reading or reconnecting starts no work; no internal agent takeover is automatic.",
+                                   " В журнале нет незавершённого эксперимента. Перед новым кандидатом, явным возобновлением или завершением прочитайте состояние и исходные квитанции команд. Чтение и переподключение не запускают работу; внутренний агент не подхватывает её автоматически."),
                      [f"GET {_RUN}/state?observe_only=true", f"GET {_RUN}/events",
                       f"GET {_RUN}/command-receipt?expected_generation=TOKEN&command_id={{command_id}}"],
                      phase_id="recovery")
-    return _step("choose_direction", "Choose the next experiment or finish",
-                 "LoopLab waits for an explicit external decision between experiments; MCP disconnection does not trigger an internal agent takeover. Use measured evidence to choose. The two paths below have different obligations; policy advice does not submit a candidate.",
+    return _step("choose_direction", text("Choose the next experiment or finish", "Выберите следующий эксперимент или завершение"),
+                 text("LoopLab waits for an explicit external decision between experiments; MCP disconnection does not trigger an internal agent takeover. Use measured evidence to choose. The two paths below have different obligations; policy advice does not submit a candidate.",
+                      "Между экспериментами LoopLab ждёт явного решения внешнего агента; отключение MCP не включает внутреннего агента. Выбирайте по измеренным доказательствам. Для продолжения и завершения действуют разные требования; совет стратегии не отправляет кандидата."),
                  [f"GET {_RUN}/state?observe_only=true", f"GET {_RUN}/harness-contract"])
 
 

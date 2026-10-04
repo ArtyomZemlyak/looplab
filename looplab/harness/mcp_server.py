@@ -9,6 +9,7 @@ from __future__ import annotations
 import json
 import os
 import re
+from typing import Literal
 from urllib.parse import quote, unquote, urlencode, urlsplit
 
 import httpx
@@ -231,11 +232,16 @@ class HarnessAPI:
             return self._unknown_write({"status": None}, "transport_error")
         return self._result(response, method=verb)
 
-    def run_progress(self, run_id: str, expected_generation: str) -> dict:
+    def run_progress(self, run_id: str, expected_generation: str, language: str = "en") -> dict:
         self._run_identity(run_id, expected_generation)
+        if language not in ("en", "ru"):
+            raise ValueError("language must be en or ru")
         result = self._checked_generation(self.request("GET", f"/api/runs/{quote(run_id, safe='')}/harness-progress"
-                            f"?expected_generation={expected_generation}&brief=true"), expected_generation)
-        if result["status"] == 200 and not result.get("code") and not self._valid_progress(result["body"]):
+                            f"?expected_generation={expected_generation}&brief=true"
+                            + ("&language=ru" if language == "ru" else "")), expected_generation)
+        if result["status"] == 200 and not result.get("code") and (not self._valid_progress(result["body"])
+                or ("language" in result["body"]["next_step"]
+                    and result["body"]["next_step"]["language"] != language)):
             return {"status": 200, "code": "response_incomplete", "outcome": "unavailable",
                     "reason": "invalid_progress",
                     "message": "Progress fields are incomplete or inconsistent. Read current state and refresh progress explicitly before deciding; missing gates are not empty obligations. No retry or work was started."}
@@ -264,6 +270,7 @@ class HarnessAPI:
                         for source in health.values())
                 and page["complete"] == all(source["read_complete"] for source in health.values())
                 and isinstance(step, dict) and step.get("owner") == "external_agent"
+                and ("language" not in step or step["language"] in ("en", "ru"))
                 and all(isinstance(step.get(key), str) and step[key] for key in ("code", "title", "detail"))
                 and strings(step.get("reads")) and all(key in step and
                     (step[key] is None or isinstance(step[key], str)) for key in ("action", "phase_id"))
@@ -742,10 +749,12 @@ def build_server(api: HarnessAPI):
 
     @mcp.tool(annotations=ToolAnnotations(readOnlyHint=True, destructiveHint=False,
                                         idempotentHint=True, openWorldHint=False))
-    def run_progress(run_id: str, expected_generation: str) -> dict:
+    def run_progress(run_id: str, expected_generation: str, language: Literal["en", "ru"] = "en") -> dict:
         """Read the compact next step, continue/finish gates and source health.
         execution separates recorded node activity from the last-read engine lock
         probe; agent connection is unmeasured. Refresh even without new events.
+        language=en|ru selects next-step wording only, with the same obligations
+        and read/action references. Older servers may omit the language stamp.
         Use the current generation from /state. Read detail references and phase_info
         before deciding; refresh after events or answers. This performs one GET only,
         returns HTTP failures unchanged, and never retries or submits a candidate.
@@ -755,7 +764,7 @@ def build_server(api: HarnessAPI):
         Missing/inconsistent critical health, gates, lifecycle or pending counts return
         invalid_progress/unavailable without body. Valid complete=false diagnostics
         are retained; empty gates must be explicit, and advice grants no permission."""
-        return api.run_progress(run_id, expected_generation)
+        return api.run_progress(run_id, expected_generation, language)
 
     @mcp.tool(annotations=ToolAnnotations(readOnlyHint=True, destructiveHint=False,
                                         idempotentHint=True, openWorldHint=False))

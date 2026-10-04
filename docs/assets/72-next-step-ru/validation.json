@@ -1,0 +1,41 @@
+{
+  "date": "2026-10-04",
+  "source_parent": "c5b59edb7506630732e986cbafd184bcf0babfed",
+  "scope": "RU/EN server next-step guidance, identical decisions and authority, generation and locale fenced UI/MCP reads",
+  "tests": [
+    {"command": ".venv/Scripts/python.exe -m pytest -o addopts='' -q tests/test_events_replay.py --basetemp=.tmp/doc72-next-step-ru/replay", "passed": 193},
+    {"command": ".venv/Scripts/python.exe -m pytest -o addopts='' -q tests/test_progress_language.py tests/test_external_progress.py tests/test_mcp_progress_shape.py tests/test_harness_mcp.py tests/test_harness_connection.py --basetemp=.tmp/doc72-next-step-ru/backend-final", "passed": 208},
+    {"cwd": "ui", "command": "node --test --test-timeout=30000 test/harnessProgressLanguage.test.js test/harnessProgressContract.test.js test/harnessHandoff.test.js test/assistantLanguage.test.js", "passed": 14},
+    {"command": ".venv/Scripts/python.exe -m pytest -o addopts='' -q tests/test_api_reference.py tests/test_documentation_contracts.py tests/test_doc_surface_budgets.py tests/test_architecture_diagram_geometry.py --basetemp=.tmp/doc72-next-step-ru/docs", "passed": 28},
+    {"command": ".venv/Scripts/python.exe -m mkdocs build --strict --site-dir .tmp/doc72-next-step-ru/site", "exit": 0},
+    {"command": ".venv/Scripts/python.exe -m pytest -o addopts='' -q tests/test_external_harness.py --basetemp=.tmp/doc72-next-step-ru/discovery", "passed": 5}
+  ],
+  "matrix": ["same non-prose fields and unchanged input", "damaged sources override checkpoint", "running/stopped/unknown engine", "paused/finished/stop requested", "queued/building/evaluating/pending", "stage, train monitor, ASHA, deadline; same verdict authority", "paused checkpoint and stopped-engine original receipts", "bounded deadline extension and explicit wait", "generation mismatch 409, unsupported locale 422", "MCP enum/default and one GET", "invalid or wrong locale stamp unavailable without retry", "late UI reply cannot commit across locale scope", "legacy unstamped response explicitly identified", "no event mutation or UI writes"],
+  "production": {
+    "command": "node node_modules/vite/bin/vite.js build --outDir ../.tmp/doc72-next-step-ru/ui-dist-final",
+    "build_exit": 0,
+    "budget_command": "node scripts/check-bundle.mjs --dist ../.tmp/doc72-next-step-ru/ui-dist-final",
+    "budget_exit": 1,
+    "baseline_js_gzip": 647650,
+    "final_js_gzip": 648036,
+    "delta_js_gzip": 386,
+    "baseline_css_gzip": 59809,
+    "final_css_gzip": 59809,
+    "baseline_violations": 4,
+    "final_violations": 4,
+    "budgets_changed": false,
+    "details": "bundles.json"
+  },
+  "browser": {
+    "fixture": "existing private demo CPU fixture, 2 terminal nodes, 79 events, 1 run-base advance; no new training",
+    "generation": "c9c4a8536df883c4ed7c11fe91ce41523ec67d129252a8591c36bb423adf4f4d",
+    "actions": "read current workspace and Agent cycle; RU/EN/RU selection; no Assistant send, model call, engine command or repo delivery",
+    "dom_viewport": [1920, 1080],
+    "dialog": {"left": 410, "right": 1510, "width": 1100, "client_width": 1088, "scroll_width": 1088},
+    "capture_limitation": "enlarged native capture was clipped despite fitting DOM geometry; final complete screenshots use default 1280x720 capture, no claim of FullHD raster acceptance",
+    "screenshots": ["01-workspace-ru.jpg", "02-agent-cycle-ru.jpg", "03-agent-cycle-en.jpg"],
+    "temporary_viewport_reset": true,
+    "temporary_tab_closed": true
+  },
+  "limits": ["full Agent cycle remains partly English", "no new user acceptance or live Codex/Claude MCP session", "no paid provider call or new training", "no owner-repo merge/push feature acceptance", "not full doc72 completion", "bundle gate remains red", "full CI not run"]
+}

@@ -1087,7 +1087,8 @@ def build_router(srv) -> APIRouter:
                              expected_generation: str = Query(...),
                              offset: int = Query(0, ge=0, le=1_000_000),
                              limit: int = Query(20, ge=1, le=100),
-                             brief: bool = Query(False)):
+                             brief: bool = Query(False),
+                             language: Literal["en", "ru"] = Query("en")):
         """Live external obligations, pending questions and paged decision histories.
 
         The three sidecar histories are independent durable sources. Each has
@@ -1097,6 +1098,8 @@ def build_router(srv) -> APIRouter:
         the shared next step, source health, counts and detail read references.
         execution separates recorded node activity from the last-read engine lock
         probe; agent connection is not measured. This read starts no work.
+        language selects only next-step wording from the same decision branches;
+        obligation identities, verdicts and read/action references are unchanged.
         agent_activity records only successful progress reads using the scoped
         harness credential in this UI process. Owner/browser reads do not refresh
         it. Two minutes of silence is quiet activity, not proof of agent death.
@@ -1108,7 +1111,8 @@ def build_router(srv) -> APIRouter:
         response.headers["Vary"] = "X-LoopLab-Token, Authorization"
         rd = _run_dir(run_id)
         result = snapshot(rd, expected_generation,
-                          activity_reader=public_node_activity, offset=offset, limit=limit)
+                          activity_reader=public_node_activity, offset=offset, limit=limit,
+                          language=language)
         if request_agent_token(request):
             srv.agent_activity.observe(rd, result["generation"])
         result["agent_activity"] = srv.agent_activity.snapshot(rd, result["generation"])

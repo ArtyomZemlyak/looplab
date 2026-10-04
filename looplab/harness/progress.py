@@ -70,7 +70,7 @@ def _page(rows: list[dict], offset: int, limit: int) -> dict:
 
 
 def snapshot(rd: Path, expected_generation: str, *, activity_reader,
-             offset: int = 0, limit: int = 20) -> dict:
+             offset: int = 0, limit: int = 20, language: str = "en") -> dict:
     store = EventStore(rd / "events.jsonl")
     events = store.read_all()
     generation = run_generation_token(events)
@@ -163,5 +163,5 @@ def snapshot(rd: Path, expected_generation: str, *, activity_reader,
                         "checkpoints": _page(checkpoint_rows, offset, limit)},
             "review_phases_enabled": sorted(required_reviews(settings))}
     from looplab.harness.progress_summary import next_step
-    result["next_step"] = next_step(result)
+    result["next_step"] = next_step(result, language)
     return result

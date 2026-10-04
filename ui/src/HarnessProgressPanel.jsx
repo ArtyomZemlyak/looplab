@@ -7,6 +7,7 @@ import HarnessConnection from './HarnessConnection.jsx'
 import AgentActivity from './AgentActivity.jsx'
 import { invalidPanelPayload, isRecord, PANEL_REQUEST_TIMEOUT_MS, RUN_GENERATION_RE } from './panelPrimitives.js'
 import { PanelResourceNotice } from './PanelResourceNotice.jsx'
+import { useAssistantLanguage } from './useAssistantLanguage.js'
 
 // External decisions live in three durable sidecars, not in the folded event log. This read model
 // keeps the intermediate reasoning receipts inspectable after a client/server restart and labels
@@ -14,16 +15,19 @@ import { PanelResourceNotice } from './PanelResourceNotice.jsx'
 export function HarnessProgressPanel({ runId, expectedGeneration, seq, externalMode, configStatus,
   onOpenEvents, onClose, compact = false, engineRunning, onOpen }) {
   const [offset, setOffset] = useState(0)
+  const [language] = useAssistantLanguage()
+  const ru = language === 'ru'
+  const readLanguage = ru ? 'ru' : 'en'
   const validGeneration = RUN_GENERATION_RE.test(expectedGeneration || '')
   const scope = validGeneration && externalMode === true
-    ? `${runId}:${expectedGeneration}:${compact ? `brief:${engineRunning}` : offset}` : ''
+    ? `${runId}:${expectedGeneration}:${readLanguage}:${compact ? `brief:${engineRunning}` : offset}` : ''
   const resource = useScopedResource(signal => get(
     runApiPath(runId, '/harness-progress')
-      + `?expected_generation=${expectedGeneration}&`
+      + `?expected_generation=${expectedGeneration}&language=${readLanguage}&`
       + (compact ? 'brief=true' : `offset=${offset}&limit=20`),
     { cache: 'no-store', signal }).then(value => {
     if (!isRecord(value) || value.generation !== expectedGeneration
-        || !validHarnessNextStep(value.next_step)
+        || !validHarnessNextStep(value.next_step, readLanguage)
         || (compact ? !value.next_step || !Number.isSafeInteger(value.event_seq) || value.event_seq < 0
           || ![true, false, null].includes(value.execution?.engine_running)
           : !isRecord(value.history) || !isRecord(value.source_health)
@@ -46,16 +50,17 @@ export function HarnessProgressPanel({ runId, expectedGeneration, seq, externalM
   // an engine prop change fences the old scope but must not override a newer server probe.
   if (compact) {
     const fresh = resource.status === 'ready' && progress?.event_seq >= seq
-    return <section className="topbar" aria-label="External agent status">
-      <span className="muted">External agent</span>
+    return <section className="topbar" aria-label={ru ? 'Состояние внешнего агента' : 'External agent status'}>
+      <span className="muted">{ru ? 'Внешний агент' : 'External agent'}</span>
       {fresh ? <details className="spacer"><summary><b>{progress.next_step.title}</b></summary>
-        <p>{progress.next_step.detail}</p></details>
-        : <span role="status">Next step unavailable</span>}
+        <p>{progress.next_step.detail}</p>
+        {ru && !progress.next_step.language && <p className="muted">Подсказка старого сервера приведена на исходном языке.</p>}</details>
+        : <span role="status">{ru ? 'Следующий шаг недоступен' : 'Next step unavailable'}</span>}
       {!fresh && <span className="spacer" />}
       <AgentActivity activity={progress?.agent_activity} fresh={fresh} />
       {!fresh && <button type="button" className="btn sm ghost"
-        onClick={() => resource.retry({ supersede: true })}>Retry</button>}
-      <button type="button" className="btn sm" onClick={onOpen}>Agent cycle</button>
+        onClick={() => resource.retry({ supersede: true })}>{ru ? 'Повторить чтение' : 'Retry'}</button>}
+      <button type="button" className="btn sm" onClick={onOpen}>{ru ? 'Цикл агента' : 'Agent cycle'}</button>
     </section>
   }
   const history = progress?.history
@@ -82,7 +87,7 @@ export function HarnessProgressPanel({ runId, expectedGeneration, seq, externalM
         {receipt.action_ref ? ` · action ${receipt.action_ref}` : ''}</div>
     </li>
   }
-  return <Panel title="External agent cycle" sub={progress ? `event #${progress.event_seq}` : runId}
+  return <Panel title={ru ? 'Цикл внешнего агента' : 'External agent cycle'} sub={progress ? `event #${progress.event_seq}` : runId}
     onClose={onClose} wide>
     {configStatus === 'ready' && externalMode !== true && <p role="status">
       This run uses LoopLab's built-in agent cycle. The external agent journals apply to runs
