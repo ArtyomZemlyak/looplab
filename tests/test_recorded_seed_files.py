@@ -13,10 +13,10 @@ from looplab.serve import seed_files as projection
 from looplab.serve.server import make_app
 
 
-def _run(root):
+def _run(root, *, train=b"print('recorded runner')\n"):
     rd, src = root / "archive", root / "owner"
     rd.mkdir(); src.mkdir()
-    (src / "train.py").write_bytes(b"print('recorded runner')\n")
+    (src / "train.py").write_bytes(train)
     (src / "recipe.env").write_bytes(b"MOMENTUM=0.2\n")
     (src / "binary.dat").write_bytes(b"\x00\xff")
     (src / "large.txt").write_bytes(b"x" * (projection.TEXT_LIMIT + 1))
@@ -70,6 +70,29 @@ def test_binary_large_path_and_corrupt_archive_do_not_supply_partial_or_live_tex
     (rd / receipt["archive"]["path"] / "train.py").write_bytes(b"corrupt")
     refusal = _read(client, params)
     assert refusal.status_code == 409 and refusal.json()["detail"]["code"] == "seed_archive_unavailable"
+
+
+@pytest.mark.parametrize("data, status", [
+    ("\ufffd".encode(), "utf8"),
+    ("кириллица 🚀\n".encode(), "utf8"),
+    (b"\xef\xbb\xbfBOM\r\n", "utf8"),
+    (b"", "utf8"),
+    (b"\xed\xa0\x80", "binary"),  # An encoded surrogate is not UTF-8 source text.
+    (b"\xff", "binary"),
+    (b"\x00", "binary"),
+])
+def test_archive_unicode_is_exact_or_explicitly_binary(tmp_path, data, status):
+    client, _, src, _, _, params = _run(tmp_path, train=data)
+    (src / "train.py").write_bytes(b"changed owner text")
+    response = _read(client, {**params, "path": "train.py"})
+    assert response.status_code == 200
+    file = response.json()["file"]
+    assert file["text_status"] == status
+    assert file["bytes"] == len(data) and file["sha256"] == hashlib.sha256(data).hexdigest()
+    if status == "utf8":
+        assert file["text"].encode("utf-8") == data
+    else:
+        assert file["text"] is None, "invalid source bytes are never replaced with invented text"
 
 
 def test_attempt_and_generation_are_required_and_reset_during_verification_is_refused(tmp_path, monkeypatch):

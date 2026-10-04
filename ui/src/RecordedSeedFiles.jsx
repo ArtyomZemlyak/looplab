@@ -29,8 +29,12 @@ export function validSeedFilesPage(page, identity, offset, path) {
     && ['bytes', 'executable', 'sha256'].every(key => file[key] === listed[key])
     && ['utf8', 'binary', 'too_large'].includes(file.text_status)
     && (file.text_status === 'utf8' ? typeof file.text === 'string'
+      && file.bytes <= page.text_limit && file.text.length <= page.text_limit
       && !file.text.includes('\0')
-      && new TextEncoder().encode(file.text).length === file.bytes && file.bytes <= page.text_limit
+      // In Unicode mode a paired surrogate is one astral code point, outside this range.
+      // Refuse lone surrogates before TextEncoder silently hashes replacement characters.
+      && !/[\uD800-\uDFFF]/u.test(file.text)
+      && new TextEncoder().encode(file.text).length === file.bytes
       : file.text === null && (file.text_status === 'too_large'
         ? file.bytes > page.text_limit : file.bytes <= page.text_limit))
 }

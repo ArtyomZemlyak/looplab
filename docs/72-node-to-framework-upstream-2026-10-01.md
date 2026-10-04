@@ -5409,3 +5409,33 @@ regressions; Windows-only materializer scenario там явно skip. Полна
 **Граница.** Это консервативная файловая проекция saved edits. Фильтр не восстанавливает
 полную программу или runtime dependencies и не доставляет изменения в task repo.
 O6/O14 остаются OPEN для этих функций.
+
+### 20.30 72.O6: hash не подтверждает текст после молчаливой Unicode-подмены (2026-10-04)
+
+**Воспроизведено.** JSON может содержать одиночный UTF-16 surrogate. Browser
+`TextEncoder` заменяет его на U+FFFD перед вычислением размера и SHA-256.
+Прежний `ui/src/RecordedSeedFiles.jsx::validSeedFilesPage` принимал такую строку,
+если receipt соответствовал replacement bytes: совпадение hash не подтверждало
+точный полученный текст. Отдельный regression сначала упал на этом принятии.
+Это дефект проверки повреждённого ответа; корректный server UTF-8 decoder
+такие строки не создаёт.
+
+**Исправлено.** Validator отказывает при unpaired surrogate до кодирования.
+Unicode-mode проверка сохраняет правильные surrogate pairs, включая emoji.
+Размер объявленного файла и длина текста ограничиваются до выделения encoded
+buffer; прежние byte-count, SHA-256 и identity проверки остаются обязательными.
+Никакой replacement-текст не выдаётся за проверенный source. Error очищает
+preview; восстановление требует явного чтения существующего архива.
+
+**Проверка.** Replay-first. Live component drive проходит повреждённый JSON с
+совпадающими replacement length/hash, отказ без preview и явное восстановление.
+Кириллица, emoji, настоящий U+FFFD, BOM/CRLF и пустой файл читаются; Copy сохраняет
+точный текст. Это тест настоящего React-компонента с подставными HTTP ответами,
+не screenshot или human acceptance. Отдельные HTTP integration cases читают
+реальный архив после изменения owner file: допустимый UTF-8 возвращается byte-exact,
+invalid UTF-8, encoded surrogate и NUL явно помечаются binary без придуманного
+текста. Selectors и результаты —
+[validation.json](assets/72-archive-unicode/validation.json).
+
+**Граница.** Source-read fix не подтверждает полноту runnable программы, её runtime
+dependencies или доставку в task repo. O6/O14 остаются OPEN.

@@ -114,6 +114,59 @@ test('real Inspector reads inherited files only on request, verifies text hash a
   } finally { localStorage.removeItem('looplab.language'); await h.close() }
 })
 
+test('archive text refuses encoder replacement even when its replacement bytes match the recorded hash', async () => {
+  // JSON permits lone UTF-16 surrogates. TextEncoder replaces them with U+FFFD, so hashing
+  // alone would authenticate different text. The server's strict UTF-8 decoder cannot emit them.
+  let source = '\ufffd'
+  let wire = source
+  const response = path => {
+    const file = { ...row, bytes: Buffer.byteLength(source),
+      sha256: createHash('sha256').update(source).digest('hex') }
+    return { ...page, files: [file], file: path ? { ...file, text_status: 'utf8', text: wire } : null }
+  }
+  const h = await mountLive({ visible: true, routes: {
+    '/api/runs/r/nodes/1/seed-files': ({ url }) => response(url.searchParams.get('path')),
+  } })
+  const previousClipboard = Object.getOwnPropertyDescriptor(navigator, 'clipboard')
+  const copied = []
+  Object.defineProperty(navigator, 'clipboard', { configurable: true,
+    value: { writeText: async value => copied.push(value) } })
+  try {
+    const { default: RecordedSeedFiles, validSeedFilesPage: valid } = await h.load('/src/RecordedSeedFiles.jsx')
+    for (const malformed of ['\ud800', '\udfff', 'a\ud800b', '\ud800\ud800', '\udfff\udfff']) {
+      wire = JSON.parse(JSON.stringify(malformed))
+      source = new TextDecoder().decode(new TextEncoder().encode(wire))
+      assert.equal(valid(response('train.py'), identity, 0, 'train.py'), false,
+        'a matching hash of replacement bytes cannot validate malformed Unicode')
+    }
+    source = '\ufffd'; wire = '\ud800'
+    const mounted = await h.mount(RecordedSeedFiles, { runId: 'r', node: { id: 1, attempt: 0 },
+      generation, baseDigest, language: 'ru' })
+    const button = name => [...mounted.container.querySelectorAll('button')].find(item => item.textContent === name)
+    await click(button('Открыть файлы базы'))
+    await until(() => button('train.py'), 'inventory')
+    await click(button('train.py'))
+    await until(() => /Архив или его квитанция недоступны/.test(mounted.container.textContent), 'malformed Unicode refused')
+    assert.equal(mounted.container.querySelector('[aria-label="База: train.py"]'), null)
+    for (const genuine of ['\ufffd', 'кириллица \ud83d\ude80\n', '\ufeffBOM\r\n', '']) {
+      source = genuine; wire = genuine
+      assert.equal(valid(response('train.py'), identity, 0, 'train.py'), true)
+      await click(button('Открыть файлы базы'))
+      await until(() => button('train.py'), 'explicit inventory recovery')
+      await click(button('train.py'))
+      await until(() => mounted.container.querySelector('[aria-label="База: train.py"]'), 'exact UTF-8 preview')
+      // CodeViewer renders separate lines. Copy must preserve BOM, CRLF and an empty file exactly.
+      await click(button('Копировать') || button('Скопировано'))
+      assert.equal(copied.at(-1), genuine)
+    }
+    assert.ok(h.fetch.calls.every(call => call.method === 'GET'))
+  } finally {
+    if (previousClipboard) Object.defineProperty(navigator, 'clipboard', previousClipboard)
+    else delete navigator.clipboard
+    await h.close()
+  }
+})
+
 test('a delayed archive read does not take focus from another input; missing edits remain explicitly unknown', async () => {
   let finish
   const h = await mountLive({ visible: true, routes: {

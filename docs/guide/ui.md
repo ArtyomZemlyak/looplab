@@ -56,6 +56,8 @@ For a completed experiment with a stored base archive, **Open base files / От�
 файлы базы** reads its inherited source separately from its edits. Browse the paged
 file list, sizes and hashes, then select a file to read its verified UTF-8 text
 (up to 256 KiB). Binary and larger files have an explicit preview limitation.
+The browser refuses malformed Unicode text instead of hashing silently substituted
+characters. Valid Cyrillic, emoji, BOM and CRLF are preserved when copying source text.
 These are the recorded seed files **before node edits and runtime mounts/task
 assets**, not a complete runnable export. The read is bound to the current run
 generation, node attempt and base receipt; reset or unavailable/corrupt evidence

@@ -1,0 +1,32 @@
+{
+  "version": 1,
+  "date": "2026-10-04",
+  "increment": "doc72 section 20.30, exact Unicode validation for recorded archive text",
+  "source_parent_commit": "b4740d2110231748abbaa4a93489f500328676cd",
+  "replay": {"selectors": ["tests/test_events_replay.py"], "passed": 193, "skipped": 0, "failed": 0, "seconds": 4.52, "order": "first"},
+  "archive_http_integration": {"selectors": ["tests/test_recorded_seed_files.py"], "passed": 14, "skipped": 0, "failed": 0, "seconds": 10.17},
+  "ui_component_regressions": {
+    "selectors": ["ui/test/recordedSeedFiles.test.js", "ui/test/nodeCode.test.js"],
+    "passed": 9, "skipped": 0, "failed": 0, "seconds": 7.30,
+    "scope": "Real React components under jsdom/Vite with fixture HTTP responses and a clipboard stub; not a browser screenshot or human acceptance."
+  },
+  "contracts": {
+    "selectors": ["tests/test_documentation_contracts.py", "tests/test_documented_entry_points_resolve.py", "tests/test_merge_history_integrity.py", "tests/test_cli_reference.py", "tests/test_package_layering.py"],
+    "passed": 47, "skipped": 0, "failed": 0, "seconds": 21.80
+  },
+  "production_ui_build": {"status": "passed", "modules": 419, "vite_seconds": 2.92},
+  "strict_documentation_build": {"status": "passed", "seconds": 10.16},
+  "total_passed": 263,
+  "total_skipped": 0,
+  "git_diff_check": "passed",
+  "reproduction": {
+    "case": "Lone UTF-16 surrogate in JSON text with byte count and SHA-256 corresponding to TextEncoder replacement bytes",
+    "before_fix": "Focused regression failed because validSeedFilesPage returned true",
+    "after_fix": "Validator refuses malformed text; live component clears preview; an explicit new read recovers valid text",
+    "valid_text_cases": ["Literal U+FFFD", "Cyrillic and emoji", "BOM and CRLF", "Empty file"],
+    "server_binary_cases": ["UTF-8 encoded surrogate", "Invalid UTF-8 byte", "NUL"],
+    "source": "Real archived bytes remain unchanged when the owner file changes; no current-repository fallback"
+  },
+  "coverage": "Focused source-read regression. Full repository CI, new training, screenshot acceptance and task repository delivery were not performed.",
+  "remaining_open": ["Full materialized program and runtime dependencies", "Target-aware task repository delivery", "Human usability and full CI acceptance"]
+}
