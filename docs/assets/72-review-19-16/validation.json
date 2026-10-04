@@ -1,0 +1,138 @@
+{
+  "version": 1,
+  "date": "2026-10-04",
+  "review": "doc72 section 19.16",
+  "source_commit": "d2cb55609b67fbf7492c4d4d30e1269a844c22a4",
+  "scope": "LoopLab external agent, Assistant onboarding, results, run-owned Maintainer worktrees and task-repo delivery",
+  "production_changes": false,
+  "suites": [
+    {
+      "selectors": [
+        "tests/test_events_replay.py"
+      ],
+      "passed": 193,
+      "failed": 0,
+      "skipped": 0,
+      "seconds": 3.46,
+      "order": "replay first"
+    },
+    {
+      "selectors": [
+        "tests/test_upstream_request_retention.py",
+        "tests/test_upstream_manifest_recovery.py",
+        "tests/test_upstream_api.py"
+      ],
+      "passed": 22,
+      "failed": 0,
+      "skipped": 0,
+      "seconds": 48.95,
+      "coverage": "Retained request publication before claim/Git, original identities and ACK recovery, damaged manifest refusals, HTTP/MCP/Assistant upstream API; private CPU fixture evaluations"
+    }
+  ],
+  "ui": {
+    "fresh_production_build": true,
+    "build_stamp": "6bf77953309a1655cdbd598ecf7709451d7499adb2584b26f5d5e06d84e31b45",
+    "viewport": [
+      1920,
+      1080
+    ],
+    "capture": "Full-page CUA captures; initial cropped captures discarded or replaced",
+    "language": "Auto resolved to English; no new RU acceptance claimed",
+    "fixture": "Existing private demo fixture recorded 2026-10-02, not created by this review",
+    "nodes": 2,
+    "base_advances": 1,
+    "event_seq": 79,
+    "run_generation": "c9c4a8536df883c4ed7c11fe91ce41523ec67d129252a8591c36bb423adf4f4d",
+    "events_hash_during_last_read": "cd2b86ff77019cfd456bff91e43c0ee12821f0b38c4a2ebef2fb64a46d8cf96c",
+    "events_hash_after_server_stop": "cd2b86ff77019cfd456bff91e43c0ee12821f0b38c4a2ebef2fb64a46d8cf96c",
+    "model_requests": 0,
+    "engine_mutations": 0,
+    "live_mcp_client_started": false,
+    "private_server_stopped": true,
+    "viewport_reset": true,
+    "screenshots": [
+      {
+        "file": "01-entry.jpg",
+        "width": 1920,
+        "height": 1080,
+        "sha256": "3dd1641e788db83b40ee8898c76d110c0dcd8cf77a94cee54cfce4a83329af61",
+        "accepted": "Exact fresh CUA screenshot saved and visually inspected; no image editing"
+      },
+      {
+        "file": "02-start-draft.jpg",
+        "width": 1920,
+        "height": 1080,
+        "sha256": "8993fcbb405b5968749a0f779a66603d00dc4de18ea3299d8846c89131ed1171",
+        "accepted": "Exact fresh CUA screenshot saved and visually inspected; no image editing"
+      },
+      {
+        "file": "03-report.jpg",
+        "width": 1920,
+        "height": 1080,
+        "sha256": "0c83574cda71970045f3ba953606263c1d96290b677736da140f3f1d66f2ddd8",
+        "accepted": "Exact fresh CUA screenshot saved and visually inspected; no image editing"
+      },
+      {
+        "file": "04-external-handoff-full.jpg",
+        "width": 1920,
+        "height": 1080,
+        "sha256": "c72f63858492c6c0f7b98b2ee0afb8e5a51d45316df1d28ac84bf768c1832c26",
+        "accepted": "Exact fresh CUA screenshot saved and visually inspected; no image editing"
+      },
+      {
+        "file": "05-chat-result.jpg",
+        "width": 1920,
+        "height": 1080,
+        "sha256": "6985049c253a2e4678a91048d326c2f72264a31aa3ef68e7871613e2104ec9bb",
+        "accepted": "Exact fresh CUA screenshot saved and visually inspected; no image editing"
+      },
+      {
+        "file": "06-code-and-base.jpg",
+        "width": 1920,
+        "height": 1080,
+        "sha256": "91550650788b6b60dc082597022ae67c1777e9fa061773d0d716b52ef5d64a66",
+        "accepted": "Exact fresh CUA screenshot saved and visually inspected; no image editing"
+      }
+    ],
+    "archive_read": {
+      "status": 409,
+      "code": "seed_archive_unavailable",
+      "message": "The recorded base archive is missing, changed or unreadable.",
+      "remediation": "Inspect the recorded archive and attempt; no live-source fallback is used.",
+      "ui_dom": "Archive or its evidence is unavailable. Refresh state and retry; the current repository is not substituted.",
+      "limit": "DOM and direct HTTP evidence; error screenshot showed transient loading and was not accepted. No inference of a new storage regression."
+    }
+  },
+  "observed_open_gaps": [
+    "Remote client cannot fetch retained exact original proposal body through HTTP/MCP; history pointer requires server filesystem access",
+    "External bootstrap still spans operator server/run/credentials, client setup and connection checks",
+    "Repeated result caveats lack one concise subject-specific conclusion linking code and delivery",
+    "Root graph chip says baseline while free result explains first eligible is not necessarily task baseline",
+    "Source errors collapse into generic refresh/retry advice",
+    "Proposal/worktree/request/check lifecycle and retention are not one Assistant card",
+    "Complete executed-program manifest and target-relative task-repo delivery remain OPEN"
+  ],
+  "not_verified": [
+    "Fresh installation or first-time user",
+    "Live model or external client handoff",
+    "New UI-driven training",
+    "New 2K/RU and keyboard/contrast acceptance",
+    "Owner repository delivery or two-run target composition",
+    "Full CI suite"
+  ],
+  "documentation_validation": {
+    "status": "passed",
+    "selectors": [
+      "tests/test_documentation_contracts.py",
+      "tests/test_documented_entry_points_resolve.py",
+      "tests/test_merge_history_integrity.py"
+    ],
+    "passed": 34,
+    "failed": 0,
+    "skipped": 0,
+    "seconds": 10.44,
+    "mkdocs_strict": "passed",
+    "git_diff_check": "passed"
+  },
+  "total_distinct_tests_passed": 249
+}
