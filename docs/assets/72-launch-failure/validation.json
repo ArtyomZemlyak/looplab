@@ -1,0 +1,125 @@
+{
+  "date": "2026-10-04",
+  "source_parent": "992f70d3b804235e6726ba6d8c3dce3ed366cb62",
+  "scope": "doc72: local errors for all five remaining lazy first-run/launch entrances, retaining nested checked-plan and saved-model controls",
+  "regression_before_fix": {
+    "command": "node --test --test-timeout=30000 test/assistantLaunchFailure.test.js",
+    "failed": 5,
+    "reason": "all five real rejected dynamic imports removed Assistant composer"
+  },
+  "tests": [
+    {
+      "command": ".venv/Scripts/python.exe -m pytest -o addopts=\"\" -q tests/test_events_replay.py --basetemp=.tmp/doc72-launch-failure/replay",
+      "passed": 193
+    },
+    {
+      "cwd": "ui",
+      "command": "node --test --test-timeout=30000 --test-concurrency=4 test/*.test.js",
+      "passed": 1954,
+      "failed": 0,
+      "skipped": 0,
+      "cancelled": 0
+    },
+    {
+      "cwd": "ui",
+      "command": "node --test --test-timeout=30000 test/assistantLaunchFailure.test.js test/assistantResultFailure.test.js test/lazyBoundaryRecovery.test.js test/newRunStarter.test.js test/launchGuidance.test.js test/launchCardSemantics.test.js test/assistantModelCheck.test.js",
+      "passed": 31,
+      "note": "before addition of pending-overlay behavioral test; subset of full UI suite"
+    },
+    {
+      "cwd": "ui",
+      "command": "node --test --test-timeout=30000 test/lazyBoundaryRecovery.test.js test/uiSemantics.test.js",
+      "passed": 40,
+      "included_in_full_ui_total": true
+    },
+    {
+      "cwd": "ui",
+      "command": "node --test --test-timeout=30000 test/assistantLaunchFailure.test.js",
+      "passed": 5,
+      "note": "final strengthened phase/locale no-retry assertions; subset, not added to unique test total"
+    },
+    {
+      "command": ".venv/Scripts/python.exe -m pytest -o addopts=\"\" -q tests/test_api_reference.py tests/test_documentation_contracts.py tests/test_doc_surface_budgets.py tests/test_architecture_diagram_geometry.py --basetemp=.tmp/doc72-launch-failure/docs",
+      "passed": 28
+    },
+    {
+      "command": ".venv/Scripts/python.exe -m mkdocs build --strict --site-dir .tmp/doc72-launch-failure/site",
+      "exit": 0
+    },
+    {
+      "command": "git diff --check",
+      "exit": 0
+    }
+  ],
+  "production_build": {
+    "command": "node node_modules/vite/bin/vite.js build --outDir ../.tmp/doc72-launch-failure/ui-dist-final",
+    "exit": 0
+  },
+  "bundle_gate": {
+    "command": "node scripts/check-bundle.mjs --dist ../.tmp/doc72-launch-failure/ui-dist-final",
+    "exit": 1,
+    "total_js_gzip": 646868,
+    "total_js_budget": 633984,
+    "remaining_excess": 12884,
+    "js_added": 43,
+    "total_css_gzip": 59635,
+    "other_size_reachability_cycle_boolean_gates_pass": true,
+    "ceilings_changed": false
+  },
+  "browser": {
+    "fixture": "new private SessionStore with two explicitly authored offline UI messages and quadratic toy proposal; no ML run",
+    "faults": "503 only for manifest entry asset of LaunchGuidance, then FirstRunModelStatus; real other assets/API",
+    "fault_counts": {
+      "fault-LaunchGuidance": 1,
+      "normal": 0,
+      "fault-FirstRunModelStatus": 1
+    },
+    "non_get_requests": [
+      {
+        "method": "POST",
+        "path": "/api/start/preflight",
+        "status": 200
+      }
+    ],
+    "checked_plan_fullhd": {
+      "alerts": [
+        "Не удалось открыть «Следующий шаг».Validated. This exact proposal is ready to start.Не удалось загрузить или отобразить этот раздел. Перезагрузите LoopLab и попробуйте снова.Перезагрузить LoopLab"
+      ],
+      "checked": true,
+      "composer": "Проверочный черновик — запуск не начинаем",
+      "forms": 1,
+      "height": 1080,
+      "scroll": {
+        "client": 778,
+        "full": 778
+      },
+      "startEnabled": true,
+      "width": 1920
+    },
+    "checks": [
+      "real free preflight succeeds despite failed guidance; checked plan and enabled start action remain",
+      "failure fallback follows current validated technical status instead of stale review text",
+      "after normal server and explicit reload guidance is visible; start requires fresh validation",
+      "first-run model-setup failure retains starter, code example prepares editable question and focuses composer",
+      "private drafts cleared without sending; return to chat; viewport reset and own tab closed"
+    ],
+    "console": "expected failed dynamic import under injected 503; no zero-error claim for fault scenario",
+    "capture": {
+      "width": 1280,
+      "height": 720
+    },
+    "model_calls": 0,
+    "engine_writes": 0,
+    "new_training": false,
+    "viewport_reset": true,
+    "own_tab_closed": true,
+    "private_server_stopped": true
+  },
+  "limits": [
+    "total JS budget remains RED, no green-CI claim",
+    "shared critical dependency or non-lazy Assistant failures may still reach its outer boundary",
+    "browser proves preflight only; ambiguous startup recovery is covered with protocol stubs, not real engine launch",
+    "no live MCP, new-user onboarding acceptance, LoopLab run-owned worktree or owner-repo delivery acceptance",
+    "doc72 OPEN topics remain OPEN"
+  ]
+}

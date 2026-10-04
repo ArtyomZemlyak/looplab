@@ -4,7 +4,7 @@ import { useDialogFocus } from './useDialogFocus.js'
 const reloadPage = () => window.location.reload()
 
 function LoadSurface({ label, mode, failed = false, onReload = reloadPage, onClose,
-    language = 'en', focusOnFailure = true }) {
+    language = 'en', focusOnFailure = true, failureContent }) {
   const ru = language === 'ru'
   const surfaceRef = useRef(null)
   const reloadRef = useRef(null)
@@ -23,6 +23,7 @@ function LoadSurface({ label, mode, failed = false, onReload = reloadPage, onClo
       : ru ? `Открываем: ${label}…` : `Opening ${label}…`}</h1>}
     {mode !== 'route' && <b>{failed ? ru ? `Не удалось открыть «${label}».` : `${label} could not be opened.`
       : ru ? `Загрузка раздела «${label}»…` : `Loading ${label}…`}</b>}
+    {failed && failureContent != null && <div>{failureContent}</div>}
     {failed
       ? <><p>{ru ? 'Не удалось загрузить или отобразить этот раздел. Перезагрузите LoopLab и попробуйте снова.'
           : 'This section failed while loading or rendering. Reload LoopLab to fetch a consistent build and retry.'}</p>
@@ -75,18 +76,21 @@ class LoadErrorBoundary extends React.Component {
   render() {
     if (this.state.error) return <LoadSurface label={this.props.label} mode={this.props.mode}
       failed onReload={this.props.onReload} onClose={this.props.onClose}
-      language={this.props.language} focusOnFailure={this.props.focusOnFailure} />
+      language={this.props.language} focusOnFailure={this.props.focusOnFailure}
+      failureContent={this.props.failureContent} />
     return this.props.children
   }
 }
 
 /** A local Suspense + error boundary. A failed chunk never blanks the surrounding route. */
 export default function LazyBoundary({ label, children, mode = 'inline', focusOnReady = false,
-    resetKey = label, onReload = reloadPage, onClose, language = 'en', focusOnFailure = true }) {
+    resetKey = label, onReload = reloadPage, onClose, language = 'en', focusOnFailure = true,
+    loadingFallback, failureContent }) {
   return <LoadErrorBoundary label={label} mode={mode} resetKey={resetKey} onReload={onReload}
-    onClose={onClose} language={language} focusOnFailure={focusOnFailure}>
-    <Suspense fallback={<LoadSurface label={label} mode={mode} onReload={onReload} onClose={onClose}
-      language={language} focusOnFailure={focusOnFailure} />}>
+    onClose={onClose} language={language} focusOnFailure={focusOnFailure} failureContent={failureContent}>
+    <Suspense fallback={loadingFallback === undefined
+      ? <LoadSurface label={label} mode={mode} onReload={onReload} onClose={onClose}
+          language={language} focusOnFailure={focusOnFailure} /> : loadingFallback}>
       <LoadedFocus focusOnReady={focusOnReady}>{children}</LoadedFocus>
     </Suspense>
   </LoadErrorBoundary>

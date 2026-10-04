@@ -10,6 +10,7 @@ import {
 } from './launchDraft.js'
 import { launchStatusOutcome, pollLaunchStatus } from './launchRecovery.js'
 import { launchCostSummary } from './launchCostModel.js'
+import LazyBoundary from './LazyBoundary.jsx'
 import {
   getSnapshot as getSettingsLaunchGuard, subscribe as subscribeSettingsLaunchGuard,
 } from './settingsLaunchGuard.js'
@@ -995,8 +996,11 @@ export default function LaunchCard({
     </section>
     <div className="asst-launch-progress"
       role="status" aria-live="polite" aria-atomic="true">
-      <React.Suspense fallback={guidanceNotice}><LaunchGuidance phase={guidancePhase}
-        language={cardLanguage} notice={guidanceNotice} /></React.Suspense>
+      <LazyBoundary resetKey={transportIdentity} language={cardLanguage} focusOnFailure={false}
+        label={cardLanguage === 'ru' ? 'Следующий шаг' : 'Next step'}
+        loadingFallback={guidanceNotice} failureContent={guidanceNotice}>
+        <LaunchGuidance phase={guidancePhase} language={cardLanguage} notice={guidanceNotice} />
+      </LazyBoundary>
     </div>
     {normalLaunchActions && <>
       <p className="asst-launch-cost"><strong>{t('Validate is free:')}</strong> {t('it makes no model/provider call and resolves inherited values in the review above.')}</p>

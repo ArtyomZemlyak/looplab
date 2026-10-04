@@ -2,6 +2,7 @@ import React, { useEffect, useState } from 'react'
 import { usePoll } from './hooks.js'
 import { deadlineGet } from './util.js'
 import { MODEL_CHECK_EVENT, modelConnectionView, readModelCheck } from './modelConnection.js'
+import LazyBoundary from './LazyBoundary.jsx'
 import './assistant-model-check.css'
 
 const AssistantModelCheck = React.lazy(() => import('./AssistantModelCheck.jsx'))
@@ -36,8 +37,11 @@ export default function FirstRunModelStatus({ onSettings, language = 'auto' }) {
     {!showCheck && <button type="button" className="btn sm" onClick={onSettings}>{ru ? 'Настроить модель' : 'Model settings'}</button>}
     {!showCheck && <button type="button" className="btn sm ghost" onClick={() => setShowCheck(true)}>
       {ru ? 'Проверить связь…' : 'Check connection…'}</button>}
-    {showCheck && <React.Suspense fallback={<span role="status">{ru ? 'Открываем проверку связи…' : 'Opening connection check…'}</span>}>
+    {showCheck && <LazyBoundary resetKey="model-check" language={language} focusOnFailure={false}
+      label={ru ? 'Проверка связи с моделью' : 'Model connection check'}
+      failureContent={<button type="button" className="btn sm" onClick={onSettings}>
+        {ru ? 'Настроить модель' : 'Model settings'}</button>}>
       <AssistantModelCheck onSettings={onSettings} language={language} />
-    </React.Suspense>}
+    </LazyBoundary>}
   </div>
 }

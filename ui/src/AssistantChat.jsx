@@ -7,6 +7,7 @@ import { launchDraftKey } from './launchDraftStore.js'
 import { OpIcon } from './icons.jsx'
 import { toolActivityProjection } from './assistantToolActivity.js'
 import { turnPropsEqual } from './assistantTranscriptModel.js'
+import LazyBoundary from './LazyBoundary.jsx'
 import './assistant-tool-activity.css'
 
 const LaunchCard = React.lazy(() => import('./LaunchCard.jsx'))
@@ -184,8 +185,8 @@ function Turn({
       {!readOnly && Array.isArray(m.proposals) && m.proposals.map((sp, i) => {
         const draftKey = launchDraftKey({ sessionId: launchSessionId, messageId: launchMessageId,
           messageIndex: launchMessageIndex, proposalId: sp.proposal_id, proposalIndex: i })
-        return <React.Suspense key={draftKey} fallback={<div className="asst-launch" role="status">
-          {language === 'ru' ? 'Загружаем карточку запуска…' : 'Loading launch card…'}</div>}>
+        return <LazyBoundary key={draftKey} resetKey={draftKey} language={language} focusOnFailure={false}
+          label={language === 'ru' ? 'Карточка запуска' : 'Launch card'}>
           <LaunchCard key={draftKey} spec={sp} chat={launchChat} launchIdentity={draftKey}
           retainedDraft={launchDrafts?.[draftKey]}
           retainedConfigOpen={launchDisclosures?.[draftKey] === true}
@@ -193,7 +194,7 @@ function Turn({
           onDraftChange={draft => onLaunchDraft?.(draftKey, draft)}
           onConfigOpenChange={open => onLaunchDisclosure?.(draftKey, open)}
           onStarted={() => onLaunchStarted?.(draftKey)} />
-        </React.Suspense>
+        </LazyBoundary>
       })}
     </div>
   </div>

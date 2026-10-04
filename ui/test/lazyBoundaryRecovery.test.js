@@ -44,3 +44,41 @@ test('default load failure focuses recovery, locale retains the failure, new ide
     await harness.close()
   }
 })
+
+test('default pending overlay retains Close, Escape and return to its opener', async () => {
+  const harness = await mountLive({ visible: true })
+  const { default: LazyBoundary } = await harness.load('/src/LazyBoundary.jsx')
+  let release
+  const pending = new Promise(resolve => { release = resolve })
+  function Reader() { throw pending }
+  function Surface() {
+    const [open, setOpen] = React.useState(false)
+    return React.createElement(React.Fragment, null,
+      React.createElement('button', { onClick: () => setOpen(true) }, 'Open reader'),
+      open && React.createElement(LazyBoundary, { label: 'Result', mode: 'overlay',
+        onClose: () => setOpen(false) }, React.createElement(Reader)))
+  }
+  const mounted = await harness.mount(Surface)
+  try {
+    const opener = mounted.container.querySelector('button')
+    await React.act(async () => opener.focus())
+    await click(opener)
+    const overlay = mounted.container.querySelector('[role="dialog"]')
+    assert.equal(overlay.getAttribute('aria-modal'), 'true')
+    const close = overlay.querySelector('button')
+    await until(() => document.activeElement === close, 'pending overlay focus')
+    await click(close)
+    await until(() => document.activeElement === opener, 'Close returns focus')
+    assert.equal(mounted.container.querySelector('[role="dialog"]'), null)
+    await click(opener)
+    await until(() => document.activeElement !== opener, 'reopened overlay focus')
+    await React.act(async () => document.activeElement.dispatchEvent(
+      new KeyboardEvent('keydown', { key: 'Escape', bubbles: true })))
+    await until(() => document.activeElement === opener, 'Escape returns focus')
+    assert.equal(mounted.container.querySelector('[role="dialog"]'), null)
+  } finally {
+    await mounted.unmount()
+    release()
+    await harness.close()
+  }
+})

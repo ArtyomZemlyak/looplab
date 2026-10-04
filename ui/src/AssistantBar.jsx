@@ -3512,10 +3512,12 @@ export default function AssistantBar({ runId, hidden = false, onReady }) {
           : firstRun
             ? 'Describe a goal to get a launch proposal. The run starts only after you review and approve it.'
             : 'Describe a goal, ask about runs, or plan an experiment.'}</p>
-      {firstRun && <React.Suspense fallback={null}>
+      {firstRun && <LazyBoundary resetKey="model-setup" language={responseLanguage} focusOnFailure={false}
+        label={text('Model setup', 'Настройка модели')}>
         <FirstRunModelStatus language={responseLanguage} onSettings={openAssistantModelSettings} />
-      </React.Suspense>}
-      {newRunDraft && <React.Suspense fallback={null}>
+      </LazyBoundary>}
+      {newRunDraft && <LazyBoundary resetKey="run-examples" language={responseLanguage} focusOnFailure={false}
+        label={text('New run examples', 'Примеры нового запуска')}>
         <NewRunStarter language={responseLanguage}
           disabled={!!input.trim() || historical || composerEditingPaused || busy || commandBusy}
           onDraft={draft => {
@@ -3523,7 +3525,7 @@ export default function AssistantBar({ runId, hidden = false, onReady }) {
             setInput(current => current.trim() ? current : draft)
             requestAnimationFrame(() => inputRef.current?.focus())
           }} />
-      </React.Suspense>}
+      </LazyBoundary>}
       {!showRunResult && !input.trim() && welcomeHints.length > 0 && <div className="asst-hints">
         {welcomeHints.map(h => <button key={h} className="asst-hint"
           disabled={historical || composerEditingPaused}

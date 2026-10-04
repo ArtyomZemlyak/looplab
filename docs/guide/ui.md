@@ -35,6 +35,11 @@ If a result reader fails to load or render, its local error offers **Reload Loop
 Перезагрузить LoopLab**. The chat composer, draft and other result reader remain
 available; a late reader failure does not move focus out of your message. You can
 close a failed comparison. Reload is explicit and reloads the whole application.
+First-run model setup, connection checks, examples and launch cards also have
+local loading errors. A failed connection-check module keeps the saved model
+status and **Model settings** available. A failed next-step hint keeps the launch
+card, its current technical status, validation and startup recovery controls.
+An explicit reload requires checking the plan again before starting it.
 Each brief separates **Comparison**, **Reliability** and **Next**. Comparison names
 the evaluation scores it uses and explains missing or incompatible evidence;
 confirmation means remain separate. Recovered metrics are labelled **Recovered**,
@@ -1286,7 +1291,7 @@ connection and payload helpers share `run-support`; owner controls and full Agen
 content retain their lazy boundaries. Assistant command suggestions use
 `AssistantBar.jsx::suggestionPop` and `.cmdbar-pop`, not the retired `.cmd-suggest` styles.
 Run `npm run check:bundle` after building: passing a route budget does not imply the
-total byte budget passed. Current measurements and remaining excess are in doc 72 §20.45.
+total byte budget passed. Current measurements and remaining excess are in doc 72 §20.46.
 
 Production HTML and non-versioned assets revalidate. Only content-hashed files listed by Vite's build manifest
 receive long-lived immutable caching. Eligible ordinary responses can use gzip when the client accepts it;

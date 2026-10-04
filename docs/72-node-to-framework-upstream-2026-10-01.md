@@ -4075,7 +4075,7 @@ merge этим проходом не проверены.
    bundle budgets. §20.42 снижает JS на 4719 B и CSS на 174 B: общая CSS,
    DAG CSS и review DAG JS теперь проходят прежние пределы. Осталось
    превышение total JS: 13317 B после §20.42, 13380 B после §20.43,
-   12841 B после §20.45;
+   12884 B после §20.46;
    потолки не повышены. Нужны дальнейшее
    уменьшение исходного кода/повторов и полный CI. Один lazy import не снижает
    сумму всех assets; нельзя выдавать route budget за зелёный общий gate.
@@ -6396,3 +6396,78 @@ manifest, lifecycle и доставка **worktree LoopLab** в пользова
 
 Документальные проверки — 28 passed; strict MkDocs и diff-check проходят.
 Всего 2169 уникальных локальных тестов: 193 replay + 1948 UI + 28 docs.
+
+### 20.46. Отказы первого запуска и вложенных подсказок — 2026-10-04
+
+**Ревью и воспроизведение.** Исходное дерево —
+`992f70d3b804235e6726ba6d8c3dce3ed366cb62`. После изоляции результатов оставались
+пять lazy entrances первого запуска: `FirstRunModelStatus`, `NewRunStarter`,
+`AssistantModelCheck`, `LaunchCard`, `LaunchGuidance`. Все пять real rejected
+imports в настоящем `OwnerWorkspace` до исправления удаляли composer.
+Особенно опасен отказ guidance после проверки плана: исчезала сама карточка
+с validation receipt и действиями startup recovery.
+
+**Исправлено.** Все пять entrances получили локальные `LazyBoundary` с RU/EN
+loading/error, явной перезагрузкой и сохранением фокуса composer при позднем
+сбое. Карточка предложения изолирована по прежнему session/message/proposal
+draft key; текст сообщения остаётся доступен. Вложенная проверка связи сохраняет
+статус модели и кнопку Settings. Вложенная guidance сохраняет карточку,
+validation и startup recovery, показывая текущий technical notice при загрузке
+и отказе. Изменение phase/notice или языка не является скрытым retry.
+`loadingFallback` и `failureContent` позволяют сохранить этот актуальный статус;
+default route/overlay recovery остаётся прежним. При явном reload сам validation
+receipt не сохраняется: перед стартом нужна новая проверка плана.
+
+**Проверено.** Replay-first — 193 passed; полный UI suite — 1954 passed,
+без fail/skip/cancel. Пять новых import-fault tests проверяют draft/focus,
+RU/EN, сохранение workspace/transcript и отсутствие неожиданных writes.
+При guidance failure после preflight сохраняются тот же form и enabled Start.
+Потерянный ответ о старте в protocol stub оставляет Check startup; GET использует
+исходный idempotency key, POST start ровно один, повторный старт недоступен.
+Текущий recovery notice продолжает отображаться внутри уже ошибочного блока.
+Это проверка UI/protocol stub, не фактический запуск engine.
+
+Добавлена поведенческая проверка pending overlay: Close и Escape закрывают
+окно и возвращают фокус к opener. Сначала full suite поймал устаревший source
+pin формы fallback; pin обновлён под условный fallback, затем полный suite
+повторно прошёл. Прежние result, draft, launch, provider-operation, recovery
+и permission tests входят в полный suite. Production build проходит.
+
+**Production browser.** Создан private `SessionStore` с двумя явно написанными
+offline fixture messages и quadratic toy proposal; это не ответ модели и не
+ML run. Private server отдавал HTTP 503 только для manifest asset guidance.
+Черновик и карточка сохранились. Реальный бесплатный preflight вернул 200:
+checked preview, итоговые настройки и enabled Start видны; technical notice
+сменился с review на validated. FullHD form client/scroll — 778/778px.
+После нормального сервера и явного reload подсказка появилась, ошибок нет;
+Start снова требует validation. Затем 503 для `FirstRunModelStatus` сохранил
+NewRunStarter; «Есть код» подготовила редактируемый вопрос и сфокусировала
+composer. В browser request log ровно один non-GET — `/api/start/preflight`.
+Provider/model calls, POST start, engine writes и обучение не выполнялись.
+Ожидаемые failed-import console errors не считаются чистой console.
+
+Снимки при штатном 1280×720:
+[checked plan при отказе guidance](assets/72-launch-failure/01-checked-plan.jpg),
+[рабочие примеры и черновик при отказе setup](assets/72-launch-failure/02-model-setup-failure.jpg).
+Ошибка guidance показана после явного клавиатурного перехода к кнопке; автоматическая
+прокрутка не заявляется. Черновики очищены без отправки, выполнен возврат в чат,
+viewport возвращён, собственная вкладка закрыта, private server остановлен.
+
+![Проверенный план сохраняется при отказе подсказки](assets/72-launch-failure/01-checked-plan.jpg)
+
+**Размеры и ограничения.** JS gzip 646825 → 646868 B (+43 B), initial shell
+82989 → 83023 B, review DAG 267981 → 267979 B; CSS неизменен — 59635 B.
+Total JS выше прежнего предела 633984 B на **12884 B**. Остальные size,
+reachability/cycle и integer-boolean guards проходят; бюджеты не повышены,
+full Agent cycle body остаётся dynamic. O1 остаётся OPEN. Измерения —
+[bundles.json](assets/72-launch-failure/bundles.json), команды и ограничения —
+[validation.json](assets/72-launch-failure/validation.json).
+
+Это изоляция optional lazy entrances, не полное покрытие shared critical
+dependency outages и любых render errors самого Assistant. Большие OPEN §19.17
+сохраняются, включая live MCP, onboarding acceptance, effective manifest,
+lifecycle и доставку **worktree LoopLab** в пользовательский repo. Browser
+приёмка ambiguous real startup, новые тренировки и repo delivery здесь не проведены.
+
+Документальные проверки — 28 passed; strict MkDocs и diff-check проходят.
+Всего 2175 уникальных локальных тестов: 193 replay + 1954 UI + 28 docs.
