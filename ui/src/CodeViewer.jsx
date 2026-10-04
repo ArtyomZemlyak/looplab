@@ -1,14 +1,14 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react'
 import { createInspectorDraftStore, useInspectorDraftField } from './inspectorDraftStore.js'
+import { codeSearchRows } from './codeSearch.js'
 
-function highlighted(text, query) {
-  if (!query) return text || ' '
-  const lower = text.toLowerCase(), needle = query.toLowerCase()
-  const parts = []; let from = 0, index
-  while ((index = lower.indexOf(needle, from)) >= 0) {
-    if (index > from) parts.push(text.slice(from, index))
-    parts.push(<mark key={`${index}:${parts.length}`}>{text.slice(index, index + query.length)}</mark>)
-    from = index + query.length
+function highlighted(text, ranges) {
+  if (!ranges.length) return text || ' '
+  const parts = []; let from = 0
+  for (const range of ranges) {
+    if (range.from > from) parts.push(text.slice(from, range.from))
+    parts.push(<mark key={range.from}>{text.slice(range.from, range.to)}</mark>)
+    from = range.to
   }
   if (from < text.length) parts.push(text.slice(from))
   return parts.length ? parts : (text || ' ')
@@ -48,7 +48,7 @@ export default function CodeViewer({
   const rows = useMemo(() => diff || String(code || '').split('\n').map((line, index) => ({
     line, l: line, kind: 'same', cls: '', oldNo: null, newNo: index + 1,
   })), [code, diff])
-  const matches = query ? rows.filter(row => String(row.line ?? row.l ?? '').toLowerCase().includes(query.toLowerCase())).length : 0
+  const { rows: searchedRows, matches } = useMemo(() => codeSearchRows(rows, query), [rows, query])
   const copy = async () => {
     const ticket = ++copySerial.current
     const source = currentCopySource.current
@@ -70,18 +70,18 @@ export default function CodeViewer({
       <label className="code-search"><span className="sr-only">{ru ? 'Поиск' : 'Search'} {label}</span>
         <input value={query} onChange={event => setQuery(event.target.value)} placeholder={`${ru ? 'Поиск' : 'Search'} ${label.toLowerCase()}…`} />
       </label>
-      {query && <span className="muted">{matches} line{matches === 1 ? '' : 's'}</span>}
+      {query && <span className="muted">{ru ? 'Строк с совпадением:' : 'Matching lines:'} {matches}</span>}
       <span className="spacer" />
       <button className={'btn sm ghost' + (wrap ? ' on' : '')} onClick={() => setWrap(value => !value)}
               aria-pressed={wrap}>{ru ? 'Перенос строк' : 'Wrap'}</button>
       {allowCopy && <button className="btn sm ghost" onClick={copy}>{sameCopySource(copied, copySource) ? (ru ? 'Скопировано' : 'Copied') : (ru ? 'Копировать' : 'Copy')}</button>}
     </div>
     <div className="code-lines" role="region" aria-label={label} tabIndex={0}>
-      {rows.map((row, index) => <div key={index} className={'code-line ' + (row.cls || '')}>
+      {searchedRows.map(({ row, text, ranges }, index) => <div key={index} className={'code-line ' + (row.cls || '')}>
         {diff && <span className="code-old-no">{row.oldNo ?? ''}</span>}
         <span className="code-new-no">{row.newNo ?? ''}</span>
         <span className="code-sign" aria-hidden="true">{row.kind === 'add' ? '+' : row.kind === 'del' ? '−' : ' '}</span>
-        <code>{highlighted(String(row.line ?? row.l ?? ''), query)}</code>
+        <code>{highlighted(text, ranges)}</code>
       </div>)}
     </div>
   </div>

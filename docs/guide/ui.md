@@ -87,6 +87,9 @@ an explicit file read, unless you moved focus to another input while it was load
 Switching source versions clears that feedback; a late reply for the previous
 version does not mark the new version copied. In a diff, Copy uses the saved
 current file text rather than the rendered diff rows.
+Code search treats the query as literal text with Unicode case-insensitive
+matching. **Matching lines / Строк с совпадением** counts rows containing a match,
+not the number of occurrences. Highlighting leaves source and copied text intact.
 
 The chat needs a configured model. Open **LoopLab → Settings → Essential → Model** to check the saved
 model and endpoint. **Test active LLM** makes one provider request and may be billed.

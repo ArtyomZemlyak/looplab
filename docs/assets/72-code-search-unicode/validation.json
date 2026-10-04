@@ -1,0 +1,36 @@
+{
+  "version": 1,
+  "date": "2026-10-04",
+  "increment": "doc72 section 20.34, original-source Unicode search ranges and matching-line count",
+  "source_parent_commit": "3b605db6b67dd68282fa6eec98ee771bcb265c1d",
+  "replay": {"selectors": ["tests/test_events_replay.py"], "passed": 193, "skipped": 0, "failed": 0, "seconds": 3.46, "order": "first"},
+  "archive_and_materialization": {
+    "selectors": ["tests/test_recorded_seed_files.py"], "passed": 18, "skipped": 0, "failed": 0, "seconds": 3.38,
+    "platform": "Windows", "native_materializer_cases": 3,
+    "other_platforms": "Three native Windows cases explicitly skip. Existing short CPU subprocess/API check also ran."
+  },
+  "ui_component_and_search_regressions": {
+    "selectors": ["ui/test/codeSearch.test.js", "ui/test/codeViewerSearch.test.js", "ui/test/codeViewerCopy.test.js", "ui/test/recordedSeedFiles.test.js", "ui/test/nodeCode.test.js", "ui/test/lineDiff.test.js"],
+    "passed": 24, "skipped": 0, "failed": 0, "seconds": 3.95,
+    "scope": "Pure search cases and real React components under jsdom/Vite with the real draft store and fixture HTTP/clipboard responses; not native browser or screenshot acceptance."
+  },
+  "contracts": {
+    "selectors": ["tests/test_documentation_contracts.py", "tests/test_documented_entry_points_resolve.py", "tests/test_merge_history_integrity.py", "tests/test_cli_reference.py", "tests/test_package_layering.py"],
+    "passed": 47, "skipped": 0, "failed": 0, "seconds": 21.32
+  },
+  "production_ui_build": {"status": "passed", "modules": 420, "vite_seconds": 3.07},
+  "strict_documentation_build": {"status": "passed", "seconds": 9.53},
+  "total_passed": 282,
+  "total_skipped": 0,
+  "git_diff_check": "passed",
+  "reproduction": {
+    "case": "Search x in source containing U+0130 followed by x",
+    "before_fix": "Live regression failed because the first mark was empty instead of x",
+    "after_fix": "Ranges come from literal Unicode matches on original source; highlights and matching-line count use the same ranges",
+    "additional_cases": ["No generated combining-dot match", "Emoji and surrogate boundaries", "Cyrillic and Greek sigma", "Literal regex metacharacters and backslash", "Repeated matches counted per row", "Diff line numbers", "RU/EN count", "Original copied source"],
+    "query_side_effects": "No HTTP/model requests or clipboard writes until explicit Copy",
+    "semantics": "Literal Unicode case-insensitive matching; no locale-specific casing or normalization"
+  },
+  "coverage": "Focused UI/source checks. Full CI, native browser/human acceptance and target repository delivery were not performed.",
+  "remaining_open": ["Full materialized program and runtime dependencies", "Target-aware task repository delivery", "Human usability and full CI acceptance"]
+}

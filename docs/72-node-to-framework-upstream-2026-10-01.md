@@ -5549,3 +5549,39 @@ API/source checks сохраняют Windows materializer и короткий р
 а не обещает отменить уже начатую запись или проверить содержимое clipboard после
 действий других приложений. Это не delivery receipt в task repo. Materialized
 manifest, runtime dependencies и target-aware доставка сохраняют OPEN O6/O14.
+
+### 20.34 72.O6: Unicode-поиск подсвечивает реальные позиции исходного кода (2026-10-04)
+
+**Воспроизведено.** `ui/src/CodeViewer.jsx::highlighted` искал в lowercase копии,
+но применял её индексы к исходной строке. Unicode lowercase expansion меняет
+длину: поиск x в `İx` создавал пустой mark вместо выделения x. Поиск combining
+dot находил символ, появившийся только после преобразования `İ`, а не в исходнике.
+Счётчик строк использовал отдельный lowercase predicate и мог подтверждать это
+ложное совпадение. Live component regression сначала упал на неверном mark.
+
+**Исправлено.** `ui/src/codeSearch.js::codeSearchRows` строит единственный набор
+диапазонов по исходному тексту. Запрос экранируется как literal pattern и ищется
+с Unicode case-insensitive flags; regex metacharacters остаются обычным текстом
+запроса. Индексы и длина берутся из самого match. Search projection сохраняет
+исходные diff rows и line identities; `ui/src/CodeViewer.jsx::highlighted` получает
+эти диапазоны, а count берётся из той же projection. Строка с несколькими
+совпадениями считается один раз. Подпись теперь явно говорит «Строк с совпадением»
+или «Matching lines», включая выбранный RU/EN язык.
+
+**Проверка.** Replay-first. Pure cases проверяют позиции после `İ` и emoji,
+невозможность split surrogate pair, отсутствие созданного lowercase dot,
+кириллицу, греческий sigma, все regex metacharacters, literal backslash,
+повторные/non-overlapping matches и blank scaffolding. Live React cases задают
+query через настоящий Inspector draft store, проверяют source marks и count,
+смену языка/wrap, diff line numbers и очистку запроса. Видимый исходный текст
+сохраняется; явный Copy возвращает его без search markup. Query changes не делают
+HTTP/model request или clipboard write. Существующие copy-race, archive, source
+version, path-ambiguity и native Windows/API regressions пройдены.
+Selectors и результаты —
+[validation.json](assets/72-code-search-unicode/validation.json).
+
+**Граница.** Это literal Unicode case-insensitive search по отображаемым source
+rows, без locale-specific casing или Unicode normalization. Он не подтверждает
+семантическое равенство программ, materialization или доставку в task repo.
+O6/O14 сохраняют OPEN для полного manifest, runtime dependencies и target-aware
+доставки.
