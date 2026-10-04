@@ -4074,7 +4074,8 @@ merge этим проходом не проверены.
 5. **O1 — размер production UI.** В исходной сборке было четыре нарушения
    bundle budgets. §20.42 снижает JS на 4719 B и CSS на 174 B: общая CSS,
    DAG CSS и review DAG JS теперь проходят прежние пределы. Осталось
-   превышение total JS: 13317 B после §20.42, 13380 B после §20.43;
+   превышение total JS: 13317 B после §20.42, 13380 B после §20.43,
+   12159 B после §20.44;
    потолки не повышены. Нужны дальнейшее
    уменьшение исходного кода/повторов и полный CI. Один lazy import не снижает
    сумму всех assets; нельзя выдавать route budget за зелёный общий gate.
@@ -6269,3 +6270,66 @@ boolean guards проходят; full Agent cycle сохраняет dynamic bou
 **LoopLab**, effective manifest, live MCP, приёмку нового пользователя и
 target-relative доставку в пользовательский repo. Нового обучения и проверки
 repo delivery LoopLab в этом проходе нет; весь doc72 не закрыт.
+
+### 20.44. Общий compression stream для начального UI — 2026-10-04
+
+**Ревью.** Исходное дерево — `21039d8b80f6203e86a882694110e410c76af50f`.
+Начальный shell уже статически загружал API/recovery, React/primitives и
+App/auth/resource helpers, но их код сжимался раздельно. Объединение только
+API и primitives экономило 519 B. Вариант с bootstrap внутри группы убирал
+manifest entry: проверки путей становились недоступны, поэтому он отвергнут.
+
+**Изменено.** `ui/vite.config.js` объединяет уже совместно загружаемые модули
+в `app-core`. `main.jsx` и его styles остаются отдельным entry. Зависимости
+не захватываются рекурсивно; owner, graph, settings, launch/result и full Agent
+cycle entrances сохраняются. Прямое сравнение двух полных production builds
+показало одинаковый начальный набор **48 source/runtime modules**, четыре
+начальных JS chunk в обоих вариантах. Это проверка состава загрузки, а не
+доказательство всех возможных runtime состояний или equivalence exports.
+
+| gzip, B | До | После | Изменение |
+|---|---:|---:|---:|
+| Total JS | 647364 | 646143 | -1221 |
+| Initial shell JS | 83202 | 82513 | -689 |
+| Owner DAG JS | 401846 | 401025 | -821 |
+| Review DAG JS | 268262 | 267469 | -793 |
+| Compact Agent cycle JS | 121497 | 120612 | -885 |
+| Total CSS | 59635 | 59635 | 0 |
+
+Остаток total JS — **12159 B** выше прежнего предела 633984 B. Остальные
+size/reachability/cycle и boolean guards проходят, ceilings не повышены.
+Full Agent cycle body отсутствует в static compact closure. O1 остаётся OPEN.
+Никакая функция продукта или проверка протокола не удалена ради размеров.
+
+**Проверено.** Replay-first — 193 passed; полный UI suite — 1945 passed,
+без fail/skip/cancel. Проверены production compilation, transport/credential
+boundaries и JSX/minifier semantics, входящие в этот suite. В production-браузере
+прочитан прежний private CPU `demo`: 79 событий, два terminal nodes.
+При FullHD работают переход List → run, Report и раскрытие selected result
+(один reader, три completion notices). Полная RU Agent cycle получила текущие
+требования и записи: событие #79. Dialog width 1100px, client/scroll 1088px.
+На недействительной review-ссылке и отсутствующем shared chat нет owner
+Assistant, composer или управляющих кнопок. Valid public capability в браузере
+не создавалась и не проверялась. Console warnings/errors не получено.
+
+На штатном 1280px capture клик run link не прошёл; после перехода на целевой
+FullHD он прошёл. 1280px usability не заявляется, основной desktop размер
+проверен отдельно. Viewport возвращён, собственная вкладка закрыта, private
+server остановлен. Снимки при штатном 1280×720:
+[Agent cycle](assets/72-core-stream/01-cycle.jpg),
+[Report](assets/72-core-stream/02-report.jpg),
+[invalid review](assets/72-core-stream/03-invalid-review.jpg).
+
+![Панель цикла агента после объединения core](assets/72-core-stream/01-cycle.jpg)
+
+Измерения — [bundles.json](assets/72-core-stream/bundles.json), сравнение
+начальных модулей — [initial-module-sets.json](assets/72-core-stream/initial-module-sets.json),
+команды и ограничения — [validation.json](assets/72-core-stream/validation.json).
+Большие OPEN §19.17 сохраняются, включая live MCP, onboarding acceptance,
+manifest и lifecycle/delivery **worktree LoopLab**. Новых тренировок, model
+calls, engine writes или owner-repo delivery в этом проходе не было. Публикация
+этого изменения в master не является доставкой capabilities из LoopLab в
+пользовательский task repo.
+
+Документальные проверки — 28 passed; strict MkDocs и diff-check проходят.
+Всего 2166 уникальных локальных тестов: 193 replay + 1945 UI + 28 docs.

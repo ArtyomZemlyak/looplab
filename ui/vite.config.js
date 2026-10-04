@@ -164,12 +164,14 @@ export default defineConfig({
               includeDependenciesRecursively: false,
             },
             {
-              name: 'ui-primitives',
-              // App-shell controls and their shared accessibility/icon implementation are always
-              // co-loaded. React's small shared runtimes are on that same universal boundary; one
-              // stream removes a repeated import and lets both halves share a gzip dictionary.
-              // The raw sprite stays there too instead of becoming another tiny request.
-              test: /[/\\]node_modules[/\\](?:react|react-dom|scheduler)[/\\]|[/\\]src[/\\](?:EnergyToggle|PanelShell|ThemeSwitcher|accessibility|fx|icons|runMapModel|useDialogFocus)\.(?:js|jsx)$|[/\\]src[/\\]looplab-icons-v1\.svg/,
+              name: 'app-core',
+              // Shell, transport/recovery and React/UI primitives already share the initial static
+              // closure. One compression stream reduces wrappers and repeated vocabulary without
+              // adding a route or owner component to that closure (doc 72 module-set comparison).
+              // Keep main.jsx and its styles outside this group: capturing the bootstrap removes
+              // the manifest entry facade and makes the security/route proofs unavailable.
+              // Optional owner, graph, result, settings and panel entrances remain separate.
+              test: /[/\\]node_modules[/\\](?:react|react-dom|scheduler)[/\\]|[/\\]src[/\\](?:App|OwnerAuth|OwnerWorkspace|LazyBoundary|DensityToggle|globalNav|resourceModel|useScopedResource|reviewRouteApi|api|apiClient|commandStorage|commandProtocol|commandModel|scopeReportActions|runStartOverRecovery|runRouteState|runMode|controlActions|conceptLensApi|crossRunLedger|eventStream|requestDeadline|EnergyToggle|PanelShell|ThemeSwitcher|accessibility|fx|icons|runMapModel|useDialogFocus)\.(?:js|jsx)$|[/\\]src[/\\]looplab-icons-v1\.svg/,
               includeDependenciesRecursively: false,
             },
           ],

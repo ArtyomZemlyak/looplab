@@ -1,0 +1,103 @@
+{
+  "date": "2026-10-04",
+  "source_parent": "21039d8b80f6203e86a882694110e410c76af50f",
+  "scope": "doc72 O1: consolidate already co-loaded initial shell/API/React modules into app-core while preserving bootstrap and optional route boundaries",
+  "tests": [
+    {
+      "command": ".venv/Scripts/python.exe -m pytest -o addopts=\"\" -q tests/test_events_replay.py --basetemp=.tmp/doc72-budget-streams/replay",
+      "passed": 193
+    },
+    {
+      "cwd": "ui",
+      "command": "node --test --test-timeout=30000 --test-concurrency=4 test/*.test.js",
+      "passed": 1945,
+      "failed": 0,
+      "skipped": 0,
+      "cancelled": 0
+    },
+    {
+      "command": ".venv/Scripts/python.exe -m pytest -o addopts=\"\" -q tests/test_api_reference.py tests/test_documentation_contracts.py tests/test_doc_surface_budgets.py tests/test_architecture_diagram_geometry.py --basetemp=.tmp/doc72-budget-streams/docs",
+      "passed": 28
+    },
+    {
+      "command": ".venv/Scripts/python.exe -m mkdocs build --strict --site-dir .tmp/doc72-budget-streams/site",
+      "exit": 0
+    },
+    {
+      "command": "git diff --check",
+      "exit": 0
+    }
+  ],
+  "production_build": {
+    "command": "node node_modules/vite/bin/vite.js build --outDir ../.tmp/doc72-budget-streams/ui-dist-final",
+    "exit": 0
+  },
+  "initial_module_comparison": {
+    "command": "node .tmp/doc72-budget-streams/verify-core.mjs",
+    "exit": 0,
+    "same_module_set": true,
+    "modules": 48,
+    "baseline_js_chunks": 4,
+    "final_js_chunks": 4,
+    "note": "full production builds against the source-parent config; source/runtime module identities only, not complete runtime/export equivalence"
+  },
+  "bundle_gate": {
+    "command": "node scripts/check-bundle.mjs --dist ../.tmp/doc72-budget-streams/ui-dist-final",
+    "exit": 1,
+    "total_js_gzip": 646143,
+    "total_js_budget": 633984,
+    "remaining_excess": 12159,
+    "js_saving": 1221,
+    "initial_js_saving": 689,
+    "total_css_gzip": 59635,
+    "other_size_reachability_cycle_boolean_gates_pass": true,
+    "ceilings_changed": false
+  },
+  "rejected_probes": [
+    "API and primitives only saved 519 bytes; full already-co-loaded shell saves more",
+    "including main.jsx removed manifest entry and made route/security proofs unavailable; rejected"
+  ],
+  "browser": {
+    "fixture": "existing private demo",
+    "events": 79,
+    "terminal_nodes": 2,
+    "viewport_dom": {
+      "width": 1920,
+      "height": 1080,
+      "cycle_width": 1100,
+      "client_width": 1088,
+      "scroll_width": 1088
+    },
+    "capture": {
+      "width": 1280,
+      "height": 720
+    },
+    "checks": [
+      "run List loaded",
+      "List to run navigation succeeds at FullHD",
+      "Report renders measured evidence and caveats",
+      "closed selected result absent, opening shows one reader and three completion notices",
+      "full RU Agent cycle loaded current requirements at event 79",
+      "invalid review has no owner Assistant/composer",
+      "missing shared chat shows unavailable and no owner Assistant/composer/control buttons"
+    ],
+    "console_warnings_errors": 0,
+    "default_capture_navigation_timeout": "1280px link click timed out; succeeded at target FullHD after checking current state",
+    "model_calls": 0,
+    "engine_writes": 0,
+    "new_training": false,
+    "valid_public_capability_browser_check": false,
+    "viewport_reset": true,
+    "own_tab_closed": true,
+    "private_server_stopped": true
+  },
+  "limits": [
+    "total JS gate remains RED, not green CI",
+    "same initial module set does not prove all runtime/export equivalence",
+    "no new-user onboarding or live external MCP acceptance",
+    "no LoopLab run-owned worktree or owner-repo delivery acceptance",
+    "1280px usability not claimed",
+    "doc72 OPEN topics remain OPEN"
+  ],
+  "total_unique_checks": 2166
+}
