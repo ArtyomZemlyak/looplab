@@ -31,6 +31,10 @@ Existing model replies and external agent interpretations keep their original te
 Switching language does not send a message or call a model. Retrying an interrupted
 message keeps that message's original language. Earlier results and the detailed selected-result
 comparison are expandable. These reads do not call a model or start work.
+If a result reader fails to load or render, its local error offers **Reload LoopLab /
+Перезагрузить LoopLab**. The chat composer, draft and other result reader remain
+available; a late reader failure does not move focus out of your message. You can
+close a failed comparison. Reload is explicit and reloads the whole application.
 Each brief separates **Comparison**, **Reliability** and **Next**. Comparison names
 the evaluation scores it uses and explains missing or incompatible evidence;
 confirmation means remain separate. Recovered metrics are labelled **Recovered**,
@@ -1282,7 +1286,7 @@ connection and payload helpers share `run-support`; owner controls and full Agen
 content retain their lazy boundaries. Assistant command suggestions use
 `AssistantBar.jsx::suggestionPop` and `.cmdbar-pop`, not the retired `.cmd-suggest` styles.
 Run `npm run check:bundle` after building: passing a route budget does not imply the
-total byte budget passed. Current measurements and remaining excess are in doc 72 §20.44.
+total byte budget passed. Current measurements and remaining excess are in doc 72 §20.45.
 
 Production HTML and non-versioned assets revalidate. Only content-hashed files listed by Vite's build manifest
 receive long-lived immutable caching. Eligible ordinary responses can use gzip when the client accepts it;

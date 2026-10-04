@@ -82,6 +82,7 @@ import { useAssistantComposer } from './useAssistantComposer.js'
 import { useAssistantFork } from './useAssistantFork.js'
 import { startTurnFallbackPolls } from './assistantTurnPolls.js'
 import { followClientRoute } from './accessibility.jsx'
+import LazyBoundary from './LazyBoundary.jsx'
 
 const FirstRunModelStatus = React.lazy(() => import('./FirstRunModelStatus.jsx'))
 const NewRunStarter = React.lazy(() => import('./NewRunStarter.jsx'))
@@ -3128,6 +3129,7 @@ export default function AssistantBar({ runId, hidden = false, onReady }) {
         {ctxUsage.compacted && <span className="muted"> ↓{ktok(ctxUsage.peak)}</span>}</span>
     : null
   const selectedRun = runId ? runsById[runId] : null
+  const resultScope = `${runId}:${selectedRun?.generation || ''}`
   const selectedRunStatus = selectedRun ? effectiveRunStatus(selectedRun) : ''
   const selectedRunHasNoNodes = selectedRun?.nodes === 0
   const showRunResult = !historical && terminalReady(selectedRun || {})
@@ -3554,8 +3556,10 @@ export default function AssistantBar({ runId, hidden = false, onReady }) {
         onLaunchDisclosure={retainTurnLaunchDisclosure}
         onLaunchStarted={settleTurnLaunchStarted} />
     </React.Fragment>)}
-    {!historical && !newRunDraft && runId && /^[0-9a-f]{64}$/.test(selectedRun?.generation || '') && <React.Suspense fallback={null}>
-      <AssistantResults key={`${runId}:${selectedRun.generation}`} runId={runId}
+    {!historical && !newRunDraft && runId && /^[0-9a-f]{64}$/.test(selectedRun?.generation || '') && <LazyBoundary
+      key={`notices:${resultScope}`} resetKey={resultScope} language={responseLanguage} focusOnFailure={false}
+      label={text('Experiment results', 'Итоги экспериментов')}>
+      <AssistantResults runId={runId}
         generation={selectedRun.generation} onOpen={openRunFromAssistant} onReady={onResultReady}
         askDisabled={composerEditingPaused || !!input.trim()}
         askDisabledReason={input.trim() ? 'Finish or clear your current draft before preparing a result question'
@@ -3565,10 +3569,11 @@ export default function AssistantBar({ runId, hidden = false, onReady }) {
           setInput(question)
           inputRef.current?.focus()
         }} />
-    </React.Suspense>}
-    {showRunResult && <RunResultDisclosure key={`${runId}:${selectedRun.generation}`}
+    </LazyBoundary>}
+    {showRunResult && <RunResultDisclosure key={resultScope}
       summary={text('Compare selected result and open solution', 'Сравнить результат и открыть решение')}>
-      <React.Suspense fallback={<div role="status">{text('Loading result…', 'Загрузка результата…')}</div>}>
+      <LazyBoundary resetKey={resultScope} language={responseLanguage} focusOnFailure={false}
+        label={text('Run result', 'Итог запуска')}>
       <AssistantRunResult run={selectedRun} onOpen={openRunFromAssistant} onReady={onResultReady}
         askDisabled={composerEditingPaused || !!input.trim()}
         askDisabledReason={input.trim() ? 'Finish or clear your current draft before preparing a result question'
@@ -3580,7 +3585,7 @@ export default function AssistantBar({ runId, hidden = false, onReady }) {
             'Объясни итог запуска, сравни с первым допустимым экспериментом и покажи ограничения и файлы решения. Не запускай новые эксперименты.'))
           inputRef.current?.focus()
         }} />
-    </React.Suspense></RunResultDisclosure>}
+    </LazyBoundary></RunResultDisclosure>}
     {!historical && pending.length > 0 && <div className="asst-perm-region" role="region"
       aria-label={`${pending.length} pending Assistant approval${pending.length === 1 ? '' : 's'}`}
       aria-live="assertive" aria-atomic="false">

@@ -226,7 +226,7 @@ test('lazy overlay fallback preserves close, focus-trap, Escape, and focus-retur
   const [lazy, runList] = await Promise.all([source('LazyBoundary.jsx'), source('RunList.jsx')])
   assert.match(lazy, /useDialogFocus\(surfaceRef, onClose, mode === 'overlay'\)/)
   assert.match(lazy, /role=\{failed \? 'alertdialog' : 'dialog'\} aria-modal="true"/)
-  assert.match(lazy, /onClick=\{onClose\}>Close<\/button>/)
+  assert.match(lazy, /onClick=\{onClose\}>\{ru \? 'Закрыть' : 'Close'\}<\/button>/)
   assert.match(lazy, /<LoadErrorBoundary[\s\S]*?onClose=\{onClose\}/)
   assert.match(lazy, /<Suspense fallback=\{<LoadSurface[\s\S]*?onClose=\{onClose\}/)
   assert.match(runList, /<LazyBoundary label="scope report" mode="overlay"[\s\S]*?onClose=\{\(\) => setShowReport\(false\)\}/)

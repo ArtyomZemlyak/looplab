@@ -3,26 +3,33 @@ import { useDialogFocus } from './useDialogFocus.js'
 
 const reloadPage = () => window.location.reload()
 
-function LoadSurface({ label, mode, failed = false, onReload = reloadPage, onClose }) {
+function LoadSurface({ label, mode, failed = false, onReload = reloadPage, onClose,
+    language = 'en', focusOnFailure = true }) {
+  const ru = language === 'ru'
   const surfaceRef = useRef(null)
   const reloadRef = useRef(null)
   useDialogFocus(surfaceRef, onClose, mode === 'overlay')
   useEffect(() => {
-    if (mode === 'overlay' || (mode === 'inline' && !failed)) return undefined
+    if (mode === 'overlay' || (mode === 'inline' && (!failed || !focusOnFailure))) return undefined
     const frame = requestAnimationFrame(() => {
       const target = failed ? reloadRef.current : surfaceRef.current
       target?.focus({ preventScroll: true })
     })
     return () => cancelAnimationFrame(frame)
-  }, [failed, mode])
+  }, [failed, mode, focusOnFailure])
 
   const body = <>
-    {mode === 'route' && <h1>{failed ? `${label} unavailable` : `Opening ${label}…`}</h1>}
-    {mode !== 'route' && <b>{failed ? `${label} could not be opened.` : `Loading ${label}…`}</b>}
+    {mode === 'route' && <h1>{failed ? ru ? `Недоступно: ${label}` : `${label} unavailable`
+      : ru ? `Открываем: ${label}…` : `Opening ${label}…`}</h1>}
+    {mode !== 'route' && <b>{failed ? ru ? `Не удалось открыть «${label}».` : `${label} could not be opened.`
+      : ru ? `Загрузка раздела «${label}»…` : `Loading ${label}…`}</b>}
     {failed
-      ? <><p>This section failed while loading or rendering. Reload LoopLab to fetch a consistent build and retry.</p>
-          <button ref={reloadRef} type="button" className="btn primary" onClick={onReload}>Reload LoopLab</button></>
-      : mode === 'route' && <p>The rest of the application remains available while this route downloads.</p>}
+      ? <><p>{ru ? 'Не удалось загрузить или отобразить этот раздел. Перезагрузите LoopLab и попробуйте снова.'
+          : 'This section failed while loading or rendering. Reload LoopLab to fetch a consistent build and retry.'}</p>
+          <button ref={reloadRef} type="button" className="btn primary" onClick={onReload}>
+            {ru ? 'Перезагрузить LoopLab' : 'Reload LoopLab'}</button></>
+      : mode === 'route' && <p>{ru ? 'Пока эта страница загружается, остальные разделы приложения остаются доступны.'
+        : 'The rest of the application remains available while this route downloads.'}</p>}
   </>
 
   if (mode === 'route') return <main ref={surfaceRef} className="auth-gate lazy-route-state"
@@ -31,9 +38,9 @@ function LoadSurface({ label, mode, failed = false, onReload = reloadPage, onClo
   </main>
   if (mode === 'overlay') return <div className="overlay lazy-overlay-state">
     <div ref={surfaceRef} className="panel" role={failed ? 'alertdialog' : 'dialog'} aria-modal="true"
-      aria-label={`${failed ? 'Load failure' : 'Loading'}: ${label}`} tabIndex={-1}>
+      aria-label={`${failed ? ru ? 'Ошибка загрузки' : 'Load failure' : ru ? 'Загрузка' : 'Loading'}: ${label}`} tabIndex={-1}>
       <div className="panel-b lazy-load-state"><button className="btn sm ghost"
-        onClick={onClose}>Close</button>{body}</div>
+        onClick={onClose}>{ru ? 'Закрыть' : 'Close'}</button>{body}</div>
     </div>
   </div>
   return <div ref={surfaceRef} className={`notice lazy-load-state${failed ? ' resource-error' : ''}`}
@@ -67,17 +74,19 @@ class LoadErrorBoundary extends React.Component {
 
   render() {
     if (this.state.error) return <LoadSurface label={this.props.label} mode={this.props.mode}
-      failed onReload={this.props.onReload} onClose={this.props.onClose} />
+      failed onReload={this.props.onReload} onClose={this.props.onClose}
+      language={this.props.language} focusOnFailure={this.props.focusOnFailure} />
     return this.props.children
   }
 }
 
 /** A local Suspense + error boundary. A failed chunk never blanks the surrounding route. */
 export default function LazyBoundary({ label, children, mode = 'inline', focusOnReady = false,
-    resetKey = label, onReload = reloadPage, onClose }) {
+    resetKey = label, onReload = reloadPage, onClose, language = 'en', focusOnFailure = true }) {
   return <LoadErrorBoundary label={label} mode={mode} resetKey={resetKey} onReload={onReload}
-    onClose={onClose}>
-    <Suspense fallback={<LoadSurface label={label} mode={mode} onReload={onReload} onClose={onClose} />}>
+    onClose={onClose} language={language} focusOnFailure={focusOnFailure}>
+    <Suspense fallback={<LoadSurface label={label} mode={mode} onReload={onReload} onClose={onClose}
+      language={language} focusOnFailure={focusOnFailure} />}>
       <LoadedFocus focusOnReady={focusOnReady}>{children}</LoadedFocus>
     </Suspense>
   </LoadErrorBoundary>

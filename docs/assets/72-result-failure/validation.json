@@ -1,0 +1,104 @@
+{
+  "date": "2026-10-04",
+  "source_parent": "7a5e943a66bcf8ce1eaa57c53e46f1e117b7e919",
+  "scope": "doc72: independent lazy result-reader failures retain Assistant, composer, draft and focus",
+  "regression_before_fix": {
+    "command": "node --test --test-timeout=30000 test/assistantResultFailure.test.js",
+    "failed": 2,
+    "reason": "real rejected dynamic imports removed the whole Assistant composer through OwnerWorkspace boundary"
+  },
+  "tests": [
+    {
+      "command": ".venv/Scripts/python.exe -m pytest -o addopts=\"\" -q tests/test_events_replay.py --basetemp=.tmp/doc72-result-failure/replay",
+      "passed": 193
+    },
+    {
+      "cwd": "ui",
+      "command": "node --test --test-timeout=30000 --test-concurrency=4 test/*.test.js",
+      "passed": 1948,
+      "failed": 0,
+      "skipped": 0,
+      "cancelled": 0
+    },
+    {
+      "cwd": "ui",
+      "command": "node --test --test-timeout=30000 test/lazyBoundaryRecovery.test.js test/assistantResultFailure.test.js test/assistantRunResult.test.js test/uiSemantics.test.js",
+      "passed": 45,
+      "included_in_full_ui_total": true
+    },
+    {
+      "command": ".venv/Scripts/python.exe -m pytest -o addopts=\"\" -q tests/test_api_reference.py tests/test_documentation_contracts.py tests/test_doc_surface_budgets.py tests/test_architecture_diagram_geometry.py --basetemp=.tmp/doc72-result-failure/docs",
+      "passed": 28
+    },
+    {
+      "command": ".venv/Scripts/python.exe -m mkdocs build --strict --site-dir .tmp/doc72-result-failure/site",
+      "exit": 0
+    },
+    {
+      "command": "git diff --check",
+      "exit": 0
+    }
+  ],
+  "ui_test_warnings": "Existing Inspector/Conversation act and deprecated ReactDOMTestUtils.act warnings also appear in source-parent full UI log; targeted new tests have none.",
+  "production_build": {
+    "command": "node node_modules/vite/bin/vite.js build --outDir ../.tmp/doc72-result-failure/ui-dist-final",
+    "exit": 0
+  },
+  "bundle_gate": {
+    "command": "node scripts/check-bundle.mjs --dist ../.tmp/doc72-result-failure/ui-dist-final",
+    "exit": 1,
+    "total_js_gzip": 646825,
+    "total_js_budget": 633984,
+    "remaining_excess": 12841,
+    "js_added": 682,
+    "total_css_gzip": 59635,
+    "other_size_reachability_cycle_boolean_gates_pass": true,
+    "ceilings_changed": false
+  },
+  "browser": {
+    "fixture": "existing private demo",
+    "events": 79,
+    "terminal_nodes": 2,
+    "fault": "HTTP 503 only for the manifest AssistantRunResult entry asset; all other assets and real API endpoints served normally",
+    "fault_requests": 3,
+    "non_get_requests": 0,
+    "fullhd_failure": {
+      "alerts": [
+        "Не удалось открыть «Итог запуска».Не удалось загрузить или отобразить этот раздел. Перезагрузите LoopLab и попробуйте снова.Перезагрузить LoopLab"
+      ],
+      "composer": "Проверочный черновик — не отправлять",
+      "height": 1080,
+      "notices": 3,
+      "readers": 0,
+      "report": true,
+      "scroll": {
+        "client": 939,
+        "full": 939
+      },
+      "width": 1920
+    },
+    "checks": [
+      "three completion notices, Report and composer remain readable on selected-reader chunk failure",
+      "closing failed comparison removes local alert and retains draft",
+      "normal server plus explicit reload opens selected reader again, with three notices and no alert",
+      "private test draft cleared without sending; screenshot error scrolled into view by explicit keyboard focus"
+    ],
+    "expected_console_error": "Failed to fetch dynamically imported module for injected 503 asset",
+    "capture": {
+      "width": 1280,
+      "height": 720
+    },
+    "model_calls": 0,
+    "engine_writes": 0,
+    "new_training": false,
+    "viewport_reset": true,
+    "own_tabs_closed": true,
+    "private_server_stopped": true
+  },
+  "limits": [
+    "total JS gate remains RED, not green CI",
+    "not all optional Assistant readers or shared dependency outages are independently isolated",
+    "no live external MCP, new-user onboarding or LoopLab run-owned worktree/delivery acceptance",
+    "doc72 OPEN topics remain OPEN"
+  ]
+}

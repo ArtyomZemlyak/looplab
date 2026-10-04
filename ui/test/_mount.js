@@ -278,11 +278,11 @@ after(async () => {
   await server.close()
 })
 
-export async function mountHarness({ routes = {}, visible = false } = {}) {
+export async function mountHarness({ routes = {}, visible = false, plugins = [] } = {}) {
   installDom({ visible })
   const fetch = fetchStub(routes)
   globalThis.fetch = fetch
-  const vite = await createServer(viteOptions())
+  const vite = await createServer({ ...viteOptions(), plugins })
   return {
     vite,
     fetch,
@@ -304,8 +304,8 @@ export async function mountHarness({ routes = {}, visible = false } = {}) {
 // for, and a second call is a no-op. The `fetch` a drive answers with is installed by the test
 // (`globalThis.fetch = fetchStub(routes)`) before it mounts, because the first effects read at
 // once. `globals` names further jsdom constructors a component reads; `visible` is `installDom`'s.
-export async function mountLive({ routes = {}, globals = [], visible = false } = {}) {
-  const harness = await mountHarness({ routes, visible })
+export async function mountLive({ routes = {}, globals = [], visible = false, plugins = [] } = {}) {
+  const harness = await mountHarness({ routes, visible, plugins })
   const dom = globalThis.__looplabMountDom
   for (const key of [...LIVE_DOM_GLOBALS, ...globals]) globalThis[key] = dom.window[key]
   globalThis.IS_REACT_ACT_ENVIRONMENT = true

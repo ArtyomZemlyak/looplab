@@ -4075,7 +4075,7 @@ merge этим проходом не проверены.
    bundle budgets. §20.42 снижает JS на 4719 B и CSS на 174 B: общая CSS,
    DAG CSS и review DAG JS теперь проходят прежние пределы. Осталось
    превышение total JS: 13317 B после §20.42, 13380 B после §20.43,
-   12159 B после §20.44;
+   12841 B после §20.45;
    потолки не повышены. Нужны дальнейшее
    уменьшение исходного кода/повторов и полный CI. Один lazy import не снижает
    сумму всех assets; нельзя выдавать route budget за зелёный общий gate.
@@ -6333,3 +6333,66 @@ calls, engine writes или owner-repo delivery в этом проходе не 
 
 Документальные проверки — 28 passed; strict MkDocs и diff-check проходят.
 Всего 2166 уникальных локальных тестов: 193 replay + 1945 UI + 28 docs.
+
+### 20.45. Сбой читателя результатов сохраняет Assistant — 2026-10-04
+
+**Ревью и воспроизведение.** Исходное дерево —
+`7a5e943a66bcf8ce1eaa57c53e46f1e117b7e919`. Общий error boundary Assistant
+ловил ошибки ленивых `AssistantResults` и `AssistantRunResult`, убирая весь чат
+вместе с composer. Две проверки с реальным отклонённым dynamic import и настоящим
+`OwnerWorkspace` до исправления падали на сохранении поля сообщения.
+
+**Исправлено.** Лента completion notices и раскрываемое сравнение получили
+отдельные `LazyBoundary`. Они показывают RU/EN loading/error и явную кнопку
+перезагрузки приложения. Отложенный сбой этих блоков не переводит фокус из
+composer. Черновик, соседний читатель и рабочая область сохраняются; закрытие
+сравнения удаляет его локальную ошибку. Run/generation меняет identity boundary;
+смена языка сохраняет зарегистрированную ошибку и не запускает скрытый retry.
+Стандартный focus recovery остальных boundary сохраняется. Новых engine waits,
+команд или автоматической отправки сообщения нет.
+
+**Проверено.** Replay-first — 193 passed; полный UI suite — 1948 passed,
+без fail/skip/cancel. Три новые проверки входят в этот suite: два отказа
+реальных imports и default recovery при render failure. Проверены сохранение
+draft/focus, независимость читателей, RU/EN, отсутствие POST, явный reload
+callback, отсутствие retry при смене языка и восстановление на новой identity.
+Прежние четыре теста disclosure/точных попыток также проходят. В полном suite
+есть прежние Inspector/Conversation act warnings и deprecated test-utils act,
+наблюдаемые и в логе исходного дерева; новые targeted tests этих warnings не дают.
+Production build проходит.
+
+В production-браузере private server отдавал **HTTP 503 только для JS asset
+`AssistantRunResult`**, остальные assets и API обслуживались нормально.
+У прежнего CPU `demo` осталось 79 событий и два terminal nodes. На FullHD после
+отказа видны три completion notices, Report, поле сообщения с черновиком и
+локальная RU ошибка сравнения. Client/scroll width блока — 939/939px.
+Закрытие убрало alert и сохранило draft. После восстановления сервера и явной
+перезагрузки появился reader с результатом; notices — три, alerts — ноль.
+Журнал private server содержит только GET: model calls и engine writes не
+выполнялись. Ожидаемая console error — failed dynamic import намеренно
+отклонённого asset; безошибочная console для fault-сценария не заявляется.
+
+Снимки при штатном 1280×720: [локальная ошибка и черновик](assets/72-result-failure/01-local-failure.jpg),
+[восстановленный читатель](assets/72-result-failure/02-recovered.jpg).
+Для снимка ошибки область прокручена явным клавиатурным переходом к reload;
+это не автоматический focus/scroll приложения. Черновик очищен без отправки,
+viewport возвращён, собственные вкладки закрыты, private server остановлен.
+
+![Локальная ошибка результата при сохранённом Assistant](assets/72-result-failure/01-local-failure.jpg)
+
+**Размеры и граница.** JS gzip 646143 → 646825 B (+682 B); initial shell
+82513 → 82989 B; review DAG 267469 → 267981 B. CSS неизменен — 59635 B.
+Total JS остаётся **12841 B** выше прежнего предела 633984 B. Все остальные
+size/reachability/cycle и integer-boolean guards проходят; ceilings не повышены.
+Full Agent cycle body остаётся вне static compact closure. O1 сохраняется OPEN.
+Измерения — [bundles.json](assets/72-result-failure/bundles.json), команды,
+сценарии и ограничения — [validation.json](assets/72-result-failure/validation.json).
+
+Эта проверка покрывает два читателя результатов; все optional cards Assistant
+и отказы их общих dependencies не объявляются полностью изолированными.
+Большие OPEN §19.17 сохраняются: live MCP, onboarding acceptance, effective
+manifest, lifecycle и доставка **worktree LoopLab** в пользовательский repo.
+Нового обучения или приёмки repo delivery LoopLab здесь нет; весь doc72 не закрыт.
+
+Документальные проверки — 28 passed; strict MkDocs и diff-check проходят.
+Всего 2169 уникальных локальных тестов: 193 replay + 1948 UI + 28 docs.
