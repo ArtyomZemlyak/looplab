@@ -114,8 +114,12 @@ external agent is connected; see the [external harness guide](external-harness.m
 
 ### Read an experiment result
 
-When a run finishes, Assistant's **Run result** card shows its first eligible experiment
-and the result selected by the engine. It labels metric direction, confirmation and recorded
+When a run finishes, open **Compare selected result and open solution / Сравнить результат и открыть решение**
+in Assistant to read its **Run result** card. The card loads only while this disclosure is open;
+closing it removes the hidden reader. Changing run or generation starts with it closed.
+Completion notices in the chat remain available independently of this optional comparison.
+The card shows its first eligible experiment and the result selected by the engine.
+It labels metric direction, confirmation and recorded
 caveats. Reading the card makes no model request. **Read Report**, **Open selected code** and
 **Find artifacts** open existing evidence; code navigation retains the exact run generation
 and experiment attempt. **Ask about this result** fills the composer without sending or

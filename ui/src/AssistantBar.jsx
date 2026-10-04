@@ -88,6 +88,18 @@ const NewRunStarter = React.lazy(() => import('./NewRunStarter.jsx'))
 const AssistantRunResult = React.lazy(() => import('./AssistantRunResult.jsx'))
 const AssistantResults = React.lazy(() => import('./AssistantResults.jsx'))
 
+// Native <details> hides children, but React still mounts them. Keep the lazy
+// result and its ready/scroll effect absent until the operator opens the summary.
+// The caller keys this boundary by run and generation so navigation closes it.
+function RunResultDisclosure({ summary, children }) {
+  const [open, setOpen] = useState(false)
+  return <details className="asst-result-details" open={open}
+    onToggle={event => setOpen(event.currentTarget.open)}>
+    <summary>{summary}</summary>
+    {open && children}
+  </details>
+}
+
 // ── ONE assistant, three flowing views: bar ⇄ side(right) ⇄ full ───────────────────────────────
 //
 // A single component owns the whole conversation (session, messages, streaming) and renders it in one
@@ -3554,7 +3566,9 @@ export default function AssistantBar({ runId, hidden = false, onReady }) {
           inputRef.current?.focus()
         }} />
     </React.Suspense>}
-    {showRunResult && <details className="asst-result-details"><summary>{text('Compare selected result and open solution', 'Сравнить результат и открыть решение')}</summary><React.Suspense fallback={null}>
+    {showRunResult && <RunResultDisclosure key={`${runId}:${selectedRun.generation}`}
+      summary={text('Compare selected result and open solution', 'Сравнить результат и открыть решение')}>
+      <React.Suspense fallback={<div role="status">{text('Loading result…', 'Загрузка результата…')}</div>}>
       <AssistantRunResult run={selectedRun} onOpen={openRunFromAssistant} onReady={onResultReady}
         askDisabled={composerEditingPaused || !!input.trim()}
         askDisabledReason={input.trim() ? 'Finish or clear your current draft before preparing a result question'
@@ -3566,7 +3580,7 @@ export default function AssistantBar({ runId, hidden = false, onReady }) {
             'Объясни итог запуска, сравни с первым допустимым экспериментом и покажи ограничения и файлы решения. Не запускай новые эксперименты.'))
           inputRef.current?.focus()
         }} />
-    </React.Suspense></details>}
+    </React.Suspense></RunResultDisclosure>}
     {!historical && pending.length > 0 && <div className="asst-perm-region" role="region"
       aria-label={`${pending.length} pending Assistant approval${pending.length === 1 ? '' : 's'}`}
       aria-live="assertive" aria-atomic="false">

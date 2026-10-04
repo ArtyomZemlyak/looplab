@@ -13,8 +13,74 @@ const row = { run_id: 'demo', generation, finished: true, phase: 'finished', eng
 let harness
 let Card
 test.before(async () => {
-  harness = await mountLive()
+  harness = await mountLive({ visible: true })
   ;({ default: Card } = await harness.load('/src/AssistantRunResult.jsx'))
+})
+
+test('result disclosure closes on a new run/generation and on read-only navigation', async () => {
+  const { default: AssistantBar } = await harness.load('/src/AssistantBar.jsx')
+  const { setRunAccess, clearRunAccess } = await harness.load('/src/runMode.js')
+  let current = row
+  const other = { ...row, run_id: 'other' }
+  const backend = fetchStub({
+    'GET /api/assistant/commands': { commands: [] },
+    'GET /api/assistant/sessions': { sessions: [] },
+    'GET /api/assistant/watches': { watches: [] },
+    'GET /api/runs': () => [current, other],
+    'GET /api/runs/demo/result-notices': payload([node]),
+    'GET /api/assistant/permissions': ({ init }) => unanswered(init),
+    'GET /api/assistant/progress': ({ init }) => unanswered(init),
+  })
+  globalThis.fetch = backend
+  localStorage.clear()
+  sessionStorage.clear()
+  const mounted = await harness.mount(AssistantBar, { runId: 'demo' })
+  const details = () => mounted.container.querySelector('.asst-result-details')
+  const open = async () => {
+    await React.act(async () => {
+      details().open = true
+      details().dispatchEvent(new Event('toggle'))
+    })
+    await until(() => details()?.querySelector('.asst-run-result'), 'visible current result')
+  }
+  const refresh = () => React.act(async () => document.dispatchEvent(new Event('visibilitychange')))
+  try {
+    const side = mounted.container.querySelector('button.cmdbar-drawer-btn')
+    if (side) await click(side)
+    await until(details, 'result disclosure')
+    await open()
+    const first = details()
+    current = { ...row, generation: 'b'.repeat(64), result_summary: {
+      ...receipt, selected: { ...receipt.selected, value: 0.9 } } }
+    await refresh()
+    await until(() => details() && details() !== first, 'new generation disclosure')
+    assert.equal(details().open, false)
+    assert.equal(details().querySelector('.asst-run-result'), null)
+    await open()
+    assert.match(details().textContent, /0\.9/)
+    // A refresh within the same generation keeps the operator's disclosure open
+    // and renders the current selected receipt rather than retaining old props.
+    current = { ...current, result_summary: { ...receipt,
+      selected: { ...receipt.selected, value: 0.8 } } }
+    await refresh()
+    await until(() => details()?.textContent.includes('0.8'), 'current receipt refresh')
+    assert.equal(details().open, true)
+    await mounted.rerender({ runId: 'other' })
+    await until(details, 'other run disclosure')
+    assert.equal(details().open, false)
+    assert.equal(details().querySelector('.asst-run-result'), null)
+    await open()
+    await React.act(async () => setRunAccess('other', { readOnly: true, seq: 10 }))
+    assert.equal(details(), null, 'history cannot retain a live result reader')
+    await React.act(async () => clearRunAccess('other'))
+    await until(details, 'restored live disclosure')
+    assert.equal(details().open, false)
+    assert.equal(backend.calls.some(call => call.method !== 'GET'), false)
+  } finally {
+    await mounted.unmount()
+    clearRunAccess('other')
+    globalThis.fetch = harness.fetch
+  }
 })
 test.after(async () => { await harness?.close() })
 
@@ -93,7 +159,16 @@ test('Assistant drafts the result question, preserves an existing draft, and sen
     await settle()
     const side = mounted.container.querySelector('button.cmdbar-drawer-btn')
     if (side) await click(side)
-    await until(() => mounted.container.querySelector('.asst-run-result button'), 'the finished result card')
+    await until(() => mounted.container.querySelector('.asst-result-details'), 'the finished result disclosure')
+    const disclosure = mounted.container.querySelector('.asst-result-details')
+    assert.equal(disclosure.open, false)
+    assert.equal(disclosure.querySelector('.asst-run-result'), null,
+      'a hidden result must not mount or publish a ready/scroll effect')
+    await React.act(async () => {
+      disclosure.open = true
+      disclosure.dispatchEvent(new Event('toggle'))
+    })
+    await until(() => mounted.container.querySelector('.asst-run-result button'), 'the opened result card')
     const ask = mounted.container.querySelector('.asst-run-result button')
     assert.equal(ask.disabled, false)
     await click(ask)
@@ -119,6 +194,12 @@ test('Assistant drafts the result question, preserves an existing draft, and sen
     assert.match(mounted.container.textContent, /Черновик сохранён\. Сначала отправьте или очистите его/)
     assert.equal(backend.calls.some(call => call.method !== 'GET'), false,
       'preparing the question cannot send a message or run command')
+    await React.act(async () => {
+      disclosure.open = false
+      disclosure.dispatchEvent(new Event('toggle'))
+    })
+    assert.equal(disclosure.querySelector('.asst-run-result'), null)
+    assert.equal(input.value, preserved, 'closing a result cannot clear its drafted question')
   } finally {
     await mounted.unmount()
     globalThis.fetch = harness.fetch

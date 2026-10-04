@@ -4074,7 +4074,8 @@ merge этим проходом не проверены.
 5. **O1 — размер production UI.** В исходной сборке было четыре нарушения
    bundle budgets. §20.42 снижает JS на 4719 B и CSS на 174 B: общая CSS,
    DAG CSS и review DAG JS теперь проходят прежние пределы. Осталось
-   превышение total JS на 13317 B; потолки не повышены. Нужны дальнейшее
+   превышение total JS: 13317 B после §20.42, 13380 B после §20.43;
+   потолки не повышены. Нужны дальнейшее
    уменьшение исходного кода/повторов и полный CI. Один lazy import не снижает
    сумму всех assets; нельзя выдавать route budget за зелёный общий gate.
 
@@ -6214,3 +6215,57 @@ ARIA сохраняет `false`. Это проверка названной ма
 effective program manifest, живой внешний клиент, human acceptance и
 проверенную target-relative доставку в пользовательский repo. Этот проход
 не является проверкой repo delivery LoopLab.
+
+### 20.43. Скрытый итог Assistant загружается при раскрытии — 2026-10-04
+
+**Ревью.** Исходное дерево — `669495f5a9df84290bc7914d4b2df46b4aacfe43`.
+Продолжение O1 выявило отдельный дефект чтения результата: native `details`
+скрывал карточку, но React всё равно монтировал `AssistantRunResult` внутри неё.
+Lazy import выполнялся до раскрытия, а ready effect мог инициировать прокрутку
+чата ради скрытого результата. Сам читатель не вызывает модель или дополнительный
+detail API; проблема касалась загрузки JS и жизненного цикла компонента.
+
+**Исправлено.** `AssistantBar.jsx::RunResultDisclosure` монтирует children только
+в открытом блоке сравнения. Ключ run ID + generation закрывает блок при смене
+идентичности. Обычное обновление данных того же поколения сохраняет раскрытие
+и показывает текущую квитанцию. Закрытие удаляет читатель; чтение истории
+не удерживает живой итог. При загрузке показывается RU/EN status вместо пустого
+fallback. Краткие completion notices остаются отдельным читателем в чате.
+Кнопка вопроса сохраняет прежние guards и только готовит черновик.
+
+**Проверено.** Replay-first — 193 passed. Полный UI suite — 1945 passed,
+без fail/skip/cancel. Четыре проверки `assistantRunResult.test.js` входят
+в это число: закрыто/открыто/снова закрыто, новый run/generation, обновление
+текущего receipt, история → live, точные ссылки попытки, ограничения сравнения,
+RU/EN, отказ перезаписать черновик, отсутствие POST при подготовке вопроса.
+Production build проходит.
+
+В production-браузере прочитан прежний private `demo` (79 events, два terminal
+nodes). До раскрытия: ноль result readers, три completion notices, нет
+modulepreload link для `AssistantRunResult`. После раскрытия итог виден; вопрос
+подготовлен без отправки. Закрытие удаляет reader и сохраняет вопрос. FullHD DOM:
+reader width 939px, client/scroll 937px — горизонтального переполнения нет.
+Console warnings/errors — ноль. Проверка modulepreload DOM не является полной
+сетевой трассировкой. Черновик очищен, viewport возвращён, собственная вкладка
+закрыта, private server остановлен. Снимки при штатном 1280×720:
+[свёрнутый блок](assets/72-result-disclosure/01-closed.jpg),
+[раскрытый итог и черновик](assets/72-result-disclosure/02-open-draft.jpg).
+
+![Итог Assistant после раскрытия](assets/72-result-disclosure/02-open-draft.jpg)
+
+**Размеры и граница.** Это исправление загрузки, не экономия суммы assets:
+JS gzip 647301 → 647364 B (+63), CSS неизменен — 59635 B. Total JS превышает
+прежний предел 633984 B на **13380 B**. Остальные size/reachability/cycle и
+boolean guards проходят; full Agent cycle сохраняет dynamic boundary. O1 OPEN,
+бюджеты не повышены. Пробы другого JSX factory и minSize групп не дали уменьшения
+и не вошли в приложение. Ограничения и команды —
+[validation.json](assets/72-result-disclosure/validation.json), размеры —
+[bundles.json](assets/72-result-disclosure/bundles.json).
+
+Документальные проверки — 28 passed; strict MkDocs и diff-check проходят.
+Всего 2166 уникальных локальных тестов: 193 replay + 1945 UI + 28 docs.
+
+Все большие OPEN §19.17 сохраняются, включая lifecycle/retention worktree
+**LoopLab**, effective manifest, live MCP, приёмку нового пользователя и
+target-relative доставку в пользовательский repo. Нового обучения и проверки
+repo delivery LoopLab в этом проходе нет; весь doc72 не закрыт.

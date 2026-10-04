@@ -1,0 +1,682 @@
+{
+  "baseline": {
+    "totals": {
+      "js": {
+        "raw": 2016442,
+        "gzip": 647301
+      },
+      "css": {
+        "raw": 286332,
+        "gzip": 59635
+      },
+      "other": {
+        "raw": 0,
+        "gzip": 0
+      }
+    },
+    "closures": [
+      {
+        "name": "initial shell",
+        "roots": [
+          "index.html"
+        ],
+        "baselineRoots": [],
+        "summary": {
+          "js": {
+            "raw": 257990,
+            "gzip": 83209
+          },
+          "css": {
+            "raw": 192380,
+            "gzip": 36473
+          },
+          "other": {
+            "raw": 0,
+            "gzip": 0
+          }
+        }
+      },
+      {
+        "name": "owner List route",
+        "roots": [
+          "index.html",
+          "src/OwnerChrome.jsx",
+          "src/RunList.jsx"
+        ],
+        "baselineRoots": [],
+        "summary": {
+          "js": {
+            "raw": 654635,
+            "gzip": 211174
+          },
+          "css": {
+            "raw": 210425,
+            "gzip": 40748
+          },
+          "other": {
+            "raw": 0,
+            "gzip": 0
+          }
+        }
+      },
+      {
+        "name": "Run compare increment",
+        "roots": [
+          "src/RunCompare.jsx"
+        ],
+        "baselineRoots": [
+          "index.html",
+          "src/OwnerChrome.jsx",
+          "src/RunList.jsx"
+        ],
+        "summary": {
+          "js": {
+            "raw": 11218,
+            "gzip": 4037
+          },
+          "css": {
+            "raw": 0,
+            "gzip": 0
+          },
+          "other": {
+            "raw": 0,
+            "gzip": 0
+          }
+        }
+      },
+      {
+        "name": "owner Claims & Curation route",
+        "roots": [
+          "index.html",
+          "src/ClaimsCuration.jsx",
+          "src/OwnerChrome.jsx"
+        ],
+        "baselineRoots": [],
+        "summary": {
+          "js": {
+            "raw": 582871,
+            "gzip": 189250
+          },
+          "css": {
+            "raw": 217927,
+            "gzip": 42571
+          },
+          "other": {
+            "raw": 0,
+            "gzip": 0
+          }
+        }
+      },
+      {
+        "name": "owner run DAG route",
+        "roots": [
+          "index.html",
+          "src/ConceptChipBar.jsx",
+          "src/Dag.jsx",
+          "src/Dock.jsx",
+          "src/Inspector.jsx",
+          "src/OwnerChrome.jsx",
+          "src/RunView.jsx"
+        ],
+        "baselineRoots": [],
+        "summary": {
+          "js": {
+            "raw": 1241590,
+            "gzip": 401779
+          },
+          "css": {
+            "raw": 239957,
+            "gzip": 46973
+          },
+          "other": {
+            "raw": 0,
+            "gzip": 0
+          }
+        }
+      },
+      {
+        "name": "valid review DAG route",
+        "roots": [
+          "index.html",
+          "src/ConceptChipBar.jsx",
+          "src/Dag.jsx",
+          "src/RunView.jsx"
+        ],
+        "baselineRoots": [],
+        "summary": {
+          "js": {
+            "raw": 818683,
+            "gzip": 268268
+          },
+          "css": {
+            "raw": 219680,
+            "gzip": 41810
+          },
+          "other": {
+            "raw": 0,
+            "gzip": 0
+          }
+        }
+      },
+      {
+        "name": "owner Concepts route",
+        "roots": [
+          "index.html",
+          "src/ConceptView.jsx",
+          "src/OwnerChrome.jsx",
+          "src/RunView.jsx"
+        ],
+        "baselineRoots": [],
+        "summary": {
+          "js": {
+            "raw": 800944,
+            "gzip": 256911
+          },
+          "css": {
+            "raw": 222630,
+            "gzip": 43702
+          },
+          "other": {
+            "raw": 0,
+            "gzip": 0
+          }
+        }
+      },
+      {
+        "name": "panel-hub increment",
+        "roots": [
+          "src/panels.jsx"
+        ],
+        "baselineRoots": [
+          "index.html",
+          "src/ConceptChipBar.jsx",
+          "src/Dag.jsx",
+          "src/Dock.jsx",
+          "src/Inspector.jsx",
+          "src/OwnerChrome.jsx",
+          "src/RunView.jsx"
+        ],
+        "summary": {
+          "js": {
+            "raw": 199531,
+            "gzip": 61468
+          },
+          "css": {
+            "raw": 25786,
+            "gzip": 6459
+          },
+          "other": {
+            "raw": 0,
+            "gzip": 0
+          }
+        }
+      },
+      {
+        "name": "owner collaboration increment",
+        "roots": [
+          "_CuaMva9e.js"
+        ],
+        "baselineRoots": [
+          "index.html",
+          "src/ConceptChipBar.jsx",
+          "src/Dag.jsx",
+          "src/Dock.jsx",
+          "src/Inspector.jsx",
+          "src/OwnerChrome.jsx",
+          "src/RunView.jsx"
+        ],
+        "summary": {
+          "js": {
+            "raw": 42080,
+            "gzip": 11520
+          },
+          "css": {
+            "raw": 0,
+            "gzip": 0
+          },
+          "other": {
+            "raw": 0,
+            "gzip": 0
+          }
+        }
+      },
+      {
+        "name": "review collaboration increment",
+        "roots": [
+          "_CuaMva9e.js"
+        ],
+        "baselineRoots": [
+          "index.html",
+          "src/ConceptChipBar.jsx",
+          "src/Dag.jsx",
+          "src/RunView.jsx"
+        ],
+        "summary": {
+          "js": {
+            "raw": 42080,
+            "gzip": 11520
+          },
+          "css": {
+            "raw": 0,
+            "gzip": 0
+          },
+          "other": {
+            "raw": 0,
+            "gzip": 0
+          }
+        }
+      },
+      {
+        "name": "Claims & Curation increment",
+        "roots": [
+          "src/ClaimsCuration.jsx"
+        ],
+        "baselineRoots": [
+          "index.html"
+        ],
+        "summary": {
+          "js": {
+            "raw": 26941,
+            "gzip": 9036
+          },
+          "css": {
+            "raw": 7502,
+            "gzip": 1823
+          },
+          "other": {
+            "raw": 0,
+            "gzip": 0
+          }
+        }
+      },
+      {
+        "name": "React Flow increment",
+        "roots": [
+          "_CLyaVuJT.js"
+        ],
+        "baselineRoots": [
+          "index.html"
+        ],
+        "summary": {
+          "js": {
+            "raw": 172337,
+            "gzip": 55264
+          },
+          "css": {
+            "raw": 15413,
+            "gzip": 2527
+          },
+          "other": {
+            "raw": 0,
+            "gzip": 0
+          }
+        }
+      }
+    ],
+    "compact_panel": {
+      "summary": {
+        "js": {
+          "raw": 365187,
+          "gzip": 121506
+        },
+        "css": {
+          "raw": 192744,
+          "gzip": 36702
+        },
+        "other": {
+          "raw": 0,
+          "gzip": 0
+        }
+      },
+      "includes_full_cycle_body": false,
+      "body_dynamic_import": true,
+      "missingImports": []
+    },
+    "violations": [
+      {
+        "code": "total_budget",
+        "message": "Total bundle JS gzip is 632.1 KiB (647,301 B), over the 619.1 KiB (633,984 B) budget by 13.0 KiB (13,317 B). Remove or defer code; change the target only with a new measured baseline."
+      }
+    ]
+  },
+  "final": {
+    "totals": {
+      "js": {
+        "raw": 2016725,
+        "gzip": 647364
+      },
+      "css": {
+        "raw": 286332,
+        "gzip": 59635
+      },
+      "other": {
+        "raw": 0,
+        "gzip": 0
+      }
+    },
+    "closures": [
+      {
+        "name": "initial shell",
+        "roots": [
+          "index.html"
+        ],
+        "baselineRoots": [],
+        "summary": {
+          "js": {
+            "raw": 257990,
+            "gzip": 83202
+          },
+          "css": {
+            "raw": 192380,
+            "gzip": 36473
+          },
+          "other": {
+            "raw": 0,
+            "gzip": 0
+          }
+        }
+      },
+      {
+        "name": "owner List route",
+        "roots": [
+          "index.html",
+          "src/OwnerChrome.jsx",
+          "src/RunList.jsx"
+        ],
+        "baselineRoots": [],
+        "summary": {
+          "js": {
+            "raw": 654918,
+            "gzip": 211236
+          },
+          "css": {
+            "raw": 210425,
+            "gzip": 40748
+          },
+          "other": {
+            "raw": 0,
+            "gzip": 0
+          }
+        }
+      },
+      {
+        "name": "Run compare increment",
+        "roots": [
+          "src/RunCompare.jsx"
+        ],
+        "baselineRoots": [
+          "index.html",
+          "src/OwnerChrome.jsx",
+          "src/RunList.jsx"
+        ],
+        "summary": {
+          "js": {
+            "raw": 11218,
+            "gzip": 4035
+          },
+          "css": {
+            "raw": 0,
+            "gzip": 0
+          },
+          "other": {
+            "raw": 0,
+            "gzip": 0
+          }
+        }
+      },
+      {
+        "name": "owner Claims & Curation route",
+        "roots": [
+          "index.html",
+          "src/ClaimsCuration.jsx",
+          "src/OwnerChrome.jsx"
+        ],
+        "baselineRoots": [],
+        "summary": {
+          "js": {
+            "raw": 583154,
+            "gzip": 189316
+          },
+          "css": {
+            "raw": 217927,
+            "gzip": 42571
+          },
+          "other": {
+            "raw": 0,
+            "gzip": 0
+          }
+        }
+      },
+      {
+        "name": "owner run DAG route",
+        "roots": [
+          "index.html",
+          "src/ConceptChipBar.jsx",
+          "src/Dag.jsx",
+          "src/Dock.jsx",
+          "src/Inspector.jsx",
+          "src/OwnerChrome.jsx",
+          "src/RunView.jsx"
+        ],
+        "baselineRoots": [],
+        "summary": {
+          "js": {
+            "raw": 1241873,
+            "gzip": 401846
+          },
+          "css": {
+            "raw": 239957,
+            "gzip": 46973
+          },
+          "other": {
+            "raw": 0,
+            "gzip": 0
+          }
+        }
+      },
+      {
+        "name": "valid review DAG route",
+        "roots": [
+          "index.html",
+          "src/ConceptChipBar.jsx",
+          "src/Dag.jsx",
+          "src/RunView.jsx"
+        ],
+        "baselineRoots": [],
+        "summary": {
+          "js": {
+            "raw": 818683,
+            "gzip": 268262
+          },
+          "css": {
+            "raw": 219680,
+            "gzip": 41810
+          },
+          "other": {
+            "raw": 0,
+            "gzip": 0
+          }
+        }
+      },
+      {
+        "name": "owner Concepts route",
+        "roots": [
+          "index.html",
+          "src/ConceptView.jsx",
+          "src/OwnerChrome.jsx",
+          "src/RunView.jsx"
+        ],
+        "baselineRoots": [],
+        "summary": {
+          "js": {
+            "raw": 801227,
+            "gzip": 256982
+          },
+          "css": {
+            "raw": 222630,
+            "gzip": 43702
+          },
+          "other": {
+            "raw": 0,
+            "gzip": 0
+          }
+        }
+      },
+      {
+        "name": "panel-hub increment",
+        "roots": [
+          "src/panels.jsx"
+        ],
+        "baselineRoots": [
+          "index.html",
+          "src/ConceptChipBar.jsx",
+          "src/Dag.jsx",
+          "src/Dock.jsx",
+          "src/Inspector.jsx",
+          "src/OwnerChrome.jsx",
+          "src/RunView.jsx"
+        ],
+        "summary": {
+          "js": {
+            "raw": 199531,
+            "gzip": 61467
+          },
+          "css": {
+            "raw": 25786,
+            "gzip": 6459
+          },
+          "other": {
+            "raw": 0,
+            "gzip": 0
+          }
+        }
+      },
+      {
+        "name": "owner collaboration increment",
+        "roots": [
+          "_CtrnQ3Td.js"
+        ],
+        "baselineRoots": [
+          "index.html",
+          "src/ConceptChipBar.jsx",
+          "src/Dag.jsx",
+          "src/Dock.jsx",
+          "src/Inspector.jsx",
+          "src/OwnerChrome.jsx",
+          "src/RunView.jsx"
+        ],
+        "summary": {
+          "js": {
+            "raw": 42080,
+            "gzip": 11520
+          },
+          "css": {
+            "raw": 0,
+            "gzip": 0
+          },
+          "other": {
+            "raw": 0,
+            "gzip": 0
+          }
+        }
+      },
+      {
+        "name": "review collaboration increment",
+        "roots": [
+          "_CtrnQ3Td.js"
+        ],
+        "baselineRoots": [
+          "index.html",
+          "src/ConceptChipBar.jsx",
+          "src/Dag.jsx",
+          "src/RunView.jsx"
+        ],
+        "summary": {
+          "js": {
+            "raw": 42080,
+            "gzip": 11520
+          },
+          "css": {
+            "raw": 0,
+            "gzip": 0
+          },
+          "other": {
+            "raw": 0,
+            "gzip": 0
+          }
+        }
+      },
+      {
+        "name": "Claims & Curation increment",
+        "roots": [
+          "src/ClaimsCuration.jsx"
+        ],
+        "baselineRoots": [
+          "index.html"
+        ],
+        "summary": {
+          "js": {
+            "raw": 26941,
+            "gzip": 9035
+          },
+          "css": {
+            "raw": 7502,
+            "gzip": 1823
+          },
+          "other": {
+            "raw": 0,
+            "gzip": 0
+          }
+        }
+      },
+      {
+        "name": "React Flow increment",
+        "roots": [
+          "_CLyaVuJT.js"
+        ],
+        "baselineRoots": [
+          "index.html"
+        ],
+        "summary": {
+          "js": {
+            "raw": 172337,
+            "gzip": 55264
+          },
+          "css": {
+            "raw": 15413,
+            "gzip": 2527
+          },
+          "other": {
+            "raw": 0,
+            "gzip": 0
+          }
+        }
+      }
+    ],
+    "compact_panel": {
+      "summary": {
+        "js": {
+          "raw": 365187,
+          "gzip": 121497
+        },
+        "css": {
+          "raw": 192744,
+          "gzip": 36702
+        },
+        "other": {
+          "raw": 0,
+          "gzip": 0
+        }
+      },
+      "includes_full_cycle_body": false,
+      "body_dynamic_import": true,
+      "missingImports": []
+    },
+    "violations": [
+      {
+        "code": "total_budget",
+        "message": "Total bundle JS gzip is 632.2 KiB (647,364 B), over the 619.1 KiB (633,984 B) budget by 13.1 KiB (13,380 B). Remove or defer code; change the target only with a new measured baseline."
+      }
+    ]
+  }
+}

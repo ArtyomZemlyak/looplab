@@ -1,0 +1,102 @@
+{
+  "date": "2026-10-04",
+  "source_parent": "669495f5a9df84290bc7914d4b2df46b4aacfe43",
+  "scope": "doc72: defer selected-result reader until disclosure, fence openness by run/generation and preserve chat notices/drafts",
+  "tests": [
+    {
+      "command": ".venv/Scripts/python.exe -m pytest -o addopts=\"\" -q tests/test_events_replay.py --basetemp=.tmp/doc72-ui-budget-next/replay",
+      "passed": 193
+    },
+    {
+      "cwd": "ui",
+      "command": "node --test --test-timeout=30000 --test-concurrency=4 test/*.test.js",
+      "passed": 1945,
+      "failed": 0,
+      "skipped": 0,
+      "cancelled": 0
+    },
+    {
+      "cwd": "ui",
+      "command": "node --test --test-timeout=30000 test/assistantRunResult.test.js",
+      "passed": 4,
+      "note": "included in full UI suite, not additional unique tests"
+    },
+    {
+      "command": ".venv/Scripts/python.exe -m pytest -o addopts=\"\" -q tests/test_api_reference.py tests/test_documentation_contracts.py tests/test_doc_surface_budgets.py tests/test_architecture_diagram_geometry.py --basetemp=.tmp/doc72-ui-budget-next/docs",
+      "passed": 28
+    },
+    {
+      "command": ".venv/Scripts/python.exe -m mkdocs build --strict --site-dir .tmp/doc72-ui-budget-next/site",
+      "exit": 0
+    },
+    {
+      "command": "git diff --check",
+      "exit": 0
+    }
+  ],
+  "production_build": {
+    "exit": 0,
+    "command": "node node_modules/vite/bin/vite.js build --outDir ../.tmp/doc72-ui-budget-next/ui-dist-final"
+  },
+  "bundle_gate": {
+    "exit": 1,
+    "total_js_gzip": 647364,
+    "total_js_budget": 633984,
+    "total_js_excess": 13380,
+    "js_change": 63,
+    "total_css_gzip": 59635,
+    "other_gates_pass": true,
+    "ceilings_changed": false
+  },
+  "matrix": [
+    "closed result absent from mounted Assistant",
+    "native opening mounts result",
+    "closing removes result and keeps question draft",
+    "new run and generation reset disclosure",
+    "same-generation refresh retains open disclosure and current receipt",
+    "history removes live result, return to live starts closed",
+    "RU/EN interpretation and exact attempt links",
+    "preparing question cannot overwrite draft or send POST"
+  ],
+  "browser": {
+    "fixture": "existing private demo",
+    "events": 79,
+    "terminal_nodes": 2,
+    "before_open": {
+      "readers": 0,
+      "notices": 3,
+      "result_modulepreload_links": 0
+    },
+    "after_close": {
+      "readers": 0,
+      "notices": 3,
+      "question_preserved": true
+    },
+    "viewport_dom": {
+      "width": 1920,
+      "height": 1080,
+      "reader_width": 939,
+      "client_width": 937,
+      "scroll_width": 937
+    },
+    "capture": {
+      "width": 1280,
+      "height": 720
+    },
+    "console_warnings_errors": 0,
+    "draft_cleared": true,
+    "viewport_reset": true,
+    "own_tab_closed": true,
+    "private_server_stopped": true
+  },
+  "limits": [
+    "total JS gate remains RED, no full CI claim",
+    "deferred loading does not reduce all-asset sum",
+    "modulepreload DOM observation is not a full network trace",
+    "no new training or model calls",
+    "no live external MCP or new-user acceptance",
+    "no LoopLab run-owned worktree/repo delivery acceptance",
+    "doc72 OPEN topics remain OPEN"
+  ],
+  "total_unique_checks": 2166
+}
