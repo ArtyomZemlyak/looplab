@@ -1,0 +1,41 @@
+{
+  "date": "2026-10-04",
+  "source_parent": "71711a14f5602abecfa16f3b79a36defde91074f",
+  "scope": "full Agent cycle RU/EN labels, rendering-envelope guards, withdrawal of current requirements on stale/incomplete reads",
+  "tests": [
+    {"command": ".venv/Scripts/python.exe -m pytest -o addopts='' -q tests/test_events_replay.py --basetemp=.tmp/doc72-cycle-requirements/replay", "passed": 193},
+    {"command": ".venv/Scripts/python.exe -m pytest -o addopts='' -q tests/test_external_progress.py tests/test_progress_language.py --basetemp=.tmp/doc72-cycle-requirements/backend", "passed": 41},
+    {"cwd": "ui", "command": "node --test --test-timeout=30000 test/harnessCycleRequirements.test.js test/harnessProgressContract.test.js test/harnessProgressLanguage.test.js test/agentActivity.test.js", "passed": 11},
+    {"cwd": "ui", "command": "node --test --test-timeout=30000 test/panelResourceTruth.test.js test/harnessHandoff.test.js", "passed": 7},
+    {"cwd": "ui", "command": "node --test --test-timeout=30000 test/harnessCycleRequirements.test.js", "passed": 2, "note": "final pagination/truncation assertions; same tests, not additional unique count"},
+    {"command": ".venv/Scripts/python.exe -m pytest -o addopts='' -q tests/test_api_reference.py tests/test_documentation_contracts.py tests/test_doc_surface_budgets.py tests/test_architecture_diagram_geometry.py --basetemp=.tmp/doc72-cycle-requirements/docs", "passed": 28},
+    {"command": ".venv/Scripts/python.exe -m mkdocs build --strict --site-dir .tmp/doc72-cycle-requirements/site", "exit": 0}
+  ],
+  "matrix": ["Russian full requirements, report/review obligations and history", "original phase IDs, verdicts, keys and authored reasons/logs unchanged", "source health false is readable but not current action guidance", "failed/newer read retains history and withdraws requirements", "explicit GET retry restores current complete requirements", "language change fences cached wrong-locale advice", "missing finish fields or malformed question/answer is unavailable without render crash", "consistent pending count and truncation; 100/101 boundary", "journal offset/limit/total/has_more; valid offset20 and mismatch rejection", "no command or model request", "shared panel resource notice English behavior unchanged"],
+  "production": {
+    "command": "node node_modules/vite/bin/vite.js build --outDir ../.tmp/doc72-cycle-requirements/ui-dist-final",
+    "build_exit": 0,
+    "baseline_js_gzip": 648036,
+    "final_js_gzip": 652020,
+    "delta_js_gzip": 3984,
+    "baseline_css_gzip": 59809,
+    "final_css_gzip": 59809,
+    "baseline_violations": 4,
+    "final_violations": 4,
+    "budgets_changed": false,
+    "details": "bundles.json",
+    "claim": "full body deferred; no total or compact gzip reduction claim, budget gate remains red"
+  },
+  "browser": {
+    "fixture": "existing private demo, 2 terminal nodes, 79 events, 1 run-base advance; no new training",
+    "generation": "c9c4a8536df883c4ed7c11fe91ce41523ec67d129252a8591c36bb423adf4f4d",
+    "actions": "read full progress, RU/EN/RU select, scroll history; no Assistant send, engine command or owner-repo delivery",
+    "dom_viewport": [1920, 1080],
+    "dialog": {"width": 1100, "right": 1510, "client_width": 1088, "scroll_width": 1088},
+    "screenshots": ["01-cycle-ru.jpg", "02-history-ru.jpg", "03-cycle-en.jpg"],
+    "capture": "default 1280x720; FullHD DOM geometry checked separately, enlarged capture limitation from prior increment",
+    "viewport_reset": true,
+    "temporary_tab_closed": true
+  },
+  "limits": ["rendering validation is not semantic receipt/admission authority", "raw diagnostics and authored text remain verbatim", "no live external client or new-user acceptance", "no new ML training or paid model call", "no owner-repo merge/push feature acceptance", "worktree means LoopLab run-owned worktree", "bundle gate remains red and full CI not run", "not full doc72 completion"]
+}

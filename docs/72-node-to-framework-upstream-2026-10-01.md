@@ -4058,7 +4058,8 @@ merge этим проходом не проверены.
 1. **O3/O9/O11/O13 — цельный вход через Assistant.** Путь подключения теперь
    локализован; §20.40 добавляет RU/EN next-step и условия checkpoints из того
    же серверного решения. Полная панель требований/истории и схема владельцев
-   ещё требуют локализации. Приёмка: первый результат и восстановление на RU/EN, явные
+   получили RU/EN labels и защиту старого/повреждённого чтения в §20.41. Схема
+   владельцев и весь onboarding ещё требуют упрощения. Приёмка: первый результат и восстановление на RU/EN, явные
    operator/client approvals, текущий blocker и расходы до действия.
 2. **O2/O4/O8 — цельная worktree/recovery карточка.** Сводка latest proposal
    сделана; нужны полная paged history, request/check/advance recovery, diff,
@@ -6093,3 +6094,58 @@ bundle-budget нарушения; пределы не повышены. Это �
 LoopLab, O5/O6 — effective program manifest, O6/O10/O14 — target-relative
 доставка в пользовательский repo. Изменение run-owned базы по-прежнему не равно
 merge/push в него. O1 сохраняет отдельную работу по размеру UI и полному CI.
+
+### 20.41. Требования и история Agent cycle: RU/EN и отказ от старых указаний — 2026-10-04
+
+**Ревью.** Исходное дерево — `71711a14f5602abecfa16f3b79a36defde91074f`.
+Полная панель оставалась английской после русского next-step. Кроме этого,
+валидатор не проверял `finish_reviews_due`, поля требований, вопросы и metadata
+страниц: неполный HTTP 200 мог вызвать ошибку React или показать пустые требования.
+После отказа refresh старые требования продолжали стоять под заголовками будущих
+действий. Общая подсказка `abort pending nodes` не различала явную отмену и
+разрешённый ответ конкретного монитора.
+
+**Исправлено.** `ui/src/harnessProgressModel.js::validHarnessProgress` проверяет
+render-critical envelope: explicit health/aggregate complete, обязательные поля
+продолжения и завершения, вопрос/число/truncation, limit/offset/total/has_more,
+поля отображаемых квитанций. Не додумывает разрешения или содержимое отсутствующих
+обязательств. Полный ответ с неполными источниками остаётся диагностикой; старое
+чтение сохраняет историю, но текущие candidate/finish требования скрыты до fresh
+complete read. Старый статус `current` назван актуальным **при последнем чтении**.
+
+`ui/src/HarnessCycleBody.jsx` переводит статические подписи требований, вопросов,
+истории, известные status chips, paging и source warning. Phase IDs, verdicts,
+ключи, reasons/expectations/logs и JSON diagnostics сохраняются verbatim.
+`ui/src/PanelResourceNotice.jsx` принимает opt-in язык для ошибок/повтора чтения;
+остальные панели сохраняют EN default. Подсказка о незавершённых экспериментах
+ведёт к state/checkpoints/original receipts и allowed answers монитора, без общего
+разрешения `abort`. Новых команд, вопросов или ожиданий движка нет.
+
+Body загружается динамически при чтении полной панели, компактный status его
+не импортирует статически. Это граница загрузки, не обещание уменьшения bundle:
+total JS gzip вырос 648036 → 652020 B (+3984), static compact closure —
+121931 → 121999 B (+68), CSS не изменился. Прежние четыре bundle-budget нарушения
+сохраняются, потолки не повышены: O1 OPEN.
+
+**Проверено.** Replay-first — 193 passed; сервер progress/locale — 41 passed;
+UI — 18 passed. RU → EN с сохранёнными original IDs/текстом, damaged source,
+stale refresh, явный повтор чтения, отсутствующие finish fields, malformed answer,
+несовпадающие question counts и page metadata. Проверены допустимые offset=20
+и 100/101 truncated questions. Общие resource notices и handoff не сломаны.
+Production build прошёл. Прочитан прежний private `demo` с настоящим серверным
+ответом: 79 events, два terminal nodes, без нового обучения, model calls или
+engine writes. DOM при FullHD: dialog 1100px, client/scroll width 1088px;
+viewport возвращён, собственная вкладка закрыта. Снимки — штатный 1280×720
+capture, не human acceptance: [требования RU](assets/72-cycle-requirements/01-cycle-ru.jpg),
+[история RU](assets/72-cycle-requirements/02-history-ru.jpg),
+[EN](assets/72-cycle-requirements/03-cycle-en.jpg).
+
+![Русские требования цикла агента](assets/72-cycle-requirements/01-cycle-ru.jpg)
+
+Команды, ограничения и размеры — [validation.json](assets/72-cycle-requirements/validation.json)
+и [bundles.json](assets/72-cycle-requirements/bundles.json).
+O3/O9/O11/O13 сохраняют OPEN для цельного Assistant onboarding, схемы владельцев,
+approvals, технических diagnostics и реального нового пользователя с live MCP.
+O2/O4/O8 — lifecycle/retention worktree LoopLab; O5/O6 — effective manifest;
+O6/O10/O14 — проверенная target-relative доставка в пользовательский repo.
+Этот UI read не выполняет merge/push в него и не закрывает весь doc72.

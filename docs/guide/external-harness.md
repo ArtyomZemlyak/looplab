@@ -572,7 +572,9 @@ responses from the old language cannot restore it. Typed MCP and UI reads refuse
 a present wrong/invalid language stamp. Older servers without the stamp remain
 readable; the UI labels their original-language fallback.
 Auto currently requests English for this server guidance. This does not translate
-recorded author text, source diagnostics or the rest of Agent cycle's history/gates.
+recorded author text or raw source diagnostics. The UI also translates its
+requirement/history headings, known status labels, pagination and read errors;
+phase IDs, verdicts, original keys and author-written reasons/logs stay verbatim.
 
 The summary prioritizes incomplete sources, then unanswered evaluation questions.
 It names the responsible external agent, detail reads, response route and MCP phase.
@@ -655,6 +657,18 @@ Use `details.history` to page the full read and `details.questions` for full
 questions, substituting the current run ID and generation. Refresh after events
 or responses; sidecar-only writes also become visible through the UI's polling.
 The UI withdraws next-step advice after a failed refresh or a newer observed event.
+
+The full UI view validates the rendering envelope through
+`ui/src/harnessProgressModel.js::validHarnessProgress`: explicit source completeness,
+candidate/finish fields, consistent question counts/truncation, journal pages and
+rendered receipt fields. An incomplete HTTP 200 is an unavailable read, not empty
+requirements. Valid damaged-source diagnostics and last-read history remain visible;
+current candidate/finish requirements are withheld until a fresh complete read.
+Known current status labels on old history say "at last read". The panel never
+derives early-stop authority from the presence of a pending node: read state,
+checkpoints and original command receipts before recovery or explicit cancellation.
+The monitor question's allowed answers remain authoritative. Opening or translating
+this view submits no command and does not restart work.
 
 For Codex, add this to your project `.codex/config.toml` (or the user config):
 

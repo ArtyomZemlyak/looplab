@@ -7,13 +7,13 @@ import { click, fetchStub, jsonResponse, mountLive, until } from './_mount.js'
 const generation = 'a'.repeat(64)
 const progress = {
   generation, event_seq: 12, at_node: 2, complete: true,
-  source_health: Object.fromEntries(['decisions', 'reviews', 'checkpoints']
-    .map(kind => [kind, { accepted_rows: 0 }])),
+  source_health: Object.fromEntries(['events', 'decisions', 'reviews', 'checkpoints']
+    .map(kind => [kind, { accepted_rows: 0, read_complete: true }])),
   history: Object.fromEntries(['decisions', 'reviews', 'checkpoints']
-    .map(kind => [kind, { total: 0, items: [], has_more: false }])),
+    .map(kind => [kind, { total: 0, offset: 0, limit: 20, items: [], has_more: false }])),
   candidate_requirements: { effective_concepts: false, hypothesis_statement: true },
   candidate_blockers_if_expanding: [], candidate_decisions_per_idea: {},
-  pending_checkpoint_count: 0, pending_checkpoints: [],
+  pending_checkpoint_count: 0, pending_checkpoints: [], pending_checkpoints_truncated: false,
   finish_pending_nodes: [2], finish_report_due: false, finish_reviews_due: [],
 }
 
@@ -85,7 +85,8 @@ test('external cycle renders candidate and finalization obligations from progres
       'harness progress payload to render')
     const content = view.container.textContent.replace(/\s+/g, ' ')
     assert.match(content, /A nonempty hypothesis statement is required/)
-    assert.match(content, /Wait for or explicitly abort pending nodes: 2/)
+    assert.match(content, /Unsettled experiments: 2/)
+    assert.match(content, /that question's allowed answers/)
     assert.match(content, /concept_tags.*command:run_concepts/)
     assert.ok(globalThis.fetch.calls.some(call =>
       call.method === 'GET' && call.path === '/api/runs/mnist/harness-progress'))
