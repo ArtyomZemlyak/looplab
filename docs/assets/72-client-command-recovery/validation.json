@@ -1,0 +1,55 @@
+{
+  "date": "2026-10-05",
+  "base_commit": "b2e5caea44caf06a5e5df86dc850489ca4f7d373",
+  "scope": "durable MCP original command requests",
+  "checks": {
+    "replay": {
+      "passed": 193
+    },
+    "compatibility": {
+      "passed": 521
+    },
+    "new_client_scenarios": 32,
+    "ruff": "passed",
+    "diff_check": "passed",
+    "mkdocs_strict": "passed",
+    "final_subset": {
+      "passed": 91
+    },
+    "compatibility_final": {
+      "passed": 524
+    }
+  },
+  "integration": {
+    "transport": "local TestClient bridge to real server command service; not TCP",
+    "lost_reply_domain_command": {
+      "command": "research_completed",
+      "domain_events_after_exact_retry": 1
+    },
+    "live_external_run": {
+      "backend": "toy",
+      "objective": "quadratic",
+      "engine_lock": "real",
+      "scoped_token": true,
+      "inject_events": 1,
+      "node_evaluated_events": 1,
+      "measured_score": 0.0,
+      "finalization": "explicit",
+      "commentary_language": "ru",
+      "provider_calls": 0
+    },
+    "fresh_client_process": {
+      "ui_imports": "forbidden in test",
+      "network_calls": 0,
+      "original_body_key_restored": true
+    }
+  },
+  "limits": [
+    "No remote TCP chaos test",
+    "No real ML training or paid provider",
+    "Full Python CI not run",
+    "Non-command action bodies still retained by the agent",
+    "No cross-machine migration or writer election",
+    "Existing UI bundle debt and controlled concept ablations remain open"
+  ]
+}

@@ -1134,6 +1134,33 @@ agent through MCP to the same UI/API server and run. A new stdio MCP session is
 normal; it does not create a new research run. Search `phases("recovery")` and read
 `phase_info("recovery")` before choosing a recovery action.
 
+**Recover the original command without remembering its key.** The stdio
+`looplab harness-mcp` client now saves command POST bodies and keys **before HTTP**
+on the client machine. A new MCP process using the same client account/root can
+call `saved_commands(run_id, expected_generation)` to find command IDs, then
+`saved_command(run_id, expected_generation, command_id)` for the original request.
+These are local reads, not server receipts; they start no work. Follow `next_offset`
+with the original `request_sha256` as `expected_request_hash`, decode the base64
+chunks, verify each `chunk_sha256` and the complete `request_sha256`. The assembled
+JSON contains `method`, `path`, `body` and `idempotency_key` for an explicit exact
+retry **after** the server checks below. Do not invent a new key to recover it.
+
+The default directory is `~/.looplab/harness-requests`; set
+`LOOPLAB_HARNESS_REQUEST_DIR` in the MCP process environment for a retained volume.
+Records are separated by server URL (including proxy prefix), run and generation.
+Keep this directory private: it includes submitted code and original command keys,
+but never the transport credential. A different machine/root has different local
+history. `store_exists=false` or an empty list does not prove that the server did
+nothing. Corrupt/unreadable records give unavailable evidence, without repair.
+Each generation stores at most 2000 command requests. Reads are bounded and paged.
+If a required lock or durable save fails, `api_request` returns
+`client_request_unavailable`, `outcome=not_sent`, before that invocation's HTTP
+request. Earlier attempts can still have effects; inspect their original receipts.
+Two different bodies under one original key conflict locally. Exact retries keep
+the same saved body/key, but remain explicit actions governed by server evidence.
+This storage covers **command POSTs only**. Preserve decision/review/lesson/skill,
+checkpoint, upstream and commentary bodies/action IDs yourself as described below.
+
 1. Read `/state` for the current run generation and whether the engine is live,
    paused, or finished. If the engine stopped, an authorized operator or external
    agent must explicitly choose resume after checking the outstanding work;

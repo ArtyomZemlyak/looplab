@@ -1,19 +1,22 @@
 """Stdio MCP adapter over LoopLab's authenticated, durable HTTP API.
 
-One API, one validation boundary: MCP never writes events or reads workspaces directly.
-It forwards to the same routes and command service the UI uses. The external agent can
-discover every current operation from OpenAPI, even when new endpoints are added later.
+One domain API: MCP never writes events or reads server workspaces directly.
+Domain operations use the same routes/command service as the UI. The stdio client
+also retains original command requests in a private store on the CLIENT machine.
+The external agent can discover live domain operations through OpenAPI.
 """
 from __future__ import annotations
 
 import json
 import os
 import re
+from pathlib import Path
 from typing import Literal
 from urllib.parse import quote, unquote, urlencode, urlsplit
 
 import httpx
 
+from looplab.events.eventstore import EventStoreLockError, InterprocessLockContended
 from looplab.harness.manifest import harness_manifest
 from looplab.harness.phases import phase_catalog, phase_detail
 
@@ -53,12 +56,13 @@ MCP_INSTRUCTIONS = (
     "Keep original lesson/skill bodies and action IDs. Exact retries acknowledge stored actions without refreshing signatures, restoring retired support or granting promotion; fresh writes check current evidence. Shared/researcher/developer lesson roles are retained. Damaged event/knowledge sources and fresh completed knowledge reviews refuse with a named source. Inspect refusal health and request operator recovery; no automatic repair/resume. "
     "Typed command_receipt also verifies v1 status/terminal consistency, control event, sequence, error_code and retryable fields. Incomplete HTTP 200 means unavailable without body, not a command verdict. Read again explicitly; a terminal rejected/failed receipt or succeeded inject still does not prove completed training. "
     "Typed run_progress and connection_check validate critical progress fields, source completeness, explicit expansion/finish gates and pending counts. Missing fields are unavailable, not empty obligations. A structurally valid complete=false read retains source diagnostics; read success does not grant admission. Refresh explicitly; no automatic retry or work. "
+    "The stdio client durably saves original command POST body/key before HTTP in its private client store. On reconnect use saved_commands and paged saved_command, verify hashes, then read server command_receipt and fresh progress/checkpoints before any explicit exact retry. Local records are unobserved intentions, not applied verdicts; an empty/missing client store proves no absence of server effects. Other decision/review/knowledge/commentary writes still require retaining exact bodies/action IDs yourself. Client storage failure returns not_sent for that invocation, without HTTP or automatic repair. "
     "Use only the scoped harness credential; owner-only workflows require the operator."
 )
 
 
 class HarnessAPI:
-    def __init__(self, url: str, token: str = "", *, transport=None):
+    def __init__(self, url: str, token: str = "", *, transport=None, request_dir=None):
         try:
             parsed = urlsplit(url)
         except ValueError:
@@ -73,6 +77,10 @@ class HarnessAPI:
                                       headers={"X-LoopLab-Token": token} if token else {})
         except httpx.InvalidURL:
             raise ValueError("LOOPLAB_HARNESS_URL must be a valid HTTP(S) server URL") from None
+        self.requests = None
+        if request_dir is not None:
+            from looplab.harness.client_requests import ClientRequests
+            self.requests = ClientRequests(request_dir, str(self.client.base_url))
 
     @staticmethod
     def _path(path: str) -> str:
@@ -221,6 +229,29 @@ class HarnessAPI:
             raise ValueError("body must be a JSON object of at most 1 MiB")
         headers = {"Idempotency-Key": idempotency_key} if idempotency_key else None
         route = self._path(path)
+        saved = None
+        parts = unquote(urlsplit(path).path).split("/")
+        if (self.requests is not None and verb == "POST" and len(parts) == 5
+                and parts[1:3] == ["api", "runs"] and parts[4] == "commands"):
+            try:
+                run_id = parts[3]  # Decode the HTTP route exactly once, including literal percent IDs.
+                generation = body.get("expected_generation") if isinstance(body, dict) else None
+                if str(self.client.base_url) != self.requests.server:
+                    raise ValueError("client request server context changed")
+                # Query aliases would not be the exact persisted HTTP request.
+                canonical = f"/api/runs/{quote(run_id, safe='')}/commands"
+                if urlsplit(path).query or path not in (canonical, f"/api/runs/{run_id}/commands"):
+                    raise ValueError("noncanonical command path")
+                row = self.requests.save(run_id, generation, body, idempotency_key,
+                                         credential=self.client.headers.get("X-LoopLab-Token", ""))
+                saved = {"source": "client", "command_id": row["command_id"],
+                         "request_sha256": row["request_sha256"], "server_effects": "unobserved"}
+                body = row["request"]["body"]
+                route = canonical.lstrip("/")  # Same encoded path HTTPX uses for literal Unicode IDs.
+            except (OSError, ValueError, RecursionError, EventStoreLockError, InterprocessLockContended):
+                # Only this client-side preflight failed: no network write has begun.
+                return {"status": None, "code": "client_request_unavailable", "outcome": "not_sent",
+                        "message": "Original command could not be durably saved. Inspect the client request store and original key/body before sending; no HTTP request was made."}
         try:
             response = self.client.request(verb, route, json=body, headers=headers)
         except httpx.TransportError:
@@ -229,8 +260,34 @@ class HarnessAPI:
             if verb == "GET":
                 return {"status": None, "code": "api_unreachable", "outcome": "unavailable",
                         "message": "API read response unavailable. Check the UI/server and read again explicitly; missing evidence does not prove no action occurred."}
-            return self._unknown_write({"status": None}, "transport_error")
-        return self._result(response, method=verb)
+            result = self._unknown_write({"status": None}, "transport_error")
+        else:
+            result = self._result(response, method=verb)
+        return {**result, "client_request": saved} if saved is not None else result
+
+    def saved_commands(self, run_id, expected_generation, offset=0, limit=20):
+        """Private local records only; not a server receipt or an automatic recovery."""
+        if self.requests is None:
+            return {"source": "client", "outcome": "unavailable", "code": "client_requests_disabled"}
+        try:
+            return self.requests.listing(run_id, expected_generation, offset=offset, limit=limit)
+        except (OSError, ValueError, RecursionError):
+            return self._client_read_refusal()
+
+    def saved_command(self, run_id, expected_generation, command_id, offset=0, limit=2048,
+                      expected_request_hash=None):
+        if self.requests is None:
+            return {"source": "client", "outcome": "unavailable", "code": "client_requests_disabled"}
+        try:
+            return self.requests.page(run_id, expected_generation, command_id, offset=offset,
+                                      limit=limit, expected_request_hash=expected_request_hash)
+        except (OSError, ValueError, RecursionError):
+            return self._client_read_refusal()
+
+    @staticmethod
+    def _client_read_refusal():
+        return {"source": "client", "outcome": "unavailable", "code": "client_request_unavailable",
+                "message": "Original client request is missing, invalid or unreadable. Inspect the client store and read server state/original receipts; no retry, repair or resume was made."}
 
     def run_progress(self, run_id: str, expected_generation: str, language: str = "en") -> dict:
         self._run_identity(run_id, expected_generation)
@@ -800,7 +857,10 @@ def build_server(api: HarnessAPI):
         Transport loss returns status=null: a write has outcome=unknown, not failed.
         A 5xx write response or incomplete 2xx acknowledgement also has outcome=unknown;
         the received HTTP status is preserved. Do not treat HTTP 200 alone as a receipt.
-        Inspect saved receipts before an exact retry; this tool never retries itself."""
+        The stdio client saves original command POST bodies/keys locally before HTTP;
+        saved_commands/saved_command recover them after process loss. Other writes
+        still require preserving the exact body/action_id yourself. Inspect saved
+        server receipts before an exact retry; this tool never retries itself."""
         return api.request(method, path, body, idempotency_key)
 
     @mcp.tool(annotations=ToolAnnotations(readOnlyHint=True, destructiveHint=False,
@@ -823,6 +883,31 @@ def build_server(api: HarnessAPI):
         """
         return api.command_receipt(run_id, expected_generation, command_id, idempotency_key)
 
+    @mcp.tool(annotations=ToolAnnotations(readOnlyHint=True, destructiveHint=False,
+                                        idempotentHint=True, openWorldHint=False))
+    def saved_commands(run_id: str, expected_generation: str, offset: int = 0, limit: int = 20) -> dict:
+        """List this MCP client's locally saved original commands after process loss.
+        Scoped by server URL, run and generation. Pages 1..100; follow next_offset.
+        No HTTP, replay, retry or resume. Empty records do not prove no server effects;
+        inspect current state/progress and command_receipt before choosing recovery.
+        """
+        return api.saved_commands(run_id, expected_generation, offset, limit)
+
+    @mcp.tool(annotations=ToolAnnotations(readOnlyHint=True, destructiveHint=False,
+                                        idempotentHint=True, openWorldHint=False))
+    def saved_command(run_id: str, expected_generation: str, command_id: str,
+                      offset: int = 0, limit: int = 2048,
+                      expected_request_hash: str | None = None) -> dict:
+        """Read original request bytes from this client's private command store.
+        Assemble base64 chunks, verify chunk_sha256 and the complete request_sha256.
+        Keep expected_request_hash across pages. The JSON contains method/path/body/key,
+        never the transport credential. Not an applied receipt: read command_receipt
+        and fresh progress/checkpoints before an explicit exact retry via api_request.
+        No HTTP, automatic paging, retry, work, source repair or engine wait.
+        """
+        return api.saved_command(run_id, expected_generation, command_id, offset, limit,
+                                 expected_request_hash)
+
     return mcp
 
 
@@ -839,6 +924,9 @@ def run_stdio(url: str | None = None, token: str | None = None) -> None:
     api = HarnessAPI(url or os.environ.get("LOOPLAB_HARNESS_URL", "http://127.0.0.1:8765"),
                      credential)
     try:
+        from looplab.harness.client_requests import ClientRequests
+        directory = os.environ.get("LOOPLAB_HARNESS_REQUEST_DIR") or Path.home() / ".looplab" / "harness-requests"
+        api.requests = ClientRequests(directory, str(api.client.base_url))
         build_server(api).run(transport="stdio")
     finally:
         api.client.close()

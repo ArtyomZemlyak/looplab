@@ -2330,6 +2330,14 @@ typed response. Оно сохраняет исходный action ID и не р�
 command/check/advance bodies, выдача полного payload после model result cap и
 передача writer остаются самостоятельными случаями приёмки O8.
 
+**Реализованный slice §20.65:** stdio MCP-клиент сохраняет исходные command POST
+body/key до HTTP на клиентской машине. Новый процесс читает private records по
+server/run/generation, восстанавливает байты и проверяет hash; локальная запись не
+подменяет серверную квитанцию. Потерянный inject reply проверен с живым external
+CPU toy engine: одна инъекция, одна оценка, явное завершение. Non-command action
+bodies, перенос на другой клиентский host, согласование writer и цельный маршрут
+первого запуска/восстановления остаются отдельной приёмкой O8.
+
 #### 72.O9 — P1 / OPEN: короткая актуальная документация и последовательный русский UI
 
 **Основание:** шаги 2–4; длинные исторические §1–18, doc 71 и руководства.
@@ -7565,3 +7573,75 @@ sentence-level проверка утверждений, полноценные �
 Общий JS budget всё ещё нарушен: **657059 B gzip** при лимите 633984 B
 (превышение 23075 B; до текущего изменения 656702 B). CSS — 59632 B при лимите
 59648 B; route budgets и forbidden closures проходят. Лимиты не повышались.
+
+
+### 20.65. Исходная команда переживает потерю MCP-процесса — 2026-10-05
+
+**O4/O8, реализованный slice.** Раньше `command_receipt` возвращал статус, но не
+исходное тело: после потери процесса агент должен был сам сохранить body и key.
+Теперь `looplab harness-mcp` сохраняет command POST **до HTTP** в private store
+клиентской машины. По умолчанию — `~/.looplab/harness-requests`; для retained volume
+есть `LOOPLAB_HARNESS_REQUEST_DIR`. Токен транспорта не входит в envelope; его
+попадание в payload отсекается до записи/отправки. Код и command keys сохраняются,
+поэтому каталог должен оставаться приватным. Прямой `HarnessAPI` подключает эту
+возможность через `request_dir`; stdio включает её автоматически.
+
+**Маршрут восстановления.** После текущих state/progress/checkpoint reads агент
+вызывает `saved_commands(run_id, expected_generation)`, затем `saved_command`
+для выбранного command ID. Это локальные read-only tools без HTTP. Пагинация
+сохраняет hash исходного запроса; каждая base64-страница имеет свой hash, полная
+сборка проверяется по `request_sha256`. Envelope содержит method/path/body/key.
+Затем нужен серверный `command_receipt` и свежие obligations. Только после этого
+агент явно выбирает точный повтор, продолжение или иной допустимый шаг.
+
+| Ситуация | Поведение |
+| --- | --- |
+| Потерян HTTP reply после принятия | Original body/key уже сохранены; исход остаётся unknown до серверного чтения |
+| Новый процесс на той же машине/root | Находит исходные команды без сети и без owner credential |
+| Изменён body под прежним key | Локальный конфликт до HTTP; исходная запись не перезаписывается |
+| Повреждён JSON, hash, identity или файловый тип | Unavailable evidence; автоматического ремонта или отправки нет |
+| Не подтверждены sync/required OS lock | `client_request_unavailable`, `not_sent` для этой попытки до HTTP; предыдущие эффекты всё ещё возможны |
+| Другой server/proxy prefix, run или generation | Отдельная история; чужой запрос не становится исходным запросом текущего run |
+| Пустой/отсутствующий store | Не доказывает отсутствие действий сервера |
+
+**Надёжность.** Required nonblocking OS lock сериализует запись, strict atomic sync
+подтверждает файл и новые директории до внешнего действия. Точное тело отделяется
+от mutable dict вызывающего кода: позднее изменение не может отправить другие
+байты, чем сохранённое намерение. Duplicate JSON keys, bool version, deep nesting,
+подмена server/key/body, directories/reparse entries вместо файлов отсекаются.
+URL-кодированные aliases endpoint не обходят сохранение; обычный русский run ID
+поддерживается и сохраняет тот же encoded path, который уходит по HTTP. Literal
+percent в ID декодируется один раз; смена HTTP base URL не позволяет отправить
+команду под локальной записью прежнего сервера.
+Максимум — 2000 записей на server/run/generation; чтение не объявляет удобный
+prefix полным источником при превышении лимита. Локальная запись всегда называется
+`source=client`, `server_effects=unobserved`; applied status берётся только с сервера.
+Это не writer lease, checkpoint, автоматический retry или скрытый resume.
+
+**Проверки.** Replay-first — 193 passed. Новый блок — 32 сценария. Совместимость
+MCP/transport/typed reads/scoped principal/external engine/containment — 521 passed;
+после Unicode/percent/server-context проверок — 524 passed. Финальный subset
+первого прохода — 91 passed. Числа
+перекрываются и не складываются. Ruff, diff-check и strict MkDocs проходят.
+
+Две интеграционные пробы используют настоящий серверный command service через
+локальный TestClient transport. Первая теряет reply после `research_completed`,
+новый клиент восстанавливает payload, читает серверную квитанцию и явно повторяет
+тот же request: domain event остаётся один. Вторая держит настоящий engine lock,
+исполняет external **CPU toy** candidate, теряет inject reply, восстанавливает
+original новым клиентом и читает успешную admission receipt без повторной инъекции:
+один `inject_node`, один `node_evaluated`, измеренная quadratic objective — 0.
+После текущих finish checks запуск явно завершается; node/run commentary публикуется
+на русском под scoped token. Это toy evaluation, не MNIST/ML training и не сетевой
+TCP chaos test. Отдельный новый Python-процесс читает сохранённое тело без FastAPI,
+Uvicorn и сетевого вызова. [Протокол](assets/72-client-command-recovery/validation.json).
+
+**Остаток OPEN.** Автосохранение относится к command POST. Decision/review/lesson/
+skill/checkpoint/upstream/commentary body и action ID агент по-прежнему сохраняет
+сам; их общий private action journal требует отдельного контрактного slice.
+Нет автоматического переноса local history на другую машину, выбора одного writer
+или orchestration loop, который выполняет obligations за агента. Старые commands
+не восстанавливаются из памяти или receipts задним числом. Полная clean-install
+приёмка и продуктовый recovery из Assistant остаются O3/O4/O8/O10/O11 OPEN.
+Управляемые абляции, качество реальной модели и прежний JS budget debt не закрыты.
+UI и bundle graph этим backend/client изменением не менялись.

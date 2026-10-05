@@ -13,6 +13,7 @@ def test_mcp_advertises_run_controls_and_full_settings_discovery():
     tools = anyio.run(build_server(api).list_tools)
     assert {"capabilities", "phases", "phase_info", "settings_keys", "setting_info", "operations",
             "operation_schema", "api_request", "run_progress", "result_notices", "command_receipt", "connection_check",
+            "saved_commands", "saved_command",
             "upstream_status", "upstream_request", "upstream_propose", "upstream_check", "upstream_advance"} == {tool.name for tool in tools}
     for tool in (t for t in tools if t.name.startswith("upstream_")):
         hints = tool.annotations.model_dump(by_alias=True)
