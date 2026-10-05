@@ -1,0 +1,41 @@
+{
+  "date": "2026-10-05",
+  "base_commit": "279d3768b89dd846e6b718cb68dd53ad58bd183e",
+  "feature": "Private immutable original semantic action requests before HTTP; read-only local recovery after MCP process loss",
+  "supported_routes": [
+    "harness-decisions", "harness-reviews", "harness-checkpoints", "harness-hypotheses",
+    "harness-selection/verify", "harness-selection/values", "lessons", "skill-candidates",
+    "result-notices", "upstream/proposals", "upstream/check", "upstream/advance", "upstream/recover"
+  ],
+  "tools": ["saved_actions", "saved_action"],
+  "verification": {
+    "replay_first": {"passed": 193, "suite": "tests/test_events_replay.py"},
+    "compatibility": {"passed": 589, "log": ".tmp/durable-actions/compat.log", "stage": "Before final upstream local-reference retention adjustment"},
+    "final_domain": {"passed": 97, "seconds": 28.33, "log": ".tmp/durable-actions/domain.log", "stage": "After final code adjustment"},
+    "new_client_action_cases": 47,
+    "counts_overlap": true,
+    "ruff": "passed",
+    "git_diff_check": "passed",
+    "strict_mkdocs": "passed"
+  },
+  "evidence": {
+    "all_13_routes": "MockTransport observes a durable exact original before HTTP; lost reply; new API client reads without HTTP",
+    "real_server_lost_replies": ["decision", "review", "checkpoint", "Russian result commentary"],
+    "real_server_transport": "FastAPI TestClient bridged through HTTPX MockTransport; actual domain commits, not TCP",
+    "server_exact_retries": "Original bodies recovered by a new client, current progress read, explicit exact retry; server journals unchanged",
+    "mcts_reset": "Lost real values reply, node reset/re-evaluated, original evidence revision restored; exact replay keeps old event and new obligation remains due; revision replacement under old action ID refused before HTTP",
+    "fresh_process": "New Python subprocess reads original without FastAPI/Uvicorn imports or HTTP",
+    "cpu_toy_regression": "Existing live external CPU toy engine lost-inject test passes in compatibility suite; one injection/evaluation, scoped authorization, explicit finish and Russian node/run commentary",
+    "failure_cases": ["required lock failure", "lock contention", "atomic publication failure", "duplicate JSON", "corrupt identity/hash/source", "credential in original", "changed evidence/body/header under original ID", "changed upstream operation", "Unicode/literal-percent run IDs", "paging limits and hash fence", "concurrent clients", "caller mutation after save", "incomplete upstream acknowledgement"]
+  },
+  "limits": [
+    "Local records are client intent, never server verdict, evidence approval or writer ownership",
+    "No automatic retry, resume, repair, abandon or engine wait",
+    "No cross-machine history transfer or retroactive recovery of old writes",
+    "Other API routes are not retained",
+    "2000 commands and 2000 actions per server/run/generation; bounded paged reads",
+    "No new MNIST/ML, paid provider or TCP chaos validation",
+    "Full clean-install and Assistant recovery acceptance remains open",
+    "Controlled ablations, real model quality and existing JS budget debt remain open"
+  ]
+}

@@ -65,7 +65,7 @@ PHASES: tuple[Phase, ...] = (
           ("POST /api/runs/{run_id}/upstream/proposals", "POST /api/runs/{run_id}/upstream/check",
            "POST /api/runs/{run_id}/upstream/advance", "POST /api/runs/{run_id}/upstream/recover")),
     Phase("recovery", "Run/CommandReceipt", "serve/command_receipt.py; serve/run_commands.py",
-          "Reconnect to the same run; observe a saved receipt before explicitly choosing recovery. The stdio MCP client can recover original command bodies/keys through saved_commands and saved_command; local intent is not a server verdict. An idle run still needs engine ownership before another candidate. An inconclusive lock probe does not prove death; reads never resume. Agent liveness is not measured.",
+          "Reconnect to the same run; observe a saved receipt before explicitly choosing recovery. The stdio MCP client can recover original command bodies/keys through saved_commands/saved_command and supported semantic action bodies/IDs/evidence through saved_actions/saved_action. Local intent is not a server verdict or current evidence approval. An idle run still needs engine ownership before another candidate. An inconclusive lock probe does not prove death; reads never resume. Agent liveness is not measured.",
           ("GET /api/runs/{run_id}/state", "GET /api/runs/{run_id}/command-receipt",
            "GET /api/runs/{run_id}/harness-progress", "GET /api/runs/{run_id}/harness-checkpoints"),
           ("command:pause", "command:resume", "command:run_abort",

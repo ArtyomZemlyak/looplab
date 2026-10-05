@@ -1152,14 +1152,33 @@ Keep this directory private: it includes submitted code and original command key
 but never the transport credential. A different machine/root has different local
 history. `store_exists=false` or an empty list does not prove that the server did
 nothing. Corrupt/unreadable records give unavailable evidence, without repair.
-Each generation stores at most 2000 command requests. Reads are bounded and paged.
+Each generation stores at most 2000 command requests and 2000 action requests,
+in separate catalogs. Reads are bounded and paged.
 If a required lock or durable save fails, `api_request` returns
 `client_request_unavailable`, `outcome=not_sent`, before that invocation's HTTP
 request. Earlier attempts can still have effects; inspect their original receipts.
 Two different bodies under one original key conflict locally. Exact retries keep
 the same saved body/key, but remain explicit actions governed by server evidence.
-This storage covers **command POSTs only**. Preserve decision/review/lesson/skill,
-checkpoint, upstream and commentary bodies/action IDs yourself as described below.
+**Recover a semantic action too.** The same private store retains original POSTs
+to `harness-decisions`, `harness-reviews`, `harness-checkpoints`,
+`harness-hypotheses`, `harness-selection/verify`, `harness-selection/values`,
+`lessons`, `skill-candidates`, `result-notices` (commentary), and
+`upstream/proposals`, `upstream/check`, `upstream/advance`, `upstream/recover`.
+Call `saved_actions(run_id, expected_generation)` for `request_id`, route,
+original `action_id` and hash; assemble `saved_action(run_id, expected_generation,
+request_id)` pages with the same hash checks as commands. It retains the exact
+body, including `expected_evidence_revision`, checkpoint ID, evidence token and
+any supplied Idempotency-Key. Transport credentials are excluded.
+
+Never replace a recovered request's evidence revision with today's revision.
+An exact retry acknowledges the original action; it does not refresh its evidence,
+restore retired support or authorize a superseded evaluator. Read current progress,
+source health and server receipts before choosing recovery. A changed body under
+the same action identity is refused locally before HTTP. Upstream operations share
+one action-ID namespace; other supported routes have separate namespaces. Use
+nonempty action IDs without leading/trailing whitespace or control characters.
+Other API routes (including owner workflows and advisory previews) are not retained.
+Old writes made before this client feature cannot be reconstructed retrospectively.
 
 1. Read `/state` for the current run generation and whether the engine is live,
    paused, or finished. If the engine stopped, an authorized operator or external

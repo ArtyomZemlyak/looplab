@@ -1,4 +1,4 @@
-"""Immutable client-side command bodies, saved before HTTP, never a server verdict.
+"""Immutable client-side request bodies, saved before HTTP, never a server verdict.
 
 The stdio client owns these files on the client machine. Credentials are not part
 of the envelope. Reads neither contact the server nor retry/resume anything.
@@ -22,6 +22,11 @@ from looplab.serve.command_identity import command_identity
 MAX_RECORD_BYTES = 1100 * 1024
 MAX_RECORDS = 2000
 _HEX = r"[0-9a-f]{64}"
+ACTION_ROUTES = frozenset({
+    "harness-decisions", "harness-reviews", "harness-checkpoints", "harness-hypotheses",
+    "harness-selection/verify", "harness-selection/values", "lessons", "skill-candidates",
+    "result-notices", "upstream/proposals", "upstream/check", "upstream/advance", "upstream/recover",
+})
 
 
 def _bytes(value):
@@ -50,6 +55,9 @@ def _unique(pairs):
 
 
 class ClientRequests:
+    identity_field = "command_id"
+    identity_pattern = r"cmd_[0-9a-f]{32}"
+
     def __init__(self, root, server_url):
         # Resolve an operator-selected root once; subordinate entries cannot be links.
         self.root = Path(root).expanduser().resolve()
@@ -83,7 +91,7 @@ class ClientRequests:
             raise ValueError("client request source unavailable")
         try:
             row = json.loads(raw, object_pairs_hook=_unique)
-            expected = {"version", "server", "run_id", "generation", "command_id",
+            expected = {"version", "server", "run_id", "generation", self.identity_field,
                         "request_sha256", "request"}
             request = row.get("request") if isinstance(row, dict) else None
             if (not isinstance(row, dict) or set(row) != expected
@@ -92,33 +100,42 @@ class ClientRequests:
                     or row["generation"] != generation or not isinstance(request, dict)
                     or set(request) != {"method", "path", "body", "idempotency_key"}
                     or request["method"] != "POST"
-                    or request["path"] != f"/api/runs/{quote(run_id, safe='')}/commands"
                     or not isinstance(request["body"], dict)
                     or request["body"].get("expected_generation") != generation
-                    or not isinstance(request["idempotency_key"], str)
-                    or not request["idempotency_key"] or len(request["idempotency_key"]) > 512
-                    or any(ord(c) < 32 or ord(c) > 126 for c in request["idempotency_key"])
-                    or row["command_id"] != command_identity(request["idempotency_key"])[0]
-                    or path.name != row["command_id"] + ".json"
+                    or row[self.identity_field] != self._identity(request, run_id)
+                    or path.name != row[self.identity_field] + ".json"
                     or row["request_sha256"] != _hash(_bytes(request))):
                 raise ValueError("client request identity/content invalid")
             return row
         except (TypeError, RecursionError) as exc:
             raise ValueError("client request structure invalid") from exc
 
-    def save(self, run_id, generation, body, key, *, credential=""):
-        directory = self._directory(run_id, generation)
-        if not isinstance(body, dict) or body.get("expected_generation") != generation:
-            raise ValueError("client command body generation invalid")
-        body = json.loads(_bytes(body))  # Frozen request, independent of the caller's mutable dict.
-        if (not isinstance(key, str) or not key or len(key) > 512
+    @staticmethod
+    def _key(key, *, required=True):
+        if (not isinstance(key, str) or (required and not key) or len(key) > 512
                 or any(ord(c) < 32 or ord(c) > 126 for c in key)):
-            raise ValueError("invalid command idempotency key")
-        command_id = command_identity(key)[0]
+            raise ValueError("invalid request idempotency key")
+
+    def _identity(self, request, run_id):
+        self._key(request["idempotency_key"])
+        if request["path"] != f"/api/runs/{quote(run_id, safe='')}/commands":
+            raise ValueError("invalid command path")
+        return command_identity(request["idempotency_key"])[0]
+
+    def save(self, run_id, generation, body, key, *, credential=""):
         request = {"method": "POST", "path": f"/api/runs/{quote(run_id, safe='')}/commands",
                    "body": body, "idempotency_key": key}
+        return self._save_request(run_id, generation, request, credential=credential)
+
+    def _save_request(self, run_id, generation, request, *, credential=""):
+        directory = self._directory(run_id, generation)
+        body = request["body"]
+        if not isinstance(body, dict) or body.get("expected_generation") != generation:
+            raise ValueError("client request body generation invalid")
+        request = json.loads(_bytes(request))  # Frozen, independent of the caller's mutable dict.
+        identity = self._identity(request, run_id)
         row = {"version": 1, "server": self.server, "run_id": run_id,
-               "generation": generation, "command_id": command_id,
+               "generation": generation, self.identity_field: identity,
                "request_sha256": _hash(_bytes(request)), "request": request}
         raw = _bytes(row)
         if len(raw) > MAX_RECORD_BYTES:
@@ -130,11 +147,11 @@ class ClientRequests:
         if lock.exists() or lock.is_symlink():
             _normal(lock)
         with interprocess_lock(lock, required=True, blocking=False):
-            path = directory / (command_id + ".json")
+            path = directory / (identity + ".json")
             if path.exists() or path.is_symlink():
                 old = self._read(path, run_id, generation)
                 if old != row:
-                    raise ValueError("original command key already has different content")
+                    raise ValueError("original request identity already has different content")
             else:
                 if len(self._paths(directory)) >= MAX_RECORDS:
                     raise ValueError("client request store is full")
@@ -142,11 +159,10 @@ class ClientRequests:
             strict_atomic_write_bytes(path, raw)
         return row
 
-    @staticmethod
-    def _paths(directory):
+    def _paths(self, directory):
         paths = []
         for path in directory.iterdir():
-            if re.fullmatch(r"cmd_[0-9a-f]{32}\.json", path.name):
+            if re.fullmatch(self.identity_pattern + r"\.json", path.name):
                 paths.append(path)
                 if len(paths) > MAX_RECORDS:
                     raise ValueError("client request store exceeds listing limit")
@@ -170,15 +186,17 @@ class ClientRequests:
                 "store_exists": exists,
                 "generation": generation, "run_id": run_id, "total": len(paths),
                 "offset": offset, "next_offset": end if end < len(paths) else None,
-                "items": [{"command_id": r["command_id"], "request_sha256": r["request_sha256"],
-                           "event_type": r["request"]["body"].get("type")
-                           if isinstance(r["request"]["body"].get("type"), str)
-                           and len(r["request"]["body"]["type"]) <= 128 else None,
-                           "server_effects": "unobserved"} for r in rows]}
+                "items": [self._summary(r) for r in rows]}
+
+    def _summary(self, row):
+        event_type = row["request"]["body"].get("type")
+        return {self.identity_field: row[self.identity_field], "request_sha256": row["request_sha256"],
+                "event_type": event_type if isinstance(event_type, str) and len(event_type) <= 128 else None,
+                "server_effects": "unobserved"}
 
     def page(self, run_id, generation, command_id, *, offset=0, limit=2048,
              expected_request_hash=None):
-        if (not isinstance(command_id, str) or not re.fullmatch(r"cmd_[0-9a-f]{32}", command_id)
+        if (not isinstance(command_id, str) or not re.fullmatch(self.identity_pattern, command_id)
                 or type(offset) is not int or offset < 0
                 or type(limit) is not int or not 1 <= limit <= 16384
                 or (offset > 0 and expected_request_hash is None)):
@@ -194,7 +212,39 @@ class ClientRequests:
         chunk = raw[offset:offset + limit]
         end = offset + len(chunk)
         return {"version": 1, "source": "client", "server": self.server,
-                "run_id": run_id, "generation": generation, "command_id": command_id,
+                "run_id": run_id, "generation": generation, self.identity_field: command_id,
                 "request_sha256": row["request_sha256"], "server_effects": "unobserved",
                 "total_bytes": len(raw), "offset": offset, "chunk": base64.b64encode(chunk).decode(),
                 "chunk_sha256": _hash(chunk), "next_offset": end if end < len(raw) else None}
+
+
+class ClientActions(ClientRequests):
+    """Generation-bound semantic writes; action IDs and evidence remain exactly authored."""
+
+    identity_field = "request_id"
+    identity_pattern = r"act_[0-9a-f]{64}"
+
+    def _identity(self, request, run_id):
+        self._key(request["idempotency_key"], required=False)
+        prefix = f"/api/runs/{quote(run_id, safe='')}/"
+        path = request["path"]
+        if not isinstance(path, str) or not path.startswith(prefix) or path[len(prefix):] not in ACTION_ROUTES:
+            raise ValueError("invalid action path")
+        action_id = request["body"].get("action_id")
+        if (not isinstance(action_id, str) or not action_id or len(action_id) > 160
+                or action_id != action_id.strip() or any(ord(c) < 32 or ord(c) == 127 for c in action_id)):
+            raise ValueError("invalid action id")
+        suffix = path[len(prefix):]
+        # Upstream uses one server-side action namespace across all operations.
+        namespace = "upstream" if suffix.startswith("upstream/") else suffix
+        return "act_" + _hash(_bytes([namespace, action_id]))
+
+    def save_action(self, run_id, generation, path, body, key="", *, credential=""):
+        return self._save_request(run_id, generation,
+                                  {"method": "POST", "path": path, "body": body, "idempotency_key": key},
+                                  credential=credential)
+
+    def _summary(self, row):
+        return {"request_id": row["request_id"], "request_sha256": row["request_sha256"],
+                "path": row["request"]["path"], "action_id": row["request"]["body"]["action_id"],
+                "server_effects": "unobserved"}

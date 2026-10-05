@@ -192,11 +192,11 @@ def test_two_clients_keep_one_original_or_refuse_content_conflict(tmp_path):
     assert restored["body"] == BODY
 
 
-def test_all_writes_and_reads_outside_commands_remain_unjournaled(tmp_path):
+def test_reads_and_non_durable_operations_remain_unjournaled(tmp_path):
     seen = []
     client = api(tmp_path, lambda r: (seen.append(r), httpx.Response(200, json={}))[1])
     for method, path in [("GET", "/api/runs/demo/commands"),
-                         ("POST", "/api/runs/demo/result-notices"),
+                         ("POST", "/api/runs/demo/novelty-preview"),
                          ("PATCH", "/api/settings")]:
         client.request(method, path, {}, "not-a-command")
     assert len(seen) == 3 and not list(tmp_path.rglob("*.json"))

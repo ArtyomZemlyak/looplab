@@ -2,7 +2,7 @@
 
 One domain API: MCP never writes events or reads server workspaces directly.
 Domain operations use the same routes/command service as the UI. The stdio client
-also retains original command requests in a private store on the CLIENT machine.
+also retains original command/action requests in a private store on the CLIENT machine.
 The external agent can discover live domain operations through OpenAPI.
 """
 from __future__ import annotations
@@ -56,7 +56,7 @@ MCP_INSTRUCTIONS = (
     "Keep original lesson/skill bodies and action IDs. Exact retries acknowledge stored actions without refreshing signatures, restoring retired support or granting promotion; fresh writes check current evidence. Shared/researcher/developer lesson roles are retained. Damaged event/knowledge sources and fresh completed knowledge reviews refuse with a named source. Inspect refusal health and request operator recovery; no automatic repair/resume. "
     "Typed command_receipt also verifies v1 status/terminal consistency, control event, sequence, error_code and retryable fields. Incomplete HTTP 200 means unavailable without body, not a command verdict. Read again explicitly; a terminal rejected/failed receipt or succeeded inject still does not prove completed training. "
     "Typed run_progress and connection_check validate critical progress fields, source completeness, explicit expansion/finish gates and pending counts. Missing fields are unavailable, not empty obligations. A structurally valid complete=false read retains source diagnostics; read success does not grant admission. Refresh explicitly; no automatic retry or work. "
-    "The stdio client durably saves original command POST body/key before HTTP in its private client store. On reconnect use saved_commands and paged saved_command, verify hashes, then read server command_receipt and fresh progress/checkpoints before any explicit exact retry. Local records are unobserved intentions, not applied verdicts; an empty/missing client store proves no absence of server effects. Other decision/review/knowledge/commentary writes still require retaining exact bodies/action IDs yourself. Client storage failure returns not_sent for that invocation, without HTTP or automatic repair. "
+    "The stdio client durably saves original command and supported semantic action POSTs before HTTP in its private client store. On reconnect use saved_commands/saved_command or saved_actions/saved_action, verify hashes, then read original server receipts and fresh progress/checkpoints/source_health before any explicit exact retry. Semantic actions include decisions/reviews, checkpoints, hypotheses, selection verify/values, lessons/skill-candidates, result commentary and upstream operations. Preserve all original action IDs and evidence revisions/tokens. Local records are unobserved intentions, not applied verdicts; an empty/missing client store proves no absence of server effects. Other API routes still require retaining originals yourself. Client storage failure returns not_sent for that invocation, without HTTP or automatic repair. "
     "Use only the scoped harness credential; owner-only workflows require the operator."
 )
 
@@ -231,27 +231,35 @@ class HarnessAPI:
         route = self._path(path)
         saved = None
         parts = unquote(urlsplit(path).path).split("/")
-        if (self.requests is not None and verb == "POST" and len(parts) == 5
-                and parts[1:3] == ["api", "runs"] and parts[4] == "commands"):
+        from looplab.harness.client_requests import ACTION_ROUTES, ClientActions
+        suffix = "/".join(parts[4:])
+        if (self.requests is not None and verb == "POST" and parts[1:3] == ["api", "runs"]
+                and (suffix == "commands" or suffix in ACTION_ROUTES)):
             try:
                 run_id = parts[3]  # Decode the HTTP route exactly once, including literal percent IDs.
                 generation = body.get("expected_generation") if isinstance(body, dict) else None
                 if str(self.client.base_url) != self.requests.server:
                     raise ValueError("client request server context changed")
                 # Query aliases would not be the exact persisted HTTP request.
-                canonical = f"/api/runs/{quote(run_id, safe='')}/commands"
-                if urlsplit(path).query or path not in (canonical, f"/api/runs/{run_id}/commands"):
-                    raise ValueError("noncanonical command path")
-                row = self.requests.save(run_id, generation, body, idempotency_key,
-                                         credential=self.client.headers.get("X-LoopLab-Token", ""))
-                saved = {"source": "client", "command_id": row["command_id"],
+                canonical = f"/api/runs/{quote(run_id, safe='')}/{suffix}"
+                if urlsplit(path).query or path not in (canonical, f"/api/runs/{run_id}/{suffix}"):
+                    raise ValueError("noncanonical request path")
+                credential = self.client.headers.get("X-LoopLab-Token", "")
+                if suffix == "commands":
+                    store = self.requests
+                    row = store.save(run_id, generation, body, idempotency_key, credential=credential)
+                else:
+                    store = ClientActions(self.requests.root, self.requests.server)
+                    row = store.save_action(run_id, generation, canonical, body, idempotency_key,
+                                            credential=credential)
+                saved = {"source": "client", store.identity_field: row[store.identity_field],
                          "request_sha256": row["request_sha256"], "server_effects": "unobserved"}
                 body = row["request"]["body"]
                 route = canonical.lstrip("/")  # Same encoded path HTTPX uses for literal Unicode IDs.
             except (OSError, ValueError, RecursionError, EventStoreLockError, InterprocessLockContended):
                 # Only this client-side preflight failed: no network write has begun.
                 return {"status": None, "code": "client_request_unavailable", "outcome": "not_sent",
-                        "message": "Original command could not be durably saved. Inspect the client request store and original key/body before sending; no HTTP request was made."}
+                        "message": "Original request could not be durably saved. Inspect the client request store and original key/action_id/body before sending; no HTTP request was made."}
         try:
             response = self.client.request(verb, route, json=body, headers=headers)
         except httpx.TransportError:
@@ -281,6 +289,28 @@ class HarnessAPI:
         try:
             return self.requests.page(run_id, expected_generation, command_id, offset=offset,
                                       limit=limit, expected_request_hash=expected_request_hash)
+        except (OSError, ValueError, RecursionError):
+            return self._client_read_refusal()
+
+    def saved_actions(self, run_id, expected_generation, offset=0, limit=20):
+        if self.requests is None:
+            return {"source": "client", "outcome": "unavailable", "code": "client_requests_disabled"}
+        from looplab.harness.client_requests import ClientActions
+        try:
+            return ClientActions(self.requests.root, self.requests.server).listing(
+                run_id, expected_generation, offset=offset, limit=limit)
+        except (OSError, ValueError, RecursionError):
+            return self._client_read_refusal()
+
+    def saved_action(self, run_id, expected_generation, request_id, offset=0, limit=2048,
+                     expected_request_hash=None):
+        if self.requests is None:
+            return {"source": "client", "outcome": "unavailable", "code": "client_requests_disabled"}
+        from looplab.harness.client_requests import ClientActions
+        try:
+            return ClientActions(self.requests.root, self.requests.server).page(
+                run_id, expected_generation, request_id, offset=offset, limit=limit,
+                expected_request_hash=expected_request_hash)
         except (OSError, ValueError, RecursionError):
             return self._client_read_refusal()
 
@@ -527,7 +557,11 @@ class HarnessAPI:
                 valid = (receipt["from_revision"] == body.get("expected_base_revision")
                     and receipt["evidence_token"] == body.get("evidence_token"))
             if not valid:
-                return self._unknown_write({"status": result["status"]}, "invalid_upstream_receipt")
+                # Drop the untrusted server body, retain our durable client intent ID.
+                context = {"status": result["status"]}
+                if "client_request" in result:
+                    context["client_request"] = result["client_request"]
+                return self._unknown_write(context, "invalid_upstream_receipt")
         return result
 
     def connection_check(self, run_id: str, expected_generation: str = "") -> dict:
@@ -857,9 +891,9 @@ def build_server(api: HarnessAPI):
         Transport loss returns status=null: a write has outcome=unknown, not failed.
         A 5xx write response or incomplete 2xx acknowledgement also has outcome=unknown;
         the received HTTP status is preserved. Do not treat HTTP 200 alone as a receipt.
-        The stdio client saves original command POST bodies/keys locally before HTTP;
-        saved_commands/saved_command recover them after process loss. Other writes
-        still require preserving the exact body/action_id yourself. Inspect saved
+        The stdio client saves original command and supported run action POSTs locally
+        before HTTP. saved_commands/saved_command and saved_actions/saved_action
+        recover exact bodies, keys/action IDs and evidence after process loss. Inspect saved
         server receipts before an exact retry; this tool never retries itself."""
         return api.request(method, path, body, idempotency_key)
 
@@ -907,6 +941,34 @@ def build_server(api: HarnessAPI):
         """
         return api.saved_command(run_id, expected_generation, command_id, offset, limit,
                                  expected_request_hash)
+
+    @mcp.tool(annotations=ToolAnnotations(readOnlyHint=True, destructiveHint=False,
+                                        idempotentHint=True, openWorldHint=False))
+    def saved_actions(run_id: str, expected_generation: str, offset: int = 0, limit: int = 20) -> dict:
+        """List this client's original semantic action requests after process loss.
+        Covers decisions/reviews, checkpoints, hypotheses, selection verify/values,
+        lessons/skill-candidates, result commentary and upstream operations. Scoped by
+        server/run/generation; pages 1..100. Each request_id identifies local intent,
+        not server approval. No HTTP, retry, resume or writer election. Check current
+        progress, source health and original server receipts before choosing recovery.
+        """
+        return api.saved_actions(run_id, expected_generation, offset, limit)
+
+    @mcp.tool(annotations=ToolAnnotations(readOnlyHint=True, destructiveHint=False,
+                                        idempotentHint=True, openWorldHint=False))
+    def saved_action(run_id: str, expected_generation: str, request_id: str,
+                     offset: int = 0, limit: int = 2048,
+                     expected_request_hash: str | None = None) -> dict:
+        """Read the exact original action request from this client's private store.
+        Assemble base64 chunks and verify chunk_sha256/request_sha256, keeping
+        expected_request_hash across pages. JSON retains method/path/body/key, action_id
+        and original evidence revisions/tokens. Never replace evidence in a recovered
+        request: exact retry acknowledges an old action, not current evidence approval.
+        Read fresh server progress/receipts; choose any retry explicitly via api_request.
+        No HTTP, automatic paging, retry, repair, resume or engine wait.
+        """
+        return api.saved_action(run_id, expected_generation, request_id, offset, limit,
+                                expected_request_hash)
 
     return mcp
 

@@ -2330,12 +2330,14 @@ typed response. Оно сохраняет исходный action ID и не р�
 command/check/advance bodies, выдача полного payload после model result cap и
 передача writer остаются самостоятельными случаями приёмки O8.
 
-**Реализованный slice §20.65:** stdio MCP-клиент сохраняет исходные command POST
+**Реализованные slices §20.65–20.66:** stdio MCP-клиент сохраняет исходные command POST
 body/key до HTTP на клиентской машине. Новый процесс читает private records по
 server/run/generation, восстанавливает байты и проверяет hash; локальная запись не
 подменяет серверную квитанцию. Потерянный inject reply проверен с живым external
-CPU toy engine: одна инъекция, одна оценка, явное завершение. Non-command action
-bodies, перенос на другой клиентский host, согласование writer и цельный маршрут
+CPU toy engine: одна инъекция, одна оценка, явное завершение. §20.66 добавляет точные
+decision/review/checkpoint/hypothesis/selection/knowledge/commentary/upstream POST
+body/action ID/evidence до HTTP и отдельные local recovery tools. Перенос на другой
+клиентский host, согласование writer и цельный маршрут
 первого запуска/восстановления остаются отдельной приёмкой O8.
 
 #### 72.O9 — P1 / OPEN: короткая актуальная документация и последовательный русский UI
@@ -7645,3 +7647,59 @@ skill/checkpoint/upstream/commentary body и action ID агент по-преж�
 приёмка и продуктовый recovery из Assistant остаются O3/O4/O8/O10/O11 OPEN.
 Управляемые абляции, качество реальной модели и прежний JS budget debt не закрыты.
 UI и bundle graph этим backend/client изменением не менялись.
+
+### 20.66 — O8: восстановление точных semantic actions после потери MCP-процесса (2026-10-05)
+
+**Проблема.** §20.65 сохранял только commands. После потери процесса агент всё ещё
+мог лишиться исходного решения, ответа на checkpoint или commentary вместе с
+`action_id` и evidence. Восстановление тела по памяти особенно опасно для MCTS:
+новый `expected_evidence_revision` под старым ID не является точным повтором.
+
+**Реализовано.** Stdio MCP-клиент теперь сохраняет до HTTP исходные POST к 13
+generation-bound routes: decisions/reviews/checkpoints/hypotheses, selection
+verify/values, lessons/skill-candidates, result commentary и upstream
+proposals/check/advance/recover. Новый процесс вызывает `saved_actions`, получает
+route/action ID/local request ID/hash и собирает `saved_action` из bounded base64
+pages. Восстанавливаются точные `method/path/body/idempotency_key`, включая
+evidence revision/token и checkpoint ID. Это работает на клиентской машине без
+FastAPI/Uvicorn и сетевого запроса при чтении.
+
+Используется тот же private store, required OS lock и strict atomic publication,
+что у commands; существующие v1 command records и tools совместимы. Commands и
+actions имеют отдельные каталоги, по 2000 записей на server/run/generation.
+Transport credential не записывается; code, prose, action IDs и evidence остаются
+приватными данными клиента. Изменение тела под прежним action identity отказывается
+до HTTP без перезаписи original. Upstream имеет общее пространство action IDs
+между operations. Остальные поддержанные routes — отдельные пространства.
+
+**Исправление при ревью.** Typed `upstream_write` при incomplete HTTP 200 раньше
+терял local intent reference вместе с неверной серверной квитанцией. Теперь
+untrusted body по-прежнему исключается, но `client_request` сохраняется для
+восстановления оригинала. Это не подтверждает выполнение upstream.
+
+**Приёмка.** Replay-first — 193 passed. Совместимость MCP/client/external progress/
+checkpoint lifecycle/containment — 589 passed. После последней правки upstream
+acknowledgement — 97 passed в наборе новых client-action, selection/knowledge
+recovery и upstream API/request/recovery проверок; 47 из них — новые client-action
+сценарии. Наборы пересекаются, их числа не следует суммировать как уникальные тесты.
+Ruff, diff check и strict MkDocs прошли. [Протокол](assets/72-client-action-recovery/validation.json).
+
+Потеря ответа воспроизведена после настоящего server commit для decision, review,
+checkpoint и русского result commentary: новый клиент читает original локально,
+проверяет progress и явно повторяет запрос; серверные журналы не меняются.
+Отдельная реальная MCTS API-проверка теряет value reply, затем делает reset и новую
+оценку узла. Original восстанавливается со старой evidence revision; exact retry
+подтверждает прежнюю публикацию, а новый value review остаётся due. Попытка
+подменить revision под старым ID отказывается клиентом до HTTP. Это seeded
+domain-fixtures; реальный external CPU toy из §20.65 также прошёл regression.
+Это не новая ML/MNIST-приёмка, не запуск платной модели и не TCP chaos test.
+
+**Границы / OPEN.** Local journal хранит намерение, не server verdict, действующее
+evidence approval или writer ownership. Нет автоматического retry/resume, repair,
+abandon или engine wait. Новая модель всё равно читает server receipts, progress,
+source health и checkpoints; superseded evidence требует нового обоснованного
+действия. Другие API routes и старые запросы до установки этой версии не сохраняются
+задним числом. Перенос истории на другой host, согласование writer, цельная
+clean-install/Assistant recovery приёмка остаются O3/O4/O8/O10/O11 OPEN. Управляемые
+абляции, качество реальной модели и прежний JS budget debt этим slice не закрыты.
+Для текущего stdio подключения нужен перезапуск MCP-процесса после обновления.
