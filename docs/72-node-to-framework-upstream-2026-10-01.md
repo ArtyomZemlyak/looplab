@@ -4077,7 +4077,7 @@ merge этим проходом не проверены.
    превышение total JS: 13317 B после §20.42, 13380 B после §20.43,
    12884 B после §20.46, 13121 B после §20.47, 13324 B после §20.48,
    13308 B после §20.49; 13734 B после §20.50; 13894 B после §20.51;
-   9940 B после §20.53;
+   9940 B после §20.53; 9964 B после §20.54;
    потолки не повышены. Нужны дальнейшее
    уменьшение исходного кода/повторов и полный CI. Один lazy import не снижает
    сумму всех assets; нельзя выдавать route budget за зелёный общий gate.
@@ -6891,3 +6891,46 @@ Concepts с честным empty projection, RU Agent cycle с requirements/hist
 split/runtime и сохранённых результатов, не полный onboarding/recovery acceptance.
 OPEN effective manifest, lifecycle/retention и target-relative delivery из §19.17
 сохраняются. Merge этой правки в master продукта не является такой доставкой.
+
+### 20.54. Карточка проверки не выбирает старый pass из перепутанной истории — 2026-10-05
+
+**Воспроизведение.** Исходный commit — `6c12b47655d05f1a8e44c76f11cbc30a34b0176f`.
+`upstreamCheckSummary` выбирал последний start по позиции в массиве, проверяя
+seq лишь выбранного claim и его finish. История `[новый start #20, старый start
+#10, старый passed #12]` снова показывала старый `passed`, executions и cost.
+Proposal summary уже отказывал при нарушении порядка, но независимая сводка
+проверки в общей карточке этой защитой не пользовалась. Ещё один дефект: поздний
+finish старого claim после нового start признавался связанным по одному action ID,
+хотя proposal/request hash/input identity могли не совпадать. Это ошибочное
+чтение диагностики UI; сервер не выдавал нового разрешения на advance.
+
+**Исправлено.** Перед выбором последнего claim проверяются seq всех строк:
+неотрицательные safe integers, строго возрастающие. Пропуски seq разрешены —
+upstream projection содержит лишь часть типов событий. Reorder, duplicate,
+missing/string/NaN/negative seq дают `unknown`, старый pass/cost не выводятся.
+Позднее завершение после latest start должно совпасть с собственным исходным
+claim по action, proposal, request hash и result input identity. Нормальное
+позднее завершение старого claim не вытесняет новый unfinished. Поведение
+abandonment, original recovery identity и явных read-before-write не ослаблено.
+
+**Проверено.** Три новые регрессии red до исправления, green после: bad sequence
+matrix, mismatched older settlements и live RU rerender passing → unavailable.
+Live React карточка сохраняет фокус кнопки Assistant; запросов нет. Целевые
+17 tests входят в полный UI suite, не прибавляются отдельно. Replay-first —
+193 passed; полный UI — 1972 passed, без fail/skip/cancel; docs/API/surface/diagram
+— 28 passed. Всего **2193 уникальных теста**. Production build, native minified
+chunk initialization test, strict MkDocs и diff-check проходят.
+
+JS gzip **643924 → 643948 B (+24 B)**; raw +176 B. CSS прежние 59635 B.
+Total JS остаётся единственным red bundle gate: **9964 B** сверх неизменённого
+лимита 633984 B. Все остальные size/reachability/cycle/integer-boolean guards
+проходят; compact full-cycle body по-прежнему dynamic. Размеры —
+[bundles.json](assets/72-check-history/bundles.json), границы проверки —
+[validation.json](assets/72-check-history/validation.json).
+
+Это проверка повреждённой UI projection, не воспроизведение повреждения
+серверного event log. Свежего browser прохода, MCP connection, provider call,
+обучения, command submission или доставки из **worktree LoopLab** в task repo
+в этом increment нет. Production browser из §20.53 не заявляется повторно.
+OPEN §19.17 по цельному onboarding/recovery, effective manifest, retention,
+target-relative delivery и полному CI сохраняются.

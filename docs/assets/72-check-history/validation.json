@@ -1,0 +1,47 @@
+{
+  "baseline_commit": "6c12b47655d05f1a8e44c76f11cbc30a34b0176f",
+  "regressions_before": {
+    "new_tests": 3,
+    "failed": 3,
+    "passed_existing": 10
+  },
+  "tests_after": {
+    "targeted_subset": 17,
+    "replay": 193,
+    "ui": 1972,
+    "documentation": 28,
+    "unique_total": 2193
+  },
+  "scenarios": [
+    "reordered latest claim exposes old pass before fix",
+    "missing/string/NaN/negative/duplicate seq withdraw verdict",
+    "gaps in filtered seq remain valid",
+    "late older settlement matches full claim identity",
+    "valid older completion leaves newer claim unfinished",
+    "live RU passing to unavailable preserves focus; zero fetches"
+  ],
+  "bundle": {
+    "js_gzip_before": 643924,
+    "js_gzip_after": 643948,
+    "limit": 633984,
+    "remaining_excess": 9964,
+    "css_gzip": 59635,
+    "only_red": "total_budget"
+  },
+  "checks": [
+    "production build",
+    "native minified client chunk initialization (part of UI suite)",
+    "docs/API/surface/diagram",
+    "strict MkDocs",
+    "diff-check"
+  ],
+  "bounds": {
+    "fresh_browser": false,
+    "mcp_connection": false,
+    "provider_call": false,
+    "training": false,
+    "command_submission": false,
+    "looplab_worktree_delivery": false,
+    "full_ci": false
+  }
+}

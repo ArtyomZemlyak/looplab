@@ -1,6 +1,7 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import { mountLive, click, until } from './_mount.js'
+import { upstreamCheckSummary } from '../src/upstreamCheckModel.js'
 
 let harness, UpstreamPanel
 test.before(async () => {
@@ -139,4 +140,49 @@ test('the shared language preference changes both guidance and draft, preserving
     window.removeEventListener('ll:focus-assistant', listener)
     await mounted.unmount()
   }
+})
+
+test('unordered or incomplete event sequences cannot expose a preceding passing check', () => {
+  const newer = { ...start, seq: 20, action_id: 'check-two' }
+  for (const history of [
+    [newer, start, finish], [start, finish, { ...newer, seq: undefined }],
+    [start, finish, { ...newer, seq: '20' }], [start, finish, { ...newer, seq: NaN }],
+    [start, finish, { ...newer, seq: -1 }], [start, finish, { ...newer, seq: 12 }],
+    [start, finish, { type: 'base_advanced', seq: 11 }],
+  ]) {
+    assert.deepEqual(upstreamCheckSummary(history), { status: 'unknown' })
+    const markup = render(history)
+    assert.match(markup, /Check evidence unavailable/)
+    assert.doesNotMatch(markup, /<strong>passed<\/strong>/)
+  }
+  // The projection omits unrelated events; monotonic is not contiguous.
+  assert.equal(upstreamCheckSummary([start, finish, newer]).status, 'unfinished')
+})
+
+test('a newer settlement binds every original claim field, not only its action ID', () => {
+  const newer = { ...start, seq: 20, action_id: 'check-two' }
+  for (const changed of [{ proposal_id: 'other' }, { request_hash: 'other' },
+    { result: { ...finish.result, input_identity: 'other' } }]) {
+    assert.deepEqual(upstreamCheckSummary([start, newer, { ...finish, seq: 22, ...changed }]),
+      { status: 'unknown' })
+  }
+  assert.equal(upstreamCheckSummary([start, newer, { ...finish, seq: 22 }]).status, 'unfinished')
+})
+
+test('live Russian view withdraws a passing check after reordered history', async () => {
+  localStorage.setItem('looplab.language', 'ru')
+  const mounted = await harness.mount(UpstreamPanel, {
+    state: { nodes: {}, upstream_enabled: true, upstream_history: [start, finish] },
+  })
+  try {
+    assert.equal(mounted.container.querySelector('strong').textContent, 'пройдена')
+    const button = mounted.container.querySelector('button')
+    button.focus()
+    await mounted.rerender({ state: { nodes: {}, upstream_enabled: true,
+      upstream_history: [{ ...start, seq: 20, action_id: 'check-two' }, start, finish] } })
+    assert.match(mounted.container.textContent, /Доказательства проверки недоступны/)
+    assert.doesNotMatch(mounted.container.textContent, /Записанная завершённая проверка/)
+    assert.equal(document.activeElement, button)
+    assert.deepEqual(harness.fetch.calls, [])
+  } finally { await mounted.unmount() }
 })
