@@ -1,0 +1,25 @@
+{
+  "feature": "LoopLab Assistant configurable timers and self-managed monitors",
+  "replay_first": {
+    "passed": 193
+  },
+  "final_targeted_suite": {
+    "passed": 332,
+    "skipped": 3,
+    "new_monitor_tests": 31
+  },
+  "unique_passed": 525,
+  "provider": "scripted offline model",
+  "cadence_probe_seconds": [
+    1800,
+    60
+  ],
+  "router_probe": "real file read/write; same-session Russian assistant reply",
+  "reset_probe": "real RunControlTools, recording command service, real node_reset event; no training launch",
+  "not_measured": [
+    "live provider",
+    "30-minute wall-clock wait",
+    "full CI"
+  ],
+  "ui_bundle": "unchanged"
+}

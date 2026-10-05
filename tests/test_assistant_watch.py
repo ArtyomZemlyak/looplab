@@ -643,13 +643,13 @@ def test_this_module_appends_no_events_and_names_no_control_intent():
         assert not any(name.startswith(bad) for bad in forbidden), (
             f"the watch scheduler must not import {name}: it appends no domain event and names no "
             "control intent, and the import is what would make that possible")
-    # It reaches exactly TWO serve modules: the run-phase vocabulary its trigger waits on, and the
+    # It reaches the run-phase vocabulary, the bounded monitor handoff contract, and the
     # OS-lock spellings its cross-process fence and owner lease are built from (review 2026-09-22,
     # SRV1-03) — the latter precisely so the lock does not arrive through `looplab.events`.
     modules = {n for n in imported if n.startswith("looplab.")
                and not any(n.startswith(f"{m}.") for m in imported if m != n)}
     assert {n for n in modules if n.startswith("looplab.serve")} == {
-        "looplab.serve.protocol", "looplab.serve.capability_store"}
+        "looplab.serve.protocol", "looplab.serve.capability_store", "looplab.serve.assistant_monitor"}
 
 
 def test_the_wake_up_preamble_states_the_three_things_the_model_cannot_know(tmp_path):

@@ -1895,9 +1895,15 @@ def system_prompt(mode: str, *, repo_root: Path = REPO_ROOT, knowledge_dir: str 
            "calls. Do not claim done until you verified the goal.\n" if work_cycle else "")
         + ("For work that must outlive this reply, use standing tools instead of promising to keep "
            "working in this HTTP turn: `watch_status` waits for a typed run/experiment/stage state, "
-           "`watch_every` monitors every N seconds, and `work_until_done` runs resumable goal/TODO/"
+           "`watch_every` monitors every N seconds, `watch_after` wakes once after a delay, "
+           "and `work_until_done` runs resumable goal/TODO/"
            "checkpoint cycles until done or blocked. List or stop them with `list_watches` / "
-           "`stop_watch`.\n" if standing_work else "")
+           "`stop_watch`; change an idle monitor with `update_watch`. For 'every 30 minutes', "
+           "use every_s=1800 and a standalone instruction identifying the run, checks, permitted "
+           "repairs/restarts and when to stop. Report interval, pinned mode and both budgets. "
+           "Size max_wakeups for the requested duration: 24 hours at 30 minutes needs 48 checks. "
+           "Monitoring requires the LoopLab server to be running; closed tabs are fine. "
+           "A wake-up cannot approve an action that needs human confirmation.\n" if standing_work else "")
         + "Be concise and concrete; use Markdown. Your final reply answers only the CURRENT request "
         "and reports only work performed in this turn; earlier conversation is context, not work to "
         "recap. When you have the answer, call `final_answer` exactly once with your reply."
@@ -1963,7 +1969,7 @@ def build_tools(run_root, alive_fn: Optional[Callable] = None, mode: str = DEFAU
                 on_todos: Optional[Callable] = None, cancel_check: Optional[Callable] = None,
                 command_service=None, command_key_namespace: str = "",
                 mutation_journal_path=None, mutation_recovery: bool = False, watches=None,
-                work_cycle: bool = False, principal=None):
+                work_cycle: bool = False, monitor_cycle: bool = False, principal=None):
     """The assistant's toolset. Read tools (filesystem scout, machine-run introspection, and — when
     memory_dir + cross_run_read_tools are on — the §22 cross-run concept/claims/atlas reads) are present
     in EVERY mode; the mutating write/shell/git providers are added only when the mode allows mutation
@@ -2068,13 +2074,16 @@ def build_tools(run_root, alive_fn: Optional[Callable] = None, mode: str = DEFAU
     providers.append(TodoTools(on_todos=on_todos))
     if work_cycle:
         providers.append(WorkCheckpointTools())
+    if monitor_cycle:
+        from looplab.serve.assistant_monitor import MonitorControlTools
+        providers.append(MonitorControlTools())
     # Standing watches (doc 29 §F4) — present in EVERY mode including read-only plan, because
     # arming one takes no action; it records an instruction to run LATER at this chat's already-
     # pinned mode. Deliberately NOT on the `mutation_recovery` path above: a recovered dangling turn
     # lost the model trace that would prove which watches the first attempt already armed, and a
     # second copy of a standing watch is a second copy of every wake-up it will ever pay for.
     if watches is not None:
-        providers.append(WatchTools(watches, run_root=run_root))
+        providers.append(WatchTools(watches, run_root=run_root, principal=principal))
     if subagents and client is not None:
         providers.append(SubagentTools(client, run_root, alive_fn=alive_fn, settings=settings,
                                        principal=principal,
@@ -2330,7 +2339,8 @@ def run_turn(client, run_root, messages: list, instruction: str, mode: str = DEF
              on_text: Optional[Callable] = None, cancel_check: Optional[Callable] = None,
              command_service=None, command_key_namespace: str = "",
              mutation_journal_path=None, mutation_recovery: bool = False, watches=None,
-             work_cycle: bool = False, response_language: str = "auto") -> dict:
+             work_cycle: bool = False, monitor_cycle: bool = False,
+             response_language: str = "auto") -> dict:
     """Run ONE assistant turn: drive the shared tool loop over the mode's toolset and return a
     response dict {ok, reply, steps, applied, mode}. `messages` is the prior conversation
     (role/content); `instruction` is the new user message. Pure orchestration — the caller injects the
@@ -2347,7 +2357,7 @@ def run_turn(client, run_root, messages: list, instruction: str, mode: str = DEF
                         command_key_namespace=command_key_namespace,
                         mutation_journal_path=mutation_journal_path,
                         mutation_recovery=mutation_recovery, watches=watches,
-                        work_cycle=work_cycle, principal=principal)
+                        work_cycle=work_cycle, monitor_cycle=monitor_cycle, principal=principal)
     roots = [Path.home(), REPO_ROOT, Path(run_root)] + list(extra_roots)
     from looplab.serve.assistant_commands import expand_command
     grounded, refs = expand_mentions(expand_command(instruction), run_root, alive_fn=alive_fn, roots=roots)
@@ -2433,7 +2443,9 @@ def run_turn(client, run_root, messages: list, instruction: str, mode: str = DEF
 
     def _checkpoint_fields():
         checkpoints = _collect("checkpoints")
-        return {"work_checkpoint": checkpoints[-1]} if checkpoints else {}
+        controls = _collect("monitor_controls")
+        return {**({"work_checkpoint": checkpoints[-1]} if checkpoints else {}),
+                **({"monitor_control": controls[-1]} if controls else {})}
 
     # WHAT HAPPENED TO MY TURN. On a cut-short exit the loop salvages one forced emit from what it
     # gathered — the right move — but presenting a cut-short investigation as a finished answer is
@@ -2646,9 +2658,11 @@ class WatchTools:
     which is the distinction doc 36 asks every such change to make explicitly.
     """
 
-    def __init__(self, watches, run_root=None):
+    def __init__(self, watches, run_root=None, principal=None):
+        from looplab.serve.principal import coerce
         self.watches = watches          # a `SessionWatches` — session-scoped, mode-pinned
         self.run_root = run_root
+        self.principal = coerce(principal).kind
 
     def bind_state(self, state=None, parent=None) -> None:
         return None
@@ -2656,7 +2670,7 @@ class WatchTools:
     def specs(self) -> list[dict]:
         from looplab.serve.assistant_watch import (
             WATCH_EXPERIMENT_STATES, WATCH_MAX_INTERVAL_S, WATCH_MIN_INTERVAL_S,
-            WATCH_RUN_STATES, WATCH_STAGE_STATES)
+            WATCH_MAX_LIFETIME_S, WATCH_MAX_WAKEUPS_CEILING, WATCH_RUN_STATES, WATCH_STAGE_STATES)
         from looplab.tools._base import fn_spec
         states = ", ".join(WATCH_RUN_STATES)
         target = {"type": "object", "properties": {
@@ -2696,14 +2710,30 @@ class WatchTools:
             fn_spec(
                 "watch_every",
                 "Run an instruction on a repeating schedule until its budget runs out — the "
-                "'monitor every N' mode. Each wake-up is a fresh turn appended to this chat.",
+                "'monitor every N' mode. Each wake-up is a fresh turn appended to this chat; "
+                "it can finish or adjust its own schedule with configure_monitor.",
                 {"every_s": {"type": "number",
                              "description": f"seconds between wake-ups "
                                             f"({WATCH_MIN_INTERVAL_S:g}–{WATCH_MAX_INTERVAL_S:g})"},
                  "instruction": {"type": "string", "description": "the standing instruction"},
                  "max_wakeups": {"type": "integer",
-                                 "description": "stop after this many wake-ups (optional)"}},
+                                 "minimum": 1, "maximum": WATCH_MAX_WAKEUPS_CEILING,
+                                 "description": "stop after this many wake-ups (optional)"},
+                 "lifetime_s": {"type": "number", "minimum": WATCH_MIN_INTERVAL_S,
+                                "maximum": WATCH_MAX_LIFETIME_S,
+                                "description": "total lifetime in seconds; default 24h"}},
                 ["every_s", "instruction"]),
+            fn_spec(
+                "watch_after", "Run one instruction after a delay; a durable one-shot timer.",
+                {"after_s": {"type": "number", "minimum": WATCH_MIN_INTERVAL_S,
+                             "maximum": WATCH_MAX_INTERVAL_S},
+                 "instruction": {"type": "string"}}, ["after_s", "instruction"]),
+            fn_spec(
+                "update_watch", "Change an armed monitor/timer's interval or instruction. "
+                "An interval edit starts a new delay from now. Preserves mode, lifetime and spent budget.",
+                {"id": {"type": "string"}, "every_s": {"type": "number", "minimum": WATCH_MIN_INTERVAL_S,
+                                                        "maximum": WATCH_MAX_INTERVAL_S},
+                 "instruction": {"type": "string"}}, ["id"]),
             fn_spec(
                 "work_until_done",
                 "Start durable continuous work toward a goal. Work runs as bounded resumable "
@@ -2737,22 +2767,43 @@ class WatchTools:
                 until = args.get("until")
                 trigger = {"kind": "run_state", "run": args.get("run"), "until": until}
                 rec = self.watches.arm(instruction=str(args.get("instruction") or ""),
-                                       trigger=trigger)
+                                       trigger=trigger, principal=self.principal)
             elif name == "watch_status":
                 trigger = {"kind": "target_status", "target": args.get("target"),
                            "until": args.get("until")}
                 rec = self.watches.arm(instruction=str(args.get("instruction") or ""),
-                                       trigger=trigger)
+                                       trigger=trigger, principal=self.principal)
             elif name == "watch_every":
                 trigger = {"kind": "schedule", "every_s": args.get("every_s")}
                 rec = self.watches.arm(instruction=str(args.get("instruction") or ""),
-                                       trigger=trigger, max_wakeups=args.get("max_wakeups"))
+                                       trigger=trigger, max_wakeups=args.get("max_wakeups"),
+                                       lifetime_s=args.get("lifetime_s"), principal=self.principal)
+            elif name == "watch_after":
+                from looplab.serve.assistant_watch import WATCH_DEFAULT_LIFETIME_S
+                if args.get("after_s") is None:
+                    raise WatchRefusal("after_s must be a number of seconds")
+                trigger = {"kind": "schedule", "every_s": args.get("after_s"), "once": True}
+                normalized = self.watches.store._normalize_trigger(trigger)
+                rec = self.watches.arm(
+                    instruction=str(args.get("instruction") or ""), trigger=normalized,
+                    max_wakeups=1, principal=self.principal,
+                    lifetime_s=normalized["every_s"] + WATCH_DEFAULT_LIFETIME_S)
+            elif name == "update_watch":
+                rec = self.watches.configure(str(args.get("id") or ""),
+                                            {k: v for k, v in args.items() if k != "id"})
+                if rec is None:
+                    return "(no such watch on this chat)"
+                return (f"(watch {rec['id']} updated: {rec['waiting_for']}; "
+                        f"instruction: {rec['instruction']}; mode: {rec['mode']}; "
+                        f"expires_at: {rec['expires_at']}; "
+                        f"wake-ups {rec['wakeups']}/{rec['max_wakeups']})")
             elif name == "work_until_done":
                 trigger = {"kind": "work", "every_s": args.get("every_s"),
                            "initial_todos": args.get("todos")}
                 rec = self.watches.arm(
                     instruction=str(args.get("goal") or ""), trigger=trigger,
-                    max_wakeups=args.get("max_cycles"), lifetime_s=args.get("lifetime_s"))
+                    max_wakeups=args.get("max_cycles"), lifetime_s=args.get("lifetime_s"),
+                    principal=self.principal)
             elif name == "list_watches":
                 rows = self.watches.list()
                 if not rows:
@@ -2762,7 +2813,9 @@ class WatchTools:
                     unit = "cycles" if (row.get("trigger") or {}).get("kind") == "work" else "wake-ups"
                     lines.append(
                         f"{row['id']}  [{row['status']}]  waiting for {row.get('waiting_for')}  "
-                        f"({row.get('wakeups', 0)}/{row.get('max_wakeups')} {unit})")
+                        f"({row.get('wakeups', 0)}/{row.get('max_wakeups')} {unit}); "
+                        f"mode={row['mode']}; next_due={row.get('next_due')}; "
+                        f"expires_at={row.get('expires_at')}; instruction={row['instruction']}")
                 return "\n".join(lines)
             elif name == "stop_watch":
                 stopped = self.watches.cancel(str(args.get("id") or ""))
@@ -2778,7 +2831,9 @@ class WatchTools:
             return f"(could not arm the watch: {type(exc).__name__})"
         return (f"(watch {rec['id']} armed — waiting for "
                 f"{rec.get('waiting_for') or describe_trigger(rec['trigger'])}; it survives a page "
-                f"reload and a server restart. Tell the user it is armed and what it waits for.)")
+                f"reload and a server restart. Mode: {rec['mode']}; "
+                f"budget: {rec['max_wakeups']} wake-ups; expires_at: {rec['expires_at']}. "
+                f"Tell the user it is armed and what it waits for.)")
 
 
 class SubagentTools:

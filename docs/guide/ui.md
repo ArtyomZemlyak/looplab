@@ -425,8 +425,8 @@ node workspaces.
   runs at the mode the chat was in when you armed it — never a wider one — and it always yields to you:
   if you are mid-turn it waits rather than interleaving. Every watch carries a wake-up budget and a
   lifetime (defaults 24 wake-ups / 24 h, 8 active watches per chat), and both are visible on the record.
-  Routes: `GET/POST /api/assistant/watches`, `DELETE /api/assistant/watches/{id}`; the agent's own
-  verbs are `watch_run` / `watch_status` / `watch_every` / `work_until_done` / `list_watches` /
+  Routes: `GET/POST /api/assistant/watches`, `PATCH/DELETE /api/assistant/watches/{id}`; the agent's own
+  verbs are `watch_run` / `watch_status` / `watch_every` / `watch_after` / `update_watch` / `work_until_done` / `list_watches` /
   `stop_watch`. After a server restart a
   read-only watch is re-armed automatically; one that could have MUTATED is left `interrupted` with
   the reason, because its turn may have applied half a change and re-entering it would apply the
@@ -437,6 +437,45 @@ node workspaces.
   receipt naming them (`watches_removed`, and each watch's id, status and condition — never its
   instruction): a watch is owned by the chat that armed it, and a chat you deleted must not go on
   holding your own sentence, nor go on polling for a conversation that is not there.
+
+    **A timer or training monitor, through chat.** For example:
+
+    > Проверяй обучение run demo каждые 30 минут в течение суток. Смотри текущие логи,
+    > ошибки и метрики. Если есть подтверждённая ошибка, исправь её и перезапусти обучение
+    > в пределах разрешений этого чата. Здоровое обучение не перезапускай. После каждой
+    > проверки кратко объясняй результат здесь. Когда обучение завершится, подведи итог
+    > и останови монитор.
+
+    The assistant calls `watch_every(every_s=1800, instruction=..., max_wakeups=48, lifetime_s=86400)` and
+    reports the interval, mode, lifetime and wake-up limit. Each wake-up receives the full
+    standing instruction, reads current evidence, and uses the same ordinary tools as a typed
+    turn. Choose the chat's permission mode **before arming** if you want unattended edits or
+    run controls: Plan can only inspect; an action requiring confirmation is immediately
+    declined and explained, never left waiting for a human. Scheduled monitoring then becomes
+    `blocked` for review, avoiding repeated paid attempts at the same denied action. Auto permits
+    ordinary run resets/resumes; high-risk actions still require a human. A monitor does not grant extra
+    permissions. The LoopLab server and a configured model must be available for wake-ups;
+    closing the browser is fine, stopping the server pauses servicing until it starts again.
+
+    Say “change that monitor to every 10 minutes, and check validation loss too” to call
+    `update_watch` with the existing watch id. Editing is atomic and allowed only while the
+    monitor is `armed`; a running or settled monitor must not be silently replayed. An
+    interval change starts a fresh delay from the edit; an instruction-only change preserves
+    the deadline. Neither edit renews the lifetime, resets used wake-ups, or changes its mode.
+    Editing also requires the chat to be in the monitor's original mode; a read-only chat cannot
+    reauthor an older monitor with wider permissions. Stop and re-arm to use a different mode.
+    The PATCH route takes `session` plus `every_s` and/or `instruction` with these same rules.
+
+    During its own scheduled turn the assistant can call `configure_monitor` to change the
+    next interval/instruction or stop (`stop=true`, with a reason). It takes effect after that
+    turn and is recorded alongside its reply. It cannot touch another monitor, arm children,
+    or renew its budget. If the turn fails or is cut short, monitoring becomes `blocked` for
+    explicit review instead of automatically repeating potentially partial changes.
+
+    For “check this once in 30 minutes”, `watch_after(after_s=1800, instruction=...)` creates
+    a durable one-shot timer. It becomes `done` after its successful wake-up; a delayed server
+    has a 24-hour servicing window after the requested time before the timer expires.
+    The requested time is a minimum delay: busy chats and other scheduled turns can defer it.
 
     **Continuous work is resumable, not one immortal request.** `work_until_done` records a goal,
     bounded cycle/lifetime budgets, and an initial TODO list. Each ordinary assistant turn makes
@@ -453,7 +492,7 @@ node workspaces.
 
     **What you actually do.** You arm a watch by *typing* — there is no "new watch" button, and the
     UI has no client binding for the POST route; your sentence becomes a `watch_run`, `watch_status`,
-    `watch_every`, or `work_until_done`
+    `watch_every`, `watch_after`, or `work_until_done`
     tool call. What you get back is a **strip above the thread** listing every standing watch: what
     it is waiting for, its status, when it next checks, its wake-up count against its budget, the
     standing instruction, the latest work checkpoint (when present), and a **Stop** button. It hides
@@ -496,8 +535,8 @@ node workspaces.
     nothing. The one terminal that gets no note is the one *you* pressed Stop on.
 
     The implementation is `looplab/serve/assistant_watch.py`, and it deliberately holds no domain
-    authority: it appends no event and names no control intent, its only import above `core` is the
-    run-phase vocabulary its trigger waits on, and the *server* — not the agent — evaluates the
+    authority: it appends no event and names no control intent; its serving dependencies supply
+    phase vocabulary, store locks and bounded monitor handoffs. The *server* evaluates the
     trigger, so an agent can never be woken because it declared its own wake condition met.
 
 - **The closing answer is about the TURN, not the session** — what you read when a long agentic turn

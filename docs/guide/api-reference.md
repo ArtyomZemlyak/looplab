@@ -10,7 +10,7 @@ vocabulary a client may append is `serve/protocol.py::CONTROL_EVENTS`.
 
 <!-- generated: api routes -->
 
-161 routes on 143 paths; 10 deprecated; 27 with a declared response model.
+162 routes on 143 paths; 10 deprecated; 27 with a declared response model.
 
 ### `/api`
 
@@ -44,6 +44,7 @@ vocabulary a client may append is `serve/protocol.py::CONTROL_EVENTS`.
 | `GET` | `/api/assistant/watches` | *List Watches* (no docstring) | — |  |
 | `POST` | `/api/assistant/watches` | Arm standing status/schedule/work from the UI (the agent uses the corresponding watch | — |  |
 | `DELETE` | `/api/assistant/watches/{watch_id}` | *Stop Watch* (no docstring) | — |  |
+| `PATCH` | `/api/assistant/watches/{watch_id}` | Change an idle scheduled monitor's interval/instruction, preserving permissions and budgets. | — |  |
 
 ### `/api/attention`
 

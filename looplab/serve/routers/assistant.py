@@ -1855,7 +1855,8 @@ def build_router(srv) -> APIRouter:
                 # unbounded population with a bounded per-watch budget, which is not a bound at all
                 # — the floor doc 36 asks for has to hold over the whole tree, not each node of it.
                 watches=None,
-                work_cycle=(record.get("trigger") or {}).get("kind") == "work")
+                work_cycle=(record.get("trigger") or {}).get("kind") == "work",
+                monitor_cycle=(record.get("trigger") or {}).get("kind") == "schedule")
         finally:
             _release_turn(sid, cancel_ev, turn_epoch)
         if declined and isinstance(res, dict):
@@ -1864,7 +1865,8 @@ def build_router(srv) -> APIRouter:
             # wake-up reporting that it "could not" do the thing they asked for, with no way to learn
             # that the server declined it rather than the run refusing it.
             res = {**res, "reply": ((res.get("reply") or "").rstrip() + "\n\n" +
-                                    unattended_denial_note(declined)).strip()}
+                                    unattended_denial_note(declined)).strip(),
+                   "unattended_denied": list(dict.fromkeys(declined))}
         return res
 
     def _watch_append(session: str, turn: dict) -> None:
@@ -1949,6 +1951,23 @@ def build_router(srv) -> APIRouter:
             raise HTTPException(404, "no such watch") from exc
         if record is None:
             raise HTTPException(404, "no such watch")
+        return {"ok": True, "watch": _watch_public(record)}
+
+    @router.patch("/api/assistant/watches/{watch_id}")
+    async def configure_watch(watch_id: str, request: Request):
+        """Change an idle scheduled monitor's interval/instruction, preserving permissions and budgets."""
+        body = await json_object(request)
+        sid = body.pop("session", None)
+        sess = _asst.get(sid) if isinstance(sid, str) else None
+        if sess is None:
+            raise HTTPException(404, "no such session")
+        try:
+            record = _watches.configure(watch_id, session=sid, changes=body,
+                                        mode=normalize_mode(sess["meta"].get("mode") or "plan"))
+        except WatchRefusal as exc:
+            raise HTTPException(400, {"code": "watch_refused", "message": str(exc)}) from exc
+        if record is None:
+            raise HTTPException(404, "no such watch on this chat")
         return {"ok": True, "watch": _watch_public(record)}
 
     # DEPRECATED in OpenAPI only — no behaviour change (review 2026-09-22, SRV2-09): no first-party

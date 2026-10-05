@@ -658,6 +658,8 @@ class WatchStore:
         wakeups_cap = int(_bounded_float(
             max_wakeups, low=1, high=WATCH_MAX_WAKEUPS_CEILING,
             default=WATCH_DEFAULT_MAX_WAKEUPS, what="max_wakeups"))
+        if trigger.get("once"):
+            wakeups_cap = 1
         lifetime = _bounded_float(lifetime_s, low=WATCH_MIN_INTERVAL_S, high=WATCH_MAX_LIFETIME_S,
                                   default=WATCH_DEFAULT_LIFETIME_S, what="lifetime_s")
         record = {
@@ -730,7 +732,10 @@ class WatchStore:
         if kind == "schedule":
             every = _bounded_float(trigger.get("every_s"), low=WATCH_MIN_INTERVAL_S,
                                    high=WATCH_MAX_INTERVAL_S, default=300.0, what="every_s")
-            return {"kind": "schedule", "every_s": every}
+            if "once" in trigger and not isinstance(trigger["once"], bool):
+                raise WatchRefusal("once must be true or false")
+            return {"kind": "schedule", "every_s": every,
+                    **({"once": True} if trigger.get("once") else {})}
         if kind == "work":
             every = _bounded_float(trigger.get("every_s"), low=WATCH_MIN_INTERVAL_S,
                                    high=WATCH_MAX_INTERVAL_S, default=60.0, what="every_s")
@@ -838,6 +843,36 @@ class WatchStore:
         return ready
 
     # ---- transitions ----------------------------------------------------------------------
+    def configure(self, watch_id: str, *, session: str, changes: dict,
+                  now: Optional[float] = None, mode: Optional[str] = None) -> Optional[dict]:
+        """Edit an idle schedule under the same lock as claiming it; preserve all authority/budgets."""
+        from looplab.serve.assistant_monitor import monitor_changes
+        changes = monitor_changes(changes)
+        try:
+            self._path(watch_id)
+        except WatchRefusal:
+            return None
+        with self._mutation():
+            record = self._read(watch_id)
+            if record is None or record.get("session") != session:
+                return None
+            if mode is not None and record["mode"] != normalize_mode(mode):
+                raise WatchRefusal(
+                    f"this monitor was armed in {record['mode']}; switch the chat back to that "
+                    "mode to edit it, or stop it and arm a new one in the current mode")
+            if record["status"] != "armed":
+                raise WatchRefusal("only an armed monitor can be edited; wait for its current turn")
+            if record["trigger"]["kind"] != "schedule":
+                raise WatchRefusal("only a scheduled monitor/timer can be edited")
+            fields = {}
+            if "every_s" in changes:
+                trigger = {**record["trigger"], "every_s": changes["every_s"]}
+                fields.update(trigger=trigger, waiting_for=describe_trigger(trigger),
+                              next_due=(time.time() if now is None else now) + changes["every_s"])
+            if "instruction" in changes:
+                fields["instruction"] = changes["instruction"]
+            return self._write({**record, **fields})
+
     def update(self, watch_id: str, **fields) -> Optional[dict]:
         """Read-modify-write one record. Refuses to move a TERMINAL watch: a wake-up that finishes
         after the operator stopped its watch must not re-arm it, and that race is ordinary (a stop
@@ -856,7 +891,8 @@ class WatchStore:
                 return record
             return self._write({**record, **fields})
 
-    def claim(self, watch_id: str, *, now: Optional[float] = None) -> Optional[dict]:
+    def claim(self, watch_id: str, *, now: Optional[float] = None,
+              expected_record: Optional[dict] = None) -> Optional[dict]:
         """Move `armed` -> `waking` under the store fence, or return None if someone else has it.
 
         "Someone else" includes ANOTHER SERVER over the same run root: the read and the write sit
@@ -867,6 +903,10 @@ class WatchStore:
         with self._mutation():
             record = self._read(watch_id)
             if record is None or record["status"] != "armed":
+                return None
+            if expected_record is not None and record != expected_record:
+                # An interval/instruction edit may race a scheduler's already-read due list.
+                # Never wake immediately on a stale deadline or spend under the old instruction.
                 return None
             claimed = {**record, "status": "waking", "claimed_at": ts}
             owner = self._owner_lease()
@@ -1004,7 +1044,7 @@ def describe_trigger(trigger: dict) -> str:
             unit = f"{every / 60:g} min"
         else:
             unit = f"{every:g} s"
-        return f"every {unit}"
+        return f"in {unit} (once)" if trigger.get("once") else f"every {unit}"
     if trigger.get("kind") == "work":
         return "continuous work until it reports done or blocked"
     if trigger.get("kind") == "target_status":
@@ -1080,12 +1120,18 @@ def wakeup_instruction(record: dict, observation) -> str:
             wakeup=int(record.get("wakeups", 0)) + 1,
             max_wakeups=record.get("max_wakeups"),
         )
-    return WAKEUP_PREAMBLE.format(
+    text = WAKEUP_PREAMBLE.format(
         waiting_for=record.get("waiting_for") or describe_trigger(record.get("trigger") or {}),
         observation=_observation_text(observation),
         wakeup=int(record.get("wakeups", 0)) + 1,
         max_wakeups=record.get("max_wakeups"),
         instruction=record.get("instruction", ""))
+    if (record.get("trigger") or {}).get("kind") == "schedule":
+        text += ("\nUse configure_monitor to stop when the goal is resolved, or to adjust your "
+                 "future interval/instruction. This cannot renew your budget or widen permissions. "
+                 "Explain the outcome and next step in the user's language. Do not restart healthy "
+                 "training or repeat a completed operation without current evidence.")
+    return text
 
 
 class SessionWatches:
@@ -1130,6 +1176,9 @@ class SessionWatches:
         if record is None or record.get("session") != self.session:
             return None
         return self.store.cancel(watch_id)
+
+    def configure(self, watch_id: str, changes: dict) -> Optional[dict]:
+        return self.store.configure(watch_id, session=self.session, changes=changes, mode=self.mode)
 
 
 class WatchService:
@@ -1510,7 +1559,9 @@ class WatchService:
         The claim is what makes concurrent ticks safe: two threads reaching the same due record
         cannot both spend a model call on it, because only one `armed -> waking` write wins.
         """
-        claimed = self.store.claim(record["id"], now=now)
+        claimed = self.store.claim(
+            record["id"], now=now,
+            expected_record=(record if record.get("trigger", {}).get("kind") == "schedule" else None))
         if claimed is None:
             return None
         # A CLAIM MUST BE SETTLED, including by an escape nobody planned for. Every settling write
@@ -1562,10 +1613,33 @@ class WatchService:
                 reason=f"the wake-up turn failed: {type(exc).__name__}")
         self._record_turn(claimed, result, observation)
         wakeups = int(claimed.get("wakeups", 0)) + 1
+        if trigger.get("kind") == "schedule" and isinstance(result, dict) and (
+                result.get("ok") is False or result.get("budget_exhausted") or result.get("unattended_denied")):
+            counted = self.store.update(claimed["id"], wakeups=wakeups) or claimed
+            return self._retire(counted, status="blocked", observation=observation,
+                                reason=("monitor needs approval for an action; review its chat reply before re-arming"
+                                        if result.get("unattended_denied") else
+                                        "monitor turn did not complete; review its outcome before re-arming"))
+        if trigger.get("kind") == "schedule" and isinstance(result, dict) and "monitor_control" in result:
+            from looplab.serve.assistant_monitor import monitor_control
+            try:
+                control = monitor_control(result["monitor_control"])
+            except WatchRefusal as exc:
+                counted = self.store.update(claimed["id"], wakeups=wakeups) or claimed
+                return self._retire(counted, status="blocked", reason=f"invalid monitor handoff: {exc}")
+            if control["stop"]:
+                return self.store.update(
+                    claimed["id"], status="done", wakeups=wakeups, last_observation=observation,
+                    waiting_for="monitor completed", last_error="", monitor_reason=control["reason"])
+            trigger = {**trigger, **({"every_s": control["every_s"]} if "every_s" in control else {})}
+            claimed = self.store.update(
+                claimed["id"], trigger=trigger, waiting_for=describe_trigger(trigger),
+                instruction=control.get("instruction", claimed["instruction"]),
+                monitor_reason=control["reason"]) or claimed
         if trigger.get("kind") == "work":
             return self._complete_work_cycle(
                 claimed, result, observation=observation, wakeups=wakeups, now=now)
-        if trigger.get("kind") in ("run_state", "target_status"):
+        if trigger.get("kind") in ("run_state", "target_status") or trigger.get("once"):
             # A run-state watch is a ONE-SHOT by construction: its condition was met, so re-arming
             # it would wake on the same fact forever. "Watch it again" is a new watch, which is also
             # the only shape under which the operator re-consents to the spend.
@@ -1678,6 +1752,8 @@ class WatchService:
             turn["work_checkpoint"] = result["work_checkpoint"]
         if result.get("error_kind"):
             turn["error_kind"] = result["error_kind"]
+        if isinstance(result.get("monitor_control"), dict):
+            turn["monitor_control"] = result["monitor_control"]
         # Same rule as an operator-typed turn: a salvage must not read as a conclusion.
         if result.get("budget_exhausted"):
             turn["budget_exhausted"] = result["budget_exhausted"]
