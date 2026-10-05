@@ -1,7 +1,7 @@
 import React from 'react'
 import './baseRevision.css'
 import { baseChoices } from './baseRevision.js'
-import { upstreamCheckSummary } from './upstreamCheckModel.js'
+import { upstreamCheckSummary, upstreamHistoryRows } from './upstreamCheckModel.js'
 import { useAssistantLanguage } from './useAssistantLanguage.js'
 import { upstreamProposalSummary, upstreamRecoveryDraft } from './upstreamProposalModel.js'
 import UpstreamRecovery from './UpstreamRecovery.jsx'
@@ -11,13 +11,13 @@ export default function UpstreamPanel({ state, onClose }) {
   const ru = language === 'ru'
   const enabled = state.upstream_enabled === true
   const bases = baseChoices(state.nodes)
-  const history = Array.isArray(state.upstream_history) ? state.upstream_history : []
-  const advances = history.filter(row => row?.type === 'base_advanced')
-  const proposal = upstreamProposalSummary(history)
+  const history = upstreamHistoryRows(state.upstream_history)
+  const advances = (history || []).filter(row => row.type === 'base_advanced')
+  const proposal = upstreamProposalSummary(state.upstream_history)
   // Once a proposal is visible, its own check is the only relevant verdict.
   // A new/failed authoring claim must not display a preceding proposal's pass.
-  const check = proposal ? proposal.check : upstreamCheckSummary(history)
-  if (!enabled && !bases.some(row => row.digest !== 'unknown') && !history.length) return null
+  const check = history ? (proposal ? proposal.check : upstreamCheckSummary(history)) : { status: 'unknown' }
+  if (!enabled && !bases.some(row => row.digest !== 'unknown') && history && !history.length) return null
   const discuss = () => {
     const text = enabled && proposal ? upstreamRecoveryDraft(proposal, language) : enabled
       ? (ru
@@ -31,7 +31,9 @@ export default function UpstreamPanel({ state, onClose }) {
       text } })))
   }
   return <section className="ov-section upstream-panel" aria-label={ru ? 'Код для следующих экспериментов' : 'Code for future experiments'}>
-    <div className="ov-section-head"><h3>{ru ? 'Код для следующих экспериментов' : 'Code for future experiments'}</h3><span>{ru ? `Обновлений базы: ${advances.length}` : `${advances.length} recorded base updates`}</span></div>
+    <div className="ov-section-head"><h3>{ru ? 'Код для следующих экспериментов' : 'Code for future experiments'}</h3><span>{history
+      ? (ru ? `Обновлений базы: ${advances.length}` : `${advances.length} recorded base updates`)
+      : (ru ? 'История обновлений недоступна' : 'Base update history unavailable')}</span></div>
     <p>{ru ? 'Полезное изменение из одного эксперимента можно проверить и добавить в общий исходный код следующих экспериментов.' : 'A useful change from one experiment can be checked and added to the shared starting code for future experiments.'}</p>
     <p className="muted">{enabled && proposal
       ? (ru ? 'Разберите записанный перенос с Assistant перед выбором следующего действия.' : 'Inspect recorded code reuse with Assistant before choosing the next action.') : enabled

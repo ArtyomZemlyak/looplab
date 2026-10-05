@@ -1,15 +1,15 @@
-import { upstreamCheckSummary } from './upstreamCheckModel.js'
+import { upstreamCheckSummary, upstreamHistoryRows } from './upstreamCheckModel.js'
 
 // State retains only 200 upstream events. This is a recorded hint, not live
 // authority, writer liveness, or proof that an original request file still exists.
 export function upstreamProposalSummary(history) {
-  const rows = Array.isArray(history) ? history : []
+  const rows = upstreamHistoryRows(history)
+  const unknown = { status: 'unknown' }
+  if (!rows) return unknown
   const types = new Set(['upstream_proposal_started', 'upstream_proposed', 'upstream_proposal_failed'])
   const relevant = rows.filter(row => types.has(row?.type))
-  if (!relevant.length) return null
-  const unknown = { status: 'unknown' }
-  if (rows.some((row, index) => !row || !Number.isSafeInteger(row.seq) || row.seq < 0
-      || index > 0 && row.seq <= rows[index - 1].seq)) return unknown
+  // A retained advance without proposal records is clipped evidence, not a new start.
+  if (!relevant.length) return rows.some(row => row.type === 'base_advanced') ? unknown : null
   const claim = relevant.filter(row => row.type === 'upstream_proposal_started').at(-1)
   if (!claim || typeof claim.proposal_id !== 'string' || !/^up_[0-9a-f]{24}$/.test(claim.proposal_id)
       || typeof claim.request_hash !== 'string' || !/^[0-9a-f]{64}$/.test(claim.request_hash)

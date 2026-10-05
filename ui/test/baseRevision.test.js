@@ -23,3 +23,14 @@ test('base filtering preserves unknowns and ignores tombstones; capability prove
   assert.equal(capabilityOrigin({ upstream_base: origin }, digest), origin)
   assert.equal(capabilityOrigin({ upstream_history: [{ ...origin, type: 'upstream_proposed' }] }, digest), null)
 })
+
+test('unreadable history cannot crash measured base provenance or invent an origin', () => {
+  const origin = { type: 'base_advanced', selector: { digest }, source_node_id: 1 }
+  for (const history of [null, {}, '[]', 1, false, [null, false]]) {
+    assert.equal(capabilityOrigin({ upstream_history: history }, digest), null)
+    // The separately recorded last base remains available after history is clipped/unreadable.
+    assert.equal(capabilityOrigin({ upstream_history: history, upstream_base: origin }, digest), origin)
+    assert.equal(capabilityOrigin({ upstream_history: history, upstream_base: origin }, 'b'.repeat(64)), null)
+  }
+  assert.equal(capabilityOrigin({ upstream_history: [null, origin] }, digest), origin)
+})

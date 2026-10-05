@@ -1321,11 +1321,15 @@ completion does not become a current check. Sequence gaps are valid in the filte
 Once the latest proposal is present, its own check summary supplies the displayed verdict/cost;
 a new, failed, abandoned or unavailable proposal cannot inherit a previous proposal's pass.
 Recorded advancement must name that verified finished check's sequence, preceding the advance.
+An omitted legacy history field stays empty; an explicit malformed field/row is unavailable,
+including the base-update count. A retained advance without proposal records offers recovery
+with no invented original identity. Measured base provenance tolerates unreadable history;
+its existing separate recorded-base fallback must still match the measured digest.
 This is a diagnostic hint: read current upstream evidence before retrying or advancing the base.
 Assistant command suggestions use
 `AssistantBar.jsx::suggestionPop` and `.cmdbar-pop`, not the retired `.cmd-suggest` styles.
 Run `npm run check:bundle` after building: passing a route budget does not imply the
-total byte budget passed. Current measurements and remaining excess are in doc 72 §20.55.
+total byte budget passed. Current measurements and remaining excess are in doc 72 §20.56.
 
 Production HTML and non-versioned assets revalidate. Only content-hashed files listed by Vite's build manifest
 receive long-lived immutable caching. Eligible ordinary responses can use gzip when the client accepts it;

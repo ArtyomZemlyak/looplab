@@ -4077,7 +4077,7 @@ merge этим проходом не проверены.
    превышение total JS: 13317 B после §20.42, 13380 B после §20.43,
    12884 B после §20.46, 13121 B после §20.47, 13324 B после §20.48,
    13308 B после §20.49; 13734 B после §20.50; 13894 B после §20.51;
-   9940 B после §20.53; 9964 B после §20.54; 9944 B после §20.55;
+   9940 B после §20.53; 9964 B после §20.54; 9944 B после §20.55; 10000 B после §20.56;
    потолки не повышены. Нужны дальнейшее
    уменьшение исходного кода/повторов и полный CI. Один lazy import не снижает
    сумму всех assets; нельзя выдавать route budget за зелёный общий gate.
@@ -6982,3 +6982,50 @@ Full-cycle body остаётся dynamic и отсутствует в compact st
 React проверка принадлежности диагностического verdict и minified build, не
 сквозная приёмка восстановления/доставки. OPEN §19.17 по onboarding/recovery,
 effective manifest, retention, target-relative delivery и полному CI остаются.
+
+### 20.56. Недоступная история не превращается в пустую — 2026-10-05
+
+**Воспроизведение.** Исходный commit —
+`cd3ec5586fac35e3b12c5dc66e692c54cf1c0ae0`. `UpstreamPanel` и pure summaries
+нормализовали non-array history в `[]`. Proposal summary фильтровал строки до
+проверки порядка: `[null]` или malformed unrelated rows выглядели как отсутствие
+proposal. UI показывал «Обновлений базы: 0» и обычный выбор нового изменения
+вместо unavailable/recovery. Если bounded история оставляла лишь `base_advanced`,
+отсутствие исходного proposal также выглядело как новый старт. Отдельный
+`capabilityOrigin` падал на non-array history и null row при показе происхождения
+измеренной базы. Три новые регрессии red до исправления, включая TypeError.
+
+**Исправлено.** Общий `upstreamHistoryRows` проверяет shape/order до type filtering
+и используется сводками и карточкой. Оmitted legacy field и настоящий пустой
+массив остаются допустимыми; explicit null/object/string/scalar, malformed rows
+или seq дают unavailable. Число обновлений не подменяется нулём. Retained advance
+без proposal records даёт unknown hint и существующий Assistant recovery draft:
+прочитать state generation/upstream_status и найти исходную identity в полной
+истории, без выдуманного тела или ключа. Возвращение валидного claim восстанавливает
+только его собственный original ID/hash. Source-origin reader защищён от non-array
+и null rows; отдельный recorded `upstream_base` по-прежнему доступен только при
+совпадении с measured digest. Это происхождение записанного результата, не новая
+оценка, разрешение на перенос или восстановленная effective программа.
+
+**Проверено.** Pure matrix отличает malformed history от отсутствующего legacy
+field, пустого массива и валидных unrelated events. Live RU/EN проходит valid
+claim → null/object/null-row/clipped-advance → valid claim: unavailable copy/count,
+no invented identity, кнопка остаётся в фокусе, явный draft восстанавливает контекст,
+fetch calls пусты. Base-origin matrix проверяет no-crash/null result, digest mismatch
+и существующий отдельный fallback. Целевые 24 tests входят в полный UI suite.
+Replay-first 193 passed; полный UI 1977 passed без fail/skip/cancel; docs/API/surface/
+diagram 28 passed. Всего **2198 уникальных тестов**. Production build, native
+minified chunk initialization в UI suite, strict MkDocs и diff-check проходят.
+
+JS gzip **643928 → 643984 B (+56 B)**; raw +123 B, CSS прежние 59635 B.
+Total JS остаётся единственным red bundle gate: **10000 B** сверх неизменённого
+лимита 633984 B. Остальные size/reachability/static-cycle/integer-boolean guards
+проходят. Full-cycle body по-прежнему dynamic и отсутствует в compact static
+closure. [bundles.json](assets/72-history-unavailable/bundles.json) и
+[validation.json](assets/72-history-unavailable/validation.json) сохраняют измерения.
+
+Это fault injection UI projection, не damaged event-log recovery на сервере.
+Новой browser сессии, MCP connection, provider call, обучения, commands или
+доставки из **worktree LoopLab** в task repo не было. Последний production browser
+проход §20.53 не заявляется повторно. OPEN §19.17 для цельного onboarding/recovery,
+effective manifest, retention, target-relative delivery и полного CI остаются.

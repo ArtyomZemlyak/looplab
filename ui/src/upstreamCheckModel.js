@@ -1,12 +1,17 @@
-// A bounded folded history reports recorded work, never current CAS authority.
-export function upstreamCheckSummary(history) {
-  const rows = Array.isArray(history) ? history : []
-  const unknown = { status: 'unknown' }
+// Older snapshots omit the field. An explicitly malformed value is not empty history.
+export function upstreamHistoryRows(history = []) {
   // Array position identifies the latest claim only in a strictly ordered projection.
   // A reordered/partial sequence must withdraw the old verdict, not select it again.
-  if (rows.some((row, index) => !row || typeof row !== 'object'
+  return Array.isArray(history) && !history.some((row, index) => !row || typeof row !== 'object'
       || !Number.isSafeInteger(row.seq) || row.seq < 0
-      || index > 0 && row.seq <= rows[index - 1].seq)) return unknown
+      || index > 0 && row.seq <= history[index - 1].seq) ? history : null
+}
+
+// A bounded folded history reports recorded work, never current CAS authority.
+export function upstreamCheckSummary(history) {
+  const rows = upstreamHistoryRows(history)
+  const unknown = { status: 'unknown' }
+  if (!rows) return unknown
   const starts = rows.filter(row => row.type === 'upstream_gate_started')
   const finishes = rows.filter(row => row.type === 'upstream_gate_finished')
   if (!starts.length && !finishes.length) return null

@@ -1,0 +1,48 @@
+{
+  "baseline_commit": "cd3ec5586fac35e3b12c5dc66e692c54cf1c0ae0",
+  "regressions_before": {
+    "new_tests": 3,
+    "failed": 3,
+    "base_origin_error": "TypeError: find is not a function"
+  },
+  "tests_after": {
+    "targeted_subset": 24,
+    "replay": 193,
+    "ui": 1977,
+    "documentation": 28,
+    "unique_total": 2198
+  },
+  "scenarios": [
+    "malformed shape/order is unavailable before filtering",
+    "omitted legacy history and genuine empty history remain empty",
+    "clipped base advance offers recovery without original identity",
+    "RU/EN valid to damaged to valid claim preserves focus; draft only; zero fetches",
+    "base origin tolerates non-array/null rows and preserves recorded matching-digest fallback"
+  ],
+  "bundle": {
+    "js_gzip_before": 643928,
+    "js_gzip_after": 643984,
+    "raw_js_delta": 123,
+    "limit": 633984,
+    "remaining_excess": 10000,
+    "css_gzip": 59635,
+    "only_red": "total_budget"
+  },
+  "checks": [
+    "production build",
+    "native minified client chunk initialization (included in UI suite)",
+    "docs/API/surface/diagram",
+    "strict MkDocs",
+    "diff-check"
+  ],
+  "bounds": {
+    "fresh_browser": false,
+    "damaged_server_log_recovery": false,
+    "mcp_connection": false,
+    "provider_call": false,
+    "training": false,
+    "commands": false,
+    "looplab_worktree_delivery": false,
+    "full_ci": false
+  }
+}

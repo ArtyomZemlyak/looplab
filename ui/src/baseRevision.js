@@ -24,7 +24,8 @@ export function baseMatches(node, selected) {
   return !selected || (nodeBase(node)?.digest || 'unknown') === selected
 }
 export function capabilityOrigin(state, digest) {
-  return (state?.upstream_history || []).find(row => row.type === 'base_advanced' && row.selector?.digest === digest)
+  const history = Array.isArray(state?.upstream_history) ? state.upstream_history : []
+  return history.find(row => row?.type === 'base_advanced' && row.selector?.digest === digest)
     || (state?.upstream_base?.selector?.digest === digest ? state.upstream_base : null)
     || null
 }

@@ -1,6 +1,7 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import { upstreamProposalSummary as summary } from '../src/upstreamProposalModel.js'
+import { upstreamCheckSummary } from '../src/upstreamCheckModel.js'
 import { click, mountLive, until } from './_mount.js'
 
 const claim = { type: 'upstream_proposal_started', seq: 1, action_id: 'original',
@@ -32,6 +33,64 @@ test('clipped, inconsistent, duplicate or reordered proposal evidence cannot gra
   }
   assert.equal(summary([]), null)
   assert.equal(summary([claim, proposal, finish]).status, 'check_unknown')
+})
+
+test('malformed history is unavailable before filtering, while omitted legacy history stays empty', () => {
+  for (const history of [null, {}, '[]', false, 1, [null], [false],
+    [{ type: 'unrelated', seq: '1' }], [{ type: 'unrelated', seq: 3 }, { type: 'unrelated', seq: 2 }]]) {
+    assert.deepEqual(summary(history), { status: 'unknown' })
+    assert.deepEqual(upstreamCheckSummary(history), { status: 'unknown' })
+  }
+  for (const history of [undefined, [], [{ type: 'unrelated', seq: 3 }]]) {
+    assert.equal(summary(history), null)
+    assert.equal(upstreamCheckSummary(history), null)
+  }
+  assert.deepEqual(summary([{ type: 'base_advanced', seq: 10 }]), { status: 'unknown' })
+})
+
+test('RU/EN damaged history offers evidence recovery and never invents an original request', async () => {
+  const harness = await mountLive()
+  const received = []
+  const listener = event => received.push(event.detail.text)
+  window.addEventListener('ll:focus-assistant', listener)
+  try {
+    const { default: UpstreamPanel } = await harness.load('/src/UpstreamPanel.jsx')
+    for (const language of ['ru', 'en']) {
+      localStorage.setItem('looplab.language', language)
+      const view = await harness.mount(UpstreamPanel, {
+        state: { nodes: {}, upstream_enabled: true, upstream_history: [claim] },
+      })
+      try {
+        const button = view.container.querySelector('button')
+        button.focus()
+        for (const history of [null, {}, [null], [{ type: 'base_advanced', seq: 10 }]]) {
+          await view.rerender({ state: { nodes: {}, upstream_enabled: true, upstream_history: history } })
+          assert.match(view.container.textContent, language === 'ru'
+            ? /История подготовки изменения недоступна/ : /Proposal evidence unavailable/)
+          if (!Array.isArray(history) || history[0] == null) assert.match(view.container.textContent,
+            language === 'ru' ? /История обновлений недоступна/ : /Base update history unavailable/)
+          assert.doesNotMatch(view.container.textContent, /expected_request_hash:|proposal_id:/)
+          assert.equal(document.activeElement, button)
+          const count = received.length
+          await click(button)
+          await until(() => received.length === count + 1, 'unknown history recovery draft')
+          assert.match(received.at(-1), language === 'ru'
+            ? /не придумывай ключ или тело/ : /do not invent a key or body/)
+          assert.ok(!received.at(-1).includes(claim.proposal_id))
+        }
+        await view.rerender({ state: { nodes: {}, upstream_enabled: true, upstream_history: [claim] } })
+        const count = received.length
+        await click(button)
+        await until(() => received.length === count + 1, 'restored verified original identity')
+        assert.ok(received.at(-1).includes(claim.proposal_id))
+        assert.deepEqual(harness.fetch.calls, [])
+      } finally { await view.unmount() }
+    }
+  } finally {
+    window.removeEventListener('ll:focus-assistant', listener)
+    localStorage.removeItem('looplab.language')
+    await harness.close()
+  }
 })
 
 test('recorded advancement requires its own passing gate, never a clipped or unrelated check', () => {
