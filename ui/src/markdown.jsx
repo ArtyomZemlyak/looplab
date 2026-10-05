@@ -74,8 +74,18 @@ function inline(text, keyBase, externalOnly = false, maxTokens = MARKDOWN_INLINE
       truncated = true
       break
     }
-    if (match.index > cursor) out.push(source.slice(cursor, match.index))
     const tok = match[0]
+    // Technical prose contains snake_case and a*b*c. Only delimited emphasis is formatting;
+    // keep identifiers and expressions intact, using the same boundary rule as stripMd.
+    if (/^[*_]/.test(tok)) {
+      const marker = tok[0]
+      const isBoundary = ch => !ch || !/\w/.test(ch) && ch !== marker
+      if (!isBoundary(source[match.index - 1]) || !isBoundary(source[re.lastIndex])) {
+        re.lastIndex = match.index + (tok.startsWith(marker + marker) ? 2 : 1)
+        continue
+      }
+    }
+    if (match.index > cursor) out.push(source.slice(cursor, match.index))
     if (tok.startsWith('`')) out.push(<code key={`${keyBase}-c${used}`}>{tok.slice(1, -1)}</code>)
     else if (tok.startsWith('[')) {
       const mm = /\[([^\]]+)\]\(([^)\s]+)\)/.exec(tok)

@@ -122,10 +122,10 @@ test('Report uses semantic section headings and exposes an unambiguous operator/
       const sections = [...dom.window.document.querySelectorAll('.report-view .section-h')]
       assert.ok(sections.length >= 4)
       assert.ok(sections.every(heading => heading.tagName === 'H2'))
-      assert.equal(sections[1].textContent, 'Recorded metric trajectory')
+      assert.equal(sections[0].textContent, 'What worked and what did not')
       const jumps = [...dom.window.document.querySelectorAll('.report-sections button')]
       assert.deepEqual(jumps.map(button => button.textContent),
-        ['Summary', 'Selected', 'Trajectory', 'Comparisons', 'Failures', 'Solution'])
+        ['Summary', 'Outcomes', 'Execution problems', 'Selected', 'Trajectory', 'Comparisons', 'Hypothesis search', 'Solution'])
       assert.ok(sections.every(heading => heading.id && heading.tabIndex === -1))
       assert.equal(dom.window.document.querySelector('.report-steps-table').tagName, 'TABLE')
       assert.equal(dom.window.document.querySelector('.report-step-changes summary')?.textContent,
@@ -266,9 +266,12 @@ test('deterministic verdict stays authoritative across UI, Markdown, and model-c
       assert.match(narrative.querySelector('.report-provenance').textContent, /published event #7/)
       assert.ok(narrative.textContent.includes(championNote))
       assert.equal(doc.querySelector('.champion-card').textContent.includes(championNote), false)
-      assert.ok(doc.querySelector('.champion-card').compareDocumentPosition(narrative)
+      assert.ok(verdictRegion.compareDocumentPosition(narrative)
         & dom.window.Node.DOCUMENT_POSITION_FOLLOWING,
-      'advisory prose must follow deterministic champion evidence')
+      'advisory prose must follow deterministic verdict evidence')
+      assert.ok(narrative.compareDocumentPosition(doc.querySelector('.champion-card'))
+        & dom.window.Node.DOCUMENT_POSITION_FOLLOWING,
+      'interpretations should be readable before detailed reproduction evidence')
       assert.equal(doc.querySelector('.report-provenance').closest('.report-toolbar'), null,
         'publication provenance must remain printable when the action toolbar is hidden')
     } finally {

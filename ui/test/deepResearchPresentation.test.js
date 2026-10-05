@@ -295,10 +295,9 @@ test('shared memo presentation keeps takeaway and trust visible while detail sta
     const reportMarkup = renderToStaticMarkup(React.createElement(ReportView, {
       state: reportState, runId: 'run', readOnly: true,
     }))
-    assert.ok(reportMarkup.indexOf('New report memo') < reportMarkup.indexOf('Old report memo'),
-      'the report should put the newest memo before history')
-    assert.equal((reportMarkup.match(/class="research-memo-region" hidden=""/g) || []).length, 2,
-      'the long memo bodies start collapsed in the report')
+    assert.doesNotMatch(reportMarkup, /New report memo|Old report memo|research-memo-region/,
+      'hypothesis-search prose must not be presented as report learnings')
+    assert.match(reportMarkup, /Hypothesis search · Deep Research/)
 
     // A reset may reuse a node id for a new attempt. Verifier evidence must continue to identify
     // the exact historical attempt rather than offering a bare-id jump into the current attempt.
@@ -318,14 +317,6 @@ test('shared memo presentation keeps takeaway and trust visible while detail sta
         name: 'panel',
         markup: renderToStaticMarkup(React.createElement(ResearchPanel, {
           state: resetState, runId: 'run', onSelect() {}, onSelectEvidence() {},
-        })),
-        interactive: true,
-      },
-      {
-        name: 'report',
-        markup: renderToStaticMarkup(React.createElement(ReportView, {
-          state: resetState, runId: 'run', readOnly: true,
-          onPickNode() {}, onPickEvidence() {},
         })),
         interactive: true,
       },
@@ -364,6 +355,22 @@ test('shared memo presentation keeps takeaway and trust visible while detail sta
     assert.match(claimOnly?.textContent || '', /#7 · current · unverified/)
     assert.match(claimOnly?.getAttribute('aria-label') || '', /current experiment 7.*unverified/i)
 
+    const formattedMarkup = renderToStaticMarkup(React.createElement(ResearchMemoBody, {
+      memo: { summary: '**Promising**, not proven.', findings: [
+        'RF(n_est=100) + GBR(n_est=100): **raw features**; _repeat first_.',
+        '[Unsafe](javascript:alert(1)) and [owner action](/api/settings).',
+      ] }, showSummary: true,
+    }))
+    const formattedDom = new JSDOM(formattedMarkup)
+    try {
+      const formatted = formattedDom.window.document
+      assert.equal(formatted.querySelector('.research-takeaway strong').textContent, 'Promising')
+      assert.equal(formatted.querySelector('.findings strong').textContent, 'raw features')
+      assert.equal(formatted.querySelector('.findings em').textContent, 'repeat first')
+      assert.match(formatted.querySelector('.findings').textContent, /RF\(n_est=100\) \+ GBR\(n_est=100\)/)
+      assert.equal(formatted.querySelectorAll('a').length, 0, 'formatting cannot create executable or owner links')
+    } finally { formattedDom.window.close() }
+
     const alignmentCases = alignmentRegressionMemos()
     for (const { key, memo } of alignmentCases) {
       const directMarkup = renderToStaticMarkup(React.createElement(ResearchMemoCard, {
@@ -391,10 +398,6 @@ test('shared memo presentation keeps takeaway and trust visible while detail sta
       ['panel', renderToStaticMarkup(React.createElement(ResearchPanel, {
         state: { research: alignmentCases.map(row => row.memo) }, runId: 'run',
       }))],
-      ['report', renderToStaticMarkup(React.createElement(ReportView, {
-        state: { ...reportState, research: alignmentCases.map(row => row.memo) },
-        runId: 'run', readOnly: true,
-      }))],
     ]) {
       const surface = new JSDOM(markup).window.document
       const cards = [...surface.querySelectorAll('.research-memo-card')]
@@ -413,10 +416,6 @@ test('shared memo presentation keeps takeaway and trust visible while detail sta
     for (const markup of [
       renderToStaticMarkup(React.createElement(ResearchPanel, {
         state: { research: [cappedMemo('Panel retained receipt')] }, runId: 'run',
-      })),
-      renderToStaticMarkup(React.createElement(ReportView, {
-        state: { ...reportState, research: [cappedMemo('Report retained receipt')] },
-        runId: 'run', readOnly: true,
       })),
     ]) {
       const dom = new JSDOM(markup)
@@ -440,9 +439,6 @@ test('shared memo presentation keeps takeaway and trust visible while detail sta
         })),
         renderToStaticMarkup(React.createElement(ResearchPanel, {
           state: { research: [memo] }, runId: 'run',
-        })),
-        renderToStaticMarkup(React.createElement(ReportView, {
-          state: { ...reportState, research: [memo] }, runId: 'run', readOnly: true,
         })),
       ]
       for (const markup of sharedMarkups) {

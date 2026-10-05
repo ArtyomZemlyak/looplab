@@ -212,12 +212,12 @@ export function ResearchMemoBody({ memo, onSteer, steeringDirection = '', onSele
   const trust = researchMemoTrust(value)
   return <div className={`research-memo-body${compact ? ' compact' : ''}`}>
     {showSummary && <section className="research-memo-block takeaway">
-      <SectionHeading icon="search">{uiText("Conclusion")}</SectionHeading>
-      <div className="research-takeaway">{((value.summary || uiText('No conclusion was recorded.')))}</div>
+      <SectionHeading icon="search">{uiText("Research takeaway")}</SectionHeading>
+      <div className="research-takeaway"><Markdown text={value.summary || uiText('No conclusion was recorded.')} externalOnly /></div>
     </section>}
     {value.findings.length > 0 && <section className="research-memo-block findings">
       <SectionHeading icon="bulb" meta={plural(value.findings.length, 'finding')}>{uiText("Key findings")}</SectionHeading>
-      <ul>{value.findings.map((finding, index) => <li key={index}>{finding}</li>)}</ul>
+      <ul>{value.findings.map((finding, index) => <li key={index}><Markdown text={finding} externalOnly /></li>)}</ul>
     </section>}
     <EvidenceDisclosure value={value} trust={trust} onSelectNode={onSelectNode}
       onSelectEvidence={onSelectEvidence} />
@@ -285,9 +285,9 @@ export default function ResearchMemoCard({ memo, memoNumber = 1, open, onToggle,
             <OpIcon name="search" size={13} />{uiText(" Research memo #")}{memoNumber}
             {latest && <span className="pill">{uiText("latest")}</span>}
             {value.trigger && <span>{uiText(triggerLabel(value.trigger))}</span>}
-            {value.at_node != null && <span>{uiText("after ")}{plural(value.at_node, 'experiment')}</span>}
+            {value.at_node != null && <span>{uiMessage(value.at_node === 1 ? "After {0} experiment" : "After {0} experiments", [value.at_node])}</span>}
           </span>
-          {/* Accordion headers show a lead; the static reading header goes straight to Conclusion. */}
+          {/* Accordion headers show a lead; the static reading header goes straight to the research takeaway. */}
           {!staticOpen && <span className="research-memo-summary" title={value.summary || undefined}>
             {((memoLead(value.summary) || uiText('No conclusion was recorded.')))}
             {memoLeadIsPartial(value.summary)

@@ -1637,32 +1637,23 @@ textarea.text { min-height: 220px; font-family: ui-monospace, Consolas, monospac
 }
 
 .report-scroll { flex: 1; overflow: auto; }
-.report-view { max-width: 1000px; margin: 0 auto; padding: 18px 22px 60px; }
+.report-view { max-width: 1180px; margin: 0 auto; padding: 18px 22px 60px; font-size: 14px; line-height: 1.6; }
 .report-toolbar { position: sticky; top: 0; z-index: 3; background: var(--bg); padding: 8px 0;
   border-bottom: 1px solid var(--line); margin-bottom: 12px; }
 .report-title { font-size: 19px; margin: 4px 0 2px; }
 .report-sub { font-size: 12px; margin-bottom: 14px; }
 
-.verdict-banner { border: 1px solid var(--line-2); border-left: 4px solid var(--accent);
-  border-radius: 12px; padding: 14px 16px; margin: 6px 0 18px; background: var(--bg-1); }
-.verdict-banner.ok { border-left-color: var(--ok); background: color-mix(in srgb, var(--ok) 7%, var(--bg-1)); }
-.verdict-banner.warn { border-left-color: #e0a93c; background: color-mix(in srgb, #e0a93c 8%, var(--bg-1)); }
-.verdict-banner.alarm { border-left-color: var(--alarm); background: color-mix(in srgb, var(--alarm) 9%, var(--bg-1)); }
+.verdict-banner { border-bottom: 1px solid var(--line); padding: 18px 0; margin: 6px 0 18px; }
 .verdict-row { display: flex; gap: 6px; align-items: center; margin-bottom: 7px; }
 .verdict-pill { font-size: 11px; font-weight: 700; text-transform: uppercase; letter-spacing: .5px;
-  padding: 2px 8px; border-radius: 999px; background: var(--bg-3); border: 1px solid var(--line-2); }
-.verdict-pill.ok { color: var(--ok); border-color: var(--ok); }
-.verdict-pill.fail { color: var(--fail); border-color: var(--fail); }
-.verdict-headline { margin: 0; font-size: 16px; font-weight: 650; line-height: 1.4; }
-.verdict-text { margin-top: 6px; color: var(--fg-mut); font-size: 13px; }
+  padding: 2px 8px; border-radius: 999px; background: transparent; border: 1px solid var(--line); }
+.verdict-headline { margin: 0; max-width: 90ch; font-size: 17px; font-weight: 650; line-height: 1.5; }
 .caveat-chips { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 10px; }
 .caveat-chip { font-size: 11px; padding: 3px 9px; border-radius: 999px; cursor: pointer;
-  background: var(--bg-3); border: 1px solid var(--line-2); color: var(--fg); }
-.caveat-chip.warn { border-color: var(--working); color: var(--working-text); }
-.caveat-chip.alarm { border-color: var(--alarm); color: var(--alarm-text); }
+  background: transparent; border: 1px solid var(--line); color: var(--fg); }
 .caveat-chip:hover { background: var(--bg-2); }
 
-.champion-card { border: 1px solid var(--line-2); border-radius: 10px; padding: 10px 14px; background: var(--bg-1); }
+.champion-card { border: 1px solid var(--line); border-radius: 10px; padding: 10px 14px; background: transparent; }
 .champion-card .kv { margin: 0; }
 
 /* ── Unified chat surface (Workstream B): the Dock is now "the chat" ──────────── */

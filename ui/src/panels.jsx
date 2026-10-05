@@ -575,6 +575,7 @@ export function ResearchPanel({ state, runId, onToast, onClose, onSelect, onSele
   return (
     <Panel title={uiText("Deep research")} sub={memos.length ? `${memos.length} memo${memos.length === 1 ? '' : 's'}` : 'none yet'} onClose={onClose}
       size={memos.length ? 'board' : undefined} className={`research-panel${memos.length ? '' : ' empty'}`}>
+      <p className="research-purpose" role="note">{uiText('Hypothesis search and experiment planning. Research claims are suggestions to verify, not measured conclusions about what worked.')}</p>
       {!memos.length && <div className="research-empty-state" role="status">
         <div><OpIcon name="search" size={16} /><strong>{uiText("No research memos yet")}</strong></div>
         <p>{uiText("Deep research runs on the configured cadence or when the Strategist requests it.")}</p>

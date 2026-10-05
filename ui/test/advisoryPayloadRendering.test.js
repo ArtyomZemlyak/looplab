@@ -198,8 +198,6 @@ test('untrusted report, memo, and research-panel prose has narrow-layout contain
     readFile(new URL('../src/research-memo.css', import.meta.url), 'utf8'),
   ])
   assert.match(reportCss, /\.report-view \.agent-report-caveats li,[\s\S]{0,300}?overflow-wrap:\s*anywhere/)
-  assert.match(reportCss, /\.report-view \.research-memo-body li,[\s\S]{0,200}?overflow-wrap:\s*anywhere/)
-  assert.match(reportCss, /\.report-view \.research-memo-toggle[\s\S]{0,120}?min-width:\s*0/)
   assert.match(memoCss, /\.research-memo-summary[\s\S]{0,220}?overflow-wrap:\s*anywhere/)
   assert.match(memoCss, /\.research-source-snippet[\s\S]{0,180}?overflow-wrap:\s*anywhere/)
 })
@@ -280,9 +278,8 @@ test('MemoCard and Report SSR stay bounded for 10k-entry and malformed payloads'
     assert.match(reportMarkup, /Agent caveats/)
     assert.match(reportMarkup, /agent caveat must not change deterministic trust/)
     assert.match(reportMarkup, /not fully verified/)
-    assert.match(reportMarkup, /Showing the latest 32 of 10000 research memos/)
-    assert.equal((reportMarkup.match(/class="research-memo-card memo-card/g) || []).length,
-      RESEARCH_MEMO_LIMITS.memos)
+    assert.match(reportMarkup, /Hypothesis search · Deep Research/)
+    assert.doesNotMatch(reportMarkup, /class="research-memo-card|memo 9999/)
     assert.ok(reportMarkup.length < 250_000)
 
     const panelMarkup = renderToStaticMarkup(React.createElement(ResearchPanel, {

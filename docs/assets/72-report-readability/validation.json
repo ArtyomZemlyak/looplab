@@ -1,0 +1,66 @@
+{
+  "baseline_commit": "d1710309f0db9ecf2617f863e0ac77015049a6c2",
+  "scenario": {
+    "run": "mle_deepseek_flash_100",
+    "source": "isolated copy of existing recorded run",
+    "viewport": [
+      1920,
+      1080
+    ],
+    "nodes": 100,
+    "evaluated": 81,
+    "failed": 19,
+    "research_memos": 9,
+    "selected_node": 89,
+    "selected_score": 0.06003,
+    "comparable_parent_scores": 0,
+    "comparison_unknown": 81
+  },
+  "checks": {
+    "replay": {
+      "passed": 193
+    },
+    "ui_full": {
+      "passed": 1992
+    },
+    "ui_affected": {
+      "passed": 97,
+      "overlaps_full_suite": true
+    },
+    "report_research_backend": {
+      "passed": 184,
+      "skipped": 2
+    },
+    "production_build": "passed",
+    "locale_coverage": "passed",
+    "bundle": {
+      "js_gzip": 656451,
+      "js_limit": 633984,
+      "css_gzip": 59646,
+      "css_limit": 59648,
+      "status": "failed_total_js_only",
+      "limits_unchanged": true
+    }
+  },
+  "browser_verified": [
+    "outcomes and execution failures before detailed analysis",
+    "assistant interpretation before charts and source",
+    "summary and narrative jumps keep heading visible",
+    "hypothesis search opens Deep Research",
+    "long research memo renders emphasis without corrupting snake_case",
+    "Report readable beside Assistant"
+  ],
+  "not_exercised": [
+    "new training",
+    "paid report refresh",
+    "live model calls",
+    "full Python CI",
+    "mobile layout"
+  ],
+  "limitations": [
+    "historical English provider prose retained",
+    "matching parent conditions absent in this historical run",
+    "remaining total JS budget debt",
+    "long technical Russian copy still needs editorial review"
+  ]
+}

@@ -5,14 +5,13 @@ import UpstreamPanel from './UpstreamPanel.jsx'
 import { peekReportRefreshIntent, reportRefreshIntent, isTransientCommandReadError, deadlineGet, fmt,
   fmtCost, fmtInt, CONTROL, runNodeApiPath } from './util.js'
 import { Trajectory, ImprovementWaterfall } from './charts.jsx'
-import { analyze, buildModelCard, verdict, paramDiffLabel, toMarkdown, hyperImportance } from './report.js'
-import MemoCard from './MemoCard.jsx'
+import { analyze, buildModelCard, verdict, paramDiffLabel, toMarkdown, hyperImportance, reportOutcomeEvidence } from './report.js'
+import ReportOutcomes from './ReportOutcomes.jsx'
 import Markdown from './markdown.jsx'
 import { OpIcon } from './icons.jsx'
 import { OBJECTIVE_SOURCE_LABEL, objectiveMetricSource, objectiveSourceCaveated,
   objectiveSourceHelp, reportStepIdentity } from './trustSemantics.js'
 import { DataTable, downloadBlob } from './accessibility.jsx'
-import { normalizeResearchMemos } from './researchMemoModel.js'
 import { normalizeReportNodeDetail, normalizeRunReport, reportCoverageText,
   reportNarrativeCoverage } from './reportModel.js'
 import { nodeTheme } from './conceptId.js'
@@ -111,27 +110,31 @@ function AgentNarrative({ rep, coverage, generation, snapshotSeq }) {
       : coverage.status === 'unknown'
         ? 'The publication did not record a valid node watermark. Its coverage cannot be established.'
         : ''
-  const groups = [
-    ['What worked', rep.what_worked], ['Learnings', rep.learnings],
-    ["What didn't work", rep.what_didnt], ['Next directions', rep.next_directions],
-  ]
+  const groups = [['What worked', rep.what_worked], ["What didn't work", rep.what_didnt],
+    ['Learnings', rep.learnings], ['Next directions', rep.next_directions]]
   return <section className={`agent-report ${coverage.status}`} role="note"
     aria-labelledby="agent-report-heading">
     <div className="agent-report-head">
       <h2 id="agent-report-heading" tabIndex={-1}>{uiText("Agent narrative")}</h2>
       <span className="pill">{uiText("advisory · not deterministic")}</span>
     </div>
+    <p className="report-section-intro">{uiText('The assistant explains the recorded results. These interpretations may be wrong; the measured verdict and comparison coverage above take precedence.')}</p>
+    <span className={`report-coverage ${coverage.status}`}>{uiText(reportCoverageText(coverage))}</span>
+    <details className="report-publication-details"><summary>{uiText('Publication details')}</summary>
     <div className="report-provenance" aria-label={uiText("Agent narrative publication provenance")}>
-      <span className={`report-coverage ${coverage.status}`}>{uiText(reportCoverageText(coverage))}</span>
       {rep.published_seq != null && <span>{uiText("published event ")}<b>#{rep.published_seq}</b></span>}
       {publishedIso && <span>{uiText("at ")}<time dateTime={publishedIso}>{new Date(rep.published_at * 1000).toLocaleString()}</time></span>}
       {rep.trigger && <span>{uiText("trigger ")}<b>{rep.trigger}</b></span>}
       {Number.isSafeInteger(snapshotSeq) && snapshotSeq >= 0 && <span>{uiText("view snapshot ")}<b>#{snapshotSeq}</b></span>}
       {/^[0-9a-f]{64}$/.test(generation || '') && <span>{uiText("generation ")}<code title={generation}>{generation.slice(0, 12)}…</code></span>}
     </div>
+    </details>
     {warning && <div className="report-coverage-warning" role="status"><OpIcon name="alert" size={13} /> {uiText(warning)}</div>}
     {rep.headline && <h3 className="agent-report-headline">{rep.headline}</h3>}
     {(rep.verdict || rep.summary) && <div className="agent-report-text"><Markdown text={rep.verdict || rep.summary} /></div>}
+    <div className="agent-report-columns">{groups.map(([label, items]) => <div className="agent-report-group" key={label}>
+      <h3>{uiText(label)}</h3>{items?.length ? <List items={items} /> : <p className="muted">{uiText('No interpretation was published for this section.')}</p>}
+    </div>)}</div>
     {rep.caveats.length > 0 && <div className="agent-report-caveats">
       <div className="agent-report-caveats-title"><OpIcon name="alert" size={12} />
         <strong>{uiText("Agent caveats")}</strong><span className="muted">{uiText("advisory narrative")}</span></div>
@@ -140,9 +143,7 @@ function AgentNarrative({ rep, coverage, generation, snapshotSeq }) {
     {rep.champion_summary && <div className="agent-report-group">
       <h3>{uiText("Champion note at publication")}</h3><Markdown text={rep.champion_summary} />
     </div>}
-    {groups.map(([label, items]) => items?.length > 0 && <div className="agent-report-group" key={label}>
-      <h3>{uiText(label)}</h3><List items={items} />
-    </div>)}
+
   </section>
 }
 
@@ -198,7 +199,7 @@ function List({ items }) {
   useUILanguage()
 
   if (!items || !items.length) return null
-  return <ul className="bul">{items.map((x, i) => <li key={i}>{x}</li>)}</ul>
+  return <ul className="bul">{items.map((x, i) => <li key={i}><Markdown text={x} externalOnly /></li>)}</ul>
 }
 
 export default function ReportView({ state, runId, onOpenPanel, canOpenPanel, onToast,
@@ -209,14 +210,13 @@ export default function ReportView({ state, runId, onOpenPanel, canOpenPanel, on
 
   const failed = Object.values(state.nodes).filter(n => nodeIsActive(n, state) && n.status === 'failed')
   const a = useMemo(() => analyze(state), [state])
+  const outcomes = useMemo(() => reportOutcomeEvidence(state), [state])
   const v = useMemo(() => verdict(state, a), [state, a, localeRevision])
   const best = v.best
   const rep = useMemo(() => normalizeRunReport(state.report), [state.report])
   const nodeCount = Object.keys(state.nodes).length
   const coverage = useMemo(() => reportNarrativeCoverage(rep, nodeCount), [rep, nodeCount])
   const imp = useMemo(() => hyperImportance(state).slice(0, 6), [state])
-  const memoProjection = useMemo(() => normalizeResearchMemos(state.research), [state.research])
-  const memos = [...memoProjection.memos].reverse()
   const solutionRunReady = typeof runId === 'string' && runId.length > 0 && state.run_id === runId
   const solutionGeneration = RUN_GENERATION_RE.test(expectedGeneration || '')
     ? expectedGeneration : null
@@ -244,7 +244,6 @@ export default function ReportView({ state, runId, onOpenPanel, canOpenPanel, on
   })
   const [bestCodeNonce, setBestCodeNonce] = useState(0)
   const bestCodeRequestRef = useRef(null)
-  const [openMemo, setOpenMemo] = useState(null)
   const [refreshing, setRefreshing] = useState(false)
   const [refreshError, setRefreshError] = useState('')
   const [refreshRetryAllowed, setRefreshRetryAllowed] = useState(true)
@@ -506,13 +505,15 @@ export default function ReportView({ state, runId, onOpenPanel, canOpenPanel, on
   const modelCard = () => JSON.stringify(buildModelCard({ ...state, report: rep }, best, exportContext), null, 2)
   const reportSections = [
     ['report-section-summary', 'Summary'],
+    ['report-section-outcomes', 'Outcomes'],
+    ['report-section-failures', 'Execution problems'],
+    rep && ['agent-report-heading', 'Agent narrative'],
     best && ['report-section-champion', 'Selected'],
     a.steps.length > 0 && ['report-section-trajectory', 'Trajectory'],
-    (memos.length || imp.length) && ['report-section-learnings', 'Learnings'],
+    imp.length > 0 && ['report-section-learnings', 'Exploratory analysis'],
     a.nEval > 0 && ['report-section-comparisons', 'Comparisons'],
-    ['report-section-failures', 'Failures'],
+    ['report-section-research', 'Hypothesis search'],
     best && ['report-section-solution', 'Solution'],
-    rep && ['agent-report-heading', 'Agent narrative'],
   ].filter(Boolean)
   const jumpToSection = id => {
     const heading = document.getElementById(id)
@@ -530,21 +531,21 @@ export default function ReportView({ state, runId, onOpenPanel, canOpenPanel, on
 
       <div className="toolbar report-toolbar" role="group" aria-label={uiText("Report actions")}>
         {readOnly && <span className="history-inline">{((readOnlyReason === 'review' ? uiText('Read-only review · report refresh disabled') : (readOnlyReason === 'start-over' ? uiText('Start over unresolved · report refresh disabled') : uiMessage("{0} · report refresh disabled", [readOnlyLabel(readOnlyReason, historySeq)]))))}</span>}
-        <span className="spacer" style={{ flex: 1 }} />
         <button className="btn sm" onClick={() => window.print()}><OpIcon name="printer" size={12} />{uiText(" Print / PDF")}</button>
         <button className="btn sm" onClick={() => dl(`${state.run_id}_report.md`, toMarkdown({ ...state, report: rep }, best, exportContext), 'text/markdown')}><OpIcon name="download" size={12} />{uiText(" Markdown")}</button>
         {best && evidenceAvailable && <button className="btn sm" disabled={!bestCode?.code} onClick={() => dl(`solution_node${best.id}.py`, bestCode.code, 'text/x-python')}><OpIcon name="download" size={12} />{uiText(" Solution")}</button>}
         <button className="btn sm" onClick={() => dl(`${state.run_id}_model_card.json`, modelCard(), 'application/json')}><OpIcon name="download" size={12} />{uiText(" Model card")}</button>
-        <nav className="report-sections" aria-label={uiText("Report sections")}>
-          <span className="report-sections-label">{uiText("Jump to")}</span>
-          {reportSections.map(([id, label]) => <button type="button" key={id}
-            onClick={() => jumpToSection(id)}>{uiText(label)}</button>)}
-        </nav>
         {!readOnly && <button className="btn sm"
           disabled={refreshing || !refreshRetryAllowed || !refreshGenerationReady || !refreshStorageReady}
           onClick={refresh}
           aria-describedby="paid-report-refresh-status"
           title={refreshDisabledReason || refreshStatus}><OpIcon name="replay" size={12} /> {uiText(refreshButtonLabel)}</button>}
+        <nav className="report-sections" aria-label={uiText("Report sections")}>
+          <span className="report-sections-label">{uiText("Jump to")}</span>
+          {reportSections.map(([id, label]) => <button type="button" key={id}
+            onClick={() => jumpToSection(id)}>{uiText(label)}</button>)}
+        </nav>
+
       </div>
       {!readOnly && <div id="paid-report-refresh-status" className="report-inline-state paid"
         role="status" aria-live="polite" aria-atomic="true">
@@ -561,6 +562,24 @@ export default function ReportView({ state, runId, onOpenPanel, canOpenPanel, on
         <h2>{((a.nEval ? uiText('No feasible champion yet') : uiText('No champion yet')))}</h2>
         <p>{((a.nEval ? uiText('Evaluations exist, but none currently qualifies for winner selection. Review constraints and failed checks.') : uiText('The report will add a champion, trajectory, and reproducible solution after the first successful evaluation.')))}</p>
       </div>}
+
+      <ReportOutcomes evidence={outcomes} state={state} onPickNode={onPickNode} />
+      <h2 id="report-section-failures" tabIndex={-1} className="section-h">{uiText("Recorded failures")}</h2>
+      <p className="report-section-intro">{uiText('A crash, timeout or missing score means the experiment did not complete. It does not show that its hypothesis is wrong.')}</p>
+      <dl className="report-failure-list">
+        {Object.entries(a.failures).map(([reason, nodes]) => <React.Fragment key={reason}>
+          <dt>{uiText(reason)}</dt><dd><b>{nodes.length}</b>{' · '}{nodes.map((node, index) => <React.Fragment key={node.id}>
+            {index > 0 && ', '}{onPickNode ? <button type="button" className="report-node-link"
+              aria-label={uiMessage('Inspect experiment #{0}', [node.id])}
+              onClick={() => onPickNode(node.id)}>#{node.id}</button> : `#${node.id}`}
+          </React.Fragment>)}</dd>
+        </React.Fragment>)}
+        {a.infeasible.length > 0 && <><dt>{uiText('infeasible')}</dt><dd>{a.infeasible.length}</dd></>}
+      </dl>
+      {!Object.keys(a.failures).length && !a.infeasible.length && <p className="muted">{uiText('No execution failures or constraint violations are recorded.')}</p>}
+
+      <AgentNarrative rep={rep} coverage={coverage} generation={expectedGeneration} snapshotSeq={observedSeq} />
+      {!rep && <p className="report-section-intro">{uiText('No assistant interpretation has been published. Recorded outcomes remain available; request an explanation in Assistant or refresh the report.')}</p>}
 
       {best && <><h2 id="report-section-champion" tabIndex={-1} className="section-h">{uiText("Selected experiment")}</h2>
         <ChampionCard best={best} state={state} /><BaseRevision node={best} state={state} /></>}
@@ -590,8 +609,8 @@ export default function ReportView({ state, runId, onOpenPanel, canOpenPanel, on
         {a.steps.length > 1 && <div className="muted">{uiText("Recorded frontier change ")}<b>{fmt(a.totalGain)}</b>{uiText(" over ")}{a.steps.length}{uiText(" steps (first eligible ")}{fmt(a.firstBest)}{uiText(" → numeric frontier ")}{fmt(a.finalBest)}).</div>}
       </>}
 
-      {(memos.length || imp.length) ? <>
-        <h2 id="report-section-learnings" tabIndex={-1} className="section-h">{uiText("What we learned")}</h2>
+      {imp.length > 0 ? <>
+        <h2 id="report-section-learnings" tabIndex={-1} className="section-h">{uiText("Exploratory parameter analysis")}</h2>
         {imp.length > 0 && <>
           <div className="muted" style={{ marginTop: 6 }}>{uiText("Exploratory correlation with the metric. Small n is fragile; correlation does not establish cause.")}</div>
           <DataTable caption={uiText("Report hyperparameter correlations")} card={false}><table className="tbl"><thead><tr><th>{uiText("param")}</th><th>|r|</th><th>r</th><th>n</th></tr></thead><tbody>
@@ -601,12 +620,6 @@ export default function ReportView({ state, runId, onOpenPanel, canOpenPanel, on
               <td className="muted">{row.r == null ? '—' : `${row.r >= 0 ? '+' : ''}${fmt(row.r, 3)}`}</td>
               <td className="muted">{row.n}</td></tr>)}
           </tbody></table></DataTable></>}
-        {memos.length > 0 && <div style={{ marginTop: 8 }}>
-          {memoProjection.omitted > 0 && <div className="muted">{uiText("Showing the latest ")}{memos.length}{uiText(" of ")}{memoProjection.total}{uiText(" research memos; older, malformed, or over-budget entries are omitted.")}</div>}
-          {memos.map((m, index) => <MemoCard key={m.sourceIndex} memo={m} idx={m.sourceIndex}
-            latest={index === 0} onSelectNode={onPickNode} onSelectEvidence={onPickEvidence} normalized
-            open={openMemo === m.sourceIndex} onToggle={(key) => setOpenMemo(current => current === key ? null : key)} />)}
-        </div>}
       </> : null}
 
       {a.nEval > 0 && <>
@@ -622,13 +635,13 @@ export default function ReportView({ state, runId, onOpenPanel, canOpenPanel, on
         </tbody></table></DataTable>
       </>}
 
-      <h2 id="report-section-failures" tabIndex={-1} className="section-h">{uiText("Recorded failures")}</h2>
-      <div className="cardgrid" style={{ marginBottom: 10 }}>
-        {Object.entries(a.failures).map(([r, ns]) => <div key={r} className="stat"><div className="n">{ns.length}</div><div className="l">{uiText("failed · ")}{r}</div></div>)}
-        {a.regressions.length > 0 && <div className="stat"><div className="n">{a.regressions.length}</div><div className="l">{uiText("worse evaluation scores")}</div></div>}
-        {a.infeasible.length > 0 && <div className="stat"><div className="n">{a.infeasible.length}</div><div className="l">{uiText("infeasible")}</div></div>}
-        {!Object.keys(a.failures).length && !a.regressions.length && !a.infeasible.length && <div className="stat"><div className="n">0</div><div className="l">{uiText("recorded failures or comparable regressions")}</div></div>}
-      </div>
+      <section className="report-research-link" aria-labelledby="report-section-research">
+        <h2 id="report-section-research" tabIndex={-1} className="section-h">{uiText('Hypothesis search · Deep Research')}</h2>
+        <p className="report-section-intro">{uiText('Research memos explore possible explanations and future experiments. They are not evidence that an approach worked. Read sources, proposed directions and verification status in Deep Research.')}</p>
+        {onOpenPanel && canOpenPanel?.('research') !== false
+          ? <button type="button" className="btn sm" onClick={event => onOpenPanel('research', event.currentTarget)}>{uiText('Open Deep Research')}</button>
+          : <p className="muted">{uiText('Deep Research is unavailable in this view.')}</p>}
+      </section>
 
       {best && <><h2 id="report-section-solution" tabIndex={-1} className="section-h">{uiText("Reproduce — selected solution")}</h2>
         {bestCodeStatus === 'restricted' && <div className="report-inline-state report-code-state" role="status">{uiText("Solution source was not included in this summary-only review link.")}</div>}
@@ -645,9 +658,6 @@ export default function ReportView({ state, runId, onOpenPanel, canOpenPanel, on
           : <div className="report-inline-state report-code-state" role="status">{uiText("No solution source was recorded for this node (for example, a repository task may not use solution.py).")}</div>)}
       </>}
 
-      {/* Provider prose is intentionally last: it may explain the run, but cannot visually bury
-          the deterministic champion, trajectory, failures, or reproduction evidence. */}
-      <AgentNarrative rep={rep} coverage={coverage} generation={expectedGeneration} snapshotSeq={observedSeq} />
     </div>
   )
 }

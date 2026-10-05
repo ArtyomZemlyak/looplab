@@ -286,6 +286,22 @@ export function analyze(state) {
   }
 }
 
+// Outcomes need the same attempt-bound primary-score comparison as the verdict. A lower
+// frontier value, a merge, a failed command or missing evidence is never a proved technique win.
+export function reportOutcomeEvidence(state) {
+  const nodes = activeNodeMap(state.nodes || {}, state)
+  const out = { better: [], worse: [], unchanged: [], unknown: [] }
+  for (const node of Object.values(nodes).sort((a, b) => a.id - b.id)) {
+    if (!isEvaluated(node)) continue
+    const difference = parentScoreDifference(node, nodes, state)
+    if (difference == null) { out.unknown.push(node.id); continue }
+    const gain = state.direction === 'min' ? -difference : difference
+    const row = { node, parent: nodes[node.parent_ids[0]], gain }
+    out[gain > 0 ? 'better' : gain < 0 ? 'worse' : 'unchanged'].push(row)
+  }
+  return out
+}
+
 // Trust caveats that must not be buried in the verdict: reward-hack / leakage / drift / single-seed /
 // infeasibility. Each is a chip with a deep-link to the panel that explains it. Pure (from state).
 export function trustCaveats(state, best) {
@@ -455,6 +471,11 @@ export function toMarkdown(state, _best, context = {}) {
     L.push('')
     L.push(uiMessage("Deterministic trust caveats: {0}.", [v.caveats.map(c => uiText(c.text)).join('; ')]))
   }
+  const outcomes = reportOutcomeEvidence(state)
+  L.push('', uiText('## Recorded outcomes'), '')
+  L.push(uiMessage('Better score: {0}; worse score: {1}; unchanged: {2}; comparison not established: {3}.',
+    [outcomes.better.length, outcomes.worse.length, outcomes.unchanged.length, outcomes.unknown.length]))
+  L.push(uiText('Only attempt-bound parent comparisons with matching evaluation conditions count. Missing comparison is not failure; a command failure does not refute a hypothesis.'))
   L.push('')
   L.push(uiMessage("- **Run:** {0}", [state.run_id]))
   L.push(uiMessage("- **Optimization orientation:** {0}", [uiText(optimizationLabel(state.direction))]))
@@ -481,8 +502,8 @@ export function toMarkdown(state, _best, context = {}) {
     if (rep.verdict || rep.summary) { L.push('>'); quote(rep.verdict || rep.summary) }
     const advisoryLists = [
       ['Agent caveats', rep.caveats], ['Champion note', rep.champion_summary ? [rep.champion_summary] : []],
-      ['What worked', rep.what_worked], ['Learnings', rep.learnings],
-      ["What didn't work", rep.what_didnt], ['Next directions', rep.next_directions],
+      ['What worked', rep.what_worked], ["What didn't work", rep.what_didnt],
+      ['Learnings', rep.learnings], ['Next directions', rep.next_directions],
     ]
     advisoryLists.forEach(([label, items]) => {
       if (!items?.length) return
