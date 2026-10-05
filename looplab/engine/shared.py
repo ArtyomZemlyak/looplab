@@ -317,6 +317,16 @@ def strategist_budget_brief(engine) -> bool:
     return bool(getattr(engine, "_strategist_budget_brief", False))
 
 
+def concept_tag_hygiene(engine) -> bool:
+    """`Settings.concept_tag_hygiene` as the engine's concept taggers read it — the ONE reading.
+
+    Asked by `concept_cadence.py` (the node tagger, the consolidation and its pending-nodes gate, the
+    card tagger) and `novelty.py` (the proposal tagger of the graded-novelty pre-check). On
+    `repair_context_record`'s ground (OFF when absent): stubs that never ran `Engine.__init__` keep
+    the historical prompts."""
+    return bool(getattr(engine, "_concept_tag_hygiene", False))
+
+
 class SharedEngineMixin:
     """Cross-cluster members, mixed into `Engine` like every other mixin. In here `self` IS the
     Engine, exactly as in the concern mixins."""

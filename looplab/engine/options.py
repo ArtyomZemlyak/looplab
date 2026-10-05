@@ -279,6 +279,10 @@ class EngineOptions:
     # `node_budget_cue`'s ground: a prompt flag, OFF here so a bare `Engine(...)` keeps the
     # historical brief.
     strategist_budget_brief: bool = False
+    # 2026-10-05: concept-tag hygiene (`Settings.concept_tag_hygiene`; run `minionerec-lora-v1`). A
+    # divergence-table row on `node_budget_cue`'s ground: a prompt flag, OFF here so a bare
+    # `Engine(...)` keeps the historical tagger prompts, minted ids and consolidation gate.
+    concept_tag_hygiene: bool = False
     # doc 67 67.4 (2026-09-26): the ablation refiner's prompt carries its probes' signed results
     # (`Settings.ablation_probe_hint`). A divergence-table row on `node_budget_cue`'s ground: a
     # prompt flag, OFF here so a bare `Engine(...)` keeps the historical bytes.

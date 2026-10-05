@@ -148,8 +148,70 @@ def _apply_consolidation(graph: "ConceptGraph", tags: dict, rename: dict) -> tup
     return new, new_tags
 
 
+def syntactic_renames(ids, tags: dict, *, decided=()) -> dict:
+    """The MEANING-PRESERVING renames of a vocabulary (`Settings.concept_tag_hygiene`), decided with no
+    model: (1) ids that are ONE id after the `_`/`-` fold (`continual_learning/forgetting` and
+    `continual-learning/forgetting`) collapse onto one spelling, and (2) an id whose trailing segments
+    are hyperparameter VALUES (`optimization/lr/1e-3`) collapses onto the knob above them. Pure and
+    deterministic in its inputs; returns `{raw: canonical}` with no identity entries.
+
+    The spelling is chosen LEVEL BY LEVEL, so a renamed parent carries its children with it and no id
+    is left whose prefix disagrees with its parent's spelling: at each level the members of a fold
+    group vote with their TAG USES (how many tags in `tags` sit at or under the id), the most-used spelling of
+    that level's own segment wins, and a tie keeps the lexicographically smallest (`-` sorts before
+    `_`, so a tie keeps the hyphenated spelling). A level with one spelling keeps it — the fold
+    collapses COLLISIONS, it does not re-spell an id nothing collides with.
+
+    `decided` is the recorded consolidation (its raws AND canonicals, B3): such an id is never renamed
+    here, and an id under it keeps its spelling of that level, so a recorded decision is never
+    re-decided by this pass either."""
+    from collections import Counter
+
+    fold = concept_tagging.fold_separators
+    decided = set(decided or ())
+    ids = sorted(set(ids))
+    # A node tagged `a/b` USES `a` too: a level's votes are its whole subtree's, so a parent spelled
+    # two ways is decided by what its children are tagged with, not only by its own bare uses.
+    uses: Counter = Counter()
+    for cids in (tags or {}).values():
+        for cid in set(cids or ()):
+            parts = str(cid).split("/")
+            uses.update("/".join(parts[:i]) for i in range(1, len(parts) + 1))
+    # fold key -> the spellings of that level that exist in the vocabulary
+    by_key: dict[str, list[str]] = {}
+    for cid in ids:
+        by_key.setdefault(fold(cid), []).append(cid)
+
+    memo: dict[str, str] = {}
+
+    def _canon(cid: str) -> str:
+        if cid in memo:
+            return memo[cid]
+        out = cid
+        if cid not in decided:
+            stripped = concept_tagging.strip_value_segments(cid)
+            if stripped and stripped != cid:
+                out = _canon(stripped)              # a value leaf is its knob
+            else:
+                parent, _, leaf = cid.rpartition("/")
+                members = by_key.get(fold(cid), [cid])
+                if any(m in decided for m in members):
+                    # A recorded id is in this fold group: it is the spelling, untouched.
+                    leaf = sorted(m for m in members if m in decided)[0].rpartition("/")[2]
+                else:
+                    best = min(members, key=lambda m: (-uses.get(m, 0), m))
+                    leaf = best.rpartition("/")[2]
+                out = f"{_canon(parent)}/{leaf}" if parent else leaf
+        memo[cid] = out
+        return out
+
+    return {cid: _canon(cid) for cid in ids if _canon(cid) != cid}
+
+
 def consolidate_concepts(graph: "ConceptGraph", tags: dict, *, client=None, embed=None,
-                         parser: str = "tool_call", known_renames=None, prompts=None) -> tuple:
+                         parser: str = "tool_call", known_renames=None, prompts=None,
+                         concept_tag_hygiene: bool = False,
+                         syntactic_out: Optional[dict] = None) -> tuple:
     """Consolidate a freely-GROWN concept vocabulary so it does not FRAGMENT into synonyms across a run
     (`augmentation` vs `data-augmentation`, `optimizer` vs `optimization`) — the §21.11 follow-up that makes
     the grown graph a STABLE coordinate system on any task. Returns `(graph, tags, rename_map)`.
@@ -164,7 +226,12 @@ def consolidate_concepts(graph: "ConceptGraph", tags: dict, *, client=None, embe
     verbatim and are AUTHORITATIVE — a decided merge is NEVER re-decided, so the vocabulary stops flapping
     (LLM consolidation is nondeterministic). Only concepts not already covered (neither a known raw nor a
     known canonical) are sent to the model; when there is nothing new to decide, the LLM step is SKIPPED
-    entirely. The returned map is the FULL resolved rename (known + new) for the caller to record."""
+    entirely. The returned map is the FULL resolved rename (known + new) for the caller to record.
+
+    `concept_tag_hygiene` (`Settings.concept_tag_hygiene`; OFF here, the historical behaviour and
+    prompt) first runs `syntactic_renames` over the vocabulary — spelling collisions and value leaves,
+    decided with no model — and shows the model only what that pass left. `syntactic_out`, when given,
+    receives the subset of the returned map the pre-pass decided, at its resolved value."""
     known_renames = {str(k): str(v) for k, v in (known_renames or {}).items() if k and v}
     concepts = [c for c in graph.concepts() if not c.id.endswith("/*")]
     if len(concepts) < 2:
@@ -177,6 +244,17 @@ def consolidate_concepts(graph: "ConceptGraph", tags: dict, *, client=None, embe
     rename: dict = dict(known_renames)   # start FIXED on the recorded decisions
     # Only concepts neither already renamed NOR a known canonical target need a fresh decision.
     decided = set(known_renames) | set(known_renames.values())
+    # THE SYNTACTIC PRE-PASS (`concept_tag_hygiene`; `syntactic_renames`): the spelling collisions and
+    # the value leaves are decided HERE, with no model, before anything is sent to one. They join
+    # `rename` like any other decision and are recorded through the same B3 path, and both their raws
+    # and their canonicals join `decided`, so the model can neither re-decide one nor rename the
+    # spelling this pass just chose (which is what B3 does to it from the next cadence on anyway).
+    # The model is shown the vocabulary WITHOUT the raws this pass already folded away.
+    syntactic: dict = {}
+    if concept_tag_hygiene:
+        syntactic = syntactic_renames(ids, tags, decided=decided)
+        rename.update(syntactic)
+        decided |= set(syntactic) | set(syntactic.values())
     undecided = [c for c in concepts if c.id not in decided]
     try:
         if not undecided:
@@ -193,7 +271,7 @@ def consolidate_concepts(graph: "ConceptGraph", tags: dict, *, client=None, embe
             class _Out(BaseModel):
                 merges: list[_Pair] = Field(default_factory=list)
 
-            vocab = "\n".join(f"- {c.id}  ({c.label})" for c in concepts)
+            vocab = "\n".join(f"- {c.id}  ({c.label})" for c in concepts if c.id not in syntactic)
             # Routed through the PromptStore like every other agent prompt in this codebase
             # (doc 25 SE-10). The DEFAULT is the shipped text byte-for-byte: this consolidation is a
             # different job from `hybrid_merge.agent_merge`'s generic item merge, so it keeps its own
@@ -241,10 +319,15 @@ def consolidate_concepts(graph: "ConceptGraph", tags: dict, *, client=None, embe
         # A failure to derive new merges must NOT discard the AUTHORITATIVE recorded decisions (B3): still
         # apply + return `known_renames` so the vocabulary stays stable (raw ids don't resurrect). Empty
         # only when there were no known renames either.
-        if known_renames:
-            g2, t2 = _apply_consolidation(graph, tags, known_renames)
-            return g2, t2, dict(known_renames)
-        return graph, tags, {}
+        if not syntactic:
+            if known_renames:
+                g2, t2 = _apply_consolidation(graph, tags, known_renames)
+                return g2, t2, dict(known_renames)
+            return graph, tags, {}
+        # …and nor may it discard the SYNTACTIC decisions, which no model was asked for: keep exactly
+        # the recorded and the syntactic renames (anything the failed step added is dropped) and
+        # resolve them below like a successful pass.
+        rename = {**known_renames, **syntactic}
 
     # Resolve transitive chains (a->b, b->c => a->c) so the rename is a single canonical hop.
     def _final(x, _seen=None):
@@ -256,6 +339,11 @@ def consolidate_concepts(graph: "ConceptGraph", tags: dict, *, client=None, embe
     # Drop identity entries: a rename CYCLE (a->b, b->a) resolves each id to itself (`_final` fail-safe),
     # and a self-rename would otherwise leak a bogus `a->a` "merge" into the reported map.
     rename = {k: v for k, v in ((k, _final(k)) for k in rename) if k != v}
+    if syntactic_out is not None:
+        # Which of the resolved renames the PRE-PASS decided (each at its final, single-hop value) —
+        # the caller's gate (`engine/concept_cadence.py::_refresh_concept_tags`) may record these
+        # while evaluations are in flight and nothing else.
+        syntactic_out.update({k: rename[k] for k in syntactic if k in rename})
     g2, t2 = _apply_consolidation(graph, tags, rename)
     return g2, t2, rename
 
@@ -267,7 +355,8 @@ def consolidate_concepts(graph: "ConceptGraph", tags: dict, *, client=None, embe
 def build_concept_map(state: RunState, task_goal: str = "", *, client=None, tools=None,
                       seed_graph: Optional[ConceptGraph] = None, asset_brief: str = "",
                       parser: str = "tool_call", known_tags=None, known_renames=None,
-                      max_workers: int = 8, prompts=None, tool_result_label: str = "") -> dict:
+                      max_workers: int = 8, prompts=None, tool_result_label: str = "",
+                      concept_tag_hygiene: bool = False, reuse_known_ids=None) -> dict:
     """THE primary D5 primitive: an LLM agent BUILDS the concept map for a run end-to-end — it GROWS the
     concept vocabulary from the actual experiments (`tag_nodes_llm`, agentic when read-only run `tools` are
     passed, so it reads each node's real code/logs), computes the pure coverage, and DERIVES the
@@ -284,7 +373,13 @@ def build_concept_map(state: RunState, task_goal: str = "", *, client=None, tool
     and read deterministically by `fold` (Phase 1/2 wiring) — this primitive is the producer, not the writer.
 
     `tool_result_label`: the untrusted-evidence fence on what the caller's `tools` return, forwarded
-    to the tagger (review 2026-09-22, TAT-02) — absent when empty, so the default call is historical."""
+    to the tagger (review 2026-09-22, TAT-02) — absent when empty, so the default call is historical.
+
+    `concept_tag_hygiene` (`Settings.concept_tag_hygiene`): forwarded to the tagger (with
+    `reuse_known_ids`, the known nodes whose tags a same-description node may copy) and to the
+    consolidation, and then the result also carries `consolidated_syntactic` — the part of
+    `consolidated` decided with no model. ABSENT when off, like the fence: the default call to each
+    is the historical one, keyword for keyword."""
     graph = seed_graph if seed_graph is not None else ConceptGraph(
         task_type=getattr(state, "task_id", "") or "")
     if client is None:
@@ -301,17 +396,26 @@ def build_concept_map(state: RunState, task_goal: str = "", *, client=None, tool
                                         grow=True, known_tags=known_tags,
                                         max_workers=max_workers, producer_modes=raw_tag_modes,
                                         **({"tool_result_label": tool_result_label}
-                                           if tool_result_label else {}))
+                                           if tool_result_label else {}),
+                                        **({"concept_tag_hygiene": True,
+                                            "reuse_known_ids": reuse_known_ids}
+                                           if concept_tag_hygiene else {}))
     # CONSOLIDATE the freely-grown vocabulary before measuring, so synonym fragmentation
     # (`augmentation` vs `data-augmentation`) doesn't split the concentration signal (§21.11 follow-up).
+    syntactic: dict = {}
     graph, tags, renamed = consolidate_concepts(
         graph, dict(raw), client=client, parser=parser,
-        known_renames=known_renames, prompts=prompts)
+        known_renames=known_renames, prompts=prompts,
+        **({"concept_tag_hygiene": True, "syntactic_out": syntactic}
+           if concept_tag_hygiene else {}))
     cov = concept_analytics.concept_coverage(state, graph, tags)
     important = derive_reference_concepts(task_goal or getattr(state, "goal", "") or "", cov,
                                           client=client, asset_brief=asset_brief, parser=parser)
     # `raw_tags` are the tagger's PRE-consolidation ids (stable per node) — the caller records THESE as
     # `node_concepts` events so a later cadence reuses them and re-derives consolidation/coverage cheaply.
-    return {"graph": graph, "tags": tags, "raw_tags": raw, "raw_tag_modes": raw_tag_modes,
-            "coverage": cov, "important_uncovered": important,
-            "consolidated": renamed, "mode": "agentic" if tools is not None else "llm"}
+    out = {"graph": graph, "tags": tags, "raw_tags": raw, "raw_tag_modes": raw_tag_modes,
+           "coverage": cov, "important_uncovered": important,
+           "consolidated": renamed, "mode": "agentic" if tools is not None else "llm"}
+    if concept_tag_hygiene:
+        out["consolidated_syntactic"] = syntactic
+    return out

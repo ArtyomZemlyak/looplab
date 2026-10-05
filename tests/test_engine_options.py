@@ -425,6 +425,9 @@ def test_from_settings_matches_old_cli_kwarg_mapping(tmp_path):
         # …and the Strategist's brief stating the node budget (doc 69 69.25), a prompt flag on the
         # same frozen ground.
         strategist_budget_brief=settings.strategist_budget_brief,
+        # …and the concept taggers' hygiene (2026-10-05, run minionerec-lora-v1), a prompt flag on
+        # the same frozen ground.
+        concept_tag_hygiene=settings.concept_tag_hygiene,
         # …and the proposal prompt's node-budget line (Q-3, 2026-09-23), ON in Settings and OFF in
         # the bare library for the same reason (a prompt flag).
         node_budget_cue=settings.node_budget_cue,
