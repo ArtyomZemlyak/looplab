@@ -1,0 +1,65 @@
+{
+  "baseline_commit": "c7b53028f0c69b67bf42f0b52b18ea9b6bdb2d4c",
+  "tests": {
+    "replay": 193,
+    "ui": 1969,
+    "documentation": 28,
+    "unique_total": 2190
+  },
+  "bundle": {
+    "js_gzip_before": 647793,
+    "js_gzip_after": 643924,
+    "saved_bytes": 3869,
+    "limit_unchanged": 633984,
+    "remaining_excess": 9940,
+    "css_gzip": 59635,
+    "only_red_guard": "total_budget",
+    "compact_js_gzip_before": 121421,
+    "compact_js_gzip_after": 129470,
+    "full_body_static": false
+  },
+  "browser": {
+    "production": true,
+    "viewport": [
+      1920,
+      1080
+    ],
+    "surfaces": [
+      "Report",
+      "Lineage",
+      "Concepts empty projection",
+      "Agent cycle requirements/history",
+      "explicit connection help",
+      "recovery form"
+    ],
+    "source_fixture": "doc72 §19.17 measured demo: 79 events, 2 evaluated nodes, 1 run-base advance",
+    "http_requests": 121,
+    "methods": [
+      "GET"
+    ],
+    "http_errors": 0,
+    "console_warn_error": [],
+    "receipt_empty_disabled": true,
+    "escape_restores_trigger_focus": true,
+    "unsent_draft_preserved": true,
+    "fullhd_horizontal_overflow": false,
+    "viewport_reset": true,
+    "own_tab_closed": true,
+    "private_server_stopped": true
+  },
+  "bounds": {
+    "new_training": false,
+    "mcp_connection": false,
+    "provider_calls": false,
+    "commands": false,
+    "looplab_worktree_delivery": false,
+    "full_ci": false
+  },
+  "checks": [
+    "production build",
+    "native non-bootstrap client chunk initialization (only static SVG fetch permitted)",
+    "docs/API/surface/diagram pytest",
+    "strict MkDocs",
+    "git diff --check"
+  ]
+}

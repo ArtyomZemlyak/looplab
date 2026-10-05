@@ -1,0 +1,312 @@
+{
+  "format": [
+    {
+      "name": "ascii",
+      "totals": {
+        "js": {
+          "raw": 2033003,
+          "gzip": 650657
+        },
+        "css": {
+          "raw": 286332,
+          "gzip": 59635
+        },
+        "other": {
+          "raw": 0,
+          "gzip": 0
+        }
+      },
+      "violations": [
+        {
+          "code": "total_budget",
+          "message": "Total bundle JS gzip is 635.4 KiB (650,657 B), over the 619.1 KiB (633,984 B) budget by 16.3 KiB (16,673 B). Remove or defer code; change the target only with a new measured baseline."
+        }
+      ]
+    },
+    {
+      "name": "single-quotes",
+      "totals": {
+        "js": {
+          "raw": 2019687,
+          "gzip": 647793
+        },
+        "css": {
+          "raw": 286332,
+          "gzip": 59635
+        },
+        "other": {
+          "raw": 0,
+          "gzip": 0
+        }
+      },
+      "violations": [
+        {
+          "code": "total_budget",
+          "message": "Total bundle JS gzip is 632.6 KiB (647,793 B), over the 619.1 KiB (633,984 B) budget by 13.5 KiB (13,809 B). Remove or defer code; change the target only with a new measured baseline."
+        }
+      ]
+    },
+    {
+      "name": "newlines",
+      "totals": {
+        "js": {
+          "raw": 2019687,
+          "gzip": 647793
+        },
+        "css": {
+          "raw": 286332,
+          "gzip": 59635
+        },
+        "other": {
+          "raw": 0,
+          "gzip": 0
+        }
+      },
+      "violations": [
+        {
+          "code": "total_budget",
+          "message": "Total bundle JS gzip is 632.6 KiB (647,793 B), over the 619.1 KiB (633,984 B) budget by 13.5 KiB (13,809 B). Remove or defer code; change the target only with a new measured baseline."
+        }
+      ]
+    },
+    {
+      "name": "combined",
+      "totals": {
+        "js": {
+          "raw": 2033003,
+          "gzip": 650657
+        },
+        "css": {
+          "raw": 286332,
+          "gzip": 59635
+        },
+        "other": {
+          "raw": 0,
+          "gzip": 0
+        }
+      },
+      "violations": [
+        {
+          "code": "total_budget",
+          "message": "Total bundle JS gzip is 635.4 KiB (650,657 B), over the 619.1 KiB (633,984 B) budget by 16.3 KiB (16,673 B). Remove or defer code; change the target only with a new measured baseline."
+        }
+      ]
+    }
+  ],
+  "groups": [
+    {
+      "name": "preferences",
+      "additions": [
+        "useAssistantLanguage",
+        "useToast"
+      ],
+      "totals": {
+        "js": {
+          "raw": 2019046,
+          "gzip": 647363
+        },
+        "css": {
+          "raw": 286332,
+          "gzip": 59635
+        },
+        "other": {
+          "raw": 0,
+          "gzip": 0
+        }
+      },
+      "violations": [
+        {
+          "code": "total_budget",
+          "message": "Total bundle JS gzip is 632.2 KiB (647,363 B), over the 619.1 KiB (633,984 B) budget by 13.1 KiB (13,379 B). Remove or defer code; change the target only with a new measured baseline."
+        }
+      ]
+    },
+    {
+      "name": "run-identity",
+      "additions": [
+        "useAssistantLanguage",
+        "useToast",
+        "baseRevision",
+        "forkProvenance",
+        "stateDelta",
+        "runCommandMachine"
+      ],
+      "totals": {
+        "js": {
+          "raw": 2018380,
+          "gzip": 646253
+        },
+        "css": {
+          "raw": 286332,
+          "gzip": 59635
+        },
+        "other": {
+          "raw": 0,
+          "gzip": 0
+        }
+      },
+      "violations": [
+        {
+          "code": "total_budget",
+          "message": "Total bundle JS gzip is 631.1 KiB (646,253 B), over the 619.1 KiB (633,984 B) budget by 12.0 KiB (12,269 B). Remove or defer code; change the target only with a new measured baseline."
+        }
+      ]
+    },
+    {
+      "name": "run-models",
+      "additions": [
+        "useAssistantLanguage",
+        "useToast",
+        "baseRevision",
+        "forkProvenance",
+        "stateDelta",
+        "runCommandMachine",
+        "conceptInspect",
+        "conceptShelf",
+        "resultMeasurement"
+      ],
+      "totals": {
+        "js": {
+          "raw": 2017906,
+          "gzip": 645554
+        },
+        "css": {
+          "raw": 286332,
+          "gzip": 59635
+        },
+        "other": {
+          "raw": 0,
+          "gzip": 0
+        }
+      },
+      "violations": [
+        {
+          "code": "total_budget",
+          "message": "Total bundle JS gzip is 630.4 KiB (645,554 B), over the 619.1 KiB (633,984 B) budget by 11.3 KiB (11,570 B). Remove or defer code; change the target only with a new measured baseline."
+        }
+      ]
+    }
+  ],
+  "more_groups": [
+    {
+      "name": "draft-and-metrics",
+      "additions": [
+        "useAssistantLanguage",
+        "useToast",
+        "baseRevision",
+        "forkProvenance",
+        "stateDelta",
+        "runCommandMachine",
+        "conceptInspect",
+        "conceptShelf",
+        "resultMeasurement",
+        "inspectorDraftStore",
+        "authoringRecoveryStorage",
+        "extraMetrics",
+        "codeSearch"
+      ],
+      "totals": {
+        "js": {
+          "raw": 2017386,
+          "gzip": 644699
+        },
+        "css": {
+          "raw": 286332,
+          "gzip": 59635
+        },
+        "other": {
+          "raw": 0,
+          "gzip": 0
+        }
+      },
+      "violations": [
+        {
+          "code": "total_budget",
+          "message": "Total bundle JS gzip is 629.6 KiB (644,699 B), over the 619.1 KiB (633,984 B) budget by 10.5 KiB (10,715 B). Remove or defer code; change the target only with a new measured baseline."
+        }
+      ]
+    },
+    {
+      "name": "recovery",
+      "additions": [
+        "useAssistantLanguage",
+        "useToast",
+        "baseRevision",
+        "forkProvenance",
+        "stateDelta",
+        "runCommandMachine",
+        "conceptInspect",
+        "conceptShelf",
+        "resultMeasurement",
+        "inspectorDraftStore",
+        "authoringRecoveryStorage",
+        "extraMetrics",
+        "codeSearch",
+        "capabilityRecovery",
+        "forkFromSeqModel"
+      ],
+      "totals": {
+        "js": {
+          "raw": 2017324,
+          "gzip": 644237
+        },
+        "css": {
+          "raw": 286332,
+          "gzip": 59635
+        },
+        "other": {
+          "raw": 0,
+          "gzip": 0
+        }
+      },
+      "violations": [
+        {
+          "code": "total_budget",
+          "message": "Total bundle JS gzip is 629.1 KiB (644,237 B), over the 619.1 KiB (633,984 B) budget by 10.0 KiB (10,253 B). Remove or defer code; change the target only with a new measured baseline."
+        }
+      ]
+    },
+    {
+      "name": "comment-contracts",
+      "additions": [
+        "useAssistantLanguage",
+        "useToast",
+        "baseRevision",
+        "forkProvenance",
+        "stateDelta",
+        "runCommandMachine",
+        "conceptInspect",
+        "conceptShelf",
+        "resultMeasurement",
+        "inspectorDraftStore",
+        "authoringRecoveryStorage",
+        "extraMetrics",
+        "codeSearch",
+        "capabilityRecovery",
+        "forkFromSeqModel",
+        "commentContract",
+        "commentRecoveryStorage"
+      ],
+      "totals": {
+        "js": {
+          "raw": 2017309,
+          "gzip": 643924
+        },
+        "css": {
+          "raw": 286332,
+          "gzip": 59635
+        },
+        "other": {
+          "raw": 0,
+          "gzip": 0
+        }
+      },
+      "violations": [
+        {
+          "code": "total_budget",
+          "message": "Total bundle JS gzip is 628.8 KiB (643,924 B), over the 619.1 KiB (633,984 B) budget by 9.7 KiB (9,940 B). Remove or defer code; change the target only with a new measured baseline."
+        }
+      ]
+    }
+  ]
+}

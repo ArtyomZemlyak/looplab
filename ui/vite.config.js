@@ -152,7 +152,10 @@ export default defineConfig({
               // keeping charts, graph libraries, settings and owner controls independently lazy.
               // Connection rules and panel payload primitives have the same pure dependency seam;
               // keeping them here removes two tiny streams without admitting an owner UI surface.
-              test: /[/\\]src[/\\](?:format|urlSafety|util|hooks|runIndex|buildingModel|nodeActivity|conceptId|nodeProjection|conceptChips|conceptSearch|Highlight|markdown|dagViewport|dagProjection|grouping|timelineModel|timelineWindow|useTimeline|useRunRouteState|mergeIntent|traceProjection|traceScrollModel|crossRunPrior|runStateModel|panelPrimitives)\.(?:js|jsx)$|[/\\]src[/\\]VirtualTimeline\.jsx$/,
+              // Doc 72: preferences, provenance, recovery and draft models share this dependency
+              // direction. Merge their small compression streams; keep all UI entrances lazy.
+              // No recursive capture: model imports must not bring a panel or owner component here.
+              test: /[/\\]src[/\\](?:format|urlSafety|util|hooks|runIndex|buildingModel|nodeActivity|conceptId|nodeProjection|conceptChips|conceptSearch|Highlight|markdown|dagViewport|dagProjection|grouping|timelineModel|timelineWindow|useTimeline|useRunRouteState|mergeIntent|traceProjection|traceScrollModel|crossRunPrior|runStateModel|panelPrimitives|useAssistantLanguage|useToast|baseRevision|forkProvenance|stateDelta|runCommandMachine|conceptInspect|conceptShelf|resultMeasurement|inspectorDraftStore|authoringRecoveryStorage|extraMetrics|codeSearch|capabilityRecovery|forkFromSeqModel|commentContract|commentRecoveryStorage)\.(?:js|jsx)$|[/\\]src[/\\]VirtualTimeline\.jsx$/,
               includeDependenciesRecursively: false,
             },
             {

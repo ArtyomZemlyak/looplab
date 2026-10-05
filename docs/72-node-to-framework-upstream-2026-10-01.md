@@ -4077,7 +4077,7 @@ merge этим проходом не проверены.
    превышение total JS: 13317 B после §20.42, 13380 B после §20.43,
    12884 B после §20.46, 13121 B после §20.47, 13324 B после §20.48,
    13308 B после §20.49; 13734 B после §20.50; 13894 B после §20.51;
-   13809 B после §20.52;
+   9940 B после §20.53;
    потолки не повышены. Нужны дальнейшее
    уменьшение исходного кода/повторов и полный CI. Один lazy import не снижает
    сумму всех assets; нельзя выдавать route budget за зелёный общий gate.
@@ -6839,3 +6839,55 @@ cycle/integer-boolean guards проходят, ceilings не менялись.
 Это проверка freshness формы через live React/Vite, не полная приёмка пользователя.
 OPEN §19.17 сохраняются для полного onboarding/recovery, effective manifest,
 lifecycle/retention и target-relative delivery.
+
+### 20.53. Общие pure models в production split — 2026-10-05
+
+**Ревью.** Исходный commit — `c7b53028f0c69b67bf42f0b52b18ea9b6bdb2d4c`.
+O1 из §19.17 оставался открыт: total JS gzip превышал лимит на 13809 B.
+Инвентаризация production modules не обнаружила второй копии React/graph library.
+Пробы формата minifier не дали экономии: ascii-only увеличивал gzip, single quotes
+и переносы строк его не уменьшали. Unsafe minification, зависимости и ceilings
+не менялись. Вместо этого измерены последовательные группы общих pure helpers.
+
+**Изменено.** 17 моделей/hooks для языка, provenance, восстановления, черновиков,
+метрик и поиска объединены с уже существующим `run-support`. Capture dependencies
+остаётся нерекурсивным. Панели, owner workflows, graph и полный Agent cycle не
+включены в эту группу. Новая проверка строит настоящий minified client и нативно
+импортирует все non-bootstrap JS chunks: SSR/dev module runner не воспроизводит
+порядок их клиентской инициализации. Разрешено только чтение built SVG icon sprite;
+любой API/другой network request проваливает тест. Main bootstrap отдельно проверен
+настоящим production браузером, поскольку его импорт запускает приложение.
+
+**Измерение и компромисс.** Total JS gzip **647793 → 643924 B (−3869 B)**,
+raw JS 2019687 → 2017309 B (−2378 B). CSS gzip прежние 59635 B. Initial shell
+83077 → 82948 B, owner DAG 401627 → 399451 B. Общий helper chunk означает более
+широкие static closures некоторых экранов: owner List 211076 → 216865 B,
+Claims & Curation 189182 → 195718 B, Concepts 256761 → 258130 B; compact Agent
+panel 121421 → 129470 B (+8049 B). Это экономия общего gzip и числа compression
+streams, не обещание ускорить каждый экран. Full cycle body остаётся dynamic и
+не входит в compact closure. Все отдельные route/size/forbidden reachability/
+static-cycle/integer-boolean guards проходят. Total JS gate по-прежнему **red**:
+**9940 B** сверх прежнего лимита 633984 B. O1 не закрыт, бюджет не повышен.
+Все route closures сохранены в [bundles.json](assets/72-bundle-shared/bundles.json).
+
+**Проверено.** Replay-first 193 passed; полный UI suite 1969 passed без fail,
+skip или cancel; docs/API/surface/diagram 28 passed. Всего **2190 уникальных
+тестов**. Production build, strict MkDocs и diff-check проходят. Новая native
+client проверка входит в UI счётчик, не прибавляется повторно.
+
+Production browser на частном localhost API и сохранённой measured fixture
+§19.17: 79 событий, два оценённых эксперимента и один recorded run-base advance.
+FullHD 1920×1080: Report с score/caveats/base evidence, Lineage с двумя nodes,
+Concepts с честным empty projection, RU Agent cycle с requirements/history и
+явно открываемыми connection/recovery instructions. Пустой receipt input не
+разрешает GET lookup. Escape закрывает диалог и возвращает фокус к trigger;
+черновик Assistant сохраняется, горизонтального overflow нет. Console warn/error
+пуст, 121 HTTP request — только GET, все успешны. Default viewport восстановлен,
+частная вкладка и сервер закрыты. [Снимок production UI](assets/72-bundle-shared/production-report.png)
+и [validation.json](assets/72-bundle-shared/validation.json) сохраняют границы проверки.
+
+Новое обучение, MCP connection, provider call, command submission или доставка
+из **worktree LoopLab** в пользовательский task repo не выполнялись. Это проверка
+split/runtime и сохранённых результатов, не полный onboarding/recovery acceptance.
+OPEN effective manifest, lifecycle/retention и target-relative delivery из §19.17
+сохраняются. Merge этой правки в master продукта не является такой доставкой.
