@@ -299,6 +299,8 @@ export function localizeSource(source, filename = "fixture.jsx") {
       p?.name?.name === "LazyBoundary"
     ) {
       if (n.value?.type === "StringLiteral") add(n.value.value);
+      else if (n.value?.type === "JSXExpressionContainer" && n.value.expression?.type === "StringLiteral")
+        add(n.value.expression.value);
       return;
     }
     if (

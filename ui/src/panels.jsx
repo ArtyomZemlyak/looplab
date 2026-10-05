@@ -2868,7 +2868,7 @@ function CmpCol({ resource, label, surfaceRef = null, onFocusCapture = null, onR
               <div className="k">{uiText("status")}</div><div className="v">{uiText(d.status)}</div>
               <div className="k">{uiText("params")}</div><div className="v">{JSON.stringify(d.idea?.params)}</div>
             </div>
-            <CodeViewer code={d.code || '(no code)'} label={uiMessage("{0} code", [label])} maxHeight={280} />
+            <CodeViewer code={d.code || uiText('(no code)')} label={uiMessage("{0} code", [label])} maxHeight={280} />
           </>
         : <>{uiText("Loading ")}{uiText(label)}{uiText(" details…")}</>}
   </div>

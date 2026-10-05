@@ -36,6 +36,7 @@ test('Russian exports localize authored explanation while preserving machine fie
   const locale = await harness.load('/src/uiLanguage.js')
   const report = await harness.load('/src/report.js')
   const { default: ReportView } = await harness.load('/src/Report.jsx')
+  const { LlmHealth } = await harness.load('/src/LlmHealth.jsx')
   globalThis.fetch = fetchStub()
   const state = { run_id: 'RAW-run', task_id: 'RAW-task', goal: 'USER goal $& /path', direction: 'min',
     phase: 'finished', best_node_id: 0, nodes: { 0: { id: 0, status: 'evaluated', feasible: true,
@@ -53,7 +54,10 @@ test('Russian exports localize authored explanation while preserving machine fie
     const html = renderToStaticMarkup(React.createElement(ReportView, { state, runId: state.run_id }))
     assert.match(html, /Среднее|Итог|Выбранный результат/)
     assert.doesNotMatch(html, /No multi-seed confirmation|>Summary<|>Selected<|>Trajectory<|>Comparisons</)
-    assert.doesNotMatch(html, />unconfirmed<|>not fully verified<|>first eligible result</)
+    assert.doesNotMatch(html, />unconfirmed<|>not fully verified<|>first eligible result<|>finished<|View .* данные/)
+    const connection = renderToStaticMarkup(React.createElement(LlmHealth, { loaded: true }))
+    assert.match(connection, /Проверить связь/); assert.doesNotMatch(connection, /Test active LLM|One provider request/)
+    assert.equal(locale.uiText('run report'), 'отчёт запуска')
     await React.act(async () => locale.setUILanguage('en'))
     assert.match(report.toMarkdown(state), /## Verdict/)
     assert.equal(report.buildModelCard(state).champion.metric, card.champion.metric)

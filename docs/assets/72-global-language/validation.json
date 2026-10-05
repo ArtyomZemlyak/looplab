@@ -1,0 +1,46 @@
+{
+  "schema": 1,
+  "topic": "doc72-global-language",
+  "ui_full": {
+    "passed": 1987,
+    "failed": 0
+  },
+  "backend_merged": {
+    "passed": 504,
+    "failed": 1,
+    "skipped": 2
+  },
+  "backend_repaired_subset": {
+    "passed": 12,
+    "failed": 0
+  },
+  "backend_unique_final_passed": 505,
+  "replay_first_passed": 193,
+  "ui_last_subset_passed": 29,
+  "locale_authored_keys": 7358,
+  "smoke": {
+    "backend": "toy",
+    "language": "ru",
+    "nodes_evaluated": 3,
+    "best_node_id": 2,
+    "metric": 8.51019194,
+    "repeat_verified": false,
+    "matching_conditions_established": false,
+    "inspect_exit": 0,
+    "replay_exit": 0
+  },
+  "budgets": {
+    "total_js_gzip": 652949,
+    "total_limit": 633984,
+    "public_dag_gzip": 268054,
+    "public_dag_limit": 268544,
+    "css_gzip": 59577,
+    "css_limit": 59648,
+    "passed": false
+  },
+  "not_verified": [
+    "full Python CI",
+    "live paid provider outputs",
+    "complete editorial review of technical Russian copy"
+  ]
+}

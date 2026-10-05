@@ -428,7 +428,9 @@ from looplab.search.speculation_calibration import (SPECULATION_CALIBRATION_PROF
 #               tree re-derives c11422fc…). INERT for a calibration replicate: the profile ships
 #               `concept_pivot: False`, so no concept cadence runs, and `EngineOptions` keeps the
 #               field False.
-_EXPECTED_DIGEST = "sha256:742355fff8202d515e9812b7ef41b1a7d3b571d6a10330fec44720a244af4925"
+# 2026-10-05: output_language adds one field, none removed; removing it re-derives
+# 742355ff. auto preserves previous prompts, but the full settings envelope legitimately grows.
+_EXPECTED_DIGEST = "sha256:853eacae2c4676f5aa4c77a8268512740a52a17a371bde55080dbc4d6eb90340"
 #   2026-09-06  + endgame_reserve_frac (doc 52 row 18: the plan's endgame reserve the dispatcher
 #               honours). The 'field set changed too' branch: 220 -> 221, both pins re-set. A
 #               calibration replicate runs the toy workload under `EngineOptions`, whose reserve is
@@ -946,7 +948,8 @@ _EXPECTED_DIGEST = "sha256:742355fff8202d515e9812b7ef41b1a7d3b571d6a10330fec4472
 #   2026-09-30  + plateau_stop_nodes (doc 70 70.4): 280 -> 281; see the digest history.
 #   2026-10-01  + activation_check, activation_unverified_gate: 281 -> 283; see the digest history.
 #   2026-10-05  + concept_tag_hygiene: 283 -> 284; see the digest history.
-_EXPECTED_FIELD_COUNT = 284
+# 2026-10-05: output_language joins the merged concept hygiene schema: 284 -> 285.
+_EXPECTED_FIELD_COUNT = 285
 
 
 def test_the_digest_did_not_change_when_the_profile_moved():

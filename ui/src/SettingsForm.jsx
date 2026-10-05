@@ -274,7 +274,7 @@ export default function SettingsForm({ form, onChange, dirty, unsaved, errors, o
         aria-selected={index === idx} tabIndex={index === idx ? 0 : -1}
         className={'tab' + (index === idx ? ' active' : '')}
         onClick={() => setActiveGroup(gr.title)} onKeyDown={event => onTabKeyDown(event, index)}
-        title={gr.sub || ''}>
+        title={uiText(gr.sub || '')}>
         {uiText(gr.displayTitle || gr.title)}{changeDot(groupUnsaved(gr), groupChanged(gr))}
       </button>)}
     </div>

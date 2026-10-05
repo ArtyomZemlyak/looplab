@@ -188,11 +188,11 @@ function CredentialState({
       </div>)}
       <div className="is-wide">
         <dt>{uiText("Source")}</dt>
-        <dd>{CREDENTIAL_SOURCE_LABELS[credential.source]}</dd>
+        <dd>{uiText(CREDENTIAL_SOURCE_LABELS[credential.source])}</dd>
       </div>
       <div className="is-wide">
         <dt>{uiText("Status")}</dt>
-        <dd>{CREDENTIAL_STATUS_LABELS[credential.status]}</dd>
+        <dd>{uiText(CREDENTIAL_STATUS_LABELS[credential.status])}</dd>
       </div>
     </dl>
     {writeError && <div id="settings-credential-write-warning"

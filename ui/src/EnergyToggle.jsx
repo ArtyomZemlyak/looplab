@@ -29,10 +29,10 @@ export default function EnergyToggle() {
   return <div className="fx-switch">
     <button type="button" ref={triggerRef} className={'btn sm ghost' + (on ? ' primary' : '')}
       title={uiText("Energy / Reactor FX — animated graph")} aria-haspopup="menu" aria-expanded={open}
-      aria-controls="energy-switcher-menu" aria-label={uiMessage("Energy effects: {0}", [cur.name])}
+      aria-controls="energy-switcher-menu" aria-label={uiMessage("Energy effects: {0}", [uiText(cur.name)])}
       onClick={() => setOpen(!open)}>
       <OpIcon name="bolt" size={12} />
-      <span className="fx-switch-label">{uiText("Energy")}{on ? `: ${cur.name}` : ''}</span>
+      <span className="fx-switch-label">{uiText("Energy")}{on ? `: ${uiText(cur.name)}` : ''}</span>
     </button>
     {open && <>
       <div className="th-backdrop" aria-hidden="true" onClick={() => close(true)} />
@@ -42,7 +42,7 @@ export default function EnergyToggle() {
         {FX_LEVELS.map(l => <button type="button" key={l.id || 'off'} role="menuitemradio" aria-checked={l.id === level}
           tabIndex={-1} className={'th-opt' + (l.id === level ? ' on' : '')}
           onClick={() => pick(l.id)}>
-          <span className="th-name"><b>{l.name}</b><span className="th-sub">{uiText(l.sub)}</span></span>
+          <span className="th-name"><b>{uiText(l.name)}</b><span className="th-sub">{uiText(l.sub)}</span></span>
           {l.id === level && <span className="th-check">✓</span>}
         </button>)}
       </div>

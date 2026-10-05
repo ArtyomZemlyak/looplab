@@ -3147,7 +3147,7 @@ export default function AssistantBar({ runId, hidden = false, onReady }) {
     <strong title={proposalContext ? text('New run proposal', 'План нового запуска') : selectedRun?.goal || runId}>
       {proposalContext ? text('New run proposal', 'План нового запуска') : selectedRun?.label || selectedRun?.run_id || runId}
     </strong>
-    {!proposalContext && <span className="asst-run-context-state">{((selectedRunStatus || uiText('Loading')))}</span>}
+    {!proposalContext && <span className="asst-run-context-state">{uiText(selectedRunStatus || 'Loading')}</span>}
     {!proposalContext && selectedRunStatus === 'stalled' && <span className="asst-run-context-help">{uiText("Engine stopped · use Resume run in Lineage.")}</span>}
   </div>
 

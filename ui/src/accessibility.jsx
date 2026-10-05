@@ -127,7 +127,7 @@ export function ChartFrame({ title, description, columns = [], rows = [], csvNam
       ? children({ labelledBy, titleId, descriptionId }) : children}</div>
     <div className="accessible-chart-actions">
       <button type="button" className="btn xs ghost" aria-expanded={showData}
-        aria-label={uiMessage("{0} {1} data", [showData ? 'Hide' : 'View', title])}
+        aria-label={uiMessage("{0} {1} data", [uiText(showData ? 'Hide' : 'View'), title])}
         aria-controls={showData ? `chart-data-${generated}` : undefined}
         onClick={() => setShowData(value => !value)}>
         {((((showData ? uiText('Hide data') : uiText('View data')))))}
@@ -140,9 +140,9 @@ export function ChartFrame({ title, description, columns = [], rows = [], csvNam
       {pages > 1 && <div className="accessible-chart-actions" role="group" aria-label={uiMessage("{0} data pages", [title])}>
         {[['First', 0], ['Previous', currentPage - 1], ['Next', currentPage + 1], ['Last', pages - 1]]
           .map(([name, target]) => <button key={name} type="button" className="btn xs ghost"
-            aria-label={uiMessage("{0} {1} data page", [name, title])} aria-controls={`chart-data-${generated}`}
+            aria-label={uiMessage("{0} {1} data page", [uiText(name), title])} aria-controls={`chart-data-${generated}`}
             disabled={target === currentPage || target < 0 || target >= pages}
-            onClick={() => setPage(target)}>{name}</button>)}
+            onClick={() => setPage(target)}>{uiText(name)}</button>)}
         <span role="status">{start + 1}–{Math.min(start + pageSize, rows.length)}{uiText(" of ")}{rows.length}{uiText(" rows")}</span>
       </div>}
       <DataTable caption={uiMessage("{0} data", [title])} columns={columns}

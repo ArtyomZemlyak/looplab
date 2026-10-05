@@ -80,7 +80,7 @@ export function LlmHealth({
 }) {
   useUILanguage()
 
-  const text = value => copy?.text(value) ?? value
+  const text = value => copy?.text(value) ?? uiText(value)
   const recoveryHelp = status => copy?.recoveryHelp(status) ?? status.error
   const noteId = useId()
   const actionNoteId = `${noteId}-action`

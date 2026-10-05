@@ -155,7 +155,9 @@ export default defineConfig({
               // Doc 72: preferences, provenance, recovery and draft models share this dependency
               // direction. Merge their small compression streams; keep all UI entrances lazy.
               // No recursive capture: model imports must not bring a panel or owner component here.
-              test: /[/\\]src[/\\](?:format|urlSafety|util|hooks|runIndex|buildingModel|nodeActivity|conceptId|nodeProjection|conceptChips|conceptSearch|Highlight|markdown|dagViewport|dagProjection|grouping|timelineModel|timelineWindow|useTimeline|useRunRouteState|mergeIntent|traceProjection|traceScrollModel|crossRunPrior|runStateModel|panelPrimitives|useToast|baseRevision|forkProvenance|stateDelta|runCommandMachine|conceptInspect|conceptShelf|resultMeasurement|inspectorDraftStore|authoringRecoveryStorage|extraMetrics|codeSearch|capabilityRecovery|forkFromSeqModel|commentContract|commentRecoveryStorage)\.(?:js|jsx)$|[/\\]src[/\\]VirtualTimeline\.jsx$/,
+              // VirtualTimeline stays with its lazy Dock/Inspector/panel entrances; forcing it into
+              // this group made a public graph pay for a timeline it never opened.
+              test: /[/\\]src[/\\](?:format|urlSafety|util|hooks|runIndex|buildingModel|nodeActivity|conceptId|nodeProjection|conceptChips|conceptSearch|Highlight|markdown|dagViewport|dagProjection|grouping|timelineModel|timelineWindow|useTimeline|useRunRouteState|mergeIntent|traceProjection|traceScrollModel|crossRunPrior|runStateModel|panelPrimitives|useToast|baseRevision|forkProvenance|stateDelta|runCommandMachine|conceptInspect|conceptShelf|resultMeasurement|inspectorDraftStore|authoringRecoveryStorage|extraMetrics|codeSearch|capabilityRecovery|forkFromSeqModel|commentContract|commentRecoveryStorage)\.(?:js|jsx)$/,
               includeDependenciesRecursively: false,
             },
             {

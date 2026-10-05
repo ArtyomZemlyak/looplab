@@ -2170,7 +2170,7 @@ export default function RunView({ runId, onBack, reviewMode = false, reviewMeta 
         {/* WHOSE CODE DREW THIS. Beside the phase pill because it qualifies every number on the
             page at once: a server that loaded its modules before the last merge answers 200 with an
             older fold, and nothing else on this screen can tell you so. See `src/serverCode.js`. */}
-        {serverCodeStale && <span className="pill warn" title={serverCodeStale.detail}>
+        {serverCodeStale && <span className="pill warn" title={uiText(serverCodeStale.detail)}>
           {uiText(serverCodeStale.text)}
         </span>}
         {compactWorkspace
@@ -2580,13 +2580,13 @@ export default function RunView({ runId, onBack, reviewMode = false, reviewMeta 
         </div>
         {compactWorkspace && !showInspector && hasInspectorContext &&
           <button ref={compactInspectorTriggerRef} className="workspace-pane-toggle" onClick={() => setCompactInspectorOpen(true)}
-                  aria-label={uiMessage("Open {0} panel", [groupDetailsOpen ? 'group' : 'inspector'])}>
+                  aria-label={uiMessage("Open {0} panel", [uiText(groupDetailsOpen ? 'group' : 'inspector')])}>
             {((groupDetailsOpen ? uiText('Group') : uiMessage("Inspector · #{0}", [selectedId])))}
           </button>}
         {compactWorkspace && showInspector &&
           <button type="button" className="workspace-scrim" tabIndex={-1}
                   onClick={closeCompactInspector}
-                  aria-label={uiMessage("Close {0} panel", [groupDetailsOpen ? 'group' : 'inspector'])} />}
+                  aria-label={uiMessage("Close {0} panel", [uiText(groupDetailsOpen ? 'group' : 'inspector')])} />}
         {!compactWorkspace && hasInspectorContext && !showInspector
           ? <button ref={sideRailRef} className="side-rail" title={uiText("show panel")}
               onClick={() => setSideC(false)}>‹ {((groupDetailsOpen ? uiText('group') : uiText('inspector')))}</button>
@@ -2605,7 +2605,7 @@ export default function RunView({ runId, onBack, reviewMode = false, reviewMeta 
                   <button ref={compactInspectorCloseRef} className="btn sm ghost"
                           data-dialog-initial-focus={compactWorkspace ? true : undefined}
                           title={((compactWorkspace ? uiText('close panel') : uiText('collapse panel')))}
-                          aria-label={`${compactWorkspace ? 'Close' : 'Collapse'} ${groupDetailsOpen ? 'group details' : 'experiment inspector'}`}
+                          aria-label={uiMessage('{0} {1}', [uiText(compactWorkspace ? 'Close' : 'Collapse'), uiText(groupDetailsOpen ? 'group details' : 'experiment inspector')])}
                           onClick={() => compactWorkspace ? closeCompactInspector() : collapseSideInspector()}>⟩</button>
                 </div>
                 {groupDetailsOpen
