@@ -1522,3 +1522,29 @@ so, and names both paths, so move `ui/dist` aside and rename `ui/.dist.looplab-p
 `ui/.dist.looplab-stage` is a build's scratch output; the next build clears it.
 
 For the containerized UI + model + engine, see [Deployment](deployment.md).
+
+
+### Short explanations after experiments
+
+New internal LLM runs enable `assistant_result_commentary` by default. While the UI
+server is running, it writes a brief Assistant explanation after each terminal
+experiment and finalized run, in `output_language`. It uses the run's model endpoint
+and model budget; one request is bounded to 400 output tokens and a 45-second wall
+limit, with no transport retry. It never pauses evaluation or executes actions.
+
+The explanation appears in the chat timeline; expand **Measurements and limitations**
+for the measured receipt. A preparing or unavailable explanation is visible, and the
+measurement remains readable. **Discuss next step** prepares a draft without sending
+it or changing the run. Disable **Explain completed experiments** in settings for facts only.
+
+Reading a page does not invoke a model. Toy and external harness runs do not use this
+worker: the external agent publishes its own evidence-bound explanation. Pre-field
+snapshots stay off; opening an old finished run does not pay to explain its history.
+An active run first discovered by the server explains subsequent completions.
+
+`assistant_result_jobs.json` keeps generation-bound claims and replies. A reply
+recovered after restart is published without another model call. An interrupted claim
+whose response was not saved is never automatically retried; discuss the measured
+result in chat. A damaged job store is shown as unavailable and needs operator
+inspection, not automatic repair. The store admits at most 2000 receipt identities
+per run generation. Historical report prose is not rewritten.

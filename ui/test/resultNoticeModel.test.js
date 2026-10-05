@@ -19,7 +19,7 @@ test('numbers do not become an improvement without comparison evidence; both dir
   assert.match(resultNoticeText(node, 'ru').caution, /Нет подтверждения повторными/)
   assert.match(resultNoticeQuestion(node), /experiment #2, attempt 1.*Do not start experiments/)
   assert.match(resultNoticeQuestion({ kind: 'run' }, 'ru'), /итог этого запуска.*Не запускай/)
-  assert.match(resultNoticeQuestion({ ...node, status: 'failed' }, 'ru'), /Trace и логи.*минимальное исправление.*Не запускай/)
+  assert.match(resultNoticeQuestion({ ...node, status: 'failed' }, 'ru'), /историю выполнения и логи.*минимальное исправление.*Не запускай/)
 })
 
 test('confirmation means cannot silently become the score compared with a parent', () => {

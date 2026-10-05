@@ -1012,6 +1012,15 @@
           "shortHelp": "Language of all screens and new human-readable text. auto follows the task; en is English; ru is Russian. Original evidence and code stay unchanged."
         },
         {
+          "key": "assistant_result_commentary",
+          "label": "Explain completed experiments",
+          "type": "bool",
+          "default": true,
+          "help": "For new internal LLM runs, the UI server writes one brief Assistant interpretation after each completed experiment and finalized run. Background model calls are charged to the run and never delay evaluation. Reads do not trigger generation. External agents publish their own interpretations; offline toy runs and historical snapshots stay off. Disable to show measured facts only. Interrupted uncertain requests are not automatically billed again.",
+          "shortLabel": "Explain results",
+          "shortHelp": "Brief background Assistant explanations of completed internal experiments. Uses the run model budget; does not wait for a chat message."
+        },
+        {
           "key": "backend",
           "label": "Role backend",
           "type": "enum",

@@ -90,8 +90,8 @@ and read leniently by read-only commands.
 ## Web editors, schema and concurrent saves
 
 The owner Web UI does not build forms by reflecting arbitrary Python fields in the browser. It fetches a
-server-owned curated catalogue with **253 of the 288 direct `Settings` fields in 10 groups**. The default
-**Essential** disclosure mode contains 19 high-frequency keys; search spans all 253 catalogued keys.
+server-owned curated catalogue with **254 of the 289 direct `Settings` fields in 10 groups**. The default
+**Essential** disclosure mode contains 19 high-frequency keys; search spans all 254 catalogued keys.
 Uncatalogued fields remain valid through environment/config/CLI inputs and are preserved by sparse Web
 writes. Which fields are catalogued is not a matter of taste: every `Settings` field is either a row or
 listed in `settings_ui_schema.py::SETTINGS_UI_SCHEMA_UNCURATED_FIELDS` with the reason the form omits it,
@@ -793,6 +793,7 @@ These are no-ops unless `backend=llm`.
 | Setting | Env | Default | Description |
 |---|---|---|---|
 | `output_language` | `LOOPLAB_OUTPUT_LANGUAGE` | `auto` | Language of all new human prose from every model role: `ru` Russian, `en` English, `auto` follows the task. Includes structured prose, research, reports, lessons and Assistant monitors. Schema keys, enums, IDs, code, commands, raw logs, measured values and historical text stay unchanged. UI language selection saves this preference for new runs and owner generation; a running engine retains its launch settings until resumed. No extra model translation call. |
+| `assistant_result_commentary` | `LOOPLAB_ASSISTANT_RESULT_COMMENTARY` | `true` | UI-server background Assistant explanations after terminal nodes and finalized internal LLM runs. One attempt per evidence receipt, charged to the run. No evaluation wait or actions; external agents author their own explanations. Toy runs and pre-field snapshots stay off. Disable for facts only. Interrupted uncertain calls are not automatically repeated. |
 | `llm_model` | `LOOPLAB_LLM_MODEL` | `qwen3:8b` | Model id |
 | `llm_base_url` | `LOOPLAB_LLM_BASE_URL` | `http://localhost:11434/v1` | OpenAI-compatible endpoint (Ollama default). Changing it **alone** is refused when a key is configured — the credential must move with it, see [moving a run to a different endpoint](llm-and-agents.md#moving-a-run-to-a-different-endpoint) |
 | `llm_api_key` | `LOOPLAB_LLM_API_KEY` | — | Secret; never serialized as a value. Local servers ignore it. Atomic with the row below: the pair is reselected from ONE source (process env, else `.env`), so setting this alone does not inherit the binding from the other source. A key set on a `Settings` object in code (`Settings(llm_api_key=...)`) is honoured only when the UI secret store selected it with its binding; otherwise, if the environment would send a different key or none, building the client is REFUSED with a message saying so, rather than going out unauthenticated |

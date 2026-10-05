@@ -52,7 +52,8 @@ def _comments(rd: Path) -> list[dict]:
     try:
         rows = [orjson.loads(line) for line in raw.splitlines()]
         fields = {"generation", "action_id", "receipt_id", "evidence_token", "summary"}
-        if any(not isinstance(row, dict) or set(row) != fields
+        if any(not isinstance(row, dict) or set(row) not in (fields, fields | {"source"})
+               or ("source" in row and row["source"] != "assistant")
                or any(not isinstance(row.get(key), str) for key in fields)
                or len(row["summary"]) > 700 for row in rows):
             raise ValueError("invalid commentary row")
@@ -185,9 +186,16 @@ def _snapshot(srv, rd: Path, expected_generation: str, *, limit: int = 50, curso
     start = max(0, end - limit)
     page = rows[start:end]
     comments = _comments(rd)
-    by_receipt = {(c["generation"], c["receipt_id"], c["evidence_token"]): c["summary"] for c in comments}
+    by_receipt = {(c["generation"], c["receipt_id"], c["evidence_token"]): c for c in comments}
     for row in page:
-        row["commentary"] = by_receipt.get((generation, row["id"], row["evidence_token"]))
+        comment = by_receipt.get((generation, row["id"], row["evidence_token"]))
+        row["commentary"] = comment["summary"] if comment else None
+        row["commentary_source"] = comment.get("source", "external") if comment else None
+    from looplab.serve.result_commentary import commentary_statuses
+    statuses = commentary_statuses(rd, generation)
+    for row in page:
+        status = statuses.get(row["evidence_token"], statuses.get("default", "none"))
+        row["commentary_status"] = "published" if row["commentary"] else "ready" if status == "published" else status
     if srv.commands.generation_fence(rd)[1] != generation:
         raise HTTPException(409, {"code": "run_generation_changed"})
     next_cursor = f"rn1.{scope}.{page[0]['id']}.{page[0]['evidence_token']}" if start and page else None
@@ -203,18 +211,31 @@ def snapshot(srv, rd: Path, expected_generation: str, *, limit: int = 50, cursor
 
 
 def publish(srv, rd: Path, body) -> dict:
+    return _publish(srv, rd, body, internal=False)
+
+
+def publish_internal(srv, rd: Path, body) -> dict:
+    """Server worker only. The public POST retains external-only authority."""
+    return _publish(srv, rd, body, internal=True)
+
+
+def _publish(srv, rd: Path, body, *, internal: bool) -> dict:
     try:
         with srv.commands.sequence(rd):
             try:
                 settings = read_config_snapshot(rd / "config.snapshot.json")
             except (OSError, ValueError, KeyError) as exc:
                 raise refusal("config_snapshot_unreadable") from exc
-            if not settings.external_harness:
+            if internal and settings.external_harness:
+                raise HTTPException(409, "internal commentary refuses an external run")
+            if not internal and not settings.external_harness:
                 raise HTTPException(409, "external commentary requires an external harness run")
             generation, receipts = _receipts(srv, rd, body.expected_generation)
             row = {"generation": generation, "action_id": body.action_id,
                    "receipt_id": body.receipt_id, "evidence_token": body.evidence_token,
                    "summary": redact_secrets(body.summary)[:700]}
+            if internal:
+                row["source"] = "assistant"
             old = _comments(rd)
             for saved in old:
                 if saved.get("generation") == generation and saved.get("action_id") == body.action_id:

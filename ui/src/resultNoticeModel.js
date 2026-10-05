@@ -76,6 +76,8 @@ export function validResultNotices(value, generation, cursor = null, limit = 200
         || typeof row.objective !== 'string' || row.objective.length > 256
         || Object.hasOwn(row, 'completed_at') && row.completed_at !== null
           && !(typeof row.completed_at === 'number' && Number.isFinite(row.completed_at) && row.completed_at >= 0)
+        || Object.hasOwn(row, 'commentary_source') && ![null, 'assistant', 'external'].includes(row.commentary_source)
+        || Object.hasOwn(row, 'commentary_status') && !['none', 'generating', 'ready', 'published', 'failed', 'interrupted', 'superseded', 'unavailable'].includes(row.commentary_status)
         || !(row.commentary === null || typeof row.commentary === 'string' && row.commentary.length <= 700)) return false
     ids.add(row.id)
     if (row.kind === 'run') return row.id === 'run' && row.status === 'finished'

@@ -345,6 +345,11 @@ class HarnessAPI:
                 rid, token = row.get("id"), row.get("evidence_token")
                 valid = (isinstance(rid, str) and rid not in identities
                          and isinstance(token, str) and re.fullmatch(r"[0-9a-f]{64}", token) is not None
+                         and ("commentary_source" not in row or row["commentary_source"] in
+                              (None, "assistant", "external"))
+                         and ("commentary_status" not in row or row["commentary_status"] in
+                              ("none", "generating", "ready", "published", "failed", "interrupted",
+                               "superseded", "unavailable"))
                          and all(key in row and (row[key] is None or
                              (type(row[key]) in (int, float)
                               and -float("inf") < row[key] < float("inf")))

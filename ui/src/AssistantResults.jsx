@@ -29,7 +29,7 @@ function ResultPages({ runId, generation, onOpen, onReady, onAsk, askDisabled, a
     classifyFailure: ({ error }) => ({ error: error?.code === 'result_notice_cursor_changed' ? 'cursor_changed' : '' }),
   })
   const rows = resource.status === 'ready' ? resource.data.items : []
-  const identity = rows.map(r => r.id + ':' + r.evidence_token + ':' + (r.commentary || '')).join('|')
+  const identity = rows.map(r => r.id + ':' + r.evidence_token + ':' + (r.commentary || '') + ':' + (r.commentary_status || '')).join('|')
   // Reading older pages must not trigger the transcript's new-result autoscroll.
   useEffect(() => { if (identity && !cursor) onReady?.() }, [identity, onReady, cursor])
   const ru = language === 'ru'
@@ -58,7 +58,14 @@ function ResultPages({ runId, generation, onOpen, onReady, onAsk, askDisabled, a
       {text.caution && <p className="asst-run-result-caution"><strong>{((ru ? 'Надёжность: ' : uiText('Reliability: ')))}</strong>{uiText(text.caution)}</p>}
       {row.kind === 'run' && row.caveats.length > 0 && <p className="asst-run-result-caution">
         {((ru ? 'Ограничения: ' : uiText('Caveats: ')))}{row.caveats.map(code => resultCaveatText(code, language)).join(' · ')}</p>}
-      {row.commentary && <p className="muted">{((ru ? 'Внешний агент · интерпретация' : uiText('External agent · interpretation')))}</p>}
+      {row.commentary && <p className="muted">{row.commentary_source === 'assistant'
+        ? (ru ? 'Ассистент · интерпретация' : uiText('Assistant · interpretation'))
+        : (ru ? 'Внешний агент · интерпретация' : uiText('External agent · interpretation'))}</p>}
+      {!row.commentary && ['generating', 'ready'].includes(row.commentary_status) && <p className="muted">
+        {ru ? 'Ассистент готовит пояснение…' : uiText('Assistant is preparing an explanation…')}</p>}
+      {!row.commentary && ['failed', 'interrupted', 'unavailable'].includes(row.commentary_status) && <p className="muted">
+        {ru ? 'Пояснение недоступно; измеренный итог сохранён. Автоповтор выключен. Можно обсудить результат в чате.'
+          : uiText('Explanation unavailable; measured result saved. No automatic retry. Discuss the result in chat.')}</p>}
       <p className="asst-result-next"><strong>{((ru ? 'Дальше: ' : uiText('Next: ')))}</strong>{uiText(text.next)}</p>
       <div className="asst-run-result-actions">
         {link(href, text.actionLabel)}
@@ -68,7 +75,7 @@ function ResultPages({ runId, generation, onOpen, onReady, onAsk, askDisabled, a
       </div>
       </details>
       {onAsk && <div className="asst-result-followup"><button className="btn sm ghost" disabled={askDisabled}
-          title={((askDisabled ? askDisabledReason : (ru ? 'Подготовить вопрос в поле сообщения' : uiText('Prepare a question in the composer'))))}
+          title={((askDisabled ? uiText(askDisabledReason) : (ru ? 'Подготовить вопрос в поле сообщения' : uiText('Prepare a question in the composer'))))}
           onClick={() => onAsk(resultNoticeQuestion(row, language))}>
           {((ru ? row.status === 'failed' ? 'Разобрать ошибку' : row.status === 'aborted' ? 'Разобрать остановку' : 'Обсудить следующий шаг' : (row.status === 'failed' ? uiText('Discuss failure') : (row.status === 'aborted' ? uiText('Discuss stop') : uiText('Discuss next step')))))}</button></div>}
       </div></div>

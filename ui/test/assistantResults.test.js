@@ -4,6 +4,28 @@ import { click, fetchStub, mountLive, until } from './_mount.js'
 import { generation, node, payload } from './_resultNoticesFixtures.js'
 import { parseRunRouteState } from '../src/runRouteState.js'
 
+test('internal explanations and interrupted work are plain Assistant turns with visible facts', async () => {
+  const harness = await mountLive()
+  const { default: Results } = await harness.load('/src/AssistantResults.jsx')
+  const ready = { ...node, commentary: 'Сравнение требует повторения.', commentary_source: 'assistant', commentary_status: 'published' }
+  const pending = { ...node, id: 'node:3:1', node_id: 3, commentary: null, commentary_source: null, commentary_status: 'generating' }
+  const failed = { ...node, id: 'node:4:1', node_id: 4, commentary: null, commentary_source: null, commentary_status: 'interrupted' }
+  const backend = fetchStub({ 'GET /api/runs/demo/result-notices': payload([ready, pending, failed]) })
+  globalThis.fetch = backend
+  localStorage.clear(); localStorage.setItem('looplab.language', 'ru')
+  const view = await harness.mount(Results, { runId: 'demo', generation })
+  try {
+    await until(() => view.container.querySelectorAll('article').length === 3, 'automatic explanations')
+    const text = view.container.textContent
+    assert.match(text, /Ассистент · интерпретация/)
+    assert.doesNotMatch(text, /Внешний агент · интерпретация/)
+    assert.match(text, /готовит пояснение/)
+    assert.match(text, /измеренный итог сохранён.*Автоповтор выключен/)
+    assert.equal(view.container.querySelectorAll('article a[href]').length, 6)
+    assert.equal(backend.calls.some(call => call.method !== 'GET'), false)
+  } finally { await view.unmount(); await harness.close() }
+})
+
 test('completion messages reconnect once, use safe prose and withdraw stale evidence; links retain attempt', async () => {
   const harness = await mountLive()
   const { default: Results } = await harness.load('/src/AssistantResults.jsx')
@@ -75,7 +97,7 @@ test('measured, stopped and run summaries separate comparison, reliability and n
     assert.match(asked[0], /причину остановки.*Завершённой метрики.*Не запускай/)
     assert.match(run.textContent, /условия оценки отличаются/)
     await click(run.querySelector('button'))
-    assert.match(asked[1], /прочитай Report.*не смешивай основные оценки/)
+    assert.match(asked[1], /прочитай отчёт.*не смешивай основные оценки/)
     assert.equal(backend.calls.some(call => call.method !== 'GET'), false)
   } finally { await mounted.unmount(); await harness.close() }
 })

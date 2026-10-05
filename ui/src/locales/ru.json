@@ -1,7 +1,7 @@
 {
   "schema": 1,
   "language": "ru",
-  "count": 7658,
+  "count": 7667,
   "messages": {
     "# LoopLab run report — {0}": "# Отчёт запуска LoopLab — {0}",
     "## Agent narrative (advisory)": "## Пояснения агента (рекомендации)",
@@ -5226,7 +5226,7 @@
     "Find original command by": "Найти оригинальную команду",
     "Find the original identity in complete history; do not invent a key or body.": "Найдите оригинальную личность в полной истории; не изобретайте ключ или тело.",
     "Finish checking the pending permanent deletion before another hypothesis command.": "Заканчивай проверку на постоянное удаление перед другой командой гипотезы.",
-    "Finish or clear your current draft before preparing a result question": "Завершить или очистить текущий черновик до подготовки вопроса о результатах",
+    "Finish or clear your current draft before preparing a result question": "Завершите или очистите текущий черновик, прежде чем подготовить вопрос по результату",
     "Finish or explicitly discard retained Run settings or Authoring work first": "Заканчивать или прямо исключить сохраненные параметры &quot; Run &quot; или &quot; Resaring &quot;",
     "First eligible experiment": "Первый эксперимент, подпадающий под действие закона",
     "First eligible is not necessarily the task baseline; detector coverage is not fully verified.": "Первое право на получение помощи не обязательно является базовым показателем; охват детектора не полностью проверяется.",
@@ -7660,6 +7660,15 @@
     "After {0} experiments": "После экспериментов: {0}",
     "crash": "Сбой",
     "timeout": "Превышение времени",
-    "no_metric": "Нет метрики"
+    "no_metric": "Нет метрики",
+    "Assistant is preparing an explanation…": "Ассистент готовит пояснение…",
+    "Assistant · interpretation": "Ассистент · интерпретация",
+    "Brief background Assistant explanations of completed internal experiments. Uses the run model budget; does not wait for a chat message.": "Краткие фоновые пояснения ассистента после завершения внутренних экспериментов. Используют бюджет модели запуска; сообщение в чате не требуется.",
+    "Explain completed experiments": "Пояснять завершённые эксперименты",
+    "Explain results": "Пояснять результаты",
+    "Explanation unavailable; measured result saved. No automatic retry. Discuss the result in chat.": "Пояснение недоступно; измеренный итог сохранён. Автоповтор выключен. Можно обсудить результат в чате.",
+    "For new internal LLM runs, the UI server writes one brief Assistant interpretation after each completed experiment and finalized run. Background model calls are charged to the run and never delay evaluation. Reads do not trigger generation. External agents publish their own interpretations; offline toy runs and historical snapshots stay off. Disable to show measured facts only. Interrupted uncertain requests are not automatically billed again.": "Для новых внутренних запусков с LLM сервер UI пишет краткое пояснение ассистента после каждого завершённого эксперимента и завершения всего запуска. Фоновые обращения к модели учитываются в бюджете запуска и не задерживают оценку. Чтение результатов не запускает генерацию. Внешний агент публикует свои пояснения; для автономного режима toy и старых конфигураций функция выключена. Выключите для показа только измеренных фактов. Прерванные запросы с неизвестным исходом автоматически не повторяются.",
+    "No detailed Assistant report has been published. Recorded outcomes remain available; discuss them in chat or refresh the report.": "Подробный отчёт ассистента ещё не опубликован. Измеренные результаты доступны выше; обсудите их в чате или обновите отчёт.",
+    "Paid AI action: provider charges may apply. One request identity will be saved when you start, so you can safely leave and resume.": "Платное действие модели: провайдер может списать средства. При запуске запрос будет сохранён — можно будет уйти со страницы и вернуться к нему позже."
   }
 }

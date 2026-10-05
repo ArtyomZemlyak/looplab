@@ -291,3 +291,27 @@ def test_page_refuses_nonfinite_json_number_without_an_exception(score):
         lambda request: httpx.Response(200, content=json.dumps(page).encode())))
     result = api.result_notices("demo", GEN)
     assert result["outcome"] == "unavailable" and "body" not in result
+
+
+@pytest.mark.parametrize("field,value", [("commentary_source", "owner"), ("commentary_source", []),
+                                        ("commentary_status", "finished"), ("commentary_status", True)])
+def test_known_commentary_metadata_refuses_invalid_states(field, value):
+    page = _page()
+    page["items"][0][field] = value
+    api = HarnessAPI("http://localhost", transport=httpx.MockTransport(
+        lambda request: httpx.Response(200, json=page)))
+    result = api.result_notices("demo", GEN)
+    assert result["outcome"] == "unavailable" and "body" not in result
+
+
+def test_internal_commentary_metadata_is_retained_without_writes():
+    page = _page()
+    page["items"][0].update(commentary="Short interpretation", commentary_source="assistant",
+                             commentary_status="published")
+    seen = []
+    def handler(request):
+        seen.append(request)
+        return httpx.Response(200, json=page)
+    api = HarnessAPI("http://localhost", transport=httpx.MockTransport(handler))
+    assert api.result_notices("demo", GEN)["body"] == page
+    assert len(seen) == 1 and seen[0].method == "GET"

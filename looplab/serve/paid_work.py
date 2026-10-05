@@ -123,7 +123,7 @@ def flush_pending_run_costs(srv, run_dir) -> bool:
 
 
 @contextmanager
-def metered_run_client(srv, settings, run_dir, generation):
+def metered_run_client(srv, settings, run_dir, generation, *, seed_prior=False, factory=None):
     """Lease and meter one UI-side model client against an exact run generation."""
     if not flush_pending_run_costs(srv, run_dir):
         raise RunCostAccountingPending
@@ -133,8 +133,13 @@ def metered_run_client(srv, settings, run_dir, generation):
     retained = False
     try:
         from looplab.core.llm import make_llm_client_for
-        client = make_llm_client_for(settings, factory=srv.make_llm_client)
-        ledger = bind_run_client_cost(client, EventStore(run_dir / "events.jsonl"))
+        client = make_llm_client_for(settings, factory=factory or srv.make_llm_client)
+        store = EventStore(run_dir / "events.jsonl")
+        if seed_prior:
+            from types import SimpleNamespace
+            from looplab.engine.costs import seed_prior_spend
+            seed_prior_spend(SimpleNamespace(researcher=client, store=store))
+        ledger = bind_run_client_cost(client, store)
         try:
             yield client
         finally:

@@ -802,6 +802,11 @@ def make_app(run_root: str | os.PathLike, *, bind_host: Optional[str] = None) ->
     # After the resume scan (registered above), exactly where the `on_event` hook it replaces ran.
     lifecycle.on_startup("recover_restart_command_workers", _recover_restart_command_workers)
 
+    from looplab.serve.result_commentary import ResultCommentaryService
+    srv.result_commentary = ResultCommentaryService(srv)
+    lifecycle.on_startup("result_commentary", srv.result_commentary.start)
+    lifecycle.on_shutdown("result_commentary", srv.result_commentary.stop)
+
     @app.get("/api/auth/status")
     def auth_status(request: Request):
         return {"required": bool(ui_token),

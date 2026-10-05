@@ -491,7 +491,7 @@ export default function ReportView({ state, runId, onOpenPanel, canOpenPanel, on
           ? 'Paid refresh is running with the saved request. You can safely leave and resume it later.'
           : savedRefreshIntent
             ? 'Paid request saved. Resume rechecks the same request; it cannot start a second job. You can safely leave.'
-            : 'Paid AI action: provider charges may apply. One request identity is saved so you can safely leave and resume.'
+            : 'Paid AI action: provider charges may apply. One request identity will be saved when you start, so you can safely leave and resume.'
   const refreshButtonLabel = refreshing ? 'Paid refresh running…'
     : savedRefreshIntent ? 'Resume paid refresh' : 'Refresh report · paid'
   const refreshDisabledReason = !refreshGenerationReady
@@ -579,7 +579,7 @@ export default function ReportView({ state, runId, onOpenPanel, canOpenPanel, on
       {!Object.keys(a.failures).length && !a.infeasible.length && <p className="muted">{uiText('No execution failures or constraint violations are recorded.')}</p>}
 
       <AgentNarrative rep={rep} coverage={coverage} generation={expectedGeneration} snapshotSeq={observedSeq} />
-      {!rep && <p className="report-section-intro">{uiText('No assistant interpretation has been published. Recorded outcomes remain available; request an explanation in Assistant or refresh the report.')}</p>}
+      {!rep && <p className="report-section-intro">{uiText('No detailed Assistant report has been published. Recorded outcomes remain available; discuss them in chat or refresh the report.')}</p>}
 
       {best && <><h2 id="report-section-champion" tabIndex={-1} className="section-h">{uiText("Selected experiment")}</h2>
         <ChampionCard best={best} state={state} /><BaseRevision node={best} state={state} /></>}

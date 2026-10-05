@@ -73,7 +73,7 @@ def test_scoped_comment_is_idempotent_and_never_changes_scores_or_owner_chat(tmp
     assert _read(client, gen).json()["items"][0]["commentary"] == body["summary"]
     assert (rd / "events.jsonl").read_bytes() == before and not (rd / "chat.jsonl").exists()
     assert client.post("/api/runs/demo/chat-log", json={"role": "action", "action": "resume"}, headers=headers).status_code == 403
-    for mutation in ({"score": 99}, {"role": "assistant"}, {"action": "resume"}):
+    for mutation in ({"score": 99}, {"role": "assistant"}, {"source": "assistant"}, {"action": "resume"}):
         assert client.post("/api/runs/demo/result-notices", json={**body, **mutation}, headers=headers).status_code == 422
     assert client.post("/api/runs/demo/result-notices", json={**body, "summary": "different"}, headers=headers).status_code == 409
     assert client.post("/api/runs/demo/result-notices", json={**body, "action_id": "duplicate"}, headers=headers).status_code == 409

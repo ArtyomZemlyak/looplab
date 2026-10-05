@@ -1,0 +1,89 @@
+{
+  "date": "2026-10-05",
+  "base_commit": "9a4391b2c4bc82dd451b67e84e73efb15a631419",
+  "scope": "automatic internal completion commentary",
+  "tests": {
+    "replay": {
+      "passed": 193
+    },
+    "backend_initial": {
+      "passed": 286
+    },
+    "backend_final_additions": {
+      "passed": 175
+    },
+    "hardening": {
+      "passed": 173,
+      "worker_scenarios": 24
+    },
+    "ui_full": {
+      "passed": 1995
+    },
+    "ui_final_copy_subset": {
+      "passed": 26
+    },
+    "server_reset_compat": {
+      "passed": 164,
+      "skipped": 3,
+      "setup_failed": 3,
+      "setup_failure": "Windows symlink creation: WinError 1314, before endpoint assertion"
+    },
+    "idle_containment": {
+      "passed": 198,
+      "worker_scenarios": 25
+    },
+    "final_idle_race": {
+      "passed": 175,
+      "worker_scenarios": 26
+    }
+  },
+  "checks": {
+    "production_build": "passed",
+    "locale": "passed",
+    "ruff": "passed",
+    "diff_check": "passed",
+    "bundle": {
+      "js_gzip_bytes": 657059,
+      "js_budget": 633984,
+      "css_gzip_bytes": 59632,
+      "css_budget": 59648,
+      "total_js": "failed_existing_budget",
+      "route_budgets": "passed",
+      "forbidden_closures": "passed"
+    },
+    "mkdocs_strict": "passed"
+  },
+  "browser": {
+    "url": "http://127.0.0.1:8793/",
+    "viewport": [
+      1920,
+      1080
+    ],
+    "language": "ru",
+    "event_source": "synthetic test fixture; no ML training",
+    "model": "scripted; no paid provider",
+    "result_count_after_restart": 3,
+    "document_scroll_width": 1920,
+    "console_errors_or_warnings": [],
+    "checked": [
+      "success",
+      "failed execution",
+      "run finalized",
+      "evidence disclosure",
+      "question draft only",
+      "reload",
+      "server restart"
+    ],
+    "capture_size": [
+      1920,
+      1008
+    ]
+  },
+  "limits": [
+    "Real model response quality not tested",
+    "Full Python CI not run",
+    "Windows symlink setup tests remain unexecuted",
+    "Controlled causal ablations remain open",
+    "Total JS budget remains above existing limit"
+  ]
+}

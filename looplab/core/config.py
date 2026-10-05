@@ -2601,6 +2601,9 @@ class Settings(BaseSettings):
     llm_model: str = "qwen3:8b"
     # Human prose across all model roles; machine-readable fields and measured evidence stay raw.
     output_language: typing.Literal["auto", "en", "ru"] = "auto"
+
+    # UI-server background prose only; never a search/evaluation gate. Legacy runs stay off.
+    assistant_result_commentary: bool = True
     # === LLM / transport ==================================================================
     llm_base_url: str = "http://localhost:11434/v1"  # Ollama OpenAI-compatible endpoint
     llm_temperature: float = 0.6
@@ -3787,6 +3790,7 @@ def unknown_snapshot_keys(data) -> list[str]:
 # Keep their historical effective behavior when newer product defaults become active: re-entry must not
 # silently add paid calls, interventions, concurrency or a different selection policy to an old run.
 LEGACY_CONFIG_SNAPSHOT_DEFAULTS: dict[str, object] = {
+    "assistant_result_commentary": False,
     "parallel_build": 1,
     "eval_parallel": None,
     "llm_parallel": None,
