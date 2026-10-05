@@ -56,7 +56,7 @@ test('all 205 current results and commentary are readable in chat despite a new 
       await click(button(view, 'Earlier'))
       await until(() => readCursors.length > calls && view.container.querySelectorAll('article').length === count,
         'older page loaded')
-      assert.equal(view.container.querySelector('details').open, true, 'older entries are expanded for reading')
+      assert.equal(view.container.querySelector('.asst-result-history').open, true, 'older entries are expanded for reading')
       capture()
     }
     assert.equal(seen.size, 205)

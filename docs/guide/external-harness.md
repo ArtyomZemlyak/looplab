@@ -83,6 +83,12 @@ language selector (Auto / English / Русский) controls new Assistant repli
 these briefs; it does not translate existing model/agent prose. The browser choice
 does not change the external agent's contract: publish interpretations in the
 user's language.
+Agent interpretations are the main Assistant message, with measurements and attempt
+links in a collapsed evidence disclosure. Recorded `completed_at` is presentation metadata:
+it places the message between timestamped conversation turns without changing its
+receipt/evidence identity. Updating commentary changes that same message. Missing legacy
+times do not invent historical order. Reading the feed does not generate model prose;
+agents should publish the interpretation below, and the UI retains a factual fallback.
 Briefs separate comparison, reliability and next steps. Evaluation scores and
 confirmation means are distinct; unknown/different comparison conditions explain
 why improvement is not established. Stopped attempts link to Trace rather than

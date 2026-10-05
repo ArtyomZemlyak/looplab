@@ -74,6 +74,8 @@ export function validResultNotices(value, generation, cursor = null, limit = 200
         || row.confirmed_std !== null && (row.confirmed_std < 0 || row.confirmed_mean === null)
         || !['min', 'max'].includes(row.direction)
         || typeof row.objective !== 'string' || row.objective.length > 256
+        || Object.hasOwn(row, 'completed_at') && row.completed_at !== null
+          && !(typeof row.completed_at === 'number' && Number.isFinite(row.completed_at) && row.completed_at >= 0)
         || !(row.commentary === null || typeof row.commentary === 'string' && row.commentary.length <= 700)) return false
     ids.add(row.id)
     if (row.kind === 'run') return row.id === 'run' && row.status === 'finished'
@@ -181,6 +183,30 @@ export function resultNoticeText(row, language = 'en') {
   const caution = score !== null && row.status !== 'aborted' ? measurement.reliability
     + (row.confirmed_mean !== null ? ` ${resultSpreadText(row.confirmed_std, language)}` : '') : ''
   return { title, stateLabel, actionLabel, outcome, comparison, caution, next }
+}
+
+export function resultNoticeBrief(row, language = 'en') {
+  const ru = language === 'ru', text = resultNoticeText(row, language)
+  if (['failed', 'aborted'].includes(row.status)) return `${text.outcome} ${text.next}`
+  const score = row.confirmed_mean ?? row.score
+  const measurement = resultMeasurement(row.confirmed_mean !== null, row.confirmed_seeds, language)
+  const value = score === null ? ru ? 'пригодной метрики нет' : 'no usable metric'
+    : `${measurement.label} ${new Intl.NumberFormat(ru ? 'ru' : 'en', { maximumSignificantDigits: 6 }).format(score)}`
+  const head = row.kind === 'run'
+    ? ru ? `Запуск завершён. ${row.selected_node === null ? 'Допустимый результат не выбран' : `Выбран эксперимент #${row.selected_node}: ${value}`}.`
+      : `The run finished. ${row.selected_node === null ? 'No eligible result was selected' : `Experiment #${row.selected_node} was selected: ${value}`}.`
+    : ru ? `Эксперимент #${row.node_id} завершён: ${value}.` : `Experiment #${row.node_id} finished: ${value}.`
+  const comparison = row.kind === 'node' && score !== null
+    ? row.score_comparison?.status === 'same' ? text.comparison
+      : (row.score_comparison?.status === 'no_parent' ? '' : ru ? 'Улучшение пока не установлено. ' : 'Improvement is not established yet. ')
+        + (COMPARISON_HELP[row.score_comparison?.status]?.[ru ? 1 : 0] || '') : ''
+  const next = row.trust_flagged || row.trust_advisory || row.parent_trust_advisory || row.salvaged
+      || row.feasible === false || row.violations > 0
+    ? ru ? 'Перед продолжением нужно проверить ограничения и предупреждения оценки.' : 'Review evaluation caveats and warnings before continuing.'
+    : row.confirmed_mean === null && score !== null
+      ? ru ? 'Результат предварительный; дальше стоит проверить его повторными запусками.' : 'This is preliminary; the next step is to check it with repeat runs.'
+      : row.kind === 'run' ? text.next : ru ? 'Дальше можно обсудить следующий эксперимент.' : 'We can discuss the next experiment now.'
+  return [head, comparison, next].filter(Boolean).join(' ')
 }
 
 export function resultNoticeQuestion(row, language = 'en') {

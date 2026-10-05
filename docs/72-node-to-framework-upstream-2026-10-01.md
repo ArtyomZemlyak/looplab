@@ -7082,3 +7082,62 @@ owner/harness credentials: Runs и Assistant доступны сразу, нет
 [Скриншот](assets/72-open-start/open-ui.png) и
 [validation.json](assets/72-open-start/validation.json) сохраняют границы проверки.
 Другие OPEN §19.17 и прежний bundle excess остаются.
+
+### 20.58. Итоги как реплики в диалоге Assistant
+
+**Ревью.** Карточки сохраняли полезные measured receipts, но появлялись отдельным
+хвостом после всех реплик. Сравнение, надёжность, next step, ссылки и agent prose
+повторяли друг друга; даже три завершения вытесняли разговор. Интерпретация была
+подчинённым блоком внутри карточки, а не основным объяснением результата.
+
+**Исправлено.** Итог использует существующий Assistant message pattern. Текущая
+интерпретация агента становится главным текстом; если её нет, короткий factual
+fallback на языке UI сообщает результат, допустимость сравнения и следующий шаг.
+Fallback не выдаётся за анализ модели. Measurements/caveats и ссылки на точную
+попытку/Report свернуты. Существенные предупреждения не скрываются комментариями.
+Обсуждение следующего шага готовит вопрос, сохраняя защиту непустого draft.
+History/paging доступны отдельным раскрытием; 205 receipts и изменённые cursors
+по-прежнему читаются без пропусков.
+
+Read-only `completed_at` берётся из terminal events и не входит в receipt evidence
+hash: старые commentary/retry identities сохраняются. UI вставляет итог между
+timestamped репликами, не переписывая порядок диалога. Обновлённая интерпретация
+остаётся на месте исходного receipt. Для legacy без времени порядок не выдумывается.
+Optimistic send получает локальную временную отметку; persisted turns сохраняют
+серверную. Invalid/stale чтение убирает текущие результаты, сохраняя реплики.
+Import/render failure локализован: fallback сохраняет диалог и composer. Prompt
+Assistant просит разговорное объяснение вывода и решения вместо field dump.
+
+**Визуальная проверка, RU, 1920×1080.**
+
+1. [До](assets/72-result-dialogue/01-before.png): отдельный блок карточек занимает
+   ленту; объяснение агента спрятано среди служебных абзацев.
+2. [После](assets/72-result-dialogue/02-after.png): итог эксперимента встроен между
+   вопросами, финальное пояснение является основным текстом Assistant.
+3. [Доказательства](assets/72-result-dialogue/03-evidence.png): disclosure сохраняет
+   измерения, ограничения, происхождение интерпретации и exact Report route.
+
+Native summary раскрывается с клавиатуры; DOM reading order совпадает с порядком
+реплик, focus/composer и explicit recovery проверены регрессиями. Полная проверка
+screen reader/контраста не заявляется. Снимки сделаны в текущем проходе на копии
+реального event fixture; тестовый диалог и краткая интерпретация seeded локально.
+Это не живой разговор с моделью и не новое обучение. Production browser не дал
+console warn/error; browser выполнял только GET. Baseline UI для сравнения взят
+из прежней production сборки, after — из новой сборки этого изменения.
+
+**Проверки.** Replay-first 193 passed; полный UI 1980 passed (включая три новые
+timeline regressions); после финальной правки CSS и fallback copy целевые 12 passed.
+Result-notices + docs/API/surface/diagram — 34 passed; Assistant language/final-answer
+scope — 25 passed. Всего **2232 уникальных passed**, без повторного подсчёта subset.
+Production build, strict MkDocs и diff-check проходят. JS gzip 643984 → **644989 B**
+(+1005 B); прежний общий JS debt вырос до **11005 B** сверх неизменённого лимита
+633984 B. CSS 59635 → **59577 B**, CSS gate проходит. Другие bundle guards проходят;
+полный CI не заявляется зелёным. [validation.json](assets/72-result-dialogue/validation.json)
+сохраняет границы и [bundles.json](assets/72-result-dialogue/bundles.json) — измерения.
+
+**OPEN.** Автоматическая модельная интерпретация для каждого внутреннего эксперимента
+здесь не введена: чтение feed не запускает оплачиваемый вызов и не создаёт скрытое
+ожидание движка. Внешний агент должен публиковать своё объяснение; встроенный
+Assistant поясняет результат в ответ на обращение. До authored interpretation
+показывается factual fallback. Остальные OPEN §19.17, bundle debt и реальная доставка
+из **worktree LoopLab** в пользовательскую репу сохраняют прежние границы.

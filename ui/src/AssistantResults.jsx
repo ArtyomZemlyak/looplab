@@ -3,15 +3,17 @@ import { get, runApiPath } from './util.js'
 import { useAssistantLanguage } from './useAssistantLanguage.js'
 import { useScopedResource } from './useScopedResource.js'
 import { hashWithRunRouteState } from './runRouteState.js'
-import { resultCaveatText, resultNoticeQuestion, resultNoticeText, validResultNotices } from './resultNoticeModel.js'
+import { resultCaveatText, resultNoticeBrief, resultNoticeQuestion, resultNoticeText, validResultNotices } from './resultNoticeModel.js'
 import './assistant-run-result.css'
+import { resultConversation } from './assistantResultTimeline.js'
 
 // Reset the navigation trail synchronously when the run incarnation changes.
 export default function AssistantResults(props) {
   return <ResultPages key={`${props.runId}:${props.generation}`} {...props} />
 }
 
-function ResultPages({ runId, generation, onOpen, onReady, onAsk, askDisabled, askDisabledReason }) {
+function ResultPages({ runId, generation, onOpen, onReady, onAsk, askDisabled, askDisabledReason,
+    messages, renderMessage }) {
   const [language] = useAssistantLanguage()
   const [cursors, setCursors] = useState([])
   const cursor = cursors.at(-1) || null
@@ -34,33 +36,46 @@ function ResultPages({ runId, generation, onOpen, onReady, onAsk, askDisabled, a
         inspectTab: ['failed', 'aborted'].includes(row.status) ? 'Trace' : 'Metrics' })
     const link = (target, label, key) => <a key={key} className="btn sm ghost" href={target}
       onClick={onOpen ? event => onOpen(event, target) : undefined}>{label}</a>
-    return <article key={row.id} className="asst-result-notice">
-      <div className="asst-run-result-head"><strong>{text.title}</strong>
-        <span className={`asst-result-status ${row.status}`}>{text.stateLabel}</span></div>
+    return <article key={`result:${row.id}`} className="feed-msg chat assistant asst-result-notice">
+      <div className="fm-body">
+      <div className="chat-who">{ru ? 'Ассистент' : 'assistant'} · {text.title}</div>
+      <div className="chat-bubble">
+      {row.commentary ? <p className="asst-result-commentary">{row.commentary}</p>
+        : <p>{resultNoticeBrief(row, language)}</p>}
+      {row.commentary && (row.trust_flagged || row.trust_advisory || row.parent_trust_advisory
+        || row.salvaged || row.feasible === false || row.violations > 0) && <p className="asst-run-result-caution">
+        {ru ? 'Есть ограничения или предупреждения оценки. Проверьте доказательства перед продолжением.'
+          : 'Evaluation caveats or warnings remain. Review the evidence before continuing.'}</p>}
+      {row.kind === 'run' && row.caveats.length > 0 && <p className="asst-run-result-caution">
+        {row.caveats.map(code => resultCaveatText(code, language)).join(' · ')}</p>}
+      <details className="asst-result-evidence"><summary>{ru ? 'Измерения и ограничения' : 'Measurements and caveats'}</summary>
       <p>{text.outcome}</p>
       {text.comparison && <p className="asst-result-comparison"><strong>{ru ? 'Сравнение: ' : 'Comparison: '}</strong>{text.comparison}</p>}
       {text.caution && <p className="asst-run-result-caution"><strong>{ru ? 'Надёжность: ' : 'Reliability: '}</strong>{text.caution}</p>}
       {row.kind === 'run' && row.caveats.length > 0 && <p className="asst-run-result-caution">
         {ru ? 'Ограничения: ' : 'Caveats: '}{row.caveats.map(code => resultCaveatText(code, language)).join(' · ')}</p>}
-      {row.commentary && <div className="asst-result-commentary">
-        <strong>{ru ? 'Внешний агент · интерпретация' : 'External agent · interpretation'}</strong>
-        <p>{row.commentary}</p></div>}
+      {row.commentary && <p className="muted">{ru ? 'Внешний агент · интерпретация' : 'External agent · interpretation'}</p>}
       <p className="asst-result-next"><strong>{ru ? 'Дальше: ' : 'Next: '}</strong>{text.next}</p>
       <div className="asst-run-result-actions">
-        {onAsk && <button className="btn sm ghost" disabled={askDisabled}
-          title={askDisabled ? askDisabledReason : ru ? 'Подготовить вопрос в поле сообщения' : 'Prepare a question in the composer'}
-          onClick={() => onAsk(resultNoticeQuestion(row, language))}>
-          {ru ? row.status === 'failed' ? 'Разобрать ошибку в чате' : row.status === 'aborted' ? 'Разобрать остановку в чате' : 'Объяснить результат в чате'
-            : row.status === 'failed' ? 'Discuss failure in chat' : row.status === 'aborted' ? 'Discuss stop in chat' : 'Explain result in chat'}</button>}
         {link(href, text.actionLabel)}
         {row.kind === 'node' && row.parents.map(parent => link(hashWithRunRouteState(base, {
           generation, nodeId: parent.node_id, nodeGeneration: parent.attempt, inspectTab: 'Metrics',
         }), `${ru ? 'Метрики' : 'Metrics'} #${parent.node_id} · ${ru ? 'попытка' : 'attempt'} ${parent.attempt}`, parent.node_id))}
       </div>
+      </details>
+      {onAsk && <div className="asst-result-followup"><button className="btn sm ghost" disabled={askDisabled}
+          title={askDisabled ? askDisabledReason : ru ? 'Подготовить вопрос в поле сообщения' : 'Prepare a question in the composer'}
+          onClick={() => onAsk(resultNoticeQuestion(row, language))}>
+          {ru ? row.status === 'failed' ? 'Разобрать ошибку' : row.status === 'aborted' ? 'Разобрать остановку' : 'Обсудить следующий шаг'
+            : row.status === 'failed' ? 'Discuss failure' : row.status === 'aborted' ? 'Discuss stop' : 'Discuss next step'}</button></div>}
+      </div></div>
     </article>
   }
   return <section className="asst-result-feed" aria-label={ru ? 'Итоги экспериментов в чате' : 'Experiment results in chat'}>
-    <div className="asst-result-feed-head"><span>{ru ? 'Краткие итоги · без вызова модели' : 'Completion briefs · no model call'}</span></div>
+    {messages && renderMessage ? resultConversation(messages, rows.length > 3 && !cursor ? rows.slice(-3) : rows)
+      .map(item => item.result ? render(item.result) : renderMessage(item.message, item.index))
+      : rows.slice(-3).map(render)}
+    <details className="asst-result-history" open={!!cursor || ['error', 'stale'].includes(resource.status)}><summary>{ru ? 'История итогов' : 'Result history'}</summary>
     <div className="asst-run-result-actions" aria-busy={resource.status === 'loading'}>
       {cursor && <>
         <button className="btn sm ghost" onClick={() => setCursors(current => current.slice(0, -1))}>
@@ -75,9 +90,6 @@ function ResultPages({ runId, generation, onOpen, onReady, onAsk, askDisabled, a
         {cursor ? ru ? 'Предыдущая страница' : 'Earlier page' : ru ? 'Последние итоги' : 'Latest page'}
         {' · '}{rows.length} / {resource.data.total}</span>}
     </div>
-    {onAsk && rows.length > 0 && <p className="muted">
-      {ru ? 'Кнопка подготовит вопрос в поле сообщения. Отправьте его, когда будете готовы.'
-        : 'The button prepares a question in the composer. Send it when you are ready.'}</p>}
     {['error', 'stale'].includes(resource.status) && <p role="status">
       {resource.error === 'cursor_changed'
         ? ru ? 'Записи изменились. Вернитесь к последним итогам.' : 'Results changed. Return to latest results.'
@@ -87,8 +99,8 @@ function ResultPages({ runId, generation, onOpen, onReady, onAsk, askDisabled, a
     {rows.length === 0 && resource.status === 'ready' && <p className="muted">
       {cursor ? ru ? 'Более ранних текущих итогов нет.' : 'No earlier current results.'
         : ru ? 'Итог появится после завершения оценки эксперимента.' : 'A brief appears after an experiment finishes evaluation.'}</p>}
-    {rows.length > 3 && <details open={!!cursor}><summary>{ru ? 'Предыдущие итоги' : 'Earlier results'} · {rows.length - 3}</summary>
+    {rows.length > 3 && (!messages || !cursor) && <details open={!!cursor}><summary>{ru ? 'Предыдущие итоги' : 'Earlier results'} · {rows.length - 3}</summary>
       {rows.slice(0, -3).map(render)}</details>}
-    {rows.slice(-3).map(render)}
+    </details>
   </section>
 }

@@ -2410,14 +2410,14 @@ export default function AssistantBar({ runId, hidden = false, onReady }) {
     const hasCtx = ctxInfo.run || ctxInfo.refs.length || ctxInfo.files.length
     const fullInstruction = instruction + filePreamble(atts)
     const localHistoryLength = msgs.length
-    const localUserTurn = { role: 'user', content: userText || instruction,
+    const localUserTurn = { role: 'user', content: userText || instruction, ts: Date.now() / 1000,
       context: hasCtx ? ctxInfo : null,
       retryPayload: { instruction, raw: fullInstruction.trim(), userText: userText || instruction,
         context, files: atts, mode: effectiveMode, responseLanguage: languageAtSend, historyLength: localHistoryLength },
       localAttempt }
     atBottomRef.current = true          // sending my own message: always scroll it into view
     setMsgs(m => [...m, localUserTurn,
-      { role: 'assistant', content: '', streaming: true, localAttempt }])
+      { role: 'assistant', content: '', streaming: true, localAttempt, ts: localUserTurn.ts }])
     const priorLen = localHistoryLength + 2
     setTurnStarting(false); setBusy(true); runningRef.current = true
     const ctrl = new AbortController(); abortRef.current = ctrl
@@ -3488,6 +3488,27 @@ export default function AssistantBar({ runId, hidden = false, onReady }) {
     // render's closures, and a message with no Retry this render gets none (UI-06, above).
     const retryHandlers = retryHandlersRef.current
     retryHandlers.publish(msgs.map((_, index) => retryHandlerFor(index)))
+    const renderMessage = (m, i) => (<React.Fragment key={`message:${i}`}>
+      {m.role === 'user' && m.context && <div className="asst-ctx-cap" title="context attached to this message">
+        {m.context.run && <span className="asst-ctx-i"><OpIcon name="folder" size={10} /> {m.context.run}</span>}
+        {(m.context.refs || []).map(r => <span key={'r' + r} className="asst-ctx-i">#{r}</span>)}
+        {(m.context.files || []).map(f => <span key={'f' + f} className="asst-ctx-i"><OpIcon name="clip" size={10} /> {f}</span>)}
+      </div>}
+      <Turn m={m} runsById={runsById} language={responseLanguage} readOnly={historical} onRevert={historical ? null : revertChange}
+        onRetry={retryHandlers.face(i)}
+        retryLabel={shareUnknown || shareVerifying
+          ? shareVerifying ? 'Checking status…' : 'Verify status' : 'Retry'}
+        retryBusy={shareVerifying || retryChecking}
+        onOpenSettings={openAssistantSettings} onRunOpen={openRunFromAssistant}
+        launchChat={launchChatThrough(i)}
+        revertState={revertState}
+        launchSessionId={sid} launchMessageId={m.turn_id || m.id} launchMessageIndex={i}
+        launchDrafts={launchDrafts}
+        launchDisclosures={launchDisclosures}
+        onLaunchDraft={retainTurnLaunchDraft}
+        onLaunchDisclosure={retainTurnLaunchDisclosure}
+        onLaunchStarted={settleTurnLaunchStarted} />
+    </React.Fragment>)
     return <>
     {renderWatchStrip()}
     {msgs.length === 0 && <div className={'asst-empty' + (runId && selectedRun?.nodes > 0 ? ' has-results' : '')}>
@@ -3537,31 +3558,11 @@ export default function AssistantBar({ runId, hidden = false, onReady }) {
           }}>{ru ? RUSSIAN_HINTS[h] : h}</button>)}
       </div>}
     </div>}
-    {msgs.map((m, i) => <React.Fragment key={i}>
-      {m.role === 'user' && m.context && <div className="asst-ctx-cap" title="context attached to this message">
-        {m.context.run && <span className="asst-ctx-i"><OpIcon name="folder" size={10} /> {m.context.run}</span>}
-        {(m.context.refs || []).map(r => <span key={'r' + r} className="asst-ctx-i">#{r}</span>)}
-        {(m.context.files || []).map(f => <span key={'f' + f} className="asst-ctx-i"><OpIcon name="clip" size={10} /> {f}</span>)}
-      </div>}
-      <Turn m={m} runsById={runsById} language={responseLanguage} readOnly={historical} onRevert={historical ? null : revertChange}
-        onRetry={retryHandlers.face(i)}
-        retryLabel={shareUnknown || shareVerifying
-          ? shareVerifying ? 'Checking status…' : 'Verify status' : 'Retry'}
-        retryBusy={shareVerifying || retryChecking}
-        onOpenSettings={openAssistantSettings} onRunOpen={openRunFromAssistant}
-        launchChat={launchChatThrough(i)}
-        revertState={revertState}
-        launchSessionId={sid} launchMessageId={m.turn_id || m.id} launchMessageIndex={i}
-        launchDrafts={launchDrafts}
-        launchDisclosures={launchDisclosures}
-        onLaunchDraft={retainTurnLaunchDraft}
-        onLaunchDisclosure={retainTurnLaunchDisclosure}
-        onLaunchStarted={settleTurnLaunchStarted} />
-    </React.Fragment>)}
-    {!historical && !newRunDraft && runId && /^[0-9a-f]{64}$/.test(selectedRun?.generation || '') && <LazyBoundary
+    {!historical && !newRunDraft && runId && /^[0-9a-f]{64}$/.test(selectedRun?.generation || '') ? <LazyBoundary
       key={`notices:${resultScope}`} resetKey={resultScope} language={responseLanguage} focusOnFailure={false}
+      loadingFallback={msgs.map(renderMessage)} failureContent={msgs.map(renderMessage)}
       label={text('Experiment results', 'Итоги экспериментов')}>
-      <AssistantResults runId={runId}
+      <AssistantResults runId={runId} messages={msgs} renderMessage={renderMessage}
         generation={selectedRun.generation} onOpen={openRunFromAssistant} onReady={onResultReady}
         askDisabled={composerEditingPaused || !!input.trim()}
         askDisabledReason={input.trim() ? 'Finish or clear your current draft before preparing a result question'
@@ -3571,7 +3572,7 @@ export default function AssistantBar({ runId, hidden = false, onReady }) {
           setInput(question)
           inputRef.current?.focus()
         }} />
-    </LazyBoundary>}
+    </LazyBoundary> : msgs.map(renderMessage)}
     {showRunResult && <RunResultDisclosure key={resultScope}
       summary={text('Compare selected result and open solution', 'Сравнить результат и открыть решение')}>
       <LazyBoundary resetKey={resultScope} language={responseLanguage} focusOnFailure={false}

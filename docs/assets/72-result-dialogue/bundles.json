@@ -1,0 +1,10 @@
+{
+  "before": {"js_gzip": 643984, "css_gzip": 59635},
+  "after": {"js_raw": 2020631, "js_gzip": 644989, "css_raw": 285875, "css_gzip": 59577},
+  "limits": {"js_gzip": 633984, "css_gzip": 59648},
+  "js_delta": 1005,
+  "css_delta": -58,
+  "remaining_js_excess": 11005,
+  "only_red": "total JS gzip budget",
+  "other_bundle_guards": "passed"
+}

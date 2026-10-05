@@ -25,6 +25,13 @@ evaluation and after finalization. They include the score, confirmation/constrai
 links to the exact experiment. **Language / Язык** beside the composer offers
 **Auto**, **English** and **Русский**, even before the first run. It sets the
 language of new Assistant replies and completion briefs and is saved in this browser.
+Completion results are ordinary Assistant messages in the conversation, placed by their
+recorded completion time between timestamped turns. A current agent interpretation is the
+main text. Until it is available, LoopLab shows a short factual conclusion and next step;
+that fallback does not claim a model analysis. **Measurements and caveats** expands the
+exact evidence and attempt links. Unknown legacy times are not invented; such receipts
+remain after the recorded conversation. **Result history** holds earlier receipts and paging.
+Reading results never calls a model, writes an owner turn, or starts an experiment.
 Auto lets the model follow your message language; generated briefs default to English.
 Russian also translates the main chat controls and prepared result questions.
 Existing model replies and external agent interpretations keep their original text.

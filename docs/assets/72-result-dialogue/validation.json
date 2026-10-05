@@ -1,0 +1,9 @@
+{
+  "baseline_commit": "5cb72dbee7870bf5611c780713888c3dd012a152",
+  "tests": {"replay": 193, "full_ui": 1980, "final_ui_subset": 12, "result_notices_and_docs": 34, "assistant_prompt_and_language": 25, "unique_passed": 2232},
+  "checks": ["production build", "strict MkDocs", "diff-check"],
+  "scenarios": ["timestamped conversation interleaves receipts", "commentary update retains receipt position", "unknown legacy time is not invented", "invalid receipt read withdraws evidence and preserves dialogue", "205 receipt pagination", "import failure preserves composer and transcript", "exact generation and attempt links", "nonempty draft protected", "interpretation stays escaped plain text"],
+  "browser": {"viewport": "1920x1080", "language": "ru", "fixture": "copied measured run with seeded local conversation and interpretation", "observed": ["result between user turns", "interpretation is main message", "evidence disclosure expands", "no console warn/error"], "requests": "GET only", "screenshots": ["01-before.png", "02-after.png", "03-evidence.png"]},
+  "metadata": {"completed_at": "event-derived presentation only, excluded from evidence token", "legacy_missing_time": "no invented chronology"},
+  "limits": ["no live provider conversation", "no new training", "no automatic model-generated interpretation for internal runs", "no full screen-reader compliance claim", "full CI not claimed green", "no LoopLab worktree delivery"]
+}

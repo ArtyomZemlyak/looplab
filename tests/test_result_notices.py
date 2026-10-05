@@ -48,6 +48,7 @@ def test_pending_node_has_no_brief_then_terminal_receipt_is_stable_and_read_only
     first = _read(client, gen)
     assert first.status_code == 200, first.text
     row = first.json()["items"][0]
+    assert row["completed_at"] == store.read_all()[-1].ts
     assert row["status"] == "evaluated" and row["score"] == 0.25
     assert row["confirmed_mean"] is None
     assert first.headers["cache-control"] == "no-store"

@@ -92,11 +92,13 @@ def _receipts(srv, rd: Path, expected_generation: str) -> tuple[str, list[dict]]
     trust_signals = current_trust_signals(state)
     advisory = set(trust_signals) - flagged
     terminal_seq = {}
+    terminal_time = {}
     for event in events:
         if event.type in (EV_NODE_EVALUATED, EV_NODE_FAILED):
             lifecycle = _lifecycle(event)
             if lifecycle is not None:
                 terminal_seq.setdefault(lifecycle, event.seq)
+                terminal_time.setdefault(lifecycle, event.ts)
     rows = []
     for node in state.nodes.values():
         if node.tombstoned or node.status not in ("evaluated", "failed"):
@@ -132,6 +134,8 @@ def _receipts(srv, rd: Path, expected_generation: str) -> tuple[str, list[dict]]
             "parents": [_measurement(state.nodes[p["node_id"]]) for p in parents],
             "trust": {"mode": state.trust_gate, "node": trust_signals.get(node.id, []),
                       "parents": [trust_signals.get(p["node_id"], []) for p in parents]}})
+        # Presentation metadata must not invalidate existing commentary/retry identities.
+        row["completed_at"] = terminal_time.get((node.id, node.attempt))
         rows.append(row)
     rows.sort(key=lambda row: (row["completed_seq"], row["node_id"], row["attempt"]))
     # A trainer exit / stop request / finalization in progress is not a run result.
@@ -153,6 +157,8 @@ def _receipts(srv, rd: Path, expected_generation: str) -> tuple[str, list[dict]]
                "trust_advisory": best.id in advisory if best else False,
                "caveats": champion_metric_caveats(state), "evidence_revision": evidence_revision(state)}
         row["evidence_token"] = _digest({"receipt": row, "nodes": [r["evidence_token"] for r in rows]})
+        row["completed_at"] = next((e.ts for e in reversed(events)
+                                    if e.type in ("finalization_finished", "run_finished")), None)
         rows.append(row)
     return generation, rows
 
