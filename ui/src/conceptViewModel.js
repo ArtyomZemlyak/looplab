@@ -11,11 +11,13 @@ export const CONCEPT_COLUMNS = [
   { key: 'evaluated', label: 'eval' },
   { key: 'best', label: 'best' },
   { key: 'mean', label: 'mean' },
-  { key: 'delta_best', label: '\u0394 best', delta: true },
-  { key: 'delta_mean', label: '\u0394 mean', delta: true },
+  { key: 'effect_delta', label: 'with / without', delta: true },
+  { key: 'effect_pairs', label: 'matched pairs' },
+  { key: 'delta_best', label: 'best − run median', delta: true },
+  { key: 'delta_mean', label: 'mean − run median', delta: true },
   { key: 'first_touch', label: 'first@' },
 ]
-export const DEFAULT_COLUMNS = ['touched', 'best', 'delta_best']
+export const DEFAULT_COLUMNS = ['touched', 'best', 'effect_delta']
 
 // `co_occurs` is materialized from the CURRENT membership projection, while the other
 // relationship edges are persisted claims. Use neutral "projected" wording for the shared edge view

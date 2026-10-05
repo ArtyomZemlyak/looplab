@@ -394,7 +394,7 @@ test('ConceptView fences, retries and preserves truthful last-good resource stat
     const metricContext = document.getElementById('concept-metric-context')
     assert.equal(metricContext?.getAttribute('role'), 'note')
     assert.match(metricContext?.textContent,
-      /Primary objective metric.*Unnamed metric.*unit not recorded.*maximize.*Δ columns.*orientation-normalized.*positive values mean better/is)
+      /Primary objective metric.*Unnamed metric.*unit not recorded.*maximize.*With \/ without.*positive means better.*descriptive.*not concept contribution/is)
     assert.match(hierarchyView?.getAttribute('aria-describedby') || '', /concept-metric-context/)
     assert.equal(document.getElementById('concept-relationship-legend'), null,
       'the hierarchy must not describe arbitrary relationship-parent semantics')
@@ -403,7 +403,7 @@ test('ConceptView fences, retries and preserves truthful last-good resource stat
     await render()
     await reply(requests.at(-1), conceptPayload('loss/a', { direction: 'min' }))
     assert.match(document.getElementById('concept-metric-context')?.textContent,
-      /unit not recorded.*minimize.*positive values mean better/is,
+      /unit not recorded.*minimize.*positive means better/is,
       'the persistent metric context names minimize without reversing normalized delta semantics')
     state = { ...state, direction: 'max' }
     await render()

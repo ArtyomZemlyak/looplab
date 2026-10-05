@@ -818,6 +818,9 @@ class LessonMemory(LessonPriorsMixin, LessonDistillMixin, LessonReconcileMixin,
                 not concepts and evidence_nodes_incomplete == 0
                 and (not classifier_observed or evidence_nodes_total == 0))
             best = final.best()
+            from looplab.search.concept_effects import concept_effects
+            effects = (concept_effects(final, outcomes, classifier_only=True)
+                       if getattr(final, "objective_key", None) is None else {})
             capsule = build_concept_capsule(
                 run_id=run_id, run_uid=getattr(final, "run_uid", ""),
                 task_id=final.task_id, direction=direction,
@@ -826,6 +829,7 @@ class LessonMemory(LessonPriorsMixin, LessonDistillMixin, LessonReconcileMixin,
                 best_metric=(task_scale_metric(best, getattr(final, "objective_key", None))
                              if best is not None else None),
                 concept_outcomes=outcomes,
+                concept_effects=effects,
                 concept_evidence_nodes_total=evidence_nodes_total,
                 concept_evidence_nodes_incomplete=evidence_nodes_incomplete,
                 concept_evidence_observed=classifier_observed)

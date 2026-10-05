@@ -46,7 +46,9 @@ def test_concept_rollup_keys_whole_ids_where_theme_rollup_keys_axes():
     assert set(concept_rollup(state)) == {
         "loss/contrastive/in-batch", "loss/contrastive/dcl", "retrieval/dense"}
     # the metric follows the run's direction, per-concept
-    assert concept_rollup(state)["retrieval/dense"] == {"count": 1, "best_metric": 0.5}
+    row = concept_rollup(state)["retrieval/dense"]
+    assert (row["count"], row["best_metric"]) == (1, 0.5)
+    assert row["effect"]["estimate"] is None
     assert concept_rollup(state)["loss/contrastive/in-batch"]["count"] == 1
 
 
@@ -289,7 +291,10 @@ def test_memory_endpoint_inherits_concepts_from_a_real_tagged_run(tmp_path, monk
     assert client.put("/api/settings", json={"settings": {"memory_dir": str(memory)}}).status_code == 200
 
     summaries = client.get("/api/runs").json()
-    assert summaries[0]["concepts"] == {"retrieval/dense": {"count": 1, "best_metric": 1.0}}
+    assert set(summaries[0]["concepts"]) == {"retrieval/dense"}
+    row = summaries[0]["concepts"]["retrieval/dense"]
+    assert (row["count"], row["best_metric"]) == (1, 1.0)
+    assert row["effect"]["estimate"] is None
 
     body = client.get("/api/memory").json()
     lesson = body["lessons"][0]

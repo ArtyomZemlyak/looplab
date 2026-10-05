@@ -9,6 +9,7 @@ import {
 import { conceptMemory, conceptMemoryNotice } from './conceptMemoryModel.js'
 import { get } from './api.js'
 import './portfolio-concepts.css'
+import ConceptEffect from './ConceptEffect.jsx'
 
 // The GLOBAL concept view — the run list's `Concepts` representation, beside List / Lineage / Compare.
 //
@@ -165,6 +166,12 @@ export function ConceptDetail({ forest, cooccurrence, id, runsById, onOpenRun, o
           + (node.best.objective ? ` · ranked by ${node.best.objective}` : '')}</small>}
       </div>
     </dl>
+    <section aria-label={uiText('Concept contribution')}>
+      <h4>{uiText('Concept contribution · with / without')}</h4>
+      <p className="muted">{uiText('Within each run, compare experiments with and without this concept while matching the remaining concepts and evaluation conditions. Effects from different objectives are not averaged.')}</p>
+      {shown.map(runId => <div key={runId}><code>{runId}</code>{' · '}
+        <ConceptEffect effect={node.effects?.get(runId)} /></div>)}
+    </section>
     {!node.best && <p className="muted pc-fact-warning">{uiText("The runs do not share one task and objective direction, or none scored. A single metric would compare different objectives.")}</p>}
     <details className="pc-method">
       <summary>{uiText("How these counts are defined")}</summary>

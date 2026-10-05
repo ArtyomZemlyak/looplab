@@ -802,11 +802,16 @@ class RunTools:
             return f"(no experiments tagged '{target}')"
         prefix = (self._projection_note(projection) + "; available strict subset follows\n"
                   if projection.status == "partial" else "")
+        from looplab.search.concept_effects import concept_effects
+        effect = concept_effects(st, [target], subtree=True)[target]
+        effect_note = (f"Matched with/without concept effect: {effect['estimate']}; "
+                   f"pairs={effect['n_pairs']}, contexts={effect['n_contexts']}; "
+                   f"{effect['reason']}. Observational, not a proven ablation.\n")
         visible = hits[:60]
         while visible:
             omitted = len(hits) - len(visible)
             suffix = (f"\n… (+{omitted} more experiment(s), not shown)" if omitted else "")
-            rendered = (prefix + f"{len(hits)} experiment(s) under '{target}':\n"
+            rendered = (prefix + f"{len(hits)} experiment(s) under '{target}':\n" + effect_note
                         + "\n".join(visible) + suffix)
             if len(rendered) <= self.max_chars:
                 return rendered

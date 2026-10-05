@@ -2170,7 +2170,24 @@ persisted `co_occurs` cache rows are ignored. A hierarchy is then **computed** b
   carries** (never divided). Current rollups and the median baseline exclude tombstoned/aborted lifecycle
   rows; best/mean eligibility also requires an evaluated, finite metric that is not explicitly infeasible.
   `delta_*` is direction-normalized vs that median, so positive means better for both minimize and maximize
-  runs. See `looplab/search/concept_analytics.py`.
+  runs. These offsets are **descriptive associations, not concept contribution**.
+  The default contribution column uses `effect` / `effect_delta` / `effect_pairs` from the
+  shared `concept_effects` estimator. It compares eligible experiments **with vs without**
+  the concept, matching the complete remaining concept set and compatible recorded evaluation
+  conditions. Single-parent contrasts take priority; each node is used once per concept.
+  Search and confirmed means never mix; confirmation requires its recorded ruler. Missing,
+  partial or untrusted membership is not evidence of absence. Unknown/incompatible conditions,
+  missing controls and bounded-work exhaustion produce **unknown**, never zero contribution.
+  The estimate is the median of equally weighted context means, with pair count, context count,
+  observed range, sign counts and bounded attempt-bound pair evidence. The range is **not a
+  confidence interval**. Tags cannot establish that code/parameters stayed constant: these are
+  observational contrasts, not proven causal ablations. Different evaluation cohorts are not pooled.
+  Subtrees compare union presence of descendants, not summed leaf effects. Run views, global concept
+  details, CLI diagnostics and `concept_nodes` share the calculation. New classifier-bound capsules
+  preserve it for cross-run agents; old median-rank signs no longer count as helped/hurt effects.
+  Cross-run aliases collapsing several techniques invalidate their separate contribution receipts.
+  Raw effects from different runs/objectives are not averaged. See
+  `looplab/search/concept_analytics.py` and `looplab/search/concept_effects.py`.
 - `node_concept_delta(state, node_id)` — one node's concepts as a **delta vs its parent(s)**:
   `{parent_ids, added, removed, inherited}` (a merge inherits from the UNION of parents; a root's concepts
   are all `added` for legacy full authoring, while a delta-authored root inherits the run base). This is a

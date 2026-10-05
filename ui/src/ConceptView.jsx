@@ -17,6 +17,8 @@ import { Marked } from './Highlight.jsx'
 import { nodeTheme } from './conceptId.js'
 import { nodeIsActive } from './nodeProjection.js'
 import { conceptRefInspectable } from './conceptInspect.js'
+import ConceptEffect from './ConceptEffect.jsx'
+import { validConceptEffect } from './conceptEffect.js'
 import './concept-state-polish.css'
 
 const TIMEOUT_MS = 12_000
@@ -233,6 +235,7 @@ export function validateConceptPayload(value, expected = {}) {
         || metricRows[id].evaluated > metricRows[id].touched
         || !(metricRows[id].first_touch === null || count(metricRows[id].first_touch))
         || !fields(metricRows[id], METRIC_FIELDS, metric)
+        || (Object.hasOwn(metricRows[id], 'effect') && !validConceptEffect(metricRows[id].effect))
         || metricRows[id].touched !== refs.length) invalidPayload()
     const lifecycle = new Set()
     let evaluated = 0
@@ -371,6 +374,7 @@ export function conceptProjectionKey(state) {
   const nodes = entries(state?.nodes).map(([key, node]) => [
     key, node?.id, node?.attempt, node?.status, node?.metric, node?.confirmed_mean,
     node?.feasible, !!node?.idea, !!node?.tombstoned,
+    node?.parent_ids, node?.metric_provenance?.comparability,
   ])
   const edges = entries(state?.concept_edges).map(([key, edge]) => [
     key, edge?.src, edge?.rel, edge?.dst, edge?.confidence,
@@ -380,7 +384,9 @@ export function conceptProjectionKey(state) {
   // not incidental state; omitting them leaves a stale "complete" frame on screen indefinitely.
   const materializationReceipts = entries(state?.node_concept_materialization_receipts)
     .map(([key, receipt]) => [key, receiptKey(receipt)])
-  return JSON.stringify([state?.direction || 'max', state?.best_node_id ?? null,
+  // Some measurement rulers are fold-internal. An event-prefix change must refresh their
+  // effects even when the public scalar metric stayed identical. Liveness ticks keep seq stable.
+  return JSON.stringify([state?.seq, state?.direction || 'max', state?.best_node_id ?? null,
     entries(state?.node_concepts), entries(state?.node_concept_provenance),
     materializationReceipts, receiptKey(state?.run_base_concept_receipt),
     entries(state?.concept_consolidation), edges, nodes, state?.aborted_nodes || []])
@@ -678,8 +684,8 @@ export default function ConceptView({ runId, generation, sequence: displayedSequ
   ].join(' ') : undefined
   const metricOrientation = data?.metrics?.direction === 'min' ? 'minimize' : 'maximize'
   const metricContext = data && <div id="concept-metric-context"
-    className="cv-resource-note metric-context" role="note">{uiText("Primary objective metric · Unnamed metric · unit not recorded · ")}{metricOrientation}.
-    {' '}{uiText("Δ columns are orientation-normalized; positive values mean better.")}</div>
+    className="cv-resource-note metric-context" role="note">{uiText("Primary objective metric · Unnamed metric · unit not recorded · ")}{uiText(metricOrientation)}.
+    {' '}{uiText('With / without estimates compare matched experiments; positive means better. Best and mean offsets from the run median are descriptive, not concept contribution.')}</div>
   const relationshipLegend = edgeProjection && <div id="concept-relationship-legend"
     className="cv-resource-note relationship-legend" role="note">{uiText("Relationship view · ")}{relationshipCopy.linkDescription}.
     {relationshipCopy.derivationNote && <> {relationshipCopy.derivationNote}</>}
@@ -1465,8 +1471,10 @@ export default function ConceptView({ runId, generation, sequence: displayedSequ
               {experiments.length}{uiText(" refs")}</button>}
           </td>{cols.map(column => {
             const value = metricRows[id]?.[column.key]
-            const tone = column.delta ? deltaTone(value) : ''
-            return <td key={column.key} className={'cv-num' + (tone ? ` d-${tone}` : '')}>{fmtCell(value)}</td>
+            const tone = column.delta && column.key !== 'effect_delta' ? deltaTone(value) : ''
+            return <td key={column.key} className={'cv-num' + (tone ? ` d-${tone}` : '')}>
+              {column.key === 'effect_delta' ? <ConceptEffect effect={metricRows[id]?.effect} /> : fmtCell(value)}
+            </td>
           })}</tr>
           {/* Render the frame's generation-bound refs, never a live-state join that can
               attach historical concepts to a replaced node with the same numeric id. */}

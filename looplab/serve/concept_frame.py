@@ -555,6 +555,15 @@ def build_core(state, *, run_id: str, lens_pack: list[dict],
             provenance_counts[provenance] = provenance_counts.get(provenance, 0) + 1
             reference_count += 1
 
+    # A bounded/invalid membership frame cannot certify concept absence. Clear every effect
+    # receipt rather than preserving a numerical claim computed from a truncated tag projection.
+    if reasons:
+        from looplab.search.concept_effects import empty_effect
+        for bucket in ("rows", "rollup"):
+            for row in metrics[bucket].values():
+                row.update(effect=empty_effect("frame_incomplete", status="unavailable"),
+                           effect_delta=None, effect_pairs=0)
+
     # The RUN-level half of the memberships this frame publishes (2026-08-17). ONE rule, in
     # `search/concept_lens.py`, computed over the folded state — but the frame may only PUBLISH it when
     # the frame is exact and self-consistent: a bounded projection that dropped a membership row or an

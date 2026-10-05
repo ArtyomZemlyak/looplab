@@ -237,7 +237,7 @@ def build_context_pack(claims: list[dict], *, concept_overview: Optional[dict] =
                       else concept_overview.get("concepts"))
         rows = [e for e in (row_source or []) if isinstance(e, dict)]
         source_complete = concept_overview.get("source_complete") is True
-        # PART V Phase 1 profit signal: surface concepts with a CONSISTENT, MULTI-RUN rank tendency (advisory
+        # Surface concepts with a CONSISTENT, MULTI-RUN matched effect tendency (advisory
         # only — prompts, never selection). The threshold lives in ONE shared helper so the context pack and
         # the cross_run_atlas tool can never diverge; a concept with mixed/thin evidence appears in neither.
         # consistency also needs a complete denominator. A non-matching partial capsule may
@@ -860,9 +860,9 @@ def render_context_pack(pack: dict) -> str:
             # concept slugs are persisted, LLM-originated data. Keep the explicit trust
             # marker on rank tendencies just as on the coverage line and the sibling cross-run tool;
             # repr quoting alone does not tell a proposing model that the span is inert memory.
-            parts = ([f"tended to RANK BETTER UNTRUSTED_MEMORY={helps}"] if helps else []) + (
-                [f"tended to RANK WORSE UNTRUSTED_MEMORY={hurts}"] if hurts else [])
-            lines.append("Cross-run concept rank tendency (better/worse half of each run vs its sibling "
-                         "concepts; advisory, NOT a rule — consider toward the first, scrutinize the "
+            parts = ([f"matched contrast BETTER UNTRUSTED_MEMORY={helps}"] if helps else []) + (
+                [f"matched contrast WORSE UNTRUSTED_MEMORY={hurts}"] if hurts else [])
+            lines.append("Cross-run concept matched effect tendency (with/without in compatible contexts; "
+                         "observational, NOT a rule — consider toward the first, scrutinize the "
                          "second): " + "; ".join(parts) + ".")
     return "\n".join(lines)

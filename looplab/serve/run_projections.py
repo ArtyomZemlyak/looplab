@@ -325,6 +325,11 @@ def _run_row(srv, rd, fence_names: set, *, cache_key: str):
             "created": (first_ts if first_ts > 0 else stt.st_ctime),  # "started" date
         }
         srv.summary_cache[cache_key] = (sig, summary)
+        if summary["source_integrity"].get("complete") is not True:
+            from looplab.search.concept_effects import empty_effect
+            for row in summary["concepts"].values():
+                row["effect"] = empty_effect("event_source_incomplete", status="unavailable")
+                row["subtree_effects"] = {}
         return summary
     except Exception:  # noqa: BLE001 - a half-written run shouldn't break the list
         return None

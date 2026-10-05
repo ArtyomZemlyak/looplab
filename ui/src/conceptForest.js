@@ -25,6 +25,7 @@ import { metricComparable, runObjective } from './runIndex.js'
 import { UNTAGGED } from './conceptShelf.js'
 
 export { UNTAGGED }
+import { validConceptEffect } from './conceptEffect.js'
 
 // Bounds. `normalizeConceptId` already caps one id at 12 segments / 256 chars, and the server caps a
 // run at `MAX_ROLLUP_CONCEPTS = 64` ids, so a 500-run page tops out around 32k ids. These are the
@@ -54,17 +55,19 @@ export function applyConceptPolicy(runs = [], policy = null) {
   const governed = source.map(run => {
     if (!isRecord(run) || !isRecord(run.concepts)) return run
     const concepts = conceptMap()
+    let effectsChanged = false
     for (const [rawId, rawValue] of Object.entries(run.concepts)) {
       const id = normalizeConceptId(rawId)
-      if (!id) { invalidTargets += 1; continue }
+      if (!id) { invalidTargets += 1; effectsChanged = true; continue }
       let target = id
       if (splitSources.has(id)) unappliedSplits += 1
       else if (Object.prototype.hasOwnProperty.call(policy.canonical, id)) {
-        if (policy.canonical[id] == null) continue
+        if (policy.canonical[id] == null) { effectsChanged = true; continue }
         target = normalizeConceptId(policy.canonical[id])
-        if (!target) { invalidTargets += 1; continue }
+        if (!target) { invalidTargets += 1; effectsChanged = true; continue }
       }
       const value = isRecord(rawValue) ? rawValue : {}
+      if (target !== id || splitSources.has(id) || concepts[target]) effectsChanged = true
       const previous = concepts[target]
       if (!previous) concepts[target] = { ...value }
       else {
@@ -79,7 +82,7 @@ export function applyConceptPolicy(runs = [], policy = null) {
         }
       }
     }
-    return { ...run, concepts }
+    return { ...run, concepts, ...(effectsChanged ? { concept_effects_invalidated: true } : {}) }
   })
   const omitted = Number(policy.canonical_omitted || 0) + Number(policy.split_sources_omitted || 0)
   const capsuleCoverageKnown = Array.isArray(policy.capsule_run_ids)
@@ -113,7 +116,9 @@ export function runConceptEntries(run) {
     // Two spellings can canonicalize to one id (`Loss/Contrastive` and `loss/contrastive`). Merging
     // them by SUMMING counts is the only reading that keeps "experiments tagged here" true.
     const current = byId[id]
-    if (!current) byId[id] = { id, count, bestMetric }
+    if (!current) byId[id] = { id, count, bestMetric,
+      ...(value.effect ? { effect: value.effect } : {}),
+      ...(value.subtree_effects ? { subtreeEffects: value.subtree_effects } : {}) }
     else {
       current.count += count
       if (bestMetric != null) current.bestMetric = current.bestMetric == null
@@ -175,7 +180,7 @@ export function buildConceptForest(runs = [], { runsById = null } = {}) {
       // run id -> that run's best metric anywhere in this subtree. A Map keyed by run id is what
       // makes `runs` a DISTINCT count rather than a sum that double-counts a run tagging `a/b` and
       // `a/c` under `a`.
-      contributors: new Map(), runIds: [], runs: 0, best: null,
+      contributors: new Map(), runIds: [], runs: 0, best: null, effects: new Map(),
     }
     if (parent) {
       const above = ensure(parent)
@@ -199,6 +204,9 @@ export function buildConceptForest(runs = [], { runsById = null } = {}) {
       // ever tagged `loss/contrastive/in-batch`, or the hierarchy is decoration (the rule
       // `conceptShelf.js::rowMatchesConcept` states for memory rows).
       for (let cursor = node; cursor; cursor = cursor.parent ? nodes[cursor.parent] : null) {
+        const effect = entry.subtreeEffects?.[cursor.id]
+        if (run.source_integrity?.complete === true && !run.concept_effects_invalidated
+          && validConceptEffect(effect)) cursor.effects.set(run.run_id, effect)
         const seen = cursor.contributors.get(run.run_id)
         cursor.contributors.set(run.run_id, seen === undefined || seen == null
           ? entry.bestMetric

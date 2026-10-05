@@ -28,7 +28,7 @@ def _lesson(statement, outcome, evidence, *, run_id="r1", role="", direction="ma
 
 
 def _cap(run_id, concepts, outcomes):
-    from looplab.engine.memory import build_concept_capsule
+    from tests._concept_effect_fixtures import capsule_with_contrasts as build_concept_capsule
     return build_concept_capsule(run_id=run_id, fingerprint=["kind:dataset"], direction="max",
                                  concepts=concepts, concept_outcomes=outcomes)
 
@@ -163,9 +163,9 @@ def test_atlas_reports_direction_normalized_profit_tendency(tmp_path):
              {"loss/win": 0.8, "loss/mid": 0.5, "loss/lose": 0.2}),
     ])
     out = CrossRunTools(tmp_path).execute("cross_run_atlas", {})
-    assert "rank tendency" in out and "not a rule" in out
-    assert "RANK BETTER" in out and "loss/win" in out
-    assert "RANK WORSE" in out and "loss/lose" in out
+    assert "matched effect tendency" in out and "not a rule" in out
+    assert "contrast BETTER" in out and "loss/win" in out
+    assert "contrast WORSE" in out and "loss/lose" in out
 
 
 def test_atlas_withholds_rank_tendency_when_nonmatching_legacy_capsule_is_unknown(tmp_path):
@@ -185,8 +185,8 @@ def test_atlas_withholds_rank_tendency_when_nonmatching_legacy_capsule_is_unknow
     out = CrossRunTools(tmp_path).execute("cross_run_atlas", {})
 
     assert "WARNING: PARTIAL capsule source" in out
-    assert "rank tendency" not in out
-    assert "RANK BETTER" not in out and "RANK WORSE" not in out
+    assert "matched effect tendency" not in out
+    assert "contrast BETTER" not in out and "contrast WORSE" not in out
 
 
 def test_atlas_rank_tendency_uses_full_overview_not_explored_display_cap(tmp_path):
@@ -202,7 +202,7 @@ def test_atlas_rank_tendency_uses_full_overview_not_explored_display_cap(tmp_pat
 
     # All nine concepts tie on n_runs, so z-hidden is outside atlas['explored'][:8]. The context-pack
     # tendency is computed before that display cap and must remain the common source for this tool.
-    assert "RANK BETTER" in out and "axis/z-hidden" in out
+    assert "contrast BETTER" in out and "axis/z-hidden" in out
 
 
 def test_atlas_tool_discloses_each_bounded_projection_section(tmp_path):
@@ -539,7 +539,7 @@ def test_bound_keeps_same_task_even_without_goal_overlap(tmp_path):
 
 
 def _cap_scoped(run_id, task_id, concepts, fingerprint, *, direction="max"):
-    from looplab.engine.memory import build_concept_capsule
+    from tests._concept_effect_fixtures import capsule_with_contrasts as build_concept_capsule
     return build_concept_capsule(run_id=run_id, task_id=task_id, fingerprint=fingerprint,
                                  direction=direction,
                                  concepts=concepts, concept_outcomes={c: 0.9 for c in concepts})
@@ -685,7 +685,8 @@ def test_cross_run_claims_scopes_D8_research_to_bound_task(tmp_path):
 def test_prior_attempts_honors_concept_splits(tmp_path):
     # mega-review regression: cross_run_prior_attempts must apply operator SPLITS like every other consumer.
     from looplab.engine.concept_registry import record_concept_split
-    from looplab.engine.memory import build_concept_capsule, ConceptCapsuleStore
+    from looplab.engine.memory import ConceptCapsuleStore
+    from tests._concept_effect_fixtures import capsule_with_contrasts as build_concept_capsule
     s = ConceptCapsuleStore(tmp_path / "concept_capsules.jsonl")
     s.add(build_concept_capsule(run_id="r1", fingerprint=["k"], direction="max",
                                 concepts=["data/aug", "loss/hard-margin"], concept_outcomes={}))
@@ -1138,7 +1139,8 @@ def test_concept_card_decodes_and_reports_cross_run_track_record(tmp_path):
                     fingerprint=["kind:dataset"]),
     ])
     # give r-drop the winning outcome in both runs so its within-run sign is +1
-    from looplab.engine.memory import ConceptCapsuleStore, build_concept_capsule
+    from looplab.engine.memory import ConceptCapsuleStore
+    from tests._concept_effect_fixtures import capsule_with_contrasts as build_concept_capsule
     store = ConceptCapsuleStore(tmp_path / "concept_capsules.jsonl")
     for rid, extra in (("a", "data/small"), ("b", "arch/wide")):
         store.add(build_concept_capsule(
@@ -1149,7 +1151,7 @@ def test_concept_card_decodes_and_reports_cross_run_track_record(tmp_path):
     out = _bind(CrossRunTools(tmp_path)).execute("concept_card", {"slug": "regularization/r-drop"})
     assert "CONCEPT CARD: UNTRUSTED_MEMORY_CONCEPT='regularization/r-drop'" in out
     assert "axis='regularization'" in out and "name='r-drop'" in out
-    assert "track record (your task family): 2 run(s)" in out and "ranked better 2" in out
+    assert "track record (your task family): 2 run(s)" in out and "matched better 2" in out
     assert "globally used in 2 prior run(s)" in out
     assert "consistently RANKED BETTER" in out
     # co-occurrence: r-drop appears with loss/plain in BOTH runs
@@ -1162,7 +1164,7 @@ def test_concept_card_decodes_and_reports_cross_run_track_record(tmp_path):
 
 
 def test_concept_card_does_not_claim_complete_denominators_from_matching_rows_only(tmp_path):
-    from looplab.engine.memory import build_concept_capsule
+    from tests._concept_effect_fixtures import capsule_with_contrasts as build_concept_capsule
 
     complete = [
         build_concept_capsule(
@@ -1294,7 +1296,7 @@ def test_concept_card_sanitizes_untrusted_slug_and_rejects_bad_args(tmp_path):
 
 
 def test_concept_card_tendency_uses_only_the_bound_task_family(tmp_path):
-    from looplab.engine.memory import build_concept_capsule
+    from tests._concept_effect_fixtures import capsule_with_contrasts as build_concept_capsule
 
     capsules = []
     for rid in ("local-a", "local-b"):
@@ -1311,7 +1313,7 @@ def test_concept_card_tendency_uses_only_the_bound_task_family(tmp_path):
 
     out = _bind(CrossRunTools(tmp_path)).execute(
         "concept_card", {"slug": "regularization/r-drop"})
-    assert "ranked better 2" in out and "ranked worse 0" in out
+    assert "matched better 2" in out and "matched worse 0" in out
     assert "consistently RANKED BETTER" in out
     assert "consistently RANKED WORSE" not in out
     assert "globally used in 5 prior run(s)" in out
@@ -1319,7 +1321,7 @@ def test_concept_card_tendency_uses_only_the_bound_task_family(tmp_path):
 
 def test_concept_card_counts_a_known_slug_beyond_the_overview_display_cap(tmp_path, monkeypatch):
     import looplab.engine.memory as memory
-    from looplab.engine.memory import build_concept_capsule
+    from tests._concept_effect_fixtures import capsule_with_contrasts as build_concept_capsule
 
     # Lower the display cap to make the exact-key failure small while retaining a >512-concept portfolio.
     # The target ties its 255 matching-capsule siblings and sorts after them, so a public-row lookup misses.
@@ -1500,7 +1502,7 @@ def test_a_different_run_that_shares_this_runs_name_is_not_excluded_as_self(tmp_
     directory) vanished from all three. Written raw so the three rows survive as three runs."""
     from types import SimpleNamespace
 
-    from looplab.engine.memory import build_concept_capsule
+    from tests._concept_effect_fixtures import capsule_with_contrasts as build_concept_capsule
 
     def cap(run_uid, concepts):
         return build_concept_capsule(run_id="run_local", run_uid=run_uid, task_id="t",

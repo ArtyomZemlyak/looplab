@@ -24,7 +24,7 @@ from looplab.core.models import RunState
 # the suite still uses (`tests/test_retro_tag_persist.py` forces a CAS race through it). Same
 # hazard CLAUDE.md records for `serve/scope_actions.py` importing store names by value. Types and
 # the pure `_normalize_concept_id` wrapper are exempt: nothing patches those.
-from looplab.search import concept_tagging
+from looplab.search import concept_tagging, concept_effects
 from looplab.search.concept_graph import ConceptGraph
 
 
@@ -243,7 +243,16 @@ def concept_metrics(state: RunState, graph: ConceptGraph,
                 r["delta_mean"] = round(sign * (mean - baseline), 6)
         rollup[cid] = r
 
+    # Legacy delta_* fields remain descriptive offsets, NOT attribution. All effect consumers
+    # use the same evidence-bound with/without estimator, including path-subtree union semantics.
+    for bucket, subtree in ((rows, False), (rollup, True)):
+        effects = concept_effects.concept_effects(state, bucket, subtree=subtree)
+        for cid, row in bucket.items():
+            row["effect"] = effects[cid]
+            row["effect_delta"] = effects[cid]["estimate"]
+            row["effect_pairs"] = effects[cid]["n_pairs"]
     return {"baseline": None if baseline is None else round(baseline, 6),
+            "delta_semantics": "descriptive_run_median_offset",
             "direction": direction, "rows": rows, "rollup": rollup}
 
 
@@ -302,6 +311,12 @@ def concept_report(state: RunState, graph: ConceptGraph,
         lines.append("  per-axis touch: "
                      + ", ".join(f"{ax}={c}" for ax, c in cov["axis_touch"].items()))
     alarm = uncovered_regions(state, graph, tags)
+    metrics = concept_metrics(state, graph, tags)
+    lines.append("  concept effects: matched with/without contrasts; observational, not causal")
+    for cid, row in metrics["rows"].items():
+        effect = row["effect"]
+        lines.append(f"    {cid}: effect={effect['estimate']} pairs={effect['n_pairs']} "
+                     f"contexts={effect['n_contexts']} ({effect['reason']})")
     lines.append("")
     if alarm["fired"]:
         lines.append("  ⚠ UNCOVERED-REGION ALARM")

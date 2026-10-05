@@ -217,7 +217,7 @@ def test_portfolio_overview_net_combines_opposite_signs_on_canonical_collapse():
     # alias loss/a and loss/b -> loss/x (both landed in the better half -> net helped)
     aliases = {"loss/a": "loss/x", "loss/b": "loss/x"}
     rows = {e["concept"]: e for e in portfolio_concept_overview(caps, aliases=aliases)["concepts"]}
-    assert "loss/x" in rows and rows["loss/x"]["n_helped"] == 1 and rows["loss/x"]["n_hurt"] == 0
+    assert "loss/x" in rows and rows["loss/x"]["n_helped"] == 0 and rows["loss/x"]["n_hurt"] == 0
 
 
 # The three `portfolio_concept_graph` tests that stood here moved to `tests/test_concept_map.py`
@@ -227,7 +227,7 @@ def test_portfolio_overview_net_combines_opposite_signs_on_canonical_collapse():
 # argument, which is why its tests no longer belong in a capsule file.
 
 
-def test_portfolio_overview_rolls_up_help_hurt_counts_across_runs():
+def test_legacy_rank_signs_do_not_claim_with_without_contribution():
     from looplab.engine.memory import portfolio_concept_overview
     caps = [
         build_concept_capsule(run_id="r1", fingerprint=["k"], direction="max",
@@ -238,9 +238,9 @@ def test_portfolio_overview_rolls_up_help_hurt_counts_across_runs():
                               concept_outcomes={"loss/a": 0.8, "loss/b": 0.5, "loss/c": 0.2}),
     ]
     rows = {e["concept"]: e for e in portfolio_concept_overview(caps)["concepts"]}
-    assert rows["loss/a"]["n_helped"] == 2 and rows["loss/a"]["n_hurt"] == 0     # consistent helper
-    assert rows["loss/c"]["n_hurt"] == 2 and rows["loss/c"]["n_helped"] == 0     # consistent hurter
-    assert rows["loss/b"]["n_neutral"] == 2                                      # always the median
+    assert rows["loss/a"]["n_helped"] == 0 and rows["loss/a"]["n_hurt"] == 0     # legacy rank is not contribution
+    assert rows["loss/c"]["n_hurt"] == 0 and rows["loss/c"]["n_helped"] == 0     # legacy rank is not contribution
+    assert rows["loss/b"]["n_neutral"] == 0                                      # missing contrast is not zero effect
 
 
 def test_context_pack_surfaces_consistent_help_hurt_tendency_advisory_only():
@@ -254,9 +254,9 @@ def test_context_pack_surfaces_consistent_help_hurt_tendency_advisory_only():
     # E3: helps/hurts carry the run count (n_helped/n_hurt) so the tendency's strength is visible.
     assert pack["coverage"]["helps"] == ["loss/a (n=2)"] and pack["coverage"]["hurts"] == ["loss/c (n=2)"]
     text = render_context_pack(pack)
-    assert "RANK BETTER" in text and "loss/a" in text
-    assert "RANK WORSE" in text and "loss/c" in text
-    assert "advisory, NOT a rule" in text                   # never a selection input
+    assert "contrast BETTER" in text and "loss/a" in text
+    assert "contrast WORSE" in text and "loss/c" in text
+    assert "observational, NOT a rule" in text                   # never a selection input
 
 
 def test_capsule_validation_guards_profit_signs():

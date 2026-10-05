@@ -321,6 +321,11 @@ def _valid_capsule_record(capsule) -> bool:
         return False
     from looplab.core.concepts import valid_concept_id
     concept_set = set(concepts)
+    effects = capsule.get("concept_effects", {})
+    from looplab.search.concept_effects import valid_effect
+    if (not isinstance(effects, dict) or len(effects) > _MAX_CAPSULE_OUTCOMES
+            or any(key not in outcomes or not valid_effect(value) for key, value in effects.items())):
+        return False
     # a capsule is a durable evidence boundary. Quarantine the entire poisoned row instead of
     # letting one invalid/out-of-membership key disagree with canonical run cards and concept projections.
     if (len(concept_set) != len(concepts)
@@ -462,7 +467,8 @@ def build_concept_capsule(*, run_id: str, fingerprint: list[str], direction: str
                           task_id: str = "", run_uid: str = "",
                           concept_evidence_nodes_total: Optional[int] = None,
                           concept_evidence_nodes_incomplete: int = 0,
-                          concept_evidence_observed: Optional[bool] = None) -> dict:
+                          concept_evidence_observed: Optional[bool] = None,
+                          concept_effects: Optional[dict] = None) -> dict:
     """A compact per-run CONCEPT capsule — the cross-run bridge (§21.20 Step 2). It records WHICH
     concepts a run explored (the shipped per-run `node_concepts` tags — no new tagger) and how it went,
     keyed by `task_fingerprint`, so a later SIMILAR run can answer "was this tried across runs, and
@@ -576,6 +582,9 @@ def build_concept_capsule(*, run_id: str, fingerprint: list[str], direction: str
         # 0 neutral / -1 clearly-worse-half vs this run's own field) — additive over v2 (old capsules lack
         # it, readers default {}). Relative rank, not causal profit; the per-node delta is Phase 3.
         "concept_signs": concept_signs,
+        # Legacy rank signs stay available as associations; they cannot answer an ablation question.
+        "concept_effects": {key: concept_effects[key] for key in bounded_outcomes
+                            if isinstance(concept_effects, dict) and key in concept_effects},
     }
 
 class ConceptCapsuleStore:
@@ -750,9 +759,9 @@ def portfolio_concept_overview_data(capsules: list[dict], *, aliases: Optional[d
         oc = c.get("concept_outcomes") or {}
         outcome_meta = capsule_completeness(
             c, "concept_outcomes", len(c.get("concept_outcomes") or {}))
-        # pre-receipt v2 writers could truncate BEFORE computing rank signs. Keep their positive
-        # concept/outcome observations, but never aggregate a sign whose comparison field may be incomplete.
-        signs = (c.get("concept_signs") or {}) if outcome_meta and outcome_meta[2] else {}
+        # Old capsules recorded best-vs-median rank, not contribution. Never relabel their
+        # rank as "helped". Only an evidence-bound with/without receipt supports that signal.
+        effects = c.get("concept_effects") or {}
         direction = str(c.get("direction") or "min")
         raw = list(c.get("concepts") or [])
         # Deterministic per-(canonical, run) aggregation: canonicalize each raw slug through the shared
@@ -773,12 +782,14 @@ def portfolio_concept_overview_data(capsules: list[dict], *, aliases: Optional[d
             # outcome is therefore the best retained observation in THIS run's direction, not the value of
             # whichever alias sorts first (which can present a losing sibling beside a winning canonical).
             metric = ((min(observed) if direction == "min" else max(observed)) if observed else None)
-            # When several raw slugs collapse to ONE canonical (operator alias/split), COMBINE their signs
-            # by NET rather than taking the sorted-first — else a merge silently drops the loser when two
-            # raws landed on opposite sides of the run's median. sign(sum): majority side, tie -> neutral.
-            run_signs = [signs.get(r) for r in sorted(raws) if signs.get(r) is not None]
-            total = sum(run_signs)
-            sign = None if not run_signs else (1 if total > 0 else -1 if total < 0 else 0)
+            # An alias collapse changes the intervention. Two separately estimated techniques
+            # cannot be added/majority-voted into a new causal-looking effect.
+            effect = effects.get(raws[0]) if len(raws) == 1 else None
+            from looplab.search.concept_effects import valid_effect
+            if not valid_effect(effect) or not outcome_meta or not outcome_meta[2]:
+                effect = None
+            estimate = effect["estimate"] if effect and effect["status"] == "matched" else None
+            sign = None if estimate is None else (1 if estimate > 0 else -1 if estimate < 0 else 0)
             e = per_concept.setdefault(key, {"concept": key, "_runs": {}})
             e["_runs"][ref] = {
                 "run_id": rid,
@@ -786,6 +797,7 @@ def portfolio_concept_overview_data(capsules: list[dict], *, aliases: Optional[d
                 "metric": metric,
                 "direction": direction,
                 "sign": sign,
+                "effect": effect,
             }
     concepts = []
     for e in per_concept.values():

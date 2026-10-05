@@ -776,12 +776,12 @@ class CrossRunTools:
         if helps or hurts:
             seg = []
             if helps:
-                seg.append("tended to RANK BETTER: " + ", ".join(
+                seg.append("matched contrast BETTER: " + ", ".join(
                     f"UNTRUSTED_MEMORY={_safe_text(c, 140)!r}" for c in helps[:6]))
             if hurts:
-                seg.append("tended to RANK WORSE: " + ", ".join(
+                seg.append("matched contrast WORSE: " + ", ".join(
                     f"UNTRUSTED_MEMORY={_safe_text(c, 140)!r}" for c in hurts[:6]))
-            lines.append("Cross-run rank tendency (better/worse half of each run; advisory, not a rule): "
+            lines.append("Cross-run matched effect tendency (with/without; observational, not a rule): "
                          + "; ".join(seg))
         if atlas["thin_coverage"]:
             lines.append("Observed in one returned run (not a coverage gap): "
@@ -1387,8 +1387,8 @@ class CrossRunTools:
                            else "track record (returned task-family observations)")
             run_label = "run(s)" if scoped_complete else "retained run(s)"
             lines.append(f"  {track_label}: {row['n_runs']} {run_label} — "
-                         f"ranked better {row['n_helped']} / middle {row['n_neutral']} / "
-                         f"ranked worse {row['n_hurt']}")
+                         f"matched better {row['n_helped']} / unchanged {row['n_neutral']} / "
+                         f"matched worse {row['n_hurt']}")
             _sym = {1: "ranked-better", 0: "middle", -1: "ranked-worse"}
             for r in row["runs"][:6]:
                 m = r.get("metric")

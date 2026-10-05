@@ -119,14 +119,15 @@ def test_coverage_helps_hurts_carry_run_counts():
     assert pack["coverage"]["helps"] == ["loss/contrastive (n=5)"]
     assert pack["coverage"]["hurts"] == ["regularization/rdrop (n=3)"]
     txt = render_context_pack(pack)
-    assert "(n=5)" in txt and "RANK BETTER" in txt and "(n=3)" in txt
+    assert "(n=5)" in txt and "contrast BETTER" in txt and "(n=3)" in txt
 
 
 def test_claims_cli_pack_derives_tendencies_before_overview_cap(tmp_path):
     from typer.testing import CliRunner
 
     from looplab.cli import app
-    from looplab.engine.memory import ConceptCapsuleStore, build_concept_capsule
+    from looplab.engine.memory import ConceptCapsuleStore
+    from tests._concept_effect_fixtures import capsule_with_contrasts as build_concept_capsule
 
     popular = [f"popular/c{index:03d}" for index in range(512)]
     capsules = []
@@ -152,8 +153,8 @@ def test_claims_cli_pack_derives_tendencies_before_overview_cap(tmp_path):
     result = CliRunner().invoke(app, ["claims", str(tmp_path), "--pack"])
 
     assert result.exit_code == 0
-    assert "RANK BETTER UNTRUSTED_MEMORY=" in result.stdout and "zz/target (n=2)" in result.stdout
-    assert "RANK WORSE UNTRUSTED_MEMORY=" in result.stdout and "zz/baseline (n=2)" in result.stdout
+    assert "contrast BETTER UNTRUSTED_MEMORY=" in result.stdout and "zz/target (n=2)" in result.stdout
+    assert "contrast WORSE UNTRUSTED_MEMORY=" in result.stdout and "zz/baseline (n=2)" in result.stdout
 
 
 def test_partial_coverage_withholds_directional_tendencies():
@@ -169,7 +170,7 @@ def test_partial_coverage_withholds_directional_tendencies():
 
     assert pack["coverage"]["helps"] == pack["coverage"]["hurts"] == []
     assert "directional tendencies are withheld" in rendered
-    assert "RANK BETTER" not in rendered and "RANK WORSE" not in rendered
+    assert "contrast BETTER" not in rendered and "contrast WORSE" not in rendered
 
 
 def test_support_and_oppose_refs_are_bounded():

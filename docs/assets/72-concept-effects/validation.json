@@ -1,0 +1,128 @@
+{
+  "date": "2026-10-05",
+  "backend_targeted": {
+    "passed": 1292,
+    "full_python_suite": false
+  },
+  "ui_full": {
+    "passed": 1991,
+    "failed": 0
+  },
+  "ui_final_policy_regression_subset": {
+    "passed": 30,
+    "included_in_full_count": true
+  },
+  "production_build": "passed",
+  "locale_coverage": "passed",
+  "ruff": "passed",
+  "mkdocs_strict": "passed",
+  "toy_replay": "passed",
+  "bundle_budget": {
+    "passed": false,
+    "total_js_gzip_bytes": 655319,
+    "limit_bytes": 633984,
+    "previous_master_bytes": 652949,
+    "remaining_excess_bytes": 21335,
+    "route_closures_and_css": "passed"
+  },
+  "smoke": {
+    "nodes": {
+      "0": {
+        "metric": 9.0,
+        "params": {
+          "x": 0.0,
+          "y": -1.0
+        },
+        "tags": [
+          "baseline"
+        ],
+        "provenance": {
+          "comparability": {
+            "version": 1,
+            "authority": "declared",
+            "keys": {
+              "declared": "cebbfccbbef7e3ba"
+            }
+          }
+        }
+      },
+      "1": {
+        "metric": 0.0,
+        "params": {
+          "x": 3.0,
+          "y": -1.0
+        },
+        "tags": [
+          "baseline",
+          "parameter/optimal-x"
+        ],
+        "provenance": {
+          "comparability": {
+            "version": 1,
+            "authority": "declared",
+            "keys": {
+              "declared": "cebbfccbbef7e3ba"
+            }
+          }
+        }
+      },
+      "2": {
+        "metric": 9.0,
+        "params": {
+          "x": 0.0,
+          "y": -1.0
+        },
+        "tags": [
+          "baseline"
+        ],
+        "provenance": {
+          "comparability": {
+            "version": 1,
+            "authority": "declared",
+            "keys": {
+              "declared": "cebbfccbbef7e3ba"
+            }
+          }
+        }
+      }
+    },
+    "effect": {
+      "v": 1,
+      "method": "matched_concept_contrast",
+      "status": "matched",
+      "reason": "observational_not_causal",
+      "estimate": 9.0,
+      "mean": 9.0,
+      "low": 9.0,
+      "high": 9.0,
+      "n_pairs": 1,
+      "n_contexts": 1,
+      "n_with": 1,
+      "n_without": 2,
+      "n_unknown": 0,
+      "positive": 1,
+      "negative": 0,
+      "neutral": 0,
+      "has_advisory_warnings": true,
+      "pairs": [
+        {
+          "with_node": 1,
+          "without_node": 0,
+          "with_attempt": 0,
+          "without_attempt": 0,
+          "delta": 9.0,
+          "kind": "matched",
+          "phase": "search"
+        }
+      ],
+      "pairs_omitted": 0
+    }
+  },
+  "scope": "Real offline LoopLab toy evaluation, three draft nodes, declared identical comparison contract. No model or GPU run.",
+  "limitations": [
+    "Matched concept tags and declared evaluation conditions are observational evidence, not proof of unchanged implementation or seeds.",
+    "One treatment matched to one control; a second control is not reused to inflate sample size.",
+    "An advisory perfect_metric warning remains visible; hard trust gates exclude samples.",
+    "Full Python CI and live model providers were not run. Existing total JavaScript budget debt remains."
+  ]
+}

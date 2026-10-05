@@ -12,7 +12,8 @@ import pytest
 
 from looplab.core.config import Settings
 from looplab.core.models import RunState
-from looplab.engine.memory import ConceptCapsuleStore, build_concept_capsule
+from looplab.engine.memory import ConceptCapsuleStore
+from tests._concept_effect_fixtures import capsule_with_contrasts as build_concept_capsule
 from looplab.engine.proposal_cues import ProposalCuesMixin
 
 
@@ -175,9 +176,9 @@ def test_rank_tendency_marks_persisted_concept_names_as_untrusted(tmp_path):
     txt = _Host(tmp_path, on=True)._cross_run_advisory_text(
         RunState(run_id="current", task_id="t", direction="max"))
 
-    tendency = next(line for line in txt.splitlines() if "rank tendency" in line)
-    assert "RANK BETTER UNTRUSTED_MEMORY=" in tendency
-    assert "RANK WORSE UNTRUSTED_MEMORY=" in tendency
+    tendency = next(line for line in txt.splitlines() if "matched effect tendency" in line)
+    assert "contrast BETTER UNTRUSTED_MEMORY=" in tendency
+    assert "contrast WORSE UNTRUSTED_MEMORY=" in tendency
 
 
 def test_live_rank_tendency_uses_full_scoped_rows_before_overview_cap(tmp_path):
@@ -201,8 +202,8 @@ def test_live_rank_tendency_uses_full_scoped_rows_before_overview_cap(tmp_path):
     text = _Host(tmp_path, on=True)._cross_run_advisory_text(
         RunState(run_id="current", task_id="t", direction="max"))
 
-    assert "RANK BETTER UNTRUSTED_MEMORY=" in text and "zz/target (n=2)" in text
-    assert "RANK WORSE UNTRUSTED_MEMORY=" in text and "zz/baseline (n=2)" in text
+    assert "contrast BETTER UNTRUSTED_MEMORY=" in text and "zz/target (n=2)" in text
+    assert "contrast WORSE UNTRUSTED_MEMORY=" in text and "zz/baseline (n=2)" in text
 
 
 def test_advisory_rejects_valid_direction_without_scope_identity(tmp_path):

@@ -31,12 +31,13 @@ FIXTURE = Path(__file__).parent / "fixtures" / "concept_frame_cases.json"
 FIXED_GENERATION = "c" * 64
 
 
-def _node(store, node_id, concepts, metric, parents=()):
+def _node(store, node_id, concepts, metric, parents=(), provenance=None):
     store.append("node_created", {
         "node_id": node_id, "parent_ids": list(parents), "operator": "draft",
         "idea": {"operator": "draft", "params": {}, "rationale": "r", "concepts": concepts},
     })
-    store.append("node_evaluated", {"node_id": node_id, "metric": metric})
+    store.append("node_evaluated", {"node_id": node_id, "metric": metric,
+                                   **({"metric_provenance": provenance} if provenance else {})})
 
 
 def _shared_pair(store):
@@ -53,7 +54,14 @@ def _recorded_and_derived(store):
 
 
 # (name, writer, query): every row is a frame the server answers 200 to.
+def _matched_contrast(store):
+    provenance = {"comparability": {"authority": "declared", "keys": {"declared": "toy-contract"}}}
+    _node(store, 0, ["base"], 0.2, provenance=provenance)
+    _node(store, 1, ["base", "method/c"], 0.5, parents=[0], provenance=provenance)
+
+
 CASES = [
+    ("a matched single-concept contrast with a declared evaluation ruler", _matched_contrast, {}),
     ("a derived co_occurs edge only, on its own lens", _shared_pair, {"lens": "co_occurs"}),
     ("a derived co_occurs edge only, on the default hierarchy", _shared_pair, {}),
     ("a recorded uses edge beside a derived one, on the uses lens",
