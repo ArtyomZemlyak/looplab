@@ -1,19 +1,12 @@
 import React, { useState } from 'react'
 import { useAssistantLanguage } from './useAssistantLanguage.js'
 import { harnessText } from './harnessText.js'
-import { get, runApiPath, COMMAND_ID_RE, COMMAND_STATUSES, COMMAND_PENDING } from './util.js'
+import { get, runApiPath, COMMAND_ID_RE } from './util.js'
 import { useScopedResource } from './useScopedResource.js'
 import { PANEL_REQUEST_TIMEOUT_MS } from './panelPrimitives.js'
 
-export function validReceipt(value, generation, commandId = '') {
-  const row = value?.command
-  return value?.version === 1 && value.generation === generation
-    && typeof row?.id === 'string' && COMMAND_ID_RE.test(row.id) && (!commandId || row.id === commandId)
-    && COMMAND_STATUSES.has(row.status) && value.terminal === !COMMAND_PENDING.has(row.status)
-    && typeof row.event_type === 'string' && row.event_type.length <= 100
-    && (row.event_seq === null || (Number.isSafeInteger(row.event_seq) && row.event_seq >= 0))
-    && typeof row.error_code === 'string' && row.error_code.length <= 256 && typeof row.retryable === 'boolean'
-}
+import { validReceipt } from './harnessReceiptModel.js'
+export { validReceipt } from './harnessReceiptModel.js'
 
 export default function HarnessReceipt({ runId, generation }) {
   const [language] = useAssistantLanguage()

@@ -24,7 +24,7 @@ import pytest
 
 from looplab.serve.protocol import (COMMAND_ACTIVE_STATUSES, COMMAND_FAILED_STATUSES,
                                     COMMAND_STATUSES, COMMAND_SUCCEEDED_STATUSES,
-                                    COMMAND_TERMINAL_STATUSES)
+                                    COMMAND_TERMINAL_STATUSES, CONTROL_EVENTS)
 
 _JS = pathlib.Path(__file__).resolve().parents[1] / "ui" / "src" / "commandModel.js"
 
@@ -46,6 +46,15 @@ def test_the_partition_is_a_partition():
     assert COMMAND_SUCCEEDED_STATUSES | COMMAND_FAILED_STATUSES == COMMAND_TERMINAL_STATUSES
     assert COMMAND_ACTIVE_STATUSES | COMMAND_TERMINAL_STATUSES == COMMAND_STATUSES
     assert len(COMMAND_STATUSES) == 7
+
+
+def test_saved_receipt_browser_control_events_match_server():
+    """A domain outcome is not a command receipt; keep the recovery allowlist exact."""
+    path = _JS.with_name("harnessReceiptModel.js")
+    match = re.search(r"RECEIPT_CONTROL_EVENTS\s*=\s*new Set\(\[([^\]]*)\]\)",
+                      path.read_text(encoding="utf-8"))
+    assert match, "saved receipt event allowlist is missing"
+    assert set(re.findall(r"'([^']+)'", match.group(1))) == set(CONTROL_EVENTS)
 
 
 def test_run_commands_derives_rather_than_spelling_its_own():

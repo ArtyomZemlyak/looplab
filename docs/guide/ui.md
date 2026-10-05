@@ -1298,10 +1298,14 @@ to recovery only when the focused control disappeared, preserving focus elsewher
 After an explicit connection click, loaded help inherits focus from the replaced button;
 a late import preserves another control used while waiting. This moves focus only and
 does not connect an MCP client or start work.
+Saved recovery receipts require a valid generation, known command status/control event,
+matching terminal flag, integer/null sequence, bounded error code and strict retryable
+boolean. An incomplete HTTP 200 withdraws the old verdict and keeps the original input;
+another read remains explicit. These checks do not prove training or authorize recovery.
 Assistant command suggestions use
 `AssistantBar.jsx::suggestionPop` and `.cmdbar-pop`, not the retired `.cmd-suggest` styles.
 Run `npm run check:bundle` after building: passing a route budget does not imply the
-total byte budget passed. Current measurements and remaining excess are in doc 72 §20.49.
+total byte budget passed. Current measurements and remaining excess are in doc 72 §20.50.
 
 Production HTML and non-versioned assets revalidate. Only content-hashed files listed by Vite's build manifest
 receive long-lived immutable caching. Eligible ordinary responses can use gzip when the client accepts it;

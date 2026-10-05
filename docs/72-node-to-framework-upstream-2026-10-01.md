@@ -4076,7 +4076,7 @@ merge этим проходом не проверены.
    DAG CSS и review DAG JS теперь проходят прежние пределы. Осталось
    превышение total JS: 13317 B после §20.42, 13380 B после §20.43,
    12884 B после §20.46, 13121 B после §20.47, 13324 B после §20.48,
-   13308 B после §20.49;
+   13308 B после §20.49; 13734 B после §20.50;
    потолки не повышены. Нужны дальнейшее
    уменьшение исходного кода/повторов и полный CI. Один lazy import не снижает
    сумму всех assets; нельзя выдавать route budget за зелёный общий gate.
@@ -6669,3 +6669,61 @@ production browser здесь не вводился. Сохранение draft 
 
 Документальные проверки — 28 passed; strict MkDocs и diff-check проходят.
 Всего 2181 уникальный тест: 193 replay + 1960 UI + 28 docs.
+
+### 20.50. Повреждённая квитанция HTTP 200 не становится verdict — 2026-10-05
+
+**Ревью и воспроизведение.** Исходный commit —
+`49299f114bce47925f69c91bed9754667e226fd6`. UI `HarnessReceipt.validReceipt`
+проверял только тип и длину `event_type`: пустая строка, неизвестное событие
+или engine outcome `node_evaluated` проходили как сохранённая команда. При
+отсутствующих expected/returned generation равенство `undefined === undefined`
+также проходило. Штатный server snapshot такие повреждённые записи отказывает,
+а typed MCP проверяет control vocabulary; дефект был в браузерной проверке
+неполного/искажённого HTTP 200. Усиленный live test до правки red на пустом событии.
+
+**Исправлено.** Чистая модель `harnessReceiptModel.js` проверяет синтаксис
+ожидаемой generation и точное членство в 34 control events. Сохранены v1,
+command ID, известный status, строгое соответствие terminal, безопасный integer/null
+sequence, error code до 256 символов и strict boolean retryable. Дополнительные
+поля совместимы. Python guard сверяет UI events с `serve/protocol.py::CONTROL_EVENTS`;
+новый server control потребует явного обновления клиента.
+
+Неполный HTTP 200 не показывает verdict и снимает прежнюю сохранённую квитанцию.
+Исходный ключ остаётся в форме, чтение повторяется только явно. Семантика
+snapshot, retry, checkpoint, admission и finish не изменена; новый engine wait,
+команда и worker restart не добавлены. Terminal `succeeded` для inject по-прежнему
+доказывает admission, не обучение. Original key-to-ID derivation здесь остаётся
+проверкой server; полная независимая идентификация браузером по ключу не заявляется.
+
+**Проверено.** Replay-first — 193 passed. Final полный UI suite — 1963 passed,
+без fail/skip/cancel. Три новых pure-model теста покрывают все control/status
+partitions, null sequence, extra fields, отсутствующие/неверные поля, domain/unknown
+event, неподходящие generation и requested command ID. Live React/Vite форма
+получает HTTP 200 с `node_evaluated`: квитанция исчезает, input сохраняется,
+выполняется один GET без скрытого повторения. Прежние явные reads, 409 refresh,
+key в header, отсутствие storage записи и terminal caveats проходят.
+
+Первый полный suite выявил прямой import `commandModel.js` вне разрешённого
+API barrel. Финальная модель использует публичный `api.js`; исключение в
+reachability allowlist не добавлялось. Suite повторён после изменения import.
+Целевые 16 UI tests — подмножество полного счётчика.
+
+Server snapshot/MCP shape/общий protocol vocabulary — 61 passed, включая новый
+cross-language guard; отдельные 10 vocabulary tests не считаются повторно.
+Документальные проверки — 28 passed. Production build, strict MkDocs и diff-check
+проходят. Всего **2245 уникальных тестов**: 193 replay + 1963 UI + 61 receipt + 28 docs.
+
+**Размеры и ограничения.** Штатная baseline/final сборка: JS gzip
+647292 → 647718 B (+426 B), raw JS +512 B; CSS остаётся 59635 B. Compact
+panel closure — 121411 → 121429 B; full body по-прежнему dynamic и отсутствует
+в compact static closure. Total JS превышает прежний предел 633984 B на
+**13734 B**. Только этот bundle gate red; остальные size/reachability/cycle/
+integer-boolean guards проходят, потолки не менялись.
+[bundles.json](assets/72-receipt-validation/bundles.json) и
+[validation.json](assets/72-receipt-validation/validation.json) фиксируют измерения.
+
+Новой production browser сессии, MCP connection, provider calls, обучения,
+публикации команд и доставки из **worktree LoopLab** в пользовательский task repo
+не было. Это исправление достоверности чтения формы. Общие OPEN §19.17 —
+полная пользовательская приёмка recovery/onboarding, effective manifest,
+lifecycle/retention и target-relative delivery — сохраняются.

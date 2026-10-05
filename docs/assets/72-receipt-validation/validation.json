@@ -1,0 +1,53 @@
+{
+  "baseline_commit": "49299f114bce47925f69c91bed9754667e226fd6",
+  "scope": "UI saved command receipt field validation; no engine or wire changes",
+  "red_reproduction": {
+    "command": "node --test --test-timeout=30000 test/harnessReceipt.test.js",
+    "passed": 0,
+    "failed": 1,
+    "reason": "validReceipt accepted an empty event_type"
+  },
+  "replay": {
+    "command": "python -m pytest -o addopts='' -q tests/test_events_replay.py --basetemp=.tmp/doc72-receipt-validation/replay",
+    "passed": 193
+  },
+  "ui": {
+    "command": "node --test --test-timeout=30000 --test-concurrency=4 test/*.test.js",
+    "passed": 1963,
+    "failed": 0,
+    "skipped": 0,
+    "initial_full_pass": "1962 passed / 1 failed: direct commandModel import violated apiBarrel reachability. Final model imports the public api barrel; no allowlist exception was added."
+  },
+  "receipt_protocols": {
+    "command": "python -m pytest -o addopts='' -q tests/test_command_receipt.py tests/test_mcp_command_receipt_shape.py tests/test_command_status_vocabulary.py --basetemp=.tmp/doc72-receipt-validation/receipts",
+    "passed": 61,
+    "vocabulary_only_10_tests": "subset, not counted twice"
+  },
+  "docs": {
+    "command": "python -m pytest -o addopts='' -q tests/test_api_reference.py tests/test_documentation_contracts.py tests/test_doc_surface_budgets.py tests/test_architecture_diagram_geometry.py --basetemp=.tmp/doc72-receipt-validation/docs",
+    "passed": 28,
+    "initial_doc_pass": "27 passed / 1 failed: expanded diagram string exceeded 600 characters. Final summary shortened; unchanged budget passes."
+  },
+  "build": {
+    "command": "node node_modules/vite/bin/vite.js build --outDir ../.tmp/doc72-receipt-validation/ui-dist-final",
+    "exit_code": 0
+  },
+  "bundle_gate": {
+    "command": "node scripts/check-bundle.mjs --dist ../.tmp/doc72-receipt-validation/ui-dist-final",
+    "exit_code": 1,
+    "remaining_failure": "total JS gzip 647718 exceeds unchanged 633984 byte limit by 13734 bytes",
+    "other_guards": "size, reachability, static cycles and integer booleans passed"
+  },
+  "mkdocs": {
+    "command": "python -m mkdocs build --strict --site-dir .tmp/doc72-receipt-validation/site",
+    "exit_code": 0
+  },
+  "unique_tests": 2245,
+  "evidence": {
+    "live_ui": "Real HarnessReceipt in React/Vite/jsdom receives HTTP 200 domain event; withdraws saved receipt, retains original key, issues one GET and no automatic retry. Existing explicit subsequent reads recover a valid receipt.",
+    "schema": "All 34 server control events and 7 status/terminal partitions; incomplete fields, invalid expected generation, mismatched requested ID, unknown/domain event and extra-field compatibility.",
+    "cross_language": "Python pins UI control vocabulary to serve/protocol.py CONTROL_EVENTS.",
+    "browser": "No new production browser session; evidence is live React and normal production build.",
+    "bounds": "No training, provider call, command publication, worker restart, credentials, MCP connection or delivery from LoopLab worktree into a task repository. Original key-to-ID derivation remains server validated, not newly reproduced in UI."
+  }
+}

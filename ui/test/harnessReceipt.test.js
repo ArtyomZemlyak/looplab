@@ -1,7 +1,7 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import React from 'react'
-import { fetchStub, jsonResponse, mountLive, until } from './_mount.js'
+import { fetchStub, jsonResponse, mountLive, settle, until } from './_mount.js'
 
 const generation = 'a'.repeat(64)
 const receipt = { version: 1, generation, terminal: false,
@@ -15,6 +15,9 @@ test('recovery lookup is explicit, sends a key only in a header and hides failed
     assert.ok(validReceipt(receipt, generation))
     assert.ok(!validReceipt({ ...receipt, terminal: true }, generation))
     assert.ok(!validReceipt(receipt, 'c'.repeat(64)))
+    assert.ok(!validReceipt({ ...receipt, command: { ...receipt.command, event_type: '' } }, generation))
+    assert.ok(!validReceipt({ ...receipt, command: { ...receipt.command, event_type: 'node_evaluated' } }, generation))
+    assert.ok(!validReceipt({ ...receipt, generation: undefined }, undefined))
     const requests = []
     globalThis.fetch = fetchStub({ '/api/runs/demo/command-receipt': request => {
       requests.push(request)
@@ -42,6 +45,18 @@ test('recovery lookup is explicit, sends a key only in a header and hides failed
     assert.match(view.container.textContent, /Reading it did not continue the command/)
     assert.ok(!view.container.textContent.includes('must not render'))
     assert.ok(!view.container.textContent.includes('private'))
+    // HTTP success is not a verdict. A domain outcome in place of a control
+    // receipt must withdraw the last good result and wait for an explicit read.
+    globalThis.fetch = fetchStub({ '/api/runs/demo/command-receipt': {
+      ...receipt, terminal: true, command: { ...receipt.command, event_type: 'node_evaluated', status: 'succeeded' },
+    } })
+    await submit()
+    await until(() => view.container.textContent.includes('Receipt unavailable or changed'), 'invalid HTTP 200')
+    assert.ok(!view.container.querySelector('[aria-label="Saved command receipt"]'))
+    assert.equal(input.value, 'original-key')
+    await settle()
+    assert.equal(globalThis.fetch.calls.length, 1, 'invalid payload must not retry itself')
+    assert.ok(globalThis.fetch.calls.every(call => call.method === 'GET'))
     globalThis.fetch = fetchStub({ '/api/runs/demo/command-receipt': () => jsonResponse({}, 409) })
     await submit()
     await until(() => view.container.textContent.includes('Receipt unavailable or changed'), 'failed refresh')
