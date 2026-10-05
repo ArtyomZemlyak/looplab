@@ -14,7 +14,7 @@ What is pinned here, each half driven through the real function with a fake clie
   * the value-segment predicate as a table, its boundary (names that end in digits) included;
   * the mint-time cleanup, folding onto a known spelling, and its absence on replayed ids;
   * the model-free consolidation pre-pass, and that the model can neither re-decide nor undo it;
-  * the pending-nodes gate letting ONLY those renames through mid-evaluation;
+  * the pending-nodes gate: ON records every rename mid-evaluation, OFF keeps the quiescent gate;
   * identical-description reuse making no call.
 """
 from __future__ import annotations
@@ -310,7 +310,7 @@ def test_a_failed_model_step_keeps_the_syntactic_decisions():
     assert syntactic["lora/rank/r64"] == "lora/rank" and "model" not in syntactic
 
 
-# --------------------------------------------------- 6. the gate: syntactic renames while pending
+# --------------------------------------------- 6. the gate: every rename while pending (ON)
 def _busy(tmp_path, *, pending: int):
     s = EventStore(tmp_path / "events.jsonl")
     s.append("run_started", {"run_id": "t", "task_id": "t", "goal": "g", "direction": "max"})
@@ -352,9 +352,11 @@ def _recorded(tmp_path, monkeypatch, *, pending, hygiene):
     return rows, seen
 
 
-def test_while_pending_only_the_syntactic_renames_are_recorded(tmp_path, monkeypatch):
+def test_while_pending_every_rename_is_recorded_when_on(tmp_path, monkeypatch):
+    # syntactic AND model (semantic) renames: the consolidation runs in the background, it does not
+    # wait for an empty queue (an operator-queued run is never quiescent).
     rows, seen = _recorded(tmp_path, monkeypatch, pending=2, hygiene=True)
-    assert rows == [{"loss/dcl_x": "loss/dcl-x"}]
+    assert rows == [{"loss/dcl_x": "loss/dcl-x", "loss/dcl": "loss/decoupled"}]
     assert seen["concept_tag_hygiene"] is True
     # an operator's tags are never lent under the classifier's mode
     assert seen["reuse_known_ids"] == {0}

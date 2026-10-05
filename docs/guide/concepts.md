@@ -200,8 +200,9 @@ resumed pre-field run stays OFF):
   Ids replayed from the log are never rewritten;
 * consolidation first runs a model-free pass (`search/concept_map.py::syntactic_renames`): ids equal
   after the `_`/`-` fold collapse onto the spelling with more tag uses (a tie keeps `-`), and value
-  leaves collapse onto their knob. These renames decide no meaning, so they ARE recorded mid-eval,
-  through the same frozen-once-recorded path; the model's renames keep the quiescent gate;
+  leaves collapse onto their knob. With the flag ON every rename — these and the model's synonym
+  merges — is recorded in the background, mid-eval, through the same frozen-once-recorded path (OFF
+  keeps the historical quiescent gate);
 * a node whose tagger description equals an already-tagged one's reuses those tags with no call (only
   from the classifier's answers, never an operator's edit).
 

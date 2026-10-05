@@ -1918,8 +1918,8 @@ class Settings(BaseSettings):
     # ON: the node and item taggers' system prompts gain three rules (tag what the experiment DOES;
     # a knob, never its value; reuse known ids verbatim); an id the node tagger returns has its value
     # leaf dropped and its spelling resolved onto a known id before it is minted; consolidation first
-    # runs a model-free pass collapsing `_`/`-` spellings and value leaves, and THOSE renames may be
-    # recorded while evaluations run (the model's renames keep the quiescent gate); and a node whose
+    # runs a model-free pass collapsing `_`/`-` spellings and value leaves, and every rename (those and
+    # the model's synonym merges) is recorded in the background while evaluations run; and a node whose
     # tagger description equals an already-tagged node's reuses its tags with no call. OFF is the
     # historical prompts and behaviour byte for byte (`search/concept_tagging.py::
     # _TAGGER_HYGIENE_RULES`, `tests/test_concept_tag_hygiene.py`); a resumed pre-field run is

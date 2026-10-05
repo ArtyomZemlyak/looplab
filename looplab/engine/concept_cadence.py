@@ -443,11 +443,20 @@ class ConceptCadenceMixin:
         # vocabulary that has not seen the running results; a `_`/`-` spelling collision and a value
         # leaf folded onto its knob (`search/concept_map.py::syntactic_renames`) decide no meaning —
         # they are functions of the id strings, the same answer whatever any evaluation returns — so
-        # they are recorded now, through the same B3 path, frozen once recorded. The MODEL's renames
-        # keep the quiescent gate exactly as before.
-        if new_renames and state.pending_nodes():
-            syntactic = (cmap.get("consolidated_syntactic") or {}) if hygiene else {}
-            new_renames = {k: v for k, v in new_renames.items() if syntactic.get(k) == v}
+        # they are recorded now, through the same B3 path, frozen once recorded.
+        #
+        # …and under the same flag the MODEL's renames too (operator decision, 2026-10-05: "пусть в
+        # фоне делает"). A synonym merge (`eval` -> `evaluation`) is a decision about the VOCABULARY,
+        # and the vocabulary does not depend on the in-flight evaluation's result either: its metric
+        # never reaches the consolidation prompt, which sees only ids and labels. Every reader of the
+        # map applies it at READ time and the fold accumulates it from the log in order
+        # (`replay_concepts.py::_on_concept_consolidation`, `min` of competing canonicals), so a rename
+        # recorded mid-evaluation replays identically and nothing downstream assumed quiescence; the
+        # gate's only effect on an operator-queued run was that the merge never happened at all.
+        # A decided rename is still frozen (B3), so a background merge cannot flap later. OFF keeps the
+        # quiescent gate exactly as before.
+        if new_renames and state.pending_nodes() and not hygiene:
+            new_renames = {}
         if new_renames:
             self.store.append(EV_CONCEPT_CONSOLIDATION,
                               {"rename": new_renames, "mode": cmap.get("mode", "llm")})
