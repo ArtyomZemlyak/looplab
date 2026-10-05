@@ -277,7 +277,9 @@ test('packaged settings metadata validates as one bounded versioned contract wit
   //   finish the run. The Python half moved too.
   //   249 -> 251 (2026-10-01): `activation_check` + `activation_unverified_gate` — the graded
   //   activation check and what its warning does to selection. The Python half moved too.
-  assert.equal(Object.keys(schema.fieldByKey).length, 252)
+  //   251 -> 252 (2026-10-05): `concept_tag_hygiene` — the concept taggers' rules and id cleanup,
+  //   and the model-free consolidation pre-pass (run minionerec-lora-v1). The Python half moved too.
+  assert.equal(Object.keys(schema.fieldByKey).length, 253)
   assert.equal(schema.fieldByKey.lesson_operator_scope.type, 'bool')
   assert.equal(schema.fieldByKey.lesson_operator_scope.default, false)
   assert.equal(schema.fieldByKey.triage_time_budget_s.type, 'float')

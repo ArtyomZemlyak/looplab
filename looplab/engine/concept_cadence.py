@@ -37,6 +37,7 @@ from looplab.core.models import (NODE_CONCEPT_PROVENANCE_AUTHORED, NODE_CONCEPT_
 from looplab.engine.cadence import (at_creation_boundary, cadence_due, cadence_marks,
                                      seed_boundary_due)
 # Through the ENGINE's fold seam, not `replay.fold` directly — see `shared.py::engine_fold`.
+from looplab.engine.shared import concept_tag_hygiene
 from looplab.engine.shared import engine_fold as fold
 from looplab.events.types import (EV_CONCEPT_CONSOLIDATION, EV_CONCEPT_COVERAGE_SNAPSHOT,
                                   EV_CONCEPT_EDGE, EV_HYPOTHESIS_CONCEPTS, EV_NODE_CONCEPTS,
@@ -402,11 +403,20 @@ class ConceptCadenceMixin:
             getattr(self, "researcher", None), getattr(self, "developer", None))
         # Span-scope the concept-map LLM generations (tagging + consolidation + importance) so they
         # file under a `concept_coverage` op, not the ambient/next-node trace. nullcontext if spanless.
+        # `Settings.concept_tag_hygiene`: forwarded only when ON, so OFF is the historical call. The
+        # nodes whose known tags a same-description node may COPY are the classifier's alone: `known`
+        # also carries operator-edited tags, and a copy is recorded under the classifier's mode.
+        hygiene = concept_tag_hygiene(self)
+        provenance = getattr(state, "node_concept_provenance", None) or {}
+        hygiene_kwargs = ({"concept_tag_hygiene": True, "reuse_known_ids": {
+            nid for nid in known
+            if provenance.get(nid) == NODE_CONCEPT_PROVENANCE_CLASSIFIER}} if hygiene else {})
         _span = getattr(self, "_op_span", None)
         with (_span("concept_coverage") if callable(_span) else contextlib.nullcontext()):
             cmap = build_concept_map(state, task_goal=state.goal or "", client=client, tools=None,
                                      seed_graph=seed, parser=parser, known_tags=known,
-                                     known_renames=known_renames, prompts=prompts)
+                                     known_renames=known_renames, prompts=prompts,
+                                     **hygiene_kwargs)
         # B3 (§21.18): record only the NEW consolidation decisions so later cadences keep them FIXED
         # (stable vocabulary, no flapping). Accumulated in the fold; emit-only-if-new -> no churn.
         new_renames = {k: v for k, v in (cmap.get("consolidated") or {}).items()
@@ -423,8 +433,21 @@ class ConceptCadenceMixin:
         # repo has reviewed only at a quiescent boundary. Withholding it costs nothing that exists
         # today: a run that never quiesces records no consolidation now either. The tags themselves are
         # still recorded — the classifier giving an experiment a tag of its OWN is the whole point.
+        #
+        # …EXCEPT the SYNTACTIC renames, under `Settings.concept_tag_hygiene`. Run `minionerec-lora-v1`
+        # (2026-10-05) recorded 0 `concept_consolidation` events over 39 nodes: an operator-queued
+        # run always has an evaluation in flight, so the boundary this gate waits for never came, and
+        # its vocabulary kept `continual` / `continual_learning` and `optimization/lr/1e-3` /
+        # `optimization/lr/3e-4` as separate concepts for the whole run — the coverage directive
+        # named two of them as two uncovered axes. The objection above is to a MEANING decided on a
+        # vocabulary that has not seen the running results; a `_`/`-` spelling collision and a value
+        # leaf folded onto its knob (`search/concept_map.py::syntactic_renames`) decide no meaning —
+        # they are functions of the id strings, the same answer whatever any evaluation returns — so
+        # they are recorded now, through the same B3 path, frozen once recorded. The MODEL's renames
+        # keep the quiescent gate exactly as before.
         if new_renames and state.pending_nodes():
-            new_renames = {}
+            syntactic = (cmap.get("consolidated_syntactic") or {}) if hygiene else {}
+            new_renames = {k: v for k, v in new_renames.items() if syntactic.get(k) == v}
         if new_renames:
             self.store.append(EV_CONCEPT_CONSOLIDATION,
                               {"rename": new_renames, "mode": cmap.get("mode", "llm")})
@@ -537,6 +560,8 @@ class ConceptCadenceMixin:
         # cadences instead of exploding one. Isolated try: a tagging hiccup must not lose the snapshot.
         try:
             from looplab.search.concept_tagging import stale_tagged_nodes, tag_text_llm
+            # `Settings.concept_tag_hygiene`: the item tagger's rules, forwarded only when ON.
+            hygiene_kwargs = {"concept_tag_hygiene": True} if concept_tag_hygiene(self) else {}
             known_h = getattr(state, "hypothesis_concepts", None) or {}
             h_at_vocab = getattr(state, "hypothesis_concepts_at_vocab", None) or {}
             v_now = len(graph.concepts())
@@ -573,7 +598,7 @@ class ConceptCadenceMixin:
                     if tagged_this_cadence == 0 and callable(_span):
                         paid_span.enter_context(_span("hypothesis_tagging"))
                     htags = sorted(tag_text_llm(h.statement, graph, client, parser=parser,
-                                                allow_plural=True))
+                                                allow_plural=True, **hygiene_kwargs))
                     self.store.append(EV_HYPOTHESIS_CONCEPTS,
                                       {"hyp_id": str(h.id), "concepts": htags,
                                        "mode": mode, "at_vocab": v_now})

@@ -183,6 +183,28 @@ surface resolves ids through it), and a per-row stamp cannot express that. Once 
 quiescent pass re-tags what the in-flight one wrote — bounded by the existing `_RETAG_CAP` — so a
 run that reaches a quiet moment ends with exactly the evidence it would have had before.
 
+**Concept-tag hygiene (`Settings.concept_tag_hygiene`, 2026-10-05).** Run `minionerec-lora-v1`
+(39 nodes) grew 73 concepts fragmented by spelling (`continual` / `continual-learning` /
+`continual_learning`) and by hyperparameter VALUES minted as concepts (`optimization/lr/1e-3`,
+`lora/rank/r64`), and recorded **0** consolidation renames — an operator-queued run is never
+quiescent, so the rule above withheld every one. With the flag ON (the default for new runs; a
+resumed pre-field run stays OFF):
+
+* both taggers' system prompts gain three rules — tag what the experiment itself DOES (a method
+  named only as a baseline or comparison target is not a tag; an experiment that trains nothing gets
+  no training-method tag), a knob never its value, and reuse known ids verbatim;
+* an id the node tagger returns has its trailing VALUE segments dropped and each level resolved onto
+  a known `_`/`-` spelling before it is minted (`search/concept_tagging.py::hygienic_concept_id`). A
+  value is a number (`2`, `0.05`, `1e-3`, `100k`) or a closed knob mnemonic plus a number (`r16`,
+  `lr1e-4`, `alpha32`); a name that merely ends in digits (`bm25`, `e5`, `l2`, `f1`, `fp16`) is not.
+  Ids replayed from the log are never rewritten;
+* consolidation first runs a model-free pass (`search/concept_map.py::syntactic_renames`): ids equal
+  after the `_`/`-` fold collapse onto the spelling with more tag uses (a tie keeps `-`), and value
+  leaves collapse onto their knob. These renames decide no meaning, so they ARE recorded mid-eval,
+  through the same frozen-once-recorded path; the model's renames keep the quiescent gate;
+* a node whose tagger description equals an already-tagged one's reuses those tags with no call (only
+  from the classifier's answers, never an operator's edit).
+
 **What the classifier replaces is kept (2026-09-08).** The cadence REWRITES a node's membership
 rather than merging into it, which is the designed behaviour — the proposer must not certify its own
 taxonomy — but until now the ids the proposer authored survived only in the raw event log, since

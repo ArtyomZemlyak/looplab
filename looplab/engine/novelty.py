@@ -30,7 +30,8 @@ from looplab.core.models import (NODE_CONCEPT_PROVENANCE_CLASSIFIER,
                                   idea_proposal_digest, idea_proposal_ref)
 from looplab.agents.propose_receipts import propose_receipt_scope, scoped_budget_exhausted
 from looplab.engine.card_reservation import discarded_proposal_receipt
-from looplab.engine.shared import card_full_rationale, effective_researcher_eval_timeout
+from looplab.engine.shared import (card_full_rationale, concept_tag_hygiene,
+                                   effective_researcher_eval_timeout)
 from looplab.core.text import tokenize
 from looplab.core.tracing import current_ids
 from looplab.events.types import EV_CROSS_RUN_PRIOR, EV_NOVELTY_GRADED, EV_NOVELTY_REJECTED
@@ -1465,7 +1466,11 @@ class NoveltyGateMixin:
             # avoids a per-proposal LLM call that would have nothing agentic to be consistent with.
             _rc = getattr(self, "_reflect_client", None)
             client = _rc() if callable(_rc) else None
-            idea_tags = (tag_idea_llm(idea, graph, client)
+            # `Settings.concept_tag_hygiene` (`shared.py::concept_tag_hygiene`): the item tagger's
+            # rules, forwarded only when ON so OFF is the historical call.
+            idea_tags = (tag_idea_llm(idea, graph, client,
+                                      **({"concept_tag_hygiene": True}
+                                         if concept_tag_hygiene(self) else {}))
                          if (node_concepts and client is not None) else None)
             # §21.20 Step 2: the gating grade is computed WITHOUT cross-run priors, so enabling the flag is
             # byte-identical to cross-run-off for SELECTION (grade_novelty checks its level 3 before the

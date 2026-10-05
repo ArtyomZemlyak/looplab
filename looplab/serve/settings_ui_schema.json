@@ -2004,6 +2004,13 @@
           "help": "Part V: refresh classifier evidence, consolidation, and the concept-coverage snapshot every N created nodes. Researcher-authored additions and removals still appear immediately; this controls only the heavier classifier pass. It also fires ONCE at the seed boundary regardless of this value, so a short run still gets a pass. Was 30 until 2026-08-11 — longer than a real run, so runs ended with tags on a single node and every concept surface read as empty."
         },
         {
+          "key": "concept_tag_hygiene",
+          "label": "Concept tag hygiene",
+          "type": "bool",
+          "default": true,
+          "help": "The concept taggers are told to tag what an experiment DOES (not a baseline it is compared with), to tag a knob rather than a hyperparameter value, and to reuse known ids verbatim; a returned id loses a value leaf and takes a known spelling before it is minted; consolidation first folds `_`/`-` spellings and value leaves with no model, and those renames are recorded even while evaluations run; a node described identically to an already-tagged one reuses its tags with no call. Off restores the historical prompts and behaviour; a resumed pre-field run stays off."
+        },
+        {
           "key": "graded_novelty",
           "label": "Graded concept novelty",
           "type": "bool",

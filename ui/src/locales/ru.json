@@ -1,7 +1,7 @@
 {
   "schema": 1,
   "language": "ru",
-  "count": 7563,
+  "count": 7565,
   "messages": {
     "# LoopLab run report — {0}": "# Отчёт запуска LoopLab — {0}",
     "## Agent narrative (advisory)": "## Пояснения агента (рекомендации)",
@@ -7565,6 +7565,8 @@
     "Free brief": "Краткий итог без вызова модели",
     "Latest result": "Последний результат",
     "Parent comparison evidence coverage": "Охват доказательств сравнения с родителями",
-    "Hyperparameter correlation report": "Корреляции гиперпараметров"
+    "Hyperparameter correlation report": "Корреляции гиперпараметров",
+    "Concept tag hygiene": "Упорядочивание тегов концептов",
+    "The concept taggers are told to tag what an experiment DOES (not a baseline it is compared with), to tag a knob rather than a hyperparameter value, and to reuse known ids verbatim; a returned id loses a value leaf and takes a known spelling before it is minted; consolidation first folds `_`/`-` spellings and value leaves with no model, and those renames are recorded even while evaluations run; a node described identically to an already-tagged one reuses its tags with no call. Off restores the historical prompts and behaviour; a resumed pre-field run stays off.": "Агентам поручается отмечать то, ЧТО ДЕЛАЕТ эксперимент (а не базовый вариант для сравнения), указывать параметр вместо его конкретного значения и повторно использовать известные идентификаторы без изменений. Перед созданием нового идентификатора убирается суффикс со значением и выбирается известное написание. Объединение сначала сводит варианты с `_`/`-` и суффиксами значений без вызова модели; переименования записываются даже во время оценки. Узел с таким же описанием повторно использует имеющиеся теги без вызова модели. Выключение возвращает прежние инструкции и поведение. При возобновлении старого запуска настройка остаётся выключенной."
   }
 }

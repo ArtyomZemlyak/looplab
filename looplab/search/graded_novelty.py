@@ -58,12 +58,16 @@ def tag_idea(idea: Idea, graph: ConceptGraph) -> frozenset[str]:
     return tag_text(_idea_tag_text(idea), graph)
 
 
-def tag_idea_llm(idea: Idea, graph: ConceptGraph, client, *, parser: str = "tool_call") -> frozenset[str]:
+def tag_idea_llm(idea: Idea, graph: ConceptGraph, client, *, parser: str = "tool_call",
+                 concept_tag_hygiene: bool = False) -> frozenset[str]:
     """AGENTIC single-idea tagger (§21.4 F2): tags the proposed idea with the LLM against the graph's grown
     vocabulary — CONSISTENT with the cached node tags — via the shared `tag_text_llm` (grow=False; respects
     an empty 'novel' verdict; heuristic `tag_text` fallback on no client / all-unknown / failure). The idea's
-    text is `_idea_tag_text(idea)`, so the heuristic fallback equals `tag_idea(idea, graph)`."""
-    return tag_text_llm(_idea_tag_text(idea), graph, client, parser=parser)
+    text is `_idea_tag_text(idea)`, so the heuristic fallback equals `tag_idea(idea, graph)`.
+    `concept_tag_hygiene` (`Settings.concept_tag_hygiene`) is forwarded only when ON, so the default
+    call is the historical one."""
+    return tag_text_llm(_idea_tag_text(idea), graph, client, parser=parser,
+                        **({"concept_tag_hygiene": True} if concept_tag_hygiene else {}))
 
 
 def _params_identical(a: dict, b: dict, *, tol: float = 1e-9) -> bool:

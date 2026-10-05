@@ -15,6 +15,7 @@ been spent.
 """
 from __future__ import annotations
 
+import re
 from typing import Optional
 
 from looplab.core.concepts import MAX_MATERIALIZED_CONCEPTS, normalize_concept_id
@@ -156,8 +157,135 @@ def untrusted_research_item(text: str, *, max_chars: int = _TAGGER_ITEM_CHARS) -
         {"item": safe}, ensure_ascii=False, separators=(",", ":"), sort_keys=True)
 
 
+# --------------------------------------------------------------------------- #
+# Concept-tag HYGIENE (`Settings.concept_tag_hygiene`, 2026-10-05)
+# --------------------------------------------------------------------------- #
+#
+# PROVENANCE: run `minionerec-lora-v1` (2026-10-05; 39 nodes, 73 concepts). Its grown vocabulary
+# fragmented in three ways no consolidation ever repaired (0 `concept_consolidation` events — see
+# `engine/concept_cadence.py::_refresh_concept_tags` for why):
+#   * SPELLING: `continual` / `continual-learning` / `continual_learning`, `eval` / `evaluation`,
+#     `training/freeze` / `training/frozen` — the coverage directive reported `continual` and
+#     `continual_learning` as two uncovered axes;
+#   * VALUES as concepts: `optimization/lr/1e-3`, `optimization/lr/3e-4`, `lora/rank/r64` — each
+#     hyperparameter value counted as one more "concept" covered;
+#   * WRONG tags: three adapter-tuning nodes tagged with full fine-tuning because their rationale
+#     named it as the BASELINE they compare against; a node that trains nothing tagged with a
+#     training method; and one experiment re-injected five times with byte-identical text tagged
+#     five different ways.
+# Each half below answers one of those: the prompt rules (the wrong tags, at the source), the mint-
+# time id cleanup (spelling and values, deterministically, for ids a model returns NOW), the
+# consolidation pre-pass (`concept_map.py::syntactic_renames`, the same two rules over the vocabulary
+# already recorded) and the identical-description reuse in `tag_nodes_llm`. All OFF at every
+# function default: the flag changes a prompt, so a library caller and a resumed pre-field run keep
+# the historical bytes (`LEGACY_CONFIG_SNAPSHOT_DEFAULTS`).
+#
+# The rules are TASK-AGNOSTIC on purpose, like the rest of the tagger prompt: no word from the run
+# that motivated them (a domain example would leak a vocabulary into every other task's prompt).
+_TAGGER_HYGIENE_RULES = (
+    "\n\nTAGGING RULES:\n"
+    "- Tag what the experiment (or item) itself DOES or CHANGES. A method named only as a baseline, "
+    "control, reference or comparison target is NOT a tag, and an experiment that trains nothing is "
+    "not tagged with a training method.\n"
+    "- A concept is a method, mechanism or knob — NEVER a hyperparameter VALUE. Tag the knob "
+    "(`optimization/lr`, `training/epochs`), never a value under it (not `optimization/lr/3e-4`, not "
+    "`training/epochs/2`); the value belongs in the experiment's params.\n"
+    "- REUSE known ids VERBATIM. Never mint a spelling variant of a known id: not a `_` vs `-` "
+    "difference, not a singular/plural pair, not an abbreviation of a known word.")
+
+
+def concept_tag_hygiene_enabled(settings) -> bool:
+    """`Settings.concept_tag_hygiene` as every NON-engine caller reads it — the ONE reading (the
+    engine's reaches it through `EngineOptions.from_settings` -> `engine/knobs.py`). A missing field
+    — an object that is not a `Settings`, or a library caller's namespace — is the historical OFF."""
+    return bool(getattr(settings, "concept_tag_hygiene", False))
+
+
+# WHAT COUNTS AS A HYPERPARAMETER VALUE. A segment is a VALUE when it is, in full:
+#   * a number — integer, decimal or scientific (`2`, `0.05`, `1e-3`, `3e-4`, `.5`), optionally
+#     with a magnitude/multiplier suffix (`100k`, `4x`); or
+#   * a KNOB MNEMONIC immediately followed by such a number (`r16`, `r64`, `lr1e-4`, `lr-3e-4`,
+#     `alpha32`, `bs64`, `seed7`, `epochs2`) — the mnemonic from the CLOSED list `_VALUE_KNOB_PREFIXES`;
+#   * several such parts joined by `-` (`r16-alpha32`).
+# Deliberately NOT a value: a name that merely ENDS in digits. `bm25`, `e5`, `t5`, `l2`, `f1`, `gpt2`,
+# `fp16`, `int8`, `b0`, `v2` all name a method, a model, a norm, a metric, a precision or a version —
+# exactly the tags a concept map exists to carry. The brief that commissioned this rule suggested "a
+# single letter followed by digits" for the letter-prefixed half; that would drop `l2`, `e5`, `t5`,
+# `f1` and `b0`, so the letter half is the closed mnemonic list instead, and a new knob mnemonic is a
+# reviewed edit to it rather than a guess. A number-only id (`16`) has no parent to keep, so the
+# mint path drops the id rather than inventing one.
+_VALUE_KNOB_PREFIXES = ("r", "k", "n", "lr", "bs", "rank", "alpha", "seed", "epoch", "epochs",
+                        "step", "steps")
+_VALUE_NUMBER = r"(?:\d+(?:\.\d*)?|\.\d+)(?:e[+-]?\d+)?(?:[kmb]|x)?"
+_VALUE_PART = (r"(?:(?:" + "|".join(sorted(_VALUE_KNOB_PREFIXES, key=len, reverse=True))
+               + r")[-_]?)?" + _VALUE_NUMBER)
+_VALUE_SEGMENT = re.compile(r"[+-]?" + _VALUE_PART + r"(?:[-_]" + _VALUE_PART + r")*")
+
+
+def is_value_segment(segment: str) -> bool:
+    """Whether ONE id segment is a hyperparameter VALUE rather than a name (the table above)."""
+    return bool(_VALUE_SEGMENT.fullmatch((segment or "").strip().lower()))
+
+
+def fold_separators(cid: str) -> str:
+    """The spelling-insensitive KEY of an id: every `_` in every segment read as `-`. Two ids with one
+    key are one concept spelled twice (`continual_learning` / `continual-learning`). A key only — the
+    identity contract stays `core/concepts.py::normalize_concept_id`, which this never changes."""
+    return (cid or "").replace("_", "-")
+
+
+def strip_value_segments(cid: str) -> str:
+    """`cid` with its TRAILING value segments removed (`optimization/lr/1e-3` -> `optimization/lr`,
+    `lora/rank/r64` -> `lora/rank`); "" when every segment is a value. A value segment in the MIDDLE
+    of an id is left alone: it is a name's qualifier there, not the leaf the knob was set to."""
+    segments = (cid or "").split("/")
+    while segments and is_value_segment(segments[-1]):
+        segments.pop()
+    return "/".join(segments)
+
+
+def known_spelling_index(ids) -> dict[str, str]:
+    """`fold_separators(id) -> id` over a vocabulary, the lexicographically SMALLEST spelling winning a
+    shared key (`-` sorts before `_`, so a tie keeps the hyphenated one). Deterministic in its input."""
+    out: dict[str, str] = {}
+    for cid in sorted(ids):
+        out.setdefault(fold_separators(cid), cid)
+    return out
+
+
+def hygienic_concept_id(cid: str, graph: ConceptGraph, spellings: Optional[dict] = None) -> str:
+    """The MINT-TIME cleanup of an id a model just returned (`Settings.concept_tag_hygiene`): trailing
+    value segments dropped, then each level resolved against the KNOWN vocabulary — a level whose
+    separator-folded spelling matches a known id takes the known spelling, so a new leaf grows under
+    the parent the graph already has (`continual_learning/replay` under a known `continual-learning`)
+    — and a level the graph does not know is folded to `-`. "" when nothing but values remained.
+
+    Never applied to an id REPLAYED from the log (`tag_nodes_llm._ensure_ids`, `graph_from_node_concepts`):
+    a recorded id is a fact, and rewriting it at read time would make the same log fold to a different
+    vocabulary under a different flag. `spellings` is `known_spelling_index(graph ids)` when a caller
+    resolves many ids against one graph; it is rebuilt here otherwise."""
+    stripped = strip_value_segments(cid)
+    if not stripped:
+        return ""
+    if stripped in graph:
+        return stripped
+    if spellings is None:
+        spellings = known_spelling_index(c.id for c in graph.concepts())
+    resolved = ""
+    for segment in stripped.split("/"):
+        level = f"{resolved}/{segment}" if resolved else segment
+        if level not in graph:
+            # A known spelling of this level wins; otherwise the KNOWN parent spelling is kept and
+            # only the new segment is folded, so a level never re-spells the ancestor it grew under.
+            folded = (f"{resolved}/{fold_separators(segment)}" if resolved
+                      else fold_separators(segment))
+            level = spellings.get(fold_separators(level), folded)
+        resolved = level
+    return resolved
+
+
 def tag_text_llm(text: str, graph: ConceptGraph, client, *, parser: str = "tool_call",
-                 allow_plural: bool = False) -> frozenset[str]:
+                 allow_plural: bool = False, concept_tag_hygiene: bool = False) -> frozenset[str]:
     """AGENTIC single-TEXT tagger — the LLM counterpart of `tag_text`, shared by the F2 idea-grader and the
     HT hypothesis tagger. The LLM assigns the text the SET of concept ids from the graph's grown vocabulary
     (the SAME rule the node tagger uses, so texts are tagged CONSISTENTLY with the cached node tags), with
@@ -165,7 +293,11 @@ def tag_text_llm(text: str, graph: ConceptGraph, client, *, parser: str = "tool_
     vocabulary. Degrades to the deterministic `tag_text` on no client / any failure; RESPECTS an empty LLM
     verdict (the model naming nothing = 'fits no known concept', kept empty), but recovers via `tag_text`
     when the model named only UNKNOWN ids. Never raises; a configured live-client call is synchronous and
-    can add provider latency/cost before returning or falling back."""
+    can add provider latency/cost before returning or falling back.
+
+    `concept_tag_hygiene` (`Settings.concept_tag_hygiene`, OFF here) appends `_TAGGER_HYGIENE_RULES` to
+    the system prompt and changes nothing else: this tagger mints no id, so the mint-time cleanup
+    `tag_nodes_llm` applies has nothing to act on."""
     if client is None:
         return tag_text(text, graph, allow_plural=allow_plural)
     try:
@@ -194,7 +326,10 @@ def tag_text_llm(text: str, graph: ConceptGraph, client, *, parser: str = "tool_
             # particular needs them. The RULE is code-owned and appended after the vocabulary for
             # the same reason `roles.py` appends `_UNTRUSTED_MEMORY_RULE` after `render()`: a label
             # names provenance, it does not tell the model what to do with an instruction inside.
-            + _TAGGER_UNTRUSTED_RULE)
+            + _TAGGER_UNTRUSTED_RULE
+            # `Settings.concept_tag_hygiene`: the three tagging rules, a SEPARATE trailing block so
+            # OFF is the historical system prompt byte for byte (`_TAGGER_HYGIENE_RULES`).
+            + (_TAGGER_HYGIENE_RULES if concept_tag_hygiene else ""))
         msgs = [{"role": "system", "content": system},
                 {"role": "user", "content": untrusted_research_item(text)
                                             + "\n\nWhich KNOWN concepts does it touch? "
@@ -234,7 +369,8 @@ def tag_nodes_llm(state: RunState, graph: ConceptGraph, client, *, parser: str =
                   grow: bool = True, tools=None, known_tags=None,
                   max_workers: int = 8,
                   producer_modes: Optional[dict[int, str]] = None,
-                  tool_result_label: str = "") -> dict[int, frozenset[str]]:
+                  tool_result_label: str = "", concept_tag_hygiene: bool = False,
+                  reuse_known_ids=None) -> dict[int, frozenset[str]]:
     """The PRIMARY (intelligent) tagger: ask the LLM to assign each experiment a SET of concept ids from
     the vocabulary — the §21.11 "multi-label tagging by deepseek" — proposing new ones when `grow` and
     GROWING the graph so it works on ANY task, not a hardcoded vocabulary. When read-only run `tools` are
@@ -256,7 +392,16 @@ def tag_nodes_llm(state: RunState, graph: ConceptGraph, client, *, parser: str =
 
     `tool_result_label` is the untrusted-evidence FENCE on what `tools` return — each node's own code
     and logs (`core/evidence.py`; review 2026-09-22, TAT-02). The toolset is the caller's, so the fence
-    is too: forwarded only when non-empty, so the default is the historical call byte for byte."""
+    is too: forwarded only when non-empty, so the default is the historical call byte for byte.
+
+    `concept_tag_hygiene` (`Settings.concept_tag_hygiene`; OFF here, the historical prompt and ids)
+    does three things, each documented at its site: the system prompt gains `_TAGGER_HYGIENE_RULES`;
+    every id the model returns is cleaned by `hygienic_concept_id` before it is placed (an id replayed
+    from `known_tags` never is); and a node whose `_describe_node` text equals an already-tagged one's
+    reuses that node's tags with NO call. `reuse_known_ids` bounds which `known_tags` nodes may lend
+    their tags that way (None = all of them): a caller whose `known_tags` mixes producers names the
+    ones whose tags are the CLASSIFIER's, so a copy never carries an operator's assertion into the
+    classifier channel under this tagger's mode."""
     from pydantic import BaseModel, Field, field_validator
 
     from looplab.core.parse import parse_structured
@@ -321,6 +466,10 @@ def tag_nodes_llm(state: RunState, graph: ConceptGraph, client, *, parser: str =
             f"\n\nKNOWN AXES: {', '.join(axes) or '(none — propose axis/slug ids)'}\n\nKNOWN VOCABULARY:\n"
             + ("\n".join(f"- {c.id}: {c.label}" for c in graph.concepts() if not c.id.endswith("/*"))
                or "(empty — this is a new task type; propose concept ids from scratch as `axis/slug`)")
+            # A SEPARATE trailing block under `concept_tag_hygiene`, so OFF is the historical prompt
+            # byte for byte. After the vocabulary on purpose: "reuse known ids verbatim" reads AFTER
+            # the list it is about.
+            + (_TAGGER_HYGIENE_RULES if concept_tag_hygiene else "")
         )
     tags: dict[int, frozenset[str]] = {}
     # Split into REUSE (no LLM) and TODO (needs an LLM tag). The reuse pass grows the graph with the
@@ -361,14 +510,15 @@ def tag_nodes_llm(state: RunState, graph: ConceptGraph, client, *, parser: str =
         except Exception:  # noqa: BLE001 — degrade this node to heuristic, never crash the harness
             return n.id, None
 
-    def _apply(nid: int, raw_ids: Optional[list]) -> None:
+    def _apply(nid: int, raw_ids: Optional[list]) -> str:
         # Single-threaded: place the raw ids into the graph (growing it for `axis/slug` proposals) and
-        # record the node's final tag set.
+        # record the node's final tag set. Returns the producer that set it (what `producer_modes`
+        # records), so the identical-description reuse below can tell an answer from a fallback.
         if raw_ids is None:
             tags[nid] = heuristic.get(nid, frozenset())
             if producer_modes is not None:
                 producer_modes[nid] = "offline-heuristic"
-            return
+            return "offline-heuristic"
         got: set[str] = set()
         for raw in raw_ids:
             cid = _normalize_concept_id(raw)
@@ -376,7 +526,17 @@ def tag_nodes_llm(state: RunState, graph: ConceptGraph, client, *, parser: str =
                 tags[nid] = heuristic.get(nid, frozenset())
                 if producer_modes is not None:
                     producer_modes[nid] = "offline-heuristic"
-                return
+                return "offline-heuristic"
+            if concept_tag_hygiene:
+                # MINT-TIME hygiene (`hygienic_concept_id`): a value leaf dropped to its knob, a
+                # spelling variant of a known id resolved onto the known spelling. An id that was
+                # nothing but values (`16`) names no concept and is dropped, not the whole answer.
+                # Under `grow=False` a cleaned id the graph lacks keeps the model's known spelling,
+                # so the cleanup can never turn a placeable answer into a heuristic fallback.
+                clean = hygienic_concept_id(cid, graph)
+                if not clean:
+                    continue
+                cid = clean if (grow or clean in graph or cid not in graph) else cid
             if cid in graph:
                 got.add(cid)
             # A grown concept's parent is its IMMEDIATE id-prefix; `ensure` materializes the whole ancestor
@@ -389,39 +549,77 @@ def tag_nodes_llm(state: RunState, graph: ConceptGraph, client, *, parser: str =
                 tags[nid] = heuristic.get(nid, frozenset())
                 if producer_modes is not None:
                     producer_modes[nid] = "offline-heuristic"
-                return
+                return "offline-heuristic"
         # empty is a legitimate successful classifier answer. Preserve it and its
         # classifier provenance instead of substituting a heuristic tag.
         tags[nid] = frozenset(got)
         if producer_modes is not None:
             producer_modes[nid] = classifier_mode
+        return classifier_mode
 
     # Tag the remaining nodes in PARALLEL BATCHES: independent LLM calls run concurrently (the wall-clock
     # win — retro-tagging a finished N-node run was ~O(N) SEQUENTIAL agentic loops), while graph growth is
     # applied BETWEEN batches so later nodes still REUSE concepts earlier ones minted; consolidation
     # normalizes any within-batch duplicate synonyms afterwards. `max_workers=1` == the old sequential path.
     workers = max(1, int(max_workers))
-    for i in range(0, len(todo), workers):
-        batch = todo[i:i + workers]
+
+    def _run_batch(batch) -> list:
         if workers == 1 or len(batch) == 1:
-            results = [_emit_safe(n) for n in batch]
-        else:
-            import concurrent.futures as _futures
-            from contextvars import copy_context
+            return [_emit_safe(n) for n in batch]
+        import concurrent.futures as _futures
+        from contextvars import copy_context
 
-            # ThreadPoolExecutor (unlike anyio.to_thread) does not propagate
-            # ContextVars. Capture one independent Context per worker item so concept tagging keeps
-            # the Engine's shared broker + enrichment lane instead of silently becoming unbounded.
-            contextual_batch = [(copy_context(), n) for n in batch]
+        # ThreadPoolExecutor (unlike anyio.to_thread) does not propagate
+        # ContextVars. Capture one independent Context per worker item so concept tagging keeps
+        # the Engine's shared broker + enrichment lane instead of silently becoming unbounded.
+        contextual_batch = [(copy_context(), n) for n in batch]
 
-            def _emit_in_context(item):
-                context, node = item
-                return context.run(_emit_safe, node)
+        def _emit_in_context(item):
+            context, node = item
+            return context.run(_emit_safe, node)
 
-            with _futures.ThreadPoolExecutor(max_workers=workers) as ex:
-                results = list(ex.map(_emit_in_context, contextual_batch))
-        for nid, raw_ids in results:
-            _apply(nid, raw_ids)
+        with _futures.ThreadPoolExecutor(max_workers=workers) as ex:
+            return list(ex.map(_emit_in_context, contextual_batch))
+
+    if not concept_tag_hygiene:
+        for i in range(0, len(todo), workers):
+            for nid, raw_ids in _run_batch(todo[i:i + workers]):
+                _apply(nid, raw_ids)
+        return tags
+
+    # IDENTICAL DESCRIPTION, IDENTICAL TAGS (`concept_tag_hygiene`). The tagger's whole input about a
+    # node is `_describe_node` (the user turn adds only the node id), so two nodes with one
+    # description are one question — and `minionerec-lora-v1` asked it five times for one re-injected
+    # experiment and got five different answers. The first answer is reused for every later twin,
+    # deterministically and with NO call: this only ever removes calls. A twin of a known node reuses
+    # the known tags (bounded by `reuse_known_ids`); a twin of a node tagged in this pass reuses that
+    # node's tags only when its answer was the CLASSIFIER's — a node that degraded to the heuristic
+    # lends nothing, so its twin still gets its own call (a failure is not an answer to copy).
+    reusable_known = set(known_tags) if reuse_known_ids is None else (
+        set(known_tags) & {int(i) for i in reuse_known_ids})
+    answered: dict[str, frozenset[str]] = {}
+    for n in experiment_nodes(state):
+        if n.id in reusable_known and n.id in tags:
+            answered.setdefault(_describe_node(n), tags[n.id])
+    pending = list(todo)
+    while pending:
+        batch, rest, asked = [], [], set()
+        for n in pending:
+            desc = _describe_node(n)
+            if desc in answered:
+                tags[n.id] = answered[desc]
+                if producer_modes is not None:
+                    producer_modes[n.id] = classifier_mode
+            elif desc in asked or len(batch) >= workers:
+                rest.append(n)           # its twin is being asked now; wait for that answer
+            else:
+                batch.append(n)
+                asked.add(desc)
+        by_id = {x.id: x for x in batch}
+        for nid, raw_ids in (_run_batch(batch) if batch else []):
+            if _apply(nid, raw_ids) == classifier_mode:
+                answered.setdefault(_describe_node(by_id[nid]), tags[nid])
+        pending = rest
     return tags
 
 

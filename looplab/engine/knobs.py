@@ -180,6 +180,9 @@ class EngineKnobs:
     # doc 69 69.25: the budget line of the Strategist's brief, read by
     # `shared.py::strategist_budget_brief`, the one place the consult learns it.
     _strategist_budget_brief = Knob("strategist_budget_brief", bool)
+    # 2026-10-05: the concept taggers' hygiene, read by `shared.py::concept_tag_hygiene`, the one
+    # place the concept cadence and the novelty pre-check learn it.
+    _concept_tag_hygiene = Knob("concept_tag_hygiene", bool)
     # doc 67 67.4: the ablation refiner's probes, stamped onto the Researcher as
     # `_ablation_probe_hint` for the ONE refine proposal (`engine/ablation.py::_ablate`).
     _ablation_probe_hint = Knob("ablation_probe_hint", bool)

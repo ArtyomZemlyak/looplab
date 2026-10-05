@@ -1909,6 +1909,22 @@ class Settings(BaseSettings):
     # NEW nodes, not with run length. 5 gives a 14-node run three passes; raise it if the enrichment lane
     # is the bottleneck, and note that the SEED boundary fires regardless of this value.
     concept_retag_every: int = Field(default=5, ge=1)
+    # CONCEPT-TAG HYGIENE (2026-10-05). Run `minionerec-lora-v1` (39 nodes, 73 concepts) grew a
+    # vocabulary fragmented by spelling (`continual` / `continual-learning` / `continual_learning`),
+    # by hyperparameter VALUES minted as concepts (`optimization/lr/1e-3`, `lora/rank/r64`), and by
+    # wrong tags (a method named only as the comparison BASELINE tagged as what the node did), while
+    # one re-injected experiment was tagged five different ways — and recorded 0 consolidation events,
+    # because every rename waited for a quiescent boundary an operator-queued run never reaches.
+    # ON: the node and item taggers' system prompts gain three rules (tag what the experiment DOES;
+    # a knob, never its value; reuse known ids verbatim); an id the node tagger returns has its value
+    # leaf dropped and its spelling resolved onto a known id before it is minted; consolidation first
+    # runs a model-free pass collapsing `_`/`-` spellings and value leaves, and THOSE renames may be
+    # recorded while evaluations run (the model's renames keep the quiescent gate); and a node whose
+    # tagger description equals an already-tagged node's reuses its tags with no call. OFF is the
+    # historical prompts and behaviour byte for byte (`search/concept_tagging.py::
+    # _TAGGER_HYGIENE_RULES`, `tests/test_concept_tag_hygiene.py`); a resumed pre-field run is
+    # pinned OFF by `LEGACY_CONFIG_SNAPSHOT_DEFAULTS`.
+    concept_tag_hygiene: bool = True
     # === Confirmation & holdout ===========================================================
     # Multi-seed confirmation (I12, ADR-15): confirm the top-k under N seeds before
     # finishing. 0 disables (default). Only meaningful when eval has variance.
@@ -4105,6 +4121,13 @@ LEGACY_CONFIG_SNAPSHOT_DEFAULTS: dict[str, object] = {
     # budget line, so a resumed run would change what its Strategist is told mid-log. (c) is
     # `False`, pointable at every commit before this one.
     "strategist_budget_brief": False,
+    # CONCEPT-TAG HYGIENE, added 2026-10-05 defaulting ON (run `minionerec-lora-v1`). (a) holds. (b)
+    # is the DIFFERENT-PROMPT ground: ON, the node and item taggers' system prompts gain the tagging
+    # rules and the consolidator is shown a pre-folded vocabulary, so a resumed run would change what
+    # its classifier is told — and which ids it mints and records — mid-log. (c) is `False`, pointable
+    # at every commit before this one; `tests/test_concept_tag_hygiene.py` holds that `false` is the
+    # historical prompt, byte for byte.
+    "concept_tag_hygiene": False,
     # THE NODE BUDGET CUE, added 2026-09-23 defaulting ON (Q-3, the Researcher's context audit).
     # (a) holds. (b) is the rows above's DIFFERENT-PROMPT ground: ON, every proposal prompt gains a
     # line stating the run's remaining node budget and its plan phase, so a resumed run would change

@@ -194,6 +194,15 @@ def _prompt_store_for(settings):
     return PromptStore(prompt_dir) if prompt_dir else None
 
 
+def _hygiene_kwargs(settings) -> dict:
+    """The RUN's `Settings.concept_tag_hygiene` as tagger keywords — `{}` when off, so the call is the
+    historical one keyword for keyword (the `fence_kwargs` shape). Read through the one non-engine
+    reader, `search/concept_tagging.py::concept_tag_hygiene_enabled`, off the run's own snapshot, so a
+    pre-field run keeps its historical prompts here too."""
+    from looplab.search.concept_tagging import concept_tag_hygiene_enabled
+    return {"concept_tag_hygiene": True} if concept_tag_hygiene_enabled(settings) else {}
+
+
 def _concept_map_for(state, resolved_type, *, offline, model=None, repo=None, run_dir=None):
     """Shared PART IV D5 build — AGENTIC by default (the LLM agent grows the graph, tags, derives the
     per-task importance; `build_concept_map`), the deterministic alias heuristic only as the `--offline`
@@ -236,7 +245,8 @@ def _concept_map_for(state, resolved_type, *, offline, model=None, repo=None, ru
             cmap = build_concept_map(state, task_goal=getattr(state, "goal", "") or "", client=client,
                                      tools=_run_tools_for(state), seed_graph=seed, asset_brief=brief,
                                      parser=settings.llm_parser,
-                                     prompts=_prompt_store_for(settings), **fence)
+                                     prompts=_prompt_store_for(settings), **fence,
+                                     **_hygiene_kwargs(settings))
             cmap["brief"] = brief
             return cmap
     graph = seed or skeleton_for(resolved_type, text=getattr(state, "goal", "") or "")
@@ -390,7 +400,8 @@ def concept_coverage(
     cmap = build_concept_map(state, task_goal=state.goal or "", client=client,
                              tools=_run_tools_for(state), seed_graph=seed, asset_brief=brief_text,
                              parser=settings.llm_parser, max_workers=jobs,
-                             prompts=_prompt_store_for(settings), **fence)
+                             prompts=_prompt_store_for(settings), **fence,
+                             **_hygiene_kwargs(settings))
     typer.echo(concept_report(state, cmap["graph"], cmap["tags"]))
     typer.echo(f"\n  (built by the LLM agent — mode={cmap['mode']}, "
                f"{len(cmap['graph'].concepts())} concepts grown)")
@@ -508,7 +519,8 @@ def board_dedup(
         _settings, client = _optional_client(
             run_dir, model, "using the heuristic hypothesis tagger")
         if client is not None:
-            tags = {h.id: tag_text_llm(h.statement, m["graph"], client, allow_plural=True) for h in hyps}
+            tags = {h.id: tag_text_llm(h.statement, m["graph"], client, allow_plural=True,
+                                       **_hygiene_kwargs(_settings)) for h in hyps}
             label = "live-agentic"
     typer.echo(dedup_report(state, m["graph"], tags=tags))
     typer.echo(f"\n  (concept graph built by: {m['mode']}; hypothesis tags: {label})")

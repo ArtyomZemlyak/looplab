@@ -29,7 +29,7 @@ SETTINGS_UI_SCHEMA_VERSION = 2
 # here reading as if 207 were derived while it is typed, which is the drift it warns about. The
 # unforgeable gate is `SETTINGS_UI_SCHEMA_KEYSET_REVISION` further down; this integer is the
 # human-readable half the docs sentence quotes, and `_load_schema` refuses when the two disagree.
-SETTINGS_UI_SCHEMA_CATALOGUE_FIELD_COUNT = 252
+SETTINGS_UI_SCHEMA_CATALOGUE_FIELD_COUNT = 253
 # On the KEYSET REVISION below: DERIVED, and deliberately no longer a hand-pinned review gate: a
 # bare integer is satisfied by
 # bumping the integer. That is exactly how `asha_live_kill_confidence` — the threshold that now
@@ -416,7 +416,15 @@ SETTINGS_UI_SCHEMA_SETTINGS_FIELD_COUNT = len(Settings.model_fields)
 # (minionerec-lora-v1 node 2, 2026-10-01: a config-only node's metric withheld over two env
 # assignments no code prints). Rows because they decide which metrics stand. Verified by
 # INTERSECTION: the 249 previous keys plus exactly those two, none removed.
-SETTINGS_UI_SCHEMA_KEYSET_REVISION = "82e12800a60db004cd37eb7ec44c9e3ff75286dece4ca7bf50c741aec956e571"
+# 251 -> 252 on 2026-10-05: `concept_tag_hygiene`, beside `concept_retag_every` — whether the concept
+# taggers are given the tagging rules, a returned id is cleaned before it is minted, consolidation
+# folds spellings and value leaves with no model (and records those mid-evaluation), and a node
+# described like an already-tagged one reuses its tags (run `minionerec-lora-v1`). A row because it
+# changes what the classifier is told and what the concept surfaces count, and it is ON in the
+# product surface. Verified by INTERSECTION: the 251 previous keys plus exactly that one (the
+# previous revision re-derives with it removed), none removed.
+# 252 -> 253: output_language joins the merged hygiene row; neither old keyset loses a key.
+SETTINGS_UI_SCHEMA_KEYSET_REVISION = "9d8f7c214545601e3d7ff781b3c5cc48b88a87dc525cad47e8e8dd25c19e7b0e"
 _SCHEMA_PATH = Path(__file__).with_name("settings_ui_schema.json")
 _FIELD_TYPES = frozenset({"bool", "enum", "secret", "int", "float", "list", "text"})
 _OPTIONAL_TEXT = ("help", "shortHelp", "shortLabel", "placeholder", "warning", "warningTitle", "warningTone")
