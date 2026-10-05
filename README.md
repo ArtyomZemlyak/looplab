@@ -218,15 +218,13 @@ looplab export-notebook  RUN_DIR         # export the champion as a runnable .ip
 
 Full flag-by-flag reference: [CLI reference](docs/guide/cli-reference.md).
 
-**The control plane authenticates itself on a shared origin.** `looplab ui` binds loopback, which is
-a real boundary on your own machine and none at all on a multi-user host: on JupyterHub every user's
-server answers on the same origin, so any same-origin page could drive `/api/*` — start a run, delete
-one, spend money. With `LOOPLAB_UI_TOKEN` unset the server therefore decides by where it is: a private
-origin stays open and byte-for-byte as before, and a shared hub **fails closed** — it mints a token
-into `~/.looplab/ui-token` (mode 600, reused across restarts, printed once with its path) and requires
-it on `/api/*`. Set `LOOPLAB_UI_TOKEN` yourself to choose the value, or `LOOPLAB_UI_ANONYMOUS=1` to
-opt out deliberately; the opt-out is logged. `looplab tui` reads the same file, so it keeps working
-untouched.
+**Quick start needs no login or URL allow-list.** `looplab ui` opens without an owner token,
+including behind a JupyterHub/reverse proxy. Host/Origin checks are off by default.
+To enable protection, set `LOOPLAB_UI_REQUIRE_AUTH=1` and `LOOPLAB_UI_CHECK_ORIGIN=1`;
+for a proxy, then list its hostname in `LOOPLAB_UI_HOSTS`. A supplied `LOOPLAB_UI_TOKEN`
+always enables login; otherwise auth opt-in generates/reuses `~/.looplab/ui-token`.
+An open server grants owner access to anyone who can reach it. Use protected mode or an
+authenticated proxy for a shared/public deployment. The default bind remains `127.0.0.1`.
 
 ## Crash & resume (the keystone)
 

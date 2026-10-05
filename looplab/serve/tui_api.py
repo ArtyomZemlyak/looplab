@@ -79,10 +79,9 @@ class Api:
     `X-LoopLab-Token` header when LOOPLAB_UI_TOKEN is set (token-gated deployments), exactly like the
     browser does, so the TUI works behind the same auth.
 
-    It also falls back to the token FILE a shared-hub server mints when the variable is unset
-    (`serve/owner_token.py`): that server fails closed by generating a credential the operator never
-    exported, and a TUI that only read the variable would 401 against a server running on the same
-    box as the same user, with nothing on screen to explain why."""
+    It also falls back to the token file created by an explicitly protected server
+    (`LOOPLAB_UI_REQUIRE_AUTH=1`), so a client in another shell can use the same credential.
+    Default open UI does not mint or activate that file."""
 
     def __init__(self, base_url: str, token: Optional[str] = None, timeout: float = 30.0):
         self.base = base_url.rstrip("/")

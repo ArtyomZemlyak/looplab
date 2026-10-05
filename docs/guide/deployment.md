@@ -103,32 +103,41 @@ HTML, and it is not written to a persistent browser store.
 
 ### What an UNSET `LOOPLAB_UI_TOKEN` means
 
-It does not mean one thing, because the exposure is not the same on both deployments:
+Quick start is **open by default**, on local, JupyterHub/proxy and non-loopback binds.
+No owner token is minted or requested unless you configure authentication. An existing
+`~/.looplab/ui-token` file is not automatically activated in open mode.
 
-| Origin | Unset token | Why |
-|---|---|---|
-| **Private** (`looplab ui` on loopback, Compose published to loopback, a per-user host) | Unauthenticated, exactly as before | Nothing else shares the origin; the token is defence in depth, and a mandatory unlock gate on a laptop buys nothing. |
-| **Shared JupyterHub origin** (`jupyter-server-proxy`, detected from `JUPYTERHUB_SERVICE_PREFIX`/`JUPYTERHUB_API_TOKEN`) | **Fails closed**: the server generates a token, stores it `0600` at `~/.looplab/ui-token`, logs the path and the value at startup, and default-denies `/api/*` | Every user's app and every other proxied page live on ONE browser origin, and the same-origin policy is per-origin, not per-path. An unauthenticated control plane there can be driven by any same-origin page: start a run, delete a run, edit settings, name a `task_file`. |
-| **A non-loopback bind** (`looplab ui --host 0.0.0.0`, or any `--host` that is not a loopback address) | **Fails closed**, identically | The hub was only ever an INSTANCE of the general property, "is this control plane published somewhere that is not just this machine". Keying the decision on the two hub environment variables meant `--host 0.0.0.0` published start/delete-run, settings, `task_file` and shell-executing experiments on every interface while answering "private origin" — the one deployment where the unlock gate is not defence in depth but the whole boundary. |
+| Startup configuration | Behavior |
+|---|---|
+| No auth settings | No login; anyone reaching the server has owner access. Default bind stays `127.0.0.1`. |
+| `LOOPLAB_UI_TOKEN` supplied | Require that owner token, regardless of other flags. |
+| `LOOPLAB_UI_REQUIRE_AUTH=1` | Require login; mint/reuse the private token file if no value was supplied. |
+| `LOOPLAB_UI_ANONYMOUS=1` | Legacy opt-out from automatic minting, including when REQUIRE_AUTH is set; does not override a supplied token. |
 
-Read a minted token back with `cat ~/.looplab/ui-token` (or `$LOOPLAB_UI_TOKEN_FILE`), then unlock the
-UI with it. `looplab tui` reads the same file, so it keeps working without an exported variable. The
-file is reused across restarts — an already-unlocked tab does not have to be re-unlocked — and a
-token file that is a symlink or readable by anyone else is **refused at startup** rather than used.
-"Readable by anyone else" is read off the mode bits, so it is a POSIX check: Windows reports `0666`
-for every file whatever its ACL, so there only the link refusal applies and the file is exactly as
-private as the directory it sits in — the default `~\.looplab\` is inside your user profile, whose
-ACL is private to your account; keep a `LOOPLAB_UI_TOKEN_FILE` somewhere equally private.
+The minted file is `~/.looplab/ui-token` (`LOOPLAB_UI_TOKEN_FILE` overrides it).
+Read it with `cat ~/.looplab/ui-token` and enter it at **Unlock LoopLab controls**.
+On POSIX it is private `0600`; on Windows keep it in your private profile directory.
+The token never appears in HTML and stays in the tab's `sessionStorage` after login.
 
-Two deliberate non-choices: "bind loopback-only when unset" cannot be the boundary, because on the hub
-the server *already* binds loopback and `jupyter-server-proxy` connects to it there — the bind host
-answers the question for a direct `--host`, and answers nothing at all for a proxy; and refusing to
-start would break the Launcher-tile deployment whose whole point is that there is no terminal in which
-to export a variable. A minted credential is fail-closed *and* recoverable.
+### Optional Host / Origin checks
 
-`LOOPLAB_UI_ANONYMOUS=1` restores the previous open behaviour on a shared origin — for a deployment
-whose origin is private in a way the detection cannot see. It is deliberately something you turn on,
-and the startup log says so on every start.
+`LOOPLAB_UI_CHECK_ORIGIN=1` enables both Host validation and mutation Origin validation.
+They are off by default, so opening a proxied URL needs no hostname allow-list for quick start.
+With checks enabled, `LOOPLAB_UI_HOSTS` allows public hostnames; their HTTPS/default-port
+origins are accepted. Other origins may be listed explicitly in `LOOPLAB_UI_CORS`.
+CORS response-read policy remains separate from these checks.
+
+For a shared/public server, opt into auth and URL checks or use an authenticated proxy:
+
+```bash
+LOOPLAB_UI_REQUIRE_AUTH=1 LOOPLAB_UI_CHECK_ORIGIN=1 LOOPLAB_UI_HOSTS=lab.example.org looplab ui --host 0.0.0.0
+```
+
+An open UI grants owner access to all reachable callers. A `LOOPLAB_HARNESS_TOKEN` can
+coexist with open UI without a separate owner token; requests presenting it still retain
+agent restrictions. It does not protect the open owner plane from callers omitting it.
+Use a different owner token when enabling owner login. Review link creation still requires
+owner auth; an open server is not a safe sharing boundary.
 
 ### Where a launch may read its task from
 
@@ -209,11 +218,9 @@ project information.
 ## Run as a JupyterHub app (jupyter-server-proxy)
 
 LoopLab can launch as a **first-class app inside a JupyterHub single-user server** — a tile in the
-Launcher that opens the live UI with no terminal and no hand-typed URL. On a hub the owner shell is
-always protected — by your `LOOPLAB_UI_TOKEN`, or by a token the server mints (unless you set
-`LOOPLAB_UI_ANONYMOUS=1`) — and a protected shell intentionally denies framing, so the tile opens a new
-browser tab; the launcher never weakens that clickjacking boundary. Only an anonymous shell (no hub
-environment, or the explicit opt-out) opens in-frame.
+Launcher that opens the live UI with no terminal and no hand-typed URL. The default hub shell opens in-frame without login. Supplying `LOOPLAB_UI_TOKEN` or
+enabling `LOOPLAB_UI_REQUIRE_AUTH=1` activates a protected shell that denies framing and
+opens in a new browser tab. The legacy anonymous opt-out suppresses automatic minting.
 Install the extra:
 
 ```bash
@@ -222,15 +229,17 @@ pip install "looplab[jupyterhub]"      # fastapi + uvicorn + jupyter-server-prox
 
 The `jupyter_serverproxy_servers` entry point (`looplab/serve/jupyter.py`) registers the tile: clicking it
 runs `looplab ui` on a free port and proxies it at `/user/<name>/proxy/<port>/`. It selects the new-tab
-target automatically when `LOOPLAB_UI_TOKEN` is present. Five env knobs matter on a hub:
+target automatically when owner login is enabled. Useful env knobs on a hub:
 
 | Env | Why |
 |---|---|
 | `LOOPLAB_RUN_ROOT` | Where runs are written. Defaults to `~/looplab-runs`; it survives idle-cull/pod replacement **only when the Spawner/Z2JH deployment mounts a persistent home/PVC**. Without that volume, both runs and default `~/.looplab` memory disappear with the pod. **Don't** point the run root at an S3/geesefs FUSE mount: the event protocol depends on coherent append, tail repair, locking and fsync semantics that object-backed FUSE commonly cannot provide. |
 | `LOOPLAB_ALLOW_UNLOCKED_WRITER` | Safety override. The engine holds `engine.lock` as the one live reducer, while the engine and authenticated control server may append serialized records to the same log. On a FUSE/S3 mount where OS locking is unavailable the reducer lock cannot be enforced, so engine startup **fails closed**. Set this to `1` only if you externally guarantee one engine per run dir and accept best-effort append locking/durability; prefer a lock-capable local disk. |
 | `LOOPLAB_UI_DIST` | A prebuilt React bundle. Set it (the image bakes one) so `looplab ui --no-build` serves instantly and never attempts an `npm build` on the noexec/FUSE home. |
-| `LOOPLAB_UI_HOSTS` | Public hostname(s), comma-separated, that may reach the UI (for example `hub.example.org`). `localhost`, `127.0.0.1`, and `::1` are always allowed; every other Host is rejected to prevent DNS rebinding. |
-| `LOOPLAB_UI_TOKEN` | The owner control credential. On a hub, **leaving it unset no longer means anonymous**: the server mints one into `~/.looplab/ui-token` (`0600`) and default-denies `/api/*`. Set it to choose your own; see [What an UNSET `LOOPLAB_UI_TOKEN` means](#what-an-unset-looplab_ui_token-means). `LOOPLAB_UI_TOKEN_FILE` moves the minted file; `LOOPLAB_UI_ANONYMOUS=1` opts back out, loudly. |
+| `LOOPLAB_UI_HOSTS` | Public hostname(s), comma-separated, that may reach the UI (for example `hub.example.org`). Used only with `LOOPLAB_UI_CHECK_ORIGIN=1`; local names are always allowed in that mode. |
+| `LOOPLAB_UI_TOKEN` | Optional owner credential; supplying it enables login. `LOOPLAB_UI_REQUIRE_AUTH=1` enables generated-token login instead. Unset/default is open, including on JupyterHub. `LOOPLAB_UI_TOKEN_FILE` moves the minted file. |
+| `LOOPLAB_UI_CHECK_ORIGIN` | Default `false`. Set `1` to enforce Host and mutation Origin checks. |
+| `LOOPLAB_UI_REQUIRE_AUTH` | Default `false`. Set `1` to require owner login and mint/reuse a credential if none was supplied. |
 | `LOOPLAB_LLM_BASE_URL` | The cluster LLM endpoint (the default is localhost Ollama). A wrong/unreachable endpoint is caught by the [endpoint preflight](llm-and-agents.md#endpoint-preflight-before-a-run-starts): the run is **refused before it starts**, so there is no event log and no `run_finished` event — nothing to resume, only the empty `engine.lock` the run dir was created to hold — and the operator sees one refusal message naming every unreachable role/target and [exit code 2](cli-reference.md#exit-codes-a-refusal-is-not-a-crash). On a hub that means a failed launch you can read, not a silent stuck run and not a "successful" run of empty fallback proposals. |
 
 **Behind a non-stripping proxy** `looplab ui` auto-derives `root_path` from `JUPYTERHUB_SERVICE_PREFIX`
@@ -238,10 +247,10 @@ target automatically when `LOOPLAB_UI_TOKEN` is present. Five env knobs matter o
 
 **Single-user image.** `Dockerfile.jupyterhub` builds a `quay.io/jupyter/base-notebook` image with
 LoopLab installed, the bundle baked + pinned, and `LOOPLAB_RUN_ROOT` set. Point your Z2JH
-`singleuser.image` (or `c.Spawner.image`) at it, mount a persistent home/PVC, and set
-`LOOPLAB_UI_HOSTS=hub.example.org` for the public hub host. For an HTTP or non-default-port origin,
-also allow the full origin in `LOOPLAB_UI_CORS`; otherwise unsafe-method requests correctly fail with
-403 even though the tile can render.
+`singleuser.image` (or `c.Spawner.image`) at it and mount a persistent home/PVC.
+For protected mode enable `LOOPLAB_UI_REQUIRE_AUTH=1` and `LOOPLAB_UI_CHECK_ORIGIN=1`,
+then set `LOOPLAB_UI_HOSTS=hub.example.org`. With URL checks enabled, HTTP/non-default-port
+origins also need the full origin in `LOOPLAB_UI_CORS`.
 
 **Resource lifecycle.** Under JupyterHub the UI server the Launcher tile starts reaps the engines it
 spawned on shutdown (a hub cull would otherwise orphan a detached engine that keeps billing GPU/CPU

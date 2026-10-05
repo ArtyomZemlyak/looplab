@@ -1,0 +1,36 @@
+{
+  "baseline_commit": "08c3191ca7eb89331889a15ed1bce24a4dd9b0f0",
+  "defaults": {"owner_login": false, "host_origin_validation": false, "bind": "127.0.0.1"},
+  "opt_ins": ["LOOPLAB_UI_REQUIRE_AUTH=1", "LOOPLAB_UI_CHECK_ORIGIN=1", "LOOPLAB_UI_TOKEN"],
+  "regressions_before": {"failed": 5, "passed": 2},
+  "tests": {
+    "replay": {"passed": 193},
+    "auth_bundle": {"passed": 138, "skipped": 5},
+    "new_old_token_file_regression": {"passed": 1},
+    "full_server_initial": {"passed": 157, "skipped": 3, "failed": 4},
+    "server_logging_corrected_rerun": {"passed": 1},
+    "final_quick_start_and_logging_subset": {"passed": 9, "included_in_unique_total": true},
+    "ui_targeted": {"passed": 8},
+    "documentation": {"passed": 28},
+    "unique_passed": 526
+  },
+  "unresolved_server_fixture_failures": {
+    "reason": "Windows symlink creation privilege missing (WinError 1314)",
+    "tests": [
+      "test_node_logs_legacy_attempt_rejects_cross_node_alias_and_replacement",
+      "test_agents_md_refuses_a_symlink_and_bounds_the_body",
+      "test_skills_authoring_lists_nested_packages_read_only_and_rejects_nested_writes"
+    ]
+  },
+  "credential_symlink_tests": "Two tests use synthetic lstat link metadata only when Windows refuses symlink creation with WinError 1314; real symlinks otherwise.",
+  "browser": {
+    "url": "http://127.0.0.1:8775/",
+    "hub_environment": "simulated JUPYTERHUB_SERVICE_PREFIX, not a deployed Hub",
+    "production_bundle": "unchanged from baseline / section 20.56",
+    "observed": ["Runs available", "Assistant input enabled", "no unlock gate", "no console warnings or errors"],
+    "requests": "GET only, completed responses 200",
+    "screenshot": "open-ui.png"
+  },
+  "checks": ["final docs/API/surface/diagram: 28 passed", "strict MkDocs build", "git diff --check"],
+  "not_claimed": ["full CI green", "full server green", "new UI build or bundle measurement", "actual Hub reverse proxy", "provider calls", "training", "durable commands", "LoopLab worktree delivery"]
+}

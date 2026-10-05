@@ -1,15 +1,4 @@
-"""What an UNSET `LOOPLAB_UI_TOKEN` means, driven with real requests.
-
-The token middleware has been in the tree for a long time; what was open is the DEFAULT. Unset meant
-unauthenticated everywhere, including on the shared JupyterHub origin the server itself detects and
-warns about — where jupyter-server-proxy puts every user's app on ONE browser origin and any
-same-origin page could therefore drive the control plane (start/delete runs, edit settings, name a
-`task_file`). `serve/owner_token.py` splits that one answer in two: a private origin stays open
-byte-for-byte, a shared origin fails closed by minting a credential.
-
-Every assertion below goes through `make_app` + a real request, because the property is "the request
-is refused", not "the module computed a string".
-"""
+"""Explicit owner login, credential retention and opt-in shared deployment behavior."""
 from __future__ import annotations
 
 import os
@@ -26,8 +15,25 @@ from looplab.serve.server import make_app  # noqa: E402
 from _posix_gates import MODE_BITS  # noqa: E402
 
 
+def _token_link(path, target, monkeypatch):
+    try:
+        path.symlink_to(target)
+    except OSError as exc:
+        if os.name != "nt" or getattr(exc, "winerror", None) != 1314:
+            raise
+        # Windows without symlink privilege: inject its link metadata answer instead.
+        # Still exercise the real entry/refusal code; never follow/read the target.
+        from types import SimpleNamespace
+        from pathlib import Path
+        previous = os.lstat
+        link = SimpleNamespace(st_mode=stat.S_IFLNK, st_file_attributes=0x400)
+        monkeypatch.setattr(os, "lstat", lambda name, *args, **kw:
+                            link if Path(name) == path else previous(name, *args, **kw))
+
+
 def _hub(monkeypatch):
     monkeypatch.setenv("JUPYTERHUB_SERVICE_PREFIX", "/user/alice/")
+    monkeypatch.setenv("LOOPLAB_UI_REQUIRE_AUTH", "1")
 
 
 def test_private_origin_without_a_token_stays_open(tmp_path, monkeypatch):
@@ -40,8 +46,8 @@ def test_private_origin_without_a_token_stays_open(tmp_path, monkeypatch):
     assert not owner_token.owner_token_path().exists()
 
 
-def test_shared_hub_without_a_token_mints_one_and_denies_by_default(tmp_path, monkeypatch):
-    """The defect, closed: on the shared origin an unset token no longer means anonymous."""
+def test_shared_hub_with_auth_opt_in_mints_one_and_denies(tmp_path, monkeypatch):
+    """Explicit auth opts a shared server into generated-token login."""
     _hub(monkeypatch)
     client = TestClient(make_app(tmp_path))
 
@@ -99,7 +105,7 @@ def test_a_symlinked_token_is_refused_where_open_cannot_refuse_links(tmp_path, m
     elsewhere.write_text("not-the-token", encoding="utf-8")
     os.chmod(elsewhere, 0o600)
     path = tmp_path / "ui-token"
-    path.symlink_to(elsewhere)
+    _token_link(path, elsewhere, monkeypatch)
     monkeypatch.delattr(os, "O_NOFOLLOW", raising=False)
     with pytest.raises(OperatorRefusal, match="symbolic link"):
         owner_token.read_owner_token_file(path)
@@ -149,7 +155,7 @@ def test_a_symlinked_token_file_is_refused_rather_than_followed(tmp_path, monkey
     path.parent.mkdir(parents=True, exist_ok=True)
     elsewhere = tmp_path / "somebody-elses-file"
     elsewhere.write_text("not-the-token", encoding="utf-8")
-    path.symlink_to(elsewhere)
+    _token_link(path, elsewhere, monkeypatch)
 
     with pytest.raises(OperatorRefusal):
         make_app(tmp_path)
@@ -192,6 +198,7 @@ def test_a_published_bind_fails_closed_exactly_like_the_hub(tmp_path, monkeypatc
     simply false here. The property is "published on an origin this deployment does not own", and
     the bind host is the second witness of it.
     """
+    monkeypatch.setenv("LOOPLAB_UI_REQUIRE_AUTH", "1")
     client = TestClient(make_app(tmp_path, bind_host="0.0.0.0"))
 
     assert client.get("/api/runs").status_code == 401
@@ -237,6 +244,7 @@ def test_the_published_bind_decision_is_LOGGED_with_its_minted_token(tmp_path, m
     """A server that fails closed and says nothing is one nobody can unlock: the minted value is
     printed exactly once, at the moment it is created, and the branch that decides whether to log
     must be the SAME predicate that decided to mint."""
+    monkeypatch.setenv("LOOPLAB_UI_REQUIRE_AUTH", "1")
     with caplog.at_level("WARNING", logger="looplab.server"):
         make_app(tmp_path, bind_host="0.0.0.0")
 

@@ -41,6 +41,7 @@ def test_prefixed_owner_api_is_not_allowed_to_bypass_token(tmp_path, monkeypatch
 
 
 def test_prefixed_owner_mutation_is_not_allowed_to_bypass_csrf(tmp_path, monkeypatch):
+    monkeypatch.setenv("LOOPLAB_UI_CHECK_ORIGIN", "1")
     monkeypatch.setenv("LOOPLAB_UI_TOKEN", "owner-secret")
     app = make_app(tmp_path)
     status = anyio.run(

@@ -1233,27 +1233,22 @@ impact preview, ACL/RBAC or a complete history workbench, so those writes are no
 
 ## Exposure & auth
 
-Bind to `127.0.0.1` (the default) for local use. On a **private origin** the control plane is
-**unauthenticated** unless you set a token, so it is not placed on the LAN implicitly. To serve beyond
-localhost, bind to `0.0.0.0` and add the public hostname to the comma-separated `LOOPLAB_UI_HOSTS`
-allow-list. Requests with any other Host are rejected, closing DNS-rebinding attacks against the local
-API.
+`looplab ui` defaults to **no login and no Host/Origin check**, including behind JupyterHub
+or a reverse proxy. The default bind stays `127.0.0.1`; opening a proxy URL needs no allow-list.
+A stored token file is not activated automatically.
 
-Setting `LOOPLAB_UI_TOKEN` for that is recommended but no longer load-bearing: a **non-loopback bind is
-itself a shared origin**, so leaving the token unset there mints one rather than serving the control
-plane open. An unset token is likewise not anonymous mode on a **shared JupyterHub origin**, where every
-proxied app shares one browser origin. In both cases the server writes the credential to
-`~/.looplab/ui-token` and default-denies `/api/*`. See
-[What an UNSET `LOOPLAB_UI_TOKEN` means](deployment.md#what-an-unset-looplab_ui_token-means).
+Protection is explicit: `LOOPLAB_UI_REQUIRE_AUTH=1` requires owner login and generates/reuses
+`~/.looplab/ui-token`; supplying `LOOPLAB_UI_TOKEN` always enables login with that value.
+`LOOPLAB_UI_CHECK_ORIGIN=1` enables Host and mutation Origin validation. In that mode, list
+public proxy hostnames in `LOOPLAB_UI_HOSTS` and nonstandard origins in `LOOPLAB_UI_CORS`.
+See [deployment options](deployment.md#what-an-unset-looplab_ui_token-means).
 
-The token is never embedded in HTML. The owner enters it at **Unlock LoopLab controls** and it remains
-in that tab's `sessionStorage`. True review links cannot be created in anonymous mode; the reviewer
-uses a separate tokenless `/review` shell and a server-enforced GET-only capability.
-
-`LOOPLAB_UI_TOKEN` is a static deployment-owner credential, not per-user identity or RBAC. On a
-shared origin — notably a JupyterHub `…/user/<name>/proxy/<port>/` path — other applications still
-share one browser security principal. Use a private origin or authenticated reverse proxy for hostile
-multi-user isolation. See the [deployment guide](deployment.md#shared-jupyterhub-origin-important).
+Open mode grants owner access to anyone reaching the server; enable protection or use an
+authenticated proxy for shared/public deployment. A scoped harness token can coexist with open
+UI, but only requests presenting it are scoped; it is not an owner-plane access boundary.
+Review-link creation still requires owner auth. Protected UI asks for the token at
+**Unlock LoopLab controls** and keeps it in the tab's `sessionStorage`, never in HTML.
+A token is a deployment-owner credential, not per-user identity or RBAC.
 
 ### Behind a path-mounting proxy (JupyterHub, reverse-proxy subpath)
 

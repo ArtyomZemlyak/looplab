@@ -155,8 +155,9 @@ import pytest  # noqa: E402
 @pytest.mark.parametrize("token", [None, "owner-secret"])
 @pytest.mark.parametrize("hub", [None, "/user/alice/"])
 @pytest.mark.parametrize("anonymous", [None, "1"])
+@pytest.mark.parametrize("require_auth", [None, "1"])
 def test_the_launcher_frames_exactly_the_servers_that_stay_anonymous(monkeypatch, tmp_path, token,
-                                                                     hub, anonymous):
+                                                                     hub, anonymous, require_auth):
     """Review 2026-09-22, SRV1-08. The launcher decides framing at spec time, in the jupyter-server
     process; the child `looplab ui` decides its owner token at start. On a hub with no token the child
     MINTS one and refuses framing, while the launcher (reading only the parent's token) framed it —
@@ -167,7 +168,7 @@ def test_the_launcher_frames_exactly_the_servers_that_stay_anonymous(monkeypatch
     from looplab.serve.owner_token import resolve_owner_token
 
     for name, value in (("LOOPLAB_UI_TOKEN", token), ("JUPYTERHUB_SERVICE_PREFIX", hub),
-                        ("LOOPLAB_UI_ANONYMOUS", anonymous)):
+                        ("LOOPLAB_UI_ANONYMOUS", anonymous), ("LOOPLAB_UI_REQUIRE_AUTH", require_auth)):
         if value is None:
             monkeypatch.delenv(name, raising=False)
         else:

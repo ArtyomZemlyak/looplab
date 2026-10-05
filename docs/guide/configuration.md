@@ -1254,3 +1254,15 @@ Two further limits are worth knowing: the operator `set_strategy` control does *
 `developer` field at all (it is refused with `strategy has unknown field(s)`), and the LLM
 Strategist's structured-output schema has no `developer` field either — a live swap comes from a
 rule-based or custom Strategist, or from a task/config choice at launch.
+
+### UI server access (startup environment)
+
+These server flags are not experiment Settings and are not pinned to a run snapshot.
+
+| Environment flag | Default | Effect |
+|---|---|---|
+| `LOOPLAB_UI_REQUIRE_AUTH` | `false` | Opt into owner login and mint/reuse a token when `LOOPLAB_UI_TOKEN` is absent. A supplied token always enables login. |
+| `LOOPLAB_UI_CHECK_ORIGIN` | `false` | Opt into Host and mutation Origin checks; configure proxy names/origins with `LOOPLAB_UI_HOSTS` / `LOOPLAB_UI_CORS`. |
+
+Quick start requires neither. See [Deployment](deployment.md#what-an-unset-looplab_ui_token-means)
+for open/protected mode, harness credentials and shared deployment boundaries.

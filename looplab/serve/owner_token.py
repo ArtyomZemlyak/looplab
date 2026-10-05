@@ -1,49 +1,14 @@
-"""The owner API credential, and the ONE rule for what an UNSET one means.
+"""Optional owner login for the UI control plane.
 
-`server.py` has always read `LOOPLAB_UI_TOKEN` and, when it is set, default-denied every `/api/*`
-request without a matching `X-LoopLab-Token`. The gap this module closes is the DEFAULT: unset meant
-unauthenticated, everywhere, including the one deployment the server itself already detects and warns
-about — a shared JupyterHub origin, where `jupyter-server-proxy` puts every user's app and every
-other proxied page on ONE browser origin, and the same-origin policy is per-origin, not per-path. On
-that origin an unauthenticated control plane can be driven by any same-origin page: start a run,
-delete a run, edit settings, name a `task_file`. The server logged exactly that and then served it.
+Quick start does not mint or require an owner token, including JupyterHub/proxy and
+non-loopback deployments. A supplied LOOPLAB_UI_TOKEN always enables owner login.
+LOOPLAB_UI_REQUIRE_AUTH=1 explicitly enables login and mints/reuses a private token
+when no value was supplied. LOOPLAB_UI_ANONYMOUS=1 remains an explicit opt-out from
+automatic minting; it never overrides an operator-supplied token.
 
-WHAT THE DEFAULT IS NOW, and why this shape rather than the two alternatives:
-
-* **Private origin (the default local single-user path): unchanged, still open.** `looplab ui` binds
-  `127.0.0.1`; a fresh `pip install` followed by `looplab ui` behaves byte-for-byte as before, with
-  no credential to find and no unlock gate. The unauthenticated default there is defence in depth,
-  not an open door, and paying a setup cost for it would buy nothing.
-* **Shared hub origin, no token set: MINT one and say so.** The server generates a token, stores it
-  `0600` under the operator's own home, and logs the path plus the value it just minted. The API is
-  then gated exactly as if the operator had exported `LOOPLAB_UI_TOKEN`.
-* **A NON-LOOPBACK BIND IS A SHARED ORIGIN TOO, and is treated exactly like the hub.** `looplab ui
-  --host 0.0.0.0` publishes the control plane — start/delete runs, edit settings, shell-executing
-  experiments — to everything that can route to the box. Until 2026-08-15 the fail-closed decision
-  was keyed on two JupyterHub env variables alone, so that invocation answered `private` and served
-  the whole plane unauthenticated; the argument below ("it already binds loopback, and that is the
-  exposed configuration") is TRUE of the hub and simply false of it. The general property is "is
-  this server published on an origin it does not own", and the hub detection is one witness of it,
-  not the definition. The bind host is the other, and it is the operator's own argument: `looplab
-  ui --host` -> `serve(host=…)` -> `make_app(bind_host=…)`.
-* **Not "bind loopback-only when unset".** On the hub it already binds loopback, and that is the
-  exposed configuration: jupyter-server-proxy connects to `127.0.0.1` itself and republishes the app
-  on the shared public origin. A loopback bind cannot see THAT difference and so cannot be the whole
-  boundary — which is why the bind host is read beside the hub detection rather than instead of it.
-* **Not "refuse to start".** The hub deployment's whole point is a Launcher tile with no terminal
-  (`serve/jupyter.py`); a refusal there is an app that cannot be started at all, and the remedy —
-  export an env var — is precisely what the operator has no terminal to do. A minted credential is
-  fail-closed AND recoverable: `cat` the file.
-
-COST TO THE OPERATOR, stated plainly. On a shared hub the first start after this change mints a
-token, so an already-open browser tab must be unlocked once with it, and any script or TUI calling
-`/api/*` needs the header (`serve/tui_api.py` reads the same file, so `looplab tui` keeps working).
-`LOOPLAB_UI_ANONYMOUS=1` restores the previous open behaviour for an operator who has a private
-origin the detection cannot see — it is deliberately an explicit, logged opt-out and not a silent one.
-
-The token FILE lives under `~/.looplab`, not under the run root: the run root is routinely a shared
-or object-backed mount (the deployment guide warns against putting run state on geesefs/S3 at all),
-and a per-deployment secret does not belong on a volume whose permission model is not the home's.
+An open control plane gives every caller reaching it owner access. For a shared or
+public deployment, enable auth/Origin checks or use an authenticated reverse proxy.
+The credential file remains under ~/.looplab, outside the run root.
 """
 from __future__ import annotations
 
@@ -66,6 +31,7 @@ _log = logging.getLogger("looplab.server")
 OWNER_TOKEN_ENV = "LOOPLAB_UI_TOKEN"
 OWNER_TOKEN_FILE_ENV = "LOOPLAB_UI_TOKEN_FILE"
 OWNER_ANONYMOUS_ENV = "LOOPLAB_UI_ANONYMOUS"
+OWNER_REQUIRE_AUTH_ENV = "LOOPLAB_UI_REQUIRE_AUTH"
 
 # Sources, in the order `resolve_owner_token` decides them. The string is what gets logged, and the
 # set is closed so a caller can branch on it instead of on a message.
@@ -73,16 +39,17 @@ SOURCE_ENV = "env"                    # the operator exported LOOPLAB_UI_TOKEN
 SOURCE_FILE = "file"                  # a token minted by an earlier start, reused
 SOURCE_MINTED = "minted"              # minted by THIS start
 SOURCE_PRIVATE_ORIGIN = "private"     # no token, and no shared origin was detected
+SOURCE_ANONYMOUS_DEFAULT = "open"       # no login requested
 SOURCE_ANONYMOUS_OPT_OUT = "anonymous"  # no token, shared origin, operator opted out explicitly
 OWNER_TOKEN_SOURCES = frozenset({
-    SOURCE_ENV, SOURCE_FILE, SOURCE_MINTED, SOURCE_PRIVATE_ORIGIN, SOURCE_ANONYMOUS_OPT_OUT})
+    SOURCE_ENV, SOURCE_FILE, SOURCE_MINTED, SOURCE_PRIVATE_ORIGIN, SOURCE_ANONYMOUS_DEFAULT, SOURCE_ANONYMOUS_OPT_OUT})
 
 _TOKEN_BYTES = 32
 
 # Hostnames that are the loopback interface under any resolver worth trusting. Anything else that is
 # not a literal loopback IP is treated as PUBLISHED — a name this process cannot resolve to an
-# interface is not evidence of privacy, and the fail-closed direction is the whole point of this
-# module.
+# interface is not evidence of privacy. This classification controls exposure diagnostics;
+# authentication is enabled separately by the operator.
 _LOOPBACK_NAMES = frozenset({"localhost", "localhost.localdomain", "ip6-localhost", "ip6-loopback"})
 
 
@@ -223,7 +190,7 @@ def resolve_owner_token(bind_host: Optional[str] = None) -> tuple[Optional[str],
 
     `bind_host` is the address this server is being published on (`serve(host=…)`), or None when the
     caller is embedding the app and there is no bind — see `_is_loopback_bind`. It is what makes
-    `--host 0.0.0.0` fail closed like the hub does.
+    diagnostics classify a private/shared deployment; authentication itself is now opt-in.
 
     A minted token is exported into `os.environ[LOOPLAB_UI_TOKEN]` on purpose: four other places ask
     that variable whether the control plane is credentialed (`serve/reviews.py` refuses to create a
@@ -235,10 +202,10 @@ def resolve_owner_token(bind_host: Optional[str] = None) -> tuple[Optional[str],
     env_token = os.environ.get(OWNER_TOKEN_ENV)
     if env_token:
         return env_token, SOURCE_ENV
-    if not on_shared_origin(bind_host):
-        return None, SOURCE_PRIVATE_ORIGIN
     if str(os.environ.get(OWNER_ANONYMOUS_ENV, "")).strip().lower() in {"1", "true", "yes", "on"}:
         return None, SOURCE_ANONYMOUS_OPT_OUT
+    if str(os.environ.get(OWNER_REQUIRE_AUTH_ENV, "")).strip().lower() not in {"1", "true", "yes", "on"}:
+        return None, SOURCE_ANONYMOUS_DEFAULT if on_shared_origin(bind_host) else SOURCE_PRIVATE_ORIGIN
     path = owner_token_path()
     token = read_owner_token_file(path)
     source = SOURCE_FILE
@@ -253,6 +220,8 @@ def _origin_phrase(bind_host: Optional[str]) -> str:
     """WHICH exposure this decision is about. The two witnesses are different deployments and the
     operator's next move differs, so the line has to name the one that actually fired rather than
     telling a `--host 0.0.0.0` operator about jupyter-server-proxy."""
+    if not on_shared_origin(bind_host):
+        return "a private/local bind"
     if _on_shared_hub():
         return "a SHARED JupyterHub origin (jupyter-server-proxy)"
     return (f"a PUBLISHED (non-loopback) bind address {str(bind_host or '').strip() or '0.0.0.0'}, "
@@ -284,18 +253,21 @@ def log_owner_token_decision(token: Optional[str], source: str,
             "LoopLab UI is on %s with no %s set; the control plane is gated "
             "by the token stored at %s (mode 0600). Read it with `cat %s`.",
             origin, OWNER_TOKEN_ENV, path, path)
+    elif source == SOURCE_ANONYMOUS_DEFAULT:
+        _log.info("LoopLab UI login is disabled by default on %s; enable %s=1 to require a token.",
+                  origin, OWNER_REQUIRE_AUTH_ENV)
     elif source == SOURCE_ANONYMOUS_OPT_OUT:
         _log.warning(
             "LoopLab UI is on %s and %s is set: the control plane "
             "(start/delete runs, edit configs, shell-executing experiments) is UNAUTHENTICATED and "
-            "reachable by any same-origin page. Unset it to fail closed, and for real isolation "
+            "reachable by any same-origin page. Unset LOOPLAB_UI_ANONYMOUS and enable LOOPLAB_UI_REQUIRE_AUTH=1 to require login; for real isolation "
             "serve each user from a PRIVATE origin. See docs/guide/deployment.md.",
             origin, OWNER_ANONYMOUS_ENV)
 
 
 __all__ = [
-    "OWNER_ANONYMOUS_ENV", "OWNER_TOKEN_ENV", "OWNER_TOKEN_FILE_ENV", "OWNER_TOKEN_SOURCES",
+    "OWNER_ANONYMOUS_ENV", "OWNER_REQUIRE_AUTH_ENV", "OWNER_TOKEN_ENV", "OWNER_TOKEN_FILE_ENV", "OWNER_TOKEN_SOURCES",
     "SOURCE_ANONYMOUS_OPT_OUT", "SOURCE_ENV", "SOURCE_FILE", "SOURCE_MINTED",
-    "SOURCE_PRIVATE_ORIGIN", "log_owner_token_decision", "on_shared_origin", "owner_token_path",
+    "SOURCE_PRIVATE_ORIGIN", "SOURCE_ANONYMOUS_DEFAULT", "log_owner_token_decision", "on_shared_origin", "owner_token_path",
     "read_owner_token_file", "resolve_owner_token",
 ]

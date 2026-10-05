@@ -439,11 +439,9 @@ def make_app(run_root: str | os.PathLike, *, bind_host: Optional[str] = None) ->
     lifecycle = ServerLifecycle()
     app = FastAPI(title="LoopLab UI", version="0.1.0", lifespan=lifecycle.lifespan)
     app.state.lifecycle = lifecycle
-    # CORS allow-list (review C3): the production UI is served SAME-ORIGIN from /dist (needs no
-    # CORS), so the only legitimate cross-origin caller is the Vite dev server. Restricting to
-    # localhost dev origins (instead of "*") stops any other web page the operator has open from
-    # driving this unauthenticated control-plane cross-origin (CSRF). Override with LOOPLAB_UI_CORS
-    # (comma-separated) if the dev server runs elsewhere.
+    # CORS governs browser response reads, independently of the opt-in mutation Origin guard.
+    # Production UI is same-origin; localhost defaults support the Vite dev server.
+    # Override with LOOPLAB_UI_CORS (comma-separated) for other cross-origin readers.
     cors = os.environ.get("LOOPLAB_UI_CORS")
     origins = ([o.strip() for o in cors.split(",") if o.strip()] if cors else
                ["http://localhost:5173", "http://127.0.0.1:5173"])
@@ -462,7 +460,7 @@ def make_app(run_root: str | os.PathLike, *, bind_host: Optional[str] = None) ->
     # Owner auth is entered through the SPA unlock gate and never embedded in public HTML.
     allowed_origins = {v for o in origins if (v := _origin_tuple(o)) is not None}
 
-    # Host validation closes DNS rebinding: deriving the target origin from request.base_url alone
+    # Opt-in Host validation closes DNS rebinding: deriving the target origin from request.base_url alone
     # trusts the attacker-controlled Host header, so Origin=Host=evil.example would look same-origin
     # after evil.example is rebound to 127.0.0.1. Local names are safe defaults; a deliberate remote
     # deployment lists its public hostnames in LOOPLAB_UI_HOSTS (comma-separated, optional ports).
@@ -471,6 +469,8 @@ def make_app(run_root: str | os.PathLike, *, bind_host: Optional[str] = None) ->
         if (host := _host_name(raw.strip())) is not None
     }
     allowed_hosts = {"localhost", "127.0.0.1", "::1"} | configured_hosts
+    check_origin = str(os.environ.get("LOOPLAB_UI_CHECK_ORIGIN", "")).strip().lower() in {
+        "1", "true", "yes", "on"}
 
     # A host trusted for the Host header (LOOPLAB_UI_HOSTS) is ALSO trusted as a same-site mutation
     # Origin. Without this, a proxied deployment (e.g. jupyter-server-proxy) that correctly set
@@ -491,7 +491,7 @@ def make_app(run_root: str | os.PathLike, *, bind_host: Optional[str] = None) ->
         # production exception and keeps the HTTP contract tests representative without weakening Host.
         in_process_test = (host == "testserver" and request.client is not None
                            and request.client.host == "testclient")
-        if host not in allowed_hosts and not in_process_test:
+        if check_origin and host not in allowed_hosts and not in_process_test:
             # THE REFUSAL NAMES ITS REMEDY. `{"detail": "untrusted Host header"}` was the whole
             # answer, and an operator who reaches it behind a reverse proxy — the ONLY way to reach
             # it, since a local browser sends a name already on the list — learns from it neither
@@ -524,10 +524,10 @@ def make_app(run_root: str | os.PathLike, *, bind_host: Optional[str] = None) ->
     @app.middleware("http")
     async def _reject_cross_origin_mutation(request: "Request", call_next):
         """CORS controls whether browser JS may READ a response; it does not stop a simple cross-site
-        POST from EXECUTING. Reject browser-originated mutations server-side. Requests without Origin
+        POST from EXECUTING. When enabled, reject browser-originated mutations server-side. Requests without Origin
         remain valid for CLI/TUI clients, while same-origin SPA calls and configured Vite origins work."""
         route_path = _scope_route_path(request.scope)
-        if (request.method in ("POST", "PUT", "PATCH", "DELETE")
+        if (check_origin and request.method in ("POST", "PUT", "PATCH", "DELETE")
                 and route_path.startswith("/api/")):
             origin = request.headers.get("origin")
             if origin:
@@ -542,25 +542,17 @@ def make_app(run_root: str | os.PathLike, *, bind_host: Optional[str] = None) ->
     # the SPA unlock gate and it remains in that tab's sessionStorage. NOTE: a shared origin (notably
     # jupyter-server-proxy paths under one host) is still one browser principal, so this static token is
     # a per-DEPLOYMENT credential rather than user identity or RBAC. See the deployment guide.
-    # WHAT AN UNSET LOOPLAB_UI_TOKEN MEANS is `serve/owner_token.py`'s decision, and it is not one
-    # answer: on a private origin it still means "unauthenticated", byte-for-byte the historical
-    # local single-user behaviour; on a SHARED origin — the JupyterHub one this server already
-    # detects and warns about, OR a non-loopback `bind_host` this process was published on — it now
-    # fails closed by MINTING a token rather than serving the control plane to
-    # any same-origin page. That module states why, and what it costs.
+    # Quick start is open unless the operator supplies a token or opts into generated-token login.
+    # A scoped harness credential can coexist with open UI; presenting it still restricts that request.
     ui_token, ui_token_source = resolve_owner_token(bind_host)
     harness_token = os.environ.get("LOOPLAB_HARNESS_TOKEN", "")
-    if harness_token and not ui_token:
-        # The scoped middleware denies anonymous owner reads. Reject this configuration
-        # before serving a UI whose auth/status would otherwise promise anonymous access.
-        raise EnvironmentRefusal("LOOPLAB_HARNESS_TOKEN requires a distinct LOOPLAB_UI_TOKEN "
-                                 "for the operator UI; set both credentials and restart the server")
     if harness_token and ui_token and hmac.compare_digest(harness_token, ui_token):
         raise ValueError("LOOPLAB_HARNESS_TOKEN must differ from LOOPLAB_UI_TOKEN")
 
     def _owner_authenticated(request: "Request") -> bool:
         supplied = request.headers.get("X-LoopLab-Token", "")
-        return bool(ui_token) and hmac.compare_digest(supplied, ui_token)
+        # A presented scoped/invalid credential never silently becomes the open UI owner.
+        return (not ui_token and not supplied) or bool(ui_token) and hmac.compare_digest(supplied, ui_token)
 
     def _harness_authenticated(request: "Request") -> bool:
         supplied = request.headers.get("X-LoopLab-Token", "")
@@ -583,11 +575,8 @@ def make_app(run_root: str | os.PathLike, *, bind_host: Optional[str] = None) ->
             },
         )
 
-    # The SAME predicate the decision was made with — not `_on_shared_hub()`, which would decide to
-    # fail closed on a published bind and then say nothing at all about it (including the once-only
-    # line carrying the minted token, i.e. the operator's only way to learn a credential they never
-    # chose). One witness, both branches.
-    if on_shared_origin(bind_host):
+    # Minted credentials need the startup instruction even on an explicitly protected local bind.
+    if on_shared_origin(bind_host) or ui_token_source in {"minted", "file"}:
         log_owner_token_decision(ui_token, ui_token_source, bind_host)
     if ui_token or harness_token:
         @app.middleware("http")
@@ -658,9 +647,10 @@ def make_app(run_root: str | os.PathLike, *, bind_host: Optional[str] = None) ->
                                               r"|projects/[^/]+|supertasks/[^/]+)", p)))):
                 return JSONResponse({"detail": "harness token cannot change operator defaults (settings, prompts, skills, knowledge), launch, reset, purge or delete a run, write a run's chat log, clear or abandon the owner's work (a trace, an activity claim, a lens, a scope action, a share link, a project or super-task), or invoke an internal model workflow; ask the operator"},
                                     status_code=403)
-            # WHO THIS IS (`serve/principal.py`): the token holder is the `owner` principal; a request
-            # on the small open surface that presented nothing is `anonymous` — never promoted.
-            _stamp_principal(request, OWNER_PRINCIPAL if (_owner_authenticated(request) or harness_auth)
+            # Protected mode uses the owner principal; open UI uses the local principal.
+            # The scoped harness remains agent-stamped; unauthenticated protected reads are anonymous.
+            _stamp_principal(request, (OWNER_PRINCIPAL if ui_token or harness_auth else LOCAL_PRINCIPAL)
+                             if (_owner_authenticated(request) or harness_auth)
                              else ANONYMOUS_PRINCIPAL)
             if harness_auth:
                 # …and WHICH credential made it the owner: the agent token may not queue an intent
@@ -815,11 +805,13 @@ def make_app(run_root: str | os.PathLike, *, bind_host: Optional[str] = None) ->
     @app.get("/api/auth/status")
     def auth_status(request: Request):
         return {"required": bool(ui_token),
-                "authenticated": not ui_token or _owner_authenticated(request)}
+                "authenticated": _owner_authenticated(request)}
 
     @app.post("/api/auth/verify")
-    def auth_verify():
+    def auth_verify(request: Request):
         # When auth is enabled the middleware has already validated the owner header.
+        if not _owner_authenticated(request):
+            return JSONResponse({"detail": "owner access required"}, status_code=403)
         return {"ok": True, "required": bool(ui_token)}
 
     # The mount ORDER (load-bearing for the overlapping patterns) and the registry of late-bound

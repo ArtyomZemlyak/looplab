@@ -3293,6 +3293,12 @@ def test_cors_is_allowlisted_not_wildcard(tmp_path):
 # finished runs is a `noop` record, so a request the guard failed to stop could pass for one it
 # stopped), it settles synchronously, and it spawns nothing. The generation is read off the log,
 # because each guard answers `GET /state` exactly as it answers the POST.
+@pytest.fixture
+def strict_origin(monkeypatch):
+    monkeypatch.setenv("LOOPLAB_UI_CHECK_ORIGIN", "1")
+
+
+@pytest.mark.usefixtures("strict_origin")
 def test_cross_origin_simple_post_is_rejected_before_mutation(tmp_path, monkeypatch):
     """CORS only hides a response; a simple cross-site POST still executes unless the server checks
     Origin. This matters in the default tokenless local mode, where a web page could otherwise append
@@ -3320,6 +3326,7 @@ def test_cross_origin_simple_post_is_rejected_before_mutation(tmp_path, monkeypa
     assert allowed.status_code == 200 and allowed.json()["status"] == "succeeded", allowed.text
 
 
+@pytest.mark.usefixtures("strict_origin")
 def test_dns_rebinding_host_cannot_self_authorize_origin(tmp_path, monkeypatch):
     """Origin and Host are both attacker-controlled during DNS rebinding; equality is not trust."""
     _build_run(tmp_path)
@@ -3342,6 +3349,7 @@ def test_dns_rebinding_host_cannot_self_authorize_origin(tmp_path, monkeypatch):
     assert local.status_code == 200 and local.json()["status"] == "succeeded", local.text
 
 
+@pytest.mark.usefixtures("strict_origin")
 def test_explicit_remote_host_allowlist(tmp_path, monkeypatch):
     _build_run(tmp_path)
     monkeypatch.setenv("LOOPLAB_UI_HOSTS", "research.example:9443")
@@ -3353,6 +3361,7 @@ def test_explicit_remote_host_allowlist(tmp_path, monkeypatch):
     assert response.status_code == 200 and response.json()["status"] == "succeeded", response.text
 
 
+@pytest.mark.usefixtures("strict_origin")
 def test_configured_host_is_trusted_as_mutation_origin_behind_a_proxy(tmp_path, monkeypatch):
     # A jupyter-server-proxy deployment rewrites the Host to the internal backend (127.0.0.1), so the
     # server's request.base_url is internal while the browser's Origin stays the PUBLIC host. A host in
@@ -3697,13 +3706,21 @@ def test_g1_shared_hub_warns(tmp_path, monkeypatch, caplog):
     msg = " ".join(caplog.messages).lower()
     assert "shared jupyterhub origin" in msg and "per-deployment" in msg
 
-    # on-hub WITHOUT a token -> fail closed, and name the credential it just minted
+    # on-hub WITHOUT a token -> open by default, with no generated credential
     caplog.clear()
     monkeypatch.delenv("LOOPLAB_UI_TOKEN", raising=False)
+    with caplog.at_level(logging.INFO, logger="looplab.server"):
+        make_app(tmp_path)
+    assert "login is disabled by default" in caplog.text
+    from looplab.serve.owner_token import owner_token_path, read_owner_token_file
+    assert read_owner_token_file() is None
+
+    # Explicit auth opt-in mints a credential and tells the operator where to read it.
+    caplog.clear()
+    monkeypatch.setenv("LOOPLAB_UI_REQUIRE_AUTH", "1")
     with caplog.at_level(logging.WARNING, logger="looplab.server"):
         make_app(tmp_path)
     assert "fails closed" in caplog.text.lower()
-    from looplab.serve.owner_token import owner_token_path, read_owner_token_file
     assert read_owner_token_file() and str(owner_token_path()) in caplog.text
 
     # on-hub, token unset AND the opt-out explicitly turned on -> the old open plane, said plainly

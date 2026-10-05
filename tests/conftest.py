@@ -291,6 +291,8 @@ def _isolate_shared_origin_detection(_isolation_patch):
     # credential into every later test in the process (`resolve_owner_token` exports what it mints).
     # Deleting it through monkeypatch restores whatever was there when the test ends.
     _isolation_patch.delenv("LOOPLAB_UI_TOKEN", raising=False)
+    _isolation_patch.delenv("LOOPLAB_UI_REQUIRE_AUTH", raising=False)
+    _isolation_patch.delenv("LOOPLAB_UI_CHECK_ORIGIN", raising=False)
 
 
 @pytest.fixture(autouse=True)

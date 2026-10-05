@@ -7029,3 +7029,56 @@ closure. [bundles.json](assets/72-history-unavailable/bundles.json) и
 доставки из **worktree LoopLab** в task repo не было. Последний production browser
 проход §20.53 не заявляется повторно. OPEN §19.17 для цельного onboarding/recovery,
 effective manifest, retention, target-relative delivery и полного CI остаются.
+
+### 20.57. Быстрый старт: вход и проверки URL включаются явно
+
+**Запрос оператора.** Отключить по умолчанию проверку origin URL и запрос токена
+для входа. Исходный commit — `08c3191ca7eb89331889a15ed1bce24a4dd9b0f0`.
+Прежние shared-hub/non-loopback defaults автоматически создавали owner credential,
+а Host/Origin guards требовали настройки проксированного адреса. Это добавляло
+шаги до первого открытия чата. Пять новых регрессий отказали до исправления.
+
+**Исправлено.** Обычный `looplab ui` открывается без входа и Host/Origin проверки,
+включая JupyterHub, прокси и non-loopback bind. Существующий token file сам по себе
+не включает вход; в открытом режиме файл не читается, не создаётся и не меняется.
+`LOOPLAB_UI_REQUIRE_AUTH=1` включает вход и безопасное создание/повторное чтение
+файла. Явный `LOOPLAB_UI_TOKEN` по-прежнему требует этот токен и имеет приоритет
+над флагами. Legacy `LOOPLAB_UI_ANONYMOUS=1` отменяет автоматическое создание,
+включая REQUIRE_AUTH, но не отменяет явно заданный токен.
+
+`LOOPLAB_UI_CHECK_ORIGIN=1` включает обе проверки: Host и Origin для mutations.
+Списки `LOOPLAB_UI_HOSTS`/`LOOPLAB_UI_CORS` сохраняют прежнюю семантику при включении.
+CORS response-read policy остаётся отдельной. Jupyter launcher выбирает framed
+default UI или unframed protected UI по тем же флагам. Обновлены CLI help, Compose,
+README, guides, env-таблица и полный process diagram.
+
+**Граница доступа.** Открытый UI предоставляет owner access всем, кто достигает
+сервера. Default bind остаётся loopback. Для общего/public deployment доступны
+явный защищённый режим и authenticated proxy. Harness credential теперь может
+сосуществовать с открытым UI без отдельного owner token; запрос с этим credential
+остаётся scoped и не получает права launch/settings/owner login. Наличие harness
+token не закрывает открытый owner plane для запросов без credential. Создание
+review links по-прежнему требует owner auth.
+
+**Проверено.** Replay-first 193 passed; auth/Jupyter/proxy/root-path/agent-scope
+138 passed, 5 POSIX skips; добавленная проверка старого token file также passed.
+Quick-start matrix (8) и corrected startup logging (1) проходят финальным прогоном.
+Полный server suite дал 157 passed, 3 skips и 4 failures: устаревшее ожидание лога
+исправлено и повторно passed; три других fixtures не смогли создать symlink
+(`WinError 1314`). Их проверки node-log alias, AGENTS symlink и nested skills здесь
+не подтверждены. В двух credential tests на такой Windows проверяется отказ по
+инъекции link metadata; это не фактическое создание symlink на Windows.
+Целевой UI suite — 8 passed; docs/API/surface/diagram — 28 passed.
+Всего **526 уникальных passed**, без повторного подсчёта целевых прогонов;
+полный server/CI не объявляется зелёным.
+
+Production UI открыт в настоящем браузере с simulated JupyterHub env, без
+owner/harness credentials: Runs и Assistant доступны сразу, нет unlock gate
+или console warn/error. Запросы только GET, все завершённые ответы 200.
+Использован неизменённый production bundle §20.56; нового UI build или bundle
+измерения нет. Проверка реального reverse proxy ограничена HTTP matrix,
+фактический Hub не разворачивался. Provider calls, обучение, durable commands и
+доставка из **worktree LoopLab** в task repo не выполнялись.
+[Скриншот](assets/72-open-start/open-ui.png) и
+[validation.json](assets/72-open-start/validation.json) сохраняют границы проверки.
+Другие OPEN §19.17 и прежний bundle excess остаются.

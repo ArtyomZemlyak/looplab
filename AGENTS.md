@@ -99,7 +99,7 @@ same domain writes used by the built-in roles; `phase_info` shows what to read a
 which commands to submit. Research memos use `research_completed`, reports use
 `report_generated`, and hypotheses, Cards and concepts have their own controls.
 Check each phase's `write_access`: task launch and global settings writes require
-the operator credential. The scoped harness token also refuses owner model
+owner access (a credential when owner login is enabled). The scoped harness token also refuses owner model
 workflows such as the legacy chat/suggest/report routes, cross-run stewards and
 scope-report generation. Author the corresponding run decisions and reports
 through the durable commands and guarded knowledge APIs.

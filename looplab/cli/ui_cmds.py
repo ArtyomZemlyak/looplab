@@ -23,11 +23,9 @@ def ui(run_root: Path = typer.Option(
                 "runs survive a pod cull/restart instead of landing in an ephemeral CWD."),
        host: str = typer.Option(
            "127.0.0.1",
-           help="Bind host. A NON-LOOPBACK value (e.g. 0.0.0.0) publishes the control plane — start/"
-                "delete runs, edit settings, shell-executing experiments — to everything that can "
-                "route to this box, so the server then FAILS CLOSED like it does on a shared "
-                "JupyterHub origin: with no LOOPLAB_UI_TOKEN set it mints one, logs where it is, and "
-                "gates /api/*. LOOPLAB_UI_ANONYMOUS=1 is the explicit opt-out."),
+           help="Bind host. Default: 127.0.0.1. UI login and Host/Origin checks are off unless "
+                "configured: LOOPLAB_UI_TOKEN or LOOPLAB_UI_REQUIRE_AUTH=1 enables login; "
+                "LOOPLAB_UI_CHECK_ORIGIN=1 enables URL checks."),
        port: int = typer.Option(8765, help="Bind port."),
        root_path: str = typer.Option(
            "", help="ASGI root_path for a NON-prefix-stripping proxy (e.g. `/user/<name>/proxy/8765`). "

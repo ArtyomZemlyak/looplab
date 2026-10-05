@@ -265,6 +265,11 @@ proxy prefix, removing URL credentials, query and fragment. Check that this URL
 is reachable from the client: `127.0.0.1` on a remote client is that client's host.
 The run and source paths belong to the server host and may not exist locally.
 
+UI login is optional: the server can use `LOOPLAB_HARNESS_TOKEN` with an open owner UI.
+Only requests presenting the scoped token receive agent restrictions; other reachable callers
+have owner access in open mode. Enable `LOOPLAB_UI_REQUIRE_AUTH=1` or supply a distinct owner
+token to protect the operator plane on a shared/public server.
+
 Supply a distinct `LOOPLAB_HARNESS_TOKEN` through the client's protected credential
 mechanism. Remove `LOOPLAB_UI_TOKEN` from the MCP process environment, including
 inherited variables. The descriptor and copied instruction contain no credential.
