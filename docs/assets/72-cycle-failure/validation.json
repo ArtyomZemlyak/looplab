@@ -1,0 +1,80 @@
+{
+  "date": "2026-10-05",
+  "source_parent": "0dbfb23b408d4c26617cce9e2ca0ed84b30cc97a",
+  "scope": "doc72: isolate full Agent cycle requirements/history failures while retaining modal and independent connection help",
+  "regression_before_fix": {
+    "command": "node --test --test-timeout=30000 test/harnessCycleFailure.test.js",
+    "failed": 2,
+    "reason": "real Vite import and render faults remove the original modal and connection entry"
+  },
+  "tests": [
+    {
+      "command": ".venv/Scripts/python.exe -m pytest -o addopts=\"\" -q tests/test_events_replay.py --basetemp=.tmp/doc72-cycle-failure/replay",
+      "passed": 193
+    },
+    {
+      "cwd": "ui",
+      "command": "node --test --test-timeout=30000 --test-concurrency=4 test/*.test.js",
+      "passed": 1956,
+      "failed": 0,
+      "skipped": 0,
+      "cancelled": 0
+    },
+    {
+      "cwd": "ui",
+      "command": "node --test --test-timeout=30000 test/harnessCycleFailure.test.js",
+      "passed": 2,
+      "included_in_full_ui_total": true
+    },
+    {
+      "command": ".venv/Scripts/python.exe -m pytest -o addopts=\"\" -q tests/test_api_reference.py tests/test_documentation_contracts.py tests/test_doc_surface_budgets.py tests/test_architecture_diagram_geometry.py --basetemp=.tmp/doc72-cycle-failure/docs",
+      "passed": 28
+    },
+    {
+      "command": ".venv/Scripts/python.exe -m mkdocs build --strict --site-dir .tmp/doc72-cycle-failure/site",
+      "exit": 0
+    },
+    { "command": "git diff --check", "exit": 0 }
+  ],
+  "production_build": {
+    "command": "node node_modules/vite/bin/vite.js build --outDir ../.tmp/doc72-cycle-failure/ui-dist-final",
+    "exit": 0
+  },
+  "bundle_gate": {
+    "command": "node scripts/check-bundle.mjs --dist ../.tmp/doc72-cycle-failure/ui-dist-final",
+    "exit": 1,
+    "total_js_gzip": 647105,
+    "total_js_budget": 633984,
+    "remaining_excess": 13121,
+    "js_added": 237,
+    "total_css_gzip": 59635,
+    "other_size_reachability_cycle_boolean_gates_pass": true,
+    "ceilings_changed": false,
+    "compact_panel_js_gzip": 121329,
+    "full_body_dynamic": true
+  },
+  "browser": {
+    "fixture": "previously measured private demo from doc72 section 19.17, 79 events; no new training",
+    "generation": "c9c4a8536df883c4ed7c11fe91ce41523ec67d129252a8591c36bb423adf4f4d",
+    "fault": "503 only for manifest entry asset of HarnessCycleBody; other assets and real API unaffected",
+    "fault_asset_reads": 1,
+    "non_get_requests": [],
+    "fullhd": { "width": 1920, "height": 1080, "dialog_client": 1098, "dialog_scroll": 1098 },
+    "retained": ["dialog title", "event 79", "Connect external agent", "unsent composer draft"],
+    "connection_help": "real generation-fenced handoff read; missing scoped credential is visible; no token created or MCP connected",
+    "escape": { "modals_after": 0, "focus_return": "Цикл агента", "draft_retained": true },
+    "normal_reload": { "body_visible": true, "alerts": 0, "unsaved_draft_persistence_not_claimed": true },
+    "screenshot": "01-local-body-failure.jpg",
+    "screenshot_viewport": { "width": 1280, "height": 720 },
+    "cleanup": "viewport reset, temporary tab closed, private servers stopped",
+    "expected_import_console_errors_not_a_clean_console_claim": true
+  },
+  "unique_tests": 2177,
+  "limitations": [
+    "no new ML run, engine commands or model call",
+    "no live MCP/client connection acceptance",
+    "no LoopLab worktree lifecycle, target repo merge or delivery acceptance",
+    "full dialog shell, connection help render errors and critical shared dependencies are outside this fix",
+    "total JS budget remains red"
+  ]
+}

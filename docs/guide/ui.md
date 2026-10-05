@@ -1288,10 +1288,14 @@ Concepts and result components. Boolean/unknown-number minifier guards remain se
 `app-core` combines the shell, transport/recovery and React/UI primitives already present
 in the initial static closure; `main.jsx` keeps its separate bootstrap entry. The pure
 connection and payload helpers share `run-support`; owner controls and full Agent cycle
-content retain their lazy boundaries. Assistant command suggestions use
+content retain their lazy boundaries. A failed Agent cycle requirements/history import or
+render leaves the dialog, connection instructions and Close/Escape available. Its RU/EN
+error does not mean obligations are empty: read current `harness-progress` before deciding.
+Language and progress refreshes do not retry a failed body; recovery reloads explicitly.
+Assistant command suggestions use
 `AssistantBar.jsx::suggestionPop` and `.cmdbar-pop`, not the retired `.cmd-suggest` styles.
 Run `npm run check:bundle` after building: passing a route budget does not imply the
-total byte budget passed. Current measurements and remaining excess are in doc 72 §20.46.
+total byte budget passed. Current measurements and remaining excess are in doc 72 §20.47.
 
 Production HTML and non-versioned assets revalidate. Only content-hashed files listed by Vite's build manifest
 receive long-lived immutable caching. Eligible ordinary responses can use gzip when the client accepts it;

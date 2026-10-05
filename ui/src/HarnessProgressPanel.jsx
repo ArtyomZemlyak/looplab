@@ -9,6 +9,7 @@ import { invalidPanelPayload, isRecord, PANEL_REQUEST_TIMEOUT_MS, RUN_GENERATION
 import { PanelResourceNotice } from './PanelResourceNotice.jsx'
 import { useAssistantLanguage } from './useAssistantLanguage.js'
 import { validHarnessProgress } from './harnessProgressModel.js'
+import LazyBoundary from './LazyBoundary.jsx'
 
 const CycleBody = React.lazy(() => import('./HarnessCycleBody.jsx'))
 
@@ -68,8 +69,13 @@ export function HarnessProgressPanel({ runId, expectedGeneration, seq, externalM
     {scope && <PanelResourceNotice resource={resource} label={ru ? 'Цикл агента' : 'Agent cycle'} language={readLanguage}
       onRetry={() => resource.retry()} />}
     {scope && <HarnessConnection runId={runId} generation={expectedGeneration} seq={seq} />}
-    {progress && <React.Suspense fallback={<p role="status">{ru ? 'Загружаем требования и историю…' : 'Loading requirements and history…'}</p>}>
-      <CycleBody progress={progress} fresh={fresh} runId={runId} offset={offset} setOffset={setOffset} onOpenEvents={onOpenEvents} />
-    </React.Suspense>}
+    {scope && <LazyBoundary label={ru ? 'Требования и история' : 'Requirements and history'}
+      resetKey={`${runId}:${expectedGeneration}`} language={readLanguage} focusOnFailure={false}
+      loadingFallback={<p role="status">{ru ? 'Загружаем требования и историю…' : 'Loading requirements and history…'}</p>}
+      failureContent={<p>{ru
+        ? 'Требования не показаны. Перед решением прочитайте актуальный harness-progress через внешнего агента или перезагрузите LoopLab.'
+        : 'Requirements are not displayed. Before deciding, read current harness-progress through the external agent or reload LoopLab.'}</p>}>
+      {progress && <CycleBody progress={progress} fresh={fresh} runId={runId} offset={offset} setOffset={setOffset} onOpenEvents={onOpenEvents} />}
+    </LazyBoundary>}
   </Panel>
 }

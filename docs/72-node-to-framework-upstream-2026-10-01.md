@@ -4075,7 +4075,7 @@ merge этим проходом не проверены.
    bundle budgets. §20.42 снижает JS на 4719 B и CSS на 174 B: общая CSS,
    DAG CSS и review DAG JS теперь проходят прежние пределы. Осталось
    превышение total JS: 13317 B после §20.42, 13380 B после §20.43,
-   12884 B после §20.46;
+   12884 B после §20.46, 13121 B после §20.47;
    потолки не повышены. Нужны дальнейшее
    уменьшение исходного кода/повторов и полный CI. Один lazy import не снижает
    сумму всех assets; нельзя выдавать route budget за зелёный общий gate.
@@ -6471,3 +6471,64 @@ lifecycle и доставку **worktree LoopLab** в пользовательс
 
 Документальные проверки — 28 passed; strict MkDocs и diff-check проходят.
 Всего 2175 уникальных локальных тестов: 193 replay + 1954 UI + 28 docs.
+
+### 20.47. Отказ содержимого Agent cycle сохраняет подключение — 2026-10-05
+
+**Воспроизведение.** Исходный commit —
+`0dbfb23b408d4c26617cce9e2ca0ed84b30cc97a`. У полного диалога внешний
+overlay boundary уже был, но вложенный `HarnessCycleBody` имел только Suspense.
+Ошибка импорта или отрисовки заменяла весь диалог общим load-failure overlay:
+терялись заголовок запуска и инструкция подключения. Два live React теста с
+настоящим Vite import/render fault до исправления подтверждают потерю исходного
+dialog DOM node. Это не падение всего RunView.
+
+**Исправлено.** Требования и история получили локальный `LazyBoundary` с RU/EN
+ошибкой и явной перезагрузкой. Сохраняются оболочка, событие, отдельный вход в
+подключение, Close/Escape и фокус оставшихся контролов. Ошибка прямо говорит,
+что требования не показаны и перед решением нужен актуальный `harness-progress`.
+Она не означает отсутствие обязательств или разрешение на следующий кандидат.
+Boundary остаётся смонтированным при временном отсутствии progress во время
+смены языка; reset identity — run/generation, без locale, seq и offset. Первый
+вариант исправления допускал повторный render при locale refresh; тест поймал
+это, окончательный вариант сохраняет состояние ошибки. Новые engine waits,
+команды и изменения admission/finish semantics не добавлены.
+
+**Проверено.** Replay-first — 193 passed. Полный UI suite — 1956 passed,
+без fail/skip/cancel; он включает два новых fault tests. Они проверяют тот же
+dialog DOM node, фокус, сохранённый черновик, RU/EN, отсутствие скрытого retry
+при смене языка и обновлении progress, независимое чтение инструкции,
+Close/Escape с возвратом фокуса к opener. Запросы теста — только GET.
+Прежние stale/damaged/incomplete progress, checkpoint, handoff и result tests
+входят в полный suite. Production build проходит.
+
+**Production browser.** Private API обслуживал ранее измеренный demo из §19.17;
+нового обучения не было. HTTP 503 введён только для manifest asset
+`HarnessCycleBody`. Диалог, событие #79, кнопка подключения и черновик сохранились.
+Настоящий `/harness-handoff` успешно открыл инструкцию с предупреждением об
+отсутствующем scoped credential. Credential не создавался, MCP-клиент не
+подключался. Escape закрыл диалог и вернул фокус к «Цикл агента», черновик остался.
+После возвращения asset и явного reload требования/история открылись без alert.
+Сохранение несохранённого черновика через полный reload не заявляется.
+
+FullHD: dialog client/scroll 1098/1098px. Снимок — штатные 1280×720 после
+возврата viewport. Оба browser request log содержат только GET; fault asset
+прочитан с 503 ровно один раз. Временная вкладка закрыта, private servers
+остановлены; команд, model calls и repo delivery не выполнялось.
+
+![Диалог и подключение сохраняются при отказе истории](assets/72-cycle-failure/01-local-body-failure.jpg)
+
+**Размеры и ограничения.** JS gzip 646868 → 647105 B (+237 B); compact panel
+static closure 121123 → 121329 B, full body по-прежнему dynamic. CSS остаётся
+59635 B. Общий JS превышает прежний предел 633984 B на **13121 B**; этот gate
+остаётся red. Остальные size/reachability/cycle/integer-boolean guards проходят,
+потолки не изменены. Измерения — [bundles.json](assets/72-cycle-failure/bundles.json),
+команды и границы проверки — [validation.json](assets/72-cycle-failure/validation.json).
+
+Изоляция относится к body полного Agent cycle. Ошибки самой оболочки, render
+ошибки connection help и shared critical dependency outages здесь не покрыты.
+Большие OPEN §19.17 сохраняются: live MCP, onboarding acceptance, effective
+manifest, lifecycle/retention и доставка **worktree LoopLab** в пользовательский
+репозиторий. Merge кода этого исправления не доказывает такую доставку.
+
+Документальные проверки — 28 passed; strict MkDocs и diff-check проходят.
+Всего 2177 уникальных тестов: 193 replay + 1956 UI + 28 docs.
