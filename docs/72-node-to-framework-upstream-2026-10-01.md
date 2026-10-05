@@ -4075,7 +4075,7 @@ merge этим проходом не проверены.
    bundle budgets. §20.42 снижает JS на 4719 B и CSS на 174 B: общая CSS,
    DAG CSS и review DAG JS теперь проходят прежние пределы. Осталось
    превышение total JS: 13317 B после §20.42, 13380 B после §20.43,
-   12884 B после §20.46, 13121 B после §20.47;
+   12884 B после §20.46, 13121 B после §20.47, 13324 B после §20.48;
    потолки не повышены. Нужны дальнейшее
    уменьшение исходного кода/повторов и полный CI. Один lazy import не снижает
    сумму всех assets; нельзя выдавать route budget за зелёный общий gate.
@@ -6532,3 +6532,77 @@ manifest, lifecycle/retention и доставка **worktree LoopLab** в пол
 
 Документальные проверки — 28 passed; strict MkDocs и diff-check проходят.
 Всего 2177 уникальных тестов: 193 replay + 1956 UI + 28 docs.
+
+### 20.48. Локальные отказы подключения и формы квитанции — 2026-10-05
+
+**Ревью и воспроизведение.** Исходный commit —
+`ed816b15e1f6f7bb9082df88e3ba03df879a1d25`. В §20.47 оставались render errors
+`HarnessHandoff` и вложенного `HarnessReceipt`: обе ошибки доходили до внешнего
+overlay boundary и заменяли весь Agent cycle. Два новых live React/Vite fault
+сценария подтвердили исчезновение исходного dialog DOM node до исправления.
+Обработка ошибки самого import в `HarnessConnection` уже была: она предлагает
+явно повторить загрузку. Этот путь и его request/resource fencing сохраняются.
+
+**Исправлено.** Готовый connection component получил отдельный `LazyBoundary`;
+вложенная форма квитанции — свою границу. При ошибке handoff остаются оболочка,
+требования, next step, журналы и вход в Events. При ошибке формы остаются также
+проверенные инструкции и выбранный MCP-клиент. Ошибки RU/EN; identity run/generation
+не включает locale или seq, поэтому refresh не является скрытым повтором reader.
+Обычные `false`/`true` focus modes и default route/overlay recovery не изменены.
+
+**Фокус.** Production browser дополнительно выявил потерю фокуса при первом
+клике: кнопка подключения исчезала при замене готовым компонентом, а мгновенный
+render failure оставлял `document.activeElement` на body. Новый opt-in
+`focusOnFailure="if-lost"` возвращает фокус к recovery только если к моменту
+animation frame он всё ещё потерян. Если оператор уже на другом контроле,
+фокус сохраняется. Отдельный live тест до этой правки был red, после — green.
+В браузере фокус при таком отказе теперь на «Перезагрузить LoopLab».
+
+**Проверено.** Replay-first — 193 passed. Final полный UI suite — 1959 passed,
+без fail/skip/cancel. Расширенный `harnessCycleFailure.test.js` содержит пять
+сценариев: прежние body import/render, новые handoff/receipt render и начальный
+отказ с исчезнувшим trigger. Проверены сохранность диалога и черновика, требования,
+инструкции/client choice, поздний фокус на surviving control, RU/EN без скрытого
+retry, Close/Escape с возвратом к opener. В начальном отказе запросов вообще нет;
+остальные тестовые запросы — только GET. Существующие handoff stale fencing,
+lookup original identity/header, provider recovery, result и launch tests входят
+в полный suite. Целевые 16 tests — его подмножество, не дополнительный счётчик.
+
+**Production browser.** В private build plugin внедрены условные render throws
+в настоящие `HarnessHandoff`/`HarnessReceipt`; параметр private test URL выбирает
+сценарий. Это инструментированная production сборка, а не HTTP 503 и не fault
+код продукта. Private server и API читали прежний измеренный demo, event #79.
+Отказ handoff сохранил next step/историю и черновик. Отказ receipt сохранил
+инструкцию; выбор Claude Code поменял конфигурацию и показал client approval
+guidance. Escape в обоих случаях вернул фокус к «Цикл агента» и сохранил черновик.
+FullHD dialog client/scroll — 1088/1088px.
+
+Затем server переведён на final сборку **без instrumentation**, выполнено новое
+открытие: handoff, history и форма доступны, alerts — 0, Read saved receipt
+disabled без исходного ID. Ничего не отправлялось. Оба browser request log
+содержат только GET; provider calls, commands, engine work, scoped credential
+setup и подключение MCP-клиента не выполнялись. Снимки — штатные 1280×720 после
+возврата viewport; второй сделан после явного клавиатурного перехода к ошибке.
+Временная вкладка закрыта, private servers остановлены.
+
+![История остаётся доступна при отказе подключения](assets/72-connection-failure/01-handoff-render-failure.jpg)
+
+[Отказ формы при рабочей инструкции Claude](assets/72-connection-failure/02-receipt-render-failure.jpg).
+
+**Размеры и ограничения.** Final JS gzip 647105 → 647308 B (+203 B), compact
+panel closure 121329 → 121376 B. CSS — прежние 59635 B. Full body остаётся
+dynamic. Total JS превышает прежний предел 633984 B на **13324 B**; gate
+остаётся red. Остальные size/reachability/cycle/integer-boolean guards проходят,
+потолки не изменены. [bundles.json](assets/72-connection-failure/bundles.json)
+сравнивает только штатные baseline/final, исключая private fault build;
+[validation.json](assets/72-connection-failure/validation.json) фиксирует команды
+и границы проверки.
+
+Это containment render errors, а не восстановление внутреннего состояния
+упавшей формы: исходный ключ из неё и несохранённый черновик через reload не
+объявляются сохранёнными. Импорт критических зависимостей/ошибка всей оболочки,
+полный onboarding acceptance, live MCP, effective manifest и lifecycle/retention/
+доставка **worktree LoopLab** в пользовательский repo остаются OPEN.
+
+Документальные проверки — 28 passed; strict MkDocs и diff-check проходят.
+Всего 2180 уникальных тестов: 193 replay + 1959 UI + 28 docs.

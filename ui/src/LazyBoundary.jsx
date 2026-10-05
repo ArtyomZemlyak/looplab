@@ -12,6 +12,10 @@ function LoadSurface({ label, mode, failed = false, onReload = reloadPage, onClo
   useEffect(() => {
     if (mode === 'overlay' || (mode === 'inline' && (!failed || !focusOnFailure))) return undefined
     const frame = requestAnimationFrame(() => {
+      // Opt-in recovery for a removed focused control; a later failure must not
+      // take focus from another control the operator has already reached.
+      if (mode === 'inline' && focusOnFailure === 'if-lost'
+          && document.activeElement && document.activeElement !== document.body) return
       const target = failed ? reloadRef.current : surfaceRef.current
       target?.focus({ preventScroll: true })
     })

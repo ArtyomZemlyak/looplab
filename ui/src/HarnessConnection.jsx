@@ -2,6 +2,7 @@ import React, { useState } from 'react'
 import { useScopedResource } from './useScopedResource.js'
 import { useAssistantLanguage } from './useAssistantLanguage.js'
 import { PANEL_REQUEST_TIMEOUT_MS } from './panelPrimitives.js'
+import LazyBoundary from './LazyBoundary.jsx'
 
 // Configuration, translations and recovery form load only after the operator
 // opens connection help. The normal progress read needs none of that code.
@@ -16,7 +17,10 @@ export default function HarnessConnection({ runId, generation, seq }) {
   })
   if (resource.status === 'ready') {
     const Component = resource.data.Component
-    return <Component key={scope} runId={runId} generation={generation} seq={seq} defaultOpen />
+    return <LazyBoundary label={ru ? 'Подключить внешнего агента' : 'Connect external agent'}
+      resetKey={scope} language={language} focusOnFailure="if-lost">
+      <Component key={scope} runId={runId} generation={generation} seq={seq} defaultOpen />
+    </LazyBoundary>
   }
   return <div>
     <button type="button" className="btn" disabled={!!resource.pending} onClick={() => {

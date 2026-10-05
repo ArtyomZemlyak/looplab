@@ -7,6 +7,7 @@ import './harness-handoff.css'
 import HarnessReceipt from './HarnessReceipt.jsx'
 import { useAssistantLanguage } from './useAssistantLanguage.js'
 import { harnessText } from './harnessText.js'
+import LazyBoundary from './LazyBoundary.jsx'
 
 export default function HarnessHandoff({ runId, generation, seq, defaultOpen = false }) {
   const [language] = useAssistantLanguage()
@@ -80,7 +81,10 @@ export default function HarnessHandoff({ runId, generation, seq, defaultOpen = f
           <pre>{harnessAgentInstruction(value, url, language)}</pre></details>
         <p className="muted">{t('Copying starts no work. Reconnect here with current state, receipts and checkpoints.')}</p>
       </>}
-      {RUN_GENERATION_RE.test(generation || '') && <HarnessReceipt key={scope} runId={runId} generation={generation} />}
+      {RUN_GENERATION_RE.test(generation || '') && <LazyBoundary label={t('Reconnect or recover a lost response')}
+        resetKey={scope} language={language} focusOnFailure="if-lost">
+        <HarnessReceipt key={scope} runId={runId} generation={generation} />
+      </LazyBoundary>}
     </>}
   </details>
 }

@@ -1,0 +1,103 @@
+{
+  "date": "2026-10-05",
+  "source_parent": "ed816b15e1f6f7bb9082df88e3ba03df879a1d25",
+  "scope": "doc72: isolate connection help and command receipt form render failures; restore removed-control focus without stealing surviving focus",
+  "regressions_before_fix": [
+    {
+      "command": "node --test --test-timeout=30000 test/harnessCycleFailure.test.js",
+      "passed": 2,
+      "failed": 2,
+      "reason": "real HarnessHandoff and HarnessReceipt render faults replaced the full dialog"
+    },
+    {
+      "command": "node --test --test-timeout=30000 --test-name-pattern='initial connection' test/harnessCycleFailure.test.js",
+      "failed": 1,
+      "reason": "removed connection trigger left focus on body instead of local recovery"
+    }
+  ],
+  "tests": [
+    {
+      "command": ".venv/Scripts/python.exe -m pytest -o addopts=\"\" -q tests/test_events_replay.py --basetemp=.tmp/doc72-connection-failure/replay",
+      "passed": 193
+    },
+    {
+      "cwd": "ui",
+      "command": "node --test --test-timeout=30000 --test-concurrency=4 test/*.test.js",
+      "passed": 1959,
+      "failed": 0,
+      "skipped": 0,
+      "cancelled": 0
+    },
+    {
+      "cwd": "ui",
+      "command": "node --test --test-timeout=30000 test/harnessCycleFailure.test.js test/harnessCycleRequirements.test.js test/harnessHandoff.test.js test/harnessReceipt.test.js test/lazyBoundaryRecovery.test.js",
+      "passed": 16,
+      "included_in_full_ui_total": true
+    },
+    {
+      "command": ".venv/Scripts/python.exe -m pytest -o addopts=\"\" -q tests/test_api_reference.py tests/test_documentation_contracts.py tests/test_doc_surface_budgets.py tests/test_architecture_diagram_geometry.py --basetemp=.tmp/doc72-connection-failure/docs",
+      "passed": 28
+    },
+    {
+      "command": ".venv/Scripts/python.exe -m mkdocs build --strict --site-dir .tmp/doc72-connection-failure/site",
+      "exit": 0
+    },
+    { "command": "git diff --check", "exit": 0 }
+  ],
+  "production_build": {
+    "command": "node node_modules/vite/bin/vite.js build --outDir ../.tmp/doc72-connection-failure/ui-dist-final",
+    "exit": 0
+  },
+  "bundle_gate": {
+    "command": "node scripts/check-bundle.mjs --dist ../.tmp/doc72-connection-failure/ui-dist-final",
+    "exit": 1,
+    "total_js_gzip": 647308,
+    "total_js_budget": 633984,
+    "remaining_excess": 13324,
+    "js_added": 203,
+    "total_css_gzip": 59635,
+    "compact_panel_js_gzip": 121376,
+    "full_body_dynamic": true,
+    "other_size_reachability_cycle_boolean_gates_pass": true,
+    "ceilings_changed": false,
+    "private_instrumented_build_excluded_from_measurements": true
+  },
+  "browser": {
+    "fixture": "previously measured private demo, generation and event log unchanged; no new training",
+    "generation": "c9c4a8536df883c4ed7c11fe91ce41523ec67d129252a8591c36bb423adf4f4d",
+    "event_seq": 79,
+    "fault_method": "private production build plugin injects conditional render throws into actual HarnessHandoff and HarnessReceipt; private URL parameter selects target; not shipped",
+    "non_get_requests": [],
+    "handoff_failure": {
+      "history_retained": true,
+      "draft_retained": true,
+      "initial_focus_after_fix": "Перезагрузить LoopLab",
+      "escape_focus": "Цикл агента",
+      "escape_modals_after": 0
+    },
+    "receipt_failure": {
+      "verified_instructions_retained": true,
+      "client": "claude",
+      "client_descriptor_updates": true,
+      "history_retained": true,
+      "draft_retained": true,
+      "escape_focus": "Цикл агента",
+      "escape_modals_after": 0
+    },
+    "fullhd": { "width": 1920, "height": 1080, "dialog_client": 1088, "dialog_scroll": 1088 },
+    "normal_final_build_without_instrumentation": { "alerts": 0, "history": true, "recovery_form": true, "read_disabled_without_identity": true },
+    "screenshots": ["01-handoff-render-failure.jpg", "02-receipt-render-failure.jpg"],
+    "screenshot_viewport": { "width": 1280, "height": 720 },
+    "second_screenshot_after_explicit_keyboard_navigation": true,
+    "cleanup": "viewport reset, temporary tab closed, private servers stopped",
+    "expected_render_console_errors_not_a_clean_console_claim": true
+  },
+  "unique_tests": 2180,
+  "limitations": [
+    "fault containment does not retain internal state of a crashed receipt form or promise unsaved drafts across full reload",
+    "no new ML run, engine command, provider call, scoped credential setup or MCP client connection",
+    "no LoopLab worktree lifecycle, target repo merge or delivery acceptance",
+    "critical dependency imports and full shell render errors remain outside this fix",
+    "total JS budget remains red"
+  ]
+}

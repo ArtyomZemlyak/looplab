@@ -28,14 +28,55 @@ const handoff = { version: 1, generation, run_id: 'demo', run_uid: 'incarnation'
   recovery: 'Read receipts and checkpoints before resubmitting to the same run.',
 }
 
-for (const failure of ['import', 'render']) {
-  test(`cycle body ${failure} failure preserves modal, connection help, focus and explicit closing`, async () => {
+test('initial connection render failure restores focus after its trigger disappears', async () => {
+  const harness = await mountLive({ visible: true, plugins: [{
+    name: 'doc72-initial-connection-failure', enforce: 'pre', transform(code, id) {
+      if (id.replaceAll('\\', '/').endsWith('/src/HarnessHandoff.jsx')) return {
+        code: code.replace('const [language] = useAssistantLanguage()',
+          `throw new Error('doc72 injected initial connection render failure');
+           const [language] = useAssistantLanguage()`), map: null }
+    },
+  }] })
+  const originalError = console.error
+  console.error = (...args) => {
+    const message = args.map(String).join(' ')
+    if (!message.includes('doc72 injected') && !message.includes('The above error occurred')) originalError(...args)
+  }
+  let view
+  try {
+    localStorage.clear()
+    const { default: Connection } = await harness.load('/src/HarnessConnection.jsx')
+    const { default: Panel } = await harness.load('/src/PanelShell.jsx')
+    const backend = fetchStub({})
+    globalThis.fetch = backend
+    function Dialog() {
+      return React.createElement(Panel, { title: 'Agent cycle', onClose: () => {} },
+        React.createElement(Connection, { runId: 'demo', generation, seq: 12 }),
+        React.createElement('button', null, 'Read history'))
+    }
+    view = await harness.mount(Dialog)
+    const connect = [...view.container.querySelectorAll('button')].find(row => row.textContent === 'Connect external agent')
+    connect.focus(); await click(connect)
+    await until(() => view.container.querySelector('[role="alert"]'), 'initial connection failure')
+    await settle()
+    const reload = view.container.querySelector('[role="alert"] button')
+    assert.ok(document.activeElement === reload, 'lost focus must move to the surviving recovery action')
+    assert.equal(backend.calls.length, 0, 'a render failure must not execute a recovery read or command')
+  } finally {
+    await view?.unmount(); console.error = originalError; await harness.close()
+  }
+})
+
+for (const [target, failure] of [['HarnessCycleBody', 'import'], ['HarnessCycleBody', 'render'],
+  ['HarnessHandoff', 'render'], ['HarnessReceipt', 'render']]) {
+  test(`${target} ${failure} failure preserves surrounding controls, focus and explicit closing`, async () => {
+    const bodyFailure = target === 'HarnessCycleBody'
     let release
     globalThis.__looplabCycleFailure = { promise: new Promise(resolve => { release = resolve }), fail: false }
     const harness = await mountLive({ visible: true, plugins: [{
       name: 'doc72-cycle-body-failure', enforce: 'pre',
       transform(code, id) {
-        if (!id.replaceAll('\\', '/').endsWith('/src/HarnessCycleBody.jsx')) return
+        if (!id.replaceAll('\\', '/').endsWith(`/src/${target}.jsx`)) return
         return { code: failure === 'import'
           ? `await globalThis.__looplabCycleFailure.promise;
               throw new Error('doc72 injected cycle import failure'); export default function Body() { return null }`
@@ -79,35 +120,67 @@ for (const failure of ['import', 'render']) {
       const connect = button('Connect external agent')
       if (failure === 'render') await until(() => view.container.textContent.includes('Before another candidate'), 'real cycle body')
       else await until(() => view.container.textContent.includes('Loading requirements and history'), 'pending body')
-      connect.focus()
+      let clientPicker
+      if (!bodyFailure) {
+        await click(connect)
+        await until(() => view.container.textContent.includes('C:/Runs/demo'), 'real connection help')
+        clientPicker = view.container.querySelector('.harness-handoff select')
+        await React.act(async () => {
+          clientPicker.value = 'claude'; clientPicker.dispatchEvent(new Event('change', { bubbles: true }))
+        })
+        assert.match(view.container.textContent, /Pending approval means/)
+      }
+      const focusTarget = bodyFailure ? connect : button('Open events')
+      focusTarget.focus()
       await React.act(async () => {
         globalThis.__looplabCycleFailure.fail = true
         release()
       })
-      if (failure === 'render') { eventSeq = 13; await view.rerender({ seq: eventSeq }) }
+      if (failure === 'render') {
+        if (target !== 'HarnessReceipt') eventSeq = 13
+        await view.rerender({ seq: eventSeq })
+      }
       await until(() => view.container.querySelector('[role="alert"], [role="alertdialog"]'), 'body failure')
       await settle()
       assert.equal(view.container.querySelector('[role="dialog"]'), dialog, 'a body failure must retain the original modal')
-      assert.equal(button('Connect external agent'), connect)
-      assert.equal(document.activeElement, connect, 'late failure must retain focus in surviving controls')
+      if (bodyFailure) assert.equal(button('Connect external agent'), connect)
+      assert.equal(document.activeElement, focusTarget, 'late failure must retain focus in surviving controls')
       assert.equal(view.container.querySelector('textarea').value, 'Keep my next question')
-      assert.doesNotMatch(view.container.textContent, /No current external-cycle gate|No knowledge reviews due/)
-      assert.match(view.container.textContent, /Requirements and history/)
+      if (bodyFailure) {
+        assert.doesNotMatch(view.container.textContent, /No current external-cycle gate|No knowledge reviews due/)
+        assert.match(view.container.textContent, /Requirements and history/)
+      } else {
+        assert.match(view.container.textContent, /Before another candidate/)
+        assert.match(view.container.textContent, /Effective concept tags are required/)
+        assert.ok(button('Open events'), 'measured history remains reachable')
+        if (target === 'HarnessReceipt') {
+          assert.equal(view.container.querySelector('.harness-handoff select'), clientPicker)
+          assert.equal(clientPicker.value, 'claude', 'a recovery failure must retain client selection')
+          assert.ok(button('Copy agent instruction'), 'verified connection instructions remain available')
+          assert.equal(button('Read saved receipt'), undefined, 'failed recovery form does not claim a receipt')
+        } else assert.equal(button('Copy agent instruction'), undefined, 'failed handoff offers no unverified instruction')
+      }
       const errorsAfterFailure = errors.length
       await React.act(async () => window.dispatchEvent(new CustomEvent('looplab:language', { detail: 'ru' })))
       await until(() => view.container.textContent.includes('Перезагрузить LoopLab'), 'Russian failure')
       await settle()
       assert.equal(errors.length, errorsAfterFailure, 'locale and read updates must not retry the failed reader')
       assert.equal(view.container.querySelector('[role="dialog"]'), dialog)
-      await click(button('Подключить внешнего агента'))
-      await until(() => view.container.textContent.includes('C:/Runs/demo'), 'independent connection instructions')
-      assert.ok(view.container.querySelector('.harness-handoff').open)
+      if (bodyFailure) {
+        await click(button('Подключить внешнего агента'))
+        await until(() => view.container.textContent.includes('C:/Runs/demo'), 'independent connection instructions')
+        assert.ok(view.container.querySelector('.harness-handoff').open)
+      }
       assert.equal(backend.calls.filter(row => row.path.endsWith('/harness-handoff')).length, 1)
       assert.ok(backend.calls.every(row => row.method === 'GET'), 'opening recovery help executes no commands')
       await click(view.container.querySelector('.panel-close'))
       assert.equal(view.container.querySelector('[aria-modal="true"]'), null)
       assert.equal(document.activeElement, opener, 'Close returns to the original opener')
       await click(opener)
+      if (!bodyFailure) {
+        await until(() => button('Connect external agent'), 'reopened connection entry')
+        await click(button('Connect external agent'))
+      }
       await until(() => view.container.querySelector('[role="alert"]'), 'reopened failure')
       await React.act(async () => window.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true })))
       assert.equal(view.container.querySelector('[aria-modal="true"]'), null)
