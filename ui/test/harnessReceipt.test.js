@@ -3,11 +3,77 @@ import assert from 'node:assert/strict'
 import React from 'react'
 import { createHash } from 'node:crypto'
 import { fetchStub, jsonResponse, mountLive, settle, until } from './_mount.js'
+import { PANEL_REQUEST_TIMEOUT_MS } from '../src/panelPrimitives.js'
 
 const generation = 'a'.repeat(64)
 const receipt = { version: 1, generation, terminal: false,
   command: { id: 'cmd_' + createHash('sha256').update('original-key').digest('hex').slice(0, 32), event_type: 'inject_node', status: 'executing',
     event_seq: 4, error_code: '', retryable: false } }
+
+test('explicit reread withdraws the saved verdict through timeout, late response and abort', async t => {
+  const harness = await mountLive({ visible: true })
+  let release
+  try {
+    const { default: HarnessReceipt } = await harness.load('/src/HarnessReceipt.jsx')
+    const failed = { ...receipt, terminal: true,
+      command: { ...receipt.command, status: 'failed', error_code: 'command_worker_failed', retryable: true } }
+    globalThis.fetch = fetchStub({ '/api/runs/demo/command-receipt': failed })
+    const view = await harness.mount(HarnessReceipt, { runId: 'demo', generation })
+    await React.act(async () => {
+      const select = view.container.querySelector('select')
+      select.value = 'id'; select.dispatchEvent(new window.Event('change', { bubbles: true }))
+    })
+    const input = view.container.querySelector('input')
+    await React.act(async () => {
+      Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value').set.call(input, receipt.command.id)
+      input.dispatchEvent(new window.Event('input', { bubbles: true }))
+      input.focus()
+    })
+    const submit = async () => React.act(async () => {
+      view.container.querySelector('form').dispatchEvent(new window.Event('submit', { bubbles: true, cancelable: true }))
+    })
+    const row = () => view.container.querySelector('[aria-label="Saved command receipt"]')
+    await submit()
+    await until(() => view.container.textContent.includes('inject_node · failed'), 'saved failure')
+    const late = new Promise(resolve => { release = resolve })
+    globalThis.fetch = fetchStub({ '/api/runs/demo/command-receipt': () => late })
+    t.mock.timers.enable({ apis: ['setTimeout'] })
+    await submit()
+    await until(() => globalThis.fetch.calls.length === 1, 'explicit pending reread')
+    assert.ok(!row(), 'saved verdict and retry permission must disappear as reread starts')
+    assert.equal(input.value, receipt.command.id)
+    assert.equal(document.activeElement, input)
+    await React.act(async () => { t.mock.timers.tick(PANEL_REQUEST_TIMEOUT_MS - 1) })
+    assert.match(view.container.textContent, /Reading saved receipt/)
+    assert.ok(!row())
+    await React.act(async () => { t.mock.timers.tick(1) })
+    await until(() => view.container.textContent.includes('Receipt unavailable or changed'), 'read deadline')
+    assert.ok(!row())
+    assert.equal(view.container.querySelector('button[type="submit"]').disabled, false)
+    const succeeded = { ...receipt, terminal: true, command: { ...receipt.command, status: 'succeeded' } }
+    await React.act(async () => { release(succeeded) })
+    await settle()
+    assert.ok(!row(), 'late result after deadline must not revive a verdict')
+    assert.equal(globalThis.fetch.calls.length, 1, 'no hidden retry after deadline')
+    globalThis.fetch = fetchStub({ '/api/runs/demo/command-receipt': succeeded })
+    await submit()
+    await until(() => view.container.textContent.includes('inject_node · succeeded'), 'explicit recovery')
+    globalThis.fetch = fetchStub({ '/api/runs/demo/command-receipt': () => {
+      throw Object.assign(new Error('aborted'), { name: 'AbortError' })
+    } })
+    await submit()
+    await settle()
+    assert.ok(!row(), 'cancelled reread must not restore its prior verdict')
+    assert.equal(view.container.querySelector('button[type="submit"]').disabled, false)
+    assert.equal(input.value, receipt.command.id)
+    assert.equal(globalThis.fetch.calls.length, 1)
+    assert.ok(globalThis.fetch.calls.every(call => call.method === 'GET'))
+  } finally {
+    release?.(receipt)
+    t.mock.timers.reset()
+    await harness.close()
+  }
+})
 
 test('recovery lookup is explicit, sends a key only in a header and hides failed refreshes', async () => {
   const harness = await mountLive({ visible: true })

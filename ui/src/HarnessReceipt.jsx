@@ -36,7 +36,8 @@ function ReceiptForm({ runId, generation }) {
   const read = event => {
     event.preventDefault()
     if (!valid || resource.pending) return
-    if (lookup?.kind === kind && lookup.value === identity) resource.retry()
+    // A new observation withdraws the prior verdict even if this read is aborted.
+    if (lookup?.kind === kind && lookup.value === identity) resource.retry({ mapLastGood: () => null })
     else setLookup({ kind, value: identity })
   }
   const row = resource.status === 'ready' ? resource.data.command : null

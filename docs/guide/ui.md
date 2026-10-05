@@ -1306,10 +1306,13 @@ Original key lookup also binds the returned command ID to the key's UTF-8 SHA-25
 identity. If secure hashing is unavailable, RU/EN guidance directs an explicit lookup
 by the original Command ID from Events; no unverified key request is sent. Changing
 run or generation clears the form and abandons the old read, without a new request.
+An explicit reread withdraws its previous verdict immediately, including retry guidance.
+Timeout, cancellation or a late response cannot restore it; another successful explicit
+read is needed. The original input and focus remain available.
 Assistant command suggestions use
 `AssistantBar.jsx::suggestionPop` and `.cmdbar-pop`, not the retired `.cmd-suggest` styles.
 Run `npm run check:bundle` after building: passing a route budget does not imply the
-total byte budget passed. Current measurements and remaining excess are in doc 72 §20.51.
+total byte budget passed. Current measurements and remaining excess are in doc 72 §20.52.
 
 Production HTML and non-versioned assets revalidate. Only content-hashed files listed by Vite's build manifest
 receive long-lived immutable caching. Eligible ordinary responses can use gzip when the client accepts it;

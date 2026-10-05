@@ -1,0 +1,46 @@
+{
+  "baseline_commit": "00e5e2c805de4e883d56b5f2d56c0e4edf3a9772",
+  "scope": "UI explicit saved receipt reread freshness",
+  "red_reproduction": {
+    "command": "node --test --test-timeout=30000 test/harnessReceipt.test.js",
+    "passed": 4,
+    "failed": 1,
+    "reason": "prior saved verdict and retry guidance remained during explicit reread"
+  },
+  "replay": {
+    "command": "python -m pytest -o addopts='' -q tests/test_events_replay.py --basetemp=.tmp/doc72-receipt-freshness/replay",
+    "passed": 193
+  },
+  "ui": {
+    "command": "node --test --test-timeout=30000 --test-concurrency=4 test/*.test.js",
+    "passed": 1968,
+    "failed": 0,
+    "skipped": 0,
+    "targeted_24_tests": "subset, not counted twice"
+  },
+  "docs": {
+    "command": "python -m pytest -o addopts='' -q tests/test_api_reference.py tests/test_documentation_contracts.py tests/test_doc_surface_budgets.py tests/test_architecture_diagram_geometry.py --basetemp=.tmp/doc72-receipt-freshness/docs",
+    "passed": 28
+  },
+  "build": {
+    "command": "node node_modules/vite/bin/vite.js build --outDir ../.tmp/doc72-receipt-freshness/ui-dist-final",
+    "exit_code": 0
+  },
+  "bundle_gate": {
+    "command": "node scripts/check-bundle.mjs --dist ../.tmp/doc72-receipt-freshness/ui-dist-final",
+    "exit_code": 1,
+    "remaining_failure": "total JS gzip 647793 exceeds unchanged 633984 byte limit by 13809 bytes",
+    "other_guards": "size, reachability, static cycles and integer booleans passed"
+  },
+  "mkdocs": {
+    "command": "python -m mkdocs build --strict --site-dir .tmp/doc72-receipt-freshness/site",
+    "exit_code": 0
+  },
+  "unique_tests": 2189,
+  "evidence": {
+    "live_ui": "React/Vite/jsdom withdraws terminal failed/retryable receipt at start of explicit reread. Input and focus remain; timeout releases button; late succeeded HTTP response cannot revive verdict or issue another GET. Explicit recovery succeeds; subsequent AbortError keeps prior verdict withdrawn.",
+    "clock": "Node mock timers drive actual PANEL_REQUEST_TIMEOUT_MS=15000; pending at deadline minus 1 ms and unavailable at deadline. No compressed real timeout.",
+    "browser": "No new production browser session; evidence is live React and normal production build.",
+    "bounds": "No server/MCP schema, key derivation or shared resource semantics changed. Previous protocol suite counts are not reused. No provider call, training, command, worker restart, MCP connection or delivery from LoopLab worktree into a task repository."
+  }
+}

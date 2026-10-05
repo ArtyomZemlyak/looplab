@@ -4077,6 +4077,7 @@ merge этим проходом не проверены.
    превышение total JS: 13317 B после §20.42, 13380 B после §20.43,
    12884 B после §20.46, 13121 B после §20.47, 13324 B после §20.48,
    13308 B после §20.49; 13734 B после §20.50; 13894 B после §20.51;
+   13809 B после §20.52;
    потолки не повышены. Нужны дальнейшее
    уменьшение исходного кода/повторов и полный CI. Один lazy import не снижает
    сумму всех assets; нельзя выдавать route budget за зелёный общий gate.
@@ -6788,3 +6789,53 @@ reachability/cycle/integer-boolean guards проходят, ceilings не мен
 HTTP header characters. OPEN §19.17 сохраняются для полной приёмки onboarding/
 recovery, effective manifest, lifecycle/retention и доставки **worktree LoopLab**
 в пользовательский task repo. Merge кода этого исправления не доказывает такую доставку.
+
+### 20.52. Повторное чтение сразу снимает прежнюю квитанцию — 2026-10-05
+
+**Ревью и воспроизведение.** Исходный commit —
+`00e5e2c805de4e883d56b5f2d56c0e4edf3a9772`. После успешного lookup повторное
+явное чтение той же identity сохраняло old resource data. Во время pending
+показывались одновременно «Reading saved receipt» и прежняя квитанция, включая
+её retryable guidance. При AbortError shared resource cancellation могла снова
+показать старый verdict. Это UI freshness defect; нового разрешения на command
+retry в engine не возникало. Новый live React тест до правки red на сохранённой
+квитанции после начала reread.
+
+**Исправлено.** Explicit reread использует существующий
+`resource.retry({ mapLastGood: () => null })`: старая квитанция снимается при
+начале наблюдения. Timeout, abort и поздний ответ не восстанавливают её. Новая
+квитанция появится только после успешного явного чтения с прежними identity/field
+guards. Form input, focus, оригинальный ID/key, one-shot GET и deadline остаются;
+нет автоматического worker restart, command retry, resume или engine wait.
+Shared resource model и поведение других readers не менялись.
+
+**Проверено.** Replay-first — 193 passed. Final полный UI suite — 1968 passed,
+без fail/skip/cancel. Новый live scenario начинает с terminal failed/retryable
+квитанции, затем держит настоящий fetch stub. При reread исчезают verdict и
+guidance, input/focus сохраняются. Node mock timers двигают существующий
+15-second deadline: за 1 ms до него остаётся pending, на границе показана
+недоступность и кнопка чтения снова доступна. Late succeeded reply после timeout
+не показывает verdict и не повторяет GET. Explicit fresh read восстанавливает
+правильную квитанцию; следующий AbortError не возвращает предыдущую. Запросы —
+только GET. Clock не заменён коротким реальным timeout. Целевые 24 UI tests —
+подмножество полного счётчика.
+
+Документальные/API/diagram проверки — 28 passed; production build, strict MkDocs
+и diff-check проходят. Всего **2189 уникальных тестов**: 193 replay + 1968 UI + 28 docs.
+Server/MCP protocol suites из §20.51 повторно не заявляются: transport, schema,
+server validation и key derivation здесь не менялись.
+
+**Размеры и ограничения.** JS gzip 647878 → 647793 B (−85 B), raw JS +22 B;
+малая разница gzip не означает сокращения исходного кода. CSS прежние 59635 B.
+Compact panel closure 121425 → 121421 B; full body по-прежнему dynamic и
+отсутствует в compact static closure. Total JS превышает прежний предел
+633984 B на **13809 B**. Только этот bundle gate red; остальные size/reachability/
+cycle/integer-boolean guards проходят, ceilings не менялись.
+[bundles.json](assets/72-receipt-freshness/bundles.json) и
+[validation.json](assets/72-receipt-freshness/validation.json) фиксируют проверки.
+
+Новой production browser сессии, MCP connection, provider call, обучения,
+команд или доставки из **worktree LoopLab** в пользовательский task repo не было.
+Это проверка freshness формы через live React/Vite, не полная приёмка пользователя.
+OPEN §19.17 сохраняются для полного onboarding/recovery, effective manifest,
+lifecycle/retention и target-relative delivery.
