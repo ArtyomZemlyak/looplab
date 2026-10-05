@@ -3,14 +3,14 @@ import React from 'react'
 import './baseRevision.css'
 import { baseChoices } from './baseRevision.js'
 import { upstreamCheckSummary, upstreamHistoryRows } from './upstreamCheckModel.js'
-import { useAssistantLanguage } from './useAssistantLanguage.js'
+import { useAssistantUILanguage } from './useAssistantLanguage.js'
 import { upstreamProposalSummary, upstreamRecoveryDraft } from './upstreamProposalModel.js'
 import UpstreamRecovery from './UpstreamRecovery.jsx'
 
 export default function UpstreamPanel({ state, onClose }) {
   useUILanguage()
 
-  const [language] = useAssistantLanguage()
+  const language = useAssistantUILanguage()
   const ru = language === 'ru'
   const enabled = state.upstream_enabled === true
   const bases = baseChoices(state.nodes)

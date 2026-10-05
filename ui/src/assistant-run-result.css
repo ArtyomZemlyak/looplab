@@ -1,5 +1,4 @@
-.asst-run-result { margin: 14px 0; padding: 16px; border: 1px solid var(--line-2);
-  border-radius: 10px; background: var(--card-bg, var(--bg)); text-align: left; }
+.asst-run-result { margin: 14px 0; padding: 8px 0; text-align: left; }
 .asst-run-result-head { display: flex; justify-content: space-between; gap: 12px; }
 .asst-run-result-head strong { font-size: 15px; }
 .asst-run-result-head span, .asst-run-result-note { font-size: 11px; color: var(--fg-mut); }
@@ -14,7 +13,8 @@
 .asst-result-feed { display: flex; flex-direction: column; margin: 14px 0; text-align: left; font-size: 13px; line-height: 1.6; }
 .asst-result-notice { overflow-wrap: anywhere; text-align: left; }
 .asst-result-notice .fm-body { width: 100%; }
-.asst-result-notice .chat-bubble { font-size: 13px; line-height: 1.55; }
+.feed-msg.chat.assistant.asst-result-notice .chat-bubble { background: none; border: 0;
+  padding: 0; border-radius: 0; font-size: 14px; line-height: 1.55; }
 .asst-result-notice .asst-result-evidence { font-size: 12px; color: var(--fg-dim); }
 .asst-result-followup { margin-top: 6px; }
 .asst-result-notice p { margin: 6px 0; }
@@ -22,7 +22,7 @@
 .asst-result-notice a { font-size: 12px; color: var(--accent); }
 .asst-result-notice .asst-run-result-actions { align-items: center; margin: 10px 0 0; }
 .asst-result-commentary { white-space: pre-wrap; }
-.asst-result-feed summary { cursor: pointer; color: var(--fg-mut); padding: 8px 0; }
+.asst-result-feed summary { cursor: pointer; color: var(--fg-mut); padding: 4px 0; }
 .asst-result-details > summary { cursor: pointer; font-size: 12px; padding: 10px 0; }
 .asst-empty.has-results { margin: 0 auto; padding: 12px 16px; }
 .asst-empty.has-results h2 { font-size: 20px; line-height: 1.35; }

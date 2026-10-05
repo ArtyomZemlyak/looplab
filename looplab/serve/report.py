@@ -24,7 +24,7 @@ from looplab.engine.champion_caveats import (CHAMPION_CAVEAT_MERGED_COORDINATES,
                                              CHAMPION_CAVEAT_SALVAGED,
                                              CHAMPION_CAVEAT_TRUST_FLAGGED,
                                              champion_metric_caveats)
-from looplab.events.digest import (experiments_digest, metric_scored_invalid, node_metric,
+from looplab.events.digest import (concept_rollup, experiments_digest, metric_scored_invalid, node_metric,
                                    node_theme)
 from looplab.core.models import NodeStatus, RunState, activation_unverified
 
@@ -49,13 +49,18 @@ _SYSTEM = (
     "best result robust across seeds, is it trustworthy or are there red flags), a plain-words "
     "`champion_summary`, and the short lists `what_worked`, `learnings`, `what_didnt`, "
     "`next_directions`, and `caveats` (state any reward-hack / leakage / drift / single-seed / "
-    "infeasibility flags plainly). Keep every list item to one short line."
+    "infeasibility flags plainly). Keep every list item to one short line. "
+    "Claim improvement only for the eligible same-ruler primary-score comparisons below; "
+    "never infer it from the first/selected numbers or confirmation means. Name node IDs and "
+    "limits. Failed evaluations show execution problems, not that an idea was ineffective. "
+    "Put untested deep-research proposals in next_directions, never in learnings or what_worked. "
+    "Concept association alone is not an ablation or a causal effect. Say when evidence is unknown."
 )
 
 
 def _report_context(state: RunState) -> str:
     """A compact, conclusion-grade brief of the whole run for the report prompt: status, champion +
-    robustness, the improvement story, trust flags, the latest research conclusion, and the
+    robustness, eligible parent comparisons, trust flags, hypothesis-search proposals, and the
     strongest/weakest experiments (via the shared digest)."""
     direction = state.direction
     best = state.best()
@@ -95,10 +100,25 @@ def _report_context(state: RunState) -> str:
         if feas:
             base = node_metric(feas[0])
             if base is not None and m is not None:
-                lines.append(f"Improvement: baseline #{feas[0].id} {_g(base)} → best {_g(m)} "
-                             f"(Δ {m - base:+.4g}).")
+                lines.append(f"Recorded first/selected values: #{feas[0].id} {_g(base)} → "
+                             f"#{best.id} {_g(m)}. These selection values can include confirmation "
+                             "means; they alone do not establish improvement or a causal effect.")
     else:
         lines.append("Champion: none yet (no feasible evaluated node).")
+    lines.extend(_parent_score_evidence(state))
+    concepts = concept_rollup(state)
+    if concepts:
+        lines.append("Concept contrasts: matched complete other-concept sets and evaluation rulers; "
+                     "observational with/without evidence, not causal ablations. Positive gain "
+                     "means better in the run direction. Missing estimates do not mean no effect.")
+        for cid, row in sorted(concepts.items(), key=lambda item: (-item[1]["count"], item[0]))[:6]:
+            effect = row["effect"]
+            lines.append(f"Concept {cid}: status={effect['status']}, reason={effect['reason']}, "
+                         f"gain={_g(effect['estimate'])}, pairs={effect['n_pairs']}, "
+                         f"contexts={effect['n_contexts']}, warnings={effect['has_advisory_warnings']}; "
+                         f"pair preview={effect['pairs'][:2]}")
+        if len(concepts) > 6:
+            lines.append(f"{len(concepts) - 6} other concept summaries omitted; inspect concept tools.")
     # Trust flags — the conclusion must not bury these.
     flags: list[str] = []
     if best is not None and any(h.get("node_id") == best.id for h in state.reward_hacks):
@@ -172,11 +192,57 @@ def _report_context(state: RunState) -> str:
     if state.research:
         memo = state.research[-1]
         if isinstance(memo, dict) and memo.get("summary"):
-            lines.append("Latest deep-research conclusion: " + str(memo["summary"])[:400])
+            lines.append("Latest hypothesis-search memo (untested proposals, not measured learnings): "
+                         + str(memo["summary"])[:400])
     dig = experiments_digest(state, top_k=6, worst_n=3)
     if dig:
         lines.append(dig)
     return "\n".join(lines)
+
+
+def _parent_score_evidence(state: RunState) -> list[str]:
+    """Use the completion receipt's authority, including creation-bound parent attempts."""
+    from collections import Counter
+
+    from looplab.engine.comparability import comparability_status, record_of
+    from looplab.events.replay import flagged_node_ids
+    from looplab.serve.node_comparison import completion_score_comparison
+    from looplab.serve.run_result_summary import current_trust_signals
+
+    flagged = set(flagged_node_ids(state))
+    advisory = set(current_trust_signals(state)) - flagged
+    counts = Counter()
+    rows = []
+    for node in sorted(state.nodes.values(), key=lambda n: n.id):
+        if node.tombstoned or node.status != NodeStatus.evaluated:
+            continue
+        parents = []
+        for pid in node.parent_ids[:8]:
+            parent = state.nodes.get(pid)
+            if (parent is not None and not parent.tombstoned
+                    and parent.status == NodeStatus.evaluated and pid not in state.aborted_nodes
+                    and node.parent_generations.get(str(pid)) == parent.attempt):
+                parents.append({"node_id": pid, "attempt": parent.attempt,
+                                "comparability": comparability_status(record_of(node), record_of(parent))})
+        status = completion_score_comparison(node, parents, state, flagged)["status"]
+        counts[status] += 1
+        if status == "same":
+            parent = state.nodes[parents[0]["node_id"]]
+            delta = node.metric - parent.metric
+            gain = delta if state.direction == "max" else -delta
+            outcome = "better" if gain > 0 else "worse" if gain < 0 else "unchanged"
+            warning = " (trust advisory remains)" if {node.id, parent.id} & advisory else ""
+            rows.append(f"#{parent.id}/attempt {parent.attempt} → #{node.id}/attempt {node.attempt}: "
+                        f"primary scores {_g(parent.metric)} → {_g(node.metric)}, "
+                        f"direction-normalized gain {gain:+.4g}, {outcome}{warning}")
+    lines = ["Primary-score parent comparison coverage: " + str(dict(sorted(counts.items()))) + "."]
+    if rows:
+        lines.append(f"Eligible same-ruler primary-score comparisons (latest {min(12, len(rows))} "
+                     f"of {len(rows)}; observational, not isolated ablations):")
+        lines.extend(rows[-12:])
+    else:
+        lines.append("No eligible same-ruler primary-score comparison establishes improvement.")
+    return lines
 
 
 # One trust-flag clause per champion caveat, on the meaning `ui/src/runIndex.js::

@@ -1,4 +1,4 @@
-import { uiText, useUILanguage } from './uiLanguage.js'
+import { uiText, useUILanguage, effectiveUILanguage } from './uiLanguage.js'
 import React from 'react'
 import './launch-guidance.css'
 
@@ -39,7 +39,7 @@ const guidance = {
 export default function LaunchGuidance({ phase, language = 'auto', notice }) {
   useUILanguage()
 
-  const ru = language === 'ru'
+  const ru = effectiveUILanguage(language) === 'ru'
   const row = guidance[phase] || guidance.review
   return <div className="asst-launch-guide">
     <strong>{row[ru ? 2 : 0]}</strong>

@@ -1,4 +1,4 @@
-import { uiText, useUILanguage } from './uiLanguage.js'
+import { uiText, useUILanguage, effectiveUILanguage } from './uiLanguage.js'
 import React from 'react'
 import './new-run-starter.css'
 
@@ -6,7 +6,7 @@ import './new-run-starter.css'
 export default function NewRunStarter({ language = 'auto', disabled = false, onDraft }) {
   useUILanguage()
 
-  const ru = language === 'ru'
+  const ru = effectiveUILanguage(language) === 'ru'
   const examples = ru ? [
     ['Есть код', 'Цель: [что улучшить]. Код находится на сервере LoopLab: [путь к репозиторию]. Помоги выбрать команду оценки и метрику. Начни с плана на три эксперимента; покажи изменяемые файлы и ограничения перед запуском.'],
     ['Есть данные', 'Цель: [что предсказывать или исследовать]. Данные находятся на сервере LoopLab: [путь к данным]. Помоги подготовить код и честную оценку результата. Предложи план на три эксперимента и покажи условия перед запуском.'],

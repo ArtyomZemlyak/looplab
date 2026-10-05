@@ -1,11 +1,11 @@
-import { uiText, useUILanguage } from './uiLanguage.js'
+import { uiText, useUILanguage, effectiveUILanguage } from './uiLanguage.js'
 import React from 'react'
 import { OpIcon } from './icons.jsx'
 
-export function PanelResourceNotice({ resource, label, onRetry, language = 'en' }) {
+export function PanelResourceNotice({ resource, label, onRetry, language = 'auto' }) {
   useUILanguage()
 
-  const ru = language === 'ru'
+  const ru = effectiveUILanguage(language) === 'ru'
   const text = (en, russian) => ru ? russian : en
   if (resource.status === 'ready') return null
   if (resource.status === 'loading') return <div className="muted" role="status">{text('Loading', 'Загружаем')} {uiText(label)}…</div>

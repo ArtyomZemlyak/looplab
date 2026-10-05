@@ -6,14 +6,14 @@ import { PANEL_REQUEST_TIMEOUT_MS, RUN_GENERATION_RE } from './panelPrimitives.j
 import { harnessAgentInstruction, harnessMcpDescriptor, harnessServerUrl, validHarnessHandoff } from './harnessHandoff.js'
 import './harness-handoff.css'
 import HarnessReceipt from './HarnessReceipt.jsx'
-import { useAssistantLanguage } from './useAssistantLanguage.js'
+import { useAssistantUILanguage } from './useAssistantLanguage.js'
 import { harnessText } from './harnessText.js'
 import LazyBoundary from './LazyBoundary.jsx'
 
 export default function HarnessHandoff({ runId, generation, seq, defaultOpen = false, focusOrigin = null }) {
   useUILanguage()
 
-  const [language] = useAssistantLanguage()
+  const language = useAssistantUILanguage()
   const t = text => harnessText(language, text)
   const [open, setOpen] = useState(defaultOpen)
   const [copied, setCopied] = useState(null)

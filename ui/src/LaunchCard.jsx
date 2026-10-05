@@ -1,5 +1,5 @@
 
-import { uiText, useUILanguage } from './uiLanguage.js'
+import { uiText, useUILanguage, effectiveUILanguage } from './uiLanguage.js'
 import React, { useEffect, useId, useMemo, useRef, useState, useSyncExternalStore } from 'react'
 import {
   clearDamagedLaunchTransport, clearLaunchTransport, createIdempotencyKey, getStartStatus,
@@ -164,6 +164,7 @@ export default function LaunchCard({
 }) {
   useUILanguage()
 
+  language = effectiveUILanguage(language)
   // Presentation only: never feed language or translated text into the draft or startup identity.
   const [russianCopy, setRussianCopy] = useState(null)
   useEffect(() => {

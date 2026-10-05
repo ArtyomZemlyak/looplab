@@ -31,10 +31,13 @@ const handoff = { version: 1, generation, run_id: 'demo', run_uid: 'incarnation'
 test('initial connection render failure restores focus after its trigger disappears', async () => {
   const harness = await mountLive({ visible: true, plugins: [{
     name: 'doc72-initial-connection-failure', enforce: 'pre', transform(code, id) {
-      if (id.replaceAll('\\', '/').endsWith('/src/HarnessHandoff.jsx')) return {
-        code: code.replace('const [language] = useAssistantLanguage()',
+      if (id.replaceAll('\\', '/').endsWith('/src/HarnessHandoff.jsx')) {
+        assert.ok(code.includes('const language = useAssistantUILanguage()'), 'render fault must reach the current reader')
+        return {
+        code: code.replace('const language = useAssistantUILanguage()',
           `throw new Error('doc72 injected initial connection render failure');
-           const [language] = useAssistantLanguage()`), map: null }
+           const language = useAssistantUILanguage()`), map: null }
+      }
     },
   }] })
   const originalError = console.error
@@ -77,12 +80,14 @@ for (const [target, failure] of [['HarnessCycleBody', 'import'], ['HarnessCycleB
       name: 'doc72-cycle-body-failure', enforce: 'pre',
       transform(code, id) {
         if (!id.replaceAll('\\', '/').endsWith(`/src/${target}.jsx`)) return
+        if (failure === 'render') assert.ok(code.includes('const language = useAssistantUILanguage()'),
+          'render fault must reach the current reader')
         return { code: failure === 'import'
           ? `await globalThis.__looplabCycleFailure.promise;
               throw new Error('doc72 injected cycle import failure'); export default function Body() { return null }`
-          : code.replace('const [language] = useAssistantLanguage()',
+          : code.replace('const language = useAssistantUILanguage()',
             `if (globalThis.__looplabCycleFailure.fail) throw new Error('doc72 injected cycle render failure');
-             const [language] = useAssistantLanguage()`), map: null }
+             const language = useAssistantUILanguage()`), map: null }
       },
     }] })
     const originalError = console.error, errors = []

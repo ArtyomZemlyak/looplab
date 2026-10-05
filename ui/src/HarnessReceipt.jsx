@@ -1,6 +1,6 @@
 import { uiText, useUILanguage } from './uiLanguage.js'
 import React, { useState } from 'react'
-import { useAssistantLanguage } from './useAssistantLanguage.js'
+import { useAssistantUILanguage } from './useAssistantLanguage.js'
 import { harnessText } from './harnessText.js'
 import { get, runApiPath, COMMAND_ID_RE } from './util.js'
 import { useScopedResource } from './useScopedResource.js'
@@ -18,7 +18,7 @@ export default function HarnessReceipt({ runId, generation }) {
 function ReceiptForm({ runId, generation }) {
   useUILanguage()
 
-  const [language] = useAssistantLanguage()
+  const language = useAssistantUILanguage()
   const t = text => harnessText(language, text)
   const [kind, setKind] = useState('key')
   const [identity, setIdentity] = useState('')

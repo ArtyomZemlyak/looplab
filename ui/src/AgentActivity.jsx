@@ -1,6 +1,6 @@
 import { uiText, useUILanguage } from './uiLanguage.js'
 import React from 'react'
-import { useAssistantLanguage } from './useAssistantLanguage.js'
+import { useAssistantUILanguage } from './useAssistantLanguage.js'
 
 export function validAgentActivity(value) {
   if (!value || typeof value !== 'object' || Array.isArray(value)
@@ -18,7 +18,7 @@ export function validAgentActivity(value) {
 export default function AgentActivity({ activity, fresh }) {
   useUILanguage()
 
-  const [language] = useAssistantLanguage()
+  const language = useAssistantUILanguage()
   const ru = language === 'ru'
   if (activity == null) return null // older server
   if (!fresh || !validAgentActivity(activity)) return <span role="status" className="muted">

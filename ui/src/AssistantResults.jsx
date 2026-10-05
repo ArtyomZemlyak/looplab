@@ -1,7 +1,7 @@
 import { uiText, useUILanguage } from './uiLanguage.js'
 import React, { useEffect, useState } from 'react'
 import { get, runApiPath } from './util.js'
-import { useAssistantLanguage } from './useAssistantLanguage.js'
+import { useAssistantUILanguage } from './useAssistantLanguage.js'
 import { useScopedResource } from './useScopedResource.js'
 import { hashWithRunRouteState } from './runRouteState.js'
 import { resultCaveatText, resultNoticeBrief, resultNoticeQuestion, resultNoticeText, validResultNotices } from './resultNoticeModel.js'
@@ -19,7 +19,7 @@ function ResultPages({ runId, generation, onOpen, onReady, onAsk, askDisabled, a
     messages, renderMessage }) {
   useUILanguage()
 
-  const [language] = useAssistantLanguage()
+  const language = useAssistantUILanguage()
   const [cursors, setCursors] = useState([])
   const cursor = cursors.at(-1) || null
   const resource = useScopedResource(signal => get(runApiPath(runId, '/result-notices')

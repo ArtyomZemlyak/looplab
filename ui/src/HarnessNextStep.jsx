@@ -1,7 +1,7 @@
 import { uiText, useUILanguage } from './uiLanguage.js'
 import React from 'react'
 import './harness-next-step.css'
-import { useAssistantLanguage } from './useAssistantLanguage.js'
+import { useAssistantUILanguage } from './useAssistantLanguage.js'
 
 const codes = new Set(['inspect_sources', 'answer_checkpoint', 'inspect_lifecycle',
   'inspect_pending', 'choose_direction'])
@@ -22,7 +22,7 @@ export function validHarnessNextStep(value, language = '') {
 export default function HarnessNextStep({ step, runId, fresh }) {
   useUILanguage()
 
-  const [language] = useAssistantLanguage()
+  const language = useAssistantUILanguage()
   const ru = language === 'ru'
   if (!step) return null
   if (!fresh) return <p role="status" className="report-inline-state">

@@ -1,4 +1,4 @@
-import { uiText, useUILanguage } from './uiLanguage.js'
+import { uiText, useUILanguage, effectiveUILanguage } from './uiLanguage.js'
 import React, { useEffect, useMemo, useRef, useState } from 'react'
 import { createInspectorDraftStore, useInspectorDraftField } from './inspectorDraftStore.js'
 import { codeSearchRows } from './codeSearch.js'
@@ -20,11 +20,11 @@ const sameCopySource = (left, right) => left?.scope === right.scope
 
 export default function CodeViewer({
   code = '', diff = null, label = 'Code', maxHeight = 420, copyText = null,
-  draftStore: sharedDraftStore = null, draftScope = null, language = 'en', allowCopy = true,
+  draftStore: sharedDraftStore = null, draftScope = null, language = 'auto', allowCopy = true,
 }) {
   useUILanguage()
 
-  const ru = language === 'ru'
+  const ru = effectiveUILanguage(language) === 'ru'
   const fallbackDraftStoreRef = useRef(null)
   if (!fallbackDraftStoreRef.current) fallbackDraftStoreRef.current = createInspectorDraftStore()
   const draftStore = sharedDraftStore || fallbackDraftStoreRef.current

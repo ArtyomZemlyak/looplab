@@ -54,3 +54,56 @@ test('Russian is available before any run, persists across views, and controls t
     finally { await reopened.unmount() }
   } finally { await harness.close() }
 })
+
+
+test('Auto resolves Russian UI and result drafts without overriding automatic response language or permissions', async () => {
+  const harness = await mountLive()
+  const original = Object.getOwnPropertyDescriptor(navigator, 'language')
+  Object.defineProperty(navigator, 'language', { value: 'ru-RU', configurable: true })
+  const { default: Bar } = await harness.load('/src/AssistantBar.jsx')
+  const { setUILanguage } = await harness.load('/src/uiLanguage.js')
+  const backend = fetchStub({
+    'GET /api/assistant/commands': { commands: [] },
+    'GET /api/assistant/sessions': { sessions: [] },
+    'GET /api/assistant/watches': { watches: [] },
+    'GET /api/runs': [{ run_id: 'demo', generation, nodes: 1, finished: false, phase: 'active' }],
+    'GET /api/runs/demo/result-notices': payload([node]),
+    'GET /api/assistant/permissions': ({ init }) => unanswered(init),
+    'GET /api/assistant/progress': ({ init }) => unanswered(init),
+    'POST /api/assistant/sessions': { id: 'auto-chat', mode: 'plan', title: '' },
+    'POST /api/assistant/sessions/auto-chat/message_stream': () => new Response(
+      'event: done\ndata: {"ok":true,"reply":"Готово."}\n\n',
+      { headers: { 'Content-Type': 'text/event-stream' } }),
+  })
+  globalThis.fetch = backend
+  localStorage.clear(); sessionStorage.clear()
+  await React.act(async () => setUILanguage('auto'))
+  const mounted = await harness.mount(Bar, { runId: 'demo' })
+  try {
+    const side = mounted.container.querySelector('.cmdbar-drawer-btn')
+    if (side) await click(side)
+    await until(() => mounted.container.querySelector('.asst-result-notice button'), 'auto Russian result')
+    assert.equal(mounted.container.querySelector('.asst-language select').value, 'auto')
+    assert.match(mounted.container.querySelector('.asst-result-notice').textContent, /Эксперимент #2/)
+    assert.ok([...mounted.container.querySelectorAll('button')].some(button => button.textContent === 'Отправить'))
+    assert.equal(backend.calls.some(call => call.method !== 'GET'), false)
+    await click(mounted.container.querySelector('.asst-result-notice button'))
+    const draft = mounted.container.querySelector('textarea').value
+    assert.match(draft, /Разбери эксперимент #2, попытку 1/)
+    await React.act(async () => setUILanguage('en'))
+    assert.match(mounted.container.querySelector('.asst-result-notice').textContent, /Experiment #2/)
+    assert.equal(mounted.container.querySelector('textarea').value, draft)
+    await React.act(async () => setUILanguage('auto'))
+    assert.equal(mounted.container.querySelector('textarea').value, draft)
+    await click([...mounted.container.querySelectorAll('button')].find(button => button.textContent === 'Отправить'))
+    await until(() => backend.calls.some(call => /message_stream/.test(call.path)), 'automatic response language')
+    const body = JSON.parse(backend.calls.find(call => /message_stream/.test(call.path)).body)
+    assert.equal(body.response_language ?? 'auto', 'auto', 'default auto is omitted by the transport')
+    assert.equal(body.mode, 'plan')
+  } finally {
+    await mounted.unmount()
+    if (original) Object.defineProperty(navigator, 'language', original)
+    else delete navigator.language
+    await harness.close()
+  }
+})

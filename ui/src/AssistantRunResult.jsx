@@ -6,7 +6,7 @@ import { terminalReady, sourceIncomplete, sourceIntegrityNotice,
   bestMetricCaveats, bestMetricCaveatNotice } from './runIndex.js'
 import { resultCaveatText, resultTrustAdvisoryText } from './resultNoticeModel.js'
 import { hashWithRunRouteState } from './runRouteState.js'
-import { useAssistantLanguage } from './useAssistantLanguage.js'
+import { useAssistantUILanguage } from './useAssistantLanguage.js'
 import { resultMeasurement, resultSpreadText } from './resultMeasurement.js'
 import './assistant-run-result.css'
 
@@ -18,7 +18,7 @@ const measured = value => value && Number.isSafeInteger(value.node_id) && value.
 export default function AssistantRunResult({ run, onOpen, onAsk, onReady, askDisabled = false, askDisabledReason }) {
   useUILanguage()
 
-  const [language] = useAssistantLanguage()
+  const language = useAssistantUILanguage()
   const text = (en, ru) => language === 'ru' ? ru : en
   React.useEffect(() => { onReady?.() }, [onReady, run?.run_id, run?.generation])
   if (!run || !terminalReady(run) || run.finalization_incomplete) return null
@@ -62,9 +62,9 @@ export default function AssistantRunResult({ run, onOpen, onAsk, onReady, askDis
       {selected.confirmed && <p className="asst-run-result-caution">{uiText(resultSpreadText(selected.confirmed_std, language))}</p>}
       {selected.trust_advisory === true && <p className="asst-run-result-caution">{uiText(resultTrustAdvisoryText(language))}</p>}
       <p className="asst-run-result-caution">{text('First eligible is not necessarily the task baseline; detector coverage is not fully verified.',
-        'Первый допустимый эксперимент не обязательно является базовым решением задачи; полнота проверок Trust не подтверждена.')}</p>
+        'Первый допустимый эксперимент не обязательно является базовым решением задачи; полнота проверок надёжности не подтверждена.')}</p>
       {caveats.length > 0 && <p className="asst-run-result-caution" title={uiText(bestMetricCaveatNotice(run))}>
-        {text('Recorded caveats:', 'Ограничения:')} {caveats.map(code => resultCaveatText(code, language)).join(' · ')}. {text('Review Report and Trust.', 'Проверьте отчёт и раздел Trust.')}
+        {text('Recorded caveats:', 'Ограничения:')} {caveats.map(code => resultCaveatText(code, language)).join(' · ')}. {text('Review Report and Trust.', 'Проверьте отчёт и раздел «Надёжность».')}
       </p>}
     </> : <p className="asst-run-result-caution">{((sourceIncomplete(run) ? uiText(sourceIntegrityNotice(run)) : text('No complete result summary is available. Open Report to inspect the recorded evidence.', 'Полного итога пока нет. Откройте отчёт и проверьте сохранённые данные.')))}</p>}
     <div className="asst-run-result-actions">

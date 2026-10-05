@@ -1,4 +1,4 @@
-import { uiText, useUILanguage } from './uiLanguage.js'
+import { uiText, useUILanguage, effectiveUILanguage } from './uiLanguage.js'
 import React, { useEffect, useLayoutEffect, useRef, useState } from 'react'
 import { deadlineGet } from './util.js'
 import { ruHealthCopy } from './llmHealthCopy.js'
@@ -13,7 +13,7 @@ import { claimPublisher, releasePublisher, captureAuthoritativeRead,
 export default function AssistantModelCheck({ onSettings, language = 'auto' }) {
   useUILanguage()
 
-  const ru = language === 'ru'
+  const ru = effectiveUILanguage(language) === 'ru'
   const ownerRef = useRef(null)
   const rootRef = useRef(null)
   const requestRef = useRef(null)

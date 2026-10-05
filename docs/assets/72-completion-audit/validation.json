@@ -1,0 +1,71 @@
+{
+  "date": "2026-10-05",
+  "baseline": "cd85047890fe87cc4b6bb5db19849b4c001ffe59",
+  "scope": "Latest LoopLab requests: open start, result dialogue, monitors, Russian, concept effects, Report/Deep Research",
+  "checks": {
+    "replay": {
+      "passed": 193
+    },
+    "backend_integration_before_final_concept_context": {
+      "passed": 358,
+      "skipped": 2
+    },
+    "final_report_language_and_census": {
+      "passed": 214,
+      "skipped": 2
+    },
+    "quick_start_and_credentials": {
+      "passed": 42,
+      "skipped": 2
+    },
+    "full_ui": {
+      "passed": 1994
+    },
+    "after_final_copy_subset": {
+      "passed": 24
+    },
+    "report_evidence_subset": {
+      "passed": 10
+    },
+    "production_build": "passed",
+    "locale": "passed",
+    "strict_mkdocs": "passed",
+    "ruff_report": "passed"
+  },
+  "counts_overlap": true,
+  "browser": {
+    "run": "isolated copy of mle_deepseek_flash_100",
+    "viewport": [
+      1920,
+      1080
+    ],
+    "checks": [
+      "auto RU labels and results",
+      "side and full Assistant",
+      "evidence disclosure with exact parent attempt",
+      "Russian result question draft without send"
+    ],
+    "console_warn_error": 0,
+    "new_training": false,
+    "provider_calls": false,
+    "user_run_modified": false
+  },
+  "bundle": {
+    "js_gzip": 656702,
+    "js_limit": 633984,
+    "js_excess": 22718,
+    "baseline_js_gzip": 656451,
+    "css_gzip": 59632,
+    "css_limit": 59648,
+    "route_guards": "passed",
+    "total_guard": "failed"
+  },
+  "open": [
+    "Automatic model commentary on every internal completion remains opt-in/user-initiated via Assistant or monitors; external agents publish commentary.",
+    "Historical provider prose stays verbatim; all new generated prose follows selected language.",
+    "Concept contrasts are observational; explicit fixed-code repeated-seed interventions remain open.",
+    "Narrative assertions are advisory, not deterministically validated sentence by sentence.",
+    "Existing document 72 section 19.17 product worktree/delivery/recovery work remains open.",
+    "Total JS byte budget exceeds target."
+  ]
+}

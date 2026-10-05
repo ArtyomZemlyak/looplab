@@ -1,4 +1,4 @@
-import { uiText, useUILanguage } from './uiLanguage.js'
+import { uiText, useUILanguage, effectiveUILanguage } from './uiLanguage.js'
 import React, { useEffect, useState } from 'react'
 import { usePoll } from './hooks.js'
 import { deadlineGet } from './util.js'
@@ -11,7 +11,7 @@ const AssistantModelCheck = React.lazy(() => import('./AssistantModelCheck.jsx')
 export default function FirstRunModelStatus({ onSettings, language = 'auto' }) {
   useUILanguage()
 
-  const ru = language === 'ru'
+  const ru = effectiveUILanguage(language) === 'ru'
   const [snapshot, setSnapshot] = useState(null)
   const [check, setCheck] = useState(readModelCheck)
   const [routeEpoch, setRouteEpoch] = useState(0)

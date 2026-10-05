@@ -1,4 +1,4 @@
-import { uiText, uiMessage, useUILanguage } from './uiLanguage.js'
+import { uiText, uiMessage, useUILanguage, effectiveUILanguage } from './uiLanguage.js'
 import React, { useEffect, useRef, useState } from 'react'
 import { deadlineGet, runNodeApiPath } from './api.js'
 import CodeViewer from './CodeViewer.jsx'
@@ -44,7 +44,7 @@ export function validSeedFilesPage(page, identity, offset, path) {
 export default function RecordedSeedFiles({ runId, node, generation, baseDigest, language, draftStore, draftScope }) {
   useUILanguage()
 
-  const ru = language === 'ru'
+  const ru = effectiveUILanguage(language) === 'ru'
   const [page, setPage] = useState(null)
   const [file, setFile] = useState(null)
   const [version, setVersion] = useState('base')

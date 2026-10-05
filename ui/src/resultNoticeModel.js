@@ -46,7 +46,7 @@ export function resultCaveatText(code, language = 'en') {
 
 
 export const resultTrustAdvisoryText = (language = 'en') => language === 'ru'
-  ? 'Есть предупреждение Trust для этой попытки; оно не исключает результат из отбора. Проверьте Trust перед продолжением.'
+  ? 'Есть предупреждение о надёжности этой попытки; оно не исключает результат из отбора. Проверьте раздел «Надёжность» перед продолжением.'
   : 'A Trust warning is recorded for this attempt; it does not exclude the result from selection. Review Trust before continuing.'
 export function validResultNotices(value, generation, cursor = null, limit = 200) {
   if (value?.version !== 1 || value.generation !== generation || !token(generation)
@@ -126,7 +126,7 @@ export function resultNoticeText(row, language = 'en') {
       ? ` Основная оценка: ${number(row.score)}.` : ` Evaluation score: ${number(row.score)}.`
     if (row.reason) outcome += ru ? ` Причина остановки: ${{ aborted: 'завершено вручную', done: 'задача завершена', error: 'ошибка', budget: 'лимит ресурсов' }[row.reason] || row.reason}.` : ` Stop reason: ${row.reason}.`
     if (row.trust_advisory) outcome += ` ${resultTrustAdvisoryText(language)}`
-    next = ru ? 'Откройте Report: итог, ограничения и файлы решения.' : 'Open Report for the result, caveats and solution files.'
+    next = ru ? 'Откройте отчёт: итог, ограничения и файлы решения.' : 'Open Report for the result, caveats and solution files.'
   } else {
     title = ru ? `Эксперимент #${row.node_id} · попытка ${row.attempt}` : `Experiment #${row.node_id} · attempt ${row.attempt}`
     const failure = ru ? ({ crash: 'ошибка выполнения команды', timeout: 'время выполнения истекло' }[row.failure] || row.failure) : row.failure
@@ -140,7 +140,7 @@ export function resultNoticeText(row, language = 'en') {
     if (row.status === 'evaluated' && (!row.feasible || row.violations > 0)) outcome += ru
       ? ' Нарушены ограничения; проверьте допустимость.' : 'Constraints violated; check eligibility.'
     if (row.trust_flagged) outcome += ru
-      ? ' Исключён из отбора политикой Trust.' : 'Excluded from selection by the Trust policy.'
+      ? ' Исключён из отбора политикой проверки надёжности.' : 'Excluded from selection by the Trust policy.'
     else if (row.trust_advisory) outcome += ` ${resultTrustAdvisoryText(language)}`
     if (row.salvaged && row.score !== null) outcome += ru
       ? ' Метрика восстановлена после ошибки; проверьте источник.' : 'Metric recovered after failure; review provenance.'
@@ -175,10 +175,10 @@ export function resultNoticeText(row, language = 'en') {
       if (help) comparison += ` ${help}`
     }
     if (row.parent_trust_advisory) comparison += ru
-      ? ' У исходного эксперимента есть предупреждение Trust; числовое сравнение не подтверждает надёжность результата.'
+      ? ' У исходного эксперимента есть предупреждение о надёжности; числовое сравнение не подтверждает надёжность результата.'
       : 'A parent has a Trust warning; the numeric comparison does not establish result reliability.'
     next = ['failed', 'aborted'].includes(row.status) ? ru ? 'Проверьте логи и причину остановки перед повторным запуском.' : 'Review logs and the stop cause before retrying.'
-      : ru ? 'Откройте Metrics и Trust; следующий эксперимент выбирает агент.' : 'Review Metrics and Trust; the agent chooses the next experiment.'
+      : ru ? 'Откройте разделы «Метрики» и «Надёжность»; следующий эксперимент выбирает агент.' : 'Review Metrics and Trust; the agent chooses the next experiment.'
   }
   const caution = score !== null && row.status !== 'aborted' ? measurement.reliability
     + (row.confirmed_mean !== null ? ` ${resultSpreadText(row.confirmed_std, language)}` : '') : ''
@@ -214,13 +214,13 @@ export function resultNoticeQuestion(row, language = 'en') {
   const target = row.kind === 'run' ? ru ? 'итог этого запуска' : 'this run’s result'
     : ru ? `эксперимент #${row.node_id}, попытку ${row.attempt}` : `experiment #${row.node_id}, attempt ${row.attempt}`
   if (row.kind === 'run') return ru
-    ? `Разбери ${target}: прочитай Report, объясни выбранный результат, ограничения и причину завершения. Сравни с первым пригодным результатом только при сопоставимых условиях; не смешивай основные оценки со средними повторных запусков. Предложи следующий шаг. Не запускай новые эксперименты и не меняй настройки.`
+    ? `Разбери ${target}: прочитай отчёт, объясни выбранный результат, ограничения и причину завершения. Сравни с первым пригодным результатом только при сопоставимых условиях; не смешивай основные оценки со средними повторных запусков. Предложи следующий шаг. Не запускай новые эксперименты и не меняй настройки.`
     : `Explain ${target}: read Report, explain the selected result, caveats and stop reason. Compare with the first eligible result only under comparable conditions; keep evaluation scores separate from confirmation means. Propose a next step. Do not start experiments or change settings.`
   if (row.status === 'failed') return ru
-    ? `Разбери ${target}: прочитай Trace и логи этой попытки, объясни причину ошибки и предложи минимальное исправление. Отдели подтверждённые факты от предположений. Не запускай новые эксперименты и не меняй настройки.`
+    ? `Разбери ${target}: прочитай историю выполнения и логи этой попытки, объясни причину ошибки и предложи минимальное исправление. Отдели подтверждённые факты от предположений. Не запускай новые эксперименты и не меняй настройки.`
     : `Explain ${target}: read this attempt’s Trace and logs, identify the failure cause, and propose a minimal repair. Separate recorded facts from assumptions. Do not start experiments or change settings.`
   if (row.status === 'aborted') return ru
-    ? `Разбери ${target}: прочитай Trace и логи этой попытки, объясни причину остановки и что нужно для повторного запуска. Завершённой метрики у этой попытки нет. Не запускай новые эксперименты и не меняй настройки.`
+    ? `Разбери ${target}: прочитай историю выполнения и логи этой попытки, объясни причину остановки и что нужно для повторного запуска. Завершённой метрики у этой попытки нет. Не запускай новые эксперименты и не меняй настройки.`
     : `Explain ${target}: read this attempt’s Trace and logs, explain why it stopped and what is needed to retry. This attempt has no completed metric. Do not start experiments or change settings.`
   return ru
     ? `Разбери ${target}: что измерено, что изменилось относительно родителя, насколько надёжен результат и что делать дальше. Сначала прочитай фактические данные этой попытки и ограничения. Не запускай новые эксперименты и не меняй настройки.`

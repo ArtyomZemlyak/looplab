@@ -94,3 +94,33 @@ test('Russian next-step labels preserve server reads and actions; legacy wording
     await harness.close()
   }
 })
+
+
+test('Auto on a Russian browser requests fenced Russian harness advice without publishing commands', async () => {
+  const harness = await mountLive({ visible: true })
+  const original = Object.getOwnPropertyDescriptor(navigator, 'language')
+  Object.defineProperty(navigator, 'language', { value: 'ru-RU', configurable: true })
+  try {
+    await React.act(async () => selectLanguage('auto'))
+    const { HarnessProgressPanel } = await harness.load('/src/HarnessProgressPanel.jsx')
+    const reads = []
+    globalThis.fetch = fetchStub({ '/api/runs/demo/harness-progress': request => {
+      reads.push(request)
+      return { generation, event_seq: 12, next_step: step(request.url.searchParams.get('language')),
+        execution: { engine_running: false } }
+    } })
+    const view = await harness.mount(HarnessProgressPanel, { compact: true, runId: 'demo',
+      expectedGeneration: generation, seq: 12, externalMode: true, engineRunning: false })
+    await until(() => view.container.textContent.includes('Проверьте завершённый запуск'), 'automatic Russian advice')
+    assert.ok(reads.length)
+    assert.ok(reads.every(row => row.method === 'GET' && row.url.searchParams.get('language') === 'ru'
+      && row.url.searchParams.get('expected_generation') === generation))
+    assert.equal(localStorage.getItem('looplab.language'), 'auto')
+    await view.unmount()
+  } finally {
+    if (original) Object.defineProperty(navigator, 'language', original)
+    else delete navigator.language
+    localStorage.removeItem('looplab.language')
+    await harness.close()
+  }
+})

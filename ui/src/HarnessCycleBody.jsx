@@ -2,7 +2,7 @@ import { uiText, uiMessage, useUILanguage } from './uiLanguage.js'
 import React from 'react'
 import HarnessNextStep from './HarnessNextStep.jsx'
 import AgentActivity from './AgentActivity.jsx'
-import { useAssistantLanguage } from './useAssistantLanguage.js'
+import { useAssistantUILanguage } from './useAssistantLanguage.js'
 
 // Reading labels only. Server phase IDs, verdicts and authored journal text stay
 // verbatim; the UI neither infers permission nor publishes an answer.
@@ -13,7 +13,7 @@ const statuses = { recorded: 'записано', pending: 'ожидает отв
 export default function HarnessCycleBody({ progress, fresh, runId, offset, setOffset, onOpenEvents }) {
   useUILanguage()
 
-  const [language] = useAssistantLanguage()
+  const language = useAssistantUILanguage()
   const ru = language === 'ru'
   const t = (en, russian) => ru ? russian : en
   const current = fresh && progress.complete

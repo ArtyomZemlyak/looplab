@@ -4,7 +4,7 @@ import CodeViewer from './CodeViewer.jsx'
 import { diffLines } from './lineDiff.js'
 import { nodeCodeModel } from './nodeCodeModel.js'
 import { useInspectorDraftField } from './inspectorDraftStore.js'
-import { useAssistantLanguage } from './useAssistantLanguage.js'
+import { useAssistantUILanguage } from './useAssistantLanguage.js'
 import { nodeBase } from './baseRevision.js'
 import RecordedSeedFiles from './RecordedSeedFiles.jsx'
 
@@ -22,7 +22,7 @@ function FileEditCode({ row, comparing, language, draftStore, draftScope }) {
 export default function NodeCode({ n, state, runId, expectedGeneration, allowBaseRead = false, draftStore, draftScope }) {
   useUILanguage()
 
-  const [language] = useAssistantLanguage()
+  const language = useAssistantUILanguage()
   const ru = language === 'ru'
   const [diff, setDiff] = useInspectorDraftField(
     draftStore, draftScope, 'diff', false, { disposable: true })

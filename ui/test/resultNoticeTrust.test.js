@@ -19,10 +19,10 @@ test('node briefs separate Trust warnings from enforced exclusion in English and
     assert.equal(validResultNotices(payload([row]), generation), true, item.name)
     for (const language of ['en', 'ru']) {
       const text = resultNoticeText(row, language)
-      assert.equal(/Trust/.test(text.outcome), item.trust_flagged || item.trust_advisory, item.name)
-      assert.equal(/Trust/.test(text.comparison), item.parent_trust_advisory, item.name)
+      assert.equal(/Trust|надёжности/.test(text.outcome), item.trust_flagged || item.trust_advisory, item.name)
+      assert.equal(/Trust|надёжности/.test(text.comparison), item.parent_trust_advisory, item.name)
       if (item.trust_flagged) assert.match(text.outcome, language === 'ru' ? /Исключён из отбора/ : /Excluded from selection/)
-      if (item.trust_advisory) assert.match(text.outcome, language === 'ru' ? /не исключает.*Проверьте Trust/ : /does not exclude.*Review Trust/)
+      if (item.trust_advisory) assert.match(text.outcome, language === 'ru' ? /не исключает.*Проверьте раздел «Надёжность»/ : /does not exclude.*Review Trust/)
       assert.equal(/improves on|лучше, чем/.test(text.comparison), item.comparison === 'same', item.name)
       assert.match(text.comparison, language === 'ru' ? /а не средние повторных/ : /not confirmation means/)
       if (item.parent_trust_advisory) assert.match(text.comparison, language === 'ru' ? /не подтверждает надёжность/ : /does not establish result reliability/)

@@ -1,11 +1,11 @@
-import { uiText, uiMessage, useUILanguage } from './uiLanguage.js'
+import { uiText, uiMessage, useUILanguage, effectiveUILanguage } from './uiLanguage.js'
 import React from 'react'
 import { ASSISTANT_MODES } from './util.js'
 
 export default function AssistantModePicker({ mode, language, disabled, disabledReason, onChange }) {
   useUILanguage()
 
-  const ru = language === 'ru'
+  const ru = effectiveUILanguage(language) === 'ru'
   const labels = { plan: 'Обсуждение', default: 'С подтверждением', acceptEdits: 'Правки файлов', auto: 'Автономно' }
   const hints = {
     plan: 'Обсуждение, чтение и предложения. Изменения и команды отключены.',

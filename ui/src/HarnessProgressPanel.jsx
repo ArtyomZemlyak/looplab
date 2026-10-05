@@ -8,7 +8,7 @@ import HarnessConnection from './HarnessConnection.jsx'
 import AgentActivity from './AgentActivity.jsx'
 import { invalidPanelPayload, isRecord, PANEL_REQUEST_TIMEOUT_MS, RUN_GENERATION_RE } from './panelPrimitives.js'
 import { PanelResourceNotice } from './PanelResourceNotice.jsx'
-import { useAssistantLanguage } from './useAssistantLanguage.js'
+import { useAssistantUILanguage } from './useAssistantLanguage.js'
 import { validHarnessProgress } from './harnessProgressModel.js'
 import LazyBoundary from './LazyBoundary.jsx'
 
@@ -22,7 +22,7 @@ export function HarnessProgressPanel({ runId, expectedGeneration, seq, externalM
   useUILanguage()
 
   const [offset, setOffset] = useState(0)
-  const [language] = useAssistantLanguage()
+  const language = useAssistantUILanguage()
   const ru = language === 'ru'
   const readLanguage = ru ? 'ru' : 'en'
   const validGeneration = RUN_GENERATION_RE.test(expectedGeneration || '')

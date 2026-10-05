@@ -1,4 +1,4 @@
-import { uiText, uiMessage, useUILanguage } from './uiLanguage.js'
+import { uiText, uiMessage, useUILanguage, effectiveUILanguage } from './uiLanguage.js'
 import React, { useCallback, useEffect, useRef, useState } from 'react'
 import { Turn, PermCard } from './AssistantChat.jsx'
 import AssistantModePicker from './AssistantModePicker.jsx'
@@ -242,7 +242,8 @@ export default function AssistantBar({ runId, hidden = false, onReady }) {
   useUILanguage()
 
   const [responseLanguage, setResponseLanguage] = useAssistantLanguage()
-  const ru = responseLanguage === 'ru'
+  const uiLanguage = effectiveUILanguage(responseLanguage)
+  const ru = uiLanguage === 'ru'
   const text = (en, russian) => ru ? russian : en
   const compactAssistant = useMediaQuery(`(max-width: ${ASSISTANT_OVERLAY_MAX_PX}px)`)
   const attentionIndicator = useAttentionIndicator()
@@ -3494,7 +3495,7 @@ export default function AssistantBar({ runId, hidden = false, onReady }) {
         {(m.context.refs || []).map(r => <span key={'r' + r} className="asst-ctx-i">#{r}</span>)}
         {(m.context.files || []).map(f => <span key={'f' + f} className="asst-ctx-i"><OpIcon name="clip" size={10} /> {f}</span>)}
       </div>}
-      <Turn m={m} runsById={runsById} language={responseLanguage} readOnly={historical} onRevert={historical ? null : revertChange}
+      <Turn m={m} runsById={runsById} language={uiLanguage} readOnly={historical} onRevert={historical ? null : revertChange}
         onRetry={retryHandlers.face(i)}
         retryLabel={shareUnknown || shareVerifying
           ? shareVerifying ? 'Checking status…' : 'Verify status' : 'Retry'}
@@ -3523,13 +3524,13 @@ export default function AssistantBar({ runId, hidden = false, onReady }) {
           : selectedRunHasNoNodes ? 'Оценок пока нет. Спросите, что требуется перед первым экспериментом.'
             : 'Спросите о результатах или следующем эксперименте.'
           : 'Опишите цель исследования или спросите о результатах. Запуск начнётся после проверки и подтверждения карточки.' : (newRunDraft ? uiText('Describe the goal, server paths, and time limit. For example: improve accuracy on [dataset] in three experiments. Review the launch card before starting.') : (runId ? (showRunResult ? uiText('Read the recorded result, open its code, or prepare a question below.') : (selectedRunHasNoNodes ? uiText('No experiment has been measured yet. Ask what is due before the first one.') : uiText('Ask about results or the next experiment.'))) : (firstRun ? uiText('Describe a goal to get a launch proposal. The run starts only after you review and approve it.') : uiText('Describe a goal, ask about runs, or plan an experiment.'))))))}</p>
-      {firstRun && <LazyBoundary resetKey="model-setup" language={responseLanguage} focusOnFailure={false}
+      {firstRun && <LazyBoundary resetKey="model-setup" language={uiLanguage} focusOnFailure={false}
         label={text('Model setup', 'Настройка модели')}>
-        <FirstRunModelStatus language={responseLanguage} onSettings={openAssistantModelSettings} />
+        <FirstRunModelStatus language={uiLanguage} onSettings={openAssistantModelSettings} />
       </LazyBoundary>}
-      {newRunDraft && <LazyBoundary resetKey="run-examples" language={responseLanguage} focusOnFailure={false}
+      {newRunDraft && <LazyBoundary resetKey="run-examples" language={uiLanguage} focusOnFailure={false}
         label={text('New run examples', 'Примеры нового запуска')}>
-        <NewRunStarter language={responseLanguage}
+        <NewRunStarter language={uiLanguage}
           disabled={!!input.trim() || historical || composerEditingPaused || busy || commandBusy}
           onDraft={draft => {
             if (openSessionPendingRef.current || input.trim() || historical || composerEditingPaused || busy || commandBusy) return
@@ -3549,7 +3550,7 @@ export default function AssistantBar({ runId, hidden = false, onReady }) {
       </div>}
     </div>}
     {!historical && !newRunDraft && runId && /^[0-9a-f]{64}$/.test(selectedRun?.generation || '') ? <LazyBoundary
-      key={`notices:${resultScope}`} resetKey={resultScope} language={responseLanguage} focusOnFailure={false}
+      key={`notices:${resultScope}`} resetKey={resultScope} language={uiLanguage} focusOnFailure={false}
       loadingFallback={msgs.map(renderMessage)} failureContent={msgs.map(renderMessage)}
       label={text('Experiment results', 'Итоги экспериментов')}>
       <AssistantResults runId={runId} messages={msgs} renderMessage={renderMessage}
@@ -3565,7 +3566,7 @@ export default function AssistantBar({ runId, hidden = false, onReady }) {
     </LazyBoundary> : msgs.map(renderMessage)}
     {showRunResult && <RunResultDisclosure key={resultScope}
       summary={text('Compare selected result and open solution', 'Сравнить результат и открыть решение')}>
-      <LazyBoundary resetKey={resultScope} language={responseLanguage} focusOnFailure={false}
+      <LazyBoundary resetKey={resultScope} language={uiLanguage} focusOnFailure={false}
         label={text('Run result', 'Итог запуска')}>
       <AssistantRunResult run={selectedRun} onOpen={openRunFromAssistant} onReady={onResultReady}
         askDisabled={composerEditingPaused || !!input.trim()}
@@ -3633,7 +3634,7 @@ export default function AssistantBar({ runId, hidden = false, onReady }) {
   // mode selector row — placed BELOW the input in the side + full composers.
   const languagePicker = <AssistantLanguagePicker language={responseLanguage} onChange={setResponseLanguage}
     disabled={busy || turnStarting || retryChecking} />
-  const modeRow = <><AssistantModePicker mode={mode} language={responseLanguage} disabled={historical || composerEditingPaused}
+  const modeRow = <><AssistantModePicker mode={mode} language={uiLanguage} disabled={historical || composerEditingPaused}
     disabledReason={historical ? readOnlyShort
       : sessionOpening ? 'Wait for the selected Assistant chat to finish opening'
         : forkingCurrentSession ? 'Wait for this chat to finish forking' : 'Wait for the current action'}

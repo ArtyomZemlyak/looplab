@@ -1,7 +1,7 @@
 import { uiText, useUILanguage } from './uiLanguage.js'
 import React, { useRef, useState } from 'react'
 import { useScopedResource } from './useScopedResource.js'
-import { useAssistantLanguage } from './useAssistantLanguage.js'
+import { useAssistantUILanguage } from './useAssistantLanguage.js'
 import { PANEL_REQUEST_TIMEOUT_MS } from './panelPrimitives.js'
 import LazyBoundary from './LazyBoundary.jsx'
 
@@ -11,7 +11,7 @@ export default function HarnessConnection({ runId, generation, seq }) {
   useUILanguage()
 
   const [wanted, setWanted] = useState(false)
-  const [language] = useAssistantLanguage()
+  const language = useAssistantUILanguage()
   const ru = language === 'ru'
   const scope = `${runId}:${generation}`
   const focusOrigin = useRef(null)
