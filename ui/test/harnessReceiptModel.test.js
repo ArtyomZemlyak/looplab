@@ -1,7 +1,9 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
+import { readFile } from 'node:fs/promises'
+import { webcrypto } from 'node:crypto'
 import { COMMAND_STATUSES, COMMAND_PENDING } from '../src/commandModel.js'
-import { RECEIPT_CONTROL_EVENTS, validReceipt } from '../src/harnessReceiptModel.js'
+import { RECEIPT_CONTROL_EVENTS, receiptCommandId, validReceipt } from '../src/harnessReceiptModel.js'
 
 const generation = 'a'.repeat(64)
 const receipt = { version: 1, generation, terminal: true,
@@ -17,6 +19,16 @@ test('saved receipts accept every control/status partition, null sequence and ex
       assert.equal(validReceipt({ ...value, terminal: !value.terminal }, generation), false)
     }
   }
+})
+
+test('original key identity matches server UTF-8 vectors without trimming or normalization', async () => {
+  const rows = JSON.parse(await readFile(new URL('../../tests/data/command_identity_vectors.json', import.meta.url), 'utf8'))
+  for (const row of rows) {
+    assert.equal(await receiptCommandId('key', row.key, webcrypto), row.command_id)
+  }
+  assert.equal(await receiptCommandId('id', receipt.command.id, null), receipt.command.id)
+  await assert.rejects(receiptCommandId('key', 'original-key', null), { code: 'receipt_key_unavailable' })
+  await assert.rejects(receiptCommandId('key', '\ud800', webcrypto), { code: 'receipt_key_unavailable' })
 })
 
 test('incomplete or inconsistent HTTP 200 receipts grant no saved verdict', () => {

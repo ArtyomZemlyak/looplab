@@ -5,10 +5,14 @@ import { get, runApiPath, COMMAND_ID_RE } from './util.js'
 import { useScopedResource } from './useScopedResource.js'
 import { PANEL_REQUEST_TIMEOUT_MS } from './panelPrimitives.js'
 
-import { validReceipt } from './harnessReceiptModel.js'
+import { receiptCommandId, validReceipt } from './harnessReceiptModel.js'
 export { validReceipt } from './harnessReceiptModel.js'
 
 export default function HarnessReceipt({ runId, generation }) {
+  return <ReceiptForm key={`${runId}:${generation}`} runId={runId} generation={generation} />
+}
+
+function ReceiptForm({ runId, generation }) {
   const [language] = useAssistantLanguage()
   const t = text => harnessText(language, text)
   const [kind, setKind] = useState('key')
@@ -16,12 +20,19 @@ export default function HarnessReceipt({ runId, generation }) {
   const [lookup, setLookup] = useState(null)
   const valid = kind === 'id' ? COMMAND_ID_RE.test(identity)
     : identity.length > 0 && identity.length <= 512 && !/[\x00-\x1f\x7f]/.test(identity)
-  const resource = useScopedResource(signal => get(runApiPath(runId, '/command-receipt')
-    + `?expected_generation=${generation}` + (lookup.kind === 'id' ? `&command_id=${lookup.value}` : ''), {
-    cache: 'no-store', signal, headers: lookup.kind === 'key' ? { 'Idempotency-Key': lookup.value } : {},
-  }), { scope: `${runId}:${generation}:${lookup?.kind}:${lookup?.value}`, gate: lookup ? null : 'idle',
+  const resource = useScopedResource(async signal => {
+    const commandId = await receiptCommandId(lookup.kind, lookup.value)
+    signal.throwIfAborted()
+    const value = await get(runApiPath(runId, '/command-receipt')
+      + `?expected_generation=${generation}` + (lookup.kind === 'id' ? `&command_id=${lookup.value}` : ''), {
+      cache: 'no-store', signal, headers: lookup.kind === 'key' ? { 'Idempotency-Key': lookup.value } : {},
+    })
+    if (!validReceipt(value, generation, commandId)) throw new Error('Invalid receipt')
+    return value
+  }, { scope: `${runId}:${generation}:${lookup?.kind}:${lookup?.value}`, gate: lookup ? null : 'idle',
     timeout: PANEL_REQUEST_TIMEOUT_MS,
-    validate: value => validReceipt(value, generation, lookup?.kind === 'id' ? lookup.value : '') ? '' : 'Invalid receipt' })
+    classifyFailure: ({ error }) => ({ status: 'error', data: null,
+      error: error?.code === 'receipt_key_unavailable' ? 'key_verification' : '' }) })
   const read = event => {
     event.preventDefault()
     if (!valid || resource.pending) return
@@ -50,7 +61,9 @@ export default function HarnessReceipt({ runId, generation }) {
     <p className="muted">{t('No original identity? Inspect Events for command_id. Do not invent a fresh key for an uncertain request.')}</p>
     {lookup && resource.pending && <p role="status">{t('Reading saved receipt…')}</p>}
     {lookup && ['error', 'stale'].includes(resource.status) && <p role="status">
-      {t('Receipt unavailable or changed. Read current state and evidence; absence does not prove no action occurred.')}</p>}
+      {t(resource.error === 'key_verification'
+        ? 'Key verification is unavailable in this browser. Read by the original Command ID from Events.'
+        : 'Receipt unavailable or changed. Read current state and evidence; absence does not prove no action occurred.')}</p>}
     {row && <div aria-label={t('Saved command receipt')}>
       <p><strong>{row.event_type} · {row.status}</strong> · {row.id}</p>
       <p>{resource.data.terminal ? t('Command receipt is terminal; this does not prove an experiment evaluated.')

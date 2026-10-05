@@ -1,0 +1,51 @@
+{
+  "baseline_commit": "f3f4076b06a7a84fc01640daf6be9dec010ca32a",
+  "scope": "UI original-key command identity and run/generation form isolation",
+  "red_reproduction": {
+    "command": "node --test --test-timeout=30000 test/harnessReceipt.test.js",
+    "passed": 0,
+    "failed": 2,
+    "reasons": ["different command ID answered original key", "original input crossed run change"]
+  },
+  "replay": {
+    "command": "python -m pytest -o addopts='' -q tests/test_events_replay.py --basetemp=.tmp/doc72-receipt-identity/replay",
+    "passed": 193
+  },
+  "ui": {
+    "command": "node --test --test-timeout=30000 --test-concurrency=4 test/*.test.js",
+    "passed": 1967,
+    "failed": 0,
+    "skipped": 0,
+    "targeted_19_tests": "subset of final full suite; late-hash scenario subsequently added and included in full suite"
+  },
+  "receipt_protocols": {
+    "command": "python -m pytest -o addopts='' -q tests/test_command_receipt.py tests/test_mcp_command_receipt_shape.py tests/test_command_status_vocabulary.py --basetemp=.tmp/doc72-receipt-identity/receipts",
+    "passed": 62
+  },
+  "docs": {
+    "command": "python -m pytest -o addopts='' -q tests/test_api_reference.py tests/test_documentation_contracts.py tests/test_doc_surface_budgets.py tests/test_architecture_diagram_geometry.py --basetemp=.tmp/doc72-receipt-identity/docs",
+    "passed": 28
+  },
+  "build": {
+    "command": "node node_modules/vite/bin/vite.js build --outDir ../.tmp/doc72-receipt-identity/ui-dist-final",
+    "exit_code": 0
+  },
+  "bundle_gate": {
+    "command": "node scripts/check-bundle.mjs --dist ../.tmp/doc72-receipt-identity/ui-dist-final",
+    "exit_code": 1,
+    "remaining_failure": "total JS gzip 647878 exceeds unchanged 633984 byte limit by 13894 bytes",
+    "other_guards": "size, reachability, static cycles and integer booleans passed"
+  },
+  "mkdocs": {
+    "command": "python -m mkdocs build --strict --site-dir .tmp/doc72-receipt-identity/site",
+    "exit_code": 0
+  },
+  "unique_tests": 2250,
+  "evidence": {
+    "live_ui": "React/Vite/jsdom drives key-header lookup, wrong-ID HTTP 200 refusal, explicit reads, missing crypto RU/EN guidance and working ID lookup. Run/generation changes clear form and prevent automatic GET; late HTTP or hash cannot republish/send old key.",
+    "identity": "Six synthetic vectors generated and pinned by Python server command_identity; JS executes real Web Crypto through the reused authoringTextRevision helper. Whitespace/Unicode unchanged; ASCII, composed/decomposed text and 512-char key. Unpaired surrogate and missing crypto refuse.",
+    "deadlines": "Hash and GET share the existing resource deadline; aborted hash is checked before GET.",
+    "browser": "No new production browser session; evidence is live React and normal production build.",
+    "bounds": "No provider call, training, command publication, worker restart, credentials, MCP connection or delivery from LoopLab worktree into a task repository. Unicode vectors do not expand HTTP header transport support. No draft/key persistence through whole-page reload."
+  }
+}

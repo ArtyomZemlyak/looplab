@@ -1302,10 +1302,14 @@ Saved recovery receipts require a valid generation, known command status/control
 matching terminal flag, integer/null sequence, bounded error code and strict retryable
 boolean. An incomplete HTTP 200 withdraws the old verdict and keeps the original input;
 another read remains explicit. These checks do not prove training or authorize recovery.
+Original key lookup also binds the returned command ID to the key's UTF-8 SHA-256
+identity. If secure hashing is unavailable, RU/EN guidance directs an explicit lookup
+by the original Command ID from Events; no unverified key request is sent. Changing
+run or generation clears the form and abandons the old read, without a new request.
 Assistant command suggestions use
 `AssistantBar.jsx::suggestionPop` and `.cmdbar-pop`, not the retired `.cmd-suggest` styles.
 Run `npm run check:bundle` after building: passing a route budget does not imply the
-total byte budget passed. Current measurements and remaining excess are in doc 72 §20.50.
+total byte budget passed. Current measurements and remaining excess are in doc 72 §20.51.
 
 Production HTML and non-versioned assets revalidate. Only content-hashed files listed by Vite's build manifest
 receive long-lived immutable caching. Eligible ordinary responses can use gzip when the client accepts it;

@@ -49,6 +49,7 @@ const russian = {
   'Original Idempotency-Key': 'Исходный Idempotency-Key',
   'Command ID': 'ID команды',
   'Read saved receipt': 'Прочитать сохранённую квитанцию',
+  'Key verification is unavailable in this browser. Read by the original Command ID from Events.': 'Проверка ключа недоступна в этом браузере. Найдите исходный Command ID в Events и прочитайте квитанцию по нему.',
   "One read only. No worker restart, command retry or resume. The key is sent in a header and kept only in this form's memory.": 'Только чтение: без перезапуска worker, повтора команды или возобновления запуска. Ключ передаётся в заголовке и хранится только в памяти этой формы.',
   'No original identity? Inspect Events for command_id. Do not invent a fresh key for an uncertain request.': 'Нет исходного ID или ключа? Найдите command_id в Events. Не создавайте новый ключ для запроса с неизвестным исходом.',
   'Reading saved receipt…': 'Читаем сохранённую квитанцию…',

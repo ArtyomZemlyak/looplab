@@ -4076,7 +4076,7 @@ merge этим проходом не проверены.
    DAG CSS и review DAG JS теперь проходят прежние пределы. Осталось
    превышение total JS: 13317 B после §20.42, 13380 B после §20.43,
    12884 B после §20.46, 13121 B после §20.47, 13324 B после §20.48,
-   13308 B после §20.49; 13734 B после §20.50;
+   13308 B после §20.49; 13734 B после §20.50; 13894 B после §20.51;
    потолки не повышены. Нужны дальнейшее
    уменьшение исходного кода/повторов и полный CI. Один lazy import не снижает
    сумму всех assets; нельзя выдавать route budget за зелёный общий gate.
@@ -6727,3 +6727,64 @@ integer-boolean guards проходят, потолки не менялись.
 не было. Это исправление достоверности чтения формы. Общие OPEN §19.17 —
 полная пользовательская приёмка recovery/onboarding, effective manifest,
 lifecycle/retention и target-relative delivery — сохраняются.
+
+### 20.51. Восстановление привязано к исходному ключу и контексту — 2026-10-05
+
+**Ревью и воспроизведение.** Исходный commit —
+`f3f4076b06a7a84fc01640daf6be9dec010ca32a`. §20.50 оставил браузерный поиск по
+original key зависимым от server identity check. Если HTTP 200 содержал корректно
+оформленную квитанцию другой команды, UI принимал её: ID проверялся только в
+режиме поиска по ID. Также сам `HarnessReceipt` не сбрасывал hooks при смене
+run/generation: старые input/lookup могли перейти в новый контекст и вызвать
+неявный GET. Нормальный handoff уже передавал scope key; новый guard защищает
+саму форму независимо от caller. Два live React теста до правки red — чужой
+receipt ID показывался, исходный ключ сохранялся после смены run.
+
+**Исправлено.** Перед key lookup браузер получает ожидаемый `cmd_` ID: первые
+128 бит SHA-256 от исходных UTF-8 bytes, как `serve/command_identity.py`.
+Пробелы и Unicode не нормализуются; повторно используется существующий bounded
+UTF-8 hash helper `authoringTextRevision`. Ответ должен соответствовать этому ID
+и generation вместе со всеми field guards §20.50. Hash и GET входят в один
+resource deadline. После hash проверяется AbortSignal: поздний hash не отправляет
+ключ уже отменённого чтения.
+
+Без доступного secure hash браузер не делает key GET и показывает RU/EN путь:
+найти исходный Command ID в Events и явно прочитать по нему. Key остаётся в форме
+до выбора режима; автоматического fallback, свежего ключа, worker restart,
+retry/resume нет. Поиск по ID доступен без Web Crypto. Ошибка чтения снимает старый
+verdict. Terminal/admission/training и engine waits не изменены.
+
+Внутренняя форма имеет run/generation identity: при смене контекста old read
+отменяется, input, lookup и режим сбрасываются. Поздний HTTP response не показывает
+старую квитанцию и не создаёт новый GET. Смена языка в том же контексте сохраняет
+input и меняет подсказку без чтения. Сохранение ключа через полный reload не добавлено.
+
+**Проверено.** Replay-first — 193 passed. Полный UI suite — 1967 passed,
+без fail/skip/cancel. Live tests проверяют чужой ID в HTTP 200, one-shot GET без
+key в URL/storage, explicit recovery, отсутствие Web Crypto с RU/EN и рабочим
+ID lookup, смену run/generation при позднем HTTP и hash. Последний сценарий
+подтверждает ноль GET после отменённого hash. Существующие language/focus/render
+failure и saved receipt shape сценарии входят в полный набор.
+
+Общий synthetic fixture `tests/data/command_identity_vectors.json`
+не содержит реальных ключей. Он покрывает ASCII, неизменённые пробелы, Unicode,
+composed/decomposed text и 512-character key. Python проверяет значения через
+реальный server `command_identity`, JS — через real Web Crypto и production
+helper; unpaired surrogate и missing crypto отвергаются. Server snapshot/MCP
+shape/vocabulary набор — 62 passed. Документальные проверки — 28 passed;
+production build, strict MkDocs и diff-check проходят.
+Всего **2250 уникальных тестов**: 193 replay + 1967 UI + 62 receipts + 28 docs.
+
+**Размеры и границы.** JS gzip 647718 → 647878 B (+160 B), raw JS +861 B;
+CSS прежние 59635 B. Compact panel closure 121429 → 121425 B; full body остаётся
+dynamic и отсутствует в compact static closure. Total JS превышает прежний
+предел 633984 B на **13894 B**; только этот bundle gate red. Остальные size/
+reachability/cycle/integer-boolean guards проходят, ceilings не менялись.
+[bundles.json](assets/72-receipt-identity/bundles.json) и
+[validation.json](assets/72-receipt-identity/validation.json) фиксируют проверки.
+
+Новой production browser сессии, MCP connection, provider call, обучения или
+команд не было. Unicode vectors проверяют алгоритм; они не расширяют допустимые
+HTTP header characters. OPEN §19.17 сохраняются для полной приёмки onboarding/
+recovery, effective manifest, lifecycle/retention и доставки **worktree LoopLab**
+в пользовательский task repo. Merge кода этого исправления не доказывает такую доставку.

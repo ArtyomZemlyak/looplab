@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import pathlib
 import re
+import json
 
 import pytest
 
@@ -55,6 +56,15 @@ def test_saved_receipt_browser_control_events_match_server():
                       path.read_text(encoding="utf-8"))
     assert match, "saved receipt event allowlist is missing"
     assert set(re.findall(r"'([^']+)'", match.group(1))) == set(CONTROL_EVENTS)
+
+
+def test_browser_command_identity_vectors_match_server_derivation():
+    """Browser recovery hashes the original UTF-8 key, preserving spaces and Unicode."""
+    from looplab.serve.command_identity import command_identity
+
+    path = pathlib.Path(__file__).with_name("data") / "command_identity_vectors.json"
+    for row in json.loads(path.read_text(encoding="utf-8")):
+        assert command_identity(row["key"])[0] == row["command_id"]
 
 
 def test_run_commands_derives_rather_than_spelling_its_own():
