@@ -1,6 +1,6 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { readFile } from 'node:fs/promises'
+import { readSource as readFile } from './_source.js'
 
 import {
   GLOBAL_DESTINATIONS, INSTALLATION_ROUTE_PANEL, INSTALLATION_SCOPED_RUN_PANELS,
@@ -98,7 +98,7 @@ test('a public review link never advertises installation surfaces', async () => 
   // one call site that knows `reviewMode`. `brandMenu.test.js` proves that arm renders no button,
   // no `aria-haspopup` and no destination — the properties that make it safe on a route which
   // bypasses OwnerAuth.
-  assert.ok(runView.includes('{reviewMode ? <BrandMark /> : <GlobalMenu />}'),
+  assert.ok(runView.includes('{reviewMode ? <><BrandMark /><LanguageControl /></> : <GlobalMenu />}'),
     'the review route bypasses OwnerAuth, so it must not render the owner LoopLab menu')
   assert.ok(!runView.includes('reviewMode && <GlobalMenu'),
     'the owner menu must never be reachable from the review arm')

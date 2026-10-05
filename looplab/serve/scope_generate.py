@@ -790,9 +790,12 @@ async def durable_generate_scope_report(
                            max_turns=(getattr(s, "agent_max_turns", 0)
                                       or DEFAULT_SCOPE_REPORT_TURNS),
                            time_budget_s=(getattr(s, "agent_time_budget_s", 0.0)
-                                          or DEFAULT_SCOPE_REPORT_TIME_S))
+                                          or DEFAULT_SCOPE_REPORT_TIME_S),
+                           **({"output_language": s.output_language}
+                              if s.output_language != "auto" else {}))
         except Exception:  # noqa: BLE001 - offline -> deterministic rollup still persists
-            content = _gen(scope, briefs, None)
+            content = _gen(scope, briefs, None, **({"output_language": s.output_language}
+                                                  if s.output_language != "auto" else {}))
         finally:
             # A tool loop that failed HALFWAY still spent every call it made before raising, so
             # the observation belongs in the `finally`, not the success path.

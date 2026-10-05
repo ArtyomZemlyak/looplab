@@ -1,3 +1,4 @@
+import { uiText, useUILanguage } from './uiLanguage.js'
 import React from 'react'
 import { BrandMark } from './GlobalMenu.jsx'
 
@@ -21,6 +22,8 @@ import { BrandMark } from './GlobalMenu.jsx'
 export default function RunScreen({
   reviewMode = false, reviewPill = false, onBack, onLeave, head = null, toast = null, children,
 }) {
+  useUILanguage()
+
   return <div className={'app' + (reviewMode ? ' review-mode' : '')}>
     <div className="topbar run-head">
       {/* The INERT mark, not the menu trigger, and that is a reachability statement like the two
@@ -30,11 +33,11 @@ export default function RunScreen({
           The mark comes from GlobalMenu.jsx so the workspace header and these six screens keep
           rendering the same LoopLab mark rather than two copies that drift. */}
       <BrandMark />
-      {onBack ? <button className="btn sm ghost" onClick={onLeave}>← runs</button>
-        : reviewPill ? <span className="pill">read-only review</span> : null}
+      {onBack ? <button className="btn sm ghost" onClick={onLeave}>{uiText("← runs")}</button>
+        : reviewPill ? <span className="pill">{uiText("read-only review")}</span> : null}
       {head}
     </div>
     {children}
-    {toast && <div className="toast" role="status" aria-live="polite" aria-atomic="true">{toast}</div>}
+    {toast && <div className="toast" role="status" aria-live="polite" aria-atomic="true">{uiText(toast)}</div>}
   </div>
 }

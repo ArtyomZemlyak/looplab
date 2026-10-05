@@ -1,6 +1,6 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { readFile } from 'node:fs/promises'
+import { readSource as readFile } from './_source.js'
 
 // ConfigPanel.jsx and CardBoard.jsx split out of panels.jsx (doc 25 UI-04). They are listed by name
 // because this contract is per-module: dropping them would silently stop covering the tables and the

@@ -1,3 +1,4 @@
+import { uiText, uiMessage, useUILanguage } from './uiLanguage.js'
 import React, { useEffect, useMemo, useRef, useState } from 'react'
 import BaseRevision from './BaseRevision.jsx'
 import UpstreamPanel from './UpstreamPanel.jsx'
@@ -71,24 +72,26 @@ export const reportRefreshFailure = (failure, thrown = false) => {
 
 // The authority banner is deterministic. Provider prose is rendered only in AgentNarrative below.
 function VerdictBanner({ v, onOpenPanel, canOpenPanel }) {
+  useUILanguage()
+
   const cls = TRUST_CLASS[v.trust] || 'warn'
   const canOpen = panel => !!onOpenPanel && canOpenPanel?.(panel) !== false
   return (
     <section className={'verdict-banner ' + cls} aria-labelledby="report-verdict-heading">
       <div className="verdict-row">
-        <span className={'verdict-pill ' + (v.outcome === 'improved' ? 'ok' : v.outcome === 'regressed' ? 'fail' : '')}>{OUTCOME_LABEL[v.outcome] || v.outcome}</span>
-        {v.robustness && v.robustness !== 'n/a' && <span className="pill">{v.robustness}</span>}
-        <span className="pill verdict-trust-label">{TRUST_LABEL[v.trust] || v.trust}</span>
+        <span className={'verdict-pill ' + (v.outcome === 'improved' ? 'ok' : v.outcome === 'regressed' ? 'fail' : '')}>{uiText(OUTCOME_LABEL[v.outcome] || v.outcome)}</span>
+        {v.robustness && v.robustness !== 'n/a' && <span className="pill">{uiText(v.robustness)}</span>}
+        <span className="pill verdict-trust-label">{uiText(TRUST_LABEL[v.trust] || v.trust)}</span>
       </div>
-      <h2 id="report-verdict-heading" className="verdict-headline">{v.headline}</h2>
-      <p className="report-next-step"><strong>Next step</strong> {v.nextStep}</p>
+      <h2 id="report-verdict-heading" className="verdict-headline">{uiText(v.headline)}</h2>
+      <p className="report-next-step"><strong>{uiText("Next step")}</strong> {uiText(v.nextStep)}</p>
       {v.caveats.length > 0 && <div className="caveat-chips">
         {v.caveats.map((c, i) => {
           const openable = canOpen(c.panel)
           return <button key={i} className={'caveat-chip ' + c.severity}
-            disabled={!openable} title={openable ? `see ${c.panel} →` : 'Unavailable in this read-only view'}
+            disabled={!openable} title={((openable ? uiMessage("see {0} →", [c.panel]) : uiText('Unavailable in this read-only view')))}
             onClick={event => { if (canOpen(c.panel)) onOpenPanel(c.panel, event.currentTarget) }}>
-            <OpIcon name="alert" size={11} /> {c.text}
+            <OpIcon name="alert" size={11} /> {uiText(c.text)}
           </button>
         })}
       </div>}
@@ -97,6 +100,8 @@ function VerdictBanner({ v, onOpenPanel, canOpenPanel }) {
 }
 
 function AgentNarrative({ rep, coverage, generation, snapshotSeq }) {
+  useUILanguage()
+
   if (!rep) return null
   const publishedIso = rep.published_at == null ? null : new Date(rep.published_at * 1000).toISOString()
   const warning = coverage.status === 'stale'
@@ -113,35 +118,37 @@ function AgentNarrative({ rep, coverage, generation, snapshotSeq }) {
   return <section className={`agent-report ${coverage.status}`} role="note"
     aria-labelledby="agent-report-heading">
     <div className="agent-report-head">
-      <h2 id="agent-report-heading" tabIndex={-1}>Agent narrative</h2>
-      <span className="pill">advisory · not deterministic</span>
+      <h2 id="agent-report-heading" tabIndex={-1}>{uiText("Agent narrative")}</h2>
+      <span className="pill">{uiText("advisory · not deterministic")}</span>
     </div>
-    <div className="report-provenance" aria-label="Agent narrative publication provenance">
-      <span className={`report-coverage ${coverage.status}`}>{reportCoverageText(coverage)}</span>
-      {rep.published_seq != null && <span>published event <b>#{rep.published_seq}</b></span>}
-      {publishedIso && <span>at <time dateTime={publishedIso}>{new Date(rep.published_at * 1000).toLocaleString()}</time></span>}
-      {rep.trigger && <span>trigger <b>{rep.trigger}</b></span>}
-      {Number.isSafeInteger(snapshotSeq) && snapshotSeq >= 0 && <span>view snapshot <b>#{snapshotSeq}</b></span>}
-      {/^[0-9a-f]{64}$/.test(generation || '') && <span>generation <code title={generation}>{generation.slice(0, 12)}…</code></span>}
+    <div className="report-provenance" aria-label={uiText("Agent narrative publication provenance")}>
+      <span className={`report-coverage ${coverage.status}`}>{uiText(reportCoverageText(coverage))}</span>
+      {rep.published_seq != null && <span>{uiText("published event ")}<b>#{rep.published_seq}</b></span>}
+      {publishedIso && <span>{uiText("at ")}<time dateTime={publishedIso}>{new Date(rep.published_at * 1000).toLocaleString()}</time></span>}
+      {rep.trigger && <span>{uiText("trigger ")}<b>{rep.trigger}</b></span>}
+      {Number.isSafeInteger(snapshotSeq) && snapshotSeq >= 0 && <span>{uiText("view snapshot ")}<b>#{snapshotSeq}</b></span>}
+      {/^[0-9a-f]{64}$/.test(generation || '') && <span>{uiText("generation ")}<code title={generation}>{generation.slice(0, 12)}…</code></span>}
     </div>
-    {warning && <div className="report-coverage-warning" role="status"><OpIcon name="alert" size={13} /> {warning}</div>}
+    {warning && <div className="report-coverage-warning" role="status"><OpIcon name="alert" size={13} /> {uiText(warning)}</div>}
     {rep.headline && <h3 className="agent-report-headline">{rep.headline}</h3>}
     {(rep.verdict || rep.summary) && <div className="agent-report-text"><Markdown text={rep.verdict || rep.summary} /></div>}
     {rep.caveats.length > 0 && <div className="agent-report-caveats">
       <div className="agent-report-caveats-title"><OpIcon name="alert" size={12} />
-        <strong>Agent caveats</strong><span className="muted">advisory narrative</span></div>
+        <strong>{uiText("Agent caveats")}</strong><span className="muted">{uiText("advisory narrative")}</span></div>
       <List items={rep.caveats} />
     </div>}
     {rep.champion_summary && <div className="agent-report-group">
-      <h3>Champion note at publication</h3><Markdown text={rep.champion_summary} />
+      <h3>{uiText("Champion note at publication")}</h3><Markdown text={rep.champion_summary} />
     </div>}
     {groups.map(([label, items]) => items?.length > 0 && <div className="agent-report-group" key={label}>
-      <h3>{label}</h3><List items={items} />
+      <h3>{uiText(label)}</h3><List items={items} />
     </div>)}
   </section>
 }
 
 function ChampionCard({ best, state }) {
+  useUILanguage()
+
   if (!best) return null
   const m = best.confirmed_mean ?? best.metric
   const direction = nodeTheme(best, state)
@@ -164,31 +171,32 @@ function ChampionCard({ best, state }) {
   return (
     <div className="champion-card">
       <div className="kv">
-        <div className="k">selected</div><div className="v">#{best.id} · {best.operator}
-          {direction ? ` · primary concept axis ${direction}` : ''}</div>
-        <div className="k">{measurement.label}</div><div className="v"><b>{fmt(m)}</b>{best.confirmed_mean != null
-          ? <span className="muted">{Number.isFinite(best.confirmed_std) && best.confirmed_std >= 0
-            ? ` ±${fmt(best.confirmed_std)}` : ' · spread not recorded'}</span>
+        <div className="k">{uiText("selected")}</div><div className="v">#{best.id} · {best.operator}
+          {(direction ? uiMessage(" · primary concept axis {0}", [direction]) : '')}</div>
+        <div className="k">{uiText(measurement.label)}</div><div className="v"><b>{fmt(m)}</b>{best.confirmed_mean != null
+          ? <span className="muted">{((Number.isFinite(best.confirmed_std) && best.confirmed_std >= 0 ? ` ±${fmt(best.confirmed_std)}` : uiText(' · spread not recorded')))}</span>
           : null}
           {objectiveCaveated && <span className="warn" title={objectiveSourceHelp(objective)}>
             {' · '}{OBJECTIVE_SOURCE_LABEL[objective.channel]}</span>}</div>
-        {best.confirmed_mean != null && <><div className="k">evaluation score</div><div className="v">{fmt(best.metric)}</div></>}
-        <div className="k">repeat evidence</div><div className="v">{measurement.reliability}</div>
-        <div className="k">params</div><div className="v">{params.length
+        {best.confirmed_mean != null && <><div className="k">{uiText("evaluation score")}</div><div className="v">{fmt(best.metric)}</div></>}
+        <div className="k">{uiText("repeat evidence")}</div><div className="v">{uiText(measurement.reliability)}</div>
+        <div className="k">{uiText("params")}</div><div className="v">{params.length
           ? <details className="champion-params">
-              <summary>{params.length} parameters · <span className="champion-params-show">show values</span><span className="champion-params-hide">hide values</span></summary>
+              <summary>{params.length}{uiText(" parameters · ")}<span className="champion-params-show">{uiText("show values")}</span><span className="champion-params-hide">{uiText("hide values")}</span></summary>
               <dl className="champion-params-list">{params.map(([key, value]) => <React.Fragment key={key}>
                 <dt>{key}</dt><dd>{fmt(value)}</dd>
               </React.Fragment>)}</dl>
             </details> : '—'}</div>
-        {(best.parent_ids || []).length > 0 && <><div className="k">lineage</div><div className="v">{best.parent_ids.map(p => '#' + p).join(' → ')}</div></>}
-        <div className="k">feasible</div><div className="v">{best.feasible === true ? 'yes' : best.feasible === false ? 'no — constraint violated' : 'unknown — not established'}</div>
+        {(best.parent_ids || []).length > 0 && <><div className="k">{uiText("lineage")}</div><div className="v">{best.parent_ids.map(p => '#' + p).join(' → ')}</div></>}
+        <div className="k">{uiText("feasible")}</div><div className="v">{((best.feasible === true ? uiText('yes') : (best.feasible === false ? uiText('no — constraint violated') : uiText('unknown — not established'))))}</div>
       </div>
     </div>
   )
 }
 
 function List({ items }) {
+  useUILanguage()
+
   if (!items || !items.length) return null
   return <ul className="bul">{items.map((x, i) => <li key={i}>{x}</li>)}</ul>
 }
@@ -197,9 +205,11 @@ export default function ReportView({ state, runId, onOpenPanel, canOpenPanel, on
   onPickNode, onPickEvidence, readOnly = false,
   historySeq = null, expectedGeneration = null, observedSeq = null,
   readOnlyReason = 'history', evidenceAvailable = true }) {
+  const [, , localeRevision] = useUILanguage()
+
   const failed = Object.values(state.nodes).filter(n => nodeIsActive(n, state) && n.status === 'failed')
   const a = useMemo(() => analyze(state), [state])
-  const v = useMemo(() => verdict(state, a), [state, a])
+  const v = useMemo(() => verdict(state, a), [state, a, localeRevision])
   const best = v.best
   const rep = useMemo(() => normalizeRunReport(state.report), [state.report])
   const nodeCount = Object.keys(state.nodes).length
@@ -513,87 +523,78 @@ export default function ReportView({ state, runId, onOpenPanel, canOpenPanel, on
   return (
     <div className="report-view" aria-busy={refreshing || undefined}>
       <h2 id="report-section-summary" tabIndex={-1} className="report-title">{state.label || state.run_id || state.task_id}</h2>
-      <div className="report-sub muted">{state.label && state.label !== state.run_id ? `${state.run_id} · ` : ''}{state.direction} · {state.phase || (state.finished ? 'finished' : 'running')}{state.stop_reason ? ` (${state.stop_reason})` : ''}
-        {' · '}{nodeCount} nodes ({a.nEval} evaluated, {failed.length} failed)
-        {state.llm_cost && ` · ${fmtInt(state.llm_cost.total_tokens)} tokens · ${fmtCost(state.llm_cost)}`}</div>
+      <div className="report-sub muted">{state.label && state.label !== state.run_id ? `${state.run_id} · ` : ''}{state.direction} · {((state.phase || (state.finished ? uiText('finished') : uiText('running'))))}{state.stop_reason ? ` (${state.stop_reason})` : ''}
+        {' · '}{nodeCount}{uiText(" nodes (")}{a.nEval}{uiText(" evaluated, ")}{failed.length}{uiText(" failed)")}{(state.llm_cost && uiMessage(" · {0} tokens · {1}", [fmtInt(state.llm_cost.total_tokens), fmtCost(state.llm_cost)]))}</div>
 
       <VerdictBanner v={v} onOpenPanel={onOpenPanel} canOpenPanel={canOpenPanel} />
 
-      <div className="toolbar report-toolbar" role="group" aria-label="Report actions">
-        {readOnly && <span className="history-inline">{readOnlyReason === 'review'
-          ? 'Read-only review · report refresh disabled'
-          : readOnlyReason === 'start-over'
-            ? 'Start over unresolved · report refresh disabled'
-            : `${readOnlyLabel(readOnlyReason, historySeq)} · report refresh disabled`}</span>}
+      <div className="toolbar report-toolbar" role="group" aria-label={uiText("Report actions")}>
+        {readOnly && <span className="history-inline">{((readOnlyReason === 'review' ? uiText('Read-only review · report refresh disabled') : (readOnlyReason === 'start-over' ? uiText('Start over unresolved · report refresh disabled') : uiMessage("{0} · report refresh disabled", [readOnlyLabel(readOnlyReason, historySeq)]))))}</span>}
         <span className="spacer" style={{ flex: 1 }} />
-        <button className="btn sm" onClick={() => window.print()}><OpIcon name="printer" size={12} /> Print / PDF</button>
-        <button className="btn sm" onClick={() => dl(`${state.run_id}_report.md`, toMarkdown({ ...state, report: rep }, best, exportContext), 'text/markdown')}><OpIcon name="download" size={12} /> Markdown</button>
-        {best && evidenceAvailable && <button className="btn sm" disabled={!bestCode?.code} onClick={() => dl(`solution_node${best.id}.py`, bestCode.code, 'text/x-python')}><OpIcon name="download" size={12} /> Solution</button>}
-        <button className="btn sm" onClick={() => dl(`${state.run_id}_model_card.json`, modelCard(), 'application/json')}><OpIcon name="download" size={12} /> Model card</button>
-        <nav className="report-sections" aria-label="Report sections">
-          <span className="report-sections-label">Jump to</span>
+        <button className="btn sm" onClick={() => window.print()}><OpIcon name="printer" size={12} />{uiText(" Print / PDF")}</button>
+        <button className="btn sm" onClick={() => dl(`${state.run_id}_report.md`, toMarkdown({ ...state, report: rep }, best, exportContext), 'text/markdown')}><OpIcon name="download" size={12} />{uiText(" Markdown")}</button>
+        {best && evidenceAvailable && <button className="btn sm" disabled={!bestCode?.code} onClick={() => dl(`solution_node${best.id}.py`, bestCode.code, 'text/x-python')}><OpIcon name="download" size={12} />{uiText(" Solution")}</button>}
+        <button className="btn sm" onClick={() => dl(`${state.run_id}_model_card.json`, modelCard(), 'application/json')}><OpIcon name="download" size={12} />{uiText(" Model card")}</button>
+        <nav className="report-sections" aria-label={uiText("Report sections")}>
+          <span className="report-sections-label">{uiText("Jump to")}</span>
           {reportSections.map(([id, label]) => <button type="button" key={id}
-            onClick={() => jumpToSection(id)}>{label}</button>)}
+            onClick={() => jumpToSection(id)}>{uiText(label)}</button>)}
         </nav>
         {!readOnly && <button className="btn sm"
           disabled={refreshing || !refreshRetryAllowed || !refreshGenerationReady || !refreshStorageReady}
           onClick={refresh}
           aria-describedby="paid-report-refresh-status"
-          title={refreshDisabledReason || refreshStatus}><OpIcon name="replay" size={12} /> {refreshButtonLabel}</button>}
+          title={refreshDisabledReason || refreshStatus}><OpIcon name="replay" size={12} /> {uiText(refreshButtonLabel)}</button>}
       </div>
       {!readOnly && <div id="paid-report-refresh-status" className="report-inline-state paid"
         role="status" aria-live="polite" aria-atomic="true">
         <OpIcon name={savedRefreshIntent || refreshing ? 'replay' : 'bolt'} size={14} />
-        <span>{refreshStatus}</span>
+        <span>{uiText(refreshStatus)}</span>
       </div>}
       {refreshError && <div className="report-inline-state error" role="alert">
         <OpIcon name="alert" size={14} /><span>{refreshError}</span>
         {!readOnly && refreshRetryAllowed && refreshGenerationReady
-          && <button className="btn sm" onClick={refresh}>{savedRefreshIntent
-            ? 'Resume paid request' : 'Retry paid refresh'}</button>}
+          && <button className="btn sm" onClick={refresh}>{((savedRefreshIntent ? uiText('Resume paid request') : uiText('Retry paid refresh')))}</button>}
       </div>}
 
       {!best && <div className="report-empty-state" role="status">
-        <h2>{a.nEval ? 'No feasible champion yet' : 'No champion yet'}</h2>
-        <p>{a.nEval
-          ? 'Evaluations exist, but none currently qualifies for winner selection. Review constraints and failed checks.'
-          : 'The report will add a champion, trajectory, and reproducible solution after the first successful evaluation.'}</p>
+        <h2>{((a.nEval ? uiText('No feasible champion yet') : uiText('No champion yet')))}</h2>
+        <p>{((a.nEval ? uiText('Evaluations exist, but none currently qualifies for winner selection. Review constraints and failed checks.') : uiText('The report will add a champion, trajectory, and reproducible solution after the first successful evaluation.')))}</p>
       </div>}
 
-      {best && <><h2 id="report-section-champion" tabIndex={-1} className="section-h">Selected experiment</h2>
+      {best && <><h2 id="report-section-champion" tabIndex={-1} className="section-h">{uiText("Selected experiment")}</h2>
         <ChampionCard best={best} state={state} /><BaseRevision node={best} state={state} /></>}
       <UpstreamPanel state={state} />
 
       {a.steps.length > 0 && <>
-        <h2 id="report-section-trajectory" tabIndex={-1} className="section-h">{a.steps.length > 1 ? 'Recorded metric trajectory' : 'First eligible metric'}</h2>
-        <p className="muted">This numeric frontier may combine evaluation scores and confirmation means.
-          Its changes do not establish a comparable improvement. Use the selected-result verdict above.</p>
+        <h2 id="report-section-trajectory" tabIndex={-1} className="section-h">{((a.steps.length > 1 ? uiText('Recorded metric trajectory') : uiText('First eligible metric')))}</h2>
+        <p className="muted">{uiText("This numeric frontier may combine evaluation scores and confirmation means. Its changes do not establish a comparable improvement. Use the selected-result verdict above.")}</p>
         <Trajectory nodes={Object.values(state.nodes)} direction={state.direction} state={state}
           steps={a.steps} onPick={onPickNode} />
         <ImprovementWaterfall steps={a.steps} direction={state.direction} />
-        <DataTable caption="Metric trajectory steps" card={false}><table className="tbl report-steps-table"><thead><tr><th>#</th><th>node</th><th>operator</th><th>recorded value</th><th>measurement</th><th>numeric change</th><th>base</th><th>what changed</th></tr></thead><tbody>
+        <DataTable caption={uiText("Metric trajectory steps")} card={false}><table className="tbl report-steps-table"><thead><tr><th>#</th><th>{uiText("node")}</th><th>{uiText("operator")}</th><th>{uiText("recorded value")}</th><th>{uiText("measurement")}</th><th>{uiText("numeric change")}</th><th>{uiText("base")}</th><th>{uiText("what changed")}</th></tr></thead><tbody>
           {a.steps.map((s, i) => <tr key={s.id}>
             <td>{i + 1}</td><td>#{s.id}</td><td><span className="report-step-kind" aria-hidden="true">
-              {s.operator || 'unknown operator'}
+              {((s.operator || uiText('unknown operator')))}
               {s.theme && s.theme !== s.operator && <span className="pill report-step-theme">{s.theme}</span>}
             </span><span className="sr-only">{reportStepIdentity(s.operator, s.theme)}</span></td>
             <td>{fmt(s.to)}</td>
-            <td>{s.measurement}</td>
-            <td className="report-delta">{s.delta == null ? 'first eligible' : fmt(s.delta)}</td>
+            <td>{uiText(s.measurement)}</td>
+            <td className="report-delta">{((s.delta == null ? uiText('first eligible') : fmt(s.delta)))}</td>
             <td><BaseRevision node={state.nodes[s.id]} state={state} compact /></td>
             <td className="muted">{s.diff.length > 2
-              ? <details className="report-step-changes"><summary>{s.diff.length} parameter changes</summary>
-                  <span>{paramDiffLabel(s.diff)}</span></details>
-              : paramDiffLabel(s.diff)}</td></tr>)}
+              ? <details className="report-step-changes"><summary>{s.diff.length}{uiText(" parameter changes")}</summary>
+                  <span>{uiText(paramDiffLabel(s.diff))}</span></details>
+              : uiText(paramDiffLabel(s.diff))}</td></tr>)}
         </tbody></table></DataTable>
-        {a.steps.length > 1 && <div className="muted">Recorded frontier change <b>{fmt(a.totalGain)}</b> over {a.steps.length} steps (first eligible {fmt(a.firstBest)} → numeric frontier {fmt(a.finalBest)}).</div>}
+        {a.steps.length > 1 && <div className="muted">{uiText("Recorded frontier change ")}<b>{fmt(a.totalGain)}</b>{uiText(" over ")}{a.steps.length}{uiText(" steps (first eligible ")}{fmt(a.firstBest)}{uiText(" → numeric frontier ")}{fmt(a.finalBest)}).</div>}
       </>}
 
       {(memos.length || imp.length) ? <>
-        <h2 id="report-section-learnings" tabIndex={-1} className="section-h">What we learned</h2>
+        <h2 id="report-section-learnings" tabIndex={-1} className="section-h">{uiText("What we learned")}</h2>
         {imp.length > 0 && <>
-          <div className="muted" style={{ marginTop: 6 }}>Exploratory correlation with the metric. Small n is fragile; correlation does not establish cause.</div>
-          <DataTable caption="Report hyperparameter correlations" card={false}><table className="tbl"><thead><tr><th>param</th><th>|r|</th><th>r</th><th>n</th></tr></thead><tbody>
+          <div className="muted" style={{ marginTop: 6 }}>{uiText("Exploratory correlation with the metric. Small n is fragile; correlation does not establish cause.")}</div>
+          <DataTable caption={uiText("Report hyperparameter correlations")} card={false}><table className="tbl"><thead><tr><th>{uiText("param")}</th><th>|r|</th><th>r</th><th>n</th></tr></thead><tbody>
             {/* `row.r >= 0` is TRUE for null, so an unmeasurable correlation used to sign its own
                 absence as "+—". A param no node varied has nothing to report here. */}
             {imp.map(row => <tr key={row.k}><td>{row.k}</td><td>{fmt(row.imp, 3)}</td>
@@ -601,9 +602,7 @@ export default function ReportView({ state, runId, onOpenPanel, canOpenPanel, on
               <td className="muted">{row.n}</td></tr>)}
           </tbody></table></DataTable></>}
         {memos.length > 0 && <div style={{ marginTop: 8 }}>
-          {memoProjection.omitted > 0 && <div className="muted">
-            Showing the latest {memos.length} of {memoProjection.total} research memos; older, malformed, or over-budget entries are omitted.
-          </div>}
+          {memoProjection.omitted > 0 && <div className="muted">{uiText("Showing the latest ")}{memos.length}{uiText(" of ")}{memoProjection.total}{uiText(" research memos; older, malformed, or over-budget entries are omitted.")}</div>}
           {memos.map((m, index) => <MemoCard key={m.sourceIndex} memo={m} idx={m.sourceIndex}
             latest={index === 0} onSelectNode={onPickNode} onSelectEvidence={onPickEvidence} normalized
             open={openMemo === m.sourceIndex} onToggle={(key) => setOpenMemo(current => current === key ? null : key)} />)}
@@ -611,42 +610,39 @@ export default function ReportView({ state, runId, onOpenPanel, canOpenPanel, on
       </> : null}
 
       {a.nEval > 0 && <>
-        <h2 id="report-section-comparisons" tabIndex={-1} className="section-h">Parent comparison coverage</h2>
-        <p className="muted">Only evaluation scores under matching recorded conditions count as better.
-          Not compared includes first experiments and missing evidence; it does not mean failure.</p>
-        <DataTable caption="Parent comparison coverage" card={false}><table className="tbl"><thead><tr>
-          <th>Operator</th><th>Evaluated</th><th>Compared with parent</th><th>Better score</th>
-          <th>Not compared</th><th>Numeric frontier</th></tr></thead><tbody>
+        <h2 id="report-section-comparisons" tabIndex={-1} className="section-h">{uiText("Parent comparison coverage")}</h2>
+        <p className="muted">{uiText("Only evaluation scores under matching recorded conditions count as better. Not compared includes first experiments and missing evidence; it does not mean failure.")}</p>
+        <DataTable caption={uiText("Parent comparison coverage")} card={false}><table className="tbl"><thead><tr>
+          <th>{uiText("Operator")}</th><th>{uiText("Evaluated")}</th><th>{uiText("Compared with parent")}</th><th>{uiText("Better score")}</th>
+          <th>{uiText("Not compared")}</th><th>{uiText("Numeric frontier")}</th></tr></thead><tbody>
           {a.operators.map(row => <tr key={row.key}><td>{row.key}</td><td>{row.evaluated}</td>
             <td>{row.compared}</td><td>{row.improved}</td><td>{row.uncompared}</td>
             <td>{fmt(row.best)}{row.best != null && <span className="muted">
-              {' · '}{resultMeasurement(row.bestConfirmed).label}</span>}</td></tr>)}
+              {' · '}{uiText(resultMeasurement(row.bestConfirmed).label)}</span>}</td></tr>)}
         </tbody></table></DataTable>
       </>}
 
-      <h2 id="report-section-failures" tabIndex={-1} className="section-h">Recorded failures</h2>
+      <h2 id="report-section-failures" tabIndex={-1} className="section-h">{uiText("Recorded failures")}</h2>
       <div className="cardgrid" style={{ marginBottom: 10 }}>
-        {Object.entries(a.failures).map(([r, ns]) => <div key={r} className="stat"><div className="n">{ns.length}</div><div className="l">failed · {r}</div></div>)}
-        {a.regressions.length > 0 && <div className="stat"><div className="n">{a.regressions.length}</div><div className="l">worse evaluation scores</div></div>}
-        {a.infeasible.length > 0 && <div className="stat"><div className="n">{a.infeasible.length}</div><div className="l">infeasible</div></div>}
-        {!Object.keys(a.failures).length && !a.regressions.length && !a.infeasible.length && <div className="stat"><div className="n">0</div><div className="l">recorded failures or comparable regressions</div></div>}
+        {Object.entries(a.failures).map(([r, ns]) => <div key={r} className="stat"><div className="n">{ns.length}</div><div className="l">{uiText("failed · ")}{r}</div></div>)}
+        {a.regressions.length > 0 && <div className="stat"><div className="n">{a.regressions.length}</div><div className="l">{uiText("worse evaluation scores")}</div></div>}
+        {a.infeasible.length > 0 && <div className="stat"><div className="n">{a.infeasible.length}</div><div className="l">{uiText("infeasible")}</div></div>}
+        {!Object.keys(a.failures).length && !a.regressions.length && !a.infeasible.length && <div className="stat"><div className="n">0</div><div className="l">{uiText("recorded failures or comparable regressions")}</div></div>}
       </div>
 
-      {best && <><h2 id="report-section-solution" tabIndex={-1} className="section-h">Reproduce — selected solution</h2>
-        {bestCodeStatus === 'restricted' && <div className="report-inline-state report-code-state" role="status">
-          Solution source was not included in this summary-only review link.
-        </div>}
+      {best && <><h2 id="report-section-solution" tabIndex={-1} className="section-h">{uiText("Reproduce — selected solution")}</h2>
+        {bestCodeStatus === 'restricted' && <div className="report-inline-state report-code-state" role="status">{uiText("Solution source was not included in this summary-only review link.")}</div>}
         {bestCodeStatus === 'waiting' && <div className="report-inline-state report-code-state" role="status" aria-live="polite">
-          {solutionWaitingMessage}
+          {uiText(solutionWaitingMessage)}
         </div>}
-        {bestCodeStatus === 'loading' && <div className="report-inline-state report-code-state" role="status">Loading solution code…</div>}
+        {bestCodeStatus === 'loading' && <div className="report-inline-state report-code-state" role="status">{uiText("Loading solution code…")}</div>}
         {(bestCodeStatus === 'error' || bestCodeStatus === 'timeout') && <div className="report-inline-state report-code-state error" role="alert">
-          <span>Couldn’t load the winning code: {bestCodeResource.error}</span>
-          <button type="button" className="btn sm" onClick={() => setBestCodeNonce(n => n + 1)}>Retry</button>
+          <span>{uiText("Couldn’t load the winning code: ")}{bestCodeResource.error}</span>
+          <button type="button" className="btn sm" onClick={() => setBestCodeNonce(n => n + 1)}>{uiText("Retry")}</button>
         </div>}
         {bestCodeStatus === 'ready' && (bestCode?.code
           ? <pre className="code">{bestCode.code}</pre>
-          : <div className="report-inline-state report-code-state" role="status">No solution source was recorded for this node (for example, a repository task may not use solution.py).</div>)}
+          : <div className="report-inline-state report-code-state" role="status">{uiText("No solution source was recorded for this node (for example, a repository task may not use solution.py).")}</div>)}
       </>}
 
       {/* Provider prose is intentionally last: it may explain the run, but cannot visually bury

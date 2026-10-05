@@ -1,6 +1,7 @@
 import test, { after } from 'node:test'
 import assert from 'node:assert/strict'
-import { readdir, readFile } from 'node:fs/promises'
+import { readdir } from 'node:fs/promises'
+import { readSource as readFile } from './_source.js'
 import { fileURLToPath } from 'node:url'
 
 import React from 'react'
@@ -113,7 +114,7 @@ test('the review route renders the inert arm and the owner routes render the men
   // The branch is at the call site because that is the only place `reviewMode` is known (App.jsx
   // passes it to RunView alone). Counted, not merely present: a second copy of the ternary would be
   // a second header, and a commented-out one pushes this to 2.
-  assert.equal((runView.match(/\{reviewMode \? <BrandMark \/> : <GlobalMenu \/>\}/g) || []).length, 1)
+  assert.equal((runView.match(/\{reviewMode \? <><BrandMark \/><LanguageControl \/><\/> : <GlobalMenu \/>\}/g) || []).length, 1)
   assert.equal((runView.match(/<GlobalMenu\b/g) || []).length, 1,
     'the workspace header may mount the menu once, and only through the reviewMode branch')
 

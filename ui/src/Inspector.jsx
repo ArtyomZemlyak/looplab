@@ -1,3 +1,4 @@
+import { uiText, uiMessage, useUILanguage } from './uiLanguage.js'
 import React, { useEffect, useId, useMemo, useState, useRef } from 'react'
 import { conditionalGet, costPricing, deadlineGet, get, fmt, fmtInt, isSweep, CONTROL,
   commandFeedback, commandCanRetry, createIdempotencyKey, getRunCommand,
@@ -96,6 +97,8 @@ const DETAIL_REQUEST_TIMEOUT_MS = 8000
 // unlike the exploratory confirm/ablate/fork which stay in the chat. Appends a node_reset control
 // event; the engine applies it on the next resume.
 function ResetBtn({ runId, id, generation, onToast }) {
+  useUILanguage()
+
   const [open, setOpen] = useState(false)
   const [busy, setBusy] = useState(false)
   const rootRef = useRef(null)
@@ -154,10 +157,10 @@ function ResetBtn({ runId, id, generation, onToast }) {
   }
   return <span ref={rootRef} className="reset-control">
     <button ref={triggerRef} className="ctx-chip ctx-chip-action"
-            title="re-run THIS node in place (no new node) from a chosen stage"
+            title={uiText("re-run THIS node in place (no new node) from a chosen stage")}
             aria-haspopup="menu" aria-expanded={open} aria-disabled={busy} aria-busy={busy}
-            onClick={() => { if (!busy) setOpen(!open) }}>{busy ? '↻ Resetting…' : '↻ Reset ▾'}</button>
-    {open && <div ref={menuRef} role="menu" className="reset-stage-menu" aria-label={`Reset experiment ${id} from stage`}
+            onClick={() => { if (!busy) setOpen(!open) }}>{((busy ? uiText('↻ Resetting…') : uiText('↻ Reset ▾')))}</button>
+    {open && <div ref={menuRef} role="menu" className="reset-stage-menu" aria-label={uiMessage("Reset experiment {0} from stage", [id])}
       onKeyDown={onMenuKeyDown}
       onBlur={event => {
         if (event.relatedTarget !== triggerRef.current && !event.currentTarget.contains(event.relatedTarget)) setOpen(false)
@@ -165,7 +168,7 @@ function ResetBtn({ runId, id, generation, onToast }) {
       {STAGES.map(([stage, label, desc, drainOnly = false]) =>
         <button type="button" role="menuitem" key={`${stage}:${drainOnly}`} className="reset-stage-option"
              tabIndex={-1} title={desc} onClick={() => doReset(stage, drainOnly)}>
-          <span className="reset-option-title"><b>{label}</b> <span className="muted">from {stage}</span></span>
+          <span className="reset-option-title"><b>{uiText(label)}</b> <span className="muted">{uiText("from ")}{stage}</span></span>
           <span className="muted reset-option-description">{desc}</span>
         </button>)}
     </div>}
@@ -184,6 +187,8 @@ export default function Inspector({ runId, nodeId, state, live, tab, setTab, onT
   commentsRevision = null, focusCommentId = null, traceClearRecoveryStore: sharedClearStore = null,
   traceClearRecoverySnapshot: sharedClearSnapshot = null,
   publishTraceClearRecovery: publishSharedClearRecovery = null, draftStore: sharedDraftStore = null }) {
+  useUILanguage()
+
   const fallbackDraftStoreRef = useRef(null)
   if (!fallbackDraftStoreRef.current) fallbackDraftStoreRef.current = createInspectorDraftStore()
   const draftStore = sharedDraftStore || fallbackDraftStoreRef.current
@@ -324,25 +329,21 @@ export default function Inspector({ runId, nodeId, state, live, tab, setTab, onT
     [runId, nodeId, nodeWorking, detailScope, detailStatus],
     { enabled: !readOnly && nodeWorking && detailStatus === 'ready', immediate: false })
 
-  if (nodeId == null) return <div className="insp-empty">Select a node to inspect its idea, code, metrics, trust, and agent trace.</div>
+  if (nodeId == null) return <div className="insp-empty">{uiText("Select a node to inspect its idea, code, metrics, trust, and agent trace.")}</div>
   const baseNode = detail || state?.nodes?.[nodeId]
   const n = traceClearedScopes.has(detailScope) ? withoutNodeTrace(baseNode) : baseNode
   const visibleDetailStatus = detailStatus
   if (!n) {
     if (visibleDetailStatus === 'error') return <div ref={detailSurfaceRef}
       className="notice resource-error detail-resource-notice" role="alert" tabIndex={-1}>
-      <span>{detailError || 'Full node details could not be loaded.'}</span>
+      <span>{((detailError || uiText('Full node details could not be loaded.')))}</span>
       <button type="button" className="btn sm" onClick={retryDetail} disabled={!!detailPending}>
-        {detailPending ? detailPendingLabel : 'Retry'}
+        {((detailPending ? detailPendingLabel : uiText('Retry')))}
       </button>
     </div>
     if (visibleDetailStatus === 'restricted') return <div ref={detailSurfaceRef}
-      className="insp-empty" role="status" tabIndex={-1}>
-      Experiment #{nodeId} is not included in this summary-only review.
-    </div>
-    return <div ref={detailSurfaceRef} className="insp-empty" role="status" tabIndex={-1}>
-      Loading experiment #{nodeId} details…
-    </div>
+      className="insp-empty" role="status" tabIndex={-1}>{uiText("Experiment #")}{nodeId}{uiText(" is not included in this summary-only review.")}</div>
+    return <div ref={detailSurfaceRef} className="insp-empty" role="status" tabIndex={-1}>{uiText("Loading experiment #")}{nodeId}{uiText(" details…")}</div>
   }
   // Detail may legitimately be one attempt ahead of the run summary. Bind recovery to the exact
   // rendered attempt, not detailScope's lagging summary attempt, so a catch-up poll cannot shed an
@@ -381,7 +382,7 @@ export default function Inspector({ runId, nodeId, state, live, tab, setTab, onT
 
   return (
     <>
-      <div className="tabs" role="tablist" aria-label="Inspector sections">
+      <div className="tabs" role="tablist" aria-label={uiText("Inspector sections")}>
         {tabs.map((t, index) => <button key={t} id={tabId(t)} type="button" role="tab"
           aria-selected={t === activeTab} aria-controls={t === activeTab ? panelId(t) : undefined}
           tabIndex={t === activeTab ? 0 : -1}
@@ -390,47 +391,35 @@ export default function Inspector({ runId, nodeId, state, live, tab, setTab, onT
       </div>
       <div ref={detailSurfaceRef} className="insp-body" id={panelId(activeTab)} role="tabpanel"
         aria-labelledby={tabId(activeTab)} tabIndex={0}>
-        {visibleDetailStatus === 'loading' && <div className="notice" role="status">Loading full node details…</div>}
+        {visibleDetailStatus === 'loading' && <div className="notice" role="status">{uiText("Loading full node details…")}</div>}
         {visibleDetailStatus === 'stale' && <div
           className="notice resource-warning detail-resource-notice" role="status">
-          <span>{detailPending
-            ? detailPending === 'reconcile'
-              ? 'Trace cleared. Refreshing the remaining experiment details…'
-              : 'Retrying experiment details… Last loaded details remain visible.'
-            : `${detailError || 'Experiment details could not be refreshed.'} Last loaded details remain visible.`}</span>
+          <span>{((detailPending ? (detailPending === 'reconcile' ? uiText('Trace cleared. Refreshing the remaining experiment details…') : uiText('Retrying experiment details… Last loaded details remain visible.')) : uiMessage("{0} Last loaded details remain visible.", [detailError || 'Experiment details could not be refreshed.'])))}</span>
           <button type="button" className="btn sm" onClick={retryDetail} disabled={!!detailPending}>
-            {detailPending ? detailPendingLabel : 'Retry'}
+            {((detailPending ? detailPendingLabel : uiText('Retry')))}
           </button>
         </div>}
         {visibleDetailStatus === 'error' && <div
           className="notice resource-error detail-resource-notice" role="alert">
-          <span>{detailError || 'Full node details could not be loaded.'} The summary below may be incomplete.</span>
+          <span>{((detailError || uiText('Full node details could not be loaded.')))}{uiText(" The summary below may be incomplete.")}</span>
           <button type="button" className="btn sm" onClick={retryDetail} disabled={!!detailPending}>
-            {detailPending ? detailPendingLabel : 'Retry'}
+            {((detailPending ? detailPendingLabel : uiText('Retry')))}
           </button>
         </div>}
         {readOnly
-          ? <div className="insp-hint history-inline">{readOnlyReason === 'review'
-              ? evidenceAvailable
-                ? 'Read-only review with redacted source evidence. Live traces and actions stay hidden.'
-                : 'Summary-only review. Source, live traces, and actions are not included.'
-              : readOnlyReason === 'start-over'
-                ? 'Start over is unresolved. Actions and live traces stay locked until the exact request is recovered.'
-                : `${readOnlyLabel(readOnlyReason, historySeq)} · read-only. Live traces, metrics sidecars and actions are hidden.`}</div>
+          ? <div className="insp-hint history-inline">{((readOnlyReason === 'review' ? (evidenceAvailable ? uiText('Read-only review with redacted source evidence. Live traces and actions stay hidden.') : uiText('Summary-only review. Source, live traces, and actions are not included.')) : (readOnlyReason === 'start-over' ? uiText('Start over is unresolved. Actions and live traces stay locked until the exact request is recovered.') : uiMessage("{0} · read-only. Live traces, metrics sidecars and actions are hidden.", [readOnlyLabel(readOnlyReason, historySeq)]))))}</div>
           : <div className="insp-hint">
-              <button type="button" className="btn sm" title="Attach this experiment to the next Assistant message"
-                onClick={() => window.dispatchEvent(new CustomEvent('ll:attach-node', { detail: { id: n.id } }))}>
-                Attach #{n.id} to Assistant
-              </button>
-              {' '}<span className="muted">Run actions stay in chat; use Comments for review.</span>{' '}
+              <button type="button" className="btn sm" title={uiText("Attach this experiment to the next Assistant message")}
+                onClick={() => window.dispatchEvent(new CustomEvent('ll:attach-node', { detail: { id: n.id } }))}>{uiText("Attach #")}{n.id}{uiText(" to Assistant")}</button>
+              {' '}<span className="muted">{uiText("Run actions stay in chat; use Comments for review.")}</span>{' '}
               <ResetBtn runId={runId} id={n.id} generation={n.attempt} onToast={onToast} />
             </div>}
 
         {onOpenLineage && <div className="insp-hint">
           <button type="button" className="ctx-chip ctx-chip-action"
-            title="open the Lineage graph with this experiment selected, among its parents and children"
-            onClick={() => onOpenLineage(n.id)}>↗ Show #{n.id} in Lineage</button>
-          <span className="muted"> — the experiment graph, with this node selected.</span>
+            title={uiText("open the Lineage graph with this experiment selected, among its parents and children")}
+            onClick={() => onOpenLineage(n.id)}>{uiText("↗ Show #")}{n.id}{uiText(" in Lineage")}</button>
+          <span className="muted">{uiText(" — the experiment graph, with this node selected.")}</span>
         </div>}
 
         {activeTab === 'Overview' && <Overview n={n} state={state} runId={readOnly ? null : runId}
@@ -504,8 +493,8 @@ export default function Inspector({ runId, nodeId, state, live, tab, setTab, onT
               allowBaseRead={!readOnly} draftStore={draftStore}
               draftScope={`code:${runId}@${expectedGeneration || '?'}:${n.id}:${n.attempt ?? '?'}`} />
           : visibleDetailStatus === 'error'
-            ? <div className="insp-empty">Code is unavailable because full node details failed to load.</div>
-            : <div className="insp-empty">Loading code…</div>)}
+            ? <div className="insp-empty">{uiText("Code is unavailable because full node details failed to load.")}</div>
+            : <div className="insp-empty">{uiText("Loading code…")}</div>)}
         {activeTab === 'Metrics' && <Metrics n={n} detail={detail} state={state} runId={runId}
           expectedGeneration={expectedGeneration} onToast={onToast} canRetarget={!readOnly} />}
         {activeTab === 'Trust' && <Trust n={n} drifts={nodeDrifts} />}
@@ -515,13 +504,17 @@ export default function Inspector({ runId, nodeId, state, live, tab, setTab, onT
   )
 }
 
-function KV({ k, v }) { return <><div className="k">{k}</div><div className="v">{v}</div></> }
+function KV({ k, v }) {
+  useUILanguage()
+ return <><div className="k">{k}</div><div className="v">{v}</div></> }
 
 // Summary for a COLLAPSED group's super-node (semantic zoom): aggregate + drill back to members.
 export function GroupSummary({
   groupKey, memberIds, state, themeFilter = null, highlightIds = null, onSelectNode, onClose,
   evalStages = null,
 }) {
+  useUILanguage()
+
   const dir = state.direction
   // Keep the drill-down on exactly the same semantic projection as its collapsed super-node. Without
   // this, a truthful 2/8 card could open a cross-direction best, trajectory, and member table.
@@ -536,9 +529,9 @@ export function GroupSummary({
   return <>
     <div className="tabs">
       <h2 className="tab active group-summary-title" tabIndex={-1}
-        data-group-summary-title>Group · {groupKey}</h2>
+        data-group-summary-title>{uiText("Group · ")}{groupKey}</h2>
       <span className="spacer" />
-      <button className="btn sm ghost" onClick={onClose} title="close group view" aria-label="Close group details">✕</button>
+      <button className="btn sm ghost" onClick={onClose} title={uiText("close group view")} aria-label={uiText("Close group details")}>✕</button>
     </div>
     <div className="insp-body">
       <div className="kv">
@@ -548,15 +541,15 @@ export function GroupSummary({
         {themes.length > 0 && <KV k="primary concept axes" v={themes.join(', ')} />}
       </div>
       {zeroMatch
-        ? <div className="insp-empty" role="status">No experiments in this group match {aggregate.filterDescription}.</div>
+        ? <div className="insp-empty" role="status">{uiText("No experiments in this group match ")}{aggregate.filterDescription}.</div>
         : <>
-          <div className="section-h">Best over {aggregate.filterActive ? 'matching ' : ''}members</div>
+          <div className="section-h">{uiText("Best over ")}{((aggregate.filterActive ? uiText('matching ') : ''))}{uiText("members")}</div>
           <Trajectory nodes={members} direction={dir} state={state} height={150} onPick={onSelectNode} />
-          <div className="section-h">{aggregate.filterActive ? 'Matching members' : 'Members'} <span className="pill">{countLabel}</span></div>
-          <DataTable caption="Group member results" card={false}><table className="tbl"><thead><tr><th>node</th><th>operator</th><th>metric</th><th>status</th></tr></thead>
+          <div className="section-h">{((aggregate.filterActive ? uiText('Matching members') : uiText('Members')))} <span className="pill">{countLabel}</span></div>
+          <DataTable caption={uiText("Group member results")} card={false}><table className="tbl"><thead><tr><th>{uiText("node")}</th><th>{uiText("operator")}</th><th>{uiText("metric")}</th><th>{uiText("status")}</th></tr></thead>
             <tbody>{members.map(n => <tr key={n.id}>
               <td><button type="button" className="btn xs ghost" data-group-member-id={n.id}
-                aria-label={`Open experiment #${n.id}`} onClick={() => onSelectNode(n.id)}>#{n.id}</button></td>
+                aria-label={uiMessage("Open experiment #{0}", [n.id])} onClick={() => onSelectNode(n.id)}>#{n.id}</button></td>
               <td>{n.operator}</td><td>{fmt(n.confirmed_mean ?? n.metric)}</td>
               <td>{nodeActivityView(n, state, evalStages).shortLabel}</td></tr>)}</tbody></table></DataTable>
         </>}
@@ -572,6 +565,8 @@ export function GroupSummary({
 // superseded and the sentence that says so) — see that module's header for the measurement. This
 // half keeps only the choreography: the re-run submit and its pending lock.
 function StagePipeline({ node, runId, id, generation, onToast }) {
+  useUILanguage()
+
   const [pendingStage, setPendingStage] = useState(null)
   // "then pause" serves the stage re-run as a DRAIN (doc 68 68.3b): the node re-evaluates and the
   // run pauses. While stage reuse after a reset is off (doc 68 68.3e) a stage click re-runs the whole
@@ -596,19 +591,18 @@ function StagePipeline({ node, runId, id, generation, onToast }) {
     finally { setPendingStage(null) }
   }
   return <div className="eval-pipeline">
-    <div className="muted eval-pipeline-label">
-      eval pipeline{failedStage ? ` — failed at ${failedStage}` : ''}{runId ? ' · click a stage to re-run from there' : ' · historical result (read-only)'}
+    <div className="muted eval-pipeline-label">{uiText("eval pipeline")}{(failedStage ? uiMessage(" — failed at {0}", [failedStage]) : '')}{((runId ? uiText(' · click a stage to re-run from there') : uiText(' · historical result (read-only)')))}
       {runId && <label className="eval-pipeline-drain"
-        title="evaluate from the chosen stage and pause the run — the search does not resume (a drain; the run must be stopped)">
+        title={uiText("evaluate from the chosen stage and pause the run — the search does not resume (a drain; the run must be stopped)")}>
         {' · '}<input type="checkbox" checked={drainOnly} disabled={pendingStage != null}
-          onChange={event => setDrainOnly(event.target.checked)} /> then pause</label>}</div>
+          onChange={event => setDrainOnly(event.target.checked)} />{uiText(" then pause")}</label>}</div>
     {/* The supersession notice sits ABOVE the chips and is `role="status"`, not a title: what an
         operator asked for is a sign that a red strip is not about the attempt that is running, and
         a tooltip is not a sign. It is absent entirely when nothing is superseded, so an unrepaired
         node's strip is exactly the historical one. */}
     {notice && <div className="eval-pipeline-superseded" role="status">
-      <span className="badge reason" title={notice.text}>superseded</span>
-      <span> {notice.text}{notice.failureText ? ` ${notice.failureText}` : ''}</span>
+      <span className="badge reason" title={uiText(notice.text)}>{uiText("superseded")}</span>
+      <span> {uiText(notice.text)}{notice.failureText ? ` ${notice.failureText}` : ''}</span>
     </div>}
     <div className="eval-pipeline-stages">
       {/* A superseded row's glyph no longer names its own outcome (stageAttribution.js:
@@ -617,10 +611,10 @@ function StagePipeline({ node, runId, id, generation, onToast }) {
       {rows.map((v, i) => <React.Fragment key={i}>
         {runId ? <button type="button" disabled={pendingStage != null} onClick={() => rerun(v.name)}
           className={'eval-pipeline-step' + (v.superseded ? ' superseded' : '')} style={{ '--stage-tone': v.tone }}
-          title={`${v.title} — click to re-run the node from here (earlier stages re-run too: stage reuse is off)`}>
+          title={uiMessage("{0} — click to re-run the node from here (earlier stages re-run too: stage reuse is off)", [v.title])}>
           {v.icon}{v.iconLabel && <span className="sr-only"> {v.iconLabel}</span>} {v.name}</button> : <span
           className={'eval-pipeline-step' + (v.superseded ? ' superseded' : '')} style={{ '--stage-tone': v.tone }}
-          title={`${v.title} · historical result`}>
+          title={uiMessage("{0} · historical result", [v.title])}>
           {v.icon}{v.iconLabel && <span className="sr-only"> {v.iconLabel}</span>} {v.name}</span>}
         {i < rows.length - 1 && <span className="muted eval-pipeline-arrow">→</span>}
       </React.Fragment>)}
@@ -644,6 +638,8 @@ const recoveryCommandRecord = (error, boundRecord) => {
 }
 
 function ConceptTags({ n, state, runId, onToast, draftStore, expectedGeneration }) {
+  useUILanguage()
+
   const draftScope = `concept-tags:${runId}@${expectedGeneration || '?'}:${n.id}:${n.attempt ?? '?'}`
   const [editing, setEditing] = useInspectorDraftField(draftStore, draftScope, 'editing', false)
   const [text, setText] = useInspectorDraftField(draftStore, draftScope, 'text', '')
@@ -808,19 +804,17 @@ function ConceptTags({ n, state, runId, onToast, draftStore, expectedGeneration 
     }
   }
   return <>
-    <div className="section-h">Concepts{status === 'partial' ? ' · partial (display-only)' : ''}
+    <div className="section-h">{uiText("Concepts")}{((status === 'partial' ? uiText(' · partial (display-only)') : ''))}
       {canEdit && !editing && <button ref={triggerRef} type="button" className="ctx-chip ctx-chip-action"
-        title="replace this experiment's concept tags (operator authoring; the classifier re-tag will not overwrite it)"
-        onClick={open}>✎ Edit tags</button>}
+        title={uiText("replace this experiment's concept tags (operator authoring; the classifier re-tag will not overwrite it)")}
+        onClick={open}>{uiText("✎ Edit tags")}</button>}
     </div>
     {!editing && (current.length
       ? <div className="node-concepts-list">{current.map(c =>
           <span key={c} className="nc-tag" title={c}>{c}</span>)}</div>
-      : <div className="muted">{status === 'unavailable' ? 'concepts unavailable'
-          : status === 'partial' ? 'none retained (partial projection)' : 'none'}</div>)}
+      : <div className="muted">{((status === 'unavailable' ? uiText('concepts unavailable') : (status === 'partial' ? uiText('none retained (partial projection)') : uiText('none'))))}</div>)}
     {editing && <div className="concept-tag-editor">
-      <label className="muted" htmlFor={`ct-${n.id}`}>One concept id per line (or comma-separated),
-        e.g. <code>loss/contrastive</code>. Invalid ids are dropped.</label>
+      <label className="muted" htmlFor={`ct-${n.id}`}>{uiText("One concept id per line (or comma-separated), e.g. ")}<code>{"loss/contrastive"}</code>{uiText(". Invalid ids are dropped.")}</label>
       <textarea id={`ct-${n.id}`} ref={areaRef} className="concept-tag-input" rows={4} value={text}
         disabled={busy}
         aria-describedby={operationFenced ? `ct-${n.id}-command-hint` : undefined}
@@ -836,11 +830,9 @@ function ConceptTags({ n, state, runId, onToast, draftStore, expectedGeneration 
           cancel()
         }} />
       {baselineChanged && <div className="notice warn compact concept-tag-recovery">
-        <span role="status">Concept tags changed after this draft started. Review the latest set before replacing it.</span>
-        <div className="concept-tag-latest"><b>Latest tags:</b> {current.length ? current.join(', ') : 'none'}</div>
-        {operationFenced && <span className="muted">
-          Check the earlier command before choosing a baseline for this next draft.
-        </span>}
+        <span role="status">{uiText("Concept tags changed after this draft started. Review the latest set before replacing it.")}</span>
+        <div className="concept-tag-latest"><b>{uiText("Latest tags:")}</b> {((current.length ? current.join(', ') : uiText('none')))}</div>
+        {operationFenced && <span className="muted">{uiText("Check the earlier command before choosing a baseline for this next draft.")}</span>}
         <div className="concept-tag-recovery-actions">
           <button type="button" className="btn xs" disabled={busy || operationFenced} onClick={() => {
             setText(currentKey)
@@ -849,41 +841,36 @@ function ConceptTags({ n, state, runId, onToast, draftStore, expectedGeneration 
             setError('')
             setMessageKind('')
             onToast?.('Latest tags loaded into the editor.')
-          }}>Use latest</button>
+          }}>{uiText("Use latest")}</button>
           <button type="button" className="btn xs" disabled={busy || operationFenced} onClick={() => {
             setBaseline(currentKey)
             setIntent(null)
             setError('')
             setMessageKind('')
             onToast?.('Latest tags acknowledged. Your draft remains in the editor.')
-          }}>Continue with my draft</button>
+          }}>{uiText("Continue with my draft")}</button>
         </div>
       </div>}
       {error && <div className={`notice compact ${messageKind === 'status' ? 'warn' : 'resource-error'}`}
-        role={messageKind === 'status' ? 'status' : 'alert'}>{error}</div>}
+        role={messageKind === 'status' ? 'status' : 'alert'}>{uiText(error)}</div>}
       {operationFenced && <div className="concept-command-recovery"
-        aria-label="Pending concept command recovery">
-        <span id={`ct-${n.id}-command-hint`} className="muted">
-          The earlier re-tag is still unresolved. Check that command before closing this draft.
-        </span>
-        <div className="concept-tag-latest"><b>Submitted tags:</b>{' '}
-          {intent.concepts?.length ? intent.concepts.join(', ') : 'none (clear all)'}
+        aria-label={uiText("Pending concept command recovery")}>
+        <span id={`ct-${n.id}-command-hint`} className="muted">{uiText("The earlier re-tag is still unresolved. Check that command before closing this draft.")}</span>
+        <div className="concept-tag-latest"><b>{uiText("Submitted tags:")}</b>{' '}
+          {((intent.concepts?.length ? intent.concepts.join(', ') : uiText('none (clear all)')))}
         </div>
-        <button type="button" className="btn xs" onClick={copyPendingInput}>
-          Copy pending input
-        </button>
+        <button type="button" className="btn xs" onClick={copyPendingInput}>{uiText("Copy pending input")}</button>
       </div>}
       <div className="concept-tag-actions">
         <button type="button" className="btn sm"
           disabled={busy || (!operationFenced && (baselineChanged || !canEdit))}
           aria-describedby={operationFenced ? `ct-${n.id}-command-hint` : undefined}
           onClick={save}>
-          {busy ? (operationFenced ? 'Checking…' : exactRetry ? 'Retrying…' : 'Saving…')
-            : operationFenced ? 'Check command' : exactRetry ? 'Retry same command' : 'Save tags'}</button>
+          {((busy ? (operationFenced ? uiText('Checking…') : (exactRetry ? uiText('Retrying…') : uiText('Saving…'))) : (operationFenced ? uiText('Check command') : (exactRetry ? uiText('Retry same command') : uiText('Save tags')))))}</button>
         <button type="button" className="btn sm ghost" disabled={busy || operationFenced}
           aria-describedby={operationFenced ? `ct-${n.id}-command-hint` : undefined}
-          title={operationFenced ? 'Check the pending re-tag before closing this draft' : undefined}
-          onClick={cancel}>Cancel</button>
+          title={((operationFenced ? uiText('Check the pending re-tag before closing this draft') : undefined))}
+          onClick={cancel}>{uiText("Cancel")}</button>
       </div>
     </div>}
   </>
@@ -895,17 +882,15 @@ function ConceptTags({ n, state, runId, onToast, draftStore, expectedGeneration 
 // "the question, its verdict, and how many OTHER attempts there were" — never "the hypothesis of this
 // node". `inspectorLinks.js::nodeCardLink` owns which of its four answers applies.
 function CardLink({ link, onOpenCard }) {
+  useUILanguage()
+
   if (link.kind === 'none') {
-    return <><div className="section-h">Work item (hypothesis)</div>
-      <div className="muted">This experiment carries no work-item stamp. A node may belong to no
-        Card (<code>Idea.card_id</code> is optional), so this is a fact about the node, not a
-        missing link.</div></>
+    return <><div className="section-h">{uiText("Work item (hypothesis)")}</div>
+      <div className="muted">{uiText("This experiment carries no work-item stamp. A node may belong to no Card (")}<code>{"Idea.card_id"}</code>{uiText(" is optional), so this is a fact about the node, not a missing link.")}</div></>
   }
   if (link.kind === 'unknown') {
-    return <><div className="section-h">Work item (hypothesis)</div>
-      <div className="muted">Stamped <b>{link.cardId}</b>, which the displayed board does not
-        publish — a historical snapshot, or beyond the published card cap. The stamp is durable; the
-        record is simply not in this frame.</div></>
+    return <><div className="section-h">{uiText("Work item (hypothesis)")}</div>
+      <div className="muted">{uiText("Stamped ")}<b>{link.cardId}</b>{uiText(", which the displayed board does not publish — a historical snapshot, or beyond the published card cap. The stamp is durable; the record is simply not in this frame.")}</div></>
   }
   const { card, cardId, summary, substituted } = link
   // `seed_statement` is the IMMUTABLE statement captured at `card_added` and the join key the whole
@@ -915,25 +900,22 @@ function CardLink({ link, onOpenCard }) {
   const shown = cardText(card.statement)
   const paraphrased = !!seed && !!shown && seed !== shown
   return <>
-    <div className="section-h">Work item (hypothesis)
-      {onOpenCard && <button type="button" className="ctx-chip ctx-chip-action"
-        title="open this work item on the Cards board, with its full record and every attempt"
-        onClick={() => onOpenCard(cardId)}>↗ Open {cardId}</button>}
+    <div className="section-h">{uiText("Work item (hypothesis)")}{onOpenCard && <button type="button" className="ctx-chip ctx-chip-action"
+        title={uiText("open this work item on the Cards board, with its full record and every attempt")}
+        onClick={() => onOpenCard(cardId)}>{uiText("↗ Open ")}{cardId}</button>}
     </div>
     <div className="v">{shown || seed || cardId}</div>
-    {paraphrased && <div className="muted">Seed statement (immutable, the join key): {seed}</div>}
+    {paraphrased && <div className="muted">{uiText("Seed statement (immutable, the join key): ")}{seed}</div>}
     <div className="node-concepts-list">
       <span className="chip xs">{cardId}</span>
       {cardText(card.verdict) && cardText(card.verdict) !== 'open'
-        && <span className="chip xs">verdict · {card.verdict}</span>}
-      {cardText(card.status) && <span className="chip xs">{card.status}</span>}
-      {card.best_delta != null && <span className="chip xs">best Δ {fmt(card.best_delta)}</span>}
+        && <span className="chip xs">{uiText("verdict · ")}{card.verdict}</span>}
+      {cardText(card.status) && <span className="chip xs">{uiText(card.status)}</span>}
+      {card.best_delta != null && <span className="chip xs">{uiText("best Δ ")}{fmt(card.best_delta)}</span>}
     </div>
     {/* The count IS the correction. One card, N attempts — including attempts that are merely
         reserved for it and are not evidence yet, which is why the union and not `card.evidence`. */}
-    <div className="muted">{summary.total === 1
-      ? 'This is the only attempt at this work item.'
-      : `${summary.total} attempts at this work item — this one and ${summary.total - 1} other${summary.total === 2 ? '' : 's'}.`}
+    <div className="muted">{((summary.total === 1 ? uiText('This is the only attempt at this work item.') : uiMessage("{0} attempts at this work item — this one and {1} other{2}.", [summary.total, summary.total - 1, summary.total === 2 ? '' : 's'])))}
       {/* One clause list, joined once: the clauses are independent, and a leading ", " after the
           sentence above read ".," whenever the first count was zero. `evidence` is "counted in its
           verdict" because it leaves out a substituted node even while `card.evidence` still names it. */}
@@ -946,7 +928,7 @@ function CardLink({ link, onOpenCard }) {
         ].filter(Boolean)
         return parts.length ? ` ${parts.join(', ')}.` : ''
       })()}
-      {substituted && ' This experiment is one of them: its Developer reported building something else.'}
+      {((substituted && uiText(' This experiment is one of them: its Developer reported building something else.')))}
     </div>
   </>
 }
@@ -970,6 +952,8 @@ const LESSON_STANDING = {
 // credits with no lessons, which is most nodes. So the common Inspector open costs zero requests, and
 // a node that did teach something costs one bounded run-scoped read.
 function DerivedMemory({ n, state, runId }) {
+  useUILanguage()
+
   const history = useMemo(() => nodeLessons(state, n.id, n.attempt, null), [state?.lessons_distilled, n.id, n.attempt])
   // The store read is worth making for a node with no event-log lesson too, because consolidation
   // runs the other way: measured across `runs/`, the surviving MERGED row usually still credits the
@@ -997,29 +981,26 @@ function DerivedMemory({ n, state, runId }) {
   if (!history.length && !live.length) return null
   return <>
     {live.length > 0 && <>
-      <div className="section-h">What memory still says about this experiment</div>
-      <div className="muted">Live cross-run lessons whose recorded evidence names this experiment.
-        These are the current text, re-read each time — consolidation may have rewritten them.</div>
+      <div className="section-h">{uiText("What memory still says about this experiment")}</div>
+      <div className="muted">{uiText("Live cross-run lessons whose recorded evidence names this experiment. These are the current text, re-read each time — consolidation may have rewritten them.")}</div>
       <ul className="bul">{live.map(row => <li key={`live:${row.statement}`}>
         <span className="v">{row.statement}</span>
         <div className="node-concepts-list">
           {row.outcome && <span className="chip xs">{row.outcome}</span>}
           {row.attemptMatch === 'unrecorded' && <span className="chip xs warn"
-            title="This row records no node attempt for this experiment, so it may have been drawn from an earlier attempt of the same id.">attempt not recorded</span>}
+            title={uiText("This row records no node attempt for this experiment, so it may have been drawn from an earlier attempt of the same id.")}>{uiText("attempt not recorded")}</span>}
           {/* The visible fingerprint of a merge: more agreeing observations than traceable ids. */}
           {row.evidenceCount != null && row.evidenceCount > row.alsoFrom.length + 1
-            && <span className="chip xs" title="Consolidation keeps only a count when it merges rows from other runs; their own evidence is not retained.">
-              {row.evidenceCount} agreeing observations, {row.alsoFrom.length + 1} still traceable</span>}
+            && <span className="chip xs" title={uiText("Consolidation keeps only a count when it merges rows from other runs; their own evidence is not retained.")}>
+              {row.evidenceCount}{uiText(" agreeing observations, ")}{row.alsoFrom.length + 1}{uiText(" still traceable")}</span>}
           {row.concepts.map(id => <span key={id} className="nc-tag">{id}</span>)}
         </div>
-        {row.alsoFrom.length > 0 && <div className="muted">Also credits {row.alsoFrom.map(id => `#${id}`).join(', ')}.</div>}
+        {row.alsoFrom.length > 0 && <div className="muted">{uiText("Also credits ")}{row.alsoFrom.map(id => `#${id}`).join(', ')}.</div>}
       </li>)}</ul>
     </>}
     {history.length > 0 && <>
-    <div className="section-h">What this experiment taught</div>
-    <div className="muted">From this run’s own event log, which is append-only — so this list is what
-      the experiment produced, not what memory happens to hold now. Each row’s standing below is read
-      live from cross-run memory, because that store merges and consolidates.</div>
+    <div className="section-h">{uiText("What this experiment taught")}</div>
+    <div className="muted">{uiText("From this run’s own event log, which is append-only — so this list is what the experiment produced, not what memory happens to hold now. Each row’s standing below is read live from cross-run memory, because that store merges and consolidates.")}</div>
     <ul className="bul">{rows.map(row => {
       const [label, why] = LESSON_STANDING[row.storeStatus] || LESSON_STANDING.unknown
       return <li key={row.lessonId || row.statement}>
@@ -1027,12 +1008,11 @@ function DerivedMemory({ n, state, runId }) {
         <div className="node-concepts-list">
           {row.outcome && <span className="chip xs">{row.outcome}</span>}
           {row.claimStance && <span className="chip xs">{row.claimStance}</span>}
-          {row.atNode != null && <span className="chip xs">distilled at #{row.atNode}</span>}
+          {row.atNode != null && <span className="chip xs">{uiText("distilled at #")}{row.atNode}</span>}
           <span className={'chip xs' + (row.storeStatus === 'present' ? ' ok' : row.storeStatus === 'absorbed' ? ' warn' : '')}
-            title={why}>{label}</span>
+            title={why}>{uiText(label)}</span>
         </div>
-        {row.alsoFrom.length > 0 && <div className="muted">Drawn from this experiment together
-          with {row.alsoFrom.map(id => `#${id}`).join(', ')}.</div>}
+        {row.alsoFrom.length > 0 && <div className="muted">{uiText("Drawn from this experiment together with ")}{row.alsoFrom.map(id => `#${id}`).join(', ')}.</div>}
       </li>
     })}</ul>
     </>}
@@ -1041,13 +1021,14 @@ function DerivedMemory({ n, state, runId }) {
         projection carries neither a lesson id nor evidence. For most runs those are the MAJORITY of
         lessons, and they can only ever be attributed to the run. Saying so is the honest close to
         this section — the alternative is a list that silently claims to be complete. */}
-    <div className="muted">Run-end reflection lessons are recorded without per-experiment evidence and
-      cannot appear here; open Lab → Memory to read them at run level.</div>
+    <div className="muted">{uiText("Run-end reflection lessons are recorded without per-experiment evidence and cannot appear here; open Lab → Memory to read them at run level.")}</div>
   </>
 }
 
 function Overview({ n, state, runId, onToast, draftStore, expectedGeneration, onOpenCard,
   evalStages = null, onTab }) {
+  useUILanguage()
+
   // Terminal details do not poll. Current state still updates confirmation/provenance; use its
   // whole result record only for the same lifecycle/status, never splice fields across attempts.
   const resultNode = currentResultNode(n, state)
@@ -1086,26 +1067,25 @@ function Overview({ n, state, runId, onToast, draftStore, expectedGeneration, on
     <ConceptTags key={`${runId}:${expectedGeneration || '?'}:${n.id}:${n.attempt}`} n={n} state={state} runId={runId}
       onToast={onToast} draftStore={draftStore} expectedGeneration={expectedGeneration} />
     {lanes.cardOnly.length > 0 && <>
-      <div className="section-h">Also on its work item</div>
+      <div className="section-h">{uiText("Also on its work item")}</div>
       {/* Kept OUT of the node's own list on purpose: a card tag is derived from the card's FIRST
           linked node and carried across merges, so presenting it beside this node's memberships
           would silently upgrade a card-level claim into a claim about this attempt's evidence. */}
       <div className="node-concepts-list">{lanes.cardOnly.map(c =>
-        <span key={c} className="nc-tag" title={`${c} — carried by the work item, not by this experiment`}>{c}</span>)}</div>
-      <div className="muted">Concepts its work item carries that this attempt does not
-        {lanes.cardTagOrigin ? ` (card tags derived from: ${lanes.cardTagOrigin})` : ''}.</div>
+        <span key={c} className="nc-tag" title={uiMessage("{0} — carried by the work item, not by this experiment", [c])}>{c}</span>)}</div>
+      <div className="muted">{uiText("Concepts its work item carries that this attempt does not")}{(lanes.cardTagOrigin ? uiMessage(" (card tags derived from: {0})", [lanes.cardTagOrigin]) : '')}.</div>
     </>}
     <StagePipeline node={n} runId={runId} id={n.id} generation={n.attempt} onToast={onToast} />
-    {chg && <><div className="section-h">What this node did</div><div className="v">{chg}</div></>}
-    {uses.length > 0 && <><div className="section-h">Merge — techniques fused</div>
+    {chg && <><div className="section-h">{uiText("What this node did")}</div><div className="v">{chg}</div></>}
+    {uses.length > 0 && <><div className="section-h">{uiText("Merge — techniques fused")}</div>
       <ul className="bul">{uses.map(u => <li key={u.parentId}>
         <b>#{u.parentId}</b>{u.theme ? ` · ${u.theme}` : ''}{u.change && u.change !== '—' ? ` — ${u.change}` : ''}</li>)}</ul></>}
     <ForkProvenance prov={forkProv} />
-    <div className="section-h">Idea params{ideaNote('params')}</div>
-    {Object.keys(p).length ? <div className="kv">{Object.entries(p).map(([k, v]) => <KV key={k} k={k} v={fmt(v)} />)}</div> : <div className="muted">none</div>}
-    {n.idea?.rationale && !(chg && chg.includes(n.idea.rationale)) && <><div className="section-h">Rationale{ideaNote('rationale')}</div><Markdown className="rationale-md" text={n.idea.rationale} /></>}
+    <div className="section-h">{uiText("Idea params")}{ideaNote('params')}</div>
+    {Object.keys(p).length ? <div className="kv">{Object.entries(p).map(([k, v]) => <KV key={k} k={k} v={fmt(v)} />)}</div> : <div className="muted">{uiText("none")}</div>}
+    {n.idea?.rationale && !(chg && chg.includes(n.idea.rationale)) && <><div className="section-h">{uiText("Rationale")}{ideaNote('rationale')}</div><Markdown className="rationale-md" text={n.idea.rationale} /></>}
     <DerivedMemory n={n} state={state} runId={runId} />
-    {n.deleted?.length > 0 && <><div className="section-h">Deleted files</div><div className="v">{n.deleted.join(', ')}</div></>}
+    {n.deleted?.length > 0 && <><div className="section-h">{uiText("Deleted files")}</div><div className="v">{n.deleted.join(', ')}</div></>}
   </>
 }
 
@@ -1117,16 +1097,17 @@ function Overview({ n, state, runId, onToast, draftStore, expectedGeneration, on
  * refusal to split a receipt that predates the split — so this half only lays it out.
  */
 function ForkProvenance({ prov }) {
+  useUILanguage()
+
   if (!prov) return null
   const at = prov.observedSeq === null ? '' : ` · read at seq ${prov.observedSeq}`
   return <>
-    <div className="section-h">Branched by an operator</div>
-    <div className="v">from #{prov.parentId}
-      {prov.generation === null ? '' : ` generation ${prov.generation}`}{at}</div>
+    <div className="section-h">{uiText("Branched by an operator")}</div>
+    <div className="v">{uiText("from #")}{prov.parentId}
+      {(prov.generation === null ? '' : uiMessage(" generation {0}", [prov.generation]))}{uiText(at)}</div>
     <div className="muted">{forkProvenanceSentence(prov)}</div>
     {prov.attribution === FORK_ATTRIBUTION_STAMPED && prov.baseDigest
-      && <div className="muted">Parent idea identity: <code>{prov.baseDigest}</code> — re-derivable
-        from this run's own log, so the lineage is checkable rather than asserted.</div>}
+      && <div className="muted">{uiText("Parent idea identity: ")}<code>{prov.baseDigest}</code>{uiText(" — re-derivable from this run's own log, so the lineage is checkable rather than asserted.")}</div>}
   </>
 }
 
@@ -1238,6 +1219,8 @@ const asText = (v) => v == null ? '' : (typeof v === 'string' ? v : JSON.stringi
 // indented tool observations directly beneath this chat (no duplication); when a turn produced only
 // tool calls, its output is empty and we say so, pointing at the tools below.
 function GenBody({ c, thinkOpen, onThink }) {
+  useUILanguage()
+
   const think = thinkOpen === true
   const nTools = (c.tool_calls || []).length
   return <div className="llm-io">
@@ -1245,19 +1228,19 @@ function GenBody({ c, thinkOpen, onThink }) {
       {c.model && <KV k="model" v={c.model} />}
       {c.model_parameters && <KV k="params" v={JSON.stringify(c.model_parameters)} />}
       {c.cost ? <KV k="cost" v={'$' + c.cost} /> : null}</div>}
-    <div className="gen-sec-h">input</div>
+    <div className="gen-sec-h">{uiText("input")}</div>
     {(c.prompt || []).map((m, i) => <div key={i} className="msg">
       <div className={'msg-role role-' + (m.role || 'user')}>{m.role}</div>
       <pre className="code">{m.content}</pre></div>)}
-    <div className="gen-sec-h">output</div>
+    <div className="gen-sec-h">{uiText("output")}</div>
     {c.completion
       ? <div className="msg"><pre className="code">{c.completion}</pre></div>
       : <div className="muted generation-empty">
-          {nTools ? `→ called ${nTools} tool${nTools > 1 ? 's' : ''} (shown below)` : '(no text output)'}</div>}
+          {((nTools ? uiMessage("→ called {0} tool{1} (shown below)", [nTools, nTools > 1 ? 's' : '']) : uiText('(no text output)')))}</div>}
     {c.thinking && <div className="msg think-debug">
       <button type="button" className="msg-role role-think disclosure-button" aria-expanded={think}
         onClick={() => onThink(!think)}>
-        {think ? '▾' : '▸'} reasoning (debug)</button>
+        {think ? '▾' : '▸'}{uiText(" reasoning (debug)")}</button>
       {think && <Markdown className="think-body" text={c.thinking} />}</div>}
   </div>
 }
@@ -1277,6 +1260,8 @@ const pruneSpanState = (current, live) => {
 }
 
 function SpanFacts({ span }) {
+  useUILanguage()
+
   const attrs = spanAttrs(span)
   const events = span.events || []
   return <>
@@ -1291,10 +1276,12 @@ function SpanFacts({ span }) {
 }
 
 export function TraceUnavailable({ label = 'Trace unavailable.', onRetry, pending = false }) {
+  useUILanguage()
+
   return <div className="notice resource-error compact" role="alert">
-    <span>{label}</span>
+    <span>{uiText(label)}</span>
     {onRetry && <button type="button" className="btn sm" onClick={onRetry} disabled={pending}>
-      {pending ? 'Retrying…' : 'Retry trace'}
+      {((pending ? uiText('Retrying…') : uiText('Retry trace')))}
     </button>}
   </div>
 }
@@ -1306,6 +1293,8 @@ export function TraceUnavailable({ label = 'Trace unavailable.', onRetry, pendin
 // work) — so the tree shows exactly what called what and what each bounded projection produced.
 function SpanRow({ row, t0, total, runId, expectedGeneration, open, io,
   onToggle, onActivate, onIo, detailId, thinkOpen, onThink, parentOp }) {
+  useUILanguage()
+
   const s = row.span, depth = Math.max(0, row.level - 2)
   const kind = s.kind || 'operation'
   const err = s.status === 'ERROR'
@@ -1342,23 +1331,23 @@ function SpanRow({ row, t0, total, runId, expectedGeneration, open, io,
     return <>
       <button type="button" tabIndex={-1} aria-expanded={open} aria-controls={detailId}
         className={'span-row gen disclosure-button' + (err ? ' err' : '')}
-        style={rowIndent} onClick={toggle} title="expand for prompt & output">
+        style={rowIndent} onClick={toggle} title={uiText("expand for prompt & output")}>
         <span className="span-tw">{open ? '▾' : '▸'}</span>
         {(() => {   // name the call by ROLE so "who writes code" is unmistakable: the Developer's LLM
           // call (under implement/repair) is "writing code"; the Researcher's (under propose) is "reasoning".
           const dev = parentOp === 'implement' || parentOp === 'repair'
           const label = dev ? 'writing code' : (parentOp === 'propose' && a.op === 'chat' ? 'reasoning' : (a.op || 'llm'))
-          return <span className="span-name gen"><OpIcon name={dev ? 'pencil' : 'bulb'} className="t-ic" /> <span className={'llm-op' + (dev ? ' dev-code' : '')}>{label}</span>{a.model && <span className="llm-model" title={a.model}>{shortModel(a.model)}</span>}</span>
+          return <span className="span-name gen"><OpIcon name={dev ? 'pencil' : 'bulb'} className="t-ic" /> <span className={'llm-op' + (dev ? ' dev-code' : '')}>{uiText(label)}</span>{a.model && <span className="llm-model" title={a.model}>{shortModel(a.model)}</span>}</span>
         })()}
         {bar}
         <span className="t">{fmt(s.duration_s, 3)}s</span>
-        {(t.prompt != null || t.completion != null) && <span className="badge" title={`${t.prompt || 0} prompt → ${t.completion || 0} completion tokens`}>{ktok(t.prompt)}→{ktok(t.completion)}</span>}
-        {err && <span className="badge reason">ERROR</span>}
+        {(t.prompt != null || t.completion != null) && <span className="badge" title={uiMessage("{0} prompt → {1} completion tokens", [t.prompt || 0, t.completion || 0])}>{ktok(t.prompt)}→{ktok(t.completion)}</span>}
+        {err && <span className="badge reason">{uiText("ERROR")}</span>}
       </button>
       {open && <div className="span-detail" id={detailId} style={detailIndent}>
-        {io === null ? <div className="muted trace-small" role="status">loading…</div> : io.status === 'unavailable'
-          ? <TraceUnavailable label="Trace detail unavailable." onRetry={retryIo} />
-          : <>{io.partial && <div className="notice compact" role="status">Trace detail truncated.</div>}
+        {io === null ? <div className="muted trace-small" role="status">{uiText("loading…")}</div> : io.status === 'unavailable'
+          ? <TraceUnavailable label={uiText("Trace detail unavailable.")} onRetry={retryIo} />
+          : <>{io.partial && <div className="notice compact" role="status">{uiText("Trace detail truncated.")}</div>}
             <GenBody c={c} thinkOpen={thinkOpen} onThink={onThink} /></>}</div>}
     </>
   }
@@ -1368,20 +1357,20 @@ function SpanRow({ row, t0, total, runId, expectedGeneration, open, io,
     return <>
       <button type="button" tabIndex={-1} aria-expanded={open} aria-controls={detailId}
         className={'span-row tool disclosure-button' + (err ? ' err' : '')}
-        style={rowIndent} onClick={toggle} title="expand for input & output">
+        style={rowIndent} onClick={toggle} title={uiText("expand for input & output")}>
         <span className="span-tw">{open ? '▾' : '▸'}</span>
         <span className="span-name tool"><OpIcon name="gear" className="t-ic" /> <b className="tool-name">{name}</b></span>
         {bar}
         <span className="t">{fmt(s.duration_s, 3)}s</span>
-        {err && <span className="badge reason">ERROR</span>}
+        {err && <span className="badge reason">{uiText("ERROR")}</span>}
       </button>
       {open && <div className="span-detail" id={detailId} style={detailIndent}>
-        {io === null ? <div className="muted trace-small" role="status">loading…</div> : io.status === 'unavailable'
-          ? <TraceUnavailable label="Trace detail unavailable." onRetry={retryIo} /> : <>
-          {io.partial && <div className="notice compact" role="status">Trace detail truncated.</div>}
-          {inp && <div className="msg"><div className="msg-role role-user">input</div><pre className="code">{inp}</pre></div>}
-          {outp && <div className="msg"><div className="msg-role role-completion">output</div><pre className="code">{outp}</pre></div>}
-          {!inp && !outp && <div className="muted trace-small">(no input/output recorded)</div>}</>}
+        {io === null ? <div className="muted trace-small" role="status">{uiText("loading…")}</div> : io.status === 'unavailable'
+          ? <TraceUnavailable label={uiText("Trace detail unavailable.")} onRetry={retryIo} /> : <>
+          {io.partial && <div className="notice compact" role="status">{uiText("Trace detail truncated.")}</div>}
+          {inp && <div className="msg"><div className="msg-role role-user">{uiText("input")}</div><pre className="code">{inp}</pre></div>}
+          {outp && <div className="msg"><div className="msg-role role-completion">{uiText("output")}</div><pre className="code">{outp}</pre></div>}
+          {!inp && !outp && <div className="muted trace-small">{uiText("(no input/output recorded)")}</div>}</>}
       </div>}
     </>
   }
@@ -1398,19 +1387,19 @@ function SpanRow({ row, t0, total, runId, expectedGeneration, open, io,
          className={(stage ? 'stage-h ' : '') + 'span-row'
            + (detail ? ' disclosure-button' : '') + (err && !stage ? ' err' : '')}
          style={rowIndent} onClick={detail ? toggle : onActivate}
-         title={detail ? `${desc} — expand detail` : desc}>
+         title={(detail ? uiMessage("{0} — expand detail", [desc]) : desc)}>
       <span className={stage ? 'stage-caret' : 'span-tw'}>
         {detail ? (open ? '▾' : '▸') : '·'}</span>
       {stage ? <><span className="stage-ic"><OpIcon name={icon} /></span><b>{role}</b>
-        {roll.calls > 0 && <span className="stage-roll" title={`${roll.tok} billed tokens`}>
-          {roll.calls} call{roll.calls > 1 ? 's' : ''}
-          {roll.ctx ? ` · ${ktok(roll.ctx)} ctx` : ''}{roll.out ? ` · ${ktok(roll.out)} out` : ''}</span>}
+        {roll.calls > 0 && <span className="stage-roll" title={uiMessage("{0} billed tokens", [roll.tok])}>
+          {roll.calls}{uiText(" call")}{roll.calls > 1 ? 's' : ''}
+          {(roll.ctx ? uiMessage(" · {0} ctx", [ktok(roll.ctx)]) : '')}{(roll.out ? uiMessage(" · {0} out", [ktok(roll.out)]) : '')}</span>}
         <span className="spacer" /></>
         : <span className="span-name" title={desc}><OpIcon name={icon} className="t-ic" />
           {role !== s.name ? role : s.name}</span>}
       {!stage && bar}
       <span className="t">{fmt(s.duration_s, 3)}s</span>
-      {err && <span className="badge reason">ERROR</span>}
+      {err && <span className="badge reason">{uiText("ERROR")}</span>}
     </Header>
     {open && detail && <div className={'span-detail' + (stage ? ' stage-root-detail' : '')}
       id={detailId} style={stage ? undefined : detailIndent}>
@@ -1423,6 +1412,8 @@ function SpanRow({ row, t0, total, runId, expectedGeneration, open, io,
 // cap, it cannot multiply at every depth and has no "show all" escape hatch. All rows remain in the
 // logical/ARIA tree and search index; only the viewport plus overscan is mounted in the DOM.
 function VirtualSpanTree({ roots, t0, total, runId, expectedGeneration, identity }) {
+  useUILanguage()
+
   const rows = useMemo(() => flattenSpanTree(roots), [roots])
   const byKey = useMemo(() => new Map(rows.map((row, index) => [row.key, index])), [rows])
   const [activeKey, setActiveKey] = useState(() => rows[0]?.key || null)
@@ -1481,9 +1472,9 @@ function VirtualSpanTree({ roots, t0, total, runId, expectedGeneration, identity
   }
   return <div className="span-tree-shell">
     <div className="span-tree-tools">
-      <label className="sr-only" htmlFor={`${treeId}-search`}>Find an observation in this span tree</label>
+      <label className="sr-only" htmlFor={`${treeId}-search`}>{uiText("Find an observation in this span tree")}</label>
       <input id={`${treeId}-search`} className="span-tree-search" type="search" value={query}
-        placeholder="Find span…" onChange={event => {
+        placeholder={uiText("Find span…")} onChange={event => {
           const value = event.target.value
           const next = spanTreeMatches(rows, value)
           setQuery(value)
@@ -1491,14 +1482,12 @@ function VirtualSpanTree({ roots, t0, total, runId, expectedGeneration, identity
         }} onKeyDown={event => {
           if (event.key === 'Enter') { event.preventDefault(); find(event.shiftKey ? -1 : 1) }
         }} />
-      <button type="button" className="seg" disabled={!matches.length} aria-label="Previous span match"
+      <button type="button" className="seg" disabled={!matches.length} aria-label={uiText("Previous span match")}
         onClick={() => find(-1)}>↑</button>
-      <button type="button" className="seg" disabled={!matches.length} aria-label="Next span match"
+      <button type="button" className="seg" disabled={!matches.length} aria-label={uiText("Next span match")}
         onClick={() => find(1)}>↓</button>
       <span className="muted span-tree-count" role="status" aria-live="polite">
-        {query ? (matches.length ? (matchAt < 0 ? `${matches.length} matches`
-          : `${matchAt + 1} of ${matches.length}`) : 'No matches')
-          : `${rows.length} span${rows.length === 1 ? '' : 's'}`}</span>
+        {((query ? (matches.length ? matchAt < 0 ? uiMessage("{0} matches", [matches.length]) : uiMessage("{0} of {1}", [matchAt + 1, matches.length]) : uiText('No matches')) : uiMessage("{0} span{1}", [rows.length, rows.length === 1 ? '' : 's'])))}</span>
     </div>
     <VirtualTimeline rows={rows} getKey={spanTreeKey} renderRow={row => {
       const state = spanState.get(row.key) || {}
@@ -1547,10 +1536,12 @@ function VirtualSpanTree({ roots, t0, total, runId, expectedGeneration, identity
 // fires for anyone who scrolls, including a keyboard user pressing Page Up, while a screen-reader
 // user driving a virtual cursor never scrolls the container — hence a real focusable control too.
 function TraceReach({ state, notice, onReach, failed = false }) {
+  useUILanguage()
+
   const { sentinelRef, onReachFocus } = useTraceScroll({ state, onReach, failed })
   if (state === TRACE_SCROLL_SETTLED) return null
   if (state === TRACE_SCROLL_BOUNDED) {
-    return <div className="notice compact" role="status">{notice} {traceScrollBoundedSuffix}</div>
+    return <div className="notice compact" role="status">{uiText(notice)} {traceScrollBoundedSuffix}</div>
   }
   return <div className="trace-reach-zone" ref={sentinelRef}>
     <button type="button" className="trace-reach" onFocus={onReachFocus} onClick={onReachFocus}>
@@ -1559,8 +1550,7 @@ function TraceReach({ state, notice, onReach, failed = false }) {
         transition rather than a region appearing and disappearing under it. */}
     <div className="muted trace-small trace-reach-status" role="status">
       {state === TRACE_SCROLL_LOADING ? TRACE_SCROLL_LOADING_LABEL : ''}</div>
-    {failed && <div className="notice compact trace-reach-failed" role="alert">
-      Could not load earlier steps. Scroll again to retry.</div>}
+    {failed && <div className="notice compact trace-reach-failed" role="alert">{uiText("Could not load earlier steps. Scroll again to retry.")}</div>}
   </div>
 }
 
@@ -1568,6 +1558,8 @@ function TraceReach({ state, notice, onReach, failed = false }) {
 // timeline. Exported so the chat feed can show the same waterfall inline (Dock.jsx) as the Inspector.
 export function NodeTrace({ spans, runId, projection = {}, onRetry, onLoadMore,
   spanLimit = NODE_TRACE_SPAN_WINDOW, expectedGeneration, treeKey = expectedGeneration || runId }) {
+  useUILanguage()
+
   const roots = spans || []
   // The scroll affordance is a hook, so it is resolved before any early return. `unavailable` is
   // still handled FIRST below: a failed observation never gets a sentinel (see traceScrollModel).
@@ -1584,7 +1576,7 @@ export function NodeTrace({ spans, runId, projection = {}, onRetry, onLoadMore,
     notice={traceWindowNotice(spanWindow)} />
   if (!roots.length) {
     if (spanWindow.kind === 'complete')
-      return <div className="muted trace-small">No execution spans captured yet.</div>
+      return <div className="muted trace-small">{uiText("No execution spans captured yet.")}</div>
     // A bounded surface's own notice already carries the count and says it cannot go further;
     // stacking the generic empty notice on top of it says "partial" twice and adds nothing.
     return <>{scroll === TRACE_SCROLL_BOUNDED ? null
@@ -1601,16 +1593,18 @@ export function NodeTrace({ spans, runId, projection = {}, onRetry, onLoadMore,
 // The coding-agent's own validation report (was its own tab) — folded into the lifecycle as the
 // Developer stage's verification footnote, only when an external agent actually wrote the node.
 function AgentReport({ r }) {
+  useUILanguage()
+
   return <div className="stage">
     <div className="stage-h">
       <span className="stage-ic" style={{ color: r.ok && !r.fell_back ? 'var(--ok)' : r.fell_back ? 'var(--working)' : 'var(--fail)' }}>
         <OpIcon name={r.ok && !r.fell_back ? 'check' : r.fell_back ? 'replay' : 'cross'} /></span>
-      <b>Developer · agent validation</b>
-      <span className="muted">{r.fell_back ? 'fell back to template' : r.ok ? 'shipped clean' : 'failed checks'}</span>
+      <b>{uiText("Developer · agent validation")}</b>
+      <span className="muted">{((r.fell_back ? uiText('fell back to template') : (r.ok ? uiText('shipped clean') : uiText('failed checks'))))}</span>
       <span className="spacer" />
-      <span className="muted">{r.attempts} attempt{r.attempts === 1 ? '' : 's'}</span>
+      <span className="muted">{r.attempts}{uiText(" attempt")}{r.attempts === 1 ? '' : 's'}</span>
     </div>
-    <DataTable caption="Agent attempt validation checks" card={false}><table className="tbl"><thead><tr><th>check</th><th>ok</th><th>detail</th></tr></thead>
+    <DataTable caption={uiText("Agent attempt validation checks")} card={false}><table className="tbl"><thead><tr><th>{uiText("check")}</th><th>{uiText("ok")}</th><th>{uiText("detail")}</th></tr></thead>
       <tbody>{(r.checks || []).map((c, i) => <tr key={i}>
         <td>{c.name}</td><td style={{ color: c.ok ? 'var(--ok)' : 'var(--fail)' }}>{c.ok ? '✓' : '✗'}</td>
         <td className="muted">{c.detail || c.severity || ''}</td></tr>)}</tbody></table></DataTable>
@@ -1622,14 +1616,16 @@ function AgentReport({ r }) {
 // tool-loop re-sends growing history each turn). The conversation projection reconstructs the loop as
 // a readable thread: the request once per sub-loop, then each retained generation delta + tool calls.
 function ConvRequest({ t }) {
+  useUILanguage()
+
   const [open, setOpen] = useState(false)   // system prompt is big — collapsed by default
   const roles = (t.messages || []).map(m => m.role).join(' + ')
   return <div className="conv-req">
     <button type="button" className="conv-req-h disclosure-button" aria-expanded={open}
-      onClick={() => setOpen(o => !o)} title="the system + user prompt for this sub-loop (shown once)">
+      onClick={() => setOpen(o => !o)} title={uiText("the system + user prompt for this sub-loop (shown once)")}>
       <span className="span-tw">{open ? '▾' : '▸'}</span>
-      <OpIcon name="chat" className="t-ic" /> <b>request</b>
-      {t.label && <span className="llm-op">{t.label}</span>}
+      <OpIcon name="chat" className="t-ic" /> <b>{uiText("request")}</b>
+      {t.label && <span className="llm-op">{uiText(t.label)}</span>}
       <span className="muted conv-req-roles"> {roles}</span>
     </button>
     {open && <div className="conv-req-body">
@@ -1641,6 +1637,8 @@ function ConvRequest({ t }) {
 }
 
 function ConvGen({ t }) {
+  useUILanguage()
+
   const [think, setThink] = useState(false)
   const calls = t.tool_calls || []
   const u = t.usage || {}
@@ -1651,36 +1649,38 @@ function ConvGen({ t }) {
     <div className="conv-gen-h">
       <OpIcon name="bulb" className="t-ic" />
       {t.model && <span className="llm-model" title={t.model}>{shortModel(t.model)}</span>}
-      {tok ? <span className="badge" title={`${u.prompt || 0} prompt → ${u.completion || 0} completion tokens`}>{ktok(tok)} tok</span> : null}
+      {tok ? <span className="badge" title={uiMessage("{0} prompt → {1} completion tokens", [u.prompt || 0, u.completion || 0])}>{ktok(tok)}{uiText(" tok")}</span> : null}
       {t.seconds != null && <span className="t">{fmt(t.seconds, 2)}s</span>}
-      {t.status === 'ERROR' && <span className="badge reason">ERROR</span>}
+      {t.status === 'ERROR' && <span className="badge reason">{uiText("ERROR")}</span>}
     </div>
     {t.think && <div className="msg think-debug">
       <button type="button" className="msg-role role-think disclosure-button" aria-expanded={think}
-        onClick={() => setThink(v => !v)}>{think ? '▾' : '▸'} thinking</button>
+        onClick={() => setThink(v => !v)}>{think ? '▾' : '▸'}{uiText(" thinking")}</button>
       {think && <Markdown className="think-body" text={t.think} />}</div>}
     {text && <div className="conv-out"><Markdown text={text} /></div>}
-    {calls.length > 0 && <div className="conv-calls muted">→ called {calls.join(', ')}</div>}
-    {!text && !t.think && calls.length === 0 && <div className="muted trace-small">(no output)</div>}
+    {calls.length > 0 && <div className="conv-calls muted">{uiText("→ called ")}{calls.join(', ')}</div>}
+    {!text && !t.think && calls.length === 0 && <div className="muted trace-small">{uiText("(no output)")}</div>}
   </div>
 }
 
 function ConvTool({ t }) {
+  useUILanguage()
+
   const [open, setOpen] = useState(false)
   const err = t.status === 'ERROR'
   return <div className={'conv-tool' + (err ? ' err' : '')}>
     <button type="button" className="conv-tool-h disclosure-button" aria-expanded={open}
-      onClick={() => setOpen(o => !o)} title="tool call — expand for input & output">
+      onClick={() => setOpen(o => !o)} title={uiText("tool call — expand for input & output")}>
       <span className="span-tw">{open ? '▾' : '▸'}</span>
       <OpIcon name="gear" className="t-ic" /> <b className="tool-name">{t.name}</b>
       {!open && t.input && <span className="muted conv-tool-prev"> {t.input.slice(0, 60)}</span>}
-      {err && <span className="badge reason">ERROR</span>}
+      {err && <span className="badge reason">{uiText("ERROR")}</span>}
       {t.seconds != null && <span className="t">{fmt(t.seconds, 2)}s</span>}
     </button>
     {open && <div className="conv-tool-body">
-      {t.input && <div className="msg"><div className="msg-role role-user">input</div><pre className="code">{t.input}</pre></div>}
-      {t.output && <div className="msg"><div className="msg-role role-completion">output</div><pre className="code">{t.output}</pre></div>}
-      {!t.input && !t.output && <div className="muted trace-small">(no input/output recorded)</div>}
+      {t.input && <div className="msg"><div className="msg-role role-user">{uiText("input")}</div><pre className="code">{t.input}</pre></div>}
+      {t.output && <div className="msg"><div className="msg-role role-completion">{uiText("output")}</div><pre className="code">{t.output}</pre></div>}
+      {!t.input && !t.output && <div className="muted trace-small">{uiText("(no input/output recorded)")}</div>}
     </div>}
   </div>
 }
@@ -1688,6 +1688,8 @@ function ConvTool({ t }) {
 // The live stdout/stderr of a stage's subprocess (training epochs, eval scoring), rendered INSIDE its
 // trace band. Auto-scrolls to the newest line while the stage is live so a running train tails itself.
 function StageLog({ text, live }) {
+  useUILanguage()
+
   const ref = useRef(null)
   const shown = text.length > 40000 ? text.slice(-40000) : text
   // Auto-tail while live, but ONLY if the user is already parked near the bottom — otherwise scrolling
@@ -1697,12 +1699,14 @@ function StageLog({ text, live }) {
     if (live && el && el.scrollHeight - el.scrollTop - el.clientHeight < 40) el.scrollTop = el.scrollHeight
   }, [text, live])
   return <div className="stage-log">
-    <div className="muted stage-log-label">📄 stage log{live ? ' · live' : ''}</div>
+    <div className="muted stage-log-label">{uiText("📄 stage log")}{((live ? uiText(' · live') : ''))}</div>
     <pre ref={ref} className="training-log">{shown}</pre>
   </div>
 }
 
 function ConvStage({ st, defaultOpen = true, log = '', logShare = null, live = false }) {
+  useUILanguage()
+
   const [icon, role, desc, tone] = stageMeta(st.label)
   const [open, setOpen] = useState(defaultOpen)
   const [allTurns, setAllTurns] = useState(false)
@@ -1715,17 +1719,17 @@ function ConvStage({ st, defaultOpen = true, log = '', logShare = null, live = f
   return <div className={'stage stage-dynamic' + (err ? ' err' : '')}
               style={{ '--stage-tone': err ? 'var(--fail)' : tone }}>
     <button type="button" className="stage-h disclosure-button" aria-expanded={open}
-         title={desc + ' — click to collapse'} onClick={() => setOpen(o => !o)}>
+         title={uiText(desc + ' — click to collapse')} onClick={() => setOpen(o => !o)}>
       <span className="stage-caret">{open ? '▾' : '▸'}</span>
       <span className="stage-ic"><OpIcon name={icon} /></span>
       <b className="stage-role">{role}</b>
       {(roll.generations || roll.tools) ? <span className="stage-roll"
-          title={tk.total ? `context window peaked at ${tk.context || 0} tokens; the model generated ${tk.completion || 0}. Billed ${tk.total} total — a tool loop RE-SENDS the growing context every turn, so billed ≫ context.` : undefined}>
-        {roll.generations || 0} turn{roll.generations === 1 ? '' : 's'}
-        {roll.tools ? ` · ${roll.tools} tool call${roll.tools === 1 ? '' : 's'}` : ''}
-        {tk.context ? ` · ${ktok(tk.context)} ctx` : ''}
-        {tk.completion ? ` · ${ktok(tk.completion)} out` : ''}</span> : null}
-      {!open && nTurns ? <span className="muted stage-hidden-count">· {nTurns} step{nTurns === 1 ? '' : 's'} hidden</span> : null}
+          title={(tk.total ? uiMessage("context window peaked at {0} tokens; the model generated {1}. Billed {2} total — a tool loop RE-SENDS the growing context every turn, so billed ≫ context.", [tk.context || 0, tk.completion || 0, tk.total]) : undefined)}>
+        {roll.generations || 0}{uiText(" turn")}{roll.generations === 1 ? '' : 's'}
+        {(roll.tools ? uiMessage(" · {0} tool call{1}", [roll.tools, roll.tools === 1 ? '' : 's']) : '')}
+        {(tk.context ? uiMessage(" · {0} ctx", [ktok(tk.context)]) : '')}
+        {(tk.completion ? uiMessage(" · {0} out", [ktok(tk.completion)]) : '')}</span> : null}
+      {!open && nTurns ? <span className="muted stage-hidden-count">· {nTurns}{uiText(" step")}{nTurns === 1 ? '' : 's'}{uiText(" hidden")}</span> : null}
     </button>
     {open && <div className="conv-turns">
       {/* Conversation Markdown is not part of the span-tree virtual window. Keep a local turn cap: a heavily-repaired / tool-looping stage
@@ -1735,7 +1739,7 @@ function ConvStage({ st, defaultOpen = true, log = '', logShare = null, live = f
         t.type === 'request' ? <ConvRequest key={j} t={t} />
           : t.type === 'tool' ? <ConvTool key={j} t={t} /> : <ConvGen key={j} t={t} />)}
       {!allTurns && (st.turns || []).length > CONVERSATION_TURN_CAP && <button className="span-more"
-        onClick={() => setAllTurns(true)}>… show {(st.turns || []).length - CONVERSATION_TURN_CAP} more turns</button>}
+        onClick={() => setAllTurns(true)}>{uiText("… show ")}{(st.turns || []).length - CONVERSATION_TURN_CAP}{uiText(" more turns")}</button>}
       {log && logShare ? <div className="muted trace-small stage-log-share" role="note">
         {logShare.note}</div> : null}
       {log ? <StageLog text={log} live={live} /> : null}
@@ -1765,6 +1769,8 @@ const matchingTracePayload = (result, subject, expectedGeneration) => {
 // fence and whether there are subprocess logs come from the subject.
 export function Conversation({ subject, runId, expectedGeneration, working, allOpen = true,
   reloadNonce = 0, onRetry, spanLimit = NODE_TRACE_SPAN_WINDOW, onLoadMore }) {
+  useUILanguage()
+
   const subjectKey = traceSubjectKey(subject)
   const subjectAttempt = traceSubjectAttempt(subject)
   const subjectBefore = traceSubjectBefore(subject)
@@ -1901,12 +1907,12 @@ export function Conversation({ subject, runId, expectedGeneration, working, allO
     return timed
   }, working ? 4000 : null,   // interval only while the agent works this node (live-refresh); null = load once
   [runId, expectedGeneration, subjectKey, working, reloadNonce, retryNonce, spanLimit])   // reloadNonce also re-runs a finished node's one-shot load
-  if (currentRead === null) return <div className="muted trace-small" role="status">loading…</div>
+  if (currentRead === null) return <div className="muted trace-small" role="status">{uiText("loading…")}</div>
   const conv = currentRead.payload || { stages: [] }
   const stages = conv.stages || []
   const unavailable = traceUnavailable(conv.projection)
   if (unavailable) return <TraceUnavailable
-    label={traceFailureLabel(currentRead?.failure, { retrying: autoRetryMs != null })}
+    label={uiText(traceFailureLabel(currentRead?.failure, { retrying: autoRetryMs != null }))}
     onRetry={onRetry} />
   // The operator's actual complaint lives here: this view is the DEFAULT one, it is where "N steps
   // hidden" is read, and until now it printed a count and then refused to pass it.
@@ -1914,9 +1920,7 @@ export function Conversation({ subject, runId, expectedGeneration, working, allO
   // span counters in the same envelope describe a different quantity — see its comment.
   const convWindow = conversationWindow(conv.projection, { canPage: !!onLoadMore })
   const staleNotice = currentRead.stale
-    ? <div className="notice compact conversation-stale" role="alert">
-      Conversation refresh failed; showing confirmed trace while run state reloads.
-    </div>
+    ? <div className="notice compact conversation-stale" role="alert">{uiText("Conversation refresh failed; showing confirmed trace while run state reloads.")}</div>
     : null
   const scroll = traceScrollState({
     view: convWindow,
@@ -1932,9 +1936,7 @@ export function Conversation({ subject, runId, expectedGeneration, working, allO
   const reach = <TraceReach state={scroll} onReach={onLoadMore} failed={currentRead.reachFailed}
     notice={conversationWindowNotice(convWindow)} />
   if (!stages.length) return convWindow.kind === 'complete'
-    ? <>{staleNotice}<div className="muted">{traceSubjectHasLogs(subject)
-      ? 'No conversation captured for this node yet.'
-      : 'No conversation captured for this operation.'}</div></>
+    ? <>{staleNotice}<div className="muted">{((traceSubjectHasLogs(subject) ? uiText('No conversation captured for this node yet.') : uiText('No conversation captured for this operation.')))}</div></>
     : <div className="conv">{staleNotice}{reach}</div>
   // The live log for a stage band: a multi-stage eval logs per stage (stages[label]); a single-command
   // eval logs to eval.log ("evaluate"/"command"); the dep-install step to setup.log. Anything else
@@ -1965,12 +1967,14 @@ export function Conversation({ subject, runId, expectedGeneration, working, allO
 // The run-level, one-time dependency install (shared by every node) — moved out of the old Training
 // tab; a collapsed footnote under the trace so a setup failure is still inspectable without its own tab.
 function RunSetupLog({ text }) {
+  useUILanguage()
+
   const [open, setOpen] = useState(false)
   return <div className="stage run-setup-stage">
     <button type="button" className="stage-h disclosure-button" aria-expanded={open}
       onClick={() => setOpen(o => !o)}>
       <span className="stage-caret">{open ? '▾' : '▸'}</span>
-      <b className="muted">Run setup <span className="normal-weight">· deps install (run-level, once)</span></b>
+      <b className="muted">{uiText("Run setup ")}<span className="normal-weight">{uiText("· deps install (run-level, once)")}</span></b>
     </button>
     {open && <div className="conv-turns"><StageLog text={text} live={false} /></div>}
   </div>
@@ -2089,6 +2093,8 @@ export function TraceSurface({
   detailUnavailable = false, onRetry = null, retryPending = false,
   bodyRef = null,
 }) {
+  useUILanguage()
+
   const [view, setView] = useState(TRACE_VIEW_CONVERSATION)  // linear reading by default
   const [allOpen, setAllOpen] = useState(false)       // bands COLLAPSED by default (expand one to read it)
   // "Try again" on a failed READ, which is not the same button as "reload this node" — the owner's
@@ -2154,22 +2160,20 @@ export function TraceSurface({
   const retainedSpanEvidence = !!pagedRead?.payload || (canUseDetail && !!detail?.payload)
   const inline = chrome === 'inline'
   const head = <div className={'trace-head' + (inline ? ' trace-head-inline' : '')}>
-    {status}
+    {uiText(status)}
     {view !== TRACE_VIEW_CONVERSATION && pagedRead?.stale && retainedSpanEvidence
       && <TraceUnavailable
-        label={pagedRead.failure === TRACE_FAILURE_SUPERSEDED
-          ? traceFailureLabel(pagedRead.failure)
-          : `Span-tree refresh failed; showing confirmed spans${pagedRead.retrying
-            ? ' while retrying automatically' : ''}.`}
+        label={((pagedRead.failure === TRACE_FAILURE_SUPERSEDED ? uiText(traceFailureLabel(pagedRead.failure)) : uiMessage("Span-tree refresh failed; showing confirmed spans{0}.", [pagedRead.retrying
+            ? ' while retrying automatically' : ''])))}
         onRetry={pagedRead.failure !== TRACE_FAILURE_SUPERSEDED ? pagedRead.retry : undefined} />}
     <div className="conv-toggle">
       {TRACE_SURFACE_VIEWS.map(v => <button key={v} type="button" aria-pressed={view === v}
         className={'seg' + (view === v ? ' on' : '')}
         onClick={() => setView(v)}
-        title={TRACE_SURFACE_VIEW_LABELS[v].title}>{TRACE_SURFACE_VIEW_LABELS[v].label}</button>)}
+        title={TRACE_SURFACE_VIEW_LABELS[v].title}>{uiText(TRACE_SURFACE_VIEW_LABELS[v].label)}</button>)}
       {view === TRACE_VIEW_CONVERSATION && <button type="button" className="seg trace-collapse"
-        aria-pressed={allOpen} title="collapse or expand every stage"
-        onClick={() => setAllOpen(o => !o)}>{allOpen ? '⊟ collapse all' : '⊞ expand all'}</button>}
+        aria-pressed={allOpen} title={uiText("collapse or expand every stage")}
+        onClick={() => setAllOpen(o => !o)}>{((allOpen ? uiText('⊟ collapse all') : uiText('⊞ expand all')))}</button>}
       {controls}
     </div>
     {below}
@@ -2180,7 +2184,7 @@ export function TraceSurface({
   // empty suffix is `/api/runs/{id}` — the RUN, which would 200 with a payload that fences out and
   // read as "unavailable". Refuse it here, where the reason can be stated.
   if (!traceSubjectValid(subject) || !runId)
-    return shell(<div className="muted" role="status">No trace is linked to this item.</div>)
+    return shell(<div className="muted" role="status">{uiText("No trace is linked to this item.")}</div>)
   if (view === TRACE_VIEW_CONVERSATION) {
     return shell(<Conversation subject={subject} runId={runId}
       expectedGeneration={expectedGeneration} working={working} allOpen={allOpen}
@@ -2190,7 +2194,7 @@ export function TraceSurface({
   // A historical/anchored node and an operation trace have no eligible detail fallback. Until their
   // first page settles, the only honest state is loading — never the positive "no spans" claim.
   if (pagedEnabled && pagedRead === null && !canUseDetail)
-    return shell(<div className="muted trace-small" role="status">loading…</div>)
+    return shell(<div className="muted trace-small" role="status">{uiText("loading…")}</div>)
   // The span tree's window rule, over whichever payload is rendering (paged read or detail default).
   // Same `canPage` as the conversation, because both raise the SAME window.
   const spanWindow = traceWindow(trace?.projection, { canPage })
@@ -2213,7 +2217,7 @@ export function TraceSurface({
     if (spanWindow.kind !== 'complete')
       return shell(<><div className="notice compact" role="status">
         {TRACE_PARTIAL_EMPTY_NOTICE}</div>{spanPager}</>)
-    return shell(<div className="muted">{traceSubjectEmptyNotice(subject)}</div>)
+    return shell(<div className="muted">{uiText(traceSubjectEmptyNotice(subject))}</div>)
   }
   const { t0, total } = traceBounds(spans)
   // Rollup from the RENDERED payload, not always the detail one: after paging, the totals below
@@ -2225,14 +2229,12 @@ export function TraceSurface({
   return shell(<>
     {spanPager}
     <div className="muted trace-rollup-intro">
-      {traceSubjectLead(subject)} · offset = start, bar = duration. Expand an observation for
-      bounded, redacted I/O.
-      {(roll.generations || roll.tools) ? <span className="trace-totals"
-          title={rtok.total ? `context window peaked at ${rtok.context || 0} tokens; the model generated ${rtok.completion || 0}. Billed ${rtok.total} total — each turn RE-SENDS the growing context, so billed ≫ context.` : undefined}>
-        {' · '}{roll.generations || 0} generation{roll.generations === 1 ? '' : 's'}
-        {roll.tools ? ` · ${roll.tools} tool call${roll.tools === 1 ? '' : 's'}` : ''}
-        {rtok.context ? ` · ${ktok(rtok.context)} ctx` : ''}
-        {rtok.completion ? ` · ${ktok(rtok.completion)} out` : ''}
+      {traceSubjectLead(subject)}{uiText(" · offset = start, bar = duration. Expand an observation for bounded, redacted I/O.")}{(roll.generations || roll.tools) ? <span className="trace-totals"
+          title={(rtok.total ? uiMessage("context window peaked at {0} tokens; the model generated {1}. Billed {2} total — each turn RE-SENDS the growing context, so billed ≫ context.", [rtok.context || 0, rtok.completion || 0, rtok.total]) : undefined)}>
+        {' · '}{roll.generations || 0}{uiText(" generation")}{roll.generations === 1 ? '' : 's'}
+        {(roll.tools ? uiMessage(" · {0} tool call{1}", [roll.tools, roll.tools === 1 ? '' : 's']) : '')}
+        {(rtok.context ? uiMessage(" · {0} ctx", [ktok(rtok.context)]) : '')}
+        {(rtok.completion ? uiMessage(" · {0} out", [ktok(rtok.completion)]) : '')}
         {roll.cost ? ` · $${roll.cost}` : ''}
       </span> : null}
     </div>
@@ -2247,6 +2249,8 @@ export function TraceSurface({
 // by the card's own Trace tab, so there is one implementation of "read the research" rather than a
 // good one and a poor one.
 export function ResearchTraces({ rows, runId, expectedGeneration = null }) {
+  useUILanguage()
+
   // One proposal is the common case and the operator asked to READ it, not to find another button.
   // Several means a re-proposal happened and the reader has to choose, so they stay closed until
   // picked — each open row is a real read.
@@ -2272,12 +2276,11 @@ export function ResearchTraces({ rows, runId, expectedGeneration = null }) {
             aria-expanded={shown} disabled={!row.trace_id}
             onClick={() => setOpen(current => (current === row.trace_id ? null : row.trace_id))}>
             <span className="research-trace-caret" aria-hidden="true">{shown ? '▾' : '▸'}</span>
-            <span className="research-who">Researcher</span>
-            <span className="muted">· {researchLinkLabel(row.link)}</span>
+            <span className="research-who">{uiText("Researcher")}</span>
+            <span className="muted">· {uiText(researchLinkLabel(row.link))}</span>
           </button>
           {(row.generations || row.tools) ? <span className="muted research-trace-roll">
-            {fmtInt(row.generations)} gen · {fmtInt(row.tools)} tools
-            · {fmtInt(row.tokens?.total)} tok</span> : null}
+            {fmtInt(row.generations)}{uiText(" gen · ")}{fmtInt(row.tools)}{uiText(" tools · ")}{fmtInt(row.tokens?.total)}{uiText(" tok")}</span> : null}
         </h4>
         {/* The trace gets the whole width, below its heading. It used to be a flex SIBLING of that
             label, which squeezed a span tree — search bar, timeline bars and all — into whatever
@@ -2305,6 +2308,8 @@ export function ResearchTraces({ rows, runId, expectedGeneration = null }) {
 // costs the server no spans.jsonl bytes at all, but it is 7,048 rows on the measured node and nobody
 // should pay for it while reading a two-band one.
 function TraceEpisodes({ runId, nodeId, attempt, expectedGeneration, anchor, onSeek, nonce = 0 }) {
+  useUILanguage()
+
   const [open, setOpen] = useState(false)
   // `undefined` = not read yet, `null` = failed. Keep the wire payload so an older cursor page can
   // be merged with its projection receipt before the pure model folds it into picker kinds.
@@ -2397,18 +2402,17 @@ function TraceEpisodes({ runId, nodeId, attempt, expectedGeneration, anchor, onS
   }
   return <span className="trace-episodes">
     <button type="button" className="btn xs ghost" aria-expanded={open}
-      title="Jump the trace window to an earlier step of this experiment — an early repair, the first training run, the proposal."
+      title={uiText("Jump the trace window to an earlier step of this experiment — an early repair, the first training run, the proposal.")}
       onClick={() => setOpen(value => !value)}>
-      <span aria-hidden="true">{open ? '▾' : '▸'}</span> steps
-      {here ? <span className="muted"> · {here.name} {here.ordinal}/{here.count}</span> : null}
+      <span aria-hidden="true">{open ? '▾' : '▸'}</span>{uiText(" steps")}{here ? <span className="muted"> · {here.name} {here.ordinal}/{here.count}</span> : null}
     </button>
     {anchor && <button type="button" className="btn xs ghost" onClick={() => onSeek(null)}
-      title="Return the window to this experiment's most recent steps">latest ›</button>}
+      title={uiText("Return the window to this experiment's most recent steps")}>{uiText("latest ›")}</button>}
     {open && <span className="trace-episodes-body">
-      {map === null && <span className="muted" role="status">loading steps…</span>}
+      {map === null && <span className="muted" role="status">{uiText("loading steps…")}</span>}
       {map?.status === 'unavailable' && <>
         <span className="muted" role="alert">{EPISODE_MAP_UNAVAILABLE}</span>
-        <button type="button" className="btn xs ghost" onClick={reloadEpisodes}>retry steps</button>
+        <button type="button" className="btn xs ghost" onClick={reloadEpisodes}>{uiText("retry steps")}</button>
       </>}
       {map?.status === 'empty' && <span className="muted" role="status">{EPISODE_MAP_EMPTY}</span>}
       {/* READ FINE, AND NOT EMPTY. This node has earlier steps and the map can point at none of
@@ -2416,9 +2420,9 @@ function TraceEpisodes({ runId, nodeId, attempt, expectedGeneration, anchor, onS
           and tell the operator their whole trace fits in one window while its own payload said
           otherwise; the count is the only honest thing there is to say, so the notice says it. */}
       {map?.status === 'unseekable' && <span className="muted" role="status">
-        {episodeMapNotice(map)}</span>}
+        {uiText(episodeMapNotice(map))}</span>}
       {map?.status === 'ready' && <>
-        <label className="muted" htmlFor={`${pickerId}-kind`}>step </label>
+        <label className="muted" htmlFor={`${pickerId}-kind`}>{uiText("step ")}</label>
         <select id={`${pickerId}-kind`} className="text" value={activeKind || ''}
           onChange={e => { setKind(e.target.value); setDraft(1) }}>
           {kinds.map(row => <option key={row.label} value={row.label}>
@@ -2427,34 +2431,32 @@ function TraceEpisodes({ runId, nodeId, attempt, expectedGeneration, anchor, onS
         {/* Prev/next/first/last plus a typed ordinal, because a picker cannot list 2,345 repairs and
             a list that long is a phone book, not a map. Every position is clamped in the model, so a
             typo can never issue a request the server would refuse. */}
-        <button type="button" className="btn xs ghost" title="first" disabled={index <= 0}
+        <button type="button" className="btn xs ghost" title={uiText("first")} disabled={index <= 0}
           onClick={() => seek(0)}>«</button>
-        <button type="button" className="btn xs ghost" title="previous" disabled={index <= 0}
+        <button type="button" className="btn xs ghost" title={uiText("previous")} disabled={index <= 0}
           onClick={() => seek(index - 1)}>‹</button>
         <input className="text trace-episode-n" type="number" min="1" max={active?.count || 1}
-          aria-label={`which ${active?.name || 'step'} to show`}
+          aria-label={uiMessage("which {0} to show", [active?.name || 'step'])}
           value={draft}
           onChange={e => setDraft(Number(e.target.value) || 1)}
           onKeyDown={e => { if (e.key === 'Enter') seek(index) }} />
-        <span className="muted">of {active?.count || 0}</span>
-        <button type="button" className="btn xs ghost" title="next"
+        <span className="muted">{uiText("of ")}{active?.count || 0}</span>
+        <button type="button" className="btn xs ghost" title={uiText("next")}
           disabled={!active || index >= active.count - 1}
           onClick={() => seek(index + 1)}>›</button>
-        <button type="button" className="btn xs ghost" title="last"
+        <button type="button" className="btn xs ghost" title={uiText("last")}
           disabled={!active || index >= active.count - 1}
           onClick={() => seek((active?.count || 1) - 1)}>»</button>
-        <button type="button" className="btn xs" onClick={() => seek(index)}>show</button>
+        <button type="button" className="btn xs" onClick={() => seek(index)}>{uiText("show")}</button>
         {map.hasOlder && <button type="button" className="btn xs ghost trace-episodes-earlier"
           disabled={olderStatus === 'loading'}
           onClick={olderStatus === 'error' ? reloadEpisodes : loadEarlier}
-          title="Load the preceding page of this experiment’s steps">
-          {olderStatus === 'loading' ? 'loading earlier steps…'
-            : olderStatus === 'error' ? 'reload steps' : 'load earlier steps'}</button>}
-        {olderStatus === 'error' && <span className="muted" role="alert">
-          The steps changed or could not be loaded. Reload and try again.</span>}
+          title={uiText("Load the preceding page of this experiment’s steps")}>
+          {((olderStatus === 'loading' ? uiText('loading earlier steps…') : (olderStatus === 'error' ? uiText('reload steps') : uiText('load earlier steps'))))}</button>}
+        {olderStatus === 'error' && <span className="muted" role="alert">{uiText("The steps changed or could not be loaded. Reload and try again.")}</span>}
         {here && <span className="muted trace-episode-sum">
           {episodeSummary(here.episode, here.index)}</span>}
-        {map.partial && <span className="muted">{episodeMapNotice(map)}</span>}
+        {map.partial && <span className="muted">{uiText(episodeMapNotice(map))}</span>}
       </>}
     </span>}
   </span>
@@ -2465,6 +2467,8 @@ export function Trace({ n, runId, expectedGeneration, expectedTraceRevision, liv
   detailStatus = 'ready',
   reloadPending = false, clearScope, clearRecoveryStore, recoverClearState = null,
   clearRecoverySignal = null, publishClearRecovery }) {
+  useUILanguage()
+
   const [nonce, setNonce] = useState(0)               // bumped after "clear trace" to reload the bands
   const bodyRef = useRef(null)
   const nodeGeneration = Number.isSafeInteger(n.attempt) && n.attempt >= 0 ? n.attempt : null
@@ -2542,8 +2546,8 @@ export function Trace({ n, runId, expectedGeneration, expectedTraceRevision, liv
         : `🏋️ ${activity.label}…`)
     : queued ? `⏳ ${activity.label}…` : null
   const status = statusLabel && <div className={'trace-live-status' + (queued ? ' waiting' : '')} role="status">
-    <span className="tls-dot" />{statusLabel}
-    {!queued && <span className="muted trace-live-note">live · auto-updates</span>}</div>
+    <span className="tls-dot" />{uiText(statusLabel)}
+    {!queued && <span className="muted trace-live-note">{uiText("live · auto-updates")}</span>}</div>
   const retryParentTrace = () => onReload?.('retry')
   const scrollTo = (where) => { const c = bodyRef.current?.closest('.insp-body'); if (c) c.scrollTop = where === 'top' ? 0 : c.scrollHeight }
   // The attempt picker. Only rendered when there IS an earlier generation — a node that never got
@@ -2551,14 +2555,14 @@ export function Trace({ n, runId, expectedGeneration, expectedTraceRevision, liv
   // not exist. Selecting an older attempt is a READ; the destructive clear below stays bound to
   // `nodeGeneration` (the current one) on purpose, so browsing history can never erase it.
   const attemptPicker = attemptOptions.length > 1 && <span className="trace-attempt">
-    <label className="muted" htmlFor={`attempt-${n.id}`}>attempt </label>
+    <label className="muted" htmlFor={`attempt-${n.id}`}>{uiText("attempt ")}</label>
     <select id={`attempt-${n.id}`} className="seg" value={selectedAttempt}
-      title="This node was repaired. Earlier attempts keep their own trace — including the one that crashed."
+      title={uiText("This node was repaired. Earlier attempts keep their own trace — including the one that crashed.")}
       onChange={e => setViewAttempt(Number(e.target.value))}>
-      {attemptOptions.map(o => <option key={o.attempt} value={o.attempt}>{o.label}</option>)}
+      {attemptOptions.map(o => <option key={o.attempt} value={o.attempt}>{uiText(o.label)}</option>)}
     </select>
     {historicalAttempt && <button type="button" className="seg"
-      onClick={() => setViewAttempt(null)}>back to current</button>}
+      onClick={() => setViewAttempt(null)}>{uiText("back to current")}</button>}
   </span>
   // The EPISODE picker, the attempt picker's sibling and NOT its substitute: attempt chooses a
   // lifecycle (what a reset creates), this chooses a position inside one (what a repair loop creates,
@@ -2621,16 +2625,15 @@ export function Trace({ n, runId, expectedGeneration, expectedTraceRevision, liv
   const researchStrip = cardId && <div className={'trace-research' + (researchOpen ? ' open' : '')}>
     <div className="trace-research-bar">
       <button type="button" className="btn xs ghost trace-research-toggle" aria-expanded={researchOpen}
-        title={`The research that proposed ${cardId}. Shared with every experiment on this work item.`}
+        title={uiMessage("The research that proposed {0}. Shared with every experiment on this work item.", [cardId])}
         onClick={() => setResearchOpen(value => !value)}>
-        <span className="trace-research-caret" aria-hidden="true">{researchOpen ? '▾' : '▸'}</span>
-        research <span className="muted">· shared with {cardId}</span>
+        <span className="trace-research-caret" aria-hidden="true">{researchOpen ? '▾' : '▸'}</span>{uiText("research ")}<span className="muted">{uiText("· shared with ")}{cardId}</span>
       </button>
       {onOpenCard && <button type="button" className="btn xs ghost"
-        onClick={() => onOpenCard(cardId)}>open {cardId} ›</button>}
+        onClick={() => onOpenCard(cardId)}>{uiText("open ")}{cardId} ›</button>}
     </div>
     {researchOpen && <div className="trace-research-body">
-      {research === null && <div className="muted" role="status">loading research…</div>}
+      {research === null && <div className="muted" role="status">{uiText("loading research…")}</div>}
       {/* A FAILED read is not an absence. The `.catch` above sets `{projection:{unavailable:true}}`,
           and `cardTraceNotice` is the model function that owns exactly this distinction — the card
           board's `_CardTrace` already calls it for the identical payload, so printing our own
@@ -2639,63 +2642,44 @@ export function Trace({ n, runId, expectedGeneration, expectedTraceRevision, liv
           cannot support it, and the disclosure is not re-fetched on collapse, so it stuck. */}
       {research !== null && !researchRows.length && <div className="muted"
         role={researchUnavailable ? 'alert' : 'status'}>
-        {researchNotice
-          || `No research is linked to ${cardId} — it is never inferred from timing.`}</div>}
+        {(researchNotice || uiMessage("No research is linked to {0} — it is never inferred from timing.", [cardId]))}</div>}
       {researchUnavailable && !researchSuperseded && <button type="button" className="btn xs ghost"
-        onClick={() => setResearch(null)}>retry research trace</button>}
+        onClick={() => setResearch(null)}>{uiText("retry research trace")}</button>}
       <ResearchTraces rows={researchRows} runId={runId} expectedGeneration={expectedGeneration} />
     </div>}
   </div>
   const clearBtn = <span className="trace-clear">
     <button type="button" ref={clearing === '' ? clearTriggerRef : clearConfirmRef}
       className={'seg' + (clearing ? ' on' : '')}
-      title={clearPrimaryConfirm ? 'confirm: erase this node’s spans'
-        : clearing === '' && !clearAvailable
-          ? clearUnavailableText
-          : clearing === '' && clearFenced
-            ? clearMessage?.verifyOperation
-              ? 'verify the original clear operation before clearing trace data again'
-              : 'refresh the experiment successfully before clearing trace data again'
-          : clearing === '' ? 'erase this node’s captured trace (spans) — useful before re-running the node so the new trace replaces the old'
-          : undefined}
+      title={((clearPrimaryConfirm ? uiText('confirm: erase this node’s spans') : (clearing === '' && !clearAvailable ? clearUnavailableText : (clearing === '' && clearFenced ? (clearMessage?.verifyOperation ? uiText('verify the original clear operation before clearing trace data again') : uiText('refresh the experiment successfully before clearing trace data again')) : (clearing === '' ? uiText('erase this node’s captured trace (spans) — useful before re-running the node so the new trace replaces the old') : undefined)))))}
       disabled={clearing === '' && (!clearAvailable || clearFenced)}
       aria-disabled={clearPrimaryBusy || undefined} aria-busy={clearPrimaryBusy || undefined}
-      aria-label={clearPrimaryConfirm
-        ? `Confirm clear trace for experiment #${n.id}, attempt ${nodeGeneration}. Results and run history stay intact.`
-        : clearPrimaryVerifying
-          ? `Checking the original trace clear outcome for experiment #${n.id}, attempt ${nodeGeneration}.`
-        : undefined}
+      aria-label={(clearPrimaryConfirm ? uiMessage("Confirm clear trace for experiment #{0}, attempt {1}. Results and run history stay intact.", [n.id, nodeGeneration]) : (clearPrimaryVerifying ? uiMessage("Checking the original trace clear outcome for experiment #{0}, attempt {1}.", [n.id, nodeGeneration]) : undefined))}
       onClick={clearing === '' ? beginClear : clearPrimaryConfirm ? doClear : undefined}>
-      {clearPrimaryVerifying
-        ? 'Checking…'
-        : clearPrimaryBusy ? 'Clearing…' : clearPrimaryConfirm ? '✕ confirm clear' : '✕ clear trace'}
+      {((clearPrimaryVerifying ? uiText('Checking…') : (clearPrimaryBusy ? uiText('Clearing…') : (clearPrimaryConfirm ? uiText('✕ confirm clear') : uiText('✕ clear trace')))))}
     </button>
     {clearPrimaryConfirm && <>
-      <button className="seg" onClick={cancelClear}>cancel</button>
-      <span className="muted trace-clear-status">
-        Clear #{n.id} · attempt {nodeGeneration}? Results and run history stay intact.
-      </span></>}
+      <button className="seg" onClick={cancelClear}>{uiText("cancel")}</button>
+      <span className="muted trace-clear-status">{uiText("Clear #")}{n.id}{uiText(" · attempt ")}{nodeGeneration}{uiText("? Results and run history stay intact.")}</span></>}
     {clearPrimaryBusy && !clearMessage
-      && <span className="sr-only" role="status">Clearing trace…</span>}
+      && <span className="sr-only" role="status">{uiText("Clearing trace…")}</span>}
     {!clearAvailable && clearing === '' && <span className="muted trace-clear-status" role="status">
       {clearUnavailableText}
     </span>}
     {clearMessage && <span className={'muted trace-clear-status'
       + (clearMessage.kind === 'error' ? ' trace-clear-error' : '')}
-      role={clearMessage.kind === 'error' ? 'alert' : 'status'}>{clearMessage.text}</span>}
+      role={clearMessage.kind === 'error' ? 'alert' : 'status'}>{uiText(clearMessage.text)}</span>}
     {clearMessage?.blocking && !clearMessage.pending
       && <button type="button" className="seg" ref={clearRefreshRef}
       aria-disabled={reloadPending || clearMessage.refreshing || undefined}
       aria-busy={reloadPending || clearMessage.refreshing || undefined}
       onClick={refreshClearScope}>
-      {clearMessage.verifyOperation
-        ? '↻ verify clear outcome'
-        : reloadPending || clearMessage.refreshing ? 'Refreshing…' : '↻ refresh experiment'}
+      {((clearMessage.verifyOperation ? uiText('↻ verify clear outcome') : (reloadPending || clearMessage.refreshing ? uiText('Refreshing…') : uiText('↻ refresh experiment'))))}
     </button>}
   </span>
   const nav = <span className="trace-nav">
-    <button className="seg" aria-label="Scroll trace to top" title="scroll to top" onClick={() => scrollTo('top')}>↑</button>
-    <button className="seg" aria-label="Scroll trace to newest" title="scroll to newest (bottom)" onClick={() => scrollTo('bottom')}>↓</button></span>
+    <button className="seg" aria-label={uiText("Scroll trace to top")} title={uiText("scroll to top")} onClick={() => scrollTo('top')}>↑</button>
+    <button className="seg" aria-label={uiText("Scroll trace to newest")} title={uiText("scroll to newest (bottom)")} onClick={() => scrollTo('bottom')}>↓</button></span>
   // STICKY control bar: pinned to the top of the scroll area (position:sticky in .trace-head) so the
   // view toggle / collapse-all / scroll nav stay reachable while you page through a long trace,
   // instead of scrolling off the top. The bar itself belongs to `TraceSurface`; these are the
@@ -2723,11 +2707,15 @@ export function Trace({ n, runId, expectedGeneration, expectedTraceRevision, liv
 // events via the metrics adapters. Polls while the node is still running so the curves fill in as
 // training progresses; keyed on n.status so a repair-retrain (pending→failed→pending) re-arms the poll.
 export function MetricCurves(props) {
+  useUILanguage()
+
   // Identity changes must clear even already settled curves before another scope is read.
   return <MetricCurveResource key={`${props.runId}:${props.expectedGeneration}:${props.nodeId}:${props.attempt}`} {...props} />
 }
 
 function MetricCurveResource({ runId, nodeId, attempt = 0, status, expectedGeneration }) {
+  useUILanguage()
+
   const done = ['evaluated', 'failed', 'confirmed'].includes(status)
   const metricAttempt = Number.isInteger(attempt) && attempt >= 0 ? attempt : 0
   const [resource, setResource] = useState(null)
@@ -2756,14 +2744,14 @@ function MetricCurveResource({ runId, nodeId, attempt = 0, status, expectedGener
     if (resource === false) setResource(null)
     setRetryNonce(n => n + 1)
   }
-  if (resource === null) return <div className="notice compact" role="status">Loading metric curves…</div>
+  if (resource === null) return <div className="notice compact" role="status">{uiText("Loading metric curves…")}</div>
   const failed = resource === false, stale = Array.isArray(resource)
   return <>
     {(failed || stale) && <div
       className={`notice ${failed ? 'resource-error' : 'resource-warning'} compact`}
       role={failed ? 'alert' : 'status'}>
-      {failed ? 'Metric curves unavailable.' : 'Last loaded metric curves; refresh failed.'}
-      {' '}<button className="btn sm" onClick={retry}>Retry</button>
+      {((failed ? uiText('Metric curves unavailable.') : uiText('Last loaded metric curves; refresh failed.')))}
+      {' '}<button className="btn sm" onClick={retry}>{uiText("Retry")}</button>
     </div>}
     {!failed && <MetricLines series={stale ? resource[0] : resource} />}
   </>
@@ -2772,6 +2760,8 @@ function MetricCurveResource({ runId, nodeId, attempt = 0, status, expectedGener
 // Exported for the same reason `MetricCurves` is: nothing in the suite MOUNTS `Inspector.jsx`, and
 // the objective row's label is a claim about a RECORD that has to be driven, not read off the source.
 export function Metrics({ n: detailNode, detail, state, runId, expectedGeneration, onToast = null, canRetarget = false }) {
+  useUILanguage()
+
   const n = currentResultNode(detailNode, state)
   // THE OBJECTIVE AN OPERATOR MAY PUT IN FORCE (doc 68 68.2): a declared extra metric the whole run
   // is re-ranked by, offered only on a live view and only where the server would accept it
@@ -2879,27 +2869,27 @@ export function Metrics({ n: detailNode, detail, state, runId, expectedGeneratio
   // describes is actually on screen.
   const anyUnverified = rows.some(r => r.caveated || r.bestCaveated)
   const ranked = (value, node) => <>{fmt(value)} <small className="muted">
-    {resultMeasurement(Number.isFinite(node?.confirmed_mean), node?.confirmed_seeds).label}</small></>
+    {uiText(resultMeasurement(Number.isFinite(node?.confirmed_mean), node?.confirmed_seeds).label)}</small></>
   return <>
     <ExperimentResult node={n} state={state} />
     <BaseRevision node={n} state={state} />
-    <div className="section-h">Reported metrics{champ ? ` · best = #${champ.id}` : ''}</div>
-    <DataTable caption="Node metric comparison" card={false}><table className="tbl"><thead><tr><th>metric</th><th>source</th><th>this node</th>{showChamp && <th>best #{champ.id}</th>}</tr></thead>
+    <div className="section-h">{uiText("Reported metrics")}{(champ ? uiMessage(" · best = #{0}", [champ.id]) : '')}</div>
+    <DataTable caption={uiText("Node metric comparison")} card={false}><table className="tbl"><thead><tr><th>{uiText("metric")}</th><th>{uiText("source")}</th><th>{uiText("this node")}</th>{showChamp && <th>{uiText("best #")}{champ.id}</th>}</tr></thead>
       <tbody>{rows.map(r => <tr key={r.k} className={r.star ? 'chosen-row' : ''}>
         <td>{r.star ? `★ ${objectiveLabel(state)}` : r.k}
           {!r.star && retargetable.has(r.k) && <button type="button" className="btn xs ghost"
-            disabled={retargeting} title={`Rank every node of this run by ${r.k} instead`}
-            onClick={() => doRetarget(r.k)}>rank by this</button>}
+            disabled={retargeting} title={uiMessage("Rank every node of this run by {0} instead", [r.k])}
+            onClick={() => doRetarget(r.k)}>{uiText("rank by this")}</button>}
           {r.star && retarget && canRetarget && onToast && <button type="button" className="btn xs ghost"
-            disabled={retargeting} title="Rank every node by the task's own metric again"
-            onClick={() => doRetarget(null)}>rank by the task metric</button>}</td>
+            disabled={retargeting} title={uiText("Rank every node by the task's own metric again")}
+            onClick={() => doRetarget(null)}>{uiText("rank by the task metric")}</button>}</td>
         <td className="muted">{r.star && !objKey
           ? <span className={objectiveCaveated ? 'warn' : ''}
             title={objectiveSourceHelp(objective)}>{OBJECTIVE_SOURCE_LABEL[objective.channel]}</span>
           : r.channel
             ? <span className={r.caveated ? 'warn' : ''}
               title={extraMetricSourceHelp(n, r.star ? objKey : r.k)}>
-              {extraMetricSourceLabel(n, r.star ? objKey : r.k)}</span>
+              {uiText(extraMetricSourceLabel(n, r.star ? objKey : r.k))}</span>
             : null}</td>
         <td>{r.star ? ranked(r.mine, n) : fmt(r.mine)}</td>
         {showChamp && <td>{r.star && !objKey && objectiveSourceCaveated(champObjective)
@@ -2907,20 +2897,14 @@ export function Metrics({ n: detailNode, detail, state, runId, expectedGeneratio
             {ranked(r.best, champ)} · {OBJECTIVE_SOURCE_LABEL[champObjective.channel]}</span>
           : r.bestCaveated
             ? <span className="warn" title={extraMetricSourceHelp(champ, r.star ? objKey : r.k)}>
-              {r.star ? ranked(r.best, champ) : fmt(r.best)} · {extraMetricSourceLabel(champ, r.star ? objKey : r.k)}</span>
+              {r.star ? ranked(r.best, champ) : fmt(r.best)} · {uiText(extraMetricSourceLabel(champ, r.star ? objKey : r.k))}</span>
             : r.star ? ranked(r.best, champ) : fmt(r.best)}</td>}</tr>)}</tbody></table></DataTable>
     {/* The extras' footnote below exists because a tooltip is not discoverable — an operator
         scanning a table does not hover every cell. That argument is STRONGER for the ★ row, which
         is the number that drives selection, so the caveat is printed rather than only hovered. It
         renders the SAME sentence the tooltip carries, from the same call, so the two cannot drift. */}
-    {retarget && <div className="muted">
-      The run ranks by <b>{retarget.key}</b> since an operator retarget (event #{retarget.seq}); before
-      it, by {retarget.previous ? <b>{retarget.previous}</b> : "the task's own metric"}, and every
-      decision taken earlier was taken on that objective. Each node keeps its own task metric in the
-      record.
-    </div>}
-    {objectiveCaveated && !objKey && <div className="muted">
-      The ★ objective is marked <b>{OBJECTIVE_SOURCE_LABEL[objective.channel]}</b>.{' '}
+    {retarget && <div className="muted">{uiText("The run ranks by ")}<b>{retarget.key}</b>{uiText(" since an operator retarget (event #")}{retarget.seq}{uiText("); before it, by ")}{retarget.previous ? <b>{retarget.previous}</b> : uiText("the task's own metric")}{uiText(", and every decision taken earlier was taken on that objective. Each node keeps its own task metric in the record.")}</div>}
+    {objectiveCaveated && !objKey && <div className="muted">{uiText("The ★ objective is marked ")}<b>{OBJECTIVE_SOURCE_LABEL[objective.channel]}</b>.{' '}
       {objectiveSourceHelp(objective)}
     </div>}
     {/* WHAT THE NUMBER IS FOR, beside the two footnotes about how it was MEASURED. The run row can
@@ -2945,41 +2929,33 @@ export function Metrics({ n: detailNode, detail, state, runId, expectedGeneratio
         admitting it cannot say. Merging them under one heading would publish the second as the
         first, which is the vacuous green one layer up. */}
     {appliedParamsDivergences(nodeAppliedParams(n)).length > 0 && <div className="muted">
-      <b>Declared coordinates that did not run.</b> {appliedParamsNotice(nodeAppliedParams(n))}
+      <b>{uiText("Declared coordinates that did not run.")}</b> {uiText(appliedParamsNotice(nodeAppliedParams(n)))}
       <ul className="applied-param-divergences">
         {appliedParamsDivergences(nodeAppliedParams(n)).map(d => <li key={d.param}>
-          <code>{d.param}</code>: declared <b>{fmt(d.declared)}</b> · ran{' '}
+          <code>{d.param}</code>{uiText(": declared ")}<b>{fmt(d.declared)}</b>{uiText(" · ran")}{' '}
           <b className="warn">{fmt(d.applied)}</b>
           {d.file ? <span className="muted"> · {d.file}{d.line == null ? '' : `:${d.line}`}
-            {d.match === 'suffix' ? ' (matched by dotted suffix)' : ''}</span> : null}
+            {((d.match === 'suffix' ? uiText(' (matched by dotted suffix)') : ''))}</span> : null}
         </li>)}
       </ul>
-      {appliedParamsChecked(nodeAppliedParams(n)) == null && <span className="muted">
-        This record does not say how many coordinates were checked, so it cannot tell you that the
-        rest agreed — only that these did not.
-      </span>}
+      {appliedParamsChecked(nodeAppliedParams(n)) == null && <span className="muted">{uiText("This record does not say how many coordinates were checked, so it cannot tell you that the rest agreed — only that these did not.")}</span>}
     </div>}
     {appliedParamsConflicts(nodeAppliedParams(n)).length > 0 && <div className="muted">
-      <b>Declared coordinates the record cannot settle.</b>{' '}
-      {appliedParamsConflictNotice(nodeAppliedParams(n))}
+      <b>{uiText("Declared coordinates the record cannot settle.")}</b>{' '}
+      {uiText(appliedParamsConflictNotice(nodeAppliedParams(n)))}
       <ul className="applied-param-conflicts">
         {appliedParamsConflicts(nodeAppliedParams(n)).map(c => <li key={c.param}>
-          <code>{c.param}</code>: declared <b>{fmt(c.declared)}</b> · read as{' '}
+          <code>{c.param}</code>{uiText(": declared ")}<b>{fmt(c.declared)}</b>{uiText(" · read as")}{' '}
           {c.readings.length
             ? c.readings.map((r, idx) => <span key={`${r.file}:${r.line}:${idx}`}>
               {idx > 0 ? ' · ' : ''}<b className="warn">{fmt(r.applied)}</b>
-              {r.file ? <span className="muted"> in {r.file}{r.line == null ? '' : `:${r.line}`}</span> : null}
+              {r.file ? <span className="muted">{uiText(" in ")}{r.file}{r.line == null ? '' : `:${r.line}`}</span> : null}
             </span>)
-            : <span className="muted">two different values this record does not name</span>}
+            : <span className="muted">{uiText("two different values this record does not name")}</span>}
         </li>)}
       </ul>
     </div>}
-    {anyUnverified && <div className="muted">
-      Rows marked <b>self-reported</b> were taken from the experiment's own stdout with nothing
-      declaring or checking them — the code that produced the number also chose to print it. They
-      are audit-only and never drive selection. <b>provenance unknown</b> means the run predates this
-      record; treat it as self-reported.
-    </div>}
+    {anyUnverified && <div className="muted">{uiText("Rows marked ")}<b>{uiText("self-reported")}</b>{uiText(" were taken from the experiment's own stdout with nothing declaring or checking them — the code that produced the number also chose to print it. They are audit-only and never drive selection. ")}<b>{uiText("provenance unknown")}</b>{uiText(" means the run predates this record; treat it as self-reported.")}</div>}
     {/* PRINTED, not the footnote's job to hover. The argument above the ★ footnote — "a tooltip is
         not discoverable, an operator scanning a table does not hover every cell" — is STRONGER
         here, because the harm is a silent tie: the recovered suite is printed to two decimals while
@@ -2988,19 +2964,13 @@ export function Metrics({ n: detailNode, detail, state, runId, expectedGeneratio
         carries any extra metric, so a backfilled map is backfilled entirely) and the champion's
         record is read separately, because the `best #N` column is a different node's number. */}
     {(extraMetricIsBackfilled(n) || (champ && extraMetricIsBackfilled(champ))) && (
-      <div className="muted">
-        Rows marked <b>reconstructed</b> were recovered from the preserved score log after the run,
-        not recorded while it was happening — at the precision the scoring program chose to print,
-        which is coarser than the objective. Two nodes equal on a reconstructed row are not known to
-        be equal.
-      </div>)}
+      <div className="muted">{uiText("Rows marked ")}<b>{uiText("reconstructed")}</b>{uiText(" were recovered from the preserved score log after the run, not recorded while it was happening — at the precision the scoring program chose to print, which is coarser than the objective. Two nodes equal on a reconstructed row are not known to be equal.")}</div>)}
     {vals.length > 0 && <>
-      <div className="section-h">Per-seed confirmation</div>
-      <DataTable caption="Per-seed confirmation metrics" card={false}><table className="tbl"><thead><tr><th>seed</th><th>metric</th></tr></thead>
+      <div className="section-h">{uiText("Per-seed confirmation")}</div>
+      <DataTable caption={uiText("Per-seed confirmation metrics")} card={false}><table className="tbl"><thead><tr><th>{uiText("seed")}</th><th>{uiText("metric")}</th></tr></thead>
         <tbody>{vals.map(x => <tr key={x.s}><td>{x.s}</td><td>{fmt(x.v)}</td></tr>)}</tbody></table></DataTable>
     </>}
-    <div className="section-h metric-curves-heading">Metric curves
-      <span className="muted metric-curves-note">· live logged scalars · grouped</span></div>
+    <div className="section-h metric-curves-heading">{uiText("Metric curves")}<span className="muted metric-curves-note">{uiText("· live logged scalars · grouped")}</span></div>
     <MetricCurves runId={runId} nodeId={n.id} expectedGeneration={expectedGeneration}
       attempt={n.attempt ?? 0} status={n.status} />
   </>
@@ -3010,15 +2980,15 @@ export function Metrics({ n: detailNode, detail, state, runId, expectedGeneratio
 // parallel-coords / scatter views. Trials aren't backend nodes, so the charts get pseudo-node
 // adapters ({id, metric, idea:{params}, feasible}) — no charts.jsx change needed.
 function Trials({ n, detail, state }) {
+  useUILanguage()
+
   const trials = detail?.trials ?? n.trials ?? []
   const summary = n.trials_summary
   const [sortKey, setSortKey] = useState('metric')
   const [sortDir, setSortDir] = useState(state.direction === 'min' ? 'asc' : 'desc')
   const [showAll, setShowAll] = useState(false)
   if (!trials.length) {
-    return <div className="muted">{summary
-      ? `Sweep of ${summary.count} trial(s) — loading full results…`
-      : 'No trials recorded for this node.'}</div>
+    return <div className="muted">{((summary ? uiMessage("Sweep of {0} trial(s) — loading full results…", [summary.count]) : uiText('No trials recorded for this node.')))}</div>
   }
   const dir = state.direction
   const params = Array.from(new Set(trials.flatMap(t => Object.keys(t.params || {}))))
@@ -3055,84 +3025,87 @@ function Trials({ n, detail, state }) {
       <KV k="Σ seconds" v={fmt(totSec)} />
     </div>
     {params.length > 0 && <>
-      <div className="section-h">Params → metric</div>
+      <div className="section-h">{uiText("Params → metric")}</div>
       <ParallelCoords nodes={pseudo} direction={dir} height={220} />
     </>}
     {scatter.length > 0 && <>
-      <div className="section-h">{params[0]} vs metric</div>
+      <div className="section-h">{params[0]}{uiText(" vs metric")}</div>
       <Scatter data={scatter} xlab={params[0]} ylab="metric" height={220} />
     </>}
-    <div className="section-h">Trials <span className="pill">{trials.length}</span></div>
-    <DataTable caption="Hyperparameter sweep trial results" card={false}><table className="tbl">
-      <thead><tr><Th k="idx">#</Th>{params.map(p => <Th key={p} k={p}>{p}</Th>)}<Th k="metric">metric</Th><Th k="seconds">s</Th></tr></thead>
+    <div className="section-h">{uiText("Trials ")}<span className="pill">{trials.length}</span></div>
+    <DataTable caption={uiText("Hyperparameter sweep trial results")} card={false}><table className="tbl">
+      <thead><tr><Th k="idx">#</Th>{params.map(p => <Th key={p} k={p}>{p}</Th>)}<Th k="metric">{uiText("metric")}</Th><Th k="seconds">s</Th></tr></thead>
       <tbody>{rows.map(t => <tr key={t._i}
         className={t._i === bestIdx ? 'best-row' : ''}>
         <td>#{t._i}{t._i === bestIdx ? <OpIcon name="crown" size={10} /> : ''}</td>
         {params.map(p => <td key={p}>{t.params?.[p] != null ? fmt(t.params[p]) : '—'}</td>)}
-        <td>{t.metric != null ? fmt(t.metric) : <span className="badge reason">{t.error ? 'error' : 'failed'}</span>}</td>
+        <td>{t.metric != null ? fmt(t.metric) : <span className="badge reason">{((t.error ? uiText('error') : uiText('failed')))}</span>}</td>
         <td className="muted">{fmt(t.seconds)}</td></tr>)}</tbody>
     </table></DataTable>
     {rowsAll.length > CAP && <button className="btn sm ghost trials-reveal" onClick={() => setShowAll(s => !s)}>
-      {showAll ? 'show fewer' : `show all ${rowsAll.length}`}</button>}
+      {((showAll ? uiText('show fewer') : uiMessage("show all {0}", [rowsAll.length])))}</button>}
   </>
 }
 
 function Trust({ n, drifts = [] }) {
+  useUILanguage()
+
   const feasibility = nodeFeasibilityStatus(n)
   const State = ({ tone, label, detail }) => <div className={`trust-state ${tone}`} role={tone === 'alarm' ? 'alert' : 'status'}>
     <OpIcon name={tone === 'alarm' ? 'alert' : tone === 'ok' ? 'check' : 'dot'} size={14} />
-    <strong>{label}</strong><span>{detail}</span>
+    <strong>{uiText(label)}</strong><span>{detail}</span>
   </div>
   return <div className="inspector-trust">
-    <div className="section-h">Robustness</div>
+    <div className="section-h">{uiText("Robustness")}</div>
     {n.confirmed_mean != null
       // `|| 'Multiple'` swallowed a REAL zero: a node reporting `confirmed_seeds: 0` alongside a
       // `confirmed_mean` is a contradiction worth seeing, and rewriting it to the reassuring word
       // "Multiple" is the one rendering that hides it. Print the count whenever it is a number —
       // including 0 — and reserve the word for a genuinely absent count.
       // (A `{/* … */}` here is a syntax error: inside a ternary we are in JS, not in JSX children.)
-      ? <><State tone="ok" label="Multi-seed confirmed" detail={`${typeof n.confirmed_seeds === 'number' ? n.confirmed_seeds : 'Multiple'} successful seeds are recorded for this node.`} /><div className="kv">
+      ? <><State tone="ok" label={uiText("Multi-seed confirmed")} detail={`${typeof n.confirmed_seeds === 'number' ? n.confirmed_seeds : 'Multiple'} successful seeds are recorded for this node.`} /><div className="kv">
         <KV k="single" v={fmt(n.metric)} />
         <KV k="robust mean" v={fmt(n.confirmed_mean)} />
         <KV k="std" v={fmt(n.confirmed_std)} />
         <KV k="seeds" v={n.confirmed_seeds} />
       </div></>
-      : <State tone="warn" label="Single-evaluation only" detail="This node is not multi-seed confirmed and could be seed-lucky." />}
-    <div className="section-h">Feasibility</div>
+      : <State tone="warn" label={uiText("Single-evaluation only")} detail="This node is not multi-seed confirmed and could be seed-lucky." />}
+    <div className="section-h">{uiText("Feasibility")}</div>
     <State {...feasibility} />
     {/* A salvaged metric has no BOUND — it is not a constraint at all — so rendering it in this
         table produced a row reading "metric_salvaged | (blank) | (blank)". It gets its own row shape
         naming where the number came from, which is the only question that row can usefully answer. */}
     {n.violations?.length
-      ? <DataTable caption="Feasibility record" card={false}><table className="tbl"><thead><tr><th>reason</th><th>value</th><th>bound</th></tr></thead>
+      ? <DataTable caption={uiText("Feasibility record")} card={false}><table className="tbl"><thead><tr><th>{uiText("reason")}</th><th>{uiText("value")}</th><th>{uiText("bound")}</th></tr></thead>
         <tbody>{n.violations.map((v, i) => isSalvagedMetricViolation(v)
-          ? <tr key={i}><td className="flag">metric salvaged</td><td>{fmt(n.metric)}</td>
-            <td className="muted">recovered by {v.salvage?.source === 'declared_reader'
-              ? 'the run’s own declared reader' : (v.salvage?.source || 'the run')}
-              {v.salvage?.stage ? ` after stage “${v.salvage.stage}”` : ''}</td></tr>
+          ? <tr key={i}><td className="flag">{uiText("metric salvaged")}</td><td>{fmt(n.metric)}</td>
+            <td className="muted">{uiText("recovered by ")}{((v.salvage?.source === 'declared_reader' ? uiText('the run’s own declared reader') : (v.salvage?.source || uiText('the run'))))}
+              {(v.salvage?.stage ? uiMessage(" after stage “{0}”", [v.salvage.stage]) : '')}</td></tr>
           : <tr key={i}><td className="flag">{v.name}</td><td>{fmt(v.value)}</td><td>{v.max != null ? `≤ ${fmt(v.max)}` : `≥ ${fmt(v.min)}`}</td></tr>)}</tbody></table>
       </DataTable>
       : null}
-    <div className="section-h">Metric drift</div>
+    <div className="section-h">{uiText("Metric drift")}</div>
     {drifts.length
-      ? <><State tone="alarm" label={`${drifts.length} divergence${drifts.length === 1 ? '' : 's'} recorded`} detail="The independent metric reader disagreed with the primary metric." /><DataTable caption="Metric drift cross-checks" card={false}><table className="tbl"><thead><tr><th>seed</th><th>primary</th><th>cross-check</th><th>tol</th></tr></thead>
+      ? <><State tone="alarm" label={uiMessage("{0} divergence{1} recorded", [drifts.length, drifts.length === 1 ? '' : 's'])} detail="The independent metric reader disagreed with the primary metric." /><DataTable caption={uiText("Metric drift cross-checks")} card={false}><table className="tbl"><thead><tr><th>{uiText("seed")}</th><th>{uiText("primary")}</th><th>{uiText("cross-check")}</th><th>{uiText("tol")}</th></tr></thead>
         <tbody>{drifts.map((d, i) => <tr key={i}><td>{d.seed ?? '—'}</td><td className="flag">{fmt(d.primary)}</td><td>{fmt(d.cross)}</td><td className="muted">{fmt(d.tolerance)}</td></tr>)}</tbody></table>
         </DataTable>
       </>
-      : <State tone="unknown" label="No drift flag recorded" detail="This does not prove that an independent cross-check ran for this node." />}
-    {n.status === 'failed' && <><div className="section-h">Failure</div><span className="badge reason">{n.error_reason}</span><pre className="code">{n.error}</pre></>}
+      : <State tone="unknown" label={uiText("No drift flag recorded")} detail="This does not prove that an independent cross-check ran for this node." />}
+    {n.status === 'failed' && <><div className="section-h">{uiText("Failure")}</div><span className="badge reason">{n.error_reason}</span><pre className="code">{n.error}</pre></>}
   </div>
 }
 
 function Cost({ state }) {
+  useUILanguage()
+
   const c = state.llm_cost
-  if (!c) return <div className="muted">No LLM cost recorded (offline/toy run, or run not finished).</div>
+  if (!c) return <div className="muted">{uiText("No LLM cost recorded (offline/toy run, or run not finished).")}</div>
   // "$ spent" used to be `fmt(c.cost)`, which printed `0` for a run whose provider never priced a
   // single call — indistinguishable from a run that really cost nothing. `costPricing` owns that
   // distinction; the priced/total call split below is the evidence for whichever answer it gives.
   const pricing = costPricing(c)
   return <div className="kv">
-    <KV k="$ spent" v={<span title={pricing.title}>{pricing.text}</span>} />
+    <KV k="$ spent" v={<span title={uiText(pricing.title)}>{uiText(pricing.text)}</span>} />
     <KV k="calls" v={fmtInt(c.calls)} />
     {/* `?? 0` here contradicted `costPricing` on the SAME object two lines up: that function treats an
         absent `priced_calls` as "this payload does not say" and prints the figure with a caveat,
@@ -3140,8 +3113,8 @@ function Cost({ state }) {
         "the provider priced nothing", the one conclusion the absent key cannot support. The row is
         the EVIDENCE for the verdict above it, so it must not assert something the verdict declines
         to. `fmtInt` already renders null/undefined as an em dash. */}
-    <KV k="priced by provider" v={<span title={pricing.title}>
-      {fmtInt(typeof c.priced_calls === 'number' ? c.priced_calls : null)} of {fmtInt(c.calls)}</span>} />
+    <KV k="priced by provider" v={<span title={uiText(pricing.title)}>
+      {fmtInt(typeof c.priced_calls === 'number' ? c.priced_calls : null)}{uiText(" of ")}{fmtInt(c.calls)}</span>} />
     <KV k="prompt tokens" v={fmtInt(c.prompt_tokens)} />
     <KV k="completion tokens" v={fmtInt(c.completion_tokens)} />
     <KV k="total tokens" v={fmtInt(c.total_tokens)} />

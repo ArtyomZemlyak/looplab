@@ -1,5 +1,7 @@
+import { uiText, useUILanguage } from './uiLanguage.js'
 import React, { useEffect, useRef, useState } from 'react'
 import { followClientRoute, nextRovingIndex } from './accessibility.jsx'
+import LanguageControl from './LanguageControl.jsx'
 import { GLOBAL_DESTINATIONS } from './globalNav.js'
 
 // The LoopLab mark, in its ONE spelling. Every topbar in the app renders it from here rather than
@@ -15,7 +17,9 @@ import { GLOBAL_DESTINATIONS } from './globalNav.js'
 // is why the arrow lives outside this element and the button below carries its own `aria-label`
 // (a `display:none` label is removed from the accessibility tree, name and all).
 export function BrandMark() {
-  return <span className="brand"><span className="dot">◉</span> LoopLab</span>
+  useUILanguage()
+
+  return <span className="brand"><span className="dot">◉</span>{uiText(" LoopLab")}</span>
 }
 
 // The LoopLab menu: every surface that is true for the WHOLE installation, in one place, on every
@@ -45,6 +49,8 @@ export function BrandMark() {
 // branch is spelled at the call site (RunView), where `reviewMode` is known.
 export default function GlobalMenu({ current = null, onNavigate = null, disabled = false,
   buttonRef = null }) {
+  useUILanguage()
+
   const [open, setOpen] = useState(false)
   const ownTriggerRef = useRef(null)
   const triggerRef = buttonRef || ownTriggerRef
@@ -72,14 +78,15 @@ export default function GlobalMenu({ current = null, onNavigate = null, disabled
       menuRef.current?.querySelector('[role="menuitem"]')?.focus({ preventScroll: true }))
     return () => cancelAnimationFrame(frame)
   }, [open])
-  return <div className="more-wrap global-menu-wrap">
+  return <><LanguageControl disabled={disabled} />
+  <div className="more-wrap global-menu-wrap">
     {/* The accessible name is explicit and starts with the visible word (WCAG 2.5.3 Label in Name):
         the mark inside is `display:none` on a narrow run header, and a hidden label would otherwise
         leave this button nameless exactly where it is reduced to a lone arrow. */}
     <button ref={triggerRef} type="button" className="btn sm ghost global-menu-btn" disabled={disabled}
       aria-haspopup="menu" aria-expanded={open} aria-controls="looplab-global-menu"
-      aria-label="LoopLab — installation-wide surfaces"
-      title="Installation-wide surfaces — not scoped to any one run"
+      aria-label={uiText("LoopLab — installation-wide surfaces")}
+      title={uiText("Installation-wide surfaces — not scoped to any one run")}
       onClick={() => setOpen(value => !value)}>
       <BrandMark />
       <span className="global-menu-caret" aria-hidden="true">▾</span>
@@ -87,23 +94,23 @@ export default function GlobalMenu({ current = null, onNavigate = null, disabled
     {open && <>
       <div className="menu-backdrop" aria-hidden="true" onClick={() => close(true)} />
       <div ref={menuRef} id="looplab-global-menu" className="run-menu more-menu" role="menu"
-        aria-label="LoopLab — installation-wide" onClick={event => event.stopPropagation()}
+        aria-label={uiText("LoopLab — installation-wide")} onClick={event => event.stopPropagation()}
         onKeyDown={onKeyDown}
         onBlur={event => {
           if (event.relatedTarget !== triggerRef.current
             && !event.currentTarget.contains(event.relatedTarget)) close(false)
         }}>
-        <div className="mi-label">Whole installation</div>
+        <div className="mi-label">{uiText("Whole installation")}</div>
         {GLOBAL_DESTINATIONS.map(entry => <a key={entry.key} role="menuitem" tabIndex={-1}
-          className={'mi' + (current === entry.key ? ' on' : '')} href={entry.hash} title={entry.title}
+          className={'mi' + (current === entry.key ? ' on' : '')} href={entry.hash} title={uiText(entry.title)}
           aria-current={current === entry.key ? 'page' : undefined}
           onClick={event => {
             close(false)
             // followClientRoute leaves a modified click (new tab / window) as a real link and only
             // intercepts the plain one, which is when the list snapshot has to be handed over.
             if (onNavigate) followClientRoute(event, () => onNavigate(entry.hash, entry.key))
-          }}>{entry.label}</a>)}
+          }}>{uiText(entry.label)}</a>)}
       </div>
     </>}
-  </div>
+  </div></>
 }

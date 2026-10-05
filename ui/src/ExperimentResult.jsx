@@ -1,3 +1,4 @@
+import { uiText, uiMessage, useUILanguage } from './uiLanguage.js'
 import React from 'react'
 import { fmt } from './util.js'
 import { objectiveKey } from './objectiveModel.js'
@@ -16,6 +17,8 @@ const finite = value => typeof value === 'number' && Number.isFinite(value)
 // Read the recorded scoring result and confirmation separately. A shared base-eval
 // receipt does not certify that two confirmation means used the same ruler.
 export default function ExperimentResult({ node: n, state = {}, onTab }) {
+  useUILanguage()
+
   const completed = n.status === 'evaluated'
   const active = nodeIsActive(n, state)
   const score = completed && finite(n.metric)
@@ -56,37 +59,34 @@ export default function ExperimentResult({ node: n, state = {}, onTab }) {
               ? 'Recorded parent attempt is unavailable or has changed; comparison is not established.'
               : keys === 'different' ? `Do not compare: ${COMPARABILITY_REFUSAL_SHORT[nodesComparabilitySplit([n, parent])]}.`
                 : 'Comparison is not established. Check the recorded base, evaluation conditions, feasibility and Trust.'
-  return <section className="experiment-result" aria-label="Experiment result">
-    <div className="experiment-result-head"><strong>Experiment result</strong>
+  return <section className="experiment-result" aria-label={uiText("Experiment result")}>
+    <div className="experiment-result-head"><strong>{uiText("Experiment result")}</strong>
       {currentMatch && n.confirmed_mean === current.confirmed_mean && eligibleMeasuredResult(n, state)
-        && eligibleMeasuredResult(current, state) && n.id === state.best_node_id && <span>Selected by the engine</span>}</div>
-    <p className="experiment-result-objective">{key || 'Objective'} · {direction}</p>
+        && eligibleMeasuredResult(current, state) && n.id === state.best_node_id && <span>{uiText("Selected by the engine")}</span>}</div>
+    <p className="experiment-result-objective">{((key || uiText('Objective')))} · {uiText(direction)}</p>
     <dl className="experiment-result-values">
-      <div><dt>Evaluation score</dt><dd>{score ? fmt(n.metric) : '—'}</dd>
-        {score && <p className={caveated ? 'experiment-result-warning' : 'muted'} title={sourceHelp}>{sourceLabel}</p>}</div>
-      <div><dt>Confirmation mean</dt><dd>{confirmed ? fmt(n.confirmed_mean) : 'Not confirmed'}</dd>
-        <p>{measurement.reliability}</p>
-        {confirmed && <p>{finite(n.confirmed_std) && n.confirmed_std >= 0
-          ? `Standard deviation: ${fmt(n.confirmed_std)}` : 'Spread is not recorded.'}</p>}</div>
+      <div><dt>{uiText("Evaluation score")}</dt><dd>{score ? fmt(n.metric) : '—'}</dd>
+        {score && <p className={caveated ? 'experiment-result-warning' : 'muted'} title={uiText(sourceHelp)}>{uiText(sourceLabel)}</p>}</div>
+      <div><dt>{uiText("Confirmation mean")}</dt><dd>{((confirmed ? fmt(n.confirmed_mean) : uiText('Not confirmed')))}</dd>
+        <p>{uiText(measurement.reliability)}</p>
+        {confirmed && <p>{((finite(n.confirmed_std) && n.confirmed_std >= 0 ? uiMessage("Standard deviation: {0}", [fmt(n.confirmed_std)]) : uiText('Spread is not recorded.')))}</p>}</div>
     </dl>
-    <p className={feasibility.tone === 'ok' && active && !excluded ? '' : 'experiment-result-warning'}>{status}.
-      {active && completed ? ` ${feasibility.detail}` : ' Inspect Trace and Trust before using this result.'}</p>
-    {score && caveated && <p className="experiment-result-warning">{sourceHelp}</p>}
-    {confirmed && <p>Multiple seeds do not establish generalization or statistical significance. Review their spread and evaluation conditions.</p>}
-    {parents.length > 0 ? <div className="experiment-result-parents"><strong>Parent comparison · evaluation scores</strong>
+    <p className={feasibility.tone === 'ok' && active && !excluded ? '' : 'experiment-result-warning'}>{uiText(status)}.
+      {((active && completed ? ` ${uiText(feasibility.detail)}` : uiText(' Inspect Trace and Trust before using this result.')))}</p>
+    {score && caveated && <p className="experiment-result-warning">{uiText(sourceHelp)}</p>}
+    {confirmed && <p>{uiText("Multiple seeds do not establish generalization or statistical significance. Review their spread and evaluation conditions.")}</p>}
+    {parents.length > 0 ? <div className="experiment-result-parents"><strong>{uiText("Parent comparison · evaluation scores")}</strong>
       <ul>{parents.map(({ id, node: parent }) => {
         const available = parent?.status === 'evaluated' && nodeIsActive(parent, state)
           && finite(parent.metric)
-        return <li key={id}>#{id}: {available ? fmt(parent.metric) : 'not available'} · current evaluation score</li>
+        return <li key={id}>#{id}: {((available ? fmt(parent.metric) : uiText('not available')))}{uiText(" · current evaluation score")}</li>
       })}</ul>
-      <p className={difference == null ? 'experiment-result-warning' : ''}>{comparison}</p>
-      <p>These are evaluation scores, not confirmation means. Parentage alone does not establish improvement.</p>
-    </div> : <p>{Array.isArray(n.parent_ids)
-      ? 'No parent experiment is recorded. This is not automatically a task baseline.'
-      : 'Parent references are unavailable; refresh the evidence before interpreting this result.'}</p>}
+      <p className={difference == null ? 'experiment-result-warning' : ''}>{uiText(comparison)}</p>
+      <p>{uiText("These are evaluation scores, not confirmation means. Parentage alone does not establish improvement.")}</p>
+    </div> : <p>{((Array.isArray(n.parent_ids) ? uiText('No parent experiment is recorded. This is not automatically a task baseline.') : uiText('Parent references are unavailable; refresh the evidence before interpreting this result.')))}</p>}
     {onTab && <div className="experiment-result-actions">
-      <button type="button" className="btn sm" onClick={() => onTab('Metrics')}>All metrics & repeat checks</button>
-      <button type="button" className="btn sm ghost" onClick={() => onTab('Trust')}>Review trust evidence</button>
+      <button type="button" className="btn sm" onClick={() => onTab('Metrics')}>{uiText("All metrics & repeat checks")}</button>
+      <button type="button" className="btn sm ghost" onClick={() => onTab('Trust')}>{uiText("Review trust evidence")}</button>
     </div>}
   </section>
 }

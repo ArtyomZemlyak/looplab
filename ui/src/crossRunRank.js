@@ -1,3 +1,4 @@
+import { uiMessage } from './uiLanguage.js'
 // Pure model for the CROSS-RUN metric overlay — the `Same-task run observations` panel's decisions.
 // No React, no I/O; unit-tested with `node --test` (`ui/test/crossRunRank.test.js`).
 //
@@ -744,7 +745,7 @@ export function trajectoryClaim(group, overlay) {
   if (overlay.beyondLimit) left.push(`${overlay.beyondLimit} beyond the ${overlay.limit} lines the chart can tell apart, in rank order`)
   if (overlay.capped) left.push(`${overlay.capped} drawn coarser: more improvements than the row carries`)
   const tail = left.length ? ` ${left.join('; ')}.` : ''
-  if (!overlay.drawn) return `No trajectory to draw for this group.${tail}`
+  if (!overlay.drawn) return uiMessage("No trajectory to draw for this group.{0}", [tail])
   return `Running best per evaluated experiment for ${overlay.drawn} of ${size} ${plural(size, 'run', 'runs')}, `
     + "on this group's own axis — one task, one direction, one evaluation, nothing rescaled; "
     + `a line holds its value until the experiment that beat it.${tail}`

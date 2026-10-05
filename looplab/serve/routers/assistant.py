@@ -476,8 +476,12 @@ def unattended_watch_approver(declined: list):
     return approver
 
 
-def unattended_denial_note(declined: list) -> str:
+def unattended_denial_note(declined: list, language="auto") -> str:
     shown = ", ".join(dict.fromkeys(declined))[:400]
+    if language == "ru":
+        return (f"[монитор] Действий, требующих вашего подтверждения: {len(declined)}. "
+                f"Они автоматически отклонены: {shown}. Повторите запрос в этом чате "
+                "и подтвердите выполнение.")
     return (f"[standing watch] {len(declined)} action(s) needing your approval were declined "
             f"automatically, because nobody is watching an automatic wake-up: {shown}. "
             f"Ask for them again in this chat and approve them there.")
@@ -1842,7 +1846,9 @@ def build_router(srv) -> APIRouter:
             turn_id = secrets.token_hex(8)
             res = _assistant_run_turn(
                 client, root, history, instruction, mode,
-                response_language=_response_language(sess["meta"].get("response_language", "auto")),
+                response_language=_response_language(
+                    s.output_language if s.output_language != "auto"
+                    else sess["meta"].get("response_language", "auto")),
                 alive_fn=_engine_alive, settings=s, approver=approver,
                 # THE PARTY THAT ARMED THE WATCH, pinned on the record at arming (like its mode): a
                 # wake-up has no request, and a legacy record with no pin runs as `anonymous`.
@@ -1865,7 +1871,7 @@ def build_router(srv) -> APIRouter:
             # wake-up reporting that it "could not" do the thing they asked for, with no way to learn
             # that the server declined it rather than the run refusing it.
             res = {**res, "reply": ((res.get("reply") or "").rstrip() + "\n\n" +
-                                    unattended_denial_note(declined)).strip(),
+                                    unattended_denial_note(declined, _watch_language(record))).strip(),
                    "unattended_denied": list(dict.fromkeys(declined))}
         return res
 
@@ -1874,6 +1880,16 @@ def build_router(srv) -> APIRouter:
         # own, and it holds the session's turn slot while it runs, so nothing can interleave. The
         # conditional append exists to drop a cancelled turn's stale reply; a watch has no such twin.
         _asst.append(session, turn)
+
+    def _watch_language(record) -> str:
+        language = _llm_settings().output_language
+        if language != "auto":
+            return language
+        session = _asst.get(record.get("session"))
+        meta = session.get("meta") if isinstance(session, dict) else None
+        language = meta.get("response_language") if isinstance(meta, dict) else None
+        # Old or damaged optional chat metadata must not suppress a stopped-watch notice.
+        return language if language in ("auto", "en", "ru") else "auto"
 
     def _watch_session_exists(sid) -> Optional[bool]:
         return watch_session_exists(_asst, sid)
@@ -1892,7 +1908,8 @@ def build_router(srv) -> APIRouter:
         _watches, observe_run=_watch_observe_run, run_turn_fn=_watch_run_turn,
         append_turn=_watch_append, observe_target=_watch_observe_target,
         session_exists=_watch_session_exists,
-        on_error=_watch_scheduler_error)
+        on_error=_watch_scheduler_error,
+        language_fn=_watch_language)
     # Settle whatever the previous process left mid-wake, and start the scheduler only if this
     # server actually has standing watches — see `WatchService.bootstrap`.
     _watch_service.bootstrap()

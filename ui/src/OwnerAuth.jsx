@@ -1,3 +1,5 @@
+import { uiText, useUILanguage } from './uiLanguage.js'
+import LanguageControl from './LanguageControl.jsx'
 import React, { useCallback, useEffect, useRef, useState } from 'react'
 import { authStatus, clearOwnerToken, verifyOwnerToken } from './api.js'
 import { deadlineRequest } from './requestDeadline.js'
@@ -11,6 +13,8 @@ const ownerAccessState = result => {
 }
 
 export default function OwnerAuth({ children, label = 'LoopLab' }) {
+  useUILanguage()
+
   const [resource, setResource] = useState({ status: 'loading', error: '' })
   const [token, setToken] = useState('')
   const [busy, setBusy] = useState(false)
@@ -103,16 +107,17 @@ export default function OwnerAuth({ children, label = 'LoopLab' }) {
   return <main className="auth-gate" data-route-main tabIndex={-1}
     aria-busy={resource.status === 'loading' ? 'true' : undefined}>
     <div className="auth-card">
+      <LanguageControl />
       <div className="auth-mark" aria-hidden="true">◉</div>
-      <h1 ref={headingRef} tabIndex={-1}>{title}</h1>
-      {resource.status === 'loading' && <p role="status" aria-live="polite">Checking owner access…</p>}
+      <h1 ref={headingRef} tabIndex={-1}>{uiText(title)}</h1>
+      {resource.status === 'loading' && <p role="status" aria-live="polite">{uiText("Checking owner access…")}</p>}
       {resource.status === 'error' && <>
-        <div ref={errorRef} className="auth-error" role="alert" tabIndex={-1}>{resource.error}</div>
-        <button className="btn primary" type="button" onClick={check}>Retry access check</button>
+        <div ref={errorRef} className="auth-error" role="alert" tabIndex={-1}>{uiText(resource.error)}</div>
+        <button className="btn primary" type="button" onClick={check}>{uiText("Retry access check")}</button>
       </>}
       {resource.status === 'locked' && <form onSubmit={unlock} aria-busy={busy ? 'true' : undefined}>
-        <p id="owner-token-help">This deployment protects run controls. Enter the <code>LOOPLAB_UI_TOKEN</code> set by the operator.</p>
-        <label htmlFor="owner-token">Owner token</label>
+        <p id="owner-token-help">{uiText("This deployment protects run controls. Enter the ")}<code>{"LOOPLAB_UI_TOKEN"}</code>{uiText(" set by the operator.")}</p>
+        <label htmlFor="owner-token">{uiText("Owner token")}</label>
         <input ref={inputRef} id="owner-token" className="auth-input" type="password"
           autoComplete="off" autoCapitalize="none" spellCheck={false}
           aria-describedby={`owner-token-help${resource.error ? ' owner-token-error' : ''}`}
@@ -121,11 +126,11 @@ export default function OwnerAuth({ children, label = 'LoopLab' }) {
             if (resource.error) setResource({ status: 'locked', error: '' })
           }} />
         {resource.error && <div ref={errorRef} id="owner-token-error" className="auth-error"
-          role="alert" tabIndex={-1}>{resource.error}</div>}
+          role="alert" tabIndex={-1}>{uiText(resource.error)}</div>}
         <button className="btn primary" type="submit" disabled={!token || busy}>
-          {busy ? 'Unlocking…' : 'Unlock this tab'}
+          {((busy ? uiText('Unlocking…') : uiText('Unlock this tab')))}
         </button>
-        <p className="muted">The token stays in this browser tab and is never embedded in shared pages.</p>
+        <p className="muted">{uiText("The token stays in this browser tab and is never embedded in shared pages.")}</p>
       </form>}
     </div>
   </main>

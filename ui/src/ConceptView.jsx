@@ -1,3 +1,4 @@
+import { uiText, uiMessage, useUILanguage } from './uiLanguage.js'
 import React, { Fragment, useEffect, useMemo, useRef, useState } from 'react'
 import { deadlineGet, fmt, runApiPath } from './util.js'
 import {
@@ -389,22 +390,24 @@ const initial = { scope: '', requestVersion: '', status: 'loading', data: null, 
 
 function StateCard({ tone, title, body, action, secondaryAction, pending = false, stale = false,
   projectionLabel = 'Concept projection' }) {
+  useUILanguage()
+
   return <section className={`cv-state-card ${tone}`} role={tone === 'error' || stale ? 'alert' : 'status'}
     aria-live={tone === 'error' || stale ? 'assertive' : 'polite'} aria-atomic="true">
     <span className="cv-state-mark" aria-hidden="true">{tone === 'loading' ? '' : tone === 'error' ? '!' : '◇'}</span>
-    <span className="cv-state-eyebrow">Concept map</span><h2>{title}</h2><p>{body}</p>
+    <span className="cv-state-eyebrow">{uiText("Concept map")}</span><h2>{title}</h2><p>{body}</p>
     {tone === 'empty' && <div className="cv-empty-flow" role="group"
-      aria-label="How the concept view is built">
-      <span>Experiments</span><i aria-hidden="true">→</i><span>{projectionLabel}</span>
-      <i aria-hidden="true">→</i><span>Outcome comparison</span>
+      aria-label={uiText("How the concept view is built")}>
+      <span>{uiText("Experiments")}</span><i aria-hidden="true">→</i><span>{projectionLabel}</span>
+      <i aria-hidden="true">→</i><span>{uiText("Outcome comparison")}</span>
     </div>}
-    {stale && <p className="cv-state-warning">Refresh failed; this is the last loaded empty result.</p>}
+    {stale && <p className="cv-state-warning">{uiText("Refresh failed; this is the last loaded empty result.")}</p>}
     {(action || secondaryAction) && <div className="cv-state-actions">
       {secondaryAction && <button type="button" className="btn primary"
-        onClick={secondaryAction}>Explore experiments in Lineage</button>}
+        onClick={secondaryAction}>{uiText("Explore experiments in Lineage")}</button>}
       {action && <button type="button" className={'btn' + (secondaryAction ? '' : ' primary')}
         onClick={action} disabled={pending}>
-        {pending ? 'Refreshing…' : tone === 'error' ? 'Retry' : 'Refresh concepts'}
+        {((pending ? uiText('Refreshing…') : (tone === 'error' ? uiText('Retry') : uiText('Refresh concepts'))))}
       </button>}
     </div>}
   </section>
@@ -417,6 +420,8 @@ function StateCard({ tone, title, body, action, secondaryAction, pending = false
 // surfaces that happen to be side by side.
 export default function ConceptView({ runId, generation, sequence: displayedSequence, state, onPickNode,
   selectedNodeId = null, onOpenLineage = null }) {
+  useUILanguage()
+
   const runKey = String(runId)
   const lensScope = JSON.stringify([runKey, generation ?? null])
   const paidLensScope = JSON.stringify([runKey, generation ?? null, displayedSequence ?? null])
@@ -673,17 +678,12 @@ export default function ConceptView({ runId, generation, sequence: displayedSequ
   ].join(' ') : undefined
   const metricOrientation = data?.metrics?.direction === 'min' ? 'minimize' : 'maximize'
   const metricContext = data && <div id="concept-metric-context"
-    className="cv-resource-note metric-context" role="note">
-    Primary objective metric · Unnamed metric · unit not recorded · {metricOrientation}.
-    {' '}Δ columns are orientation-normalized; positive values mean better.
-  </div>
+    className="cv-resource-note metric-context" role="note">{uiText("Primary objective metric · Unnamed metric · unit not recorded · ")}{metricOrientation}.
+    {' '}{uiText("Δ columns are orientation-normalized; positive values mean better.")}</div>
   const relationshipLegend = edgeProjection && <div id="concept-relationship-legend"
-    className="cv-resource-note relationship-legend" role="note">
-    Relationship view · {relationshipCopy.linkDescription}.
+    className="cv-resource-note relationship-legend" role="note">{uiText("Relationship view · ")}{relationshipCopy.linkDescription}.
     {relationshipCopy.derivationNote && <> {relationshipCopy.derivationNote}</>}
-    {' '}Indentation shows one primary display parent; “+N links” opens additional projected
-    parents. This is not a taxonomy hierarchy.
-  </div>
+    {' '}{uiText("Indentation shows one primary display parent; “+N links” opens additional projected parents. This is not a taxonomy hierarchy.")}</div>
   const filter = useMemo(() => filterConceptTree(data?.tree, byConcept, query, { edgeProjection }),
     [data, byConcept, query, edgeProjection])
   const searching = query.trim().length > 0 && !!filter
@@ -1265,36 +1265,31 @@ export default function ConceptView({ runId, generation, sequence: displayedSequ
   const lensCreator = <form className="cv-lensnew" onSubmit={createLens}>
     <input className="text" value={lensPrompt} maxLength={LENS_PROMPT_MAX_CHARS}
       onChange={event => setCurrentLensForm(form => ({ ...form, prompt: event.target.value, error: '' }))}
-      placeholder={displayedSequence != null ? 'live view required'
-        : hasExactGeneration ? 'describe a grouping lens…' : 'verified generation required'}
-      aria-label="Describe a lens to create" aria-describedby="paid-concept-lens-status"
+      placeholder={((displayedSequence != null ? uiText('live view required') : (hasExactGeneration ? uiText('describe a grouping lens…') : uiText('verified generation required'))))}
+      aria-label={uiText("Describe a lens to create")} aria-describedby="paid-concept-lens-status"
       disabled={lensBusy || lensUnavailable || !!savedLensIntent} />
     <button type="submit" className="btn sm"
       aria-describedby="paid-concept-lens-status"
-      title={!hasExactGeneration ? 'Reload the run and wait for its verified generation.' : undefined}
+      title={((!hasExactGeneration ? uiText('Reload the run and wait for its verified generation.') : undefined))}
       disabled={lensBusy || lensUnavailable || (!savedLensIntent && !lensPrompt.trim())}>
-      {lensBusy ? currentRecovery.status === 'polling' ? 'Polling existing paid job…'
-        : currentRecovery.status === 'checking' ? 'Checking paid recovery…'
-          : currentRecovery.status === 'resolving' ? 'Resolving orphaned claim…'
-            : 'Reconciling paid lens…'
-        : savedLensIntent ? 'Resume paid lens' : 'Create lens · paid'}</button>
+      {((lensBusy ? (currentRecovery.status === 'polling' ? uiText('Polling existing paid job…') : (currentRecovery.status === 'checking' ? uiText('Checking paid recovery…') : (currentRecovery.status === 'resolving' ? uiText('Resolving orphaned claim…') : uiText('Reconciling paid lens…')))) : (savedLensIntent ? uiText('Resume paid lens') : uiText('Create lens · paid'))))}</button>
     {savedLensIntent && (canArchiveLens
       ? <button type="button" className="btn sm danger cv-lensdiscard"
-        disabled={lensBusy} onClick={archiveOldLens}>Archive old-generation receipt</button>
+        disabled={lensBusy} onClick={archiveOldLens}>{uiText("Archive old-generation receipt")}</button>
       : canAbandonLens ? <button type="button" className="btn sm danger cv-lensdiscard"
-        disabled={lensBusy || lensReadOnly} onClick={abandonSavedLens}>Abandon unknown request</button>
+        disabled={lensBusy || lensReadOnly} onClick={abandonSavedLens}>{uiText("Abandon unknown request")}</button>
       : <button type="button" className="btn sm ghost cv-lensdiscard"
-        disabled={lensBusy} onClick={discardSavedLens}>Why no local discard?</button>)}
+        disabled={lensBusy} onClick={discardSavedLens}>{uiText("Why no local discard?")}</button>)}
     {!savedLensIntent && currentRecovery.status === 'ready'
       && currentRecovery.receipt?.state === 'orphaned'
       && <button type="button" className="btn sm danger cv-lensdiscard"
-        disabled={lensBusy || lensReadOnly} onClick={resolveRecoveredLens}>Resolve orphaned paid claim</button>}
+        disabled={lensBusy || lensReadOnly} onClick={resolveRecoveredLens}>{uiText("Resolve orphaned paid claim")}</button>}
     {!savedLensIntent && (currentRecovery.status === 'error'
       || currentRecovery.receipt?.state === 'conflict')
       && <button type="button" className="btn sm ghost cv-lensdiscard"
-        disabled={lensBusy} onClick={retryServerRecovery}>Recheck paid recovery</button>}
+        disabled={lensBusy} onClick={retryServerRecovery}>{uiText("Recheck paid recovery")}</button>}
     <span id="paid-concept-lens-status" className="muted" role="note">
-      {lensStatus}</span>
+      {uiText(lensStatus)}</span>
     {lensErr && <span className="cv-lenserr" role="alert">{lensErr}</span>}
   </form>
 
@@ -1326,11 +1321,11 @@ export default function ConceptView({ runId, generation, sequence: displayedSequ
       ? 'This run has experiment history but no recorded concept memberships. Lineage still shows the experiments; LoopLab does not infer a taxonomy from legacy labels.'
       : 'This view fills after the Researcher assigns concepts. LoopLab does not invent a taxonomy meanwhile.' }
   if (stateCard) return <div className="concept-view cv-state-layout" role="region"
-    aria-label={projectionAriaLabel} aria-describedby={projectionDescription}>
+    aria-label={uiText(projectionAriaLabel)} aria-describedby={projectionDescription}>
     <StateCard {...stateCard} projectionLabel={projectionLabel} />
     {stateCard.tone !== 'empty' && metricContext}{relationshipLegend}
     {data && recoveryNeedsSurface && (currentRecovery.status === 'settled' && !savedLensIntent
-      ? <p className="cv-state-warning" role="status">{currentRecovery.notice}</p>
+      ? <p className="cv-state-warning" role="status">{uiText(currentRecovery.notice)}</p>
       : lensCreator)}</div>
 
   // Null-prototype rehydrate (same prototype-safety as byConcept): metrics.rows is raw JSON, and a
@@ -1358,11 +1353,11 @@ export default function ConceptView({ runId, generation, sequence: displayedSequ
   ]
   const linkKind = relationshipTypes
   return <div className="concept-view" role="region"
-    aria-label={projectionAriaLabel} aria-describedby={projectionDescription}
+    aria-label={uiText(projectionAriaLabel)} aria-describedby={projectionDescription}
     aria-busy={refreshing}>
     <header className="cv-bar">
-      <div className="cv-heading"><strong>{projectionLabel}</strong><span
-        title={`Concept frame sequence ${data.captured_seq}`}>
+      <div className="cv-heading"><strong>{uiText(projectionLabel)}</strong><span
+        title={uiMessage("Concept frame sequence {0}", [data.captured_seq])}>
         {counted(taggedConceptCount, 'tagged concept')} · {counted(displayedConceptNodeCount,
           'displayed concept node')} · {counted(experimentCount, 'tagged experiment')}
       </span></div>
@@ -1371,66 +1366,63 @@ export default function ConceptView({ runId, generation, sequence: displayedSequ
           <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" aria-hidden="true">
             <circle cx="11" cy="11" r="7" /><path d="M21 21l-4.3-4.3" /></svg>
           <input className="cs-input" value={query} autoComplete="off"
-            placeholder="filter concepts & experiments…" aria-label="Filter concepts and experiments"
+            placeholder={uiText("filter concepts & experiments…")} aria-label={uiText("Filter concepts and experiments")}
             onChange={event => setQuery(event.target.value)}
             onKeyDown={event => { if (event.key === 'Escape') { event.preventDefault(); setQuery('') } }} />
           {query &&
-            <button type="button" className="cs-clear" aria-label="Clear filter" onClick={() => setQuery('')}>×</button>}
+            <button type="button" className="cs-clear" aria-label={uiText("Clear filter")} onClick={() => setQuery('')}>×</button>}
         </div>
       </div>
       <div className="cv-lensctl">
-        <label className="cv-lenspick"><span>Projection lens</span><select className="text" value={lens}
+        <label className="cv-lenspick"><span>{uiText("Projection lens")}</span><select className="text" value={lens}
           onChange={event => {
             const name = event.target.value
             setExpanded(new Set()); setEvidenceExpanded(new Set())
             setLens(name, availableLenses.find(item => item.name === name))
           }}
-          aria-label="Concept projection lens">
+          aria-label={uiText("Concept projection lens")}>
           {availableLenses.map(item => <option key={item.name} value={item.name}>
             {(item.derived ? '✦ ' : '') + (item.label || item.name)}</option>)}
         </select></label>
         {activeDerived && <button type="button" className="cv-lensdel"
-          title={`Delete lens “${activeDerived.label}”`} aria-label={`Delete lens ${activeDerived.label}`}
+          title={uiMessage("Delete lens “{0}”", [activeDerived.label])} aria-label={uiMessage("Delete lens {0}", [activeDerived.label])}
           onClick={() => deleteLens(activeDerived.name)}>×</button>}
         <details className="cv-lens-add" open={recoveryNeedsSurface || undefined}>
-          <summary>Create custom lens · paid</summary>
+          <summary>{uiText("Create custom lens · paid")}</summary>
           {lensCreator}
         </details>
       </div>
       <div className="cv-tree-actions">
         <button type="button" className="btn sm ghost"
-          onClick={() => setExpanded(new Set(Object.keys(data.tree.nodes)))}>Expand concept rows</button>
-        <button type="button" className="btn sm ghost" onClick={() => setExpanded(new Set())}>Collapse concept rows</button>
-        <button type="button" className="btn sm" onClick={refresh} disabled={refreshing}>{refreshing ? 'Refreshing…' : 'Refresh'}</button>
+          onClick={() => setExpanded(new Set(Object.keys(data.tree.nodes)))}>{uiText("Expand concept rows")}</button>
+        <button type="button" className="btn sm ghost" onClick={() => setExpanded(new Set())}>{uiText("Collapse concept rows")}</button>
+        <button type="button" className="btn sm" onClick={refresh} disabled={refreshing}>{((refreshing ? uiText('Refreshing…') : uiText('Refresh')))}</button>
       </div>
-      <div className="cv-cols" role="group" aria-label="Visible metric columns"><span>Metrics</span>
+      <div className="cv-cols" role="group" aria-label={uiText("Visible metric columns")}><span>{uiText("Metrics")}</span>
         {CONCEPT_COLUMNS.map(column => <button key={column.key} type="button" aria-pressed={columns.includes(column.key)}
           disabled={columns.includes(column.key) && columns.length === 1}
           className={'cv-col' + (columns.includes(column.key) ? ' on' : '')}
-          onClick={() => toggleColumn(column.key)}>{column.label}</button>)}
+          onClick={() => toggleColumn(column.key)}>{uiText(column.label)}</button>)}
         {data.metrics.baseline != null && <span className="cv-baseline" role="note"
-          title="Median robust metric across eligible evaluated experiments (metric available and not explicitly infeasible); Δ columns are direction-normalized relative to this median."
-          aria-label={`Run median robust metric ${fmt(data.metrics.baseline)} across eligible evaluated experiments: metric available and not explicitly infeasible. Delta columns are direction-normalized relative to this median.`}>
-          run median {fmt(data.metrics.baseline)}</span>}
+          title={uiText("Median robust metric across eligible evaluated experiments (metric available and not explicitly infeasible); Δ columns are direction-normalized relative to this median.")}
+          aria-label={uiMessage("Run median robust metric {0} across eligible evaluated experiments: metric available and not explicitly infeasible. Delta columns are direction-normalized relative to this median.", [fmt(data.metrics.baseline)])}>{uiText("run median ")}{fmt(data.metrics.baseline)}</span>}
       </div>
     </header>
     {metricContext}{relationshipLegend}
-    {refreshing && <div className="cv-resource-note" role="status" aria-live="polite"><span className="cv-inline-spinner" aria-hidden="true" />Refreshing concepts… Last loaded view remains visible.</div>}
-    {current.status === 'stale' && <div className="cv-resource-note stale" role="alert"><span>Showing the last loaded concept view; refresh {current.timeout ? 'timed out' : 'failed'}.</span><button type="button" className="btn sm" onClick={refresh}>Retry</button></div>}
+    {refreshing && <div className="cv-resource-note" role="status" aria-live="polite"><span className="cv-inline-spinner" aria-hidden="true" />{uiText("Refreshing concepts… Last loaded view remains visible.")}</div>}
+    {current.status === 'stale' && <div className="cv-resource-note stale" role="alert"><span>{uiText("Showing the last loaded concept view; refresh ")}{((current.timeout ? uiText('timed out') : uiText('failed')))}.</span><button type="button" className="btn sm" onClick={refresh}>{uiText("Retry")}</button></div>}
     {!data.authoritative && <div className="cv-resource-note partial"
       role={completenessKind === 'materialization-corruption' ? 'alert' : 'status'}>
-      {incompleteMessage}
+      {uiText(incompleteMessage)}
     </div>}
-    {data.lens_contract.fallback === 'no_matching_edges' && <div className="cv-resource-note" role="status">
-      No matching relationship links were available for the requested {data.requested_lens} lens; showing the is-a hierarchy instead.
-    </div>}
-    {data.historical && <div className="cv-resource-note" role="status">Historical concept frame at sequence {data.captured_seq} of {data.max_seq}.</div>}
-    <div className="cv-resource-note epistemic" role="note">Memberships are recorded claims; taxonomy semantics are not independently verified.</div>
+    {data.lens_contract.fallback === 'no_matching_edges' && <div className="cv-resource-note" role="status">{uiText("No matching relationship links were available for the requested ")}{data.requested_lens}{uiText(" lens; showing the is-a hierarchy instead.")}</div>}
+    {data.historical && <div className="cv-resource-note" role="status">{uiText("Historical concept frame at sequence ")}{data.captured_seq}{uiText(" of ")}{data.max_seq}.</div>}
+    <div className="cv-resource-note epistemic" role="note">{uiText("Memberships are recorded claims; taxonomy semantics are not independently verified.")}</div>
     <div className="cv-table-wrap"><table className="cv-table"
       style={cols.length > 3 ? { minWidth: 300 + cols.length * 82 } : undefined}>
       <thead><tr><th className="cv-name" scope="col"
-        style={{ width: cols.length > 3 ? 300 : '58%' }}>Concept / experiment</th>
-      {cols.map(column => <th key={column.key} className="cv-num" scope="col">{column.label}</th>)}</tr></thead><tbody>
+        style={{ width: cols.length > 3 ? 300 : '58%' }}>{uiText("Concept / experiment")}</th>
+      {cols.map(column => <th key={column.key} className="cv-num" scope="col">{uiText(column.label)}</th>)}</tr></thead><tbody>
       {rows.map(({ id, depth, hasChildren }) => {
         const node = data.tree.nodes[id]
         const experiments = byConcept[id] || []
@@ -1462,15 +1454,15 @@ export default function ConceptView({ runId, generation, sequence: displayedSequ
               : <span className="cv-chev-placeholder" aria-hidden="true">·</span>}
             <span className="cv-cid" title={id}><Marked text={conceptLabel} query={searching ? query : ''} /></span>
             {!!crossParents.length && <details className="cv-crosslinks">
-              <summary className="cv-badge" title={crossParentSummary}
-                aria-label={crossParentSummary}>+{crossParents.length} {crossParents.length === 1 ? 'link' : 'links'}</summary>
-              <span className="cv-crosslinks-detail">{crossParentSummary}</span>
+              <summary className="cv-badge" title={uiText(crossParentSummary)}
+                aria-label={uiText(crossParentSummary)}>+{crossParents.length} {((crossParents.length === 1 ? uiText('link') : uiText('links')))}</summary>
+              <span className="cv-crosslinks-detail">{uiText(crossParentSummary)}</span>
             </details>}
             {!!experiments.length && <button type="button" className="cv-badge btn xs"
               onClick={() => toggleEvidence(id)} aria-expanded={evidenceOpen}
-              title={`${evidenceOpen ? 'Hide' : 'Show'} tagged experiments for ${id}`}
-              aria-label={`${evidenceOpen ? 'Hide' : 'Show'} ${experiments.length} tagged ${experiments.length === 1 ? 'experiment' : 'experiments'} for ${id}`}>
-              {experiments.length} refs</button>}
+              title={uiMessage("{0} tagged experiments for {1}", [evidenceOpen ? 'Hide' : 'Show', id])}
+              aria-label={uiMessage("{0} {1} tagged {2} for {3}", [evidenceOpen ? 'Hide' : 'Show', experiments.length, experiments.length === 1 ? 'experiment' : 'experiments', id])}>
+              {experiments.length}{uiText(" refs")}</button>}
           </td>{cols.map(column => {
             const value = metricRows[id]?.[column.key]
             const tone = column.delta ? deltaTone(value) : ''
@@ -1503,18 +1495,17 @@ export default function ConceptView({ runId, generation, sequence: displayedSequ
                 <span className="cv-exp"><Marked text={`Experiment #${ref.node_id} · attempt ${ref.node_generation}`} query={searching ? query : ''} /></span>
                 <span className="badge"><Marked text={ref.status} query={searching ? query : ''} /></span>
                 <span className={'cv-ref-facts' + (rollupLabel === 'excluded' ? ' excluded' : '')}>
-                  {constraintLabel} · membership · {ref.membership_provenance}
-                  {' · '}rollup · {rollupLabel}
+                  {constraintLabel}{uiText(" · membership · ")}{ref.membership_provenance}
+                  {' · '}{uiText("rollup · ")}{rollupLabel}
                 </span>
                 {ref.is_best
-                  && <span className="cv-best" title="Frame champion" aria-label="Frame champion">★</span>}</button></td>
-              <td className="cv-num cv-expmetric" colSpan={cols.length} title={rollup}>
-                {ref.metric === null ? 'metric unavailable' : `${fmt(ref.metric)}${ref.feasible === false ? ' · excluded' : ''}`}</td></tr>
+                  && <span className="cv-best" title={uiText("Frame champion")} aria-label={uiText("Frame champion")}>★</span>}</button></td>
+              <td className="cv-num cv-expmetric" colSpan={cols.length} title={uiText(rollup)}>
+                {((ref.metric === null ? uiText('metric unavailable') : `${fmt(ref.metric)}${ref.feasible === false ? ' · excluded' : ''}`))}</td></tr>
           })}</Fragment>
       })}
       {searching && rows.length === 0 &&
-        <tr><td className="cv-name cv-nomatch" colSpan={cols.length + 1}>
-          No concept or experiment matches “{query.trim()}”.</td></tr>}
+        <tr><td className="cv-name cv-nomatch" colSpan={cols.length + 1}>{uiText("No concept or experiment matches “")}{query.trim()}”.</td></tr>}
     </tbody></table></div>
   </div>
 }

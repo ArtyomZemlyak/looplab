@@ -2583,6 +2583,8 @@ class Settings(BaseSettings):
     # Validate on the box with `python -m looplab.runtime.seccomp egress`.
     syscall_fence: str = "off"
     llm_model: str = "qwen3:8b"
+    # Human prose across all model roles; machine-readable fields and measured evidence stay raw.
+    output_language: typing.Literal["auto", "en", "ru"] = "auto"
     # === LLM / transport ==================================================================
     llm_base_url: str = "http://localhost:11434/v1"  # Ollama OpenAI-compatible endpoint
     llm_temperature: float = 0.6

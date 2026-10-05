@@ -1,3 +1,4 @@
+import { uiText, uiMessage } from './uiLanguage.js'
 import { activeNodeMap } from './nodeProjection.js'
 
 export const ALL_RUNS = '__all__'
@@ -40,7 +41,7 @@ export function sourceIntegrityNotice(run = {}) {
   if (!sourceIncomplete(run)) return ''
   const receipt = run.source_integrity
   if (receipt.unreadable) {
-    return 'This run’s event log could not be read at all. Nothing on this screen describes the run.'
+    return uiText('This run’s event log could not be read at all. Nothing on this screen describes the run.')
   }
   const good = Number.isSafeInteger(receipt.good_records) ? receipt.good_records : null
   const dropped = Number.isSafeInteger(receipt.dropped_lines) ? receipt.dropped_lines : null
@@ -136,40 +137,10 @@ export function bestMetricCaveatNotice(run = {}) {
   const slugs = bestMetricCaveats(run)
   if (!slugs.length) return ''
   const sentences = slugs.map(slug => (
-    slug === CHAMPION_CAVEAT_SALVAGED
-      ? 'This run’s best metric was NOT measured: its evaluation failed and the run recovered the '
-        + 'number with its own declared reader. metric_salvage is set to “select”, so it competes '
-        + 'for champion like a measured result.'
-      : slug === CHAMPION_CAVEAT_TRUST_FLAGGED
-        ? 'The node this number comes from carries a high-precision reward-hacking or leakage '
-          + 'signal. trust_gate is not enforcing, so it was selected as this run’s best anyway.'
-        : slug === CHAMPION_CAVEAT_PARAMS_OVERRIDDEN
-          ? 'The node this number comes from ships code — or ran under a resolved configuration — '
-            + 'that assigns a different value to a parameter its own experiment record declares, or '
-            + 'two of its own carriers disagree, so the declared configuration is not '
-            + 'the one this result was produced under. The run selected on it anyway — the metric '
-            + 'itself was measured normally; what is in question is what it is a measurement of.'
-          : slug === CHAMPION_CAVEAT_MIXED_COMPARABILITY
-            // The row carries the slug and not the refusing facet, so all three causes are named;
-            // the run's own Pareto view names the one that refused (`nodesComparabilitySplit`).
-            ? 'This run’s own nodes were not all measured against the same evaluation — their '
-              + 'recorded comparability keys, the source trees they ran on, or the evaluation '
-              + 'protocols they ran under (profile, scorer, fingerprint) provably differ — so this '
-              + 'number won a mixed field. The values are each true of their own measurement; the '
-              + 'ordering between them is not.'
-            : slug === CHAMPION_CAVEAT_MERGED_COORDINATES
-              ? 'This number comes from a MEAN-MERGE node: its parameters are the arithmetic '
-                + 'average of its two parents’ declarations, and it trained nothing of its own — it '
-                + 'averaged their weights and scored the average. Nobody chose the configuration '
-                + 'this result is filed under, so it sits at coordinates no run ever occupied. The '
-                + 'metric itself was measured normally, and the run selected on it.'
-              : slug === CHAMPION_CAVEAT_RETARGETED_OBJECTIVE
-                // Doc 68 68.2: the row names the key (`objective_key`), so the sentence does too.
-                ? `An operator retarget made a declared extra metric${runObjective(run)
+    (slug === CHAMPION_CAVEAT_SALVAGED ? uiMessage("This run’s best metric was NOT measured: its evaluation failed and the run recovered the number with its own declared reader. metric_salvage is set to “select”, so it competes for champion like a measured result.", []) : (slug === CHAMPION_CAVEAT_TRUST_FLAGGED ? uiMessage("The node this number comes from carries a high-precision reward-hacking or leakage signal. trust_gate is not enforcing, so it was selected as this run’s best anyway.", []) : (slug === CHAMPION_CAVEAT_PARAMS_OVERRIDDEN ? uiMessage("The node this number comes from ships code — or ran under a resolved configuration — that assigns a different value to a parameter its own experiment record declares, or two of its own carriers disagree, so the declared configuration is not the one this result was produced under. The run selected on it anyway — the metric itself was measured normally; what is in question is what it is a measurement of.", []) : (slug === CHAMPION_CAVEAT_MIXED_COMPARABILITY ? uiMessage("This run’s own nodes were not all measured against the same evaluation — their recorded comparability keys, the source trees they ran on, or the evaluation protocols they ran under (profile, scorer, fingerprint) provably differ — so this number won a mixed field. The values are each true of their own measurement; the ordering between them is not.", []) : (slug === CHAMPION_CAVEAT_MERGED_COORDINATES ? uiMessage("This number comes from a MEAN-MERGE node: its parameters are the arithmetic average of its two parents’ declarations, and it trained nothing of its own — it averaged their weights and scored the average. Nobody chose the configuration this result is filed under, so it sits at coordinates no run ever occupied. The metric itself was measured normally, and the run selected on it.", []) : (slug === CHAMPION_CAVEAT_RETARGETED_OBJECTIVE ? uiText(`An operator retarget made a declared extra metric${runObjective(run)
                   ? ` (“${runObjective(run)}”)` : ''} this run’s objective: its best metric is `
                   + 'that metric’s value, not the task’s own, and every node was ranked by it. It '
-                  + 'is a different ruler from any run ranked by the task’s own metric.'
-                : `The server reports a caveat this view has no sentence for: “${slug}”.`))
+                  + 'is a different ruler from any run ranked by the task’s own metric.') : uiMessage("The server reports a caveat this view has no sentence for: “{0}”.", [slug])))))))))
   return sentences.join(' ')
 }
 
@@ -217,7 +188,7 @@ export function pendingFinalizeIntent(run = {}) {
 const RUN_DIR_NAME_RE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/
 export function finalizeRecoveryCommand(runId = '') {
   const name = String(runId || '').trim()
-  return `looplab finalize <runs>/${RUN_DIR_NAME_RE.test(name) ? name : '<run_dir>'}`
+  return uiMessage("looplab finalize <runs>/{0}", [RUN_DIR_NAME_RE.test(name) ? name : '<run_dir>'])
 }
 
 /** The whole remedy for a stalled finalization no client control can perform, or null when the
@@ -493,9 +464,9 @@ export function dagEmptyPresentation({
 
 export function lifecyclePhaseLabel(run = {}) {
   const mode = runLifecycle(run).mode
-  if (mode === 'finalization-stalled') return 'finalization stalled'
+  if (mode === 'finalization-stalled') return uiText('finalization stalled')
   if (mode === 'finalizing' || mode === 'finishing' || mode === 'finished') return mode
-  if (mode === 'unknown') return 'engine ownership unknown'
+  if (mode === 'unknown') return uiText('engine ownership unknown')
   return run.phase || mode || '—'
 }
 
@@ -986,8 +957,7 @@ export function metricIncomparabilityText(reason) {
   if (Object.hasOwn(OBJECTIVE_REFUSAL_TEXT, reason)) return OBJECTIVE_REFUSAL_TEXT[reason]
   const clause = Object.hasOwn(COMPARABILITY_REFUSAL_TEXT, reason)
     ? COMPARABILITY_REFUSAL_TEXT[reason] : ''
-  return clause ? `these runs share one task and objective, but two of them ${clause}`
-    : `these runs were refused a ranking for a reason this view has no sentence for: “${reason}”`
+  return (clause ? uiMessage("these runs share one task and objective, but two of them {0}", [clause]) : uiMessage("these runs were refused a ranking for a reason this view has no sentence for: “{0}”", [reason]))
 }
 
 // WHY the run list's metric sort is off, in the words its `<option>` has room for — or '' when it
@@ -997,13 +967,12 @@ export function metricIncomparabilityText(reason) {
 // task whose runs differed only in direction (critic 2026-09-26). `taskSelected` is the list's
 // exact task filter; without one the refusal is the filter, whatever the rows say.
 export function metricSortRefusal(runs = [], { taskSelected = false } = {}) {
-  if (!taskSelected) return 'select one task'
+  if (!taskSelected) return uiText('select one task')
   const rows = Array.isArray(runs) ? runs : []
-  if (!rows.length) return 'no runs'
+  if (!rows.length) return uiText('no runs')
   const reason = metricIncomparability(rows)
   if (!reason) return ''
-  return Object.hasOwn(COMPARABILITY_REFUSAL_SHORT, reason) ? COMPARABILITY_REFUSAL_SHORT[reason]
-    : 'not comparable'
+  return (Object.hasOwn(COMPARABILITY_REFUSAL_SHORT, reason) ? COMPARABILITY_REFUSAL_SHORT[reason] : uiText('not comparable'))
 }
 
 export function sortRuns(runs = [], key = 'time', order = 'desc') {
@@ -1055,10 +1024,10 @@ export function comparisonScope(selectedRuns = [], max = COMPARE_MAX) {
 /** One line for the selection bar: how many are picked, and what comparison will do with them. */
 export function selectionNotice(scope) {
   if (!scope || !scope.total) return ''
-  if (scope.total < 2) return 'Select one more run to compare.'
+  if (scope.total < 2) return uiText('Select one more run to compare.')
   if (scope.omitted) {
     return `Comparison shows the first ${scope.shown.length} of ${scope.total}; `
       + `${scope.omitted} more stay selected.`
   }
-  return 'Ready to compare run details.'
+  return uiText('Ready to compare run details.')
 }

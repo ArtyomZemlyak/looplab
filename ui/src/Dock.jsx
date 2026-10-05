@@ -1,3 +1,4 @@
+import { uiText, uiMessage, useUILanguage } from './uiLanguage.js'
 import React, { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import { get, fmt, workingId, getRunCommand, retryRunCommand, runCommand,
   commandFeedback, commandErrorMessage, commandFailureRecord, commandCanRetry, createIdempotencyKey,
@@ -116,6 +117,8 @@ const traceFailureKind = error => (error?.traceFailure === TRACE_FAILURE_SUPERSE
   ? TRACE_FAILURE_SUPERSEDED : TRACE_FAILURE_UNREADABLE)
 
 export function LiveTrace({ runId, generation, active }) {
+  useUILanguage()
+
   const expectedGeneration = normalizeRunGeneration(generation)
   const scope = expectedGeneration || runId
   const [tailState, setTailState] = useState({ scope, items: [], projection: null })
@@ -168,8 +171,8 @@ export function LiveTrace({ runId, generation, active }) {
   // A "load earlier" button at the TOP of the feed (replaces the dead partial notice); a terminal note
   // only when partial but the server ceiling is reached (older spans live in the node's full trace).
   const partialControl = !partial ? null : canLoadEarlier
-    ? <button type="button" className="lt-loadmore disclosure-button" onClick={loadEarlier}>↑ load earlier spans</button>
-    : <div className="lt-note" role="status">Earlier history is in the node's full trace.</div>
+    ? <button type="button" className="lt-loadmore disclosure-button" onClick={loadEarlier}>{uiText("↑ load earlier spans")}</button>
+    : <div className="lt-note" role="status">{uiText("Earlier history is in the node's full trace.")}</div>
   useLayoutEffect(() => {
     const el = bodyRef.current
     if (!el || !open) return
@@ -184,27 +187,24 @@ export function LiveTrace({ runId, generation, active }) {
     <div className={'live-trace' + (open ? ' open' : '')}>
       {/* Standard inline disclosure — caret ▸ left of the label, expands IN PLACE (not a popup). */}
       <button type="button" className="lt-toggle disclosure-button" aria-expanded={open}
-           onClick={() => setOpen(o => !o)} title="stream the agent's thoughts + tool calls">
-        <span className="lt-caret">{open ? '▾' : '▸'}</span>trace
-      </button>
+           onClick={() => setOpen(o => !o)} title={uiText("stream the agent's thoughts + tool calls")}>
+        <span className="lt-caret">{open ? '▾' : '▸'}</span>{uiText("trace")}</button>
       {open && <div className="lt-body" ref={bodyRef} onScroll={event => {
         const el = event.currentTarget
         stickRef.current = el.scrollHeight - el.scrollTop - el.clientHeight < 8
       }}>
         {current.stale && <TraceUnavailable
-          label={current.failure === TRACE_FAILURE_SUPERSEDED
-            ? traceFailureLabel(TRACE_FAILURE_SUPERSEDED)
-            : 'Trace refresh failed; showing confirmed spans while retrying.'} />}
+          label={((current.failure === TRACE_FAILURE_SUPERSEDED ? uiText(traceFailureLabel(TRACE_FAILURE_SUPERSEDED)) : uiText('Trace refresh failed; showing confirmed spans while retrying.')))} />}
         {!loaded
-          ? <div className="muted lt-empty" role="status">loading trace…</div>
+          ? <div className="muted lt-empty" role="status">{uiText("loading trace…")}</div>
           : unavailable
           // This poll re-reads every 3 s, so an unreadable tail really is retrying; a SUPERSEDED one
           // is not, and saying "retrying automatically" about it would promise a recovery that
           // cannot arrive on this scope. Both sentences come from the one vocabulary.
-          ? <TraceUnavailable label={traceFailureLabel(current.failure, { retrying: true })} />
+          ? <TraceUnavailable label={uiText(traceFailureLabel(current.failure, { retrying: true }))} />
           : <>{partialControl}
             {!tail.length && !partial
-              ? <div className="muted lt-empty">waiting for the next agent step…</div>
+              ? <div className="muted lt-empty">{uiText("waiting for the next agent step…")}</div>
               : tail.map((it, i) => it.kind === 'generation'
             ? <div key={it.span_id || i} className="lt-row lt-gen">
                 <span className="lt-ic">🧠</span>
@@ -307,31 +307,35 @@ export function agentStatus(live, log, evalStages = null, externalMode = false) 
 }
 
 const Disclosure = ({ label, children }) => {
+  useUILanguage()
+
   const [open, setOpen] = useState(false)
   return <div className="think-debug trace-disclosure">
     <button type="button" className="role-think disclosure-button trace-disclosure-toggle" aria-expanded={open}
          onClick={() => setOpen(v => !v)}>
-      {open ? '▾' : '▸'} {label}</button>
+      {open ? '▾' : '▸'} {uiText(label)}</button>
     {open && children}
   </div>
 }
 
 function NodeCreatedDetail({ d, trace }) {
+  useUILanguage()
+
   const idea = d.idea || {}
   const think = collectThinking(trace, d.node_id)
   const params = idea.params || {}
   const space = idea.space || {}
   return (
     <div className="ev-detail">
-      <div className="section-h">Conclusion — why this experiment next</div>
+      <div className="section-h">{uiText("Conclusion — why this experiment next")}</div>
       {idea.rationale ? <Markdown className="rationale-md" text={idea.rationale} /> : <div className="v">—</div>}
       <div className="ev-meta">
-        <span>operator <b>{idea.operator || d.operator}</b></span>
-        {(d.parent_ids || []).length > 0 && <span>built from {d.parent_ids.map(p => '#' + p).join(', ')}</span>}
-        {Object.keys(params).length > 0 && <span>params {Object.entries(params).map(([k, v]) => `${k}=${fmt(v, 3)}`).join(', ')}</span>}
-        {Object.keys(space).length > 0 && <span>sweep {Object.entries(space).map(([k, v]) => `${k}∈[${(Array.isArray(v) ? v : [v]).join(', ')}]`).join('; ')}</span>}
+        <span>{uiText("operator ")}<b>{idea.operator || d.operator}</b></span>
+        {(d.parent_ids || []).length > 0 && <span>{uiText("built from ")}{d.parent_ids.map(p => '#' + p).join(', ')}</span>}
+        {Object.keys(params).length > 0 && <span>{uiText("params ")}{Object.entries(params).map(([k, v]) => `${k}=${fmt(v, 3)}`).join(', ')}</span>}
+        {Object.keys(space).length > 0 && <span>{uiText("sweep ")}{Object.entries(space).map(([k, v]) => `${k}∈[${(Array.isArray(v) ? v : [v]).join(', ')}]`).join('; ')}</span>}
       </div>
-      {think.length > 0 && <Disclosure label="Researcher thinking (debug)">
+      {think.length > 0 && <Disclosure label={uiText("Researcher thinking (debug)")}>
         {think.map((t, i) => <Markdown key={i} className="think-body" text={t.text} />)}
       </Disclosure>}
     </div>
@@ -339,47 +343,51 @@ function NodeCreatedDetail({ d, trace }) {
 }
 
 function PolicyDetail({ d }) {
+  useUILanguage()
+
   const scores = d.scores || {}
   const entries = Object.entries(scores).sort((a, b) => b[1] - a[1])
   return (
     <div className="ev-detail">
-      <div className="section-h">Why this node{d.reason ? ` — ${d.reason}` : ''}</div>
+      <div className="section-h">{uiText("Why this node")}{d.reason ? ` — ${d.reason}` : ''}</div>
       {entries.length === 0
-        ? <div className="v muted">chose #{d.chosen} (no candidate scores recorded)</div>
-        : <DataTable caption="Candidate scores for node selection" card={false}><table className="tbl"><thead><tr><th>node</th><th>score</th></tr></thead>
+        ? <div className="v muted">{uiText("chose #")}{d.chosen}{uiText(" (no candidate scores recorded)")}</div>
+        : <DataTable caption={uiText("Candidate scores for node selection")} card={false}><table className="tbl"><thead><tr><th>{uiText("node")}</th><th>{uiText("score")}</th></tr></thead>
             <tbody>{entries.map(([nid, sc]) =>
               <tr key={nid} className={String(nid) === String(d.chosen) ? 'chosen-row' : ''}>
-                <td>#{nid}{String(nid) === String(d.chosen) ? ' ✓ chosen' : ''}</td><td>{fmt(sc, 4)}</td></tr>)}
+                <td>#{nid}{((String(nid) === String(d.chosen) ? uiText(' ✓ chosen') : ''))}</td><td>{fmt(sc, 4)}</td></tr>)}
             </tbody></table></DataTable>}
     </div>
   )
 }
 
 function StrategyDetail({ d }) {
+  useUILanguage()
+
   const s = d.strategy || {}
   const ctx = d.ctx || {}
   const ctxRows = Object.entries(ctx).filter(([, v]) => v != null && typeof v !== 'object')
   return (
     <div className="ev-detail">
-      <div className="section-h">Why this strategy</div>
+      <div className="section-h">{uiText("Why this strategy")}</div>
       <div className="v">{s.rationale || '—'}</div>
       <div className="ev-meta">
-        <span>policy <b>{s.policy || '?'}</b></span>
-        {s.fidelity && <span>fidelity {s.fidelity}</span>}
-        {s.developer && <span>developer {s.developer}</span>}
-        {s.eval_parallel != null && <span>eval parallel {s.eval_parallel}</span>}
-        {s.llm_parallel != null && <span>LLM total {s.llm_parallel}</span>}
+        <span>{uiText("policy ")}<b>{s.policy || '?'}</b></span>
+        {s.fidelity && <span>{uiText("fidelity ")}{s.fidelity}</span>}
+        {s.developer && <span>{uiText("developer ")}{s.developer}</span>}
+        {s.eval_parallel != null && <span>{uiText("eval parallel ")}{s.eval_parallel}</span>}
+        {s.llm_parallel != null && <span>{uiText("LLM total ")}{s.llm_parallel}</span>}
         {s.llm_lane_limits && typeof s.llm_lane_limits === 'object'
           && !Array.isArray(s.llm_lane_limits)
-          && <span>LLM lanes {Object.entries(s.llm_lane_limits).slice(0, 5)
+          && <span>{uiText("LLM lanes ")}{Object.entries(s.llm_lane_limits).slice(0, 5)
             .map(([lane, width]) => `${lane}:${width}`).join(', ')}</span>}
         {s.card_scoring && typeof s.card_scoring === 'object' && !Array.isArray(s.card_scoring)
-          && <span>Card scoring {s.card_scoring.stance || 'balanced'} · novelty {s.card_scoring.novelty_weight}
-            {' · '}coverage {s.card_scoring.coverage_weight}</span>}
-        {s.source && <span>source {s.source}</span>}
+          && <span>{uiText("Card scoring ")}{((s.card_scoring.stance || uiText('balanced')))}{uiText(" · novelty ")}{s.card_scoring.novelty_weight}
+            {' · '}{uiText("coverage ")}{s.card_scoring.coverage_weight}</span>}
+        {s.source && <span>{uiText("source ")}{s.source}</span>}
       </div>
       {ctxRows.length > 0 && <>
-        <div className="section-h">Decision context</div>
+        <div className="section-h">{uiText("Decision context")}</div>
         <div className="ev-meta">{ctxRows.map(([k, v]) =>
           <span key={k} className="ev-ctx"><b>{k}</b> {String(v)}</span>)}</div>
       </>}
@@ -388,8 +396,10 @@ function StrategyDetail({ d }) {
 }
 
 export function ResearchDetail({ d, MemoBody = LazyResearchMemoBody }) {
+  useUILanguage()
+
   return <div className="ev-detail research-event-detail">
-    <React.Suspense fallback={<div className="muted" role="status">Loading research memo…</div>}>
+    <React.Suspense fallback={<div className="muted" role="status">{uiText("Loading research memo…")}</div>}>
       <MemoBody memo={d.memo} showSummary compact />
     </React.Suspense>
   </div>
@@ -422,6 +432,8 @@ function genericRows(e) {
 }
 
 function GenericDetail({ e }) {
+  useUILanguage()
+
   const rows = genericRows(e)
   if (!rows.length) return <div className="ev-detail"><pre className="code event-json">{JSON.stringify(e.data || {}, null, 2)}</pre></div>
   return <div className="ev-detail">{rows.map(([k, v], i) =>
@@ -432,6 +444,8 @@ function GenericDetail({ e }) {
 // event's own trace_id — so a strategy_decision row shows only the strategist's reasoning, not the
 // whole node. Rendered with the same span-tree component as a node's trace.
 export function OpTrace({ runId, traceId, expectedGeneration }) {
+  useUILanguage()
+
   const scope = `${expectedGeneration || runId}:${traceId}`
   const [traceState, setTraceState] = useState(null)
   const [retryNonce, setRetryNonce] = useState(0)
@@ -473,18 +487,16 @@ export function OpTrace({ runId, traceId, expectedGeneration }) {
     setRetryNonce(value => value + 1)
   }
   if (trace === null)
-    return <div className="muted trace-loading" role="status">loading trace…</div>
+    return <div className="muted trace-loading" role="status">{uiText("loading trace…")}</div>
   const retrying = autoRetryMs != null
   // The receipt is rendered HERE rather than delegated to NodeTrace's own default: only this
   // component knows WHICH failure it was, and a surface that cannot name it prints one sentence for
   // two facts. The Retry button stays enabled while a re-read is scheduled — the wait is in the
   // label, and the operator must keep the option of asking now.
   if (traceUnavailable(trace.projection)) return <TraceUnavailable
-    label={traceFailureLabel(trace.failure, { retrying })} onRetry={retry} />
+    label={uiText(traceFailureLabel(trace.failure, { retrying }))} onRetry={retry} />
   return <>{trace.stale && <TraceUnavailable
-    label={trace.failure === TRACE_FAILURE_SUPERSEDED
-      ? traceFailureLabel(TRACE_FAILURE_SUPERSEDED)
-      : 'Trace refresh failed; showing confirmed spans.'} onRetry={retry} />}
+    label={((trace.failure === TRACE_FAILURE_SUPERSEDED ? uiText(traceFailureLabel(TRACE_FAILURE_SUPERSEDED)) : uiText('Trace refresh failed; showing confirmed spans.')))} onRetry={retry} />}
     <NodeTrace spans={trace.spans} projection={trace.projection} runId={runId}
       expectedGeneration={expectedGeneration} treeKey={scope} onRetry={retry} /></>
 }
@@ -492,6 +504,8 @@ export function OpTrace({ runId, traceId, expectedGeneration }) {
 // One feed row, chat-message styled: an icon/color by kind, the narration, an expandable "why" card.
 export function EventRow({ e, onFocusEvent, focusLabel, nodeCreatedAttempt, autoOpen, runId,
   runGeneration, readOnly, liveBuilding, expansion, onExpansionChange }) {
+  useUILanguage()
+
   const [localOpen, setLocalOpen] = useState(autoOpen)
   const localTouched = useRef(false)
   const controlled = expansion != null
@@ -603,7 +617,7 @@ export function EventRow({ e, onFocusEvent, focusLabel, nodeCreatedAttempt, auto
         <div className="fm-line">
           {expandable && <button type="button" className="fm-tw" aria-expanded={open}
             aria-controls={detailsId}
-            aria-label={`${open ? 'Collapse' : 'Expand'} details for event ${e.seq}`}
+            aria-label={uiMessage("{0} details for event {1}", [open ? 'Collapse' : 'Expand', e.seq])}
             onClick={() => changeOpen(!open, true)}>{open ? '▾' : '▸'}</button>}
           <button type="button" className="fm-main" onClick={() => onFocusEvent(e)}
             aria-label={`${narr}. ${focusLabel}`}
@@ -613,29 +627,22 @@ export function EventRow({ e, onFocusEvent, focusLabel, nodeCreatedAttempt, auto
           </button>
         </div>
         {open && expandable && <div className="ev-detail-wrap" id={detailsId}>
-          {hasOmittedDetail && <div className="notice" role="note">
-            Event details were not transferred: {omittedBytes.toLocaleString()} source bytes exceed the bounded page response.
-          </div>}
+          {hasOmittedDetail && <div className="notice" role="note">{uiText("Event details were not transferred: ")}{omittedBytes.toLocaleString()}{uiText(" source bytes exceed the bounded page response.")}</div>}
           {hasReason && reasoningDetail(e, nodeTrace)}
           {hasGeneric && <GenericDetail e={e} />}
-          {hasTrace && nodeTrace == null && !nodeTraceError && <div className="muted" role="status">loading node trace…</div>}
+          {hasTrace && nodeTrace == null && !nodeTraceError && <div className="muted" role="status">{uiText("loading node trace…")}</div>}
           {/* The Retry button stays ENABLED while an automatic re-read is scheduled: the wait is
               announced in the label, and disabling the one control the operator has in order to
               display a busy state would take away the ability to ask now. */}
           {hasTrace && nodeTraceError && <TraceUnavailable
-            label={nodeTraceFailure === TRACE_FAILURE_SUPERSEDED
-              ? traceFailureLabel(TRACE_FAILURE_SUPERSEDED)
-              : nodeTrace == null
-              ? (nodeAutoRetryMs != null ? 'Could not load node trace; retrying automatically.'
-                : 'Could not load node trace.')
-              : 'Node trace refresh failed; showing confirmed spans.'}
+            label={((nodeTraceFailure === TRACE_FAILURE_SUPERSEDED ? uiText(traceFailureLabel(TRACE_FAILURE_SUPERSEDED)) : (nodeTrace == null ? (nodeAutoRetryMs != null ? uiText('Could not load node trace; retrying automatically.') : uiText('Could not load node trace.')) : uiText('Node trace refresh failed; showing confirmed spans.'))))}
             onRetry={retryNodeTrace} />}
           {hasTrace && nodeTrace != null && <NodeTrace spans={nodeSpans}
             projection={nodeTrace.projection} runId={runId} onRetry={retryNodeTrace}
             onLoadMore={loadMoreNodeTrace} spanLimit={nodeTraceLimit}
             expectedGeneration={expectedTraceGeneration} treeKey={nodeTraceScope} />}
           {opTraceId && (e.type === 'research_completed'
-            ? <Disclosure label="research process & tool activity">
+            ? <Disclosure label={uiText("research process & tool activity")}>
                 <OpTrace runId={runId} traceId={opTraceId}
                   expectedGeneration={expectedTraceGeneration} />
               </Disclosure>
@@ -693,6 +700,8 @@ export default function Dock({ runId, live, liveSeq, expectedGeneration, timelin
   onKindFiltersChange = null, focusOnMount = false, onInitialFocus = null,
   collapseControlRef = null, startOverState = null, onStartOver = null, evalStages = null,
   externalMode = false }) {
+  useUILanguage()
+
   const log = timeline.rows
   const collapseButtonRef = useRef(null)
   const startOverDialogRef = useRef(null)
@@ -1210,7 +1219,7 @@ export default function Dock({ runId, live, liveSeq, expectedGeneration, timelin
     startOverDialogIntent?.label || live?.label || live?.run_id || runId)
   const startOverIdentity = startOverLabel === String(runId)
     ? <code>{runId}</code>
-    : <><b>“{startOverLabel}”</b> <span className="muted">(run <code>{runId}</code>)</span></>
+    : <><b>“{startOverLabel}”</b> <span className="muted">{uiText("(run ")}<code>{runId}</code>)</span></>
   // Publish only from the committed layout and bind the callable to this exact run generation. A
   // functional identity cleanup prevents an old StrictMode/unmount cleanup from erasing a newer
   // controller. The parent also receives busy/failure reactively, so a prominent canvas recovery CTA
@@ -1233,83 +1242,77 @@ export default function Dock({ runId, live, liveSeq, expectedGeneration, timelin
   return (
     <div className="dock chat-dock">
       <div className="dock-tabs">
-        <span className="chat-label"><OpIcon name="flag" size={14} /> events &amp; timeline</span>
+        <span className="chat-label"><OpIcon name="flag" size={14} />{uiText(" events & timeline")}</span>
         {/* clickable so the user can return to live even when the controls (with the Live button) are hidden */}
         <button type="button" className={'hist-tag-mini ' + (visiblyLive ? 'live' : 'hist')}
               onClick={returnToLive} disabled={visiblyLive}
-              title={visiblyLive ? '' : 'Jump to latest verified event'}>
-          {atLiveView
-            ? visiblyLive ? `live · ${liveSeq}` : 'reading · jump latest'
-            : `replay ${sliderVal}/${liveSeq} → live`}</button>
+              title={((visiblyLive ? '' : uiText('Jump to latest verified event')))}>
+          {((atLiveView ? (visiblyLive ? uiMessage("live · {0}", [liveSeq]) : uiText('reading · jump latest')) : uiMessage("replay {0}/{1} → live", [sliderVal, liveSeq])))}</button>
         <span className="spacer" />
         <button className={'btn sm ghost' + (!collapsed && showControls ? ' on' : '')
                   + (filtersActive ? ' filters-active' : '')}
-                title={filtersActive ? 'Timeline filters — active filters applied' : 'Timeline filters'}
-                aria-label={filtersActive ? 'Timeline filters, active filters applied' : 'Timeline filters'}
+                title={((filtersActive ? uiText('Timeline filters — active filters applied') : uiText('Timeline filters')))}
+                aria-label={((filtersActive ? uiText('Timeline filters, active filters applied') : uiText('Timeline filters')))}
                 aria-expanded={!collapsed && showControls} aria-controls="run-timeline-controls"
-                onClick={toggleControls}><OpIcon name="sliders" size={13} /> controls</button>
-        <button ref={setCollapseButtonRef} className="btn sm ghost dock-collapse" title={collapsed ? 'expand' : 'collapse'}
-                aria-label={collapsed ? 'Expand events and timeline' : 'Collapse events and timeline'}
+                onClick={toggleControls}><OpIcon name="sliders" size={13} />{uiText(" controls")}</button>
+        <button ref={setCollapseButtonRef} className="btn sm ghost dock-collapse" title={((collapsed ? uiText('expand') : uiText('collapse')))}
+                aria-label={((collapsed ? uiText('Expand events and timeline') : uiText('Collapse events and timeline')))}
                 aria-expanded={!collapsed} aria-controls="run-events-timeline"
                 onClick={onToggleCollapse}><OpIcon name={collapsed ? 'chevron-up' : 'chevron-down'} size={13} /></button>
       </div>
       {!collapsed && <div id="run-events-timeline" className="dock-body chat-body" style={{ height }}>
         {showControls && <div id="run-timeline-controls" className="dock-controls">
           <div className="scrubber inline">
-            <button className="btn sm" onClick={returnToLive} disabled={drag == null && visiblyLive}><OpIcon name="play" size={11} /> Live</button>
+            <button className="btn sm" onClick={returnToLive} disabled={drag == null && visiblyLive}><OpIcon name="play" size={11} />{uiText(" Live")}</button>
             <input type="range" min={0} max={Math.max(0, liveSeq)} value={sliderVal}
-                   aria-label="Timeline sequence" aria-valuetext={sliderVal >= liveSeq ? `live at ${liveSeq}` : `replay ${sliderVal} of ${liveSeq}`}
+                   aria-label={uiText("Timeline sequence")} aria-valuetext={sliderVal >= liveSeq ? `live at ${liveSeq}` : `replay ${sliderVal} of ${liveSeq}`}
                    onChange={e => onScrub(Number(e.target.value))}
                    onPointerUp={endScrub} onMouseUp={endScrub} onKeyUp={endScrub} onBlur={endScrub} />
-            <span className={(sliderVal >= liveSeq) ? 'live-tag' : 'hist-tag'}>{(sliderVal >= liveSeq) ? `live · ${liveSeq}` : `replay · ${sliderVal}/${liveSeq}`}</span>
+            <span className={(sliderVal >= liveSeq) ? 'live-tag' : 'hist-tag'}>{(sliderVal >= liveSeq ? uiMessage("live · {0}", [liveSeq]) : uiMessage("replay · {0}/{1}", [sliderVal, liveSeq]))}</span>
           </div>
           <div className="kind-chips">
-            <input className="text feed-filter" aria-label="Filter loaded events" placeholder="filter events…" value={filter} onChange={e => onFilterChange?.(e.target.value)} />
+            <input className="text feed-filter" aria-label={uiText("Filter loaded events")} placeholder={uiText("filter events…")} value={filter} onChange={e => onFilterChange?.(e.target.value)} />
             <div className="kind-chip-strip">
               {GROUPS.map(([g, label]) => <button key={g}
                 className={'kind-chip k-' + g + (kinds.has(g) ? ' on' : '')} aria-pressed={kinds.has(g)}
                 onClick={() => toggleKind(g)}>
-                <OpIcon name={GROUP_GLYPH[g]} size={12} /> {label}</button>)}
-              {kinds.size > 0 && <button className="kind-chip clear" onClick={() => setKinds(new Set())}>clear</button>}
+                <OpIcon name={GROUP_GLYPH[g]} size={12} /> {uiText(label)}</button>)}
+              {kinds.size > 0 && <button className="kind-chip clear" onClick={() => setKinds(new Set())}>{uiText("clear")}</button>}
             </div>
           </div>
         </div>}
         <div className="timeline-pagebar">
           <button type="button" className="btn sm ghost" disabled={!timeline.hasMore.older || timeline.loading.older}
-            onClick={timeline.loadOlder}>{timeline.loading.older ? 'Loading…' : 'Load older'}</button>
+            onClick={timeline.loadOlder}>{((timeline.loading.older ? uiText('Loading…') : uiText('Load older')))}</button>
           <span className="muted">
-            {timeline.totalEvents != null ? `${log.length} loaded of ${timeline.totalEvents}` : `${log.length} loaded`}
+            {(timeline.totalEvents != null ? uiMessage("{0} loaded of {1}", [log.length, timeline.totalEvents]) : uiMessage("{0} loaded", [log.length]))}
             {feed.length !== log.length
               ? ` · ${feed.length} ${(filter.trim() || kinds.size) ? 'matching' : 'shown'}`
               : ''}
           </span>
           {timeline.hasMore.newer && <button type="button" className="btn sm ghost"
             disabled={timeline.loading.newer} onClick={timeline.loadNewer}>
-            {timeline.loading.newer ? 'Loading…' : 'Load newer'}</button>}
+            {((timeline.loading.newer ? uiText('Loading…') : uiText('Load newer')))}</button>}
         </div>
         {(filter.trim() !== '' || kinds.size > 0) && timeline.totalEvents != null && timeline.totalEvents > log.length &&
-          <div className="timeline-window-note" role="note">Filters search loaded events only; page for more.</div>}
-        {timeline.status === 'loading' && log.length === 0 && <div className="timeline-resource muted" role="status">Loading timeline…</div>}
-        {timeline.loading.around && <div className="timeline-resource muted" role="status">Loading around seq {viewSeq}…</div>}
+          <div className="timeline-window-note" role="note">{uiText("Filters search loaded events only; page for more.")}</div>}
+        {timeline.status === 'loading' && log.length === 0 && <div className="timeline-resource muted" role="status">{uiText("Loading timeline…")}</div>}
+        {timeline.loading.around && <div className="timeline-resource muted" role="status">{uiText("Loading around seq ")}{viewSeq}…</div>}
         {timeline.errors.tail && <div className="notice resource-error" role="alert">
-          <span>{log.length ? 'Refresh failed; window unchanged.' : timeline.errors.tail}</span>
-          <button className="btn sm" onClick={() => timeline.retry('tail')}>Retry</button></div>}
+          <span>{((log.length ? uiText('Refresh failed; window unchanged.') : timeline.errors.tail))}</span>
+          <button className="btn sm" onClick={() => timeline.retry('tail')}>{uiText("Retry")}</button></div>}
         {timeline.errors.older && <div className="notice resource-error compact" role="alert">
-          <span>Older events unavailable.</span><button className="btn sm" onClick={timeline.loadOlder}>Retry</button></div>}
+          <span>{uiText("Older events unavailable.")}</span><button className="btn sm" onClick={timeline.loadOlder}>{uiText("Retry")}</button></div>}
         {timeline.errors.newer && <div className="notice resource-error compact" role="alert">
-          <span>Live refresh failed; events may lag.</span><button className="btn sm" onClick={timeline.loadNewer}>Retry</button></div>}
+          <span>{uiText("Live refresh failed; events may lag.")}</span><button className="btn sm" onClick={timeline.loadNewer}>{uiText("Retry")}</button></div>}
         {timeline.errors.around && <div className="notice resource-error compact" role="alert">
-          <span>Replay seq {viewSeq} unavailable.</span>
-          <button className="btn sm" onClick={() => timeline.retry('around')}>Retry</button></div>}
+          <span>{uiText("Replay seq ")}{viewSeq}{uiText(" unavailable.")}</span>
+          <button className="btn sm" onClick={() => timeline.retry('around')}>{uiText("Retry")}</button></div>}
         {timeline.tornTail && <div className="timeline-window-note warning" role="status">
-          {timeline.sourceTailLimited
-            ? 'The raw log tail exceeds the safety limit; showing the last verified canonical prefix.'
-            : 'The final source row is incomplete or non-canonical; showing the last verified event prefix.'}
+          {((timeline.sourceTailLimited ? uiText('The raw log tail exceeds the safety limit; showing the last verified canonical prefix.') : uiText('The final source row is incomplete or non-canonical; showing the last verified event prefix.')))}
         </div>}
         {feed.length === 0 && timeline.status === 'ready' && !timeline.loading.around
-          ? <div className="timeline-resource muted">{(filter.trim() || kinds.size)
-              ? 'nothing matches the loaded window'
-              : log.length > 0 ? 'only background bookkeeping in this window — page older for run events' : 'no events yet'}</div>
+          ? <div className="timeline-resource muted">{((filter.trim() || kinds.size ? uiText('nothing matches the loaded window') : (log.length > 0 ? uiText('only background bookkeeping in this window — page older for run events') : uiText('no events yet'))))}</div>
           : <VirtualTimeline rows={feed} getKey={timelineEventKey}
               identity={`${runId}:${timeline.generation || 'pending'}`}
               className="feed chat-feed" ariaLabel="Run events"
@@ -1343,94 +1346,75 @@ export default function Dock({ runId, live, liveSeq, expectedGeneration, timelin
           const age = externalMode === false ? liveStatusAgeLabel(live, log) : ''
           return <div className="agent-status dock-agent-status">
             <div className="as-line">{externalMode === false && <span className="as-dot" />}<span className="as-seg">{pipeline}</span>
-              {age && <span className="muted as-age" title="how long this phase has been running">
+              {age && <span className="muted as-age" title={uiText("how long this phase has been running")}>
                 {age}</span>}</div>
             {externalMode === false && <LiveTrace runId={runId} generation={timeline.generation} active={atLiveView} />}
           </div>
         })()}
         <div className="dock-foot">
           <span className="muted dock-foot-hint">
-            {readOnly ? 'Historical timeline — live controls and sidecar trace details are disabled.' : <>
-              Ask Assistant about this run. Shortcuts: <code className="cmd-hint">/stop · /finalize · /resume · /approve #id</code>
+            {readOnly ? uiText('Historical timeline — live controls and sidecar trace details are disabled.') : <>{uiText("Ask Assistant about this run. Shortcuts: ")}<code className="cmd-hint">/stop · /finalize · /resume · /approve #id</code>
             </>}
           </span>
           {!readOnly && <div className="transport">
             {transportPending && <div className={'transport-message' + (transportPending.statusUnavailable ? ' warning' : '')}
               role={transportPending.statusUnavailable ? 'alert' : 'status'}>
               <span>
-                {transportPending.statusUnavailable
-                  ? transportPending.observationKind === 'access' ? 'Owner access required to check command status'
-                    : transportPending.observationKind === 'protocol' ? 'Invalid command status response'
-                      : 'Command status unavailable — the same intent is preserved'
-                  : transportPending.checking ? 'Checking the same command…'
-                    : transportPending.retrying ? 'Retrying the same command…'
-                      : transportPending.record?.status === 'submitting'
-                        ? `Submitting ${transportPending.action}…`
-                        : transportPending.action === 'finalize' ? 'Finalizing…'
-                          : transportPending.action === 'stop' ? 'Stop requested…' : 'Resume requested…'}
+                {((transportPending.statusUnavailable ? (transportPending.observationKind === 'access' ? uiText('Owner access required to check command status') : (transportPending.observationKind === 'protocol' ? uiText('Invalid command status response') : uiText('Command status unavailable — the same intent is preserved'))) : (transportPending.checking ? uiText('Checking the same command…') : (transportPending.retrying ? uiText('Retrying the same command…') : (transportPending.record?.status === 'submitting' ? uiMessage("Submitting {0}…", [transportPending.action]) : (transportPending.action === 'finalize' ? uiText('Finalizing…') : (transportPending.action === 'stop' ? uiText('Stop requested…') : uiText('Resume requested…'))))))))}
                 {transportPending.record?.id
-                  ? <span className="transport-command-id" title={`Command ${transportPending.record.id}`}>
+                  ? <span className="transport-command-id" title={uiMessage("Command {0}", [transportPending.record.id])}>
                       {' · '}{String(transportPending.record.id).slice(0, 12)}…</span> : null}
               </span>
               {transportPending.statusUnavailable && <>
-                <span className="transport-detail">{transportPending.observationKind === 'access'
-                  ? 'Verify owner access, then check again.'
-                  : transportPending.observationKind === 'protocol'
-                    ? 'Saved command response unverifiable.'
-                    : 'Reconnect and check before another action.'}</span>
+                <span className="transport-detail">{((transportPending.observationKind === 'access' ? uiText('Verify owner access, then check again.') : (transportPending.observationKind === 'protocol' ? uiText('Saved command response unverifiable.') : uiText('Reconnect and check before another action.'))))}</span>
                 <button className="btn sm" onClick={onCheckTransport}
-                  aria-label={`Check preserved ${transportPending.action} command`}>
-                  Check command</button>
+                  aria-label={uiMessage("Check preserved {0} command", [transportPending.action])}>{uiText("Check command")}</button>
                 {transportPending.protocolInvalid && <button className="btn sm ghost"
-                  onClick={dismissProtocolTransport}>Dismiss</button>}
+                  onClick={dismissProtocolTransport}>{uiText("Dismiss")}</button>}
               </>}
               {!transportPending.statusUnavailable && pendingRemedy && <>
                 <span className="transport-detail">
-                  {`Waiting ${Math.round(pendingRemedy.elapsedMs / 1000)}s. ${pendingRemedy.waitingFor} `}
-                  {pendingRemedy.boundedMs == null
-                    ? 'This server does not report when the command stops waiting.'
-                    : `It stops waiting on its own in about ${Math.max(1, Math.round(pendingRemedy.boundedMs / 1000))}s, and then says why.`}
+                  {uiMessage("Waiting {0}s. {1} ", [Math.round(pendingRemedy.elapsedMs / 1000), pendingRemedy.waitingFor])}
+                  {((pendingRemedy.boundedMs == null ? uiText('This server does not report when the command stops waiting.') : uiMessage("It stops waiting on its own in about {0}s, and then says why.", [Math.max(1, Math.round(pendingRemedy.boundedMs / 1000))])))}
                 </span>
                 {pendingRemedy.canCheck && <button className="btn sm ghost" onClick={onCheckTransport}
-                  aria-label={`Check the pending ${transportPending.action} command now`}>
-                  Check now</button>}
+                  aria-label={uiMessage("Check the pending {0} command now", [transportPending.action])}>{uiText("Check now")}</button>}
               </>}
             </div>}
             {!transportPending && externalTransportPending && foreignLockView && <div
               className="transport-message" role="status" aria-live="polite" aria-atomic="true">
-              <span>/{foreignLockView.action} is pending in {foreignLockView.owner}</span>
+              <span>/{foreignLockView.action}{uiText(" is pending in ")}{foreignLockView.owner}</span>
               {foreignLockView.commandId && <span className="transport-command-id"
-                title={`Command ${foreignLockView.commandId}`}>
+                title={uiMessage("Command {0}", [foreignLockView.commandId])}>
                 {' · '}{String(foreignLockView.commandId).slice(0, 12)}…</span>}
               {/* The account and the escape. Withheld while the command still looks instantaneous,
                   so a stop that lands in 300 ms does not flash a release button at the operator. */}
               {foreignLockView.accountable && <>
                 <span className="transport-detail">
-                  {`Held ${foreignCommandLockAge(foreignLockView.ageMs)}. ${foreignLockView.text}`}
+                  {uiMessage("Held {0}. {1}", [foreignCommandLockAge(foreignLockView.ageMs), foreignLockView.text])}
                 </span>
                 <button className="btn sm ghost" onClick={releaseForeignLock}
                   title={foreignLockView.releaseHint}
-                  aria-label={`Release the run controls held by ${foreignLockView.owner}`}>
-                  Release these controls</button>
+                  aria-label={uiMessage("Release the run controls held by {0}", [foreignLockView.owner])}>{uiText("Release these controls")}</button>
               </>}
             </div>}
             {!transportBusy && transportFailure && <>
               <div className="transport-message error" role="alert">
-                <span>{failureHeading}{failedCommandId
-                  ? <span className="transport-command-id" title={`Command ${failedCommandId}`}>
+                <span>{uiText(failureHeading)}{failedCommandId
+                  ? <span className="transport-command-id" title={uiMessage("Command {0}", [failedCommandId])}>
                       {' · '}{String(failedCommandId).slice(0, 12)}…</span> : null}
                   {!failedCommandId && conflictingCommandId
-                    ? <span className="transport-command-id" title={`Conflicting active command ${conflictingCommandId}`}>
-                        {' · active '}{String(conflictingCommandId).slice(0, 12)}…</span> : null}</span>
+                    ? <span className="transport-command-id" title={uiMessage("Conflicting active command {0}", [conflictingCommandId])}>
+                        {uiText(' · active ')}{String(conflictingCommandId).slice(0, 12)}…</span> : null}</span>
                 <span className="transport-detail">{commandErrorMessage(transportFailure.record)}</span>
               </div>
               {canRetryTransport && <button className="btn sm" onClick={onRetryTransport}
-                title="Retry the same durable command">Retry command</button>}
+                title={uiText("Retry the same durable command")}>{uiText("Retry command")}</button>}
               <button className="btn sm ghost" onClick={dismissTransportFailure}
-                title="Dismiss result">Dismiss</button>
+                title={uiText("Dismiss result")}>{uiText("Dismiss")}</button>
             </>}
-            {!transportBusy && !transportFailure && mode === 'finalizing' && <span className="muted" role="status">Finalizing…</span>}
-            {!transportBusy && !transportFailure && mode === 'finishing' && <span className="muted" role="status">Finishing write-out…</span>}
+            {!transportBusy && !transportFailure && mode === 'finalizing' && <span className="muted" role="status">{uiText("Finalizing…")}</span>}
+            {!transportBusy && !transportFailure && mode === 'finishing' && <span className="muted" role="status">{uiText("Finishing write-out…")}</span>}
             {/* Reattach is offered only when there IS a pending finalize to reattach to — see
                 `runIndex.js::pendingFinalizeIntent`. On a naturally-finished run this same button
                 submitted a `run_abort` the server rejects `command_intent_missing`, whose own
@@ -1439,41 +1423,38 @@ export default function Dock({ runId, live, liveSeq, expectedGeneration, timelin
                 affordance that could act from here spawns an engine. */}
             {!transportBusy && !transportFailure && mode === 'finalization-stalled'
               && !stalledRemedy && <>
-              <span className="muted" role="alert">Finalization stalled</span>
+              <span className="muted" role="alert">{uiText("Finalization stalled")}</span>
               <button className="btn sm" onClick={onFinalize}
-                title="Resume pending finalization">Reattach finalization</button>
+                title={uiText("Resume pending finalization")}>{uiText("Reattach finalization")}</button>
             </>}
             {!transportBusy && !transportFailure && mode === 'finalization-stalled'
               && stalledRemedy && <div className="transport-message" role="alert">
-              <span>Finalization stalled — no pending finalize to reattach</span>
+              <span>{uiText("Finalization stalled — no pending finalize to reattach")}</span>
               <span className="transport-detail">
-                {stalledRemedy.why}, and nothing here will resume it. Complete the wrap-up from a
-                shell: <code>{stalledRemedy.command}</code>
+                {stalledRemedy.why}{uiText(", and nothing here will resume it. Complete the wrap-up from a shell: ")}<code>{stalledRemedy.command}</code>
               </span>
             </div>}
             {!transportBusy && !transportFailure && mode === 'running' && <>
-              <button className="btn sm" aria-label="Stop run without finalizing"
-                title="Stop now; resume or finalize later" onClick={onStop}><OpIcon name="pause" size={13} /> Stop run</button>
-              <button className="btn sm danger" aria-label="Finalize run"
-                title="Finalize: stop, report, lessons and cost" onClick={onFinalize}><OpIcon name="stop" size={13} /> Finalize</button></>}
+              <button className="btn sm" aria-label={uiText("Stop run without finalizing")}
+                title={uiText("Stop now; resume or finalize later")} onClick={onStop}><OpIcon name="pause" size={13} />{uiText(" Stop run")}</button>
+              <button className="btn sm danger" aria-label={uiText("Finalize run")}
+                title={uiText("Finalize: stop, report, lessons and cost")} onClick={onFinalize}><OpIcon name="stop" size={13} />{uiText(" Finalize")}</button></>}
             {!transportBusy && !transportFailure && (mode === 'paused' || mode === 'stalled') && <>
-              <button className="btn sm primary" aria-label="Resume run" title="Continue run" onClick={onResume}><OpIcon name="play" size={13} /> Resume run</button>
-              <button className="btn sm danger" aria-label="Finalize run"
-                title="Finalize: stop, report, lessons and cost" onClick={onFinalize}><OpIcon name="stop" size={13} /> Finalize</button></>}
+              <button className="btn sm primary" aria-label={uiText("Resume run")} title={uiText("Continue run")} onClick={onResume}><OpIcon name="play" size={13} />{uiText(" Resume run")}</button>
+              <button className="btn sm danger" aria-label={uiText("Finalize run")}
+                title={uiText("Finalize: stop, report, lessons and cost")} onClick={onFinalize}><OpIcon name="stop" size={13} />{uiText(" Finalize")}</button></>}
             {!transportBusy && !transportFailure && mode === 'finished' && <>
-              <button className="btn sm primary" aria-label="Resume finished run"
-                title={runActionBusy ? 'Another run lifecycle action must be resolved first' : 'Reopen and continue'}
-                disabled={runActionBusy} onClick={onResume}><OpIcon name="play" size={13} /> Resume run</button>
+              <button className="btn sm primary" aria-label={uiText("Resume finished run")}
+                title={((runActionBusy ? uiText('Another run lifecycle action must be resolved first') : uiText('Reopen and continue')))}
+                disabled={runActionBusy} onClick={onResume}><OpIcon name="play" size={13} />{uiText(" Resume run")}</button>
               <button className="btn sm danger start-over-trigger" aria-haspopup="dialog"
-                aria-label="Start run over" title={startOverDisabled
-                  ? startOverState?.disabledReason || 'Resolve the existing Start over outcome first'
-                  : 'Archive this generation and start again from the saved task and settings'}
+                aria-label={uiText("Start run over")} title={((startOverDisabled ? (startOverState?.disabledReason || uiText('Resolve the existing Start over outcome first')) : uiText('Archive this generation and start again from the saved task and settings')))}
                 disabled={startOverDisabled} onClick={() => setStartOverDialogIntent({
                   runId: String(runId),
                   expectedGeneration: String(expectedGeneration || ''),
                   label: String(live?.label || live?.run_id || runId),
                 })}>
-                <OpIcon name="replay" size={13} /> Start over…</button></>}
+                <OpIcon name="replay" size={13} />{uiText(" Start over…")}</button></>}
           </div>}
         </div>
       </div>}
@@ -1484,23 +1465,19 @@ export default function Dock({ runId, live, liveSeq, expectedGeneration, timelin
           aria-describedby="start-over-description start-over-cost-note"
           tabIndex={-1}>
           <div className="modal-h">
-            <b id="start-over-title">Start this run over?</b>
+            <b id="start-over-title">{uiText("Start this run over?")}</b>
           </div>
           <div className="modal-b">
             <p id="start-over-description" className="start-over-copy">
-              {startOverIdentity} will start again from its saved task and settings. Current events,
-              nodes, traces, and chat leave the live view and remain archived on disk.
-            </p>
-            <p id="start-over-cost-note" className="start-over-cost-note">
-              The engine starts immediately and may use provider and evaluation budget.
-            </p>
+              {startOverIdentity}{uiText(" will start again from its saved task and settings. Current events, nodes, traces, and chat leave the live view and remain archived on disk.")}</p>
+            <p id="start-over-cost-note" className="start-over-cost-note">{uiText("The engine starts immediately and may use provider and evaluation budget.")}</p>
             <div className="modal-actions">
               <button type="button" className="btn sm" data-dialog-initial-focus
-                onClick={closeStartOverDialog}>Keep current run</button>
+                onClick={closeStartOverDialog}>{uiText("Keep current run")}</button>
               <button type="button" className="btn sm danger"
                 disabled={startOverDisabled || mode !== 'finished'
                   || startOverDialogIntent.expectedGeneration !== expectedGeneration}
-                onClick={submitStartOver}>Archive &amp; start over</button>
+                onClick={submitStartOver}>{uiText("Archive & start over")}</button>
             </div>
           </div>
         </section>

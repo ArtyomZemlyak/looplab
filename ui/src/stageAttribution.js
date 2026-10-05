@@ -1,3 +1,4 @@
+import { uiMessage } from './uiLanguage.js'
 // The eval pipeline's stage strip, ATTRIBUTED — the pure half of `Inspector.jsx::StagePipeline`.
 //
 // THE DEFECT THIS EXISTS FOR. `stage_finished` is appended once per stage per ATTEMPT of the
@@ -77,7 +78,7 @@ export const STAGE_SUPERSEDED_ICON = '⋯'
 // attempt that recorded it and must stay reachable to a reader who cannot see a tone. Every other
 // row is unchanged, label included (there is none), which is what keeps the negative control exact.
 export const stageSupersededLabel = (s) =>
-  `${s?.status} under an earlier attempt; superseded — no later attempt has reported on this stage`
+  uiMessage("{0} under an earlier attempt; superseded — no later attempt has reported on this stage", [s?.status])
 
 const seconds = (s) => s?.seconds != null ? ` · ${s.seconds}s` : ''
 const exit = (s) => s?.exit_code != null ? ` · exit ${s.exit_code}` : ''

@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict'
-import { readFile } from 'node:fs/promises'
+import { readSource as readFile } from './_source.js'
 import test from 'node:test'
 
 const source = name => readFile(new URL(`../src/${name}`, import.meta.url), 'utf8')

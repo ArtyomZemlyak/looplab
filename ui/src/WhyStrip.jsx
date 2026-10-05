@@ -1,9 +1,12 @@
+import { uiText, uiMessage, useUILanguage } from './uiLanguage.js'
 import React, { useId, useState } from 'react'
 import { OpIcon } from './icons.jsx'
 
 // Compact, always-visible narration of the loop's latest autonomous decisions. Keeping this pure
 // projection outside panels.jsx means the core run canvas does not download every optional panel.
 export default function WhyStrip({ state, onSelect }) {
+  useUILanguage()
+
   const detailBaseId = useId()
   const [expandedKey, setExpandedKey] = useState(null)
   const items = []
@@ -13,7 +16,7 @@ export default function WhyStrip({ state, onSelect }) {
     items.push({
       icon: 'compass',
       label: 'strategy',
-      text: strat.strategy.rationale || `policy -> ${strat.strategy.policy}`,
+      text: (strat.strategy.rationale || uiMessage("policy -> {0}", [strat.strategy.policy])),
       at: strat.at_node,
     })
   }
@@ -27,7 +30,7 @@ export default function WhyStrip({ state, onSelect }) {
         : chosen.parent_id != null ? ` from #${chosen.parent_id}` : ''}`
       : (chosen || 'action')
     items.push({
-      icon: 'bolt', label, text: decision.rationale || '', at: decision.at_node,
+      icon: 'bolt', label: label, text: decision.rationale || '', at: decision.at_node,
     })
   }
   if (state.policy_reason) {
@@ -39,7 +42,7 @@ export default function WhyStrip({ state, onSelect }) {
     })
   }
   if (!items.length) return null
-  return <div className="why-strip" role="region" aria-label="Why the loop is doing what it is doing live">
+  return <div className="why-strip" role="region" aria-label={uiText("Why the loop is doing what it is doing live")}>
     {items.slice(0, 3).map((item, index) => {
       const Item = item.node != null ? 'button' : 'span'
       const itemKey = `${index}:${item.label}:${item.node ?? ''}:${item.at ?? ''}`
@@ -52,19 +55,19 @@ export default function WhyStrip({ state, onSelect }) {
             title={item.text || undefined}
             onClick={item.node != null ? () => onSelect?.(item.node) : undefined}>
             <OpIcon name={item.icon} size={12} className="why-ic" />
-            <b>{item.label}</b> {item.text}
+            <b>{uiText(item.label)}</b> {item.text}
             {item.at != null ? <span className="muted"> @{item.at}</span> : null}
           </Item>
           {item.text && <button type="button" className="why-disclosure disclosure-button"
             aria-expanded={expanded} aria-controls={detailId}
-            aria-label={`${expanded ? 'Hide' : 'Show'} full rationale for ${item.label}`}
+            aria-label={uiMessage("{0} full rationale for {1}", [expanded ? 'Hide' : 'Show', item.label])}
             onClick={() => setExpandedKey(current => current === itemKey ? null : itemKey)}>
             <OpIcon name={expanded ? 'chevron-up' : 'chevron-down'} size={12} />
           </button>}
         </div>
         {item.text && <div id={detailId} className="why-detail" role="region" hidden={!expanded}
-          aria-label={`Full rationale for ${item.label}`}>
-          <b>{item.label}</b> {item.text}
+          aria-label={uiMessage("Full rationale for {0}", [item.label])}>
+          <b>{uiText(item.label)}</b> {item.text}
           {item.at != null ? <span className="muted"> @{item.at}</span> : null}
         </div>}
       </div>

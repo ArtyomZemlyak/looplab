@@ -1,3 +1,4 @@
+import { uiText, uiMessage, useUILanguage } from './uiLanguage.js'
 import React, { useEffect, useId, useMemo, useRef, useState } from 'react'
 import { addConceptSelection, chipsAtPath, breadcrumb, matchingNodeIds,
   toggleConceptSelection } from './conceptChips.js'
@@ -19,6 +20,8 @@ const SEARCH_RESULTS = 8   // dropdown cap; the pure model ranks globally, this 
 // The pure model (chip counts, breadcrumb, matching set) lives in conceptChips.js and is unit-tested;
 // this component is only wiring + markup.
 export default function ConceptChipBar({ state, onHighlight }) {
+  useUILanguage()
+
   // partial rows may be rendered on their node, but absence within them is not truth.
   // Keep THEM out of chip counts, search, selection and DAG filtering -- them, the degraded rows, not
   // the run. Receipts are per node; withholding one node's row is what that rule asks for, and dropping
@@ -136,11 +139,9 @@ export default function ConceptChipBar({ state, onHighlight }) {
   if (materialization === 'unavailable' || (!hasConcepts && withheld > 0)) return (
     <div className="concept-bar" role={materialization === 'unavailable' ? 'alert' : 'status'}>
       <div className="cb-head">
-        <strong>Concepts</strong>
+        <strong>{uiText("Concepts")}</strong>
         <span className="chip xs warn">{materialization.toUpperCase()}</span>
-        <span className="muted">{materialization === 'unavailable'
-          ? 'Membership unavailable; not empty.'
-          : `Membership withheld for all ${withheld} tagged experiment${withheld === 1 ? '' : 's'}; not empty.`}</span>
+        <span className="muted">{((materialization === 'unavailable' ? uiText('Membership unavailable; not empty.') : uiMessage("Membership withheld for all {0} tagged experiment{1}; not empty.", [withheld, withheld === 1 ? '' : 's'])))}</span>
       </div>
     </div>
   )
@@ -151,49 +152,48 @@ export default function ConceptChipBar({ state, onHighlight }) {
   const keyExact = (key) => key[0] === '='
 
   return (
-    <div className="concept-bar" role="group" aria-label="Concept filter">
+    <div className="concept-bar" role="group" aria-label={uiText("Concept filter")}>
       <div className="cb-head">
-        <strong>Concepts</strong>
+        <strong>{uiText("Concepts")}</strong>
         {/* Counts below are a LOWER BOUND while any row is withheld: the withheld experiments may or may
             not carry these concepts, and the graph filter cannot reach them. Say so rather than letting
             a silently short count read as the whole run. */}
         {withheld > 0 &&
-          <span className="chip xs warn" title={`${withheld} experiment${withheld === 1 ? "'s" : "s'"} membership could not be materialized; counts are a lower bound and these experiments never match a filter.`}>
-            PARTIAL · {withheld} withheld</span>}
-        <nav className="cb-crumbs" aria-label="Concept breadcrumb">
+          <span className="chip xs warn" title={uiMessage("{0} experiment{1} membership could not be materialized; counts are a lower bound and these experiments never match a filter.", [withheld, withheld === 1 ? "'s" : "s'"])}>{uiText("PARTIAL · ")}{withheld}{uiText(" withheld")}</span>}
+        <nav className="cb-crumbs" aria-label={uiText("Concept breadcrumb")}>
           <button type="button" className={'cb-crumb' + (path ? '' : ' on')}
-            onClick={() => setPath('')} aria-current={path ? undefined : 'true'}>All</button>
+            onClick={() => setPath('')} aria-current={path ? undefined : 'true'}>{uiText("All")}</button>
           {crumbs.map((c, i) => <React.Fragment key={c.id}>
             <span className="cb-sep" aria-hidden="true">›</span>
             <button type="button" className={'cb-crumb' + (i === crumbs.length - 1 ? ' on' : '')}
               onClick={() => setPath(c.id)}
-              aria-current={i === crumbs.length - 1 ? 'true' : undefined}>{c.label}</button>
+              aria-current={i === crumbs.length - 1 ? 'true' : undefined}>{uiText(c.label)}</button>
           </React.Fragment>)}
         </nav>
         <span className="spacer" />
         <div className="cs">
           {!searchOpen
-            ? <button type="button" className="cs-icon" aria-label="Search concepts"
+            ? <button type="button" className="cs-icon" aria-label={uiText("Search concepts")}
                 onClick={openSearch}><OpIcon name="search" size={15} /></button>
             : <div className={'cs-box' + (searching ? ' focus' : '')}>
                 <OpIcon name="search" size={13} />
                 <input ref={inputRef} className="cs-input" value={query}
-                  placeholder="find a concept…" aria-label="Search concepts" autoComplete="off"
+                  placeholder={uiText("find a concept…")} aria-label={uiText("Search concepts")} autoComplete="off"
                   role="combobox" aria-autocomplete="list" aria-expanded={searching}
                   aria-controls={searching ? listboxId : undefined}
                   aria-activedescendant={activeOptionId}
                   onChange={e => setQuery(e.target.value)} onKeyDown={onSearchKey}
                   onBlur={() => { if (!query) closeSearch() }} />
                 {query &&
-                  <button type="button" className="cs-clear" aria-label="Clear search"
+                  <button type="button" className="cs-clear" aria-label={uiText("Clear search")}
                     onClick={() => { setQuery(''); inputRef.current?.focus() }}>×</button>}
               </div>}
           {searching &&
-            <div className="cs-pop" id={listboxId} role="listbox" aria-label="Concept search results">
+            <div className="cs-pop" id={listboxId} role="listbox" aria-label={uiText("Concept search results")}>
               {results.length === 0
-                ? <div className="cs-empty">No concept matches “{trimmedQuery}”.</div>
+                ? <div className="cs-empty">{uiText("No concept matches “")}{trimmedQuery}”.</div>
                 : <>
-                  <div className="cs-pop-h">Concepts · Enter to pin</div>
+                  <div className="cs-pop-h">{uiText("Concepts · Enter to pin")}</div>
                   {results.map((r, i) => {
                     const parent = r.id.includes('/') ? r.id.slice(0, r.id.lastIndexOf('/') + 1) : ''
                     return (
@@ -201,7 +201,7 @@ export default function ConceptChipBar({ state, onHighlight }) {
                         tabIndex={-1} aria-selected={i === cursor}
                         className={'cs-res' + (i === cursor ? ' cursor' : '')}
                         onMouseEnter={() => setCursor(i)} onClick={() => commitConcept(r.id)}
-                        title={`${r.id} · ${r.count} experiment(s)`}>
+                        title={uiMessage("{0} · {1} experiment(s)", [r.id, r.count])}>
                         <span><span className="cs-path">{parent}</span><Marked text={r.label} query={query} /></span>
                         <span className="cs-cnt">{r.count}</span>
                       </button>
@@ -211,28 +211,27 @@ export default function ConceptChipBar({ state, onHighlight }) {
             </div>}
         </div>
         {selected.length > 0 &&
-          <button type="button" className="btn sm ghost" onClick={clearSelection}>
-            clear ({selected.length})</button>}
+          <button type="button" className="btn sm ghost" onClick={clearSelection}>{uiText("clear (")}{selected.length})</button>}
       </div>
 
       {selected.length > 0 &&
-        <div className="cb-selected" aria-label="Selected concepts">
+        <div className="cb-selected" aria-label={uiText("Selected concepts")}>
           {selected.map(key => {
             const label = keyLabel(key)
             return <button key={key} type="button" className="cb-pill"
               onClick={() => removeSelected(key)}
-              title={`${label}${keyExact(key) ? ' (exactly)' : ''} — click to remove`}>
+              title={uiMessage("{0}{1} — click to remove", [label, keyExact(key) ? ' (exactly)' : ''])}>
               {keyExact(key) && <span className="cb-here" aria-hidden="true">·</span>}
-              <span className="cb-pill-label">{label}</span>
+              <span className="cb-pill-label">{uiText(label)}</span>
               <span className="cb-x" aria-hidden="true">×</span>
-              <span className="sr-only"> remove filter {label}</span>
+              <span className="sr-only">{uiText(" remove filter ")}{uiText(label)}</span>
             </button>
           })}
         </div>}
 
-      <div className="cb-chips" aria-label={path ? `Concepts under ${path}` : 'Top-level concepts'}>
+      <div className="cb-chips" aria-label={((path ? uiMessage("Concepts under {0}", [path]) : uiText('Top-level concepts')))}>
         {chips.length === 0
-          ? <span className="muted cb-empty">No concepts at this level.</span>
+          ? <span className="muted cb-empty">{uiText("No concepts at this level.")}</span>
           : chips.map(chip => {
             const key = keyOf(chip)
             const on = selected.includes(key)
@@ -242,14 +241,14 @@ export default function ConceptChipBar({ state, onHighlight }) {
                   + (!on && searching && matchedIds.has(chip.id) ? ' match' : '')}>
                 <button type="button" className="cb-chip-main" aria-pressed={on}
                   onClick={() => toggleSelect(key)}
-                  title={`${chip.id} · ${chip.count} experiment(s)${chip.atLevel ? ' tagged here (not deeper) — highlights only these' : ''}`}>
+                  title={uiMessage("{0} · {1} experiment(s){2}", [chip.id, chip.count, chip.atLevel ? ' tagged here (not deeper) — highlights only these' : ''])}>
                   {chip.atLevel && <span className="cb-here" aria-hidden="true">·</span>}
-                  <span className="cb-name">{chip.label}</span>
+                  <span className="cb-name">{uiText(chip.label)}</span>
                   <span className="cb-count">{chip.count}</span>
                 </button>
                 {!chip.atLevel &&
-                  <button type="button" className="cb-drill" aria-label={`Open ${chip.id}`}
-                    onClick={() => setPath(chip.id)} title={`Drill into ${chip.label}`}>›</button>}
+                  <button type="button" className="cb-drill" aria-label={uiMessage("Open {0}", [chip.id])}
+                    onClick={() => setPath(chip.id)} title={uiMessage("Drill into {0}", [chip.label])}>›</button>}
               </span>
             )
           })}

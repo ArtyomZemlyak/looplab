@@ -16,7 +16,7 @@
 // assertions describe what the guard must NOT be.
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { readFileSync } from 'node:fs'
+import { readSourceSync as readFileSync } from './_source.js'
 import { fileURLToPath } from 'node:url'
 import { dirname, join } from 'node:path'
 

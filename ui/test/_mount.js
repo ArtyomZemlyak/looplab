@@ -38,6 +38,7 @@ import assert from 'node:assert/strict'
 import { after } from 'node:test'
 import { performance } from 'node:perf_hooks'
 import { fileURLToPath } from 'node:url'
+import { readFileSync } from 'node:fs'
 
 import React from 'react'
 import { renderToStaticMarkup } from 'react-dom/server'
@@ -125,11 +126,18 @@ const hangUp = () => {
 // the request body a live drive asserts on (`null` for a read).
 export function fetchStub(routes = {}) {
   const calls = []
+  const assetCalls = []
   const stub = async (input, init = {}) => {
     const href = typeof input === 'string' || input instanceof URL ? String(input) : input.url
     const url = new URL(href, 'http://localhost/')
     const method = String(init.method || 'GET').toUpperCase()
     const path = url.pathname
+    // Static language assets are shipped files, not API actions. Keep a separate
+    // inventory; a test may override the route to drive failed or delayed loads.
+    if (path.endsWith('/locales/ru.json') && !Object.hasOwn(routes, path)) {
+      assetCalls.push({ path, method })
+      return jsonResponse(JSON.parse(readFileSync(new URL('../src/locales/ru.json', import.meta.url), 'utf8')))
+    }
     calls.push({ path, method, body: init.body ?? null })
     const key = [`${method} ${path}`, path].find(name => Object.hasOwn(routes, name))
     if (key === undefined) return jsonResponse({ error: 'unstubbed route' }, 404)
@@ -139,6 +147,7 @@ export function fetchStub(routes = {}) {
     return answer instanceof Response ? answer : jsonResponse(answer)
   }
   stub.calls = calls
+  stub.assetCalls = assetCalls
   return stub
 }
 

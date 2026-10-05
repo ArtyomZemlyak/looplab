@@ -1,3 +1,4 @@
+import { uiText, uiMessage, useUILanguage } from './uiLanguage.js'
 import React, { useCallback, useEffect, useId, useLayoutEffect, useMemo, useRef, useState } from 'react'
 
 import { attentionHref } from './attentionModel.js'
@@ -45,7 +46,7 @@ function itemTime(seconds) {
   try {
     label = new Intl.DateTimeFormat(undefined, { dateStyle: 'medium', timeStyle: 'short' }).format(date)
   } catch { label = date.toLocaleString() }
-  return { iso: date.toISOString(), label }
+  return { iso: date.toISOString(), label: label }
 }
 
 function snapshotAge(value, now = Date.now()) {
@@ -112,6 +113,8 @@ const SEVERITY_LABEL = Object.freeze({
 
 function AttentionItem({ item, unread, sourceStale, onOpenRun, onMarkRead, onDismiss,
   onOpenPermission }) {
+  useUILanguage()
+
   const timestamp = itemTime(item.created)
   const stale = item.stale || sourceStale
   const activeAction = item.needsAction && item.active
@@ -128,33 +131,35 @@ function AttentionItem({ item, unread, sourceStale, onOpenRun, onMarkRead, onDis
       <span className="attention-severity-dot" aria-hidden="true" />
       {SEVERITY_LABEL[item.severity] && <span className="sr-only">{SEVERITY_LABEL[item.severity]}: </span>}
       <h4>{item.title}</h4>
-      {stale && <span className="attention-stale-label">Stale</span>}
-      {unread && <span className="attention-new-label">{stale ? 'Unread' : 'New'}</span>}
+      {stale && <span className="attention-stale-label">{uiText("Stale")}</span>}
+      {unread && <span className="attention-new-label">{((stale ? uiText('Unread') : uiText('New')))}</span>}
     </div>
     {item.source === 'run' && <p className="attention-run-context">
       <strong>{item.contextLabel || item.runId}</strong>
-      {item.taskId && item.taskId !== item.contextLabel && <span> · task {item.taskId}</span>}
+      {item.taskId && item.taskId !== item.contextLabel && <span>{uiText(" · task ")}{item.taskId}</span>}
     </p>}
     <p>{item.detail}</p>
-    {timestamp && <time dateTime={timestamp.iso}>{timestamp.label}</time>}
+    {timestamp && <time dateTime={timestamp.iso}>{uiText(timestamp.label)}</time>}
     <div className="attention-item-actions">
       {runHref && <a className="attention-button primary" href={runHref}
-        aria-label={`${actionLabel} for ${item.contextLabel || item.runId}`}
-        onClick={event => onOpenRun(event, item.id, runHref)}>{actionLabel}</a>}
+        aria-label={uiMessage("{0} for {1}", [actionLabel, item.contextLabel || item.runId])}
+        onClick={event => onOpenRun(event, item.id, runHref)}>{uiText(actionLabel)}</a>}
       {item.source === 'permission' && <button type="button" className="attention-button primary"
-        aria-label={permissionActionLabel}
-        onClick={() => onOpenPermission(item)}>{actionLabel}</button>}
+        aria-label={uiText(permissionActionLabel)}
+        onClick={() => onOpenPermission(item)}>{uiText(actionLabel)}</button>}
       {activeAction && unread && <button type="button" className="attention-button subtle"
-        aria-label={`Mark ${item.title}${item.source === 'run' ? ` for ${item.contextLabel || item.runId}` : ''} as read`}
-        onClick={() => onMarkRead(item.id)}>Mark read</button>}
+        aria-label={uiMessage("Mark {0}{1} as read", [item.title, item.source === 'run' ? ` for ${item.contextLabel || item.runId}` : ''])}
+        onClick={() => onMarkRead(item.id)}>{uiText("Mark read")}</button>}
       {!activeAction && <button type="button" className="attention-button subtle"
-        aria-label={`Dismiss ${item.title}${item.source === 'run' ? ` for ${item.contextLabel || item.runId}` : ''}`}
-        onClick={() => onDismiss(item.id)}>Dismiss</button>}
+        aria-label={uiMessage("Dismiss {0}{1}", [item.title, item.source === 'run' ? ` for ${item.contextLabel || item.runId}` : ''])}
+        onClick={() => onDismiss(item.id)}>{uiText("Dismiss")}</button>}
     </div>
   </li>
 }
 
 export default function AttentionCenter() {
+  useUILanguage()
+
   const {
     items, currentItems, initialized, runStale, permissionsStale, partial, truncated,
     hasMore, loadingMore, loadMoreError, loadMore, refresh,
@@ -536,7 +541,7 @@ export default function AttentionCenter() {
     : unreadCount > 0
       ? `at least ${unreadCount} loaded ${itemWord(unreadCount)} ${unreadCount === 1 ? 'is' : 'are'} unread`
       : 'no unread items are loaded; unread count is incomplete'
-  const countAria = `${actionAria}; ${unreadAria}`
+  const countAria = `${uiText(actionAria)}; ${uiText(unreadAria)}`
   const triggerLabel = !initialized
     ? 'Open attention center. Checking for updates.'
     : feedVerified
@@ -617,30 +622,30 @@ export default function AttentionCenter() {
         aria-modal="true" aria-labelledby={titleId} aria-describedby={descriptionId} tabIndex={-1}>
         <header className="attention-header">
           <div className="attention-title-wrap">
-            <h2 id={titleId}>Attention center</h2>
-            <p id={descriptionId}>{headerStatus}</p>
+            <h2 id={titleId}>{uiText("Attention center")}</h2>
+            <p id={descriptionId}>{uiText(headerStatus)}</p>
           </div>
           {unreadCount > 0 && <button type="button" className="attention-header-action"
-            aria-label={`${unreadComplete ? 'Mark all' : 'Mark'} ${unreadCount} ${unreadComplete ? 'unread' : 'loaded unread'} ${itemWord(unreadCount)} as read${activeActionCount > 0 ? `; ${actionCountExact ? stillActionPhrase : `${uncertainActionPhrase}; current action total is unavailable`}` : ''}`}
-            onClick={markAllRead}>{unreadComplete ? 'Mark all read' : 'Mark loaded read'}</button>}
-          <button type="button" className="attention-close" aria-label="Close attention center"
+            aria-label={uiMessage("{0} {1} {2} {3} as read{4}", [unreadComplete ? 'Mark all' : 'Mark', unreadCount, unreadComplete ? 'unread' : 'loaded unread', itemWord(unreadCount), activeActionCount > 0 ? `; ${actionCountExact ? stillActionPhrase : `${uncertainActionPhrase}; current action total is unavailable`}` : ''])}
+            onClick={markAllRead}>{((unreadComplete ? uiText('Mark all read') : uiText('Mark loaded read')))}</button>}
+          <button type="button" className="attention-close" aria-label={uiText("Close attention center")}
             data-dialog-initial-focus onClick={close}><OpIcon name="cross" size={20} /></button>
         </header>
 
         <div className="attention-scroll">
-          <nav className="attention-jump-nav" aria-label="Attention sections">
+          <nav className="attention-jump-nav" aria-label={uiText("Attention sections")}>
             <button type="button" className="attention-jump"
-              aria-label={`Jump to Needs action, ${actionAria}`}
+              aria-label={uiMessage("Jump to Needs action, {0}", [actionAria])}
               onClick={() => jumpToSection('action')}>
-              <span>Needs action</span>
+              <span>{uiText("Needs action")}</span>
               <span className="attention-jump-count" aria-hidden="true">{actionCountExact
                 ? visualCount(activeActionCount)
                 : activeActionCount > 99 ? '99+?' : `${activeActionCount}?`}</span>
             </button>
             <button type="button" className="attention-jump"
-              aria-label={`Jump to Recent, ${recentItems.length} loaded`}
+              aria-label={uiMessage("Jump to Recent, {0} loaded", [recentItems.length])}
               onClick={() => jumpToSection('recent')}>
-              <span>Recent</span>
+              <span>{uiText("Recent")}</span>
               <span className="attention-jump-count" aria-hidden="true">
                 {visualCount(recentItems.length)}
               </span>
@@ -653,25 +658,21 @@ export default function AttentionCenter() {
                 Same rule the claim-ledger source readiness list is already annotated with. */}
             <div role="status" aria-live="polite">
               <ul>
-                {sourceMessages.map(message => <li key={message}>{message}</li>)}
+                {sourceMessages.map(message => <li key={message}>{uiText(message)}</li>)}
               </ul>
             </div>
             {!feedVerified && <button type="button" className="attention-button subtle"
-              onClick={() => refresh?.()}>Retry now</button>}
+              onClick={() => refresh?.()}>{uiText("Retry now")}</button>}
           </div>}
 
           <section className="attention-section" aria-labelledby={`${titleId}-action`}>
             <div className="attention-section-heading">
-              <h3 ref={actionHeadingRef} id={`${titleId}-action`} tabIndex={-1}>Needs action</h3>
+              <h3 ref={actionHeadingRef} id={`${titleId}-action`} tabIndex={-1}>{uiText("Needs action")}</h3>
               <span className={`attention-section-count${activeActionCount > 0 ? ' has-action' : ''}`}>
                 <span aria-hidden="true">{actionCountExact
                   ? activeActionCount
                   : activeActionCount > 99 ? '99+?' : `${activeActionCount}?`}</span>
-                <span className="sr-only">{actionCountExact
-                  ? `${actionPhrase} in total`
-                  : activeActionCount > 0
-                    ? `${uncertainActionPhrase}. Current total unavailable.`
-                    : 'No action cards are loaded. Current total unavailable.'}</span>
+                <span className="sr-only">{((actionCountExact ? uiMessage("{0} in total", [actionPhrase]) : (activeActionCount > 0 ? uiMessage("{0}. Current total unavailable.", [uncertainActionPhrase]) : uiText('No action cards are loaded. Current total unavailable.'))))}</span>
               </span>
             </div>
             {actionItems.length
@@ -680,29 +681,28 @@ export default function AttentionCenter() {
                   sourceStale={item.source === 'run' ? runStale : permissionsStale}
                   onOpenRun={openRun} onMarkRead={markRead}
                   onDismiss={dismiss} onOpenPermission={openPermission} />)}</ul>
-              : <p className="attention-empty">{actionEmptyCopy}</p>}
+              : <p className="attention-empty">{uiText(actionEmptyCopy)}</p>}
           </section>
 
           <section className="attention-notifications" aria-labelledby={`${titleId}-notifications`}>
             <div>
-              <h3 id={`${titleId}-notifications`}>Desktop notifications</h3>
+              <h3 id={`${titleId}-notifications`}>{uiText("Desktop notifications")}</h3>
               <p>{capabilityCopy(capability, preferences)}</p>
             </div>
             {notificationsEnabled
               ? <button type="button" className="attention-button subtle" disabled={notificationBusy}
-                onClick={disableNotifications}>Disable</button>
+                onClick={disableNotifications}>{uiText("Disable")}</button>
               : <button type="button" className="attention-button" disabled={enableBlocked}
-                onClick={enableNotifications}>{notificationBusy ? 'Enabling…' : 'Enable'}</button>}
+                onClick={enableNotifications}>{((notificationBusy ? uiText('Enabling…') : uiText('Enable')))}</button>}
           </section>
           {notificationFeedback && <p className="attention-feedback" role="status">{notificationFeedback}</p>}
 
           <section className="attention-section" aria-labelledby={`${titleId}-recent`}>
             <div className="attention-section-heading">
-              <h3 ref={recentHeadingRef} id={`${titleId}-recent`} tabIndex={-1}>Recent</h3>
+              <h3 ref={recentHeadingRef} id={`${titleId}-recent`} tabIndex={-1}>{uiText("Recent")}</h3>
               <span className="attention-section-count">
-                <span aria-hidden="true">{recentItems.length} loaded</span>
-                <span className="sr-only">{recentItems.length} recent {itemWord(recentItems.length)} loaded
-                </span>
+                <span aria-hidden="true">{recentItems.length}{uiText(" loaded")}</span>
+                <span className="sr-only">{recentItems.length}{uiText(" recent ")}{itemWord(recentItems.length)}{uiText(" loaded")}</span>
               </span>
             </div>
             {recentItems.length
@@ -711,23 +711,17 @@ export default function AttentionCenter() {
                   sourceStale={item.source === 'run' ? runStale : permissionsStale}
                   onOpenRun={openRun} onMarkRead={markRead}
                   onDismiss={dismiss} onOpenPermission={openPermission} />)}</ul>
-              : <p className="attention-empty">{recentEmptyCopy}</p>}
+              : <p className="attention-empty">{uiText(recentEmptyCopy)}</p>}
           </section>
 
           {hasMore && <div className="attention-load-more">
             <button type="button" className="attention-button" disabled={loadingMore}
-              onClick={loadMore}>{loadingMore ? 'Loading…' : 'Load older items'}</button>
+              onClick={loadMore}>{((loadingMore ? uiText('Loading…') : uiText('Load older items')))}</button>
           </div>}
           {loadMoreError && <p className="attention-feedback" role="status">{loadMoreError}</p>}
 
           {initialized && items.length > 0 && visibleItems.length === 0
-            && <p className="attention-all-dismissed">{feedVerified
-              ? truncated
-                ? 'All loaded items are dismissed. Load older items to continue.'
-                : 'All current items are dismissed. New IDs will appear here normally.'
-              : verified
-                ? 'All loaded items are dismissed. Current status is unavailable; retry to verify the current list.'
-                : `All loaded items are dismissed. ${NO_COMPLETE_ATTENTION_SNAPSHOT} Retry to check the current state.`}</p>}
+            && <p className="attention-all-dismissed">{((feedVerified ? (truncated ? uiText('All loaded items are dismissed. Load older items to continue.') : uiText('All current items are dismissed. New IDs will appear here normally.')) : (verified ? uiText('All loaded items are dismissed. Current status is unavailable; retry to verify the current list.') : uiMessage("All loaded items are dismissed. {0} Retry to check the current state.", [NO_COMPLETE_ATTENTION_SNAPSHOT]))))}</p>}
         </div>
       </section>
     </div>}

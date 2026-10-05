@@ -1,3 +1,4 @@
+import { uiText, uiMessage, useUILanguage } from './uiLanguage.js'
 import React, { useCallback, useEffect, useRef, useState } from 'react'
 import { Turn, PermCard } from './AssistantChat.jsx'
 import AssistantModePicker from './AssistantModePicker.jsx'
@@ -93,6 +94,8 @@ const AssistantResults = React.lazy(() => import('./AssistantResults.jsx'))
 // result and its ready/scroll effect absent until the operator opens the summary.
 // The caller keys this boundary by run and generation so navigation closes it.
 function RunResultDisclosure({ summary, children }) {
+  useUILanguage()
+
   const [open, setOpen] = useState(false)
   return <details className="asst-result-details" open={open}
     onToggle={event => setOpen(event.currentTarget.open)}>
@@ -236,6 +239,8 @@ const useLatestHandler = handler => {
 }
 
 export default function AssistantBar({ runId, hidden = false, onReady }) {
+  useUILanguage()
+
   const [responseLanguage, setResponseLanguage] = useAssistantLanguage()
   const ru = responseLanguage === 'ru'
   const text = (en, russian) => ru ? russian : en
@@ -1388,7 +1393,7 @@ export default function AssistantBar({ runId, hidden = false, onReady }) {
       flash('Startup recovery retained because explicit confirmation is unavailable.')
       return
     }
-    const confirmed = window.confirm(`${orphanDescription}. ${recordDescription} Removing it only releases this tab's local Start fence; it does not prove that no provider work or cost occurred. Inspect the run list and provider activity before any new Start. Have you inspected them and want to remove this exact local recovery record?`)
+    const confirmed = window.confirm(uiMessage("{0}. {1} Removing it only releases this tab's local Start fence; it does not prove that no provider work or cost occurred. Inspect the run list and provider activity before any new Start. Have you inspected them and want to remove this exact local recovery record?", [orphanDescription, recordDescription]))
     if (!confirmed) {
       flash('Startup recovery retained. Inspect the run list and provider activity before any new Start.')
       return
@@ -1534,7 +1539,7 @@ export default function AssistantBar({ runId, hidden = false, onReady }) {
     deleteFocusAfterRef.current = row?.nextElementSibling?.querySelector('.asst-sess-open:not(:disabled)')
       || row?.previousElementSibling?.querySelector('.asst-sess-open:not(:disabled)')
       || document.querySelector('.asst-side-h .btn.primary')
-    setDeleteConfirm({ id: session.id, title: session.title || 'Chat' })
+    setDeleteConfirm({ id: session.id, title: (session.title || uiText('Chat')) })
     setDeleteConfirmError('')
   }
   const confirmDeleteSession = async () => {
@@ -2550,9 +2555,7 @@ export default function AssistantBar({ runId, hidden = false, onReady }) {
           }
           const restored = inputCleared || (retryFiles == null && atts.length > 0)
           if (shareStateChanged) {
-            setShareAckNotice({ sid: id, message: restored
-              ? 'Nothing sent · live public-link state changed. Your draft was restored; verify the warning, then send again.'
-              : 'Nothing sent · live public-link state changed. Verify the warning, then retry the original turn.' })
+            setShareAckNotice({ sid: id, message: (restored ? uiText('Nothing sent · live public-link state changed. Your draft was restored; verify the warning, then send again.') : uiText('Nothing sent · live public-link state changed. Verify the warning, then retry the original turn.')) })
             flash(restored ? 'Nothing sent · draft restored after public-link state changed'
               : 'Nothing sent · public-link state changed')
             refreshSessions()
@@ -3099,11 +3102,9 @@ export default function AssistantBar({ runId, hidden = false, onReady }) {
   const launchRecoveryButton = launchRecoveries.length > 0
     ? <button type="button" className="btn sm asst-launch-global" onClick={openLaunchRecovery}
         aria-label={`${launchRecoveryLabel}${launchRecoveries.length > 1 ? ` (${launchRecoveries.length})` : ''}`}
-        title={nextLaunchRecovery?.invalid
-          ? 'Review a damaged durable startup recovery record'
-          : 'Reopen the Assistant proposal that owns this durable startup identity'}>
+        title={((nextLaunchRecovery?.invalid ? uiText('Review a damaged durable startup recovery record') : uiText('Reopen the Assistant proposal that owns this durable startup identity')))}>
         <OpIcon name="alert" size={13} />
-        <span className="asst-launch-global-label">{launchRecoveryLabel}</span>
+        <span className="asst-launch-global-label">{uiText(launchRecoveryLabel)}</span>
         {launchRecoveries.length > 1 && <span className="asst-launch-global-count">{launchRecoveries.length}</span>}
       </button>
     : null
@@ -3124,9 +3125,8 @@ export default function AssistantBar({ runId, hidden = false, onReady }) {
   const ctxUsage = contextUsage(msgs)
   const ktok = (n) => n >= 1000 ? (n / 1000).toFixed(n < 10000 ? 1 : 0) + 'k' : String(n || 0)
   const ctxChip = ctxUsage.last > 0
-    ? <span className="asst-ctxtok" title={contextChipTitle(ctxUsage)}>
-        <OpIcon name="sliders" size={10} /> {ktok(ctxUsage.last)} ctx
-        {ctxUsage.compacted && <span className="muted"> ↓{ktok(ctxUsage.peak)}</span>}</span>
+    ? <span className="asst-ctxtok" title={contextChipTitle(ctxUsage).split(' · ').map(uiText).join(' · ')}>
+        <OpIcon name="sliders" size={10} /> {ktok(ctxUsage.last)}{uiText(" ctx")}{ctxUsage.compacted && <span className="muted"> ↓{ktok(ctxUsage.peak)}</span>}</span>
     : null
   const selectedRun = runId ? runsById[runId] : null
   const resultScope = `${runId}:${selectedRun?.generation || ''}`
@@ -3147,8 +3147,8 @@ export default function AssistantBar({ runId, hidden = false, onReady }) {
     <strong title={proposalContext ? text('New run proposal', 'План нового запуска') : selectedRun?.goal || runId}>
       {proposalContext ? text('New run proposal', 'План нового запуска') : selectedRun?.label || selectedRun?.run_id || runId}
     </strong>
-    {!proposalContext && <span className="asst-run-context-state">{selectedRunStatus || 'Loading'}</span>}
-    {!proposalContext && selectedRunStatus === 'stalled' && <span className="asst-run-context-help">Engine stopped · use Resume run in Lineage.</span>}
+    {!proposalContext && <span className="asst-run-context-state">{((selectedRunStatus || uiText('Loading')))}</span>}
+    {!proposalContext && selectedRunStatus === 'stalled' && <span className="asst-run-context-help">{uiText("Engine stopped · use Resume run in Lineage.")}</span>}
   </div>
 
   const slashMatch = /^\/(\w*)$/.exec(input)
@@ -3463,21 +3463,21 @@ export default function AssistantBar({ runId, hidden = false, onReady }) {
   }
 
   const renderWatchStrip = () => (!watchView.visible ? null : <div className="asst-watches"
-    role="region" aria-label="Standing watches">
-    <div className="asst-watches-h muted">{watchView.summary}</div>
+    role="region" aria-label={uiText("Standing watches")}>
+    <div className="asst-watches-h muted">{uiText(watchView.summary)}</div>
     {watchView.items.map(item => <div key={item.id}
       className={'asst-watch' + (item.attention ? ' attention' : '') + (item.terminal ? ' done' : '')}>
       <div className="asst-watch-top">
-        <span className="asst-watch-for">{item.waitingFor}</span>
-        <span className="asst-watch-status">{item.statusText}</span>
-        {item.nextCheck && <span className="asst-watch-next muted">next check {item.nextCheck}</span>}
-        {item.budget && <span className="asst-watch-budget muted">{item.budget}</span>}
+        <span className="asst-watch-for">{uiText(item.waitingFor)}</span>
+        <span className="asst-watch-status">{uiText(item.statusText)}</span>
+        {item.nextCheck && <span className="asst-watch-next muted">{uiText("next check ")}{uiText(item.nextCheck)}</span>}
+        {item.budget && <span className="asst-watch-budget muted">{uiText(item.budget)}</span>}
         {item.stoppable && <button type="button" className="btn sm asst-watch-stop"
           disabled={stoppingWatches.has(item.id)}
-          onClick={() => stopWatch(item.id)}>Stop</button>}
+          onClick={() => stopWatch(item.id)}>{uiText("Stop")}</button>}
       </div>
       <div className="asst-watch-what muted">{item.instruction}</div>
-      {item.checkpoint && <div className="asst-watch-note muted">Checkpoint: {item.checkpoint}</div>}
+      {item.checkpoint && <div className="asst-watch-note muted">{uiText("Checkpoint: ")}{item.checkpoint}</div>}
       {item.note && <div className="asst-watch-note muted">{item.note}</div>}
     </div>)}
   </div>)
@@ -3489,7 +3489,7 @@ export default function AssistantBar({ runId, hidden = false, onReady }) {
     const retryHandlers = retryHandlersRef.current
     retryHandlers.publish(msgs.map((_, index) => retryHandlerFor(index)))
     const renderMessage = (m, i) => (<React.Fragment key={`message:${i}`}>
-      {m.role === 'user' && m.context && <div className="asst-ctx-cap" title="context attached to this message">
+      {m.role === 'user' && m.context && <div className="asst-ctx-cap" title={uiText("context attached to this message")}>
         {m.context.run && <span className="asst-ctx-i"><OpIcon name="folder" size={10} /> {m.context.run}</span>}
         {(m.context.refs || []).map(r => <span key={'r' + r} className="asst-ctx-i">#{r}</span>)}
         {(m.context.files || []).map(f => <span key={'f' + f} className="asst-ctx-i"><OpIcon name="clip" size={10} /> {f}</span>)}
@@ -3512,27 +3512,17 @@ export default function AssistantBar({ runId, hidden = false, onReady }) {
     return <>
     {renderWatchStrip()}
     {msgs.length === 0 && <div className={'asst-empty' + (runId && selectedRun?.nodes > 0 ? ' has-results' : '')}>
-      <div className="asst-empty-eyebrow">LOOPLAB ASSISTANT</div>
+      <div className="asst-empty-eyebrow">{uiText("LOOPLAB ASSISTANT")}</div>
       <h2>{newRunDraft ? text('What should we investigate?', 'Что исследуем?')
         : showRunResult ? text('What did this run achieve?', 'Каков результат запуска?')
         : runId ? text('Work through this run together', 'Разберём этот запуск вместе')
           : text('What would you like to explore?', 'Что хотите исследовать?')}</h2>
-      <p>{ru ? newRunDraft
+      <p>{((ru ? newRunDraft
         ? 'Опишите цель, расположение кода и данных и ограничение по времени. Перед стартом проверьте карточку запуска.'
         : runId ? showRunResult ? 'Прочитайте итог, откройте код решения или подготовьте вопрос ниже.'
           : selectedRunHasNoNodes ? 'Оценок пока нет. Спросите, что требуется перед первым экспериментом.'
             : 'Спросите о результатах или следующем эксперименте.'
-          : 'Опишите цель исследования или спросите о результатах. Запуск начнётся после проверки и подтверждения карточки.'
-        : newRunDraft
-        ? 'Describe the goal, server paths, and time limit. For example: improve accuracy on [dataset] in three experiments. Review the launch card before starting.'
-        : runId
-          ? showRunResult ? 'Read the recorded result, open its code, or prepare a question below.'
-            : selectedRunHasNoNodes
-            ? 'No experiment has been measured yet. Ask what is due before the first one.'
-            : 'Ask about results or the next experiment.'
-          : firstRun
-            ? 'Describe a goal to get a launch proposal. The run starts only after you review and approve it.'
-            : 'Describe a goal, ask about runs, or plan an experiment.'}</p>
+          : 'Опишите цель исследования или спросите о результатах. Запуск начнётся после проверки и подтверждения карточки.' : (newRunDraft ? uiText('Describe the goal, server paths, and time limit. For example: improve accuracy on [dataset] in three experiments. Review the launch card before starting.') : (runId ? (showRunResult ? uiText('Read the recorded result, open its code, or prepare a question below.') : (selectedRunHasNoNodes ? uiText('No experiment has been measured yet. Ask what is due before the first one.') : uiText('Ask about results or the next experiment.'))) : (firstRun ? uiText('Describe a goal to get a launch proposal. The run starts only after you review and approve it.') : uiText('Describe a goal, ask about runs, or plan an experiment.'))))))}</p>
       {firstRun && <LazyBoundary resetKey="model-setup" language={responseLanguage} focusOnFailure={false}
         label={text('Model setup', 'Настройка модели')}>
         <FirstRunModelStatus language={responseLanguage} onSettings={openAssistantModelSettings} />
@@ -3590,7 +3580,7 @@ export default function AssistantBar({ runId, hidden = false, onReady }) {
         }} />
     </LazyBoundary></RunResultDisclosure>}
     {!historical && pending.length > 0 && <div className="asst-perm-region" role="region"
-      aria-label={`${pending.length} pending Assistant approval${pending.length === 1 ? '' : 's'}`}
+      aria-label={uiMessage("{0} pending Assistant approval{1}", [pending.length, pending.length === 1 ? '' : 's'])}
       aria-live="assertive" aria-atomic="false">
       {pending.map((req, index) => {
         const focusedFromAttention = attentionPermissionTargetVisible
@@ -3610,19 +3600,14 @@ export default function AssistantBar({ runId, hidden = false, onReady }) {
   }
 
   const fileChips = files.length > 0 && <div className="asst-files">
-    {files.map(f => <span key={f.name} className="chip xs file" title={`${(f.size / 1024).toFixed(1)} KB${f.truncated ? ' · truncated' : ''}`}>
+    {files.map(f => <span key={f.name} className="chip xs file" title={uiMessage("{0} KB{1}", [(f.size / 1024).toFixed(1), f.truncated ? ' · truncated' : ''])}>
       <OpIcon name="doc" size={11} /> {f.name}
       <button className="chip-x" onClick={() => removeFile(f.name)}
-        disabled={composerEditingPaused} aria-label={`Remove ${f.name}`}>✕</button></span>)}
+        disabled={composerEditingPaused} aria-label={uiMessage("Remove {0}", [f.name])}>✕</button></span>)}
   </div>
 
-  const attachBtn = (cls) => <button className={cls} aria-label="Attach text files"
-    title={historical ? readOnlyShort : sessionOpening ? 'Wait for the selected Assistant chat to finish opening'
-      : shareUnknown ? 'Attach to this draft; sending is paused until public-link status is verified'
-      : shareBusy ? 'Wait for the current public-link action'
-        : forkingCurrentSession ? 'Wait for this chat to finish forking'
-          : draftRunMismatch ? draftRunMismatchMessage
-            : pendingFileReads > 0 ? 'Wait for the selected attachment to finish reading' : 'attach text file(s)'}
+  const attachBtn = (cls) => <button className={cls} aria-label={uiText("Attach text files")}
+    title={((historical ? readOnlyShort : (sessionOpening ? uiText('Wait for the selected Assistant chat to finish opening') : (shareUnknown ? uiText('Attach to this draft; sending is paused until public-link status is verified') : (shareBusy ? uiText('Wait for the current public-link action') : (forkingCurrentSession ? uiText('Wait for this chat to finish forking') : (draftRunMismatch ? draftRunMismatchMessage : (pendingFileReads > 0 ? uiText('Wait for the selected attachment to finish reading') : uiText('attach text file(s)')))))))))}
     disabled={historical || composerEditingPaused || draftRunMismatch || pendingFileReads > 0}
     onClick={() => fileRef.current?.click()}>
     <OpIcon name="clip" size={14} /></button>
@@ -3636,13 +3621,13 @@ export default function AssistantBar({ runId, hidden = false, onReady }) {
   const newChatButton = (cls, label, idleTitle) => {
     const gate = newChatGate({ turnStarting, retryChecking, directConfirm }, idleTitle)
     return <button className={cls} aria-label={text('Start a new Assistant chat', 'Начать новый чат с ассистентом')}
-      title={gate.title} disabled={gate.disabled} onClick={newChat}>{ru ? '+ Чат' : label}</button>
+      title={uiText(gate.title)} disabled={gate.disabled} onClick={newChat}>{((ru ? '+ Чат' : uiText(label)))}</button>
   }
   const foldToBarButton = (cls, idleTitle) => {
     const fold = foldControl(directConfirm, idleTitle)
-    return <button className={cls} title={fold.title}
+    return <button className={cls} title={uiText(fold.title)}
       onClick={fold.action === 'cancel' ? cancelDirectConfirmation : collapseToBar}>
-      {fold.label}</button>
+      {uiText(fold.label)}</button>
   }
 
   // mode selector row — placed BELOW the input in the side + full composers.
@@ -3657,7 +3642,7 @@ export default function AssistantBar({ runId, hidden = false, onReady }) {
   // The /command hint listbox — one definition reused by the docked bar AND the side/full composers, so
   // command discovery is identical everywhere. Only one view renders at a time, so the shared id is unique.
   const suggestionPop = showSuggestions ? <div className="cmdbar-pop" id="assistant-command-listbox"
-      role="listbox" aria-label="Assistant commands">
+      role="listbox" aria-label={uiText("Assistant commands")}>
     {suggestions.map((c, index) => <button key={c.name} id={`assistant-command-option-${index}`}
       className="cmdbar-pop-item" role="option" tabIndex={-1} aria-selected={index === activeSuggestionIndex}
       disabled={composerEditingPaused}
@@ -3675,8 +3660,8 @@ export default function AssistantBar({ runId, hidden = false, onReady }) {
   // A full composer (textarea + attach + send/stop + mode row below) — reused by side + full views.
   const composer = (placeholder) => <div
     className={'chat-in asst-in' + (directConfirm ? ' direct-confirming' : '')}>
-    <div className="asst-next-context" role="note" aria-label="Assistant conversation and message context">
-      <span className="asst-next-chat" title={currentSession?.title || 'New chat'}>
+    <div className="asst-next-context" role="note" aria-label={uiText("Assistant conversation and message context")}>
+      <span className="asst-next-chat" title={((currentSession?.title || uiText('New chat')))}>
         {text('Chat', 'Чат')} <strong>{currentSession?.title || text('New chat', 'Новый чат')}</strong>
       </span>
       <span className="asst-next-target" title={nextMessageTarget}>
@@ -3686,25 +3671,14 @@ export default function AssistantBar({ runId, hidden = false, onReady }) {
         {nextMessageRefs.map(id => <span key={id}>#{id}</span>)}
       </span>}
     </div>
-    {historical && <div className="assistant-history-lock">{runLoadingLocked
-      ? 'Verifying this run · Assistant actions are paused.'
-      : runUnavailableLocked
-        ? 'Run unavailable · Assistant actions are paused. Retry the run or return to the run list.'
-        : startOverLocked
-      ? 'Start over unresolved · Assistant paused until the exact request is recovered.'
-      : reviewLocked ? 'Read-only review · Assistant actions are unavailable.'
-        : staleDiagnostic
-          ? 'Diagnostic link generation mismatch · Assistant paused. Open the current generation to continue.'
-          : `History seq ${runAccess.seq} · Assistant paused. Return live to ask about or change this run.`}</div>}
+    {historical && <div className="assistant-history-lock">{((runLoadingLocked ? uiText('Verifying this run · Assistant actions are paused.') : (runUnavailableLocked ? uiText('Run unavailable · Assistant actions are paused. Retry the run or return to the run list.') : (startOverLocked ? uiText('Start over unresolved · Assistant paused until the exact request is recovered.') : (reviewLocked ? uiText('Read-only review · Assistant actions are unavailable.') : (staleDiagnostic ? uiText('Diagnostic link generation mismatch · Assistant paused. Open the current generation to continue.') : uiMessage("History seq {0} · Assistant paused. Return live to ask about or change this run.", [runAccess.seq])))))))}</div>}
     {directConfirm?.phase === 'checking' && <div className="assistant-command-pending">
       <span ref={directConfirmStatusRef} tabIndex={-1} role="status"
         aria-live="polite" aria-atomic="true">
-        {directConfirm.direct.name === 'approve'
-          ? 'Verifying the exact approval target · nothing sent…'
-          : 'Checking current run state · nothing sent…'}
+        {((directConfirm.direct.name === 'approve' ? uiText('Verifying the exact approval target · nothing sent…') : uiText('Checking current run state · nothing sent…')))}
       </span>
       <button ref={directConfirmCancelRef} type="button" className="btn sm ghost"
-        onClick={cancelDirectConfirmation}>Cancel · keep draft</button>
+        onClick={cancelDirectConfirmation}>{uiText("Cancel · keep draft")}</button>
     </div>}
     {directConfirm?.phase === 'ready' && <div
       className="asst-perm risk-consequential assistant-direct-confirm"
@@ -3712,24 +3686,24 @@ export default function AssistantBar({ runId, hidden = false, onReady }) {
       aria-labelledby="assistant-direct-confirm-title"
       aria-describedby="assistant-direct-confirm-details">
       <div className="asst-perm-h">
-        <span className="asst-perm-badge">confirmation required</span>
-        <b id="assistant-direct-confirm-title">{directConfirm.title}</b>
-        <span className="asst-perm-risk consequential">consequential</span>
+        <span className="asst-perm-badge">{uiText("confirmation required")}</span>
+        <b id="assistant-direct-confirm-title">{uiText(directConfirm.title)}</b>
+        <span className="asst-perm-risk consequential">{uiText("consequential")}</span>
       </div>
       <dl className="asst-perm-details" id="assistant-direct-confirm-details">
-        <div><dt>Run</dt><dd><code>{directConfirm.runId}</code></dd></div>
-        <div><dt>Version</dt><dd><code className="assistant-direct-identity">
+        <div><dt>{uiText("Run")}</dt><dd><code>{directConfirm.runId}</code></dd></div>
+        <div><dt>{uiText("Version")}</dt><dd><code className="assistant-direct-identity">
           {directConfirm.expectedGeneration}</code></dd></div>
         {Number.isSafeInteger(directConfirm.nodeGeneration)
-          && <div><dt>Attempt</dt><dd>experiment #{directConfirm.direct.arg}
-            {' · generation '}{directConfirm.nodeGeneration}</dd></div>}
-        <div><dt>Command</dt><dd><code>{directConfirm.commandText}</code></dd></div>
-        <div><dt>Mode</dt><dd>{directConfirm.modeLabel}</dd></div>
-        <div><dt>Consequence</dt><dd>{directConfirm.consequence}</dd></div>
+          && <div><dt>{uiText("Attempt")}</dt><dd>{uiText("experiment #")}{directConfirm.direct.arg}
+            {uiText(' · generation ')}{directConfirm.nodeGeneration}</dd></div>}
+        <div><dt>{uiText("Command")}</dt><dd><code>{directConfirm.commandText}</code></dd></div>
+        <div><dt>{uiText("Mode")}</dt><dd>{directConfirm.modeLabel}</dd></div>
+        <div><dt>{uiText("Consequence")}</dt><dd>{directConfirm.consequence}</dd></div>
       </dl>
       <div className="asst-perm-actions">
         <button ref={directConfirmCancelRef} type="button" className="btn sm ghost"
-          onClick={cancelDirectConfirmation}>Cancel · keep draft</button>
+          onClick={cancelDirectConfirmation}>{uiText("Cancel · keep draft")}</button>
         <button type="button"
           className={`btn sm ${directConfirm.danger ? 'danger' : 'primary'}`}
           onClick={confirmDirectCommand}>{directConfirm.actionLabel}</button>
@@ -3737,62 +3711,51 @@ export default function AssistantBar({ runId, hidden = false, onReady }) {
     </div>}
     {currentShareAckNotice && <div className="assistant-command-pending error" role="alert"
       aria-live="assertive" aria-atomic="true">
-      <span>{currentShareAckNotice.message}</span>
+      <span>{uiText(currentShareAckNotice.message)}</span>
       <button type="button" className="btn sm ghost"
-        onClick={() => setShareAckNotice(current => current?.sid === sid ? null : current)}>
-        Dismiss
-      </button>
+        onClick={() => setShareAckNotice(current => current?.sid === sid ? null : current)}>{uiText("Dismiss")}</button>
     </div>}
     {(shareUnknown || shareVerifying) && <div className="assistant-command-pending assistant-share-pending error">
-      <span>{shareStatusMessage}</span>
+      <span>{uiText(shareStatusMessage)}</span>
       <button type="button" className="btn sm" onClick={retryShareStatus}
         disabled={shareBusy || shareVerifying || sessionsStatus === 'loading' || sessionsStatus === 'refreshing'}>
-        {shareVerifying || sessionsStatus === 'loading' || sessionsStatus === 'refreshing'
-          ? 'Checking status…' : 'Retry status'}
+        {((shareVerifying || sessionsStatus === 'loading' || sessionsStatus === 'refreshing' ? uiText('Checking status…') : uiText('Retry status')))}
       </button>
       <button type="button" className="btn sm ghost" onClick={revokeCurrentShares}
-        disabled={shareBusy || forkingCurrentSession}>Unshare</button>
+        disabled={shareBusy || forkingCurrentSession}>{uiText("Unshare")}</button>
     </div>}
     {sessionOpening && <div className="assistant-command-pending" role="status"
       aria-live="polite" aria-atomic="true">
-      {attentionPermissionFocus.phase === 'loading'
-        ? 'Opening the selected Assistant chat; the exact approval will load next…'
-        : 'Opening the selected Assistant chat…'}
+      {((attentionPermissionFocus.phase === 'loading' ? uiText('Opening the selected Assistant chat; the exact approval will load next…') : uiText('Opening the selected Assistant chat…')))}
     </div>}
     {attentionPermissionFocus.phase === 'loading' && !sessionOpening
       && <div className="assistant-command-pending" role="status"
-        aria-live="polite" aria-atomic="true">
-        Loading the exact Assistant approval…
-      </div>}
-    {retryChecking && <div className="assistant-command-pending">
-      Checking the saved Assistant turn…
-    </div>}
+        aria-live="polite" aria-atomic="true">{uiText("Loading the exact Assistant approval…")}</div>}
+    {retryChecking && <div className="assistant-command-pending">{uiText("Checking the saved Assistant turn…")}</div>}
     {(commandBusy || directFailure) && <div ref={commandStatusRef} tabIndex={-1}
       className={'assistant-command-pending' + (showDirectFailure ? ' error' : '')}
       role={directNeedsAlert ? 'alert' : 'status'} aria-live={directNeedsAlert ? 'assertive' : 'polite'} aria-atomic="true">
       <span>{showDirectFailure ? directFailureText : pendingCommandText}</span>
       {canCheckDirect && <button className="btn sm" disabled={directRecoveryPaused}
-        onClick={checkDirect}>Check same command</button>}
+        onClick={checkDirect}>{uiText("Check same command")}</button>}
       {directPending?.protocolInvalid && <button className="btn sm ghost"
-        disabled={!!directPending.checking} onClick={dismissProtocolDirect}>Dismiss</button>}
+        disabled={!!directPending.checking} onClick={dismissProtocolDirect}>{uiText("Dismiss")}</button>}
       {canRetryDirect && <button className="btn sm" disabled={directRecoveryPaused}
-        onClick={retryDirect}>Retry same command</button>}
-      {showDirectFailure && <button className="btn sm ghost" onClick={dismissDirectFailure}>Dismiss</button>}
+        onClick={retryDirect}>{uiText("Retry same command")}</button>}
+      {showDirectFailure && <button className="btn sm ghost" onClick={dismissDirectFailure}>{uiText("Dismiss")}</button>}
     </div>}
     {draftRunMismatch && <div className="assistant-command-pending error" role="alert"
       aria-live="assertive" aria-atomic="true">
       <span>{draftRunMismatchMessage}</span>
       <button type="button" className="btn sm ghost" disabled={sessionOpening} onClick={useDraftHere}>
-        {runId ? 'Use in this run' : 'Use without a run'}
+        {((runId ? uiText('Use in this run') : uiText('Use without a run')))}
       </button>
     </div>}
     {pendingFileReads > 0 && <div className="assistant-command-pending" role="status"
-      aria-live="polite" aria-atomic="true">
-      Reading selected attachment…
-    </div>}
+      aria-live="polite" aria-atomic="true">{uiText("Reading selected attachment…")}</div>}
     {runId && refNodes(input).length > 0 && <div className="cmdbar-ctx">
       {refNodes(input).map(id => <span key={id} className="chip xs">#{id}
-        <button className="chip-x" aria-label={`Detach experiment ${id}`} disabled={composerEditingPaused}
+        <button className="chip-x" aria-label={uiMessage("Detach experiment {0}", [id])} disabled={composerEditingPaused}
           onClick={() => {
             if (openSessionPendingRef.current) return
             setInput(input.replace(new RegExp(`#(?:node-)?${id}\\b`, 'gi'), '').replace(/\s{2,}/g, ' ').trim())
@@ -3809,23 +3772,14 @@ export default function AssistantBar({ runId, hidden = false, onReady }) {
         ].filter(Boolean).join(' ') || undefined}
         {...comboAria}
         disabled={historical || commandBusy || composerEditingPaused} onChange={changeInput} onKeyDown={onKey}
-        placeholder={historical ? readOnlyShort : shareUnknown
-          ? 'Public-link status unknown · keep drafting; Send will verify it' : shareBusy
-            ? 'Finishing public-link action…' : forkingCurrentSession
-              ? 'Forking this chat…' : newRunDraft ? text('Describe the goal for your new run…', 'Опишите цель нового запуска…')
-                : ru ? 'Спросите ассистента… (Enter — отправить, Shift+Enter — новая строка)' : placeholder} />
+        placeholder={((historical ? readOnlyShort : (shareUnknown ? uiText('Public-link status unknown · keep drafting; Send will verify it') : (shareBusy ? uiText('Finishing public-link action…') : (forkingCurrentSession ? uiText('Forking this chat…') : newRunDraft ? text('Describe the goal for your new run…', 'Опишите цель нового запуска…')
+                : ru ? 'Спросите ассистента… (Enter — отправить, Shift+Enter — новая строка)' : placeholder)))))} />
       {busy
-        ? <button className="btn sm" aria-label="Stop Assistant" title="stop" onClick={stop}>■</button>
+        ? <button className="btn sm" aria-label={uiText("Stop Assistant")} title={uiText("stop")} onClick={stop}>■</button>
         : <button className="btn sm primary"
             disabled={sessionOpening || retryChecking || turnStarting || historical || commandBusy || composerEditingPaused || draftRunMismatch || pendingFileReads > 0
               || (!input.trim() && files.length === 0)}
-            onClick={send}>{sessionOpening ? 'Opening\u2026'
-              : retryChecking ? 'Checking\u2026'
-              : turnStarting ? 'Starting\u2026'
-              : shareUnknown || shareVerifying ? shareVerifying ? 'Checking…' : 'Verify to send'
-              : commandBusy || shareBusy ? 'Waiting…'
-              : forkingCurrentSession ? 'Forking…'
-                : pendingFileReads > 0 ? 'Reading…' : text('Send', 'Отправить')}</button>}
+            onClick={send}>{((sessionOpening ? uiText('Opening\u2026') : (retryChecking ? uiText('Checking\u2026') : (turnStarting ? uiText('Starting\u2026') : (shareUnknown || shareVerifying ? (shareVerifying ? uiText('Checking…') : uiText('Verify to send')) : (commandBusy || shareBusy ? uiText('Waiting…') : (forkingCurrentSession ? uiText('Forking…') : (pendingFileReads > 0 ? uiText('Reading…') : text('Send', 'Отправить')))))))))}</button>}
     </div>
     {draftingNewRun && <div id="assistant-new-run-hint" className="asst-new-run-hint" role="note">
       <span>{newRunDraft
@@ -3894,154 +3848,125 @@ export default function AssistantBar({ runId, hidden = false, onReady }) {
 
   // ── bottom bar — ONLY in bar view (moves into the side panel otherwise) ──
   const barView = () => <div className={'cmdbar-wrap'}><div className={'cmdbar-dock' + (sessionOpening || retryChecking || turnStarting || busy || commandBusy || forkingCurrentSession ? ' thinking' : '') + (hasNew ? ' fresh' : '')}>
-      <button className="cmdbar-ic" aria-label="Open full Assistant" title="Open the full Assistant conversation" onClick={openFull}>
-        <OpIcon name="chat" size={14} /> Assistant
-      </button>
+      <button className="cmdbar-ic" aria-label={uiText("Open full Assistant")} title={uiText("Open the full Assistant conversation")} onClick={openFull}>
+        <OpIcon name="chat" size={14} />{uiText(" Assistant")}</button>
       {launchRecoveryButton}
       <span className="cmdbar-target" title={`${draftingNewRun ? 'Drafting' : 'Next message to'} ${nextMessageTarget}`}>
-        {draftingNewRun ? 'New run' : runId ? `Run · ${nextMessageTarget}` : 'No run'}
+        {((draftingNewRun ? uiText('New run') : (runId ? uiMessage("Run · {0}", [nextMessageTarget]) : uiText('No run'))))}
       </span>
       <button type="button" className={`cmdbar-mode mode-${mode}`}
-        aria-label={`Assistant mode for the next message: ${activeMode.label}. ${activeMode.hint}. Open Assistant to inspect or change.`}
-        title={`${activeMode.label} · ${activeMode.hint}`} onClick={openSide}>
-        <span className="cmdbar-mode-prefix">Mode · </span><span>{activeMode.label}</span>
+        aria-label={uiMessage("Assistant mode for the next message: {0}. {1}. Open Assistant to inspect or change.", [uiText(activeMode.label), uiText(activeMode.hint)])}
+        title={`${uiText(activeMode.label)} · ${uiText(activeMode.hint)}`} onClick={openSide}>
+        <span className="cmdbar-mode-prefix">{uiText("Mode · ")}</span><span>{uiText(activeMode.label)}</span>
       </button>
       {languagePicker}
       <div className="cmdbar-field">
         {(refNodes(input).length > 0 || files.length > 0) && <div className="cmdbar-ctx">
           {runId && refNodes(input).map(id => <span key={id} className="chip xs">#{id}</span>)}
           {files.map(f => <span key={f.name} className="chip xs file"><OpIcon name="doc" size={10} /> {f.name}
-            <button className="chip-x" aria-label={`Remove ${f.name}`}
+            <button className="chip-x" aria-label={uiMessage("Remove {0}", [f.name])}
               disabled={composerEditingPaused} onClick={() => removeFile(f.name)}>✕</button></span>)}
         </div>}
         {suggestionPop}
         <input className="cmdbar-in" ref={inputRef} value={input}
-          aria-label="Assistant command or question"
+          aria-label={uiText("Assistant command or question")}
           aria-describedby={shareUnknown || shareVerifying ? 'assistant-share-status' : undefined}
           role="combobox" aria-autocomplete="list" aria-expanded={showSuggestions}
           aria-controls="assistant-command-listbox"
           aria-activedescendant={activeSuggestionIndex >= 0 ? `assistant-command-option-${activeSuggestionIndex}` : undefined}
           disabled={historical || commandBusy || composerEditingPaused} onChange={changeInput} onKeyDown={onKey}
-          placeholder={historical ? readOnlyShort : shareUnknown
-            ? 'Public-link status unknown · keep drafting; Send will verify it' : shareBusy
-              ? 'Finishing public-link action…' : forkingCurrentSession
-                ? 'Forking this chat…' : ru ? 'Задайте вопрос или опишите цель… (/ — команды)'
-                : runId
-                  ? 'Command or ask…  /stop · pause · #12 to attach an experiment · or describe what to do'
-                  : 'Describe a run to start, or ask the assistant…  ( / for commands )'} />
+          placeholder={((historical ? readOnlyShort : (shareUnknown ? uiText('Public-link status unknown · keep drafting; Send will verify it') : (shareBusy ? uiText('Finishing public-link action…') : (forkingCurrentSession ? uiText('Forking this chat…') : (ru ? 'Задайте вопрос или опишите цель… (/ — команды)' : (runId ? uiText('Command or ask…  /stop · pause · #12 to attach an experiment · or describe what to do') : uiText('Describe a run to start, or ask the assistant…  ( / for commands )'))))))))} />
       </div>
       {attachBtn('cmdbar-attach')}
       {shareUnknown || shareVerifying
         ? <span className="cmdbar-status thinking recovery error">
-            <span><span className="cmdbar-who">{shareVerifying
-              ? 'checking public-link status' : 'public-link status unknown'}</span>
-              {' · '}draft available · nothing sent</span>
+            <span><span className="cmdbar-who">{((shareVerifying ? uiText('checking public-link status') : uiText('public-link status unknown')))}</span>
+              {' · '}{uiText("draft available · nothing sent")}</span>
             <button type="button" className="btn sm" onClick={retryShareStatus}
               disabled={shareBusy || shareVerifying || sessionsStatus === 'loading' || sessionsStatus === 'refreshing'}>
-              {shareVerifying ? 'Checking…' : 'Retry status'}
+              {((shareVerifying ? uiText('Checking…') : uiText('Retry status')))}
             </button>
             <button type="button" className="btn sm ghost" onClick={revokeCurrentShares}
-              disabled={shareBusy}>Unshare</button>
+              disabled={shareBusy}>{uiText("Unshare")}</button>
           </span>
         : sessionOpening
           ? <span className="cmdbar-status thinking">
-              <span className="cmdbar-pip" /> opening selected chat...
-            </span>
+              <span className="cmdbar-pip" />{uiText(" opening selected chat...")}</span>
         : retryChecking
           ? <span className="cmdbar-status thinking">
-              <span className="cmdbar-pip" /> checking saved turn...
-            </span>
+              <span className="cmdbar-pip" />{uiText(" checking saved turn...")}</span>
         : turnStarting
           ? <span className="cmdbar-status thinking">
-              <span className="cmdbar-pip" /> starting response...
-            </span>
+              <span className="cmdbar-pip" />{uiText(" starting response...")}</span>
         : busy
         ? <span className={'cmdbar-status thinking' + (liveShareActive ? ' assistant-live-share' : '')}>
             <span className="cmdbar-pip" />
             {liveShareActive
-              ? <><span className="cmdbar-who">live public link</span> this reply remains public · thinking…</>
-              : ' thinking…'}
+              ? <><span className="cmdbar-who">{uiText("live public link")}</span>{uiText(" this reply remains public · thinking…")}</>
+              : uiText(' thinking…')}
           </span>
         : commandBusy
           ? <span ref={commandStatusRef} tabIndex={-1}
               className={'cmdbar-status thinking' + (canCheckDirect ? ' recovery' : '')}
               role={directNeedsAlert ? 'alert' : 'status'}
               aria-live={directNeedsAlert ? 'assertive' : 'polite'} aria-atomic="true">
-              <span className="cmdbar-pip" /> {pendingCommandText || 'Waiting for command…'}
+              <span className="cmdbar-pip" /> {((pendingCommandText || uiText('Waiting for command…')))}
               {canCheckDirect && <button className="btn sm" disabled={directRecoveryPaused}
-                onClick={checkDirect}>Check</button>}
+                onClick={checkDirect}>{uiText("Check")}</button>}
               {directPending?.protocolInvalid && <button className="btn sm ghost"
-                disabled={!!directPending.checking} onClick={dismissProtocolDirect}>Dismiss</button>}
+                disabled={!!directPending.checking} onClick={dismissProtocolDirect}>{uiText("Dismiss")}</button>}
             </span>
           : directFailure
             ? <span ref={commandStatusRef} tabIndex={-1} className="cmdbar-status thinking recovery error"
                 role="alert" aria-live="assertive" aria-atomic="true">
                 <span>{directFailureText}</span>
                 {canRetryDirect && <button className="btn sm" disabled={directRecoveryPaused}
-                  onClick={retryDirect}>Retry same command</button>}
-                <button className="btn sm ghost" onClick={dismissDirectFailure}>Dismiss</button>
+                  onClick={retryDirect}>{uiText("Retry same command")}</button>}
+                <button className="btn sm ghost" onClick={dismissDirectFailure}>{uiText("Dismiss")}</button>
               </span>
           : currentShareAckNotice
             ? <span className="cmdbar-status thinking recovery error" role="alert"
                 aria-live="assertive" aria-atomic="true">
-                <span><span className="cmdbar-who">nothing sent</span> · public-link state changed</span>
+                <span><span className="cmdbar-who">{uiText("nothing sent")}</span>{uiText(" · public-link state changed")}</span>
                 <button type="button" className="btn sm ghost"
-                  onClick={() => setShareAckNotice(current => current?.sid === sid ? null : current)}>
-                  Dismiss
-                </button>
+                  onClick={() => setShareAckNotice(current => current?.sid === sid ? null : current)}>{uiText("Dismiss")}</button>
               </span>
           : draftRunMismatch
             ? <span className="cmdbar-status thinking recovery error" role="alert"
                 aria-live="assertive" aria-atomic="true" title={draftRunMismatchMessage}>
-                <span><span className="cmdbar-who">draft held</span> · from {draftRunSource}</span>
+                <span><span className="cmdbar-who">{uiText("draft held")}</span>{uiText(" · from ")}{draftRunSource}</span>
                 <button type="button" className="btn sm ghost" disabled={sessionOpening}
-                  onClick={useDraftHere}>Use here</button>
+                  onClick={useDraftHere}>{uiText("Use here")}</button>
               </span>
           : forkingCurrentSession
             ? <span className="cmdbar-status thinking" role="status"
                 aria-live="polite" aria-atomic="true">
-                <span className="cmdbar-pip" /> forking this chat…
-              </span>
+                <span className="cmdbar-pip" />{uiText(" forking this chat…")}</span>
           : pendingFileReads > 0
             ? <span className="cmdbar-status thinking" role="status"
                 aria-live="polite" aria-atomic="true">
-                <span className="cmdbar-pip" /> reading selected attachment…
-              </span>
+                <span className="cmdbar-pip" />{uiText(" reading selected attachment…")}</span>
           : liveShareActive
           ? <button className="cmdbar-status preview assistant-live-share" type="button"
-              title="This chat has a live public link. Open the full Assistant to revoke it."
+              title={uiText("This chat has a live public link. Open the full Assistant to revoke it.")}
               onClick={openFull}>
-              <span className="cmdbar-who">live public link</span> new messages remain public
-              <span className="cmdbar-more"> ▸</span>
+              <span className="cmdbar-who">{uiText("live public link")}</span>{uiText(" new messages remain public")}<span className="cmdbar-more"> ▸</span>
             </button>
           : preview
-          ? <button className="cmdbar-status preview" title="open the conversation" onClick={openSide}>
-              <span className="cmdbar-who">assistant</span> {preview}<span className="cmdbar-more"> ▸</span></button>
+          ? <button className="cmdbar-status preview" title={uiText("open the conversation")} onClick={openSide}>
+              <span className="cmdbar-who">{uiText("assistant")}</span> {preview}<span className="cmdbar-more"> ▸</span></button>
           : null}
       {/* send / stop share ONE slot (you can't send mid-turn) — kept separate from the side button
           so stopping never opens a view. */}
       {busy
-        ? <button className="cmdbar-go stop" aria-label="Stop Assistant" title="stop the assistant" onClick={stop}>■</button>
+        ? <button className="cmdbar-go stop" aria-label={uiText("Stop Assistant")} title={uiText("stop the assistant")} onClick={stop}>■</button>
         : <button className="cmdbar-go"
-            aria-label={sessionOpening ? 'Opening selected Assistant chat'
-              : retryChecking ? 'Checking saved Assistant turn'
-                : turnStarting ? 'Starting Assistant response' : shareUnknown || shareVerifying ? shareVerifying
-              ? 'Checking public-link status; nothing sent'
-              : 'Verify public-link status before sending' : 'Send Assistant message'}
-            title={sessionOpening ? 'Wait for the selected Assistant chat to finish opening'
-              : retryChecking ? 'Wait for the saved Assistant turn check to finish'
-                : turnStarting ? 'Wait for the Assistant response to start'
-              : draftRunMismatch ? draftRunMismatchMessage
-              : shareUnknown || shareVerifying ? shareVerifying
-                ? 'Checking public-link status; your draft remains editable'
-                : 'Messaging paused until public-link status is verified'
-              : commandBusy ? 'Waiting for the current run command' : historical ? readOnlyShort
-                : forkingCurrentSession ? 'Wait for this chat to finish forking'
-                  : pendingFileReads > 0 ? 'Wait for the selected attachment to finish reading' : 'send (Enter)'}
+            aria-label={((sessionOpening ? uiText('Opening selected Assistant chat') : (retryChecking ? uiText('Checking saved Assistant turn') : (turnStarting ? uiText('Starting Assistant response') : (shareUnknown || shareVerifying ? (shareVerifying ? uiText('Checking public-link status; nothing sent') : uiText('Verify public-link status before sending')) : uiText('Send Assistant message'))))))}
+            title={((sessionOpening ? uiText('Wait for the selected Assistant chat to finish opening') : (retryChecking ? uiText('Wait for the saved Assistant turn check to finish') : (turnStarting ? uiText('Wait for the Assistant response to start') : (draftRunMismatch ? draftRunMismatchMessage : (shareUnknown || shareVerifying ? (shareVerifying ? uiText('Checking public-link status; your draft remains editable') : uiText('Messaging paused until public-link status is verified')) : (commandBusy ? uiText('Waiting for the current run command') : (historical ? readOnlyShort : (forkingCurrentSession ? uiText('Wait for this chat to finish forking') : (pendingFileReads > 0 ? uiText('Wait for the selected attachment to finish reading') : uiText('send (Enter)')))))))))))}
             disabled={sessionOpening || retryChecking || turnStarting || historical || commandBusy || composerEditingPaused || draftRunMismatch || pendingFileReads > 0
               || (!input.trim() && files.length === 0)} onClick={send}>▶</button>}
-      <button className="cmdbar-drawer-btn" aria-label="Open Assistant in side view"
-        title="open chat on the right (side view)" onClick={openSide}><OpIcon name="chat" size={13} /></button>
+      <button className="cmdbar-drawer-btn" aria-label={uiText("Open Assistant in side view")}
+        title={uiText("open chat on the right (side view)")} onClick={openSide}><OpIcon name="chat" size={13} /></button>
       {visibleToast && <div className="cmdbar-toast" role="status" aria-live="polite" aria-atomic="true">{visibleToast}</div>}
     </div></div>
 
@@ -4049,14 +3974,14 @@ export default function AssistantBar({ runId, hidden = false, onReady }) {
   const sideView = () => <>
     {compactAssistant && <div className="asst-side-backdrop" aria-hidden="true"
       onPointerDown={collapseToBar} />}
-    <aside ref={sideDialogRef} className="asst-side-panel" aria-label="Assistant"
+    <aside ref={sideDialogRef} className="asst-side-panel" aria-label={uiText("Assistant")}
       role={compactAssistant ? 'dialog' : undefined} aria-modal={compactAssistant ? 'true' : undefined}
       aria-hidden={deleteConfirm ? 'true' : undefined} inert={deleteConfirm ? '' : undefined}
       tabIndex={compactAssistant ? -1 : undefined} style={{ width: sideW }}>
-      {!compactAssistant && <div className="asst-resize" role="separator" aria-label="Resize Assistant panel"
+      {!compactAssistant && <div className="asst-resize" role="separator" aria-label={uiText("Resize Assistant panel")}
         aria-orientation="vertical" aria-valuemin={320} aria-valuemax={maxSideWidth()}
         aria-valuenow={Math.round(sideW)} tabIndex={0} onPointerDown={startResize}
-        onKeyDown={resizeWithKeys} title="Drag or use arrow keys to resize" />}
+        onKeyDown={resizeWithKeys} title={uiText("Drag or use arrow keys to resize")} />}
       <div className="asst-drawer-h">
         <b className="asst-drawer-ttl">{text('Assistant', 'Ассистент')}</b>
         {ctxChip}
@@ -4064,10 +3989,9 @@ export default function AssistantBar({ runId, hidden = false, onReady }) {
         {sid && (currentSession?.shared || shareCopy || shareUnknown)
           && <button type="button" className={'btn sm assistant-share-state'
             + (shareUnknown || liveShareActive ? ' warn' : '')}
-            title="Open the full Assistant to inspect or revoke public links"
+            title={uiText("Open the full Assistant to inspect or revoke public links")}
             onClick={openFull}>
-            {shareUnknown ? 'share status unknown · messaging paused' : liveShareActive
-              ? 'LIVE · new replies public' : 'snapshot public'}
+            {((shareUnknown ? uiText('share status unknown · messaging paused') : (liveShareActive ? uiText('LIVE · new replies public') : uiText('snapshot public'))))}
           </button>}
         <span className="spacer" style={{ flex: 1 }} />
         {compactAssistant && attentionIndicator.active && <AttentionLauncher
@@ -4076,15 +4000,15 @@ export default function AssistantBar({ runId, hidden = false, onReady }) {
         <button className="btn sm ghost" title={text('expand to the full view', 'Открыть полный чат')} onClick={openFull}>{text('⤢ full', '⤢ весь чат')}</button>
         {foldToBarButton('btn sm ghost', 'collapse to the bar')}
       </div>
-      <div className="asst-side-conversation" role="group" aria-label="Current Assistant chat">
+      <div className="asst-side-conversation" role="group" aria-label={uiText("Current Assistant chat")}>
         <span>{text('Chat', 'Чат')}</span>
-        <strong title={currentSession?.title || (sid ? 'Loading chat…' : 'New chat')}>
+        <strong title={((currentSession?.title || (sid ? uiText('Loading chat…') : uiText('New chat'))))}>
           {currentSession?.title || (sid ? text('Loading chat…', 'Загрузка чата…') : text('New chat', 'Новый чат'))}
         </strong>
         <button type="button" className="btn sm ghost" onClick={openFull}>{text('All chats', 'Все чаты')}</button>
       </div>
       {runContextBanner}
-      <div className="asst-drawer-feed" ref={feedRef} role="log" aria-label="Assistant transcript"
+      <div className="asst-drawer-feed" ref={feedRef} role="log" aria-label={uiText("Assistant transcript")}
         aria-live="off" aria-busy={busy} tabIndex={0}
         onScroll={onFeedScroll}>{renderThread()}</div>
       {composer('Ask Assistant… (Enter sends · Shift+Enter new line)')}
@@ -4094,7 +4018,7 @@ export default function AssistantBar({ runId, hidden = false, onReady }) {
 
   // ── full page — dedicated OPAQUE view (sessions · thread · composer) ──
   const fullView = () => <div ref={fullDialogRef} className="asst-view asst-full" role="dialog"
-      aria-modal="true" aria-label="Assistant" aria-hidden={deleteConfirm ? 'true' : undefined}
+      aria-modal="true" aria-label={uiText("Assistant")} aria-hidden={deleteConfirm ? 'true' : undefined}
       inert={deleteConfirm ? '' : undefined} tabIndex={-1}>
       <div className="asst-side">
         <div className="asst-side-h">
@@ -4105,19 +4029,17 @@ export default function AssistantBar({ runId, hidden = false, onReady }) {
         <div ref={sessionsRef} className="asst-sessions"
           aria-busy={sessionsStatus === 'loading' || sessionsStatus === 'refreshing'}>
           {sessionsStatus === 'loading' && <div className="asst-session-resource" role="status">
-            <span>Loading chats…</span>
+            <span>{uiText("Loading chats…")}</span>
           </div>}
           {sessionsStatus === 'refreshing' && <div className="asst-session-resource" role="status">
-            <span>Refreshing chats…</span>
+            <span>{uiText("Refreshing chats…")}</span>
           </div>}
           {['error', 'stale'].includes(sessionsStatus) && <div
             className={`asst-session-resource ${sessionsStatus}`}
             role={sessionsStatus === 'error' ? 'alert' : 'status'}>
             <OpIcon name="alert" size={13} />
-            <span>{sessionsStatus === 'stale'
-              ? 'Showing the last loaded chat list. Refresh failed.'
-              : 'Chats could not be loaded.'}</span>
-            <button type="button" className="btn xs" onClick={refreshSessions}>Retry</button>
+            <span>{((sessionsStatus === 'stale' ? uiText('Showing the last loaded chat list. Refresh failed.') : uiText('Chats could not be loaded.')))}</span>
+            <button type="button" className="btn xs" onClick={refreshSessions}>{uiText("Retry")}</button>
           </div>}
           {sessionsStatus === 'ready' && sessions.length === 0
             && <div className="muted asst-session-empty">{text('No chats yet.', 'Пока нет чатов.')}</div>}
@@ -4127,38 +4049,22 @@ export default function AssistantBar({ runId, hidden = false, onReady }) {
             <button type="button" className="asst-sess-open"
               aria-current={s.id === sid ? 'page' : undefined}
               aria-busy={String(openingSid || '') === String(s.id) || undefined}
-              aria-label={String(openingSid || '') === String(s.id)
-                ? `Opening chat ${s.title || 'Chat'}` : s.cleanup_required
-                ? 'Incomplete chat deletion; use Delete to retry cleanup'
-                : undefined}
-              title={String(openingSid || '') === String(s.id) ? 'Opening this Assistant chat…'
-                : turnStarting ? 'Wait for the new Assistant chat to finish starting'
-                  : retryChecking ? 'Wait for the saved turn check to finish'
-                    : s.cleanup_required ? 'This partial chat cannot be opened. Delete it to retry cleanup.' : undefined}
+              aria-label={((String(openingSid || '') === String(s.id) ? uiMessage("Opening chat {0}", [s.title || 'Chat']) : (s.cleanup_required ? uiText('Incomplete chat deletion; use Delete to retry cleanup') : undefined)))}
+              title={((String(openingSid || '') === String(s.id) ? uiText('Opening this Assistant chat…') : (turnStarting ? uiText('Wait for the new Assistant chat to finish starting') : (retryChecking ? uiText('Wait for the saved turn check to finish') : (s.cleanup_required ? uiText('This partial chat cannot be opened. Delete it to retry cleanup.') : undefined)))))}
               disabled={s.cleanup_required === true || turnStarting || retryChecking || !!directConfirm
                 || String(openingSid || '') === String(s.id)}
               onClick={() => openSession(s.id)}>
-              <span className="asst-sess-t">{s.title || 'Chat'}</span>
-              <span className="asst-sess-m">{String(openingSid || '') === String(s.id)
-                ? 'Opening…' : s.cleanup_required
-                ? 'Cleanup required · delete to retry'
-                : s.shared
+              <span className="asst-sess-t">{((s.title || uiText('Chat')))}</span>
+              <span className="asst-sess-m">{((String(openingSid || '') === String(s.id) ? uiText('Opening…') : (s.cleanup_required ? uiText('Cleanup required · delete to retry') : s.shared
                   ? `${Number(s.share_count) > 1 ? `${s.share_count} public links` : 'Public link'} ${s.share_live ? 'LIVE · new replies public' : 'active'}${s.share_expires_at ? ` · until ${fmtDate(s.share_expires_at)}` : ''}`
-                  : fmtAgo(s.updated)}</span>
+                  : fmtAgo(s.updated))))}</span>
             </button>
             <button type="button" className="asst-sess-x" onClick={(e) => requestDeleteSession(s, e)}
               disabled={forkBusySid === s.id || turnStarting || !!directConfirm
                 || String(openingSid || '') === String(s.id)
                 || (s.id === sid && (retryChecking || busy || pending.length > 0))}
-              title={forkBusySid === s.id ? 'Wait for this chat to finish forking'
-                : turnStarting ? 'Wait for the new Assistant chat to finish starting'
-                  : String(openingSid || '') === String(s.id) ? 'Wait for this chat to finish opening'
-                    : s.id === sid && retryChecking ? 'Wait for the saved Assistant turn check to finish'
-                      : s.id === sid && (busy || pending.length > 0)
-                        ? 'Stop or finish this Assistant turn before deleting the chat' : undefined}
-              aria-label={s.cleanup_required
-                ? `Retry cleanup for ${s.title || 'incomplete chat deletion'}`
-                : `Delete chat ${s.title || 'Chat'}`}>✕</button>
+              title={((forkBusySid === s.id ? uiText('Wait for this chat to finish forking') : (turnStarting ? uiText('Wait for the new Assistant chat to finish starting') : (String(openingSid || '') === String(s.id) ? uiText('Wait for this chat to finish opening') : (s.id === sid && retryChecking ? uiText('Wait for the saved Assistant turn check to finish') : (s.id === sid && (busy || pending.length > 0) ? uiText('Stop or finish this Assistant turn before deleting the chat') : undefined))))))}
+              aria-label={(s.cleanup_required ? uiMessage("Retry cleanup for {0}", [s.title || 'incomplete chat deletion']) : uiMessage("Delete chat {0}", [s.title || 'Chat']))}>✕</button>
           </div>)}
         </div>
       </div>
@@ -4170,38 +4076,26 @@ export default function AssistantBar({ runId, hidden = false, onReady }) {
           {ctxChip}
           {launchRecoveryButton}
           {sid && <button className="btn sm ghost" type="button"
-            title={forkBusySid === sid ? 'Forking this chat…'
-              : forkBusy ? 'Another Assistant fork is still in progress'
-              : deletingCurrentSession ? 'This chat is being deleted'
-                : currentForkRecovery
-                  ? 'Check the exact pending fork before starting another'
-                  : shareTurnIncomplete
-                  ? 'Wait for the current Assistant reply to finish or recover it before forking'
-                  : shareBusy ? 'Wait for the current share action before forking'
-                    : 'Fork this complete chat into a new session'}
+            title={((forkBusySid === sid ? uiText('Forking this chat…') : (forkBusy ? uiText('Another Assistant fork is still in progress') : (deletingCurrentSession ? uiText('This chat is being deleted') : (currentForkRecovery ? uiText('Check the exact pending fork before starting another') : (shareTurnIncomplete ? uiText('Wait for the current Assistant reply to finish or recover it before forking') : (shareBusy ? uiText('Wait for the current share action before forking') : uiText('Fork this complete chat into a new session'))))))))}
             disabled={forkBusy || shareBusy || deletingCurrentSession || !!directConfirm
               || (shareTurnIncomplete && !currentForkRecovery)}
-            onClick={forkCurrentSession}>{forkBusySid === sid ? 'forking…'
-              : currentForkRecovery ? '⑂ check fork' : '⑂ fork'}</button>}
+            onClick={forkCurrentSession}>{((forkBusySid === sid ? uiText('forking…') : (currentForkRecovery ? uiText('⑂ check fork') : uiText('⑂ fork'))))}</button>}
           {sid && (currentSession?.shared || shareCopy || shareUnknown)
             && <span className={'pill assistant-share-state'
               + (shareUnknown || liveShareActive ? ' warn' : '')}>
-              {shareUnknown ? 'share state unknown' : liveShareActive
-                ? 'LIVE public link · new replies public' : 'public snapshot active'}
+              {((shareUnknown ? uiText('share state unknown') : (liveShareActive ? uiText('LIVE public link · new replies public') : uiText('public snapshot active'))))}
             </span>}
           {shareUnknown && <button className="btn sm" type="button" onClick={retryShareStatus}
             disabled={shareBusy || shareVerifying || sessionsStatus === 'loading' || sessionsStatus === 'refreshing'}
-            title="Verify the exact active public-link capabilities before messaging">
-            {shareVerifying || sessionsStatus === 'loading' || sessionsStatus === 'refreshing'
-              ? 'checking share…' : 'retry share status'}
+            title={uiText("Verify the exact active public-link capabilities before messaging")}>
+            {((shareVerifying || sessionsStatus === 'loading' || sessionsStatus === 'refreshing' ? uiText('checking share…') : uiText('retry share status')))}
           </button>}
           {sid && !currentSession && !shareCopy && !shareUnknown
             && <button className="btn sm ghost" type="button"
               disabled={sessionsStatus === 'loading' || sessionsStatus === 'refreshing'}
-              title="Verify that this chat has no existing public links before creating another"
+              title={uiText("Verify that this chat has no existing public links before creating another")}
               onClick={refreshSessions}>
-              {sessionsStatus === 'loading' || sessionsStatus === 'refreshing'
-                ? 'checking share…' : 'retry share status'}
+              {((sessionsStatus === 'loading' || sessionsStatus === 'refreshing' ? uiText('checking share…') : uiText('retry share status')))}
             </button>}
           {/* A share link is a separate secret with an expiry — not this chat's id — and it is frozen
               at the turns that exist right now, so anything said afterwards stays private. "unshare"
@@ -4209,37 +4103,26 @@ export default function AssistantBar({ runId, hidden = false, onReady }) {
           {sid && currentSession && !deletingCurrentSession && !currentSession.shared
             && !shareUnknown && !shareCopy
             && <button className="btn sm ghost"
-              title={forkingCurrentSession
-                ? 'Wait for this chat to finish forking before creating a snapshot'
-                : shareTurnIncomplete
-                ? 'Wait for the current Assistant turn to finish before freezing a complete snapshot'
-                : 'Create and copy a frozen read-only snapshot'}
+              title={((forkingCurrentSession ? uiText('Wait for this chat to finish forking before creating a snapshot') : (shareTurnIncomplete ? uiText('Wait for the current Assistant turn to finish before freezing a complete snapshot') : uiText('Create and copy a frozen read-only snapshot'))))}
               disabled={shareBusy || forkingCurrentSession || shareTurnIncomplete || !!directConfirm}
-              onClick={createShareSnapshot}>{shareBusySid === sid ? 'working…' : '⤴ create snapshot'}</button>}
+              onClick={createShareSnapshot}>{((shareBusySid === sid ? uiText('working…') : uiText('⤴ create snapshot')))}</button>}
           {sid && !deletingCurrentSession && (currentSession?.shared || shareUnknown || shareCopy)
             && <button className="btn sm ghost"
-              title={forkingCurrentSession
-                ? 'Wait for this chat to finish forking before revoking links'
-                : 'Revoke every share link'}
+              title={((forkingCurrentSession ? uiText('Wait for this chat to finish forking before revoking links') : uiText('Revoke every share link')))}
               disabled={shareBusy || forkingCurrentSession}
-              onClick={revokeCurrentShares}>{shareBusySid === sid ? 'working…'
-                : `⤫ ${shareUnknown ? 'revoke pending' : 'unshare'}`}</button>}
+              onClick={revokeCurrentShares}>{((shareBusySid === sid ? uiText('working…') : `⤫ ${shareUnknown ? 'revoke pending' : 'unshare'}`))}</button>}
           <button className="btn sm ghost" title={text('dock to the right', 'Открыть сбоку')} onClick={openSide}>{text('▧ side', '▧ сбоку')}</button>
           {foldToBarButton('btn sm ghost', 'fold to the bar')}
         </div>
         {shareCopy && <div className="copy-link-fallback" role="status">
-          <label htmlFor={`assistant-share-fallback-${sid}`}>
-            Frozen snapshot · expires {fmtDate(shareCopy.expiresAt)} · link remains visible in this tab
-          </label>
+          <label htmlFor={`assistant-share-fallback-${sid}`}>{uiText("Frozen snapshot · expires ")}{fmtDate(shareCopy.expiresAt)}{uiText(" · link remains visible in this tab")}</label>
           <input id={`assistant-share-fallback-${sid}`} readOnly value={shareCopy.url}
             onFocus={event => event.currentTarget.select()} />
-          <button type="button" className="btn sm" onClick={copyShareFallbackLink}>Copy link</button>
-          <a className="btn sm" href={shareCopy.url} target="_blank" rel="noreferrer noopener">
-            Open snapshot
-          </a>
+          <button type="button" className="btn sm" onClick={copyShareFallbackLink}>{uiText("Copy link")}</button>
+          <a className="btn sm" href={shareCopy.url} target="_blank" rel="noreferrer noopener">{uiText("Open snapshot")}</a>
         </div>}
         {runContextBanner}
-        <div className="asst-feed" ref={feedRef} role="log" aria-label="Assistant transcript"
+        <div className="asst-feed" ref={feedRef} role="log" aria-label={uiText("Assistant transcript")}
           aria-live="off" aria-busy={busy} tabIndex={0}
           onScroll={onFeedScroll}>{renderThread()}</div>
         {composer('Ask Assistant… (Enter sends · Shift+Enter new line)')}
@@ -4256,25 +4139,20 @@ export default function AssistantBar({ runId, hidden = false, onReady }) {
         aria-describedby="assistant-delete-description assistant-delete-warning"
         aria-busy={deleteConfirmBusy} tabIndex={-1}>
         <div className="modal-h">
-          <b id="assistant-delete-title">Delete this Assistant chat?</b>
+          <b id="assistant-delete-title">{uiText("Delete this Assistant chat?")}</b>
         </div>
         <div className="modal-b">
-          <p id="assistant-delete-description" className="assistant-delete-copy">
-            You are deleting <strong>“{deleteConfirm.title}”</strong>.
+          <p id="assistant-delete-description" className="assistant-delete-copy">{uiText("You are deleting ")}<strong>“{deleteConfirm.title}”</strong>.
           </p>
-          <p id="assistant-delete-warning" className="assistant-delete-warning">
-            Its transcript will be permanently deleted, and any live Assistant work in this chat will be cancelled. This cannot be undone.
-          </p>
+          <p id="assistant-delete-warning" className="assistant-delete-warning">{uiText("Its transcript will be permanently deleted, and any live Assistant work in this chat will be cancelled. This cannot be undone.")}</p>
           {deleteConfirmError && <div ref={deleteErrorRef} className="flag assistant-delete-error"
             role="alert" tabIndex={-1}>{deleteConfirmError}</div>}
-          {deleteConfirmBusy && <div className="assistant-delete-progress" role="status" aria-live="polite">
-            Deleting chat and cancelling live work…
-          </div>}
+          {deleteConfirmBusy && <div className="assistant-delete-progress" role="status" aria-live="polite">{uiText("Deleting chat and cancelling live work…")}</div>}
           <div className="modal-actions">
             <button type="button" className="btn sm" data-dialog-initial-focus
-              disabled={deleteConfirmBusy} onClick={closeDeleteConfirm}>Cancel</button>
+              disabled={deleteConfirmBusy} onClick={closeDeleteConfirm}>{uiText("Cancel")}</button>
             <button type="button" className="btn sm danger" disabled={deleteConfirmBusy}
-              onClick={confirmDeleteSession}>{deleteConfirmBusy ? 'Deleting chat…' : 'Delete chat'}</button>
+              onClick={confirmDeleteSession}>{((deleteConfirmBusy ? uiText('Deleting chat…') : uiText('Delete chat')))}</button>
           </div>
         </div>
       </section>
@@ -4291,13 +4169,10 @@ export default function AssistantBar({ runId, hidden = false, onReady }) {
   return <>
     {hiddenFileInput}
     <output className="sr-only" aria-live="polite" aria-atomic="true">
-      {sessionOpening ? view === 'bar' ? 'Opening Assistant chat.' : ''
-        : retryChecking ? 'Checking saved Assistant turn.'
-          : turnStarting ? 'Starting Assistant response.'
-            : busy ? 'Assistant is responding.' : replyAnnouncement}
+      {((sessionOpening ? (view === 'bar' ? uiText('Opening Assistant chat.') : '') : (retryChecking ? uiText('Checking saved Assistant turn.') : (turnStarting ? uiText('Starting Assistant response.') : (busy ? uiText('Assistant is responding.') : replyAnnouncement)))))}
     </output>
     <div id="assistant-share-status" className="sr-only" role="status" aria-live="polite" aria-atomic="true">
-      {shareStatusMessage}
+      {uiText(shareStatusMessage)}
     </div>
 
     {view === 'bar' && barView()}

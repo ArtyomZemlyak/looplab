@@ -1,3 +1,4 @@
+import { uiText, uiMessage, useUILanguage } from './uiLanguage.js'
 import React, { useEffect, useId, useMemo, useRef, useState } from 'react'
 
 import {
@@ -170,12 +171,12 @@ const recoveryStorageMessage = 'Recovery storage is unavailable. Nothing was sen
 const recoveryChangedMessage = 'The saved recovery identity changed. Nothing was sent; refresh this Comments view before retrying.'
 
 function DraftCounter({ draft }) {
+  useUILanguage()
+
   const invalid = draft.tooLarge || draft.invalidUnicode
   return <span className={'comment-byte-count' + (invalid ? ' over' : '')}
     aria-live={invalid ? 'polite' : 'off'}>
-    {draft.invalidUnicode
-      ? 'Unsupported Unicode sequence'
-      : `${draft.bytes.toLocaleString()} / ${COMMENT_MAX_BYTES.toLocaleString()} bytes`}
+    {((draft.invalidUnicode ? uiText('Unsupported Unicode sequence') : uiMessage("{0} / {1} bytes", [draft.bytes.toLocaleString(), COMMENT_MAX_BYTES.toLocaleString()])))}
   </span>
 }
 
@@ -183,6 +184,8 @@ function CommentComposer({
   runId, nodeId, nodeGeneration, expectedGeneration, onRefresh, onAnnounce,
   draftStore, draftScope,
 }) {
+  useUILanguage()
+
   const fieldId = useId()
   const recoveryIdentity = {
     kind: 'create', runId, expectedGeneration, nodeId, nodeGeneration, commentId: null,
@@ -331,9 +334,9 @@ function CommentComposer({
   }
 
   return <form className="comment-composer" onSubmit={submit} aria-busy={busy ? 'true' : 'false'}>
-    <label htmlFor={fieldId}>Add a comment to experiment #{nodeId}</label>
+    <label htmlFor={fieldId}>{uiText("Add a comment to experiment #")}{nodeId}</label>
     <textarea id={fieldId} className="text" rows={4} value={text} disabled={busy} maxLength={8192}
-      placeholder="Record a decision, question, or review note…"
+      placeholder={uiText("Record a decision, question, or review note…")}
       aria-describedby={`${fieldId}-hint ${fieldId}-count${error ? ` ${fieldId}-error` : ''}`}
       onChange={event => {
         const next = event.target.value
@@ -352,11 +355,11 @@ function CommentComposer({
         if ((event.ctrlKey || event.metaKey) && event.key === 'Enter') submit(event)
       }} />
     <div className="comment-composer-meta">
-      <span id={`${fieldId}-hint`} className="muted">Plain text · Ctrl/⌘+Enter posts · visible in read-only review links after redaction</span>
+      <span id={`${fieldId}-hint`} className="muted">{uiText("Plain text · Ctrl/⌘+Enter posts · visible in read-only review links after redaction")}</span>
       <span id={`${fieldId}-count`}><DraftCounter draft={draft} /></span>
     </div>
     {recovery.storageUnavailable && <div className="notice resource-error comment-inline-error" role="alert">
-      <span>{recoveryStorageMessage}</span>
+      <span>{uiText(recoveryStorageMessage)}</span>
       <button type="button" className="btn xs" onClick={() => {
         const inspected = recovery.inspect()
         if (inspected.kind === 'none') {
@@ -369,37 +372,30 @@ function CommentComposer({
           setError('A saved comment operation was restored. Check that exact command before posting again.')
           setMessageKind('status')
         }
-      }}>Retry storage</button>
+      }}>{uiText("Retry storage")}</button>
     </div>}
     {recovery.damaged && <div className="notice resource-error comment-inline-error" role="alert">
-      <span>A saved new-comment recovery record is invalid. Posting stays blocked because discarding an
-        unverified append-only command could create a duplicate. Restore this tab's recovery data or
-        reload Comments; nothing will be sent automatically.</span>
+      <span>{uiText("A saved new-comment recovery record is invalid. Posting stays blocked because discarding an unverified append-only command could create a duplicate. Restore this tab's recovery data or reload Comments; nothing will be sent automatically.")}</span>
     </div>}
     {error && <div id={`${fieldId}-error`}
       className={`notice comment-inline-error ${messageKind === 'status' ? 'warn' : 'resource-error'}`}
-      role={messageKind === 'status' ? 'status' : 'alert'}><span>{error}</span></div>}
+      role={messageKind === 'status' ? 'status' : 'alert'}><span>{uiText(error)}</span></div>}
     {outcomeUnknown && <div className="comment-recovery-panel"
-      aria-label="Uncertain comment submission recovery">
+      aria-label={uiText("Uncertain comment submission recovery")}>
       <details>
-        <summary>View submission to check</summary>
-        <div className="comment-recovery-payload">{pendingIntent.text}</div>
+        <summary>{uiText("View submission to check")}</summary>
+        <div className="comment-recovery-payload">{uiText(pendingIntent.text)}</div>
       </details>
       <div className="comment-recovery-actions">
-        <button type="button" className="btn sm" onClick={onRefresh}>Refresh comments</button>
-        <button type="button" className="btn sm" onClick={copyPendingSubmission}>
-          Copy pending submission
-        </button>
+        <button type="button" className="btn sm" onClick={onRefresh}>{uiText("Refresh comments")}</button>
+        <button type="button" className="btn sm" onClick={copyPendingSubmission}>{uiText("Copy pending submission")}</button>
       </div>
-      <div className="muted">Check command safely resubmits the exact saved idempotency key. This
-        append-only recovery cannot be discarded until the server returns a terminal outcome.</div>
+      <div className="muted">{uiText("Check command safely resubmits the exact saved idempotency key. This append-only recovery cannot be discarded until the server returns a terminal outcome.")}</div>
     </div>}
     {retryIntentMismatch && <div className="comment-recovery-panel" role="status">
-      <span>The saved failed command belongs to different text. Restore it to retry, or discard that terminal failure before posting a new intent.</span>
+      <span>{uiText("The saved failed command belongs to different text. Restore it to retry, or discard that terminal failure before posting a new intent.")}</span>
       <div className="comment-recovery-actions">
-        <button type="button" className="btn sm" onClick={() => setText(retryIntent.text)}>
-          Restore failed submission
-        </button>
+        <button type="button" className="btn sm" onClick={() => setText(retryIntent.text)}>{uiText("Restore failed submission")}</button>
         <button type="button" className="btn sm ghost" onClick={() => {
           if (!clearCommentOperationIntent(retryIntent.recovery)) {
             setError('The saved failed-command record changed and was not discarded. Refresh Comments.')
@@ -408,26 +404,23 @@ function CommentComposer({
           setRetryIntent(null)
           setError('Failed command discarded. Review this draft before posting a new comment.')
           setMessageKind('status')
-        }}>Discard failed command</button>
+        }}>{uiText("Discard failed command")}</button>
       </div>
     </div>}
     <div className="comment-composer-actions">
       <button type="submit" className="btn sm primary"
         disabled={busy || recovery.damaged || recovery.storageUnavailable || retryIntentMismatch
           || (!outcomeUnknown && !draft.valid)}
-        title={exactRetry ? 'Retry this exact durable command; no new comment intent is created'
-          : retryIntentMismatch ? 'Resolve the saved failed command before posting new text'
-            : recovery.damaged || recovery.storageUnavailable
-              ? 'Working recovery storage is required before posting' : undefined}>
-        <OpIcon name="chat" size={12} /> {busy
-          ? outcomeUnknown ? 'Checking…' : exactRetry ? 'Retrying…' : 'Posting…'
-          : outcomeUnknown ? 'Check command' : exactRetry ? 'Retry same command' : 'Post comment'}
+        title={((exactRetry ? uiText('Retry this exact durable command; no new comment intent is created') : (retryIntentMismatch ? uiText('Resolve the saved failed command before posting new text') : (recovery.damaged || recovery.storageUnavailable ? uiText('Working recovery storage is required before posting') : undefined))))}>
+        <OpIcon name="chat" size={12} /> {((busy ? (outcomeUnknown ? uiText('Checking…') : (exactRetry ? uiText('Retrying…') : uiText('Posting…'))) : (outcomeUnknown ? uiText('Check command') : (exactRetry ? uiText('Retry same command') : uiText('Post comment')))))}
       </button>
     </div>
   </form>
 }
 
 function History({ runId, comment, expectedGeneration, onAnnounce, domPrefix }) {
+  useUILanguage()
+
   const [open, setOpen] = useState(false)
   const [pages, setPages] = useState([])
   const [status, setStatus] = useState('idle')
@@ -468,14 +461,14 @@ function History({ runId, comment, expectedGeneration, onAnnounce, domPrefix }) 
         setOpen(next)
         if (next && status === 'idle') load()
       }}>
-      {open ? 'Hide history' : `History (${comment.version})`}
+      {((open ? uiText('Hide history') : uiMessage("History ({0})", [comment.version])))}
     </button>
     {open && <div id={`${domPrefix}-history`} className="comment-history-body">
-      {status === 'loading' && <div className="muted" role="status">Loading history…</div>}
+      {status === 'loading' && <div className="muted" role="status">{uiText("Loading history…")}</div>}
       {error && <>
-        <div className="notice resource-error comment-inline-error" role="alert"><span>{error}</span></div>
+        <div className="notice resource-error comment-inline-error" role="alert"><span>{uiText(error)}</span></div>
         <div className="comment-recovery-actions">
-          <button type="button" className="btn xs" onClick={() => load()}>Retry</button>
+          <button type="button" className="btn xs" onClick={() => load()}>{uiText("Retry")}</button>
         </div>
       </>}
       {versions.length > 0 && <ol>
@@ -486,11 +479,11 @@ function History({ runId, comment, expectedGeneration, onAnnounce, domPrefix }) 
               title={fmtDate(version.updatedAt)}>{fmtAgo(version.updatedAt)}</time>
           </div>
           <div className="comment-history-text">{version.text}</div>
-          {version.resolved && <span className="pill">resolved</span>}
+          {version.resolved && <span className="pill">{uiText("resolved")}</span>}
         </li>)}
       </ol>}
       {hasMore && <button type="button" className="btn sm" disabled={status === 'loading-more'}
-        onClick={() => load(nextCursor)}>{status === 'loading-more' ? 'Loading…' : 'Load older history'}</button>}
+        onClick={() => load(nextCursor)}>{((status === 'loading-more' ? uiText('Loading…') : uiText('Load older history')))}</button>}
     </div>}
   </div>
 }
@@ -499,6 +492,8 @@ function CommentCard({
   runId, comment, expectedGeneration, readOnly, global, focused,
   onOpenComment, onRefresh, onAnnounce, draftStore, draftScope, draftSurface,
 }) {
+  useUILanguage()
+
   const editScope = `${draftScope}:edit`
   const resolutionScope = `${draftScope}:resolution`
   const observationScope = `${draftScope}:observation`
@@ -910,28 +905,25 @@ function CommentCard({
 
   return <article id={commentDomId} data-comment-id={comment.id} tabIndex={-1}
     className={'comment-card' + (comment.resolved ? ' resolved' : '') + (focused ? ' focused' : '')}
-    aria-label={`Comment on experiment ${comment.nodeId} by ${comment.actorLabel}`}>
+    aria-label={uiMessage("Comment on experiment {0} by {1}", [comment.nodeId, comment.actorLabel])}>
     <header className="comment-card-head">
       {global && (comment.legacy
-        ? <span className="comment-node-label">Experiment #{comment.nodeId} · attempt unknown</span>
+        ? <span className="comment-node-label">{uiText("Experiment #")}{comment.nodeId}{uiText(" · attempt unknown")}</span>
         : <button type="button" className="btn xs ghost comment-node-link"
-            onClick={() => onOpenComment?.(comment)}>
-            Experiment #{comment.nodeId} · attempt {comment.nodeGeneration}
+            onClick={() => onOpenComment?.(comment)}>{uiText("Experiment #")}{comment.nodeId}{uiText(" · attempt ")}{comment.nodeGeneration}
           </button>)}
       <span className="comment-actor"><OpIcon name={comment.actorKind === 'assistant' ? 'bot' : 'user'} size={12} /> {comment.actorLabel}</span>
       <time dateTime={new Date(comment.updatedAt * 1000).toISOString()}
         title={`${comment.updatedAt === comment.createdAt ? 'Created' : 'Updated'} ${fmtDate(comment.updatedAt)}`}>
         {fmtAgo(comment.updatedAt)}
       </time>
-      {comment.version > 1 && <span className="muted">edited</span>}
-      {comment.resolved && <span className="pill ok">Resolved</span>}
+      {comment.version > 1 && <span className="muted">{uiText("edited")}</span>}
+      {comment.resolved && <span className="pill ok">{uiText("Resolved")}</span>}
     </header>
 
-    {surfaceStale && <div className="notice warn compact" role="status">
-      A newer comment version is open in another view. This copy is read-only until comments refresh.
-    </div>}
+    {surfaceStale && <div className="notice warn compact" role="status">{uiText("A newer comment version is open in another view. This copy is read-only until comments refresh.")}</div>}
     {editorVisible ? <div className="comment-editor">
-      <label className="sr-only" htmlFor={`${commentDomId}-editor`}>Edit comment on experiment #{comment.nodeId}</label>
+      <label className="sr-only" htmlFor={`${commentDomId}-editor`}>{uiText("Edit comment on experiment #")}{comment.nodeId}</label>
       <textarea ref={editorRef} id={`${commentDomId}-editor`} className="text" rows={4} maxLength={8192}
         value={draftText} disabled={busy || resolutionFence}
         aria-describedby={`${commentDomId}-editor-audit${resolutionError
@@ -957,12 +949,10 @@ function CommentCard({
             }
           }
         }} />
-      <div id={`${commentDomId}-editor-audit`} className="comment-editor-audit" role="note">
-        Saving creates a new audit version. Prior text remains in the run log and backups.
-      </div>
-      <div className="comment-editor-meta"><span className="muted">Plain text · Esc cancels</span><DraftCounter draft={draft} /></div>
+      <div id={`${commentDomId}-editor-audit`} className="comment-editor-audit" role="note">{uiText("Saving creates a new audit version. Prior text remains in the run log and backups.")}</div>
+      <div className="comment-editor-meta"><span className="muted">{uiText("Plain text · Esc cancels")}</span><DraftCounter draft={draft} /></div>
       {editRecovery.storageUnavailable && <div className="notice resource-error comment-inline-error" role="alert">
-        <span>{recoveryStorageMessage}</span>
+        <span>{uiText(recoveryStorageMessage)}</span>
         <button type="button" className="btn xs" onClick={() => {
           const inspected = editRecovery.inspect()
           if (inspected.kind === 'none') {
@@ -973,23 +963,23 @@ function CommentCard({
             setEditError('A saved edit operation was restored. Check that exact command; any newer draft remains retained.')
             setEditMessageKind('status')
           }
-        }}>Retry storage</button>
+        }}>{uiText("Retry storage")}</button>
       </div>}
       {editRecovery.damaged && <div className="notice resource-error comment-inline-error" role="alert">
-        <span>A saved edit recovery record is invalid. Editing is blocked until that browser-only record is discarded.</span>
+        <span>{uiText("A saved edit recovery record is invalid. Editing is blocked until that browser-only record is discarded.")}</span>
         <button type="button" className="btn xs" onClick={() => {
           if (editRecovery.discardDamaged()) {
             setEditError('Damaged edit recovery discarded. Review this draft against the current comment.')
             setEditMessageKind('status')
           } else setEditError('The damaged edit recovery changed and was not discarded. Refresh Comments.')
-        }}>Discard damaged recovery</button>
+        }}>{uiText("Discard damaged recovery")}</button>
       </div>}
       {editError && <div
         className={`notice comment-inline-error ${editMessageKind === 'status' ? 'warn' : 'resource-error'}`}
         role={editMessageKind === 'status' ? 'status' : 'alert'}><span>{editError}</span></div>}
       {versionChanged && <div className="comment-recovery-panel">
         <details>
-          <summary>View latest comment</summary>
+          <summary>{uiText("View latest comment")}</summary>
           <div className="comment-recovery-payload">{comment.text}</div>
         </details>
         <div className="comment-recovery-actions">
@@ -1000,8 +990,8 @@ function CommentCard({
             setDirty(false)
             setEditConflictVersion(null)
             setEditError('')
-          }}>Use latest</button>
-          <button type="button" className="btn xs" onClick={copyDraft}>Copy my draft</button>
+          }}>{uiText("Use latest")}</button>
+          <button type="button" className="btn xs" onClick={copyDraft}>{uiText("Copy my draft")}</button>
           <button type="button" className="btn xs" disabled={busy || editOutcomeUnknown} onClick={() => {
             setEditBaseVersion(comment.version)
             setEditBaseText(comment.text)
@@ -1009,25 +999,25 @@ function CommentCard({
             setEditConflictVersion(null)
             setEditError('')
             onAnnounce?.('Latest comment version acknowledged. Your draft remains in the editor.')
-          }}>Continue with my draft</button>
+          }}>{uiText("Continue with my draft")}</button>
         </div>
       </div>}
       {editConflictVersion != null && <div className="comment-recovery-panel">
         <div className="comment-recovery-actions">
-          <button type="button" className="btn xs" onClick={onRefresh}>Reload current</button>
-          <button type="button" className="btn xs" onClick={copyDraft}>Copy my draft</button>
+          <button type="button" className="btn xs" onClick={onRefresh}>{uiText("Reload current")}</button>
+          <button type="button" className="btn xs" onClick={copyDraft}>{uiText("Copy my draft")}</button>
         </div>
       </div>}
       {editOutcomeUnknown && <div className="comment-recovery-panel">
         <details>
-          <summary>View edit submission to check</summary>
-          <div className="comment-recovery-payload">{uncertainEdit.text}</div>
+          <summary>{uiText("View edit submission to check")}</summary>
+          <div className="comment-recovery-payload">{uiText(uncertainEdit.text)}</div>
         </details>
         <div className="comment-recovery-actions">
-          <button type="button" className="btn xs" onClick={onRefresh}>Refresh comments</button>
-          <button type="button" className="btn xs" onClick={copyPendingEdit}>Copy pending edit</button>
+          <button type="button" className="btn xs" onClick={onRefresh}>{uiText("Refresh comments")}</button>
+          <button type="button" className="btn xs" onClick={copyPendingEdit}>{uiText("Copy pending edit")}</button>
           <button type="button" className="btn xs ghost" disabled={!!editBusy}
-            title="Only discard this after confirming that the edit was not applied"
+            title={uiText("Only discard this after confirming that the edit was not applied")}
             onClick={() => {
               if (!clearCommentOperationIntent(uncertainEdit.recovery)) {
                 setEditError('The saved edit recovery changed and was not discarded. Refresh Comments.')
@@ -1036,15 +1026,13 @@ function CommentCard({
               setUncertainEdit(null)
               setEditError('Pending edit discarded. Review your draft against the current comment.')
               setEditMessageKind('status')
-            }}>Discard pending edit</button>
+            }}>{uiText("Discard pending edit")}</button>
         </div>
       </div>}
       {editRetryMismatch && <div className="comment-recovery-panel" role="status">
-        <span>The saved failed edit belongs to different text or an older version. Restore its text to retry when valid, or discard that terminal failure.</span>
+        <span>{uiText("The saved failed edit belongs to different text or an older version. Restore its text to retry when valid, or discard that terminal failure.")}</span>
         <div className="comment-recovery-actions">
-          <button type="button" className="btn xs" onClick={() => setDraftText(editRetryIntent.text)}>
-            Restore failed edit
-          </button>
+          <button type="button" className="btn xs" onClick={() => setDraftText(editRetryIntent.text)}>{uiText("Restore failed edit")}</button>
           <button type="button" className="btn xs ghost" onClick={() => {
             if (!clearCommentOperationIntent(editRetryIntent.recovery)) {
               setEditError('The saved failed-edit record changed and was not discarded. Refresh Comments.')
@@ -1053,56 +1041,50 @@ function CommentCard({
             setEditRetryIntent(null)
             setEditError('Failed edit command discarded. Review this draft before saving a new edit.')
             setEditMessageKind('status')
-          }}>Discard failed edit</button>
+          }}>{uiText("Discard failed edit")}</button>
         </div>
       </div>}
       <div className="comment-editor-actions">
         <button type="button" className="btn sm ghost"
           disabled={!!editBusy || editOutcomeUnknown || !!editRetryIntent}
-          title={editOutcomeUnknown || editRetryIntent
-            ? 'Resolve the saved edit command before closing this draft' : undefined}
+          title={((editOutcomeUnknown || editRetryIntent ? uiText('Resolve the saved edit command before closing this draft') : undefined))}
           onClick={() => {
             if (editBusy || editOutcomeUnknown || editRetryIntent) return
             draftStore.clear(editScope)
             restoreEditFocus()
-          }}>Cancel</button>
+          }}>{uiText("Cancel")}</button>
         <button type="button" className="btn sm primary"
           disabled={busy || resolutionFence || editRecoveryBlocked || editRetryMismatch
             || (!editOutcomeUnknown && (editConflictVersion != null || editIntentMismatch
               || !draft.valid || !draftChanged || versionChanged))}
-          title={exactEditRetry ? 'Retry this exact durable command; no new edit intent is created'
-            : editRetryMismatch ? 'Resolve the saved failed edit before saving new text'
-              : editRecoveryBlocked ? 'Working recovery storage is required before saving' : undefined}
-          onClick={save}>{editBusy === 'edit'
-            ? editOutcomeUnknown ? 'Checking…' : exactEditRetry ? 'Retrying…' : 'Saving…'
-            : editOutcomeUnknown ? 'Check command'
-              : exactEditRetry ? 'Retry same command' : 'Save comment'}</button>
+          title={((exactEditRetry ? uiText('Retry this exact durable command; no new edit intent is created') : (editRetryMismatch ? uiText('Resolve the saved failed edit before saving new text') : (editRecoveryBlocked ? uiText('Working recovery storage is required before saving') : undefined))))}
+          onClick={save}>{((editBusy === 'edit' ? (editOutcomeUnknown ? uiText('Checking…') : (exactEditRetry ? uiText('Retrying…') : uiText('Saving…'))) : (editOutcomeUnknown ? uiText('Check command') : (exactEditRetry ? uiText('Retry same command') : uiText('Save comment')))))}</button>
       </div>
     </div> : <div className="comment-text">{comment.text}</div>}
 
     {!editorVisible && editRecovery.storageUnavailable && <div className="notice resource-error comment-inline-error" role="alert">
-      <span>Edit recovery storage is unavailable. Editing is blocked.</span>
-      <button type="button" className="btn xs" onClick={retryEditRecoveryStorage}>Retry storage</button>
+      <span>{uiText("Edit recovery storage is unavailable. Editing is blocked.")}</span>
+      <button type="button" className="btn xs" onClick={retryEditRecoveryStorage}>{uiText("Retry storage")}</button>
     </div>}
     {!editorVisible && editRecovery.damaged && <div className="notice resource-error comment-inline-error" role="alert">
-      <span>A saved edit recovery record is invalid. Editing is blocked.</span>
+      <span>{uiText("A saved edit recovery record is invalid. Editing is blocked.")}</span>
       <button type="button" className="btn xs" onClick={() => {
         if (!editRecovery.discardDamaged()) {
           setEditError('The damaged edit recovery changed and was not discarded. Refresh Comments.')
         }
-      }}>Discard damaged recovery</button>
+      }}>{uiText("Discard damaged recovery")}</button>
     </div>}
     {resolutionRecovery.storageUnavailable && <div className="notice resource-error comment-inline-error" role="alert">
-      <span>Resolution recovery storage is unavailable. Resolve/reopen is blocked.</span>
-      <button type="button" className="btn xs" onClick={retryResolutionRecoveryStorage}>Retry storage</button>
+      <span>{uiText("Resolution recovery storage is unavailable. Resolve/reopen is blocked.")}</span>
+      <button type="button" className="btn xs" onClick={retryResolutionRecoveryStorage}>{uiText("Retry storage")}</button>
     </div>}
     {resolutionRecovery.damaged && <div className="notice resource-error comment-inline-error" role="alert">
-      <span>A saved resolution recovery record is invalid. Resolve/reopen is blocked.</span>
+      <span>{uiText("A saved resolution recovery record is invalid. Resolve/reopen is blocked.")}</span>
       <button type="button" className="btn xs" onClick={() => {
         if (!resolutionRecovery.discardDamaged()) {
           setResolutionError('The damaged resolution recovery changed and was not discarded. Refresh Comments.')
         }
-      }}>Discard damaged recovery</button>
+      }}>{uiText("Discard damaged recovery")}</button>
     </div>}
 
     {resolutionError && <div id={`${commentDomId}-resolution-error`}
@@ -1111,9 +1093,9 @@ function CommentCard({
     {(resolutionConflictVersion != null || resolutionOutcomeUnknown || resolutionIntentMismatch) &&
       <div className="comment-recovery-panel">
         <div className="comment-recovery-actions">
-        <button type="button" className="btn xs" onClick={onRefresh}>Refresh comments</button>
+        <button type="button" className="btn xs" onClick={onRefresh}>{uiText("Refresh comments")}</button>
         {(uncertainResolution || resolutionRetryIntent) && <button type="button" className="btn xs ghost"
-          title="Discard only after reviewing the current comment state"
+          title={uiText("Discard only after reviewing the current comment state")}
           onClick={() => {
             const intent = uncertainResolution || resolutionRetryIntent
             if (!clearCommentOperationIntent(intent.recovery)) {
@@ -1124,7 +1106,7 @@ function CommentCard({
             setResolutionRetryIntent(null)
             setResolutionConflictVersion(null)
             setResolutionError('Saved resolution command discarded. Review the current state before acting again.')
-          }}>Discard saved resolution command</button>}
+          }}>{uiText("Discard saved resolution command")}</button>}
         </div>
     </div>}
     <footer className="comment-card-actions">
@@ -1140,20 +1122,16 @@ function CommentCard({
             focusEditorRef.current = true
             setEditing(true)
           }}>
-          <OpIcon name="pencil" size={11} /> {dirty || editRetryIntent || uncertainEdit ? 'Resume edit' : 'Edit'}
+          <OpIcon name="pencil" size={11} /> {((dirty || editRetryIntent || uncertainEdit ? uiText('Resume edit') : uiText('Edit')))}
         </button>
         <button type="button" className="btn xs ghost"
           disabled={busy || hasEditDraft || resolutionConflictVersion != null
             || resolutionIntentMismatch || resolutionRecovery.damaged
             || resolutionRecovery.storageUnavailable}
-          title={exactResolutionRetry ? 'Retry this exact durable command; no new resolution intent is created' : undefined}
+          title={((exactResolutionRetry ? uiText('Retry this exact durable command; no new resolution intent is created') : undefined))}
           onClick={() => changeResolution(resolutionTarget)}>
           <OpIcon name={comment.resolved ? 'replay' : 'check'} size={11} />
-          {resolutionBusy === 'resolution'
-            ? resolutionOutcomeUnknown ? 'Checking…' : exactResolutionRetry ? 'Retrying…' : 'Applying…'
-            : resolutionOutcomeUnknown ? 'Check command'
-              : exactResolutionRetry ? `Retry ${resolutionTarget ? 'resolve' : 'reopen'}`
-                : comment.resolved ? 'Reopen' : 'Resolve'}
+          {((resolutionBusy === 'resolution' ? (resolutionOutcomeUnknown ? uiText('Checking…') : (exactResolutionRetry ? uiText('Retrying…') : uiText('Applying…'))) : (resolutionOutcomeUnknown ? uiText('Check command') : (exactResolutionRetry ? uiMessage("Retry {0}", [resolutionTarget ? 'resolve' : 'reopen']) : (comment.resolved ? uiText('Reopen') : uiText('Resolve'))))))}
         </button>
       </>}
       {canViewHistory && !editorVisible && <History
@@ -1161,9 +1139,9 @@ function CommentCard({
         runId={runId} comment={comment}
         expectedGeneration={expectedGeneration} onAnnounce={onAnnounce}
         domPrefix={commentDomId} />}
-      {comment.legacy && <span className="muted comment-legacy-note">Legacy notes are read-only.</span>}
+      {comment.legacy && <span className="muted comment-legacy-note">{uiText("Legacy notes are read-only.")}</span>}
       {!readOnly && !comment.legacy && !comment.editable &&
-        <span className="muted comment-legacy-note">This comment is read-only. Its audit history remains available.</span>}
+        <span className="muted comment-legacy-note">{uiText("This comment is read-only. Its audit history remains available.")}</span>}
     </footer>
   </article>
 }
@@ -1182,6 +1160,8 @@ export default function CommentsThread({
   draftStore: sharedDraftStore = null,
   draftSurface = global ? 'global' : 'inspector',
 }) {
+  useUILanguage()
+
   // Review mode is an authority boundary even if a future caller forgets the redundant readOnly
   // prop. The request layer also rejects mutations, but controls/history must never be rendered.
   const immutable = readOnly || reviewMode
@@ -1228,12 +1208,11 @@ export default function CommentsThread({
 
   const hasExactGeneration = /^[0-9a-f]{64}$/.test(expectedGeneration || '')
   return <section className={'comments-thread' + (global ? ' global' : '')}
-    aria-label={global ? 'Run comments' : `Comments for experiment ${nodeId}`}
+    aria-label={((global ? uiText('Run comments') : uiMessage("Comments for experiment {0}", [nodeId])))}
     aria-busy={feed.loading || feed.refreshing ? 'true' : 'false'}>
     <div className="sr-only" role="status" aria-live="polite" aria-atomic="true">{announcement}</div>
     {reviewMode && <div className="notice comment-review-note" role="note">
-      <b>Read-only comments.</b> Comments are attributed to generic run actors; LoopLab does not identify individual people.
-    </div>}
+      <b>{uiText("Read-only comments.")}</b>{uiText(" Comments are attributed to generic run actors; LoopLab does not identify individual people.")}</div>}
     {!immutable && !global && hasExactGeneration && Number.isSafeInteger(nodeGeneration)
       // KEYED so a node switch remounts it. Inspector swaps `nodeId` on this same element position,
       // so without a key the composer's `retryIntent` survives into the new node — and `exactRetry`
@@ -1245,27 +1224,25 @@ export default function CommentsThread({
         draftStore={draftStore}
         draftScope={`comment-composer:${runId}@${expectedGeneration}:${nodeId}:${nodeGeneration}`} />}
 
-    <div className="comment-filter-bar" role="group" aria-label="Filter comments">
+    <div className="comment-filter-bar" role="group" aria-label={uiText("Filter comments")}>
       {[
         ['open', 'Open'], ['resolved', 'Resolved'], ['all', 'All'],
       ].map(([key, label]) => <button type="button" key={key} className="btn sm ghost"
-        aria-pressed={filter === key} onClick={() => setFilter(key)}>{label} <span>{counts[key]}</span></button>)}
-      {feed.refreshing && <span className="muted" role="status">Refreshing…</span>}
+        aria-pressed={filter === key} onClick={() => setFilter(key)}>{uiText(label)} <span>{counts[key]}</span></button>)}
+      {feed.refreshing && <span className="muted" role="status">{uiText("Refreshing…")}</span>}
     </div>
 
-    {feed.loading && <div className="notice" role="status">Loading comments…</div>}
+    {feed.loading && <div className="notice" role="status">{uiText("Loading comments…")}</div>}
     {feed.error && <div className={'notice resource-error comment-feed-error' + (feed.stale ? ' stale' : '')}>
       <span role={feed.stale ? 'status' : 'alert'}>
-        {feed.stale ? 'Showing the last received comments. ' : ''}{feed.error}
+        {((feed.stale ? uiText('Showing the last received comments. ') : ''))}{feed.error}
       </span>
-      <button type="button" className="btn sm" onClick={feed.refresh}>Retry</button>
+      <button type="button" className="btn sm" onClick={feed.refresh}>{uiText("Retry")}</button>
     </div>}
     {!feed.loading && feed.initialized && !feed.error && feed.comments.length === 0
-      && <div className="comments-empty muted">{immutable
-        ? 'No comments are available in this review.'
-        : global ? 'No comments yet. Add one from an experiment’s Comments tab.' : 'No comments on this experiment yet.'}</div>}
+      && <div className="comments-empty muted">{((immutable ? uiText('No comments are available in this review.') : (global ? uiText('No comments yet. Add one from an experiment’s Comments tab.') : uiText('No comments on this experiment yet.'))))}</div>}
     {!feed.loading && feed.comments.length > 0 && visible.length === 0
-      && <div className="comments-empty muted">No {filter} comments.</div>}
+      && <div className="comments-empty muted">{uiText("No ")}{filter}{uiText(" comments.")}</div>}
 
     <div className="comment-list">
       {visible.map(comment => <CommentCard key={comment.id} runId={runId} comment={comment}
@@ -1277,9 +1254,9 @@ export default function CommentsThread({
     </div>
     {feed.loadMoreError && <div className="notice resource-error comment-feed-error">
       <span role="alert">{feed.loadMoreError}</span>
-      <button type="button" className="btn sm" onClick={feed.loadMore}>Retry</button>
+      <button type="button" className="btn sm" onClick={feed.loadMore}>{uiText("Retry")}</button>
     </div>}
     {feed.hasMore && <button type="button" className="btn sm comment-load-more"
-      disabled={feed.loadingMore} onClick={feed.loadMore}>{feed.loadingMore ? 'Loading…' : 'Load older comments'}</button>}
+      disabled={feed.loadingMore} onClick={feed.loadMore}>{((feed.loadingMore ? uiText('Loading…') : uiText('Load older comments')))}</button>}
   </section>
 }

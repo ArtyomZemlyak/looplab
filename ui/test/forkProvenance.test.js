@@ -7,7 +7,7 @@
 // `serve/control_validation.py::_normalize_fork_receipt` stamped at the time — which is not the same
 // set of keys for every log on disk, and that is the whole point of the attribution ladder.
 import assert from 'node:assert/strict'
-import { readFile } from 'node:fs/promises'
+import { readSource as readFile } from './_source.js'
 import test from 'node:test'
 
 import {

@@ -47,6 +47,7 @@ from looplab.serve.capability_store import (
 )
 from looplab.serve.llm_context import ASSISTANT_EVIDENCE_GUARD, BOSS_EVIDENCE_LABEL
 from looplab.serve.principal import portfolio_access
+from looplab.core.output_language import assistant_language_scope
 
 # Permission modes mirror Claude Code. `plan` is the safe read-only default; mutating modes are
 # enforced by the write/shell/git providers. Re-export the shared source of truth so session and
@@ -2331,6 +2332,7 @@ def cutoff_notice(budget: dict) -> str:
             f"assemble from what I had gathered, not a finished investigation. {raise_it}_")
 
 
+@assistant_language_scope
 def run_turn(client, run_root, messages: list, instruction: str, mode: str = DEFAULT_MODE, *,
              alive_fn: Optional[Callable] = None, settings=None, on_step: Optional[Callable] = None,
              approver: Optional[Callable] = None, extra_roots=(), _subagent: bool = False,

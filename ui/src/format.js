@@ -1,3 +1,5 @@
+
+import { effectiveUILanguage } from './uiLanguage.js'
 // Pure value formatters: metric numbers, byte sizes, epoch-seconds timestamps, and the caption
 // font-size fitter. Split out of util.js (mega-refactor P5.2 — bodies verbatim); util.js re-exports
 // everything, so importers are unchanged.
@@ -150,8 +152,7 @@ export function costPricing(c) {
   // either "nothing was spent" or "all of it is priced" would be inventing the missing half.
   if (calls === null) {
     return { text: `$${fmt(cost)}`, priced: cost > 0, partial: false,
-             title: 'This roll-up does not record how many calls it covers, so the figure may be a'
-               + ' floor. Open the run to see the split.' }
+             title: `This roll-up does not record how many calls it covers, so the figure may be a floor. Open the run to see the split.` }
   }
   // The payload does not carry the counter: show the cost it DOES carry, and say the split is
   // unknown rather than asserting either "unpriced" or "all priced".
@@ -203,16 +204,22 @@ export function fmtBytes(n) {
 // Epoch-SECONDS timestamp helpers (run mtime/created come from os.stat → seconds, not ms).
 export function fmtDate(sec, withTime = true) {
   if (!sec) return '—'
-  return new Date(sec * 1000).toLocaleString(undefined, withTime
+  return new Date(sec * 1000).toLocaleString(effectiveUILanguage(), withTime
     ? { year: 'numeric', month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' }
     : { year: 'numeric', month: 'short', day: 'numeric' })
 }
 export function fmtAgo(sec) {
   if (!sec) return ''
   const d = Date.now() / 1000 - sec
+  if (effectiveUILanguage() === 'ru') {
+    if (d < 60) return 'только что'
+    if (d < 3600) return `${Math.floor(d / 60)} мин. назад`
+    if (d < 86400) return `${Math.floor(d / 3600)} ч. назад`
+    if (d < 7 * 86400) return `${Math.floor(d / 86400)} д. назад`
+  }
   if (d < 60) return 'just now'
   if (d < 3600) return Math.floor(d / 60) + 'm ago'
   if (d < 86400) return Math.floor(d / 3600) + 'h ago'
   if (d < 7 * 86400) return Math.floor(d / 86400) + 'd ago'
-  return new Date(sec * 1000).toLocaleDateString()
+  return new Date(sec * 1000).toLocaleDateString(effectiveUILanguage())
 }

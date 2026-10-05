@@ -87,7 +87,10 @@ class ToyResearcher:
         keys = list(self.bounds)
         if parent is None:
             params = {k: round(self.rng.uniform(*self.bounds[k]), 4) for k in keys}
-            return Idea(operator="draft", params=params, rationale="random seed point",
+            return Idea(operator="draft", params=params,
+                        rationale=("случайная начальная точка"
+                                   if getattr(self, "output_language", "auto") == "ru"
+                                   else "random seed point"),
                         **self._calibration_fields("draft"))
         params = {}
         for k in keys:
@@ -95,7 +98,9 @@ class ToyResearcher:
             v = parent.idea.params.get(k, 0.0) + self.rng.gauss(0.0, self.step)
             params[k] = round(max(lo, min(hi, v)), 4)
         return Idea(operator="improve", params=params,
-                    rationale=f"perturb best node {parent.id} (metric={parent.metric})",
+                    rationale=(f"изменить параметры лучшего узла {parent.id} (metric={parent.metric})"
+                               if getattr(self, "output_language", "auto") == "ru"
+                               else f"perturb best node {parent.id} (metric={parent.metric})"),
                     **self._calibration_fields("improve"))
 
 

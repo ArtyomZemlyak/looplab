@@ -1,3 +1,4 @@
+import { canonicalUISource } from './_localizedSource.js'
 import { readFileSync as readFileSyncRaw } from 'node:fs'
 import { readFile as readFileAsync } from 'node:fs/promises'
 
@@ -6,7 +7,9 @@ import { readFile as readFileAsync } from 'node:fs/promises'
 const lf = source => source.replace(/\r\n?/g, '\n')
 
 export const readSource = async (path, encoding = 'utf8') =>
-  lf(await readFileAsync(path, encoding))
+  normalize(path, lf(await readFileAsync(path, encoding)))
 
 export const readSourceSync = (path, encoding = 'utf8') =>
-  lf(readFileSyncRaw(path, encoding))
+  normalize(path, lf(readFileSyncRaw(path, encoding)))
+
+const normalize = (path, text) => /[/\\]src[/\\].*\.(jsx|js)$/.test(String(path)) ? canonicalUISource(text) : text

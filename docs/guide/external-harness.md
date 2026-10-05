@@ -1829,3 +1829,12 @@ measured execution and command receipts, not external provider billing.
 HyperResearch's discoverable workflow and OpenResearch's experiment workspace
 informed the interface. LoopLab uses its own event log, candidate snapshots and
 metric provenance as the durable center.
+
+### Language of authored output
+
+The harness contract exposes `output_language.language` (`auto`, `en`, `ru`). Use it
+for all new explanations, research, reviews, lesson/skill descriptions, reports and result
+commentary, including human prose inside structured values. Preserve schema keys, enums,
+identifiers, commands, code, verbatim evidence and measured numbers. This preference adds
+no admission checkpoint or engine wait. It is fixed in the launched run snapshot; change it
+on resume or a new run. The UI language applies across the interface and owner generation.

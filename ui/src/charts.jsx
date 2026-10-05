@@ -1,3 +1,4 @@
+import { uiText, uiMessage, useUILanguage } from './uiLanguage.js'
 import React from 'react'
 import { fmt, operatorMeta } from './util.js'
 import { ChartFrame } from './accessibility.jsx'
@@ -23,6 +24,8 @@ const starPoints = (x, y, radius) => Array.from({ length: 10 }, (_, index) => {
 
 function PointMark({ x, y, size = 4, color, shape = 'circle', className = '', opacity = 1,
   variant = 'solid', feasibility = 'feasible', onClick = null, title }) {
+  useUILanguage()
+
   const common = { className: 'chart-point-shape', fill: variant === 'outline' ? 'var(--bg-1)' : color,
     stroke: variant === 'outline' ? color : 'var(--fg)', strokeWidth: variant === 'outline' ? 1.5 : 0.65 }
   const mark = shape === 'square'
@@ -73,18 +76,20 @@ function themeColor(t) {
 // A compact colour legend rendered under a chart (operators present in the data). When `onPick` is
 // given the swatches are clickable to FOCUS one operator group (dim the rest) — interactive grouping.
 function ChartLegend({ items, active = null, onPick = null }) {
+  useUILanguage()
+
   if (!items || items.length < 2) return null
   return <div className="chart-legend">{items.map((it, i) =>
     onPick ? <button type="button" key={i}
       className={'chart-leg pick' + (active && active !== it.key ? ' dim' : '')}
       aria-pressed={active === it.key}
       onClick={() => onPick(active === it.key ? null : it.key)}
-      title={active === it.key ? 'show all' : `show only ${it.label}`}>
+      title={((active === it.key ? uiText('show all') : uiMessage("show only {0}", [it.label])))}>
       <span className={`chart-leg-dot shape-${it.shape || 'circle'} variant-${it.variant || 'solid'}`}
-        style={{ '--marker-color': it.color, background: it.color }} />{it.label}</button>
+        style={{ '--marker-color': it.color, background: it.color }} />{uiText(it.label)}</button>
       : <span key={i} className={'chart-leg' + (active && active !== it.key ? ' dim' : '')}>
         <span className={`chart-leg-dot shape-${it.shape || 'circle'} variant-${it.variant || 'solid'}`}
-          style={{ '--marker-color': it.color, background: it.color }} />{it.label}</span>)}</div>
+          style={{ '--marker-color': it.color, background: it.color }} />{uiText(it.label)}</span>)}</div>
 }
 
 // Best-metric-over-time + all-node scatter. Pass `steps` (from report.improvements) to annotate
@@ -97,6 +102,8 @@ export function Trajectory({
   nodes, direction, state = null, width = 760, height = 220,
   steps = null, onPick = null, selected = null,
 }) {
+  useUILanguage()
+
   const evald = nodes.filter(n => nodeIsActive(n, state) && n.status === 'evaluated'
     && Number.isFinite(n.confirmed_mean ?? n.metric))
     .sort((a, b) => a.id - b.id)
@@ -111,7 +118,7 @@ export function Trajectory({
   const grpColor = (n) => groupBy === 'theme' ? themeColor(grpKey(n)) : opColor(n.operator)
   const grpLabel = (g) => groupBy === 'theme' ? g : operatorMeta(g).label
   const grpSwatch = (g) => groupBy === 'theme' ? themeColor(g) : opColor(g)
-  if (!evald.length) return <Empty>no evaluated nodes yet</Empty>
+  if (!evald.length) return <Empty>{uiText("no evaluated nodes yet")}</Empty>
   const xs = evald.map(n => n.id)
   const ys = evald.map(n => n.confirmed_mean ?? n.metric)
   const minY = Math.min(...ys), maxY = Math.max(...ys)
@@ -200,26 +207,24 @@ export function Trajectory({
     { key: 'eligibility', label: 'Selection status' }, { key: 'feasible', label: 'Constraint status' },
   ]
   return (
-    <ChartFrame className="chart" title="Metric trajectory"
-      description={`${FRONTIER_HELP} ${knownDirection ? 'Line: eligible numeric frontier.' : 'Unknown direction: no frontier.'} Markers group nodes; rings show constraints.${pick ? ' Click the plot for the nearest node; keyboard users can use View data.' : ''}`}
+    <ChartFrame className="chart" title={uiText("Metric trajectory")}
+      description={uiMessage("{0} {1} Markers group nodes; rings show constraints.{2}", [uiText(FRONTIER_HELP), uiText(knownDirection ? 'Line: eligible numeric frontier.' : 'Unknown direction: no frontier.'), uiText(pick ? ' Click the plot for the nearest node; keyboard users can use View data.' : '')])}
       columns={columns} rows={tableRows} csvName="metric-trajectory.csv">
     {({ labelledBy }) => <>
     <div className="chart-tools">
-      {hasThemes && <span className="chart-grp">group:
-        {['operator', 'theme'].map(g => <button type="button" key={g} aria-pressed={groupBy === g}
+      {hasThemes && <span className="chart-grp">{uiText("group:")}{['operator', 'theme'].map(g => <button type="button" key={g} aria-pressed={groupBy === g}
           className={'btn xs ghost' + (groupBy === g ? ' primary' : '')}
           onClick={() => { setGroupBy(g); setFocusGrp(null) }}
-          title={`colour points by ${groupDimensionLabel(g)}`}>{groupDimensionLabel(g)}</button>)}
+          title={uiMessage("colour points by {0}", [groupDimensionLabel(g)])}>{uiText(groupDimensionLabel(g))}</button>)}
       </span>}
       {canLog && <button type="button" aria-pressed={logY}
         className={'btn xs ghost' + (logY ? ' primary' : '')} onClick={() => setLogY(v => !v)}
-        title="toggle a logarithmic Y axis">log Y</button>}
+        title={uiText("toggle a logarithmic Y axis")}>{uiText("log Y")}</button>}
       {canFocus && <button type="button"
         className={'btn xs ghost' + (!detailY ? ' primary' : '')} onClick={() => setDetailY(v => !v)}>
-        {detailY ? 'Full range' : 'Focus on results'}</button>}
+        {((detailY ? uiText('Full range') : uiText('Focus on results')))}</button>}
     </div>
-    {clipped > 0 && <div className="chart-scale-note" role="note">
-      Detail {fmt(shownMin)}–{fmt(shownMax)} · {clipped} worse {clipped === 1 ? 'result' : 'results'} shown as triangles at the {direction === 'min' ? 'top' : 'bottom'} edge (worst {fmt(direction === 'min' ? maxY : minY)}).
+    {clipped > 0 && <div className="chart-scale-note" role="note">{uiText("Detail ")}{fmt(shownMin)}–{fmt(shownMax)} · {clipped}{uiText(" worse ")}{((clipped === 1 ? uiText('result') : uiText('results')))}{uiText(" shown as triangles at the ")}{((direction === 'min' ? uiText('top') : uiText('bottom')))}{uiText(" edge (worst ")}{fmt(direction === 'min' ? maxY : minY)}).
     </div>}
     <svg width="100%" viewBox={`0 0 ${w} ${h}`} className={pick ? 'pickable' : ''}
          role="img" aria-labelledby={labelledBy}
@@ -280,18 +285,18 @@ export function Trajectory({
           <line x1={hx} x2={hx} y1={plotTop} y2={plotBottom} stroke={AX} strokeDasharray="3 3" opacity=".6" />
           <circle cx={hx} cy={hy} r="5" fill="none" stroke="var(--fg)" strokeWidth="1.5" />
           <rect x={tx} y={2} width={tw} height={16} rx="3" fill="var(--bg-1)" stroke={GRID} />
-          <text x={tx + tw / 2} y={13} fill="var(--fg)" fontSize="10.5" textAnchor="middle">{label}</text>
+          <text x={tx + tw / 2} y={13} fill="var(--fg)" fontSize="10.5" textAnchor="middle">{uiText(label)}</text>
         </g>
       })()}
-      <text x={pad} y={12} fill={AX} fontSize="11">eligible frontier: {fmt(best)}{observedBestFlagged ? ' · flagged' : ''}{useLog ? ' · log Y' : ''}</text>
-      <text x={pad} y={h - 8} fill={AX} fontSize="11">node id →</text>
+      <text x={pad} y={12} fill={AX} fontSize="11">{uiText("eligible frontier: ")}{fmt(best)}{((observedBestFlagged ? uiText(' · flagged') : ''))}{((useLog ? uiText(' · log Y') : ''))}</text>
+      <text x={pad} y={h - 8} fill={AX} fontSize="11">{uiText("node id →")}</text>
     </svg>
     <ChartLegend items={groupsPresent.map(g => ({ key: g, label: grpLabel(g), color: grpSwatch(g), ...groupMarker(g) }))}
                  active={focusGrp} onPick={setFocusGrp} />
     {(evald.some(n => n.feasible === false) || evald.some(n => n.feasible == null)) &&
-      <div className="chart-status-legend" aria-label="Constraint marker legend">
-        {evald.some(n => n.feasible === false) && <span><span className="chart-status-ring dashed" /> dashed ring · infeasible</span>}
-        {evald.some(n => n.feasible == null) && <span><span className="chart-status-ring" /> solid ring · status not reported</span>}
+      <div className="chart-status-legend" aria-label={uiText("Constraint marker legend")}>
+        {evald.some(n => n.feasible === false) && <span><span className="chart-status-ring dashed" />{uiText(" dashed ring · infeasible")}</span>}
+        {evald.some(n => n.feasible == null) && <span><span className="chart-status-ring" />{uiText(" solid ring · status not reported")}</span>}
       </div>}
     </>}
     </ChartFrame>
@@ -300,8 +305,10 @@ export function Trajectory({
 
 // Numeric frontier changes, including mixed measurement types and unknown comparison conditions.
 export function ImprovementWaterfall({ steps, direction, width = 760 }) {
+  useUILanguage()
+
   const [showLater, setShowLater] = React.useState(true)
-  if (!steps || !steps.length) return <Empty>no eligible frontier values yet</Empty>
+  if (!steps || !steps.length) return <Empty>{uiText("no eligible frontier values yet")}</Empty>
   // Bound only the visual layer: the named table and CSV below retain every exact row. Keeping the
   // baseline plus the latest 99 steps gives long runs a useful endpoint without an unbounded SVG.
   const change = step => Number.isFinite(step?.from) && Number.isFinite(step?.to)
@@ -338,17 +345,15 @@ export function ImprovementWaterfall({ steps, direction, width = 760 }) {
   const labelled = i => i === 0 || i === shown.length - 1
     || (i % labelEvery === 0 && i * slot >= 48 && (shown.length - 1 - i) * slot >= 48)
   return (
-    <ChartFrame title={baselineOnly ? 'First eligible value' : 'Numeric frontier changes'}
-      description={FRONTIER_HELP}
+    <ChartFrame title={((baselineOnly ? uiText('First eligible value') : uiText('Numeric frontier changes')))}
+      description={uiText(FRONTIER_HELP)}
       columns={columns} rows={rows} csvName="numeric-frontier.csv">
     {({ labelledBy }) => <>
       {canFocus && <div className="chart-tools"><button type="button" className="btn xs ghost"
-        onClick={() => setShowLater(value => !value)}>{focused ? 'All steps' : 'Later changes'}</button></div>}
-      {focused && <div className="waterfall-context" role="note">
-        First eligible #{steps[0].id} {fmt(steps[0].to)} → next frontier #{steps[1].id} {fmt(steps[1].to)} (numeric change {fmt(firstChange)}). Bars below use the later metric range.
-      </div>}
+        onClick={() => setShowLater(value => !value)}>{((focused ? uiText('All steps') : uiText('Later changes')))}</button></div>}
+      {focused && <div className="waterfall-context" role="note">{uiText("First eligible #")}{steps[0].id} {fmt(steps[0].to)}{uiText(" → next frontier #")}{steps[1].id} {fmt(steps[1].to)}{uiText(" (numeric change ")}{fmt(firstChange)}{uiText("). Bars below use the later metric range.")}</div>}
       {shown.length < candidates.length && <div className="muted" role="note">
-        {focused ? `Showing latest 100 of ${candidates.length} later steps` : `Showing the baseline and latest 99 of ${steps.length} steps`}; View data and CSV include all {steps.length}.
+        {(focused ? uiMessage("Showing latest 100 of {0} later steps", [candidates.length]) : uiMessage("Showing the baseline and latest 99 of {0} steps", [steps.length]))}{uiText("; View data and CSV include all ")}{steps.length}.
       </div>}
       <svg width={plotW} viewBox={`0 0 ${plotW} ${h}`} role="img" aria-labelledby={labelledBy}>
       {[0, .5, 1].map((t, i) => <g key={i}>
@@ -382,8 +387,10 @@ export function ImprovementWaterfall({ steps, direction, width = 760 }) {
 }
 
 export function Bars({ data, width = 760, height = 220, color = '#4aa3ff', fmtv = fmt }) {
+  useUILanguage()
+
   // data: [{label, value}]
-  if (!data || !data.length) return <Empty>no data</Empty>
+  if (!data || !data.length) return <Empty>{uiText("no data")}</Empty>
   const max = Math.max(...data.map(d => Math.abs(d.value)), 1e-9)
   const bh = 22, gap = 8, lab = 150, w = width
   const h = Math.max(height, data.length * (bh + gap) + 10)
@@ -392,7 +399,7 @@ export function Bars({ data, width = 760, height = 220, color = '#4aa3ff', fmtv 
     { key: 'value', label: 'Value', numeric: true },
   ]
   return (
-    <ChartFrame title="Value comparison" description="Bar lengths and exact values compare each item."
+    <ChartFrame title={uiText("Value comparison")} description={uiText("Bar lengths and exact values compare each item.")}
       columns={columns} rows={data} csvName="bar-values.csv">
     {({ labelledBy }) => <svg width="100%" viewBox={`0 0 ${w} ${h}`}
       role="img" aria-labelledby={labelledBy}>
@@ -400,7 +407,7 @@ export function Bars({ data, width = 760, height = 220, color = '#4aa3ff', fmtv 
         const y = i * (bh + gap) + 4
         const bw = Math.abs(d.value) / max * (w - lab - 60)
         return <g key={i}>
-          <text x={lab - 8} y={y + bh / 2 + 4} fill="var(--fg)" fontSize="12" textAnchor="end">{d.label}</text>
+          <text x={lab - 8} y={y + bh / 2 + 4} fill="var(--fg)" fontSize="12" textAnchor="end">{uiText(d.label)}</text>
           <rect x={lab} y={y} width={bw} height={bh} rx="3" fill={color}
             stroke="var(--fg)" strokeWidth=".75" opacity=".85" />
           <text x={lab + bw + 6} y={y + bh / 2 + 4} fill={AX} fontSize="11">{fmtv(d.value)}</text>
@@ -413,13 +420,15 @@ export function Bars({ data, width = 760, height = 220, color = '#4aa3ff', fmtv 
 
 // Gantt of span timing per node. `onPick(nid)` drills into the clicked span's node.
 export function Gantt({ spans, width = 760, onPick }) {
+  useUILanguage()
+
   const flat = []
   const walk = (arr, nid) => arr.forEach(s => {
     flat.push({ nid, name: s.name, start: s.start, dur: s.duration_s || 0, err: s.status === 'ERROR' })
     if (s.children) walk(s.children, nid)
   })
   Object.entries(spans?.nodes || {}).forEach(([nid, arr]) => walk(arr, nid))
-  if (!flat.length) return <Empty>no spans recorded</Empty>
+  if (!flat.length) return <Empty>{uiText("no spans recorded")}</Empty>
   const t0 = Math.min(...flat.map(s => s.start))
   const t1 = Math.max(...flat.map(s => s.start + s.dur))
   const span = Math.max(1e-6, t1 - t0)
@@ -435,7 +444,7 @@ export function Gantt({ spans, width = 760, onPick }) {
     { key: 'dur', label: 'Duration (s)', numeric: true }, { key: 'err', label: 'Error' },
   ]
   return (
-    <ChartFrame title="Execution span timeline" description="Start time and duration for each recorded node span; failed spans also use a dashed outline."
+    <ChartFrame title={uiText("Execution span timeline")} description={uiText("Start time and duration for each recorded node span; failed spans also use a dashed outline.")}
       columns={columns} rows={flat} csvName="execution-spans.csv">
     {({ labelledBy }) => <svg width="100%" viewBox={`0 0 ${w} ${h}`}
       role="img" aria-labelledby={labelledBy}>
@@ -451,7 +460,7 @@ export function Gantt({ spans, width = 760, onPick }) {
             strokeDasharray={s.err ? '3 2' : undefined} opacity=".85" />
         </g>
       })}
-      <text x={lab} y={h - 4} fill={AX} fontSize="11">{fmt(span)}s total span</text>
+      <text x={lab} y={h - 4} fill={AX} fontSize="11">{fmt(span)}{uiText("s total span")}</text>
     </svg>}
     </ChartFrame>
   )
@@ -459,8 +468,10 @@ export function Gantt({ spans, width = 760, onPick }) {
 
 // Parallel coordinates of params -> metric.
 export function ParallelCoords({ nodes, direction, width = 760, height = 260, onPick = null }) {
+  useUILanguage()
+
   const ev = nodes.filter(n => (n.metric ?? null) !== null)
-  if (!ev.length) return <Empty>no evaluated nodes</Empty>
+  if (!ev.length) return <Empty>{uiText("no evaluated nodes")}</Empty>
   const pick = onPick || null
   const isNum = v => v != null && Number.isFinite(Number(v))
   // Only numeric params can be plotted on a value axis; a string param (optimizer=adam) would give
@@ -468,7 +479,7 @@ export function ParallelCoords({ nodes, direction, width = 760, height = 260, on
   const params = Array.from(new Set(ev.flatMap(n => Object.keys(n.idea?.params || {}))))
     .filter(a => ev.some(n => isNum(n.idea?.params?.[a])))
   const axes = [...params, 'metric']
-  if (axes.length < 2) return <Empty>not enough dimensions</Empty>
+  if (axes.length < 2) return <Empty>{uiText("not enough dimensions")}</Empty>
   const vals = (n, a) => { const v = a === 'metric' ? (n.confirmed_mean ?? n.metric) : n.idea?.params?.[a]; return isNum(v) ? Number(v) : null }
   const ranges = {}
   axes.forEach(a => { const xs = ev.map(n => vals(n, a)).filter(v => v != null); ranges[a] = [Math.min(...xs), Math.max(...xs)] })
@@ -490,8 +501,8 @@ export function ParallelCoords({ nodes, direction, width = 760, height = 260, on
       value: row => vals(row.source, axis) })),
   ]
   return (
-    <ChartFrame title="Parameter relationships"
-      description="Parallel coordinates connect each experiment's numeric parameters to its metric; exact values are available below."
+    <ChartFrame title={uiText("Parameter relationships")}
+      description={uiText("Parallel coordinates connect each experiment's numeric parameters to its metric; exact values are available below.")}
       columns={columns} rows={rows} csvName="parallel-coordinates.csv">
     {({ labelledBy }) => <svg width="100%" viewBox={`0 0 ${w} ${h}`}
       role="img" aria-labelledby={labelledBy}>
@@ -519,7 +530,9 @@ export function ParallelCoords({ nodes, direction, width = 760, height = 260, on
 // metric vs a constraint value (Pareto-ish). data: [{x,y,feasible,id}]
 // `onPick(id)` (optional) drills into a point's node (points carrying an `id`).
 export function Scatter({ data, xlab, ylab, width = 720, height = 260, onPick = null }) {
-  if (!data || !data.length) return <Empty>no constraint data</Empty>
+  useUILanguage()
+
+  if (!data || !data.length) return <Empty>{uiText("no constraint data")}</Empty>
   const xs = data.map(d => d.x), ys = data.map(d => d.y)
   const pad = 40, w = width, h = height
   // Hoist the extents out of the scale closures: recomputing Math.min/Math.max(...xs) inside X()/Y()
@@ -539,8 +552,8 @@ export function Scatter({ data, xlab, ylab, width = 720, height = 260, onPick = 
     { key: 'feasible', label: 'Feasible' },
   ]
   return (
-    <ChartFrame title={`${ylab} by ${xlab}`}
-      description="Feasible, infeasible, and unknown points use different shapes as well as colours; every point also has an exact text row."
+    <ChartFrame title={uiMessage("{0} by {1}", [ylab, xlab])}
+      description={uiText("Feasible, infeasible, and unknown points use different shapes as well as colours; every point also has an exact text row.")}
       columns={columns} rows={tableRows} csvName="scatter-data.csv">
     {({ labelledBy }) => <>
     <svg width="100%" viewBox={`0 0 ${w} ${h}`}
@@ -571,17 +584,21 @@ export function Scatter({ data, xlab, ylab, width = 720, height = 260, onPick = 
 // Tiny sparkline of a numeric series — used by collapsed-group super-cards, sweep node cards, and
 // the inspector. Returns null for <2 points (nothing meaningful to draw).
 export function Spark({ series, width = 120, height = 22, label = null }) {
+  useUILanguage()
+
   if (!series || series.length < 2) return null
   const lo = Math.min(...series), hi = Math.max(...series), span = hi - lo || 1
   const W = width, H = height
   const pts = series.map((v, i) => `${(i / (series.length - 1) * W).toFixed(1)},${(H - (v - lo) / span * H).toFixed(1)}`).join(' ')
   return <svg className="grp-spark" width={W} height={H} role="img"
-    aria-label={label || `Trend across ${series.length} values, from ${fmt(series[0])} to ${fmt(series[series.length - 1])}`}>
+    aria-label={(label || uiMessage("Trend across {0} values, from {1} to {2}", [series.length, fmt(series[0]), fmt(series[series.length - 1])]))}>
     <polyline points={pts} fill="none" stroke="var(--accent)" strokeWidth="1.5" />
   </svg>
 }
 
-function Empty({ children }) { return <div className="muted" style={{ padding: 20 }}>{children}</div> }
+function Empty({ children }) {
+  useUILanguage()
+ return <div className="muted" style={{ padding: 20 }}>{children}</div> }
 
 // U4 · overlay several runs' running-best trajectories on ONE axis, to compare convergence at a
 // glance. `runs` = [{label, run_id, points:[[experiment, running-best, node_id]], complete}] — the
@@ -595,9 +612,11 @@ const _RUN_DASHES = ['', '7 3', '2 3', '9 3 2 3', '5 2', '1 3', '10 3', '4 3 1 3
 const _runPoints = run => (Array.isArray(run.points) && run.points.length
   ? run.points : (run.series || []).map((value, index) => [index, value]))
 export function MultiTrajectory({ runs, width = 760, height = 240, title = 'Cross-run trajectories' }) {
+  useUILanguage()
+
   const withData = (runs || []).map(run => ({ run, points: _runPoints(run) }))
     .filter(entry => entry.points.length > 0)
-  if (!withData.length) return <Empty>no comparable run trajectories yet</Empty>
+  if (!withData.length) return <Empty>{uiText("no comparable run trajectories yet")}</Empty>
   const allV = withData.flatMap(entry => entry.points.map(point => point[1]))
   const lo = Math.min(...allV), hi = Math.max(...allV), span = (hi - lo) || 1
   const maxX = Math.max(...withData.map(entry => entry.points[entry.points.length - 1][0]))
@@ -622,7 +641,7 @@ export function MultiTrajectory({ runs, width = 760, height = 240, title = 'Cros
   ]
   return (
     <ChartFrame title={title}
-      description="Each run uses both a hue and a dash pattern; a line holds its value until the experiment that beat it, and the table contains every exact change point."
+      description={uiText("Each run uses both a hue and a dash pattern; a line holds its value until the experiment that beat it, and the table contains every exact change point.")}
       columns={columns} rows={rows} csvName="run-trajectories.csv">
     {({ labelledBy }) => <>
       <svg width={w} height={h} role="img" aria-labelledby={labelledBy}>
@@ -630,7 +649,7 @@ export function MultiTrajectory({ runs, width = 760, height = 240, title = 'Cros
         <line x1={pad} y1={12} x2={pad} y2={h - pad} stroke="var(--border)" />
         <text x={pad - 6} y={16} textAnchor="end" fontSize="10" fill="var(--fg-mut)">{fmt(hi)}</text>
         <text x={pad - 6} y={h - pad} textAnchor="end" fontSize="10" fill="var(--fg-mut)">{fmt(lo)}</text>
-        <text x={(w + pad) / 2} y={h - 6} textAnchor="middle" fontSize="10" fill="var(--fg-mut)">experiment #</text>
+        <text x={(w + pad) / 2} y={h - 6} textAnchor="middle" fontSize="10" fill="var(--fg-mut)">{uiText("experiment #")}</text>
         {withData.map(({ run, points }, k) => {
           const c = _RUN_COLORS[k % _RUN_COLORS.length]
           const dash = _RUN_DASHES[k % _RUN_DASHES.length]
@@ -650,7 +669,7 @@ export function MultiTrajectory({ runs, width = 760, height = 240, title = 'Cros
             <line x1="0" x2="18" y1="4" y2="4" stroke={_RUN_COLORS[k % _RUN_COLORS.length]}
               strokeDasharray={_RUN_DASHES[k % _RUN_DASHES.length] || undefined} strokeWidth="2" /></svg>
           {run.label || run.run_id}{run.complete === false
-            ? <span title="more improvements than the row carries: this line is drawn from an even subsample of its change points, first and last kept"> (coarser)</span>
+            ? <span title={uiText("more improvements than the row carries: this line is drawn from an even subsample of its change points, first and last kept")}>{uiText(" (coarser)")}</span>
             : null}</span>)}
       </div>
     </>}

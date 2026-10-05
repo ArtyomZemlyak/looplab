@@ -1,4 +1,5 @@
 import React, { useSyncExternalStore } from 'react'
+import { uiText, useUILanguage } from './uiLanguage.js'
 
 import { OpIcon } from './icons.jsx'
 
@@ -84,12 +85,13 @@ export function openAttentionCenter() {
 }
 
 export function AttentionLauncher({ indicator, embedded = false, expanded, controls, onClick }) {
+  useUILanguage()
   const toneClass = indicator.tone === 'action'
     ? ' has-action' : indicator.tone === 'unread' ? ' has-unread' : ''
   const className = `attention-trigger${embedded ? ' in-assistant' : ''}${toneClass}`
     + (indicator.verified ? '' : ' is-unverified')
   return <button type="button" className={className}
-    aria-label={indicator.ariaLabel} aria-haspopup="dialog"
+    aria-label={uiText(indicator.ariaLabel)} aria-haspopup="dialog"
     aria-expanded={expanded} aria-controls={controls} onClick={onClick}>
     <OpIcon name="bell" size={22} className="attention-bell-icon" />
     {indicator.showBadge && <span

@@ -116,7 +116,7 @@ test('RunView holds exactly one topbar and reaches the rest through the shell', 
   // so what this counts now is the one ternary that chooses between the owner and review arms.
   // Still an exact count for the same reason: a commented-out copy pushes it to 2.
   assert.equal(count(/className="brand"/g), 0)
-  assert.equal(count(/\{reviewMode \? <BrandMark \/> : <GlobalMenu \/>\}/g), 1)
+  assert.equal(count(/\{reviewMode \? <><BrandMark \/><LanguageControl \/><\/> : <GlobalMenu \/>\}/g), 1)
   assert.equal(count(/<RunScreen\b/g), 6)
   assert.equal(count(/<\/RunScreen>/g), 6)
   // The per-screen variations, counted where they belong.

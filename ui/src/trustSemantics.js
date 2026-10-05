@@ -1,3 +1,4 @@
+import { uiText, uiMessage } from './uiLanguage.js'
 // Pure trust-state wording shared by the run-wide Trust panel and the node Inspector.
 // Absence of a recorded flag is deliberately NOT treated as proof that a detector ran.
 import { rewardHackNodeCount } from './nodeProjection.js'
@@ -116,10 +117,7 @@ export const salvagedProvenance = node =>
 // "produce the file": the declaration matched SEVERAL artifacts and the engine refused to pick, which
 // is the property that keeps a declared pattern from manufacturing a referent nobody chose.
 const unboundBecause = (why) =>
-  why === 'not_declared' ? ', because the task declares no eval.metric.subject'
-    : why === 'ambiguous' ? ': the declared eval.metric.subject_glob matched more than one artifact, '
-        + 'so the engine refused to pick one'
-    : why ? `: the declared subject is ${why}` : ''
+  (why === 'not_declared' ? uiText(', because the task declares no eval.metric.subject') : (why === 'ambiguous' ? uiMessage(": the declared eval.metric.subject_glob matched more than one artifact, so the engine refused to pick one", []) : (why ? uiMessage(": the declared subject is {0}", [why]) : '')))
 
 export function nodeFeasibilityStatus(node) {
   const violations = node?.violations || []

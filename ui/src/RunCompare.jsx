@@ -1,3 +1,4 @@
+import { uiText, uiMessage, useUILanguage } from './uiLanguage.js'
 import React, { useEffect, useLayoutEffect, useRef, useState } from 'react'
 import { distinctMetricFormatter, get, fmt, fmtAgo, fmtCost, fmtElapsedSeconds, normalizeRunGeneration, runApiPath } from './util.js'
 import { effectiveRunStatus, metricIncomparabilityText } from './runIndex.js'
@@ -138,6 +139,8 @@ export default function RunCompare({
   runs, columns, names, onColumns, onRemove, onOpen = null, headingRef = null,
   onFocusCapture = null,
 }) {
+  useUILanguage()
+
   const identity = compareIdentity(runs)
   const [resource, setResource] = useState(() => ({
     identity,
@@ -289,8 +292,8 @@ export default function RunCompare({
     onFocusCapture={captureFocus}>
     <div className="compare-head">
       <div>
-        <h2 ref={headingRef} id="run-compare-title" tabIndex={-1}>Run comparison</h2>
-        <p>{runs.length} runs · The Run column stays pinned; choose the evidence columns you need.</p>
+        <h2 ref={headingRef} id="run-compare-title" tabIndex={-1}>{uiText("Run comparison")}</h2>
+        <p>{runs.length}{uiText(" runs · The Run column stays pinned; choose the evidence columns you need.")}</p>
       </div>
       <details ref={columnsDetailsRef} className="compare-columns" onKeyDown={event => {
         if (event.key !== 'Escape' || !event.currentTarget.open) return
@@ -298,40 +301,37 @@ export default function RunCompare({
         event.stopPropagation()
         closeColumns()
       }}>
-        <summary>Columns · {columns.length}</summary>
-        <fieldset><legend className="sr-only">Comparison columns</legend>
-          <button type="button" className="btn sm compare-columns-close" onClick={closeColumns}>
-            Done
-          </button>
+        <summary>{uiText("Columns · ")}{columns.length}</summary>
+        <fieldset><legend className="sr-only">{uiText("Comparison columns")}</legend>
+          <button type="button" className="btn sm compare-columns-close" onClick={closeColumns}>{uiText("Done")}</button>
           {COMPARE_COLUMNS.map(([id, label]) => <label key={id}>
-            <input type="checkbox" checked={columns.includes(id)} onChange={() => toggleColumn(id)} /> {label}
+            <input type="checkbox" checked={columns.includes(id)} onChange={() => toggleColumn(id)} /> {uiText(label)}
           </label>)}
         </fieldset>
       </details>
       <button className="btn sm" aria-disabled={snapshotBusy || undefined}
         aria-busy={snapshotBusy || undefined} onClick={refreshCapture}>
-        {snapshotStatus === 'loading' ? 'Loading…'
-          : snapshotStatus === 'refreshing' ? 'Refreshing…' : 'Refresh snapshot'}
+        {((snapshotStatus === 'loading' ? uiText('Loading…') : (snapshotStatus === 'refreshing' ? uiText('Refreshing…') : uiText('Refresh snapshot'))))}
       </button>
     </div>
     <div id="run-compare-receipt" className="compare-receipt" role="status" aria-live="polite">
-      {snapshotReceipt}
-      {snapshotPartial && ' Some detail was unavailable or could not be verified for this capture.'}
-      {rankingReceipt}
+      {uiText(snapshotReceipt)}
+      {((snapshotPartial && uiText(' Some detail was unavailable or could not be verified for this capture.')))}
+      {uiText(rankingReceipt)}
     </div>
     {snapshotRuns.length > 0 && rankingWarning && <div id="run-compare-ranking-warning"
       className="notice resource-warning" role="status">
-      {rankingWarning}
+      {uiText(rankingWarning)}
     </div>}
     <div className="data-table-region">
-      <div className="data-table-scroll" role="region" aria-label="Selected run comparison"
+      <div className="data-table-scroll" role="region" aria-label={uiText("Selected run comparison")}
         aria-describedby={`run-compare-receipt${rankingWarning
           ? ' run-compare-ranking-warning' : ''}`} aria-busy={snapshotBusy} tabIndex={0}>
         <table className="tbl data-table compare-table">
-          <caption className="sr-only">Comparison of selected runs</caption>
-          <thead><tr><th scope="col" className="compare-pinned">Run</th>
+          <caption className="sr-only">{uiText("Comparison of selected runs")}</caption>
+          <thead><tr><th scope="col" className="compare-pinned">{uiText("Run")}</th>
             {columns.map(id => <th scope="col" key={id}>{COMPARE_COLUMNS.find(column => column[0] === id)?.[1]}</th>)}
-            <th scope="col"><span className="sr-only">Actions</span></th></tr></thead>
+            <th scope="col"><span className="sr-only">{uiText("Actions")}</span></th></tr></thead>
           <tbody>{snapshotRuns.map(run => {
             const label = run.label || run.run_id
             const detail = detailById[run.run_id]
@@ -342,49 +342,44 @@ export default function RunCompare({
               <th scope="row" className="compare-pinned">
                 <button type="button" className="compare-link" data-run-open-id={run.run_id}
                   onClick={() => openComparisonRoute(onOpen, run.run_id,
-                    `#/run/${encodeURIComponent(run.run_id)}`)}>{label}</button>
-                {isBest && <span className="pill compare-best">{tiedBest ? 'Tied best' : 'Best'}</span>}
+                    `#/run/${encodeURIComponent(run.run_id)}`)}>{uiText(label)}</button>
+                {isBest && <span className="pill compare-best">{((tiedBest ? uiText('Tied best') : uiText('Best')))}</span>}
                 {unranked && <span className="pill" title={
-                  'This run folded from a readable PREFIX of its event log. Its number describes '
-                  + 'the records that could be read and is not evidence about the rest, so it is '
-                  + 'shown but never ranked.'}>Not ranked — partial log</span>}
+                  uiMessage("This run folded from a readable PREFIX of its event log. Its number describes the records that could be read and is not evidence about the rest, so it is shown but never ranked.", [])}>{uiText("Not ranked — partial log")}</span>}
                 {run.label && <small>{run.run_id}</small>}
-                {detail?.partial && <small>partial detail</small>}
+                {detail?.partial && <small>{uiText("partial detail")}</small>}
               </th>
               {columns.map(id => <td key={id}>{id === 'champion' && championHref
                 ? <button type="button" className="compare-link"
                     onClick={() => openComparisonRoute(onOpen, run.run_id, championHref)}
-                    aria-label={`Open captured champion experiment ${detail.state.best_node_id} in ${label}`}>
+                    aria-label={uiMessage("Open captured champion experiment {0} in {1}", [detail.state.best_node_id, label])}>
                     #{detail.state.best_node_id}</button>
                 : valueFor(id, run, detail, snapshotNames, formatMetric)}</td>)}
               <td><button className="btn xs ghost" data-compare-remove-id={run.run_id}
                 onClick={event => removeRun(run.run_id, event.currentTarget)}
-                aria-label={`Remove ${label} from comparison`}>Remove</button></td>
+                aria-label={uiMessage("Remove {0} from comparison", [label])}>{uiText("Remove")}</button></td>
             </tr>
           })}
           {!snapshotRuns.length && <tr><td colSpan={columns.length + 2} className="muted">
-            {snapshotStatus === 'error'
-              ? 'No verified run capture is available.' : 'Loading selected run capture…'}
+            {((snapshotStatus === 'error' ? uiText('No verified run capture is available.') : uiText('Loading selected run capture…')))}
           </td></tr>}
           </tbody>
         </table>
       </div>
     </div>
     <details className="compare-config">
-      <summary>Configuration differences · {config.total}</summary>
+      <summary>{uiText("Configuration differences · ")}{config.total}</summary>
       {snapshotStatus !== 'loading' && config.rows.length
-        ? <div className="data-table-scroll" role="region" aria-label="Configuration differences" tabIndex={0}>
+        ? <div className="data-table-scroll" role="region" aria-label={uiText("Configuration differences")} tabIndex={0}>
             <table className="tbl data-table compare-config-table">
-              <thead><tr><th scope="col">Setting</th>{snapshotRuns.map(run =>
+              <thead><tr><th scope="col">{uiText("Setting")}</th>{snapshotRuns.map(run =>
                 <th scope="col" key={run.run_id}>{run.label || run.run_id}</th>)}</tr></thead>
               <tbody>{config.rows.map(row => <tr key={row.key}><th scope="row">{row.key}</th>
                 {row.values.map((value, index) => <td key={snapshotRuns[index].run_id}>{value}</td>)}</tr>)}</tbody>
             </table>
-            {config.total > config.rows.length && <p className="muted">Showing the first {config.rows.length} of {config.total} differing settings.</p>}
+            {config.total > config.rows.length && <p className="muted">{uiText("Showing the first ")}{config.rows.length}{uiText(" of ")}{config.total}{uiText(" differing settings.")}</p>}
           </div>
-        : <p className="muted">{snapshotStatus === 'loading'
-            ? 'Loading configuration capture…'
-            : 'No verified configuration differences are available for this capture.'}</p>}
+        : <p className="muted">{((snapshotStatus === 'loading' ? uiText('Loading configuration capture…') : uiText('No verified configuration differences are available for this capture.')))}</p>}
     </details>
   </section>
 }

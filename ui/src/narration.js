@@ -1,3 +1,4 @@
+import { uiText, uiMessage } from './uiLanguage.js'
 import { durationLabel, fmt, fmtCost, NODE_ACTIVITY, nodeActivityStatus,
   recordedNodeActivity } from './util.js'
 import { stripMd } from './markdown.jsx'
@@ -47,11 +48,11 @@ const objectValue = (value, key) => ownValue(value, key) && value[key] !== null
 export const NARR = {
   run_started: {
     validate: d => ownAny(d, ['goal', 'task_id']) && ownValue(d, 'direction'),
-    render: (d) => `run started — ${d.goal || d.task_id} (${d.direction})`,
+    render: (d) => uiMessage("run started — {0} ({1})", [d.goal || d.task_id, d.direction]),
   },
   node_building: {
     validate: d => ownValue(d, 'node_id'),
-    render: (d) => `building node #${d.node_id} via ${d.operator || 'improve'}…`,
+    render: (d) => uiMessage("building node #{0} via {1}…", [d.node_id, d.operator || 'improve']),
   },
   // The live-progress beacon. It IS in the curated feed (an entry here is what `isCuratedType`
   // consults) because "every step has its own visible signal" is the whole point — and it is in
@@ -78,7 +79,7 @@ export const NARR = {
     validate: d => ownValue(d, 'node_id') && ownValue(d, 'metric'),
     render: (d) => `node #${d.node_id} → ${fmt(d.metric)}`,
   },
-  node_eval_started: { render: (d) => `node #${d.node_id} started evaluating` },
+  node_eval_started: { render: (d) => uiMessage("node #{0} started evaluating", [d.node_id]) },
   node_failed: {
     validate: d => ownValue(d, 'node_id') && ownValue(d, 'reason'),
     render: (d) => `node #${d.node_id} failed (${d.reason})${d.triage_action === 'reject_idea' ? ' — idea rejected' + (d.triage_rationale ? ': ' + String(d.triage_rationale).slice(0, 70) : '') : ''}`,
@@ -87,9 +88,7 @@ export const NARR = {
     validate: d => ownValue(d, 'node_id') && ownValue(d, 'attempt'),
     // A deferred row (`judge_deferred`): the rationale is the judge's HELD reject_idea, and the
     // engine bought this repair over it — said, rather than narrated as if the judge asked for it.
-    render: (d) => (d.judge_deferred && d.judge_deferred.action
-      ? `node #${d.node_id} repaired (attempt ${d.attempt}) over a held ${d.judge_deferred.action}${note(d.rationale)}`
-      : `node #${d.node_id} repaired (attempt ${d.attempt})${note(d.rationale)}`),
+    render: (d) => ((d.judge_deferred && d.judge_deferred.action ? uiMessage("node #{0} repaired (attempt {1}) over a held {2}{3}", [d.node_id, d.attempt, d.judge_deferred.action, note(d.rationale)]) : uiMessage("node #{0} repaired (attempt {1}){2}", [d.node_id, d.attempt, note(d.rationale)]))),
   },
   node_confirmed: {
     validate: d => ['node_id', 'mean', 'std', 'seeds'].every(key => ownValue(d, key)),
@@ -97,7 +96,7 @@ export const NARR = {
   },
   best_confirmed: {
     validate: d => ownValue(d, 'node_id'),
-    render: (d) => `robust winner: #${d.node_id}${d.significant ? ' (significant >1SE)' : ''}`,
+    render: (d) => uiMessage("robust winner: #{0}{1}", [d.node_id, d.significant ? ' (significant >1SE)' : '']),
   },
   ablate: {
     validate: d => ownValue(d, 'parent_id') && objectValue(d, 'impacts'),
@@ -116,26 +115,24 @@ export const NARR = {
       const rows = Array.isArray(d?.verdicts) ? d.verdicts : []
       const ties = rows.reduce(
         (n, v) => n + (Number.isFinite(v?.ties) && v.ties > 0 ? v.ties : 0), 0);
-      if (d.leak) return 'leakage scan: LEAK DETECTED';
-      return ties > 0
-        ? `leakage scan: clean (${ties} train row${ties === 1 ? ' shares' : 's share'} the first test timestamp)`
-        : 'leakage scan: clean';
+      if (d.leak) return uiText('leakage scan: LEAK DETECTED');
+      return (ties > 0 ? uiMessage("leakage scan: clean ({0} train row{1} the first test timestamp)", [ties, ties === 1 ? ' shares' : 's share']) : uiText('leakage scan: clean'));
     },
   },
   approval_requested: {
     validate: d => ownValue(d, 'node_id'),
-    render: (d) => `awaiting approval of #${d.node_id}`,
+    render: (d) => uiMessage("awaiting approval of #{0}", [d.node_id]),
   },
   approval_granted: {
     validate: d => ownValue(d, 'node_id'),
     render: (d) => `approved #${d.node_id}`,
   },
-  pause: { render: () => 'stopped (frozen — not finalized)' },
+  pause: { render: () => uiText('stopped (frozen — not finalized)') },
   // (`resume` / `run_abort` are defined once, below with the richer wording — the duplicate keys here
   // were dead: the later definitions always won. arch-review §5 P3.)
   node_abort: {
     validate: d => ownValue(d, 'node_id'),
-    render: (d) => `stop requested for #${d.node_id}`,
+    render: (d) => uiMessage("stop requested for #{0}", [d.node_id]),
   },
   budget_extend: {
     render: (d) => {
@@ -143,7 +140,7 @@ export const NARR = {
       if (d.add_nodes) bits.push(`+${d.add_nodes} experiment node${d.add_nodes === 1 ? '' : 's'}`)
       if (d.max_seconds != null) bits.push(`wall-clock ${d.max_seconds}s`)
       if (d.max_eval_seconds != null) bits.push(`per-eval ${d.max_eval_seconds}s`)
-      return `run budget extended — ${bits.join(', ') || 'no change'}`
+      return uiMessage("run budget extended — {0}", [bits.join(', ') || 'no change'])
     },
   },
   hint: { validate: d => ownValue(d, 'text'), render: (d) => `hint: ${d.text}` },
@@ -161,11 +158,11 @@ export const NARR = {
   },
   rung_promoted: {
     validate: d => ownValue(d, 'rung') && Array.isArray(d?.survivors),
-    render: (d) => `ASHA rung ↑${d.rung}: promoted ${(d.survivors || []).map(s => '#' + s).join(', ')}`,
+    render: (d) => uiMessage("ASHA rung ↑{0}: promoted {1}", [d.rung, (d.survivors || []).map(s => '#' + s).join(', ')]),
   },
   set_strategy: {
     validate: d => nestedValue(d, 'strategy', 'policy'),
-    render: (d) => `operator pinned strategy → ${strategySummary(d.strategy)}`,
+    render: (d) => uiMessage("operator pinned strategy → {0}", [strategySummary(d.strategy)]),
   },
   metric_retarget: {
     validate: d => Object.hasOwn(d || {}, 'key'),
@@ -173,39 +170,38 @@ export const NARR = {
       ? `objective → ${d.key} (operator retarget)` : "objective → the task's own metric")
       + note(d.goal, 70),
   },
-  deep_research: { render: () => 'deep research requested' },
-  research_completed: { render: (d) => `deep research (${d.trigger || 'auto'})${note(d.memo?.summary)}` },
-  report_generated: { render: (d) => `run report updated${note(d.content?.headline, 90)}` },
+  deep_research: { render: () => uiText('deep research requested') },
+  research_completed: { render: (d) => uiMessage("deep research ({0}){1}", [d.trigger || 'auto', note(d.memo?.summary)]) },
+  report_generated: { render: (d) => uiMessage("run report updated{0}", [note(d.content?.headline, 90)]) },
   reflection_note: { render: (d) => `memory: ${d.n_lessons || 0} lesson${(d.n_lessons || 0) === 1 ? '' : 's'}${d.n_skills ? `, ${d.n_skills} skill${d.n_skills === 1 ? '' : 's'}` : ''}${note(d.note)}` },
   // The MID-RUN half of the same memory write (skills_promoted): a card that settled early is
   // promoted while the run is still going, so the feed says so at the node it happened at
   // rather than only in the run-end note.
-  skills_promoted: { render: (d) => `memory: ${d.count || 0} settled skill${(d.count || 0) === 1 ? '' : 's'} promoted` },
+  skills_promoted: { render: (d) => uiMessage("memory: {0} settled skill{1} promoted", [d.count || 0, (d.count || 0) === 1 ? '' : 's']) },
   proxy_scored: {
     validate: d => ownValue(d, 'node_id') && ownValue(d, 'score'),
-    render: (d) => `proxy scored #${d.node_id}: ${fmt(d.score)}${d.skipped ? ' (skipped full eval)' : ''}`,
+    render: (d) => uiMessage("proxy scored #{0}: {1}{2}", [d.node_id, fmt(d.score), d.skipped ? ' (skipped full eval)' : '']),
   },
   reward_hack_suspected: {
     validate: d => ownValue(d, 'node_id') && Array.isArray(d?.signals)
       && d.signals.every(signal => ownValue(signal, 'signal')),
-    render: (d) => `reward-hack suspected on #${d.node_id}: ${(d.signals || []).map(s => s.signal).join(', ')}`,
+    render: (d) => uiMessage("reward-hack suspected on #{0}: {1}", [d.node_id, (d.signals || []).map(s => s.signal).join(', ')]),
   },
   novelty_rejected: {
     validate: d => ownValue(d, 'near_node') && ownValue(d, 'distance'),
-    render: (d) => `dedup: proposal near #${d.near_node} (dist ${fmt(d.distance, 3)}) nudged to diversify`,
+    render: (d) => uiMessage("dedup: proposal near #{0} (dist {1}) nudged to diversify", [d.near_node, fmt(d.distance, 3)]),
   },
   hypothesis_ranked: {
     validate: d => ownValue(d, 'n') || Array.isArray(d?.order),
-    render: (d) => `ranked ${d.n || (d.order || []).length} hypotheses by payoff${d.confidence != null ? ` (${Math.round(d.confidence * 100)}% conf)` : ''}${note(d.reason, 70)}`,
+    render: (d) => uiMessage("ranked {0} hypotheses by payoff{1}{2}", [d.n || (d.order || []).length, d.confidence != null ? ` (${Math.round(d.confidence * 100)}% conf)` : '', note(d.reason, 70)]),
   },
   foresight_selected: {
     validate: d => ownValue(d, 'kind') && ownValue(d, 'chosen')
       && (ownValue(d, 'n') || Array.isArray(d?.order)),
-    render: (d) => `foresight picked ${d.kind === 'solution' ? 'implementation' : 'idea'} ${(d.chosen ?? 0) + 1} of ${d.n || (d.order || []).length}${d.confidence != null ? ` (${Math.round(d.confidence * 100)}% conf)` : ''}${note(d.reason, 70)}`,
+    render: (d) => uiMessage("foresight picked {0} {1} of {2}{3}{4}", [d.kind === 'solution' ? 'implementation' : 'idea', (d.chosen ?? 0) + 1, d.n || (d.order || []).length, d.confidence != null ? ` (${Math.round(d.confidence * 100)}% conf)` : '', note(d.reason, 70)]),
   },
   run_finished: {
-    render: (d) => (d?.reason === 'aborted' || d?.reason === 'finalized') ? 'run finalized (wrapped up)'
-      : `run finished${d.reason ? ' (' + d.reason + ')' : ''}`,
+    render: (d) => (d?.reason === 'aborted' || d?.reason === 'finalized' ? uiText('run finalized (wrapped up)') : uiMessage("run finished{0}", [d.reason ? ' (' + d.reason + ')' : ''])),
   },
   llm_cost: {
     validate: d => ownValue(d, 'total_tokens') && ownValue(d, 'cost'),
@@ -215,31 +211,31 @@ export const NARR = {
   // produce gets a plain-English line here, so an action never shows in the feed as a raw-JSON blob. ---
   force_confirm: {
     validate: d => ownValue(d, 'node_id'),
-    render: (d) => `requested a multi-seed confirm of #${d.node_id}`,
+    render: (d) => uiMessage("requested a multi-seed confirm of #{0}", [d.node_id]),
   },
   force_ablate: {
     validate: d => ownValue(d, 'node_id'),
-    render: (d) => `requested an ablation probe on #${d.node_id}`,
+    render: (d) => uiMessage("requested an ablation probe on #{0}", [d.node_id]),
   },
   fork: {
     validate: d => ownValue(d, 'from_node_id'),
-    render: (d) => `forked a fresh improve-branch from #${d.from_node_id}`,
+    render: (d) => uiMessage("forked a fresh improve-branch from #{0}", [d.from_node_id]),
   },
   inject_node: {
     validate: d => objectValue(d, 'idea'),
-    render: (d) => { const i = d.idea || {}; return `added experiment: ${i.operator || 'improve'}${d.parent_id != null ? ' from #' + d.parent_id : ''}${i.rationale ? ' — ' + stripMd(i.rationale).slice(0, 70) : ''}` },
+    render: (d) => { const i = d.idea || {}; return uiMessage("added experiment: {0}{1}{2}", [i.operator || 'improve', d.parent_id != null ? ' from #' + d.parent_id : '', i.rationale ? ' — ' + stripMd(i.rationale).slice(0, 70) : '']) },
   },
   annotation: {
     validate: d => ownValue(d, 'node_id') && ownValue(d, 'text'),
-    render: (d) => `note on #${d.node_id}: ${String(d.text || '').slice(0, 80)}`,
+    render: (d) => uiMessage("note on #{0}: {1}", [d.node_id, String(d.text || '').slice(0, 80)]),
   },
-  run_reopened: { render: () => 'run reopened to keep going' },
-  resume: { render: () => 'run resumed — continuing' },
-  run_abort: { render: (d) => `finalize requested${d.reason ? ' (' + d.reason + ')' : ''} — wrapping up` },
-  command_ack: { render: (d) => `engine acknowledged command${d.event_seq != null ? ` at event ${d.event_seq}` : ''}` },
+  run_reopened: { render: () => uiText('run reopened to keep going') },
+  resume: { render: () => uiText('run resumed — continuing') },
+  run_abort: { render: (d) => uiMessage("finalize requested{0} — wrapping up", [d.reason ? ' (' + d.reason + ')' : '']) },
+  command_ack: { render: (d) => uiMessage("engine acknowledged command{0}", [d.event_seq != null ? ` at event ${d.event_seq}` : '']) },
   hypothesis_added: {
     validate: d => ownValue(d, 'statement'),
-    render: (d) => `hypothesis added${d.source ? ' (' + d.source + ')' : ''} — ${String(d.statement || '').slice(0, 90)}`,
+    render: (d) => uiMessage("hypothesis added{0} — {1}", [d.source ? ' (' + d.source + ')' : '', String(d.statement || '').slice(0, 90)]),
   },
   // THE CARD LIFECYCLE. These were folded, durable and in the log — and invisible, because the feed
   // is an allow-list (`isCuratedType`) and none of them had an entry. Measured on
@@ -252,11 +248,11 @@ export const NARR = {
   },
   card_build_requested: {
     validate: d => ownValue(d, 'card_id'),
-    render: (d) => `build requested for ${d.card_id} — the Developer is starting`,
+    render: (d) => uiMessage("build requested for {0} — the Developer is starting", [d.card_id]),
   },
   card_build_attempted: {
     validate: d => ownValue(d, 'card_id'),
-    render: (d) => `${d.card_id} build attempt${d.generation ? ` (generation ${d.generation})` : ''}`,
+    render: (d) => uiMessage("{0} build attempt{1}", [d.card_id, d.generation ? ` (generation ${d.generation})` : '']),
   },
   card_build_done: {
     validate: d => ownValue(d, 'card_id'),
@@ -265,7 +261,7 @@ export const NARR = {
   },
   card_enriched: {
     validate: d => ownValue(d, 'id'),
-    render: (d) => `${d.id} enriched from node #${d.node_id}`,
+    render: (d) => uiMessage("{0} enriched from node #{1}", [d.id, d.node_id]),
   },
   card_ranked: {
     validate: d => ownValue(d, 'order'),
@@ -275,11 +271,11 @@ export const NARR = {
   // The START of deep research. `research_completed` was narrated and this was not, so a multi-minute
   // web+LLM investigation announced itself only once it was over.
   research_attempted: {
-    render: (d) => `deep research started (${d.trigger || 'auto'})${d.manual ? ' — requested' : ''}`,
+    render: (d) => uiMessage("deep research started ({0}){1}", [d.trigger || 'auto', d.manual ? ' — requested' : '']),
   },
   speculation_depth_settled: {
     validate: d => ownValue(d, 'depth'),
-    render: (d) => `prefetch depth ${d.previous ?? '?'} → ${d.depth}${note(d.reason, 90)}`,
+    render: (d) => uiMessage("prefetch depth {0} → {1}{2}", [d.previous ?? '?', d.depth, note(d.reason, 90)]),
   },
   // docs/29 F1. The run CHANGED ITS EXECUTION WIDTH, which is exactly the kind of thing an operator
   // debugs as something else when it is silent ("why is my 4-GPU box running one experiment"). The
@@ -297,83 +293,83 @@ export const NARR = {
       const from = ev.widest_declared_gpus != null && ev.gpu_pool != null
         ? ` (${ev.open_proposals ?? '?'} open proposal(s) wanting up to ${ev.widest_declared_gpus} GPU(s) of ${ev.gpu_pool})`
         : ''
-      return `width re-pinned from the proposals — ${axes}${from}`
+      return uiMessage("width re-pinned from the proposals — {0}{1}", [axes, from])
     },
   },
   hypothesis_merged: {
     validate: d => ownValue(d, 'statement'),
-    render: (d) => `hypotheses merged — ${String(d.statement || '').slice(0, 80)}${(d.aliases || []).length ? ` (${(d.aliases || []).length} paraphrase${(d.aliases || []).length === 1 ? '' : 's'} folded)` : ''}`,
+    render: (d) => uiMessage("hypotheses merged — {0}{1}", [String(d.statement || '').slice(0, 80), (d.aliases || []).length ? ` (${(d.aliases || []).length} paraphrase${(d.aliases || []).length === 1 ? '' : 's'} folded)` : '']),
   },
   lessons_distilled: {
     validate: d => ownValue(d, 'count'),
     render: (d) => `distilled ${d.count || 0} lesson${d.count === 1 ? '' : 's'}${d.trigger ? ' (' + d.trigger + ')' : ''}`,
   },
-  lessons_refreshed: { render: (d) => d.skipped ? 'cross-run lessons refresh skipped' : 'cross-run lessons refreshed' },
+  lessons_refreshed: { render: (d) => (d.skipped ? uiText('cross-run lessons refresh skipped') : uiText('cross-run lessons refreshed')) },
   coverage_snapshot: {
     validate: d => ownValue(d, 'themes') && ownValue(d, 'niches'),
     render: (d) => `coverage — ${d.themes || 0} theme${d.themes === 1 ? '' : 's'} · ${d.niches || 0} niche${d.niches === 1 ? '' : 's'}${d.dominant_theme_frac != null ? ` · dominant ${Math.round(d.dominant_theme_frac * 100)}%` : ''}`,
   },
-  deps_installed: { render: (d) => `dependencies installed${d.packages ? ': ' + (Array.isArray(d.packages) ? d.packages.slice(0, 6).join(', ') : String(d.packages).slice(0, 80)) : ''}` },
-  fork_done: { render: () => 'fork fulfilled — branch added' },
-  inject_done: { render: () => 'experiment injected into the tree' },
+  deps_installed: { render: (d) => uiMessage("dependencies installed{0}", [d.packages ? ': ' + (Array.isArray(d.packages) ? d.packages.slice(0, 6).join(', ') : String(d.packages).slice(0, 80)) : '']) },
+  fork_done: { render: () => uiText('fork fulfilled — branch added') },
+  inject_done: { render: () => uiText('experiment injected into the tree') },
   confirm_done: {
     validate: d => ownValue(d, 'node_id'),
-    render: (d) => `multi-seed confirm finished for #${d.node_id}`,
+    render: (d) => uiMessage("multi-seed confirm finished for #{0}", [d.node_id]),
   },
   confirm_eval: {
     validate: d => ['seed', 'node_id', 'metric'].every(key => ownValue(d, key)),
-    render: (d) => `confirm seed ${d.seed} on #${d.node_id} → ${fmt(d.metric)}`,
+    render: (d) => uiMessage("confirm seed {0} on #{1} → {2}", [d.seed, d.node_id, fmt(d.metric)]),
   },
   agent_decision: {
     validate: d => nestedValue(d, 'chosen', 'kind') && Array.isArray(d?.legal),
-    render: (d) => `agent chose ${d.chosen?.kind || '?'}${d.chosen?.node_id != null ? ' → #' + d.chosen.node_id : ''} (of ${(d.legal || []).length} legal move${(d.legal || []).length === 1 ? '' : 's'})${note(d.rationale, 70)}`,
+    render: (d) => uiMessage("agent chose {0}{1} (of {2} legal move{3}){4}", [d.chosen?.kind || '?', d.chosen?.node_id != null ? ' → #' + d.chosen.node_id : '', (d.legal || []).length, (d.legal || []).length === 1 ? '' : 's', note(d.rationale, 70)]),
   },
   agent_validated: {
     validate: d => ownValue(d, 'node_id'),
-    render: (d) => `developer validated #${d.node_id}${d.fell_back ? ' (fell back to a simpler build)' : d.ok === false ? ' (checks failed)' : ' ✓'}`,
+    render: (d) => uiMessage("developer validated #{0}{1}", [d.node_id, d.fell_back ? ' (fell back to a simpler build)' : d.ok === false ? ' (checks failed)' : ' ✓']),
   },
-  spec_proposed: { render: () => 'eval spec proposed — awaiting ratification' },
-  spec_approval_requested: { render: () => 'awaiting your approval of the eval spec' },
-  spec_approved: { render: () => 'eval spec ratified' },
+  spec_proposed: { render: () => uiText('eval spec proposed — awaiting ratification') },
+  spec_approval_requested: { render: () => uiText('awaiting your approval of the eval spec') },
+  spec_approved: { render: () => uiText('eval spec ratified') },
   spec_drift: {
     validate: d => ownValue(d, 'node_id'),
-    render: (d) => `spec drift on #${d.node_id}${d.seed != null ? ' (seed ' + d.seed + ')' : ''} — metric discarded`,
+    render: (d) => uiMessage("spec drift on #{0}{1} — metric discarded", [d.node_id, d.seed != null ? ' (seed ' + d.seed + ')' : '']),
   },
-  drift_unavailable: { render: (d) => `drift check unavailable${note(d.reason)}` },
+  drift_unavailable: { render: (d) => uiMessage("drift check unavailable{0}", [note(d.reason)]) },
   data_profiled: {
     validate: d => ownValue(d, 'columns') && d.columns !== null
       && typeof d.columns === 'object',
-    render: (d) => { const c = d.columns; const n = Array.isArray(c) ? c.length : Object.keys(c || {}).length; return `dataset profiled (${n} column${n === 1 ? '' : 's'})` },
+    render: (d) => { const c = d.columns; const n = Array.isArray(c) ? c.length : Object.keys(c || {}).length; return uiMessage("dataset profiled ({0} column{1})", [n, n === 1 ? '' : 's']) },
   },
   data_provenance: {
     validate: d => objectValue(d, 'assets'),
-    render: (d) => { const n = Object.keys(d.assets || {}).length; return `dataset provenance pinned (${n} asset${n === 1 ? '' : 's'})` },
+    render: (d) => { const n = Object.keys(d.assets || {}).length; return uiMessage("dataset provenance pinned ({0} asset{1})", [n, n === 1 ? '' : 's']) },
   },
   // Setup phase (task + data), made watchable: these appear live between run start and the first node.
-  setup_started: { render: (d) => `setting up task & data${d.repo ? ' (repo)' : ''}…` },
+  setup_started: { render: (d) => uiMessage("setting up task & data{0}…", [d.repo ? ' (repo)' : '']) },
   setup_step: {
     validate: d => ownValue(d, 'step'),
     render: (d) => `setup: ${d.step}${d.detail ? ' — ' + String(d.detail).slice(0, 80) : (d.sources?.length ? ' (' + d.sources.join(', ') + ')' : '')}`,
   },
-  setup_finished: { render: (d) => `setup done${d.seconds != null ? ` (${d.seconds}s)` : ''}` },
+  setup_finished: { render: (d) => uiMessage("setup done{0}", [d.seconds != null ? ` (${d.seconds}s)` : '']) },
   workspace_seeded: {
     validate: d => ownValue(d, 'node_id') && Array.isArray(d?.materialized),
-    render: (d) => `seeded node #${d.node_id ?? '?'} workspace: ${(d.materialized || []).join(', ').slice(0, 90)}`,
+    render: (d) => uiMessage("seeded node #{0} workspace: {1}", [d.node_id ?? '?', (d.materialized || []).join(', ').slice(0, 90)]),
   },
   run_setup_started: {
     validate: d => Array.isArray(d?.command),
-    render: (d) => `run setup (once): ${(d.command || []).join(' ').slice(0, 80)}`,
+    render: (d) => uiMessage("run setup (once): {0}", [(d.command || []).join(' ').slice(0, 80)]),
   },
   run_setup_finished: {
     validate: d => ownValue(d, 'exit_code'),
-    render: (d) => `run setup ${d.exit_code === 0 ? 'ok' : 'FAILED (exit ' + d.exit_code + ')'}`,
+    render: (d) => uiMessage("run setup {0}", [d.exit_code === 0 ? 'ok' : 'FAILED (exit ' + d.exit_code + ')']),
   },
-  host_grading: { render: (d) => `host-side grading active${d.scorer ? ' (' + d.scorer + ')' : ''}${d.competition ? ' · ' + d.competition : ''}` },
-  diversity_archive: { render: () => 'diversity archive updated' },
-  workspace_changed: { render: () => 'workspace changed since the last run — re-grounding' },
+  host_grading: { render: (d) => uiMessage("host-side grading active{0}{1}", [d.scorer ? ' (' + d.scorer + ')' : '', d.competition ? ' · ' + d.competition : '']) },
+  diversity_archive: { render: () => uiText('diversity archive updated') },
+  workspace_changed: { render: () => uiText('workspace changed since the last run — re-grounding') },
   budget: {
     validate: d => ownValue(d, 'nodes') && ownValue(d, 'elapsed_s'),
-    render: (d) => `checkpoint — ${d.nodes} node${d.nodes === 1 ? '' : 's'}, ${fmt(d.elapsed_s, 3)}s elapsed`,
+    render: (d) => uiMessage("checkpoint — {0} node{1}, {2}s elapsed", [d.nodes, d.nodes === 1 ? '' : 's', fmt(d.elapsed_s, 3)]),
   },
   // Meaningful events that previously LEAKED as raw JSON (no narration + not hidden). Narrated here so
   // they read cleanly. The high-volume / internal read-model events (node_concepts and the rest of the
@@ -384,19 +380,19 @@ export const NARR = {
   // the generic line instead of "#undefined"/"level undefined" (the file's documented anti-#undefined rule).
   node_reset: {
     validate: d => ownValue(d, 'node_id'),
-    render: (d) => `re-running node #${d.node_id} from ${d.from_stage || d.stage || 'propose'}`,
+    render: (d) => uiMessage("re-running node #{0} from {1}", [d.node_id, d.from_stage || d.stage || 'propose']),
   },
   node_tombstoned: {
     validate: d => (Array.isArray(d?.node_ids) && d.node_ids.length > 0) || ownValue(d, 'node_id'),
-    render: (d) => { const ids = Array.isArray(d.node_ids) ? d.node_ids : (d.node_id != null ? [d.node_id] : []); return ids.length ? `deleted node${ids.length === 1 ? '' : 's'} ${ids.map(n => '#' + n).join(', ')}` : 'deleted a node subtree' },
+    render: (d) => { const ids = Array.isArray(d.node_ids) ? d.node_ids : (d.node_id != null ? [d.node_id] : []); return (ids.length ? uiMessage("deleted node{0} {1}", [ids.length === 1 ? '' : 's', ids.map(n => '#' + n).join(', ')]) : uiText('deleted a node subtree')) },
   },
   holdout_evaluated: {
     validate: d => ownValue(d, 'node_id') && ownValue(d, 'metric'),
-    render: (d) => `holdout (final-exam) score for #${d.node_id} → ${fmt(d.metric)}`,
+    render: (d) => uiMessage("holdout (final-exam) score for #{0} → {1}", [d.node_id, fmt(d.metric)]),
   },
   novelty_graded: {
     validate: d => ownValue(d, 'level'),
-    render: (d) => `novelty graded ${d.node_id != null ? '#' + d.node_id + ' ' : ''}level ${d.level}${d.grade ? ' (' + d.grade + ')' : ''} → ${d.recommendation || 'allow'}`,
+    render: (d) => uiMessage("novelty graded {0}level {1}{2} → {3}", [d.node_id != null ? '#' + d.node_id + ' ' : '', d.level, d.grade ? ' (' + d.grade + ')' : '', d.recommendation || 'allow']),
   },
   // A capsule's best metric is run-wide, not the matched concept's outcome. Only the
   // v2 retained-outcome row earns concept-level wording; every fallback says "run best" explicitly.
@@ -407,11 +403,11 @@ export const NARR = {
   },
   comment_created: {
     validate: d => ownValue(d, 'node_id') && ownValue(d, 'text'),
-    render: (d) => `comment on #${d.node_id ?? '?'}: ${String(d.text || d.body || '').slice(0, 80)}`,
+    render: (d) => uiMessage("comment on #{0}: {1}", [d.node_id ?? '?', String(d.text || d.body || '').slice(0, 80)]),
   },
   comment_edited: {
     validate: d => ownValue(d, 'node_id'),
-    render: (d) => `comment edited on #${d.node_id ?? '?'}`,
+    render: (d) => uiMessage("comment edited on #{0}", [d.node_id ?? '?']),
   },
   comment_resolution_changed: {
     validate: d => ownValue(d, 'node_id'),
@@ -419,7 +415,7 @@ export const NARR = {
   },
   concept_tag_edited: {
     validate: d => ownValue(d, 'node_id') && Array.isArray(d?.concepts),
-    render: (d) => `operator re-tagged #${d.node_id}: ${(d.concepts || []).slice(0, 4).join(', ') || '(cleared)'}`,
+    render: (d) => uiMessage("operator re-tagged #{0}: {1}", [d.node_id, (d.concepts || []).slice(0, 4).join(', ') || '(cleared)']),
   },
   // `d.priority` is the 0-BASED wire value while every operator surface is 1-based (the board chip
   // renders priority+1, the form says "1 is highest", savePriority submits visible-1) — so pinning
@@ -432,12 +428,12 @@ export const NARR = {
   card_edited: {
     validate: d => typeof d?.id === 'string' && d.id.length > 0
       && typeof d?.statement === 'string',
-    render: (d) => `Card ${d.id.slice(0, 80)} display statement edited${note(d.statement, 70)}`,
+    render: (d) => uiMessage("Card {0} display statement edited{1}", [d.id.slice(0, 80), note(d.statement, 70)]),
   },
   card_resource_pinned: {
     validate: d => typeof d?.id === 'string' && d.id.length > 0
       && ownValue(d, 'gpus'),
-    render: (d) => `Card ${d.id.slice(0, 80)} resource override: ${d.gpus} GPU${d.gpus === 1 ? '' : 's'}${d.gpu_mem_mib != null ? ` · ${d.gpu_mem_mib} MiB/GPU` : ''}`,
+    render: (d) => uiMessage("Card {0} resource override: {1} GPU{2}{3}", [d.id.slice(0, 80), d.gpus, d.gpus === 1 ? '' : 's', d.gpu_mem_mib != null ? ` · ${d.gpu_mem_mib} MiB/GPU` : '']),
   },
   card_dropped: {
     validate: d => typeof d?.id === 'string' && d.id.length > 0,
@@ -445,7 +441,7 @@ export const NARR = {
   },
   card_auto_dropped: {
     validate: d => typeof d?.id === 'string' && d.id.length > 0,
-    render: (d) => `Card ${d.id.slice(0, 80)} automatically dropped${note(d.reason, 70)}`,
+    render: (d) => uiMessage("Card {0} automatically dropped{1}", [d.id.slice(0, 80), note(d.reason, 70)]),
   },
   card_reopened: {
     validate: d => typeof d?.id === 'string' && d.id.length > 0,
@@ -453,29 +449,29 @@ export const NARR = {
   },
   hypothesis_updated: {
     validate: d => ownValue(d, 'statement'),
-    render: (d) => `hypothesis updated — ${String(d.statement || '').slice(0, 80)}`,
+    render: (d) => uiMessage("hypothesis updated — {0}", [String(d.statement || '').slice(0, 80)]),
   },
-  trust_gate_changed: { render: (d) => `trust gate changed${d.gate ? ` — ${d.gate}` : ''}` },
-  inject_failed: { render: (d) => `experiment injection failed${note(d.reason)}` },
-  env_changed: { render: () => 'environment changed since run start — re-grounding' },
-  task_changed: { render: () => 'the task read at this entry differs from the one recorded — later nodes are measured against it' },
+  trust_gate_changed: { render: (d) => uiMessage("trust gate changed{0}", [d.gate ? ` — ${d.gate}` : '']) },
+  inject_failed: { render: (d) => uiMessage("experiment injection failed{0}", [note(d.reason)]) },
+  env_changed: { render: () => uiText('environment changed since run start — re-grounding') },
+  task_changed: { render: () => uiText('the task read at this entry differs from the one recorded — later nodes are measured against it') },
   // Failure/audit + progress events whose SUCCESS or sibling twins are already narrated — hiding only the
   // failure/correction case was the wrong asymmetry, so surface them here too (found by the coverage audit).
-  report_refresh_failed: { render: (d) => `report refresh failed${note(d.reason || d.error || d.message)}` },
-  log_repaired: { render: (d) => `event log repaired${d.dropped_lines != null ? ` — dropped ${d.dropped_lines} corrupt line${d.dropped_lines === 1 ? '' : 's'}, kept ${d.good_records ?? '?'}` : ' at divergence'}` },
+  report_refresh_failed: { render: (d) => uiMessage("report refresh failed{0}", [note(d.reason || d.error || d.message)]) },
+  log_repaired: { render: (d) => uiMessage("event log repaired{0}", [d.dropped_lines != null ? ` — dropped ${d.dropped_lines} corrupt line${d.dropped_lines === 1 ? '' : 's'}, kept ${d.good_records ?? '?'}` : ' at divergence']) },
   stage_finished: {
     validate: d => ownAny(d, ['name', 'stage']),
     render: (d) => `stage ${d.name || d.stage || '?'} ${d.status === 'ok' || d.status === 'passed' || d.ok === true ? '✓' : (d.status || 'finished')}${d.node_id != null ? ` (#${d.node_id})` : ''}`,
   },
-  lessons_reconciled: { render: (d) => `lessons reconciled${d.n_retired != null || d.n_added != null ? ` — ${d.n_retired || 0} retired, ${d.n_added || 0} re-derived` : ''}${d.reason === 'stale_rows_gone_under_lock' ? ' (the stale rows were already gone)' : ''}` },
+  lessons_reconciled: { render: (d) => uiMessage("lessons reconciled{0}{1}", [d.n_retired != null || d.n_added != null ? ` — ${d.n_retired || 0} retired, ${d.n_added || 0} re-derived` : '', d.reason === 'stale_rows_gone_under_lock' ? ' (the stale rows were already gone)' : '']) },
   // The verdict is about ONE eval phase, and saying so is the difference between "the training is
   // broken" and "the data_prep stage printed something odd". `log_role`/`stage` are additive (rows
   // predating them render exactly as before); only `training` may have killed anything.
   train_monitor_alert: {
     validate: d => ownValue(d, 'node_id') && ownValue(d, 'status'),
-    render: (d) => `training monitor: #${d.node_id} ${d.log_role && d.log_role !== 'training'
+    render: (d) => uiMessage("training monitor: #{0} {1}{2}{3}", [d.node_id, d.log_role && d.log_role !== 'training'
       ? `${d.stage ? `stage ${d.stage}` : 'a non-training phase'} looks ${d.status} (advisory)`
-      : `looks ${d.status}`}${d.reason ? ' — ' + String(d.reason).slice(0, 90) : ''}${d.confidence != null ? ` (${Math.round(d.confidence * 100)}% conf)` : ''}`,
+      : `looks ${d.status}`, d.reason ? ' — ' + String(d.reason).slice(0, 90) : '', d.confidence != null ? ` (${Math.round(d.confidence * 100)}% conf)` : '']),
   },
   // asha_rank carries RECOVERY edges too — asha_monitor publishes both precisely so projections can
   // CLEAR the flag — so ignoring `d.underperforming` rendered a recovery as another warning.
@@ -501,13 +497,13 @@ export const NARR = {
     // rendered as the opaque "details could not be summarized" fallback instead. `node_id` alone
     // defines the claim; every other field the line interpolates has a documented default.
     validate: d => ownValue(d, 'node_id'),
-    render: (d) => `ASHA judge: #${d.node_id} ${(d.stop_decided ?? d.kill) === true
+    render: (d) => uiMessage("ASHA judge: #{0} {1}{2}{3}", [d.node_id, (d.stop_decided ?? d.kill) === true
       ? (d.kill === false
         ? `STOP decided — superseded by ${d.kill_superseded_by || 'another watchdog'}`
         : 'STOP decided — early-kill claimed')
-      : `keep running (${d.status || 'unavailable'})`}${d.reason ? ' — ' + String(d.reason).slice(0, 90) : ''}${d.confidence != null ? ` (${Math.round(d.confidence * 100)}% conf)` : ''}`,
+      : `keep running (${d.status || 'unavailable'})`, d.reason ? ' — ' + String(d.reason).slice(0, 90) : '', d.confidence != null ? ` (${Math.round(d.confidence * 100)}% conf)` : '']),
   },
-  restart: { render: () => 'run restart requested (pause-and-resume handoff)' },
+  restart: { render: () => uiText('run restart requested (pause-and-resume handoff)') },
 }
 
 // Coarse "kind" per event type: drives the icon, the accent color, and the filter chips. One place so
@@ -564,7 +560,7 @@ export const isCuratedType = (type) => Object.hasOwn(NARR, type)
 export function eventNarration(event) {
   const omittedBytes = event?._log_page?.truncated ? Number(event._log_page.raw_bytes || 0) : 0
   if (event?._log_page?.truncated === true) {
-    return `${event.type || 'event'} — details omitted (${omittedBytes.toLocaleString()} source bytes exceed page limit)`
+    return uiMessage("{0} — details omitted ({1} source bytes exceed page limit)", [event.type || 'event', omittedBytes.toLocaleString()])
   }
   try {
     // Own-property read so an event type equal to an Object.prototype key ("toString", "constructor")
@@ -586,7 +582,7 @@ export function eventNarration(event) {
     if (!value) throw new TypeError('incomplete event narration')
     return String(value || event?.type || 'event')
   } catch {
-    return `${event?.type || 'event'} — details could not be summarized`
+    return uiMessage("{0} — details could not be summarized", [event?.type || 'event'])
   }
 }
 
@@ -693,8 +689,8 @@ export function pendingWorkLabel(live, log = [], stagesIn = null) {
     const record = started.length ? evalStageFor(pending[0], stages) : null
     if (record) return `Experiment #${pending[0].id} · ${evalStageLabel(record)}…`
     if (started.length) return `Experiment #${pending[0].id} training / evaluating…`
-    if (queued.length) return `Experiment #${pending[0].id} waiting for an evaluation slot…`
-    return `Experiment #${pending[0].id} pending — evaluation start unknown…`
+    if (queued.length) return uiMessage("Experiment #{0} waiting for an evaluation slot…", [pending[0].id])
+    return uiMessage("Experiment #{0} pending — evaluation start unknown…", [pending[0].id])
   }
   const parts = []
   // With several evaluating at once the strip has no room for each one's step, so it names them only

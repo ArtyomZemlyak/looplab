@@ -72,7 +72,13 @@ def llm_settings(store: SettingsStore, rd: Optional[Path] = None) -> "Settings":
         cfg = json.loads(raw)
         if not isinstance(cfg, dict):
             raise ValueError("config snapshot must contain an object")
-        return store.resolve_snapshot_settings(cfg)
+        settings = store.resolve_snapshot_settings(cfg)
+        # Human prose is an owner display preference, independent of the run's
+        # frozen experiment and routing contract. Never alter historical content.
+        language = global_settings(store).output_language
+        if language != "auto":
+            settings = settings.model_copy(update={"output_language": language})
+        return settings
     return global_settings(store)
 
 

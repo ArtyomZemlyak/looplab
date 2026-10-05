@@ -1,3 +1,5 @@
+
+import { uiText, useUILanguage } from './uiLanguage.js'
 import React, { useEffect, useMemo, useRef, useState } from 'react'
 
 import PanelShell from './PanelShell.jsx'
@@ -56,6 +58,8 @@ export default function ForkFromSeqPanel({
   runId, node = null, viewSeq = null, expectedGeneration = null, access = null,
   liveNodes = null, onToast, onClose, onOpenLive,
 }) {
+  useUILanguage()
+
   // The snapshot's idea, narrowed by the model. Keyed on the node's identity rather than the object
   // so a poll that re-materializes an equal snapshot cannot silently reset a half-typed form.
   const base = useMemo(() => forkIdeaFromSnapshot(node),
@@ -156,20 +160,15 @@ export default function ForkFromSeqPanel({
 
   const title = 'Branch from this snapshot'
   const subject = node?.id == null ? null : `experiment #${node.id} · attempt ${node.attempt ?? 0}`
-  return <PanelShell title={title} sub={subject || undefined} onClose={onClose} wide>
-    <p className="muted">
-      A branch is a NEW experiment whose parent is the one you are reading and whose idea is the one
-      you edit here. It is fenced by CONTENT, not by the point in the timeline you are standing at:
-      it is accepted at the live tail as long as {subject ? `#${node.id}` : 'that experiment'} is
-      still the attempt shown above, and refused outright if it has been re-run since.
-    </p>
+  return <PanelShell title={uiText(title)} sub={subject || undefined} onClose={onClose} wide>
+    <p className="muted">{uiText("A branch is a NEW experiment whose parent is the one you are reading and whose idea is the one you edit here. It is fenced by CONTENT, not by the point in the timeline you are standing at: it is accepted at the live tail as long as ")}{((subject ? `#${node.id}` : uiText('that experiment')))}{uiText(" is still the attempt shown above, and refused outright if it has been re-run since.")}</p>
     {accessRefusal
       ? <div className="notice" role="status">{accessRefusal}</div>
       : node?.id == null
         ? <div className="notice" role="status">{FORK_BLOCKED_REASONS.no_node}</div>
         : <>
           <div className="sf-field">
-            <label className="sf-label" htmlFor="fork-operator">Operator</label>
+            <label className="sf-label" htmlFor="fork-operator">{uiText("Operator")}</label>
             <div className="sf-input">
               <input id="fork-operator" className="text" value={operator} maxLength={120}
                 disabled={fenced || submitting}
@@ -177,7 +176,7 @@ export default function ForkFromSeqPanel({
             </div>
           </div>
           <div className="sf-field">
-            <label className="sf-label" htmlFor="fork-rationale">Rationale</label>
+            <label className="sf-label" htmlFor="fork-rationale">{uiText("Rationale")}</label>
             <div className="sf-input">
               <textarea id="fork-rationale" className="text" value={rationale} rows={4}
                 style={{ minHeight: 90 }} maxLength={20_000} disabled={fenced || submitting}
@@ -185,7 +184,7 @@ export default function ForkFromSeqPanel({
             </div>
           </div>
           <div className="sf-field">
-            <label className="sf-label" htmlFor="fork-params">Parameters (JSON object, or empty)</label>
+            <label className="sf-label" htmlFor="fork-params">{uiText("Parameters (JSON object, or empty)")}</label>
             <div className="sf-input">
               <textarea id="fork-params" className="text" value={paramsText} rows={8}
                 style={{ minHeight: 140 }} disabled={fenced || submitting}
@@ -200,35 +199,29 @@ export default function ForkFromSeqPanel({
               envelope, the Card, the hypothesis and the footprint deliberately are NOT (the reason
               is in FORK_IDEA_FIELDS). An operator who cannot see which is which will assume the
               branch is a copy. */}
-          <p className="muted">
-            The evaluation profile, timeout and search space are carried over unchanged. Concept
-            tags, the Card, the hypothesis and the footprint are not: a branch you authored is not
-            inside the Researcher's Card budget and carries no taxonomy you did not write.
-          </p>
+          <p className="muted">{uiText("The evaluation profile, timeout and search space are carried over unchanged. Concept tags, the Card, the hypothesis and the footprint are not: a branch you authored is not inside the Researcher's Card budget and carries no taxonomy you did not write.")}</p>
           {outcome && <div ref={noticeRef} tabIndex={-1} className="notice"
             role={outcome.kind === 'landed' ? 'status' : 'alert'}>
-            {outcome.text}
+            {uiText(outcome.text)}
             {/* The only affordance a MOVED refusal may offer. Retrying these bytes is refused
                 identically every time — what helps is reading the parent as it is now, which is a
                 different address, so this is a navigation and not a retry button. */}
             {outcome.failure?.moved && onOpenLive && <div style={{ marginTop: 8 }}>
               <button type="button" className="btn sm primary"
-                onClick={() => onOpenLive(outcome.failure.nodeId ?? node.id)}>
-                Return to live and re-read #{outcome.failure.nodeId ?? node.id}</button>
+                onClick={() => onOpenLive(outcome.failure.nodeId ?? node.id)}>{uiText("Return to live and re-read #")}{outcome.failure.nodeId ?? node.id}</button>
             </div>}
             {outcome.kind === 'landed' && onOpenLive && <div style={{ marginTop: 8 }}>
-              <button type="button" className="btn sm primary" onClick={() => onOpenLive(null)}>
-                Return to live</button>
+              <button type="button" className="btn sm primary" onClick={() => onOpenLive(null)}>{uiText("Return to live")}</button>
             </div>}
           </div>}
           <div className="row" style={{ display: 'flex', gap: 8, marginTop: 12 }}>
             <button type="button" className="btn primary"
               disabled={!!blocked || fenced || submitting}
               title={blocked || undefined} onClick={submit}>
-              {submitting ? 'Branching…' : 'Create branch'}
+              {((submitting ? uiText('Branching…') : uiText('Create branch')))}
             </button>
             <button type="button" className="btn ghost" onClick={onClose}>
-              {fenced ? 'Close' : 'Cancel'}
+              {((fenced ? uiText('Close') : uiText('Cancel')))}
             </button>
             {/* A disabled button explains nothing, and the commonest reason to be here is the one
                 worth saying out loud: an unedited copy is not a new experiment. */}

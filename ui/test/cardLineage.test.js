@@ -6,7 +6,7 @@
 // `freshness_unknown` — unbuildable by construction — rendered in the Kanban lanes beside 134 real
 // work items. On v5 that ratio was 5 of 5, i.e. a board that read as full with nothing to run.
 import assert from 'node:assert/strict'
-import { readFileSync } from 'node:fs'
+import { readSourceSync as readFileSync } from './_source.js'
 import { test } from 'node:test'
 import {
   CARD_KIND_DIRECTION, CARD_KIND_EXPERIMENT, UNFILED_GROUP_ID,

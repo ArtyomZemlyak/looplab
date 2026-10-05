@@ -1195,7 +1195,8 @@ class WatchService:
     def __init__(self, store: WatchStore, *, observe_run: Callable, run_turn_fn: Callable,
                  append_turn: Callable, observe_target: Optional[Callable] = None,
                  interval_s: float = 2.0, on_error: Optional[Callable] = None,
-                 session_exists: Optional[Callable] = None):
+                 session_exists: Optional[Callable] = None,
+                 language_fn: Optional[Callable] = None):
         self.store = store
         self.observe_run = observe_run          # run_id -> the read model's row (or None)
         self.observe_target = observe_target    # typed target -> bounded status projection
@@ -1204,6 +1205,7 @@ class WatchService:
         # session id -> True (there) / False (PROVABLY gone) / None (cannot tell). The third answer
         # is not a nicety: this one is wired to an irreversible delete. See `_sweep_orphaned_watches`.
         self.session_exists = session_exists
+        self.language_fn = language_fn
         self.interval_s = float(interval_s)
         self.on_error = on_error
         self._thread: Optional[threading.Thread] = None
@@ -1537,13 +1539,23 @@ class WatchService:
         touches the wake-up ladder nor gives this module any new authority. `notice: true` on the
         turn is what lets a renderer tell the two apart.
         """
+        try:
+            language = self.language_fn(record) if self.language_fn is not None else "auto"
+        except (OSError, ValueError):
+            language = "auto"  # settings read failure cannot suppress a stopped-monitor notice
+        from looplab.core.prose_locale import authored_text
+        waiting = record.get('waiting_for') or describe_trigger(record.get('trigger') or {})
+        content = (
+            f"[standing watch stopped] {reason}\n\n"
+            f"It was waiting for: {waiting}\n"
+            f"Its standing instruction was: {str(record.get('instruction') or '')[:400]}")
+        if language == "ru":
+            content = (f"[монитор остановлен] {authored_text(reason, language)}\n\n"
+                       f"Условие: {authored_text(waiting, language)}\n"
+                       f"Инструкция: {str(record.get('instruction') or '')[:400]}")
         turn = {
             "role": "assistant",
-            "content": (
-                f"[standing watch stopped] {reason}\n\n"
-                f"It was waiting for: "
-                f"{record.get('waiting_for') or describe_trigger(record.get('trigger') or {})}\n"
-                f"Its standing instruction was: {str(record.get('instruction') or '')[:400]}"),
+            "content": content,
             "watch": {"id": record.get("id"), "waiting_for": record.get("waiting_for"),
                       "status": record.get("status"), "notice": True},
             "steps": [], "applied": [], "todos": [],

@@ -1,3 +1,4 @@
+import { uiText, uiMessage, useUILanguage } from './uiLanguage.js'
 import React, { useEffect, useMemo, useRef } from 'react'
 import {
   ReactFlow, Background, Controls, Handle, MiniMap, Panel, Position, useReactFlow,
@@ -19,6 +20,8 @@ import { followClientRoute } from './accessibility.jsx'
 const RUN_W = 190, RUN_H = 80, RUN_DX = 214, ROW_DY = 122, INDENT = 64
 
 function RunNode({ data }) {
+  useUILanguage()
+
   const run = data.run
   // Concepts BEFORE themes, and never both. `themes` is the axis-truncated, legacy-backfilled grouping
   // signal (`events/digest.py::theme_rollup`): for a concept-tagged run it shows `loss` where the run
@@ -36,23 +39,23 @@ function RunNode({ data }) {
     <a className="run-node nodrag nopan" data-run-open-id={run.run_id}
          href={`#/run/${encodeURIComponent(run.run_id)}`}
          onClick={event => followClientRoute(event, open)}
-         aria-label={`Open ${run.label || run.run_id}, ${label}, ${run.task_id || 'unknown task'}`}
+         aria-label={uiMessage("Open {0}, {1}, {2}", [run.label || run.run_id, label, run.task_id || 'unknown task'])}
          title={run.goal}>
       <Handle type="source" position={Position.Right} style={{ opacity: 0 }} />
       <Handle type="target" position={Position.Left} style={{ opacity: 0 }} />
-      <div className="row"><span className={'pill phase ' + status}>{label}</span>
+      <div className="row"><span className={'pill phase ' + status}>{uiText(label)}</span>
         <b>{run.label || run.run_id}</b></div>
-      <div className="muted">{run.label ? `${run.run_id} · ` : ''}{run.task_id} · best {fmt(run.best_confirmed ?? run.best_metric)} {run.direction || ''}</div>
+      <div className="muted">{run.label ? `${run.run_id} · ` : ''}{run.task_id}{uiText(" · best ")}{fmt(run.best_confirmed ?? run.best_metric)} {run.direction || ''}</div>
       {concepts.length > 0 && <div className="chips">{concepts.slice(0, 4).map(([id, info]) =>
         // The LEAF segment is shown with the full path in the title: at map zoom a four-segment id is
         // unreadable, and the leaf is the discriminating part. The full id stays one hover away so the
         // chip is still a usable handle on the tree.
-        <span className="chip sm concept-chip" key={id} title={`${id} — best ${fmt(info.best_metric)}`}>
+        <span className="chip sm concept-chip" key={id} title={uiMessage("{0} — best {1}", [id, fmt(info.best_metric)])}>
           {id.split('/').pop()} <b>{info.count}</b></span>)}
         {concepts.length > 4 && <span className="chip sm muted"
           title={concepts.slice(4).map(([id]) => id).join('\n')}>+{concepts.length - 4}</span>}</div>}
       {themes.length > 0 && <div className="chips">{themes.slice(0, 4).map(([theme, info]) =>
-        <span className="chip sm" key={theme} title={`best ${fmt(info.best_metric)}`}>{theme} <b>{info.count}</b></span>)}</div>}
+        <span className="chip sm" key={theme} title={uiMessage("best {0}", [fmt(info.best_metric)])}>{theme} <b>{info.count}</b></span>)}</div>}
     </a>
   )
 }
@@ -68,11 +71,13 @@ export function sortedRunConcepts(run) {
 }
 
 function ProjRegion({ data }) {
+  useUILanguage()
+
   const toggle = () => data.onToggle(data.id)
   const tab = (
     <button type="button" className="grp-tab nodrag nopan"
          onClick={(event) => { event.stopPropagation(); toggle() }}
-         title={`Collapse ${data.name}`}>
+         title={uiMessage("Collapse {0}", [data.name])}>
       <span className="grp-chev">▾</span><OpIcon name="folder" className="t-ic" /> {data.name}<span className="grp-n">{data.count}</span>
     </button>
   )
@@ -80,14 +85,16 @@ function ProjRegion({ data }) {
 }
 
 function ProjSuper({ data }) {
+  useUILanguage()
+
   return (
-    <SuperShell tint={data.tint} onClick={() => data.onToggle(data.id)} title={`Expand ${data.name}`}>
+    <SuperShell tint={data.tint} onClick={() => data.onToggle(data.id)} title={uiMessage("Expand {0}", [data.name])}>
       <div className="row">
         <span className="grp-chev btn-chev">▸</span>
         <b className="grp-name"><OpIcon name="folder" className="t-ic" /> {data.name}</b>
         <span className="spacer" style={{ flex: 1 }} /><span className="grp-n">{data.count}</span>
       </div>
-      <div className="muted" style={{ marginTop: 3 }}>{data.runs} run{data.runs !== 1 ? 's' : ''} · expand to inspect</div>
+      <div className="muted" style={{ marginTop: 3 }}>{data.runs}{uiText(" run")}{data.runs !== 1 ? 's' : ''}{uiText(" · expand to inspect")}</div>
     </SuperShell>
   )
 }
@@ -190,6 +197,8 @@ export function buildGraph(projects, runs, collapsed, onOpen, onToggle) {
 }
 
 function FitVisible({ signature, initialViewport }) {
+  useUILanguage()
+
   const { fitView, setViewport } = useReactFlow()
   const initialViewportRef = useRef(initialViewport)
   useEffect(() => {
@@ -211,6 +220,8 @@ function FitVisible({ signature, initialViewport }) {
 
 export default function MapView({ onOpen, runs = [], projects = [], collapsed = new Set(), onToggle,
   scopeLabel = 'All runs', initialViewport = null, onViewportChange = null }) {
+  useUILanguage()
+
   const { nodes, edges } = useMemo(
     () => buildGraph(projects, runs, collapsed, onOpen, onToggle),
     [projects, runs, collapsed, onOpen, onToggle])
@@ -231,9 +242,9 @@ export default function MapView({ onOpen, runs = [], projects = [], collapsed = 
         <Controls showInteractive={false} />
         <MiniMap pannable zoomable className="run-minimap" nodeColor={node => node.type === 'run' ? 'var(--accent)' : 'var(--line-2)'} />
         <Panel position="top-left" className="map-summary">
-          <b>{runs.length} runs</b><span>{scopeLabel}</span>
-          <span>{runNodeCount} visible · {collapsedIds.length} collapsed cluster{collapsedIds.length === 1 ? '' : 's'}</span>
-          {collapsedIds.length > 0 && <button className="btn sm" onClick={() => collapsedIds.forEach(onToggle)}>Expand clusters</button>}
+          <b>{runs.length}{uiText(" runs")}</b><span>{scopeLabel}</span>
+          <span>{runNodeCount}{uiText(" visible · ")}{collapsedIds.length}{uiText(" collapsed cluster")}{collapsedIds.length === 1 ? '' : 's'}</span>
+          {collapsedIds.length > 0 && <button className="btn sm" onClick={() => collapsedIds.forEach(onToggle)}>{uiText("Expand clusters")}</button>}
         </Panel>
       </ReactFlow>
     </div>

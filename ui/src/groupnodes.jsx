@@ -1,3 +1,4 @@
+import { uiText, uiMessage, useUILanguage } from './uiLanguage.js'
 import React from 'react'
 
 // Shared chrome for the "group" visual language used by BOTH the in-run canvas (Dag.jsx) and the
@@ -7,6 +8,8 @@ import React from 'react'
 // Soft enclosing hull behind a group; `tab` is the (interactive) label the caller wires. Used by the
 // cross-run Map (MapView.jsx); the in-run canvas (Dag.jsx) uses the slimmer GroupRegion below.
 export function RegionShell({ w, h, path, tint, tab }) {
+  useUILanguage()
+
   return (
     <div className="grp-region" style={{ width: w, height: h, '--grp-tint': tint }}>
       <svg width={w} height={h} aria-hidden="true" focusable="false"><path d={path} className="grp-hull" /></svg>
@@ -24,6 +27,8 @@ export function GroupRegion({
   w, h, label, count, totalCount, matchedCount = count,
   filterActive = false, filterDescription = null, tint, onToggle,
 }) {
+  useUILanguage()
+
   const splitAcrossBands = Number.isFinite(totalCount) && totalCount > count
   const countText = filterActive
     ? `${matchedCount}/${count}${splitAcrossBands ? ' · split' : ''}`
@@ -40,10 +45,10 @@ export function GroupRegion({
       style={{ width: w, height: h, '--grp-tint': tint }}>
       <button type="button" className="grp-pill"
         onClick={(e) => { e.stopPropagation(); onToggle && onToggle(label) }}
-        aria-label={`Collapse group ${label}; ${countDescription}`}
-        title={`${countDescription}. Collapse group`}>
+        aria-label={uiMessage("Collapse group {0}; {1}", [label, countDescription])}
+        title={uiMessage("{0}. Collapse group", [countDescription])}>
         <span className="grp-chev">▾</span>
-        <span className="grp-pill-label">{label}</span>
+        <span className="grp-pill-label">{uiText(label)}</span>
         <span className="grp-n">{countText}</span>
       </button>
     </div>
@@ -52,12 +57,14 @@ export function GroupRegion({
 
 // Collapsed-group card shell. Caller supplies the body (children) and the click/selected state.
 export function SuperShell({ tint, selected, dimmed = false, onClick, title, selectKey, children }) {
+  useUILanguage()
+
   return (
     <div className={'grp-super' + (selected ? ' sel' : '') + (dimmed ? ' dim' : '')} style={{ '--grp-tint': tint }}
          title={title}>
       {onClick && <button type="button" className="grp-super-select" onClick={onClick}
         data-group-select-key={selectKey == null ? undefined : String(selectKey)}
-        aria-label={title || 'Open collapsed group'} aria-pressed={!!selected} />}
+        aria-label={((title || uiText('Open collapsed group')))} aria-pressed={!!selected} />}
       {children}
     </div>
   )

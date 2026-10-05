@@ -1,3 +1,4 @@
+import { uiText, useUILanguage } from './uiLanguage.js'
 import React, { lazy } from 'react'
 import GlobalMenu from './GlobalMenu.jsx'
 import LazyBoundary from './LazyBoundary.jsx'
@@ -18,6 +19,8 @@ const GpuPanel = lazyNamed('GpuPanel')
 const BODY = { memory: MemoryPanel, knowledge: AuthoringPanel, gpu: GpuPanel }
 
 export default function InstallationView({ view, onBack }) {
+  useUILanguage()
+
   const destination = globalDestination(view)
   const Body = BODY[view]
   const [toast, showToast] = useToast()
@@ -25,9 +28,9 @@ export default function InstallationView({ view, onBack }) {
   return <div className="app">
     <div className="topbar">
       <GlobalMenu current={view} />
-      <button className="btn sm ghost" onClick={onBack}>← runs</button>
-      <span className="ttl" style={{ fontWeight: 700, fontSize: 15 }}>{destination.label}</span>
-      <span className="muted">{destination.title}</span>
+      <button className="btn sm ghost" onClick={onBack}>{uiText("← runs")}</button>
+      <span className="ttl" style={{ fontWeight: 700, fontSize: 15 }}>{uiText(destination.label)}</span>
+      <span className="muted">{uiText(destination.title)}</span>
       <span className="spacer" style={{ flex: 1 }} />
     </div>
     <main className="installation-page" data-route-main tabIndex={-1}>
@@ -39,6 +42,6 @@ export default function InstallationView({ view, onBack }) {
         </LazyBoundary>
       </PanelPresentationContext.Provider>
     </main>
-    {toast && <div className="toast" role="status" aria-live="polite">{toast}</div>}
+    {toast && <div className="toast" role="status" aria-live="polite">{uiText(toast)}</div>}
   </div>
 }

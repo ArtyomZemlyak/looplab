@@ -1,3 +1,4 @@
+import { uiText, useUILanguage } from './uiLanguage.js'
 import React, { useEffect, useRef, useState } from 'react'
 import { get, runApiPath } from './util.js'
 import { useScopedResource } from './useScopedResource.js'
@@ -10,6 +11,8 @@ import { harnessText } from './harnessText.js'
 import LazyBoundary from './LazyBoundary.jsx'
 
 export default function HarnessHandoff({ runId, generation, seq, defaultOpen = false, focusOrigin = null }) {
+  useUILanguage()
+
   const [language] = useAssistantLanguage()
   const t = text => harnessText(language, text)
   const [open, setOpen] = useState(defaultOpen)
@@ -59,14 +62,14 @@ export default function HarnessHandoff({ runId, generation, seq, defaultOpen = f
       {value && fresh && <>
         <dl>
           <dt>{t('UI / API server')}</dt><dd>{url}</dd>
-          <dt>{t('Run')}</dt><dd>{value.run_id} · external harness</dd>
+          <dt>{t('Run')}</dt><dd>{value.run_id}{uiText(" · external harness")}</dd>
           <dt>{t('Run root on server')}</dt><dd>{value.server_paths.run_root}</dd>
           <dt>{t('Run directory')}</dt><dd>{value.server_paths.run_dir}</dd>
           <dt>{t('Engine probe')}</dt><dd>{value.engine_running === null ? t('Unknown') : value.engine_running ? t('Alive at last read') : t('Stopped at last read')}{t(' · agent connection is not measured')}</dd>
         </dl>
         <h4>{t('1. Configure the MCP process')}</h4>
         <label>{t('MCP client ')}<select value={client} onChange={event => { setClient(event.target.value); setCopied(null) }}>
-          <option value="codex">Codex</option><option value="claude">Claude Code</option>
+          <option value="codex">{uiText("Codex")}</option><option value="claude">{uiText("Claude Code")}</option>
           <option value="generic">{t('Other MCP client')}</option></select></label>
         <pre>{harnessMcpDescriptor(url, client)}</pre>
         <button type="button" className="btn sm" onClick={copyConfig}>{t('Copy MCP configuration')}</button>

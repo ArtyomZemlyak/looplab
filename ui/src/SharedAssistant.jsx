@@ -1,3 +1,5 @@
+import { uiText, uiMessage, useUILanguage } from './uiLanguage.js'
+import LanguageControl from './LanguageControl.jsx'
 import React, { useCallback, useEffect, useId, useRef, useState } from 'react'
 import { deadlineSharedAssistant, fmtDate } from './util.js'
 import { Turn } from './AssistantChat.jsx'
@@ -91,15 +93,15 @@ const sharedLoadFailure = error => {
   }
   return {
     terminal: false,
-    message: error?.name === 'TimeoutError'
-      ? 'Shared chat loading timed out. Check your connection and retry.'
-      : 'Shared chat could not be loaded. Retry when the service is reachable.',
+    message: (error?.name === 'TimeoutError' ? uiText('Shared chat loading timed out. Check your connection and retry.') : uiText('Shared chat could not be loaded. Retry when the service is reachable.')),
   }
 }
 
 // Read-only view of a shared assistant session (opened via a share link). No composer, no tools —
 // just the transcript.
 export default function SharedAssistant({ sid }) {
+  useUILanguage()
+
   const [resource, setResource] = useState({ status: 'loading', data: null, error: '' })
   const dataRef = useRef(null)
   const mountedRef = useRef(false)
@@ -186,41 +188,38 @@ export default function SharedAssistant({ sid }) {
     aria-labelledby={titleId} aria-describedby={statusId}>
     <div className="asst-main">
       <div className="asst-main-h">
-        <h1 id={titleId} className="ttl" style={{ flex: 1 }}>{sess?.meta.title || 'Shared chat'}</h1>
+        <h1 id={titleId} className="ttl" style={{ flex: 1 }}>{((sess?.meta.title || uiText('Shared chat')))}</h1>
+        <LanguageControl />
         <div className="asst-shared-terms" role="note">
-          <span className="pill">{sess ? (liveShare ? 'live · read-only' : 'frozen snapshot · read-only') : 'public · read-only'}</span>
+          <span className="pill">{((sess ? (liveShare ? uiText('live · read-only') : uiText('frozen snapshot · read-only')) : uiText('public · read-only')))}</span>
           {/* Number guard, not a truth test: `expiry` is epoch seconds, so its falsy value is a real
               instant (1970) and `0 && <span/>` renders a bare `0` beside the share pill. Same shape
               as the Card board's `||`-chain zero. */}
-          {typeof expiry === 'number' && <span className="muted">Expires <time dateTime={new Date(expiry * 1000).toISOString()}>
+          {typeof expiry === 'number' && <span className="muted">{uiText("Expires ")}<time dateTime={new Date(expiry * 1000).toISOString()}>
             {fmtDate(expiry)}</time></span>}
         </div>
         {sess && <button className="btn sm" type="button" disabled={refreshing}
-          title={liveShare ? 'Load newly shared messages' : 'Recheck whether this frozen link is still available'}
-          onClick={event => loadFromControl(event, true)}>{refreshing ? 'Refreshing…'
-            : liveShare ? 'Refresh messages' : 'Recheck link'}</button>}
+          title={((liveShare ? uiText('Load newly shared messages') : uiText('Recheck whether this frozen link is still available')))}
+          onClick={event => loadFromControl(event, true)}>{((refreshing ? uiText('Refreshing…') : (liveShare ? uiText('Refresh messages') : uiText('Recheck link'))))}</button>}
       </div>
       <div id={statusId} className="sr-only" role="status" aria-live="polite" aria-atomic="true">
-        {statusMessage}
+        {uiText(statusMessage)}
       </div>
-      <div className="asst-feed" role="log" aria-live="off" aria-label="Shared Assistant transcript"
+      <div className="asst-feed" role="log" aria-live="off" aria-label={uiText("Shared Assistant transcript")}
         aria-busy={resource.status === 'loading' || refreshing ? 'true' : undefined} tabIndex={0}>
-        {truncated && <div className="notice" role="note">
-          This public transcript reached its safety limit. Some messages or details are not included.
-        </div>}
-        {resource.status === 'loading' && <div className="notice">Loading shared chat…</div>}
-        {refreshing && <div className="notice">Refreshing shared chat…</div>}
+        {truncated && <div className="notice" role="note">{uiText("This public transcript reached its safety limit. Some messages or details are not included.")}</div>}
+        {resource.status === 'loading' && <div className="notice">{uiText("Loading shared chat…")}</div>}
+        {refreshing && <div className="notice">{uiText("Refreshing shared chat…")}</div>}
         {(resource.status === 'error' || resource.status === 'stale' || resource.status === 'gone') && <div
           className="notice" role="alert"
           style={{ borderColor: 'var(--fail)', color: 'var(--fg)' }}>
-          <p>{resource.status === 'stale'
-            ? `${resource.error} Showing the last loaded transcript.` : resource.error}</p>
+          <p>{(resource.status === 'stale' ? uiMessage("{0} Showing the last loaded transcript.", [resource.error]) : resource.error)}</p>
           {resource.status !== 'gone'
-            && <button className="btn sm" type="button" onClick={retry}>Retry</button>}
+            && <button className="btn sm" type="button" onClick={retry}>{uiText("Retry")}</button>}
         </div>}
         {sess && sess.messages.map((message, index) => <Turn key={index} m={message}
           readOnly audience="public" />)}
-        {sess && messageCount === 0 && <div className="muted">This shared snapshot has no complete turns.</div>}
+        {sess && messageCount === 0 && <div className="muted">{uiText("This shared snapshot has no complete turns.")}</div>}
       </div>
     </div>
   </main>

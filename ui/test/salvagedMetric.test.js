@@ -12,7 +12,7 @@
 // wrong. The exclusion is real; the accusation is not, and they are separable.
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { readFileSync } from 'node:fs'
+import { readSourceSync as readFileSync } from './_source.js'
 import { isSalvagedMetricViolation, nodeFeasibilityStatus } from '../src/trustSemantics.js'
 
 const salvaged = (extra = {}) => ({

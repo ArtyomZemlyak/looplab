@@ -1,3 +1,4 @@
+import { uiMessage } from './uiLanguage.js'
 import { normalizeConceptId } from './conceptId.js'
 
 const canonical = value => {
@@ -17,5 +18,5 @@ export function crossRunPriorNarration(data) {
   const history = runCount
     ? `${runCount} retained run${runCount === 1 ? '' : 's'}`
     : 'match recorded'
-  return `cross-run prior${labels ? ': ' + labels : ''} — ${history} · evidence completeness unknown`
+  return uiMessage("cross-run prior{0} — {1} · evidence completeness unknown", [labels ? ': ' + labels : '', history])
 }

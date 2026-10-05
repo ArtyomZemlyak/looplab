@@ -1,3 +1,4 @@
+import { uiText, uiMessage, useUILanguage } from './uiLanguage.js'
 import React, { useEffect, useId, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import UpstreamPanel from './UpstreamPanel.jsx'
 import { deadlineGet, get, post, fmt, fmtInt, fmtBytes, fmtElapsedSeconds, CONTROL,
@@ -53,7 +54,7 @@ import {
 
 export { default as Panel } from './PanelShell.jsx'
 
-const Stat = ({ n, l }) => <div className="stat"><div className="n">{n}</div><div className="l">{l}</div></div>
+const Stat = ({ n, l }) => { useUILanguage(); return (<div className="stat"><div className="n">{n}</div><div className="l">{l}</div></div>) }
 
 function overviewHintPreview(text) {
   const plain = stripMd(text || '').trim()
@@ -65,14 +66,16 @@ function overviewHintPreview(text) {
 }
 
 const MetricGauge = ({ value, max = 100, hot = false, label, valueText }) => {
+  useUILanguage()
+
   const numericValue = typeof value === 'number' && Number.isFinite(value) ? value : null
   const numericMax = typeof max === 'number' && Number.isFinite(max) && max > 0 ? max : null
   if (numericValue == null || numericMax == null) {
-    return <span className="muted" aria-label={`${label} unavailable`}>unavailable</span>
+    return <span className="muted" aria-label={uiMessage("{0} unavailable", [label])}>{uiText("unavailable")}</span>
   }
   const safeValue = Math.max(0, Math.min(numericMax, numericValue))
   return <div className="gauge">
-    <div className="bar" role="progressbar" aria-label={label} aria-valuemin={0}
+    <div className="bar" role="progressbar" aria-label={uiText(label)} aria-valuemin={0}
       aria-valuemax={numericMax} aria-valuenow={safeValue} aria-valuetext={valueText}>
       <div className={'fill' + (hot ? ' hot' : '')}
         style={{ width: `${safeValue / numericMax * 100}%` }} />
@@ -437,6 +440,8 @@ function usePanelResource(loader, normalize = value => value, key = '', pollMs =
 
 // At-a-glance run facts derive from the folded state; RunView supplies the authoritative eval ceiling.
 export function OverviewPanel({ state, maxEval, phase, runState, onClose, onOpenPanel, onReadReport }) {
+  useUILanguage()
+
   const nodes = Object.values(activeNodeMap(state.nodes || {}, state))
   const analysis = analyze(state)
   const result = verdict(state, analysis)
@@ -462,65 +467,62 @@ export function OverviewPanel({ state, maxEval, phase, runState, onClose, onOpen
     requestAnimationFrame(() => window.dispatchEvent(new CustomEvent('ll:focus-assistant')))
   }
   return (
-    <Panel title="Overview" sub={state.label || state.run_id || state.task_id || ''} onClose={onClose} wide className="overview-panel">
+    <Panel title={uiText("Overview")} sub={state.label || state.run_id || state.task_id || ''} onClose={onClose} wide className="overview-panel">
       <UpstreamPanel state={state} onClose={onClose} />
       <div className="ov-summary">
         <div className="ov-best">
-          <span className="ov-label">Selected result</span>
+          <span className="ov-label">{uiText("Selected result")}</span>
           <strong>{best ? fmt(best.confirmed_mean ?? best.metric) : '—'}</strong>
-          <span className="ov-sub">{best ? `Node #${best.id} · ${measurement.label}` : 'No eligible result selected'}
+          <span className="ov-sub">{((best ? uiMessage("Node #{0} · {1}", [best.id, measurement.label]) : uiText('No eligible result selected')))}
             {state.direction && ` · ${state.direction === 'min' ? 'minimize' : state.direction === 'max' ? 'maximize' : state.direction}`}</span>
         </div>
         <div className="ov-run-facts">
-          <div><span className="ov-label">Run state</span><strong>{runState || (state.paused ? 'paused' : state.finished ? 'finished' : '—')}</strong></div>
-          <div><span className="ov-label">Phase</span><strong>{phase || state.phase || '—'}</strong></div>
-          <div><span className="ov-label">Experiments</span><strong>{evaluated} evaluated <span className="ov-fact-muted">/ {nodes.length} nodes</span></strong></div>
-          <div><span className="ov-label">Failures</span><strong>{failed}</strong></div>
+          <div><span className="ov-label">{uiText("Run state")}</span><strong>{((runState || (state.paused ? uiText('paused') : (state.finished ? uiText('finished') : '—'))))}</strong></div>
+          <div><span className="ov-label">{uiText("Phase")}</span><strong>{phase || state.phase || '—'}</strong></div>
+          <div><span className="ov-label">{uiText("Experiments")}</span><strong>{evaluated}{uiText(" evaluated ")}<span className="ov-fact-muted">/ {nodes.length}{uiText(" nodes")}</span></strong></div>
+          <div><span className="ov-label">{uiText("Failures")}</span><strong>{failed}</strong></div>
         </div>
       </div>
-      <section className="ov-section" aria-label="Result interpretation">
-        <h3>Result interpretation</h3><p>{result.headline}</p>
-        <p className="muted">{result.nextStep}</p>
-        {onReadReport && <button type="button" className="btn xs ghost" onClick={onReadReport}>Read Report</button>}
+      <section className="ov-section" aria-label={uiText("Result interpretation")}>
+        <h3>{uiText("Result interpretation")}</h3><p>{uiText(result.headline)}</p>
+        <p className="muted">{uiText(result.nextStep)}</p>
+        {onReadReport && <button type="button" className="btn xs ghost" onClick={onReadReport}>{uiText("Read Report")}</button>}
       </section>
-      <section className="ov-section ov-budget" aria-label="Evaluation time">
-        <div className="ov-section-head"><h3>Evaluation time</h3>
+      <section className="ov-section ov-budget" aria-label={uiText("Evaluation time")}>
+        <div className="ov-section-head"><h3>{uiText("Evaluation time")}</h3>
           <strong>{evalSec == null ? '—' : fmtElapsedSeconds(evalSec)}{evalLimit != null && ` / ${fmtElapsedSeconds(evalLimit)}`}</strong></div>
-        {evalPercent != null && <div className="ov-budget-bar" role="progressbar" aria-label="Evaluation budget used"
+        {evalPercent != null && <div className="ov-budget-bar" role="progressbar" aria-label={uiText("Evaluation budget used")}
           aria-valuemin={0} aria-valuemax={evalLimit} aria-valuenow={Math.min(evalSec, evalLimit)}
           aria-valuetext={`${fmtElapsedSeconds(evalSec)} of ${fmtElapsedSeconds(evalLimit)} used`}>
           <span style={{ width: `${evalPercent}%` }} /></div>}
-        <div className="ov-budget-note">{evalLimit == null ? 'Evaluation-time limit unavailable' : evalSec == null
-          ? 'Remaining time unavailable' : evalSec > evalLimit
-          ? `Over limit by ${fmtElapsedSeconds(evalSec - evalLimit)}`
-          : `${fmtElapsedSeconds(Math.max(0, evalLimit - evalSec))} remaining`}
-          {cost?.total_tokens != null && <span> · {fmtInt(cost.total_tokens)} tokens</span>}</div>
+        <div className="ov-budget-note">{((evalLimit == null ? uiText('Evaluation-time limit unavailable') : (evalSec == null ? uiText('Remaining time unavailable') : evalSec > evalLimit ? uiMessage("Over limit by {0}", [fmtElapsedSeconds(evalSec - evalLimit)]) : uiMessage("{0} remaining", [fmtElapsedSeconds(Math.max(0, evalLimit - evalSec))]))))}
+          {cost?.total_tokens != null && <span> · {fmtInt(cost.total_tokens)}{uiText(" tokens")}</span>}</div>
       </section>
-      {(rewardFlags > 0 || duplicates > 0) && <section className="ov-section ov-signals" aria-label="Review signals">
-        <h3>Review signals</h3>
+      {(rewardFlags > 0 || duplicates > 0) && <section className="ov-section ov-signals" aria-label={uiText("Review signals")}>
+        <h3>{uiText("Review signals")}</h3>
         <div className="ov-signal-list">
           {rewardFlags > 0 && <button type="button" className="ov-signal ov-signal-alert" onClick={() => onOpenPanel?.('trust')}>
-            <OpIcon name="alert" size={15} /> {rewardFlags} suspicious {rewardFlags === 1 ? 'result' : 'results'} <span>Open Trust →</span></button>}
-          {duplicates > 0 && <div className="ov-signal"><OpIcon name="replay" size={15} /> {duplicates} near-duplicate {duplicates === 1 ? 'proposal' : 'proposals'}</div>}
+            <OpIcon name="alert" size={15} /> {rewardFlags}{uiText(" suspicious ")}{((rewardFlags === 1 ? uiText('result') : uiText('results')))} <span>{uiText("Open Trust →")}</span></button>}
+          {duplicates > 0 && <div className="ov-signal"><OpIcon name="replay" size={15} /> {duplicates}{uiText(" near-duplicate ")}{((duplicates === 1 ? uiText('proposal') : uiText('proposals')))}</div>}
         </div>
       </section>}
-      {hints.length > 0 && <section className="ov-section ov-directions" aria-label="Saved hints">
-        <div className="ov-section-head"><h3><OpIcon name="bulb" size={15} /> Saved hints</h3><span className="ov-count">{hints.length}</span></div>
-        <div className="ov-latest"><span className="ov-label">Latest hint</span>
-          <p>{latestHintLead || 'No text available'}</p></div>
-        {hints.length > 1 && <details className="ov-details"><summary>Show all {hints.length} hints</summary>
-          <ol className="ov-hints">{hints.map((hint, i) => <li key={i}>{stripMd(hintText(hint)) || 'No text available'}</li>)}</ol>
+      {hints.length > 0 && <section className="ov-section ov-directions" aria-label={uiText("Saved hints")}>
+        <div className="ov-section-head"><h3><OpIcon name="bulb" size={15} />{uiText(" Saved hints")}</h3><span className="ov-count">{hints.length}</span></div>
+        <div className="ov-latest"><span className="ov-label">{uiText("Latest hint")}</span>
+          <p>{((latestHintLead || uiText('No text available')))}</p></div>
+        {hints.length > 1 && <details className="ov-details"><summary>{uiText("Show all ")}{hints.length}{uiText(" hints")}</summary>
+          <ol className="ov-hints">{hints.map((hint, i) => <li key={i}>{((stripMd(hintText(hint)) || uiText('No text available')))}</li>)}</ol>
         </details>}
-        {hints.length === 1 && latestHintLead !== latestHintPlain && <details className="ov-details"><summary>Read full hint</summary>
+        {hints.length === 1 && latestHintLead !== latestHintPlain && <details className="ov-details"><summary>{uiText("Read full hint")}</summary>
           <p className="ov-hint-full">{latestHintPlain}</p></details>}
       </section>}
-      {strat && <section className="ov-section ov-strategy" aria-label="Search strategy">
-        <div className="ov-section-head"><h3><OpIcon name="compass" size={15} /> Search strategy</h3>
+      {strat && <section className="ov-section ov-strategy" aria-label={uiText("Search strategy")}>
+        <div className="ov-section-head"><h3><OpIcon name="compass" size={15} />{uiText(" Search strategy")}</h3>
           <strong>{(strat.policy || 'greedy') + (strat.fidelity ? ' / ' + strat.fidelity : '')}</strong></div>
-        {strat.rationale && <details className="ov-details"><summary>Why this strategy?</summary>
+        {strat.rationale && <details className="ov-details"><summary>{uiText("Why this strategy?")}</summary>
           <p className="ov-why">{strat.rationale}</p></details>}
       </section>}
-      <div className="ov-footer"><button type="button" className="btn" onClick={discuss}>Discuss in Assistant</button></div>
+      <div className="ov-footer"><button type="button" className="btn" onClick={discuss}>{uiText("Discuss in Assistant")}</button></div>
     </Panel>
   )
 }
@@ -528,6 +530,8 @@ export function OverviewPanel({ state, maxEval, phase, runState, onClose, onOpen
 // Deep-research drawer: keep history reachable while reading a long memo. Directions post standing
 // hints for the next proposal; they do not start an experiment.
 export function ResearchPanel({ state, runId, onToast, onClose, onSelect, onSelectEvidence }) {
+  useUILanguage()
+
   const memoProjection = useMemo(() => normalizeResearchMemos(state.research), [state.research])
   const memos = [...memoProjection.memos].reverse()   // newest retained first
   const newestMemoIndex = memos[0]?.sourceIndex ?? null
@@ -569,45 +573,39 @@ export function ResearchPanel({ state, runId, onToast, onClose, onSelect, onSele
   const latestSelected = selectedMemo?.sourceIndex === newestMemoIndex
   const finished = state.phase === 'finished'
   return (
-    <Panel title="Deep research" sub={memos.length ? `${memos.length} memo${memos.length === 1 ? '' : 's'}` : 'none yet'} onClose={onClose}
+    <Panel title={uiText("Deep research")} sub={memos.length ? `${memos.length} memo${memos.length === 1 ? '' : 's'}` : 'none yet'} onClose={onClose}
       size={memos.length ? 'board' : undefined} className={`research-panel${memos.length ? '' : ' empty'}`}>
       {!memos.length && <div className="research-empty-state" role="status">
-        <div><OpIcon name="search" size={16} /><strong>No research memos yet</strong></div>
-        <p>Deep research runs on the configured cadence or when the Strategist requests it.</p>
-        <details><summary>Why can this be empty?</summary>
-          <p>The run may not have created its first experiment, the LLM backend may be unavailable,
-            or <code>deep_research_every</code> may be set to <code>-1</code>.</p>
+        <div><OpIcon name="search" size={16} /><strong>{uiText("No research memos yet")}</strong></div>
+        <p>{uiText("Deep research runs on the configured cadence or when the Strategist requests it.")}</p>
+        <details><summary>{uiText("Why can this be empty?")}</summary>
+          <p>{uiText("The run may not have created its first experiment, the LLM backend may be unavailable, or ")}<code>{"deep_research_every"}</code>{uiText(" may be set to ")}<code>-1</code>.</p>
         </details>
       </div>}
-      {memoProjection.omitted > 0 && <div className="muted">
-        Showing {memos.length} of {memoProjection.total} newest valid memos; older, malformed, or over-budget entries are omitted.
-      </div>}
+      {memoProjection.omitted > 0 && <div className="muted">{uiText("Showing ")}{memos.length}{uiText(" of ")}{memoProjection.total}{uiText(" newest valid memos; older, malformed, or over-budget entries are omitted.")}</div>}
       {selectedMemo && <div className={`research-workspace${memos.length === 1 ? ' single' : ''}`}>
-        {memos.length > 1 && <nav className="research-history" aria-label="Research memos">
-          <div className="research-history-title">Memo history <span>{memos.length}</span></div>
+        {memos.length > 1 && <nav className="research-history" aria-label={uiText("Research memos")}>
+          <div className="research-history-title">{uiText("Memo history ")}<span>{memos.length}</span></div>
           {memos.map((memo, index) => {
             const trust = researchMemoTrust(memo)
             return <button type="button" key={memo.sourceIndex}
               className={`research-history-item${memo.sourceIndex === selectedMemo.sourceIndex ? ' selected' : ''}`}
               aria-current={memo.sourceIndex === selectedMemo.sourceIndex ? 'true' : undefined}
               onClick={() => selectMemo(memo.sourceIndex)}>
-              <span className="research-history-meta">#{memo.sourceIndex + 1}{index === 0 ? ' · latest' : ''}
-                {memo.at_node != null ? ` · after ${memo.at_node} experiments` : ''}</span>
-              <span className="research-history-lead">{memoLead(memo.summary) || 'No conclusion was recorded.'}</span>
-              <span className={`research-history-trust tone-${trust.tone}`}>{trust.label}</span>
+              <span className="research-history-meta">#{memo.sourceIndex + 1}{((index === 0 ? uiText(' · latest') : ''))}
+                {(memo.at_node != null ? uiMessage(" · after {0} experiments", [memo.at_node]) : '')}</span>
+              <span className="research-history-lead">{((memoLead(memo.summary) || uiText('No conclusion was recorded.')))}</span>
+              <span className={`research-history-trust tone-${trust.tone}`}>{uiText(trust.label)}</span>
             </button>
           })}
         </nav>}
         <div className="research-reading" ref={readingRef}>
           <div className="research-reading-toolbar">
-            <span>Memo #{selectedMemo.sourceIndex + 1} of {memoProjection.total}</span>
+            <span>{uiText("Memo #")}{selectedMemo.sourceIndex + 1}{uiText(" of ")}{memoProjection.total}</span>
             <button type="button" className="btn sm" onClick={discussMemo}>
-              <OpIcon name="chat" size={14} /> Discuss in Assistant
-            </button>
+              <OpIcon name="chat" size={14} />{uiText(" Discuss in Assistant")}</button>
           </div>
-          {!latestSelected && <p className="research-history-notice" role="note">
-            Historical memo. Newer research may supersede these directions; select the latest memo to steer.
-          </p>}
+          {!latestSelected && <p className="research-history-notice" role="note">{uiText("Historical memo. Newer research may supersede these directions; select the latest memo to steer.")}</p>}
           <ResearchMemoCard key={selectedMemo.sourceIndex} memo={selectedMemo}
           memoNumber={selectedMemo.sourceIndex + 1} latest={latestSelected}
           staticOpen variant="panel" normalized
@@ -623,16 +621,20 @@ export function ResearchPanel({ state, runId, onToast, onClose, onSelect, onSele
 }
 
 function TrustState({ value, action = null }) {
+  useUILanguage()
+
   const icon = value.tone === 'alarm' ? 'alert' : value.tone === 'ok' ? 'check' : 'dot'
   return <div className={`trust-state ${value.tone}`} role={value.tone === 'alarm' ? 'alert' : 'status'}>
     <OpIcon name={icon} size={14} />
-    <strong>{value.label}</strong>
+    <strong>{uiText(value.label)}</strong>
     <span>{value.detail}</span>
     {action && <div className="trust-state-actions">{action}</div>}
   </div>
 }
 
 export function TrustPanel({ state, runId, onClose, onSelect, onToast, readOnly = false }) {
+  useUILanguage()
+
   // Trust coverage is only verifiable against the detector config, so this panel DOES render the
   // failure message — hence its own classifier. It bounds the read at the panel deadline like every
   // sibling panel: before doc 25 UI-06 this was the one config read with no deadline at all, and a
@@ -672,9 +674,7 @@ export function TrustPanel({ state, runId, onClose, onSelect, onToast, readOnly 
       ? 'warn' : 'ok'
   const trustSummary = {
     tone: trustSummaryTone,
-    label: trustSummaryTone === 'alarm' ? 'Review flagged evidence before using this result'
-      : trustSummaryTone === 'warn' ? 'Trust coverage needs review'
-        : 'Recorded trust checks found no flagged issue',
+    label: (trustSummaryTone === 'alarm' ? uiText('Review flagged evidence before using this result') : (trustSummaryTone === 'warn' ? uiText('Trust coverage needs review') : uiText('Recorded trust checks found no flagged issue'))),
     detail: [
       robust ? `Winner: ${robust.confirmed_mean != null ? 'multi-seed confirmed' : 'single evaluation'}`
         : 'Winner: unavailable',
@@ -684,24 +684,23 @@ export function TrustPanel({ state, runId, onClose, onSelect, onToast, readOnly 
     ].join(' · '),
   }
   return (
-    <Panel title="Trust & rigor" sub="evidence and coverage" onClose={onClose} wide>
+    <Panel title={uiText("Trust & rigor")} sub="evidence and coverage" onClose={onClose} wide>
       <div className="trust-panel-body">
       {configLoading && <TrustState value={{ tone: 'loading', label: 'Loading detector configuration', detail: 'Checking which trust controls were actually enabled for this run.' }} />}
       {configResource.status === 'error' && !configLoading && <TrustState
         value={{ tone: 'unknown', label: 'Detector configuration unavailable', detail: `Coverage cannot be verified: ${configResource.error}` }}
-        action={<button className="btn sm" onClick={() => configResource.retry()}>Retry</button>} />}
+        action={<button className="btn sm" onClick={() => configResource.retry()}>{uiText("Retry")}</button>} />}
       <div className="trust-overview">
         <TrustState value={trustSummary} action={flaggedCount > 0
           ? <button type="button" className="btn sm"
-              onClick={() => rewardSignalsRef.current?.scrollIntoView({ block: 'start' })}>
-              Review {flaggedCount} flagged {flaggedCount === 1 ? 'node' : 'nodes'}
+              onClick={() => rewardSignalsRef.current?.scrollIntoView({ block: 'start' })}>{uiText("Review ")}{flaggedCount}{uiText(" flagged ")}{((flaggedCount === 1 ? uiText('node') : uiText('nodes')))}
             </button> : null} />
       </div>
       {state.host_grading
         ? <TrustState value={{ tone: 'ok', label: 'Host-side grading recorded', detail: `The candidate writes predictions only; ${state.host_grading.scorer || 'the host scorer'} evaluates ${state.host_grading.n_labels ?? 'held-out'} labels outside the candidate process.` }} />
         : <TrustState value={{ tone: 'warn', label: 'Metric is not host-graded', detail: 'This run does not record an out-of-process grader, so the displayed metric may be self-reported by the candidate process.' }} />}
       <details className="trust-config-details">
-        <summary>Detector configuration</summary>
+        <summary>{uiText("Detector configuration")}</summary>
         <div className="cardgrid">
           <Stat n={cfg?.trust_mode || (configLoading ? 'Loading…' : 'Unknown')} l="sandbox tier" />
           <Stat n={cfg?.eval_trust_mode || (configLoading ? 'Loading…' : 'Unknown')} l="eval trust mode" />
@@ -710,7 +709,7 @@ export function TrustPanel({ state, runId, onClose, onSelect, onToast, readOnly 
         </div>
       </details>
 
-      <div className="section-h">Seed-luck and robustness</div>
+      <div className="section-h">{uiText("Seed-luck and robustness")}</div>
       {robust && naive
         ? <>
           <TrustState value={robust.confirmed_mean != null
@@ -721,55 +720,51 @@ export function TrustPanel({ state, runId, onClose, onSelect, onToast, readOnly 
             ? { tone: 'ok', label: 'Winner is multi-seed confirmed', detail: `${typeof robust.confirmed_seeds === 'number' ? robust.confirmed_seeds : 'Multiple'} successful seeds produced ${fmt(robust.confirmed_mean)} ±${fmt(robust.confirmed_std)}.` }
             : { tone: 'warn', label: 'Winner is single-evaluation', detail: 'Seed luck has not been ruled out; the selected winner is not a robust result yet.' }} />
           <div className="kv">
-            <div className="k">single-eval leader</div><div className="v">#{naive.id} · {fmt(naive.metric)}</div>
-            <div className="k">selected winner</div><div className="v">#{robust.id} · {fmt(robust.confirmed_mean ?? robust.metric)}{robust.confirmed_mean != null ? ` ±${fmt(robust.confirmed_std)}` : ' (unconfirmed)'}</div>
-            {robust.confirmed_mean != null && naive.id !== robust.id && <><div className="k flag">demotion</div><div className="v">Single-eval leader #{naive.id} was not selected — multi-seed confirmation corrected a seed-lucky result.</div></>}
+            <div className="k">{uiText("single-eval leader")}</div><div className="v">#{naive.id} · {fmt(naive.metric)}</div>
+            <div className="k">{uiText("selected winner")}</div><div className="v">#{robust.id} · {fmt(robust.confirmed_mean ?? robust.metric)}{((robust.confirmed_mean != null ? ` ±${fmt(robust.confirmed_std)}` : uiText(' (unconfirmed)')))}</div>
+            {robust.confirmed_mean != null && naive.id !== robust.id && <><div className="k flag">{uiText("demotion")}</div><div className="v">{uiText("Single-eval leader #")}{naive.id}{uiText(" was not selected — multi-seed confirmation corrected a seed-lucky result.")}</div></>}
           </div>
         </>
         : <TrustState value={{ tone: 'unknown', label: 'No result to confirm', detail: 'There are no feasible evaluated nodes yet.' }} />}
 
-      <div className="section-h">Leakage scan {leak && leak.leak && <span className="chip alarm">LEAK — run refused</span>}</div>
+      <div className="section-h">{uiText("Leakage scan ")}{leak && leak.leak && <span className="chip alarm">{uiText("LEAK — run refused")}</span>}</div>
       <TrustState value={leakState} />
       {(leak?.verdicts || []).length > 0 &&
-        <DataTable caption="Leakage detector verdicts" card={false}><table className="tbl"><thead><tr><th>detector</th><th>result</th><th>detail</th></tr></thead><tbody>
+        <DataTable caption={uiText("Leakage detector verdicts")} card={false}><table className="tbl"><thead><tr><th>{uiText("detector")}</th><th>{uiText("result")}</th><th>{uiText("detail")}</th></tr></thead><tbody>
           {(leak.verdicts || []).map((v, i) => <tr key={i}>
-            <td>{v.detector || 'unnamed detector'}</td><td className={`trust-result ${v.leak ? 'fail' : 'pass'}`}>{v.leak ? 'Flagged' : 'Passed'}</td>
+            <td>{((v.detector || uiText('unnamed detector')))}</td><td className={`trust-result ${v.leak ? 'fail' : 'pass'}`}>{((v.leak ? uiText('Flagged') : uiText('Passed')))}</td>
             <td className="muted">{Object.entries(v).filter(([k]) => !['detector', 'leak'].includes(k)).map(([k, val]) => `${k}=${typeof val === 'object' ? JSON.stringify(val) : val}`).join('  ') || '—'}</td>
           </tr>)}</tbody></table></DataTable>}
 
-      <div className="section-h">Drift cross-check</div>
+      <div className="section-h">{uiText("Drift cross-check")}</div>
       <TrustState value={driftState} />
       {(state.drifts || []).length
-        ? <DataTable caption="Run metric drift comparisons" card={false}><table className="tbl"><thead><tr><th>node</th><th>primary</th><th>cross</th><th>tolerance</th></tr></thead><tbody>
+        ? <DataTable caption={uiText("Run metric drift comparisons")} card={false}><table className="tbl"><thead><tr><th>{uiText("node")}</th><th>{uiText("primary")}</th><th>{uiText("cross")}</th><th>{uiText("tolerance")}</th></tr></thead><tbody>
           {state.drifts.map((d, i) => <tr key={i}><td className="flag">#{d.node_id}</td><td>{fmt(d.primary)}</td><td>{fmt(d.cross)}</td><td>{fmt(d.tolerance)}</td></tr>)}</tbody></table></DataTable>
         : null}
 
-      <div className="section-h" ref={rewardSignalsRef}>Reward-hacking monitor (B5) {flaggedCount > 0 && <span className="chip alarm">{flaggedCount} currently flagged</span>}</div>
+      <div className="section-h" ref={rewardSignalsRef}>{uiText("Reward-hacking monitor (B5) ")}{flaggedCount > 0 && <span className="chip alarm">{flaggedCount}{uiText(" currently flagged")}</span>}</div>
       <TrustState value={hackState} />
       {/* Folded state is the enforcement truth (it applies trust_gate_changed events);
           the config snapshot alone can claim a gate the fold never engages. */}
-      {(state.trust_gate || cfg) && <div className="muted" style={{ marginBottom: 6 }}>
-        enforcement: <b>{state.trust_gate || cfg?.trust_gate || 'audit'}</b>{(state.trust_gate || cfg?.trust_gate || 'audit') === 'audit'
-          ? ' — signals are logged only; set trust_gate=gate/block (or the thorough profile) to keep a high-precision flag from winning.'
-          : ' — a high-precision flag is excluded from best-selection and breeding/confirmation.'}
-        {' '}Only high-precision signals gate; broad critic/perfect-score warnings stay advisory, except
-        <code> critic:hardcoded_metric</code>, which is classified as high precision.</div>}
+      {(state.trust_gate || cfg) && <div className="muted" style={{ marginBottom: 6 }}>{uiText("enforcement: ")}<b>{((state.trust_gate || cfg?.trust_gate || uiText('audit')))}</b>{(((state.trust_gate || cfg?.trust_gate || 'audit') === 'audit' ? uiText(' — signals are logged only; set trust_gate=gate/block (or the thorough profile) to keep a high-precision flag from winning.') : uiText(' — a high-precision flag is excluded from best-selection and breeding/confirmation.')))}
+        {' '}{uiText("Only high-precision signals gate; broad critic/perfect-score warnings stay advisory, except")}<code>{" critic:hardcoded_metric"}</code>{uiText(", which is classified as high precision.")}</div>}
       {(state.reward_hacks || []).length
-        ? <DataTable caption="Reward-hacking signal history" card={false}><table className="tbl"><thead><tr><th>node</th><th>attempt</th><th>scope</th><th>signal</th><th>detail</th><th>action</th></tr></thead><tbody>
+        ? <DataTable caption={uiText("Reward-hacking signal history")} card={false}><table className="tbl"><thead><tr><th>{uiText("node")}</th><th>{uiText("attempt")}</th><th>{uiText("scope")}</th><th>{uiText("signal")}</th><th>{uiText("detail")}</th><th>{uiText("action")}</th></tr></thead><tbody>
           {state.reward_hacks.map((h, i) => {
             const current = currentHackRecords.has(h)
             const actionable = current && Number.isSafeInteger(h.generation)
               && Number.isSafeInteger(state.nodes?.[h.node_id]?.attempt)
             return <tr key={i}>
-            <td className="flag"><button className="btn xs ghost" title="Open the current experiment; the signal's attempt is listed separately"
+            <td className="flag"><button className="btn xs ghost" title={uiText("Open the current experiment; the signal's attempt is listed separately")}
               disabled={!state.nodes?.[h.node_id]} onClick={() => { onSelect && onSelect(h.node_id); onClose() }}>#{h.node_id}</button></td>
-            <td>{Number.isSafeInteger(h.generation) && h.generation >= 0 ? h.generation : 'not recorded'}</td>
-            <td>{current ? 'Current attempt' : 'Historical or unavailable'}</td>
+            <td>{((Number.isSafeInteger(h.generation) && h.generation >= 0 ? h.generation : uiText('not recorded')))}</td>
+            <td>{((current ? uiText('Current attempt') : uiText('Historical or unavailable')))}</td>
             <td>{(h.signals || []).map(s => s.signal).join(', ')}</td>
             <td className="muted">{(h.signals || []).map(s => s.detail).filter(Boolean).join(' · ')}</td>
             <td>{!readOnly && <button className="btn xs ghost" disabled={!actionable}
-              title={actionable ? "quarantine: abort this node so it can't be selected" : 'This signal does not identify the current active attempt'}
-              onClick={() => quarantine(h)}>quarantine</button>}</td>
+              title={((actionable ? uiText("quarantine: abort this node so it can't be selected") : uiText('This signal does not identify the current active attempt')))}
+              onClick={() => quarantine(h)}>{uiText("quarantine")}</button>}</td>
           </tr>})}</tbody></table></DataTable>
         : null}
       </div>
@@ -778,13 +773,15 @@ export function TrustPanel({ state, runId, onClose, onSelect, onToast, readOnly 
 }
 
 export function SensitivityPanel({ state, onClose, onSelect }) {
+  useUILanguage()
+
   // Aggregate ablation impacts across all ablate events (latest MEASURED wins per param).
   const bars = sensitivityBars(state.ablations)
   return (
-    <Panel title="Parameter sensitivity" onClose={onClose} wide>
-      <div className="section-h">Ablation impact (|Δmetric| when param zeroed)</div>
-      {bars.length ? <Bars data={bars} color="#9a6bff" /> : <div className="muted">No ablation events yet (enable ablate_every or use Force-ablate on a node).</div>}
-      <div className="section-h">Parallel coordinates — params → metric</div>
+    <Panel title={uiText("Parameter sensitivity")} onClose={onClose} wide>
+      <div className="section-h">{uiText("Ablation impact (|Δmetric| when param zeroed)")}</div>
+      {bars.length ? <Bars data={bars} color="#9a6bff" /> : <div className="muted">{uiText("No ablation events yet (enable ablate_every or use Force-ablate on a node).")}</div>}
+      <div className="section-h">{uiText("Parallel coordinates — params → metric")}</div>
       <ParallelCoords nodes={Object.values(state.nodes)} direction={state.direction}
         onPick={onSelect ? (id) => { onSelect(id); onClose && onClose() } : undefined} />
     </Panel>
@@ -792,16 +789,18 @@ export function SensitivityPanel({ state, onClose, onSelect }) {
 }
 
 export function FailuresPanel({ state, onClose, onSelect }) {
+  useUILanguage()
+
   const failed = Object.values(state.nodes).filter(n => n.status === 'failed')
   const byReason = {}
   failed.forEach(n => { (byReason[n.error_reason || 'unknown'] ||= []).push(n) })
   return (
-    <Panel title="Failures" sub={`${failed.length} failed`} onClose={onClose}>
+    <Panel title={uiText("Failures")} sub={`${failed.length} failed`} onClose={onClose}>
       <div className="cardgrid" style={{ marginBottom: 12 }}>
         {Object.entries(byReason).map(([r, ns]) => <Stat key={r} n={ns.length} l={r} />)}
         {!failed.length && <Stat n={0} l="no failures" />}
       </div>
-      <DataTable caption="Failed nodes and errors" card={false}><table className="tbl"><thead><tr><th>node</th><th>reason</th><th>error</th></tr></thead><tbody>
+      <DataTable caption={uiText("Failed nodes and errors")} card={false}><table className="tbl"><thead><tr><th>{uiText("node")}</th><th>{uiText("reason")}</th><th>{uiText("error")}</th></tr></thead><tbody>
         {failed.map(n => <tr key={n.id}>
           <td><button type="button" className="btn xs ghost" onClick={() => { onSelect?.(n.id); onClose?.() }}>#{n.id}</button></td>
           <td className="flag">{n.error_reason}</td><td className="muted">{(n.error || '').slice(0, 80)}</td></tr>)}
@@ -818,6 +817,8 @@ export { HarnessProgressPanel } from './HarnessProgressPanel.jsx'
 // the operator can see what's coming. Order is policy-driven (the engine picks next), so this is
 // "see + cancel + add", not manual reordering (which no engine event supports).
 export function QueuePanel({ state, runId, onSelect, onClose, onToast }) {
+  useUILanguage()
+
   const work = partitionNodeWork(state)
   const workNodes = [...work.building, ...work.evaluating, ...work.queued, ...work.unknown]
   const injects = (state.inject_requests || []).slice(state.injects_done || 0)
@@ -831,42 +832,38 @@ export function QueuePanel({ state, runId, onSelect, onClose, onToast }) {
   }
   const queuedCount = workNodes.length + injects.length + forks.length + confirmReq.length + ablateReq.length
   return (
-    <Panel title="Queue" sub={`${queuedCount} planned / in-flight`} onClose={onClose}>
+    <Panel title={uiText("Queue")} sub={`${queuedCount} planned / in-flight`} onClose={onClose}>
       <div className="muted" style={{ marginBottom: 10 }}>
         {/* `/experiment` was never a command either (same dead end as the research panel's old
             `/deep-research`). The two shapes that DO append an inject/fork are the graph node menu's
-            own items, so name them exactly as Dag.jsx spells them. */}
-        The next experiment is chosen by the search policy; this is the live work-list — cancel a
-        pending experiment, or add one from a node’s “Explore from here” / “Merge with…” menu on the
-        graph.
-      </div>
+            own items, so name them exactly as Dag.jsx spells them. */}{uiText("The next experiment is chosen by the search policy; this is the live work-list — cancel a pending experiment, or add one from a node’s “Explore from here” / “Merge with…” menu on the graph.")}</div>
       <div className="cardgrid" style={{ marginBottom: 12 }}>
         <Stat n={work.building.length} l="building" />
         <Stat n={work.evaluating.length} l="training / evaluating" />
         <Stat n={work.queued.length} l="waiting for a slot" />
         {work.unknown.length > 0 && <Stat n={work.unknown.length} l="start unknown" />}
       </div>
-      <div className="section-h">Node execution {workNodes.length > 0 && <span className="pill">{workNodes.length}</span>}</div>
+      <div className="section-h">{uiText("Node execution ")}{workNodes.length > 0 && <span className="pill">{workNodes.length}</span>}</div>
       {workNodes.length
-        ? <DataTable caption="Node build and evaluation queue" card={false}><table className="tbl"><thead><tr><th>node</th><th>activity</th><th>op</th><th>parents</th><th>hypothesis / rationale</th><th>action</th></tr></thead><tbody>
+        ? <DataTable caption={uiText("Node build and evaluation queue")} card={false}><table className="tbl"><thead><tr><th>{uiText("node")}</th><th>{uiText("activity")}</th><th>{uiText("op")}</th><th>{uiText("parents")}</th><th>{uiText("hypothesis / rationale")}</th><th>{uiText("action")}</th></tr></thead><tbody>
           {workNodes.map(n => { const activity = nodeActivityView(n, state); return <tr key={n.id}>
             <td><button className="btn xs ghost" onClick={() => { onSelect && onSelect(n.id); onClose() }}>#{n.id}</button></td>
-            <td><span className={`activity-chip ${activity.tone}`} title={activity.label}>{activity.label}</span></td>
+            <td><span className={`activity-chip ${activity.tone}`} title={uiText(activity.label)}>{uiText(activity.label)}</span></td>
             <td><span className="op-icon"><OpIcon name={operatorMeta(n.operator).icon} size={12} /></span> {n.operator}</td>
             <td className="muted">{(n.parent_ids || []).map(p => '#' + p).join(', ') || '—'}</td>
             <td className="muted">{stripMd(n.idea?.hypothesis || n.idea?.rationale || '').slice(0, 70)}</td>
-            <td>{n.status === 'pending' ? <button className="btn xs ghost" aria-label={`Cancel experiment ${n.id}`}
-              title="cancel this experiment (node_abort)" onClick={() => cancel(n.id)}><OpIcon name="cross" size={11} /></button> : '—'}</td>
+            <td>{n.status === 'pending' ? <button className="btn xs ghost" aria-label={uiMessage("Cancel experiment {0}", [n.id])}
+              title={uiText("cancel this experiment (node_abort)")} onClick={() => cancel(n.id)}><OpIcon name="cross" size={11} /></button> : '—'}</td>
           </tr> })}
         </tbody></table></DataTable>
-        : <div className="muted">No node is building, evaluating, or waiting for a slot right now.</div>}
+        : <div className="muted">{uiText("No node is building, evaluating, or waiting for a slot right now.")}</div>}
       {(injects.length + forks.length + confirmReq.length + ablateReq.length) > 0 && <>
-        <div className="section-h">Queued control requests</div>
+        <div className="section-h">{uiText("Queued control requests")}</div>
         <div className="chips">
-          {injects.map((q, i) => <span key={'i' + i} className="chip sm" title="operator-injected experiment awaiting materialization">inject: {(q.idea?.operator || 'experiment')}</span>)}
-          {forks.map((q, i) => <span key={'f' + i} className="chip sm" title="fork awaiting materialization">fork #{q.from_node_id ?? q.parent_id ?? '?'}</span>)}
-          {confirmReq.map(r => <span key={`c:${r.node_id}:${r.generation ?? 'legacy'}`} className="chip sm" title={r.generation == null ? undefined : `node generation ${r.generation}`}>confirm #{r.node_id}</span>)}
-          {ablateReq.map(r => <span key={`a:${r.node_id}:${r.generation ?? 'legacy'}`} className="chip sm" title={r.generation == null ? undefined : `node generation ${r.generation}`}>ablate #{r.node_id}</span>)}
+          {injects.map((q, i) => <span key={'i' + i} className="chip sm" title={uiText("operator-injected experiment awaiting materialization")}>{uiText("inject: ")}{(((q.idea?.operator || uiText('experiment'))))}</span>)}
+          {forks.map((q, i) => <span key={'f' + i} className="chip sm" title={uiText("fork awaiting materialization")}>{uiText("fork #")}{q.from_node_id ?? q.parent_id ?? '?'}</span>)}
+          {confirmReq.map(r => <span key={`c:${r.node_id}:${r.generation ?? 'legacy'}`} className="chip sm" title={(r.generation == null ? undefined : uiMessage("node generation {0}", [r.generation]))}>{uiText("confirm #")}{r.node_id}</span>)}
+          {ablateReq.map(r => <span key={`a:${r.node_id}:${r.generation ?? 'legacy'}`} className="chip sm" title={(r.generation == null ? undefined : uiMessage("node generation {0}", [r.generation]))}>{uiText("ablate #")}{r.node_id}</span>)}
         </div>
       </>}
     </Panel>
@@ -944,6 +941,8 @@ export function paretoFront(nodes, direction) {
 // screen. Here the invisible fact is the measured node the caveated point displaced, so the panel
 // names the front restricted to measured objectives whenever a caveated node is on this one.
 export function ParetoPanel({ state, onClose, onSelect }) {
+  useUILanguage()
+
   const nodes = Object.values(state.nodes).filter(n => paretoMetric(n) != null && n.feasible !== false)
   // WHAT refused a pair of these nodes, named (`runIndex.js::nodesComparabilitySplit`), or ''.
   const splitBy = nodesComparabilitySplit(nodes)
@@ -963,7 +962,7 @@ export function ParetoPanel({ state, onClose, onSelect }) {
   const ops = {}
   Object.values(state.nodes).forEach(n => { const o = (ops[n.operator] ||= { n: 0, ev: 0 }); o.n++; if (n.status === 'evaluated') o.ev++ })
   return (
-    <Panel title="Pareto · Diversity · Operators" onClose={onClose} wide>
+    <Panel title={uiText("Pareto · Diversity · Operators")} onClose={onClose} wide>
       {(() => {
         const { keys, front } = paretoFront(nodes, state.direction)
         const unverified = unverifiedExtraMetricKeys(nodes, keys)
@@ -985,9 +984,9 @@ export function ParetoPanel({ state, onClose, onSelect }) {
           : []
         const displaced = measuredFront.filter(m => !front.some(f => f.id === m.id))
         return <>
-          <div className="section-h">Pareto-optimal set (I5) {keys.length ? <span className="pill">{keys.length + 1} objectives</span> : <span className="pill">metric only</span>}</div>
+          <div className="section-h">{uiText("Pareto-optimal set (I5) ")}{keys.length ? <span className="pill">{keys.length + 1}{uiText(" objectives")}</span> : <span className="pill">{uiText("metric only")}</span>}</div>
           {sortedFront.length
-            ? <DataTable caption="Pareto-optimal node metrics" card={false}><table className="tbl"><thead><tr><th>node</th><th>metric</th>
+            ? <DataTable caption={uiText("Pareto-optimal node metrics")} card={false}><table className="tbl"><thead><tr><th>{uiText("node")}</th><th>{uiText("metric")}</th>
                 {/* A column heading carries the caveat, because a whole objective axis is either
                     trustworthy or not — see `unverifiedExtraMetricKeys` for why ANY unverified
                     reporter marks the column. This panel treats every extra as a cost-like
@@ -1007,20 +1006,18 @@ export function ParetoPanel({ state, onClose, onSelect }) {
                       : ''}</td>
                     {keys.map(k => <td key={k} className="muted">{fmt(n.extra_metrics?.[k])}</td>)}</tr>)}
               </tbody></table></DataTable>
-            : <div className="muted">No feasible evaluated nodes yet.</div>}
+            : <div className="muted">{uiText("No feasible evaluated nodes yet.")}</div>}
           {/* PRINTED, not only hovered — the same argument the extras' footnote below already makes,
               and stronger here because this table is what an operator reads to pick a configuration
               to reuse. It renders the SAME sentence the cell's tooltip carries, from the same call. */}
           {caveated.length > 0 && <div className="muted" style={{ marginTop: 8 }}>
             {caveated.map(n => <div key={n.id}>
-              ⚠ #{n.id}&rsquo;s objective is <b>{OBJECTIVE_SOURCE_LABEL[sources.get(n.id).channel]}</b>.{' '}
+              ⚠ #{n.id}{uiText("’s objective is ")}<b>{OBJECTIVE_SOURCE_LABEL[sources.get(n.id).channel]}</b>.{' '}
               {objectiveSourceHelp(sources.get(n.id))}
             </div>)}
-            <div>It is ranked here because the run ranks it — this front shows the selection the
-              engine is actually making, not a corrected one.
-              {displaced.length > 0 && <> Set {caveated.length === 1 ? 'it' : 'those'} aside and{' '}
+            <div>{uiText("It is ranked here because the run ranks it — this front shows the selection the engine is actually making, not a corrected one.")}{displaced.length > 0 && <>{uiText(" Set ")}{((caveated.length === 1 ? uiText('it') : uiText('those')))}{uiText(" aside and")}{' '}
                 {displaced.map(n => `#${n.id} (${fmt(n.confirmed_mean ?? n.metric)})`).join(', ')}{' '}
-                {displaced.length === 1 ? 'is' : 'are'} non-dominated on measured objectives alone.</>}
+                {((displaced.length === 1 ? uiText('is') : uiText('are')))}{uiText(" non-dominated on measured objectives alone.")}</>}
             </div>
           </div>}
           {/* THE FRONT MAY BE OVER INCOMPARABLE POINTS, which no caveat above can express: every
@@ -1030,30 +1027,18 @@ export function ParetoPanel({ state, onClose, onSelect }) {
               #3 does not dominate #5 if #5 was scored on a harder corpus. Fires only on a PROVEN
               difference (`looplab/engine/comparability.py`): every node on this box records no key,
               and a banner over silence would show on every run and mean nothing. */}
-          {splitBy && <div className="warn" style={{ marginTop: 8 }}>
-            ⚠ This run&rsquo;s nodes were <b>not all measured against the same evaluation</b> — two
-            of them {COMPARABILITY_REFUSAL_TEXT[splitBy] || 'were measured under provably different evaluations'}.
-            Dominance between two such nodes is not a fact, so this front orders points that do not
-            share an axis. Each value is still true of its own measurement; the front is not.
-          </div>}
+          {splitBy && <div className="warn" style={{ marginTop: 8 }}>{uiText("⚠ This run’s nodes were ")}<b>{uiText("not all measured against the same evaluation")}</b>{uiText(" — two of them ")}{((COMPARABILITY_REFUSAL_TEXT[splitBy] || uiText('were measured under provably different evaluations')))}{uiText(". Dominance between two such nodes is not a fact, so this front orders points that do not share an axis. Each value is still true of its own measurement; the front is not.")}</div>}
           {sortedFront.length > 0 && unverified.size > 0 && <div className="muted" style={{ marginTop: 8 }}>
-            ⚠ {[...unverified].join(', ')} {unverified.size === 1 ? 'is' : 'are'} not a declared
-            measurement: the value was taken from the experiment's own stdout, or the run predates
-            the record that would say. The front below is computed over it anyway — read it as a
-            trade-off the experiments <i>reported</i>, not one the engine verified.
-          </div>}
-          {sortedFront.length > 0 && <div className="muted" style={{ marginTop: 8 }}>
-            Confirmed mean is used when available; otherwise the recorded metric is used.
-            {!keys.length && <> With one objective, every feasible node tied at the best displayed metric is
-              Pareto-optimal. Add extra_metrics (e.g. latency, size) to show trade-offs.</>}
+            ⚠ {[...unverified].join(', ')} {((unverified.size === 1 ? uiText('is') : uiText('are')))}{uiText(" not a declared measurement: the value was taken from the experiment's own stdout, or the run predates the record that would say. The front below is computed over it anyway — read it as a trade-off the experiments ")}<i>{uiText("reported")}</i>{uiText(", not one the engine verified.")}</div>}
+          {sortedFront.length > 0 && <div className="muted" style={{ marginTop: 8 }}>{uiText("Confirmed mean is used when available; otherwise the recorded metric is used.")}{!keys.length && <>{uiText(" With one objective, every feasible node tied at the best displayed metric is Pareto-optimal. Add extra_metrics (e.g. latency, size) to show trade-offs.")}</>}
           </div>}
         </>
       })()}
-      <div className="section-h">Pareto (metric vs constraint)</div>
-      {scatter || <div className="muted">No constraints/aux metrics in this task.</div>}
-      <div className="section-h">Diversity archive {archive && <span className="pill">{archive.niches} niches</span>}</div>
+      <div className="section-h">{uiText("Pareto (metric vs constraint)")}</div>
+      {scatter || <div className="muted">{uiText("No constraints/aux metrics in this task.")}</div>}
+      <div className="section-h">{uiText("Diversity archive ")}{archive && <span className="pill">{archive.niches}{uiText(" niches")}</span>}</div>
       {archive?.elites?.length
-        ? <DataTable caption="Diversity archive elite nodes" card={false}><table className="tbl"><thead><tr><th>node</th><th>metric</th><th>params</th></tr></thead><tbody>
+        ? <DataTable caption={uiText("Diversity archive elite nodes")} card={false}><table className="tbl"><thead><tr><th>{uiText("node")}</th><th>{uiText("metric")}</th><th>{uiText("params")}</th></tr></thead><tbody>
           {/* The elites are the other "reuse this configuration" table on this panel, so they read
               the same vocabulary off the same node record. An elite naming a node this state does
               not hold answers `measured` by the model's own totality — no record, no caveat. */}
@@ -1065,21 +1050,23 @@ export function ParetoPanel({ state, onClose, onSelect }) {
                   {' · '}{OBJECTIVE_SOURCE_LABEL[source.channel]}</span> : ''}</td>
               <td className="muted">{JSON.stringify(e.params)}</td></tr>
           })}</tbody></table></DataTable>
-        : <div className="muted">No archive (run not finished).</div>}
-      <div className="section-h">Operator productivity</div>
-      <DataTable caption="Operator productivity summary" card={false}><table className="tbl"><thead><tr><th>operator</th><th>nodes</th><th>evaluated</th></tr></thead><tbody>
+        : <div className="muted">{uiText("No archive (run not finished).")}</div>}
+      <div className="section-h">{uiText("Operator productivity")}</div>
+      <DataTable caption={uiText("Operator productivity summary")} card={false}><table className="tbl"><thead><tr><th>{uiText("operator")}</th><th>{uiText("nodes")}</th><th>{uiText("evaluated")}</th></tr></thead><tbody>
         {Object.entries(ops).map(([o, s]) => <tr key={o}><td>{o}</td><td>{s.n}</td><td>{s.ev}</td></tr>)}</tbody></table></DataTable>
     </Panel>
   )
 }
 
 export function DataQualityPanel({ state, onClose }) {
+  useUILanguage()
+
   const prof = state.data_profile
-  if (!prof) return <Panel title="Data quality" onClose={onClose}><div className="muted">No data profile (task exposes no dataset).</div></Panel>
+  if (!prof) return <Panel title={uiText("Data quality")} onClose={onClose}><div className="muted">{uiText("No data profile (task exposes no dataset).")}</div></Panel>
   const cols = Object.entries(prof)
   return (
-    <Panel title="Data quality" sub={`${cols.length} columns`} onClose={onClose} wide>
-      <DataTable caption="Dataset column quality profile" card={false}><table className="tbl"><thead><tr><th>column</th><th>dtype</th><th>missing%</th><th>unique</th><th>min</th><th>max</th><th>mean</th><th>flags</th></tr></thead><tbody>
+    <Panel title={uiText("Data quality")} sub={`${cols.length} columns`} onClose={onClose} wide>
+      <DataTable caption={uiText("Dataset column quality profile")} card={false}><table className="tbl"><thead><tr><th>{uiText("column")}</th><th>{uiText("dtype")}</th><th>{uiText("missing%")}</th><th>{uiText("unique")}</th><th>{uiText("min")}</th><th>{uiText("max")}</th><th>{uiText("mean")}</th><th>{uiText("flags")}</th></tr></thead><tbody>
         {cols.map(([c, s]) => <tr key={c}>
           {/* `(s.missing_frac || 0) * 100` invented a measurement. Not every profiler records
               missingness — real logs carry rows that are only `{count, dtype, constant}`
@@ -1091,7 +1078,7 @@ export function DataQualityPanel({ state, onClose }) {
           <td>{fmt(typeof s.missing_frac === 'number' ? s.missing_frac * 100 : null, 3)}</td>
           <td>{fmtInt(s.n_unique)}</td>
           <td>{fmt(s.min)}</td><td>{fmt(s.max)}</td><td>{fmt(s.mean)}</td>
-          <td>{s.constant && <span className="flag">constant </span>}{s.high_missing && <span className="flag">high-missing</span>}</td></tr>)}
+          <td>{s.constant && <span className="flag">{uiText("constant ")}</span>}{s.high_missing && <span className="flag">{uiText("high-missing")}</span>}</td></tr>)}
       </tbody></table></DataTable>
     </Panel>
   )
@@ -1114,36 +1101,21 @@ const AUTHORING_KIND_ENV = { prompts: 'LOOPLAB_PROMPT_DIR', skills: 'LOOPLAB_SKI
 
 const AUTHORING_KIND_PURPOSE = {
   prompts: {
-    what: <><b>Role prompt overrides.</b> A file named <code>&lt;prompt key&gt;.md</code> REPLACES the
-      built-in system prompt for that role, and is re-read on every call — an edit lands on the next
-      agent turn with no restart.</>,
-    disclosure: <>A file whose name is not a known prompt key is never looked up: the built-in default
-      keeps running, silently. The key list is <code>looplab/core/prompts.py::PROMPT_KEYS</code>.</>,
+    what: <><b>{uiText("Role prompt overrides.")}</b>{uiText(" A file named ")}<code>{"<prompt key>.md"}</code>{uiText(" REPLACES the built-in system prompt for that role, and is re-read on every call — an edit lands on the next agent turn with no restart.")}</>,
+    disclosure: <>{uiText("A file whose name is not a known prompt key is never looked up: the built-in default keeps running, silently. The key list is ")}<code>{"looplab/core/prompts.py::PROMPT_KEYS"}</code>.</>,
   },
   skills: {
-    what: <><b>Researcher techniques</b>: <code>list_skills</code> / <code>use_skill</code> loads
-      recipes and code mid-run.</>,
-    disclosure: <>Root <code>*.md</code>: writable. Nested{' '}
-      <code>&lt;package&gt;/SKILL.md</code>: read-only; edit its package path. Flat Save/recovery API rejects
-      slash paths. Auto-distilled <code>&lt;memory dir&gt;/skills/</code> candidates need cross-task
-      promotion for production; review them under <b>memory_skills</b>.</>,
+    what: <><b>{uiText("Researcher techniques")}</b>: <code>{"list_skills"}</code> / <code>{"use_skill"}</code>{uiText(" loads recipes and code mid-run.")}</>,
+    disclosure: <>{uiText("Root ")}<code>{"*.md"}</code>{uiText(": writable. Nested")}{' '}
+      <code>{"<package>/SKILL.md"}</code>{uiText(": read-only; edit its package path. Flat Save/recovery API rejects slash paths. Auto-distilled ")}<code>{"<memory dir>/skills/"}</code>{uiText(" candidates need cross-task promotion for production; review them under ")}<b>{uiText("memory_skills")}</b>.</>,
   },
   memory_skills: {
-    what: <><b>What your runs distilled</b>: <code>&lt;memory dir&gt;/skills/</code>, one card per
-      technique a run's own supported work item earned. Read-only here — the engine writes them.</>,
-    disclosure: <>The frontmatter is the lifecycle: <code>status: candidate</code> is a card one task
-      produced and <b>no run loads it</b>; a later run on a DIFFERENT task family that re-confirms the
-      same claim promotes it to <code>promoted</code>, which is the only status the production listing
-      shows. <code>demoted</code>/<code>retired</code> mean a later recorded outcome reversed it. Edits
-      belong in the store the engine owns, so this tab reviews and never writes; delete a bad card on
-      the host.</>,
+    what: <><b>{uiText("What your runs distilled")}</b>: <code>{"<memory dir>/skills/"}</code>{uiText(", one card per technique a run's own supported work item earned. Read-only here — the engine writes them.")}</>,
+    disclosure: <>{uiText("The frontmatter is the lifecycle: ")}<code>{"status: candidate"}</code>{uiText(" is a card one task produced and ")}<b>{uiText("no run loads it")}</b>{uiText("; a later run on a DIFFERENT task family that re-confirms the same claim promotes it to ")}<code>{"promoted"}</code>{uiText(", which is the only status the production listing shows. ")}<code>{"demoted"}</code>/<code>{"retired"}</code>{uiText(" mean a later recorded outcome reversed it. Edits belong in the store the engine owns, so this tab reviews and never writes; delete a bad card on the host.")}</>,
   },
   knowledge: {
-    what: <><b>Free-form notes</b> for the agents to retrieve with <code>kb_search</code> — anything
-      worth keeping that is not a per-run finding.</>,
-    disclosure: <>The same directory the agents write to with their own <code>remember</code> tool, and
-      the same files Lab → Memory → Knowledge shows read-only. So this is the one kind BOTH you and
-      the runs write.</>,
+    what: <><b>{uiText("Free-form notes")}</b>{uiText(" for the agents to retrieve with ")}<code>{"kb_search"}</code>{uiText(" — anything worth keeping that is not a per-run finding.")}</>,
+    disclosure: <>{uiText("The same directory the agents write to with their own ")}<code>{"remember"}</code>{uiText(" tool, and the same files Lab → Memory → Knowledge shows read-only. So this is the one kind BOTH you and the runs write.")}</>,
   },
 }
 
@@ -1151,6 +1123,8 @@ export function AuthoringPanel({
   onClose, onToast, draftStore: sharedDraftStore = null, navigationGuardOwner = 'panel',
   publishNavigationGuard = null,
 }) {
+  useUILanguage()
+
   const [kind, setKind] = useState('prompts')
   const [selectedScope, setSelectedScope] = useState(null)
   const fallbackDraftStoreRef = useRef(null)
@@ -1778,7 +1752,7 @@ export function AuthoringPanel({
       return
     }
     if (document.conflict && !window.confirm(
-      `${document.name} changed on the server. Overwrite its newer copy with this retained draft?`,
+      uiMessage("{0} changed on the server. Overwrite its newer copy with this retained draft?", [document.name]),
     )) return
     try {
       const desiredRevision = await authoringTextRevision(document.draftText)
@@ -1881,7 +1855,7 @@ export function AuthoringPanel({
     if (!verifiedRecovery || saveRef.current || !activeRef.current
         || !['prepared', 'missing'].includes(verifiedRecovery.phase)) return
     if (!window.confirm(
-      `Resume exact save for ${recovery.name}?\n\nThe same identity, revision, and contents cannot overwrite a newer version.`,
+      uiMessage("Resume exact save for {0}?\n\nThe same identity, revision, and contents cannot overwrite a newer version.", [recovery.name]),
     )) return
     submitAuthoringSave(verifiedRecovery)
   }
@@ -1890,7 +1864,7 @@ export function AuthoringPanel({
         || document.observedText == null
         || !/^sha256:[0-9a-f]{64}$/.test(document.observedRevision || '') || saveRef.current) return
     if (!window.confirm(
-      `Use current server copy of ${document.name}?\n\nThis discards its retained draft.`,
+      uiMessage("Use current server copy of {0}?\n\nThis discards its retained draft.", [document.name]),
     )) return
     const scope = scopeFor(document.kind, document.name)
     setDocuments(current => current[scope] ? {
@@ -1910,7 +1884,7 @@ export function AuthoringPanel({
     if (!exact || !exact.releaseAllowed || !exact.releaseInspected
         || exact.operationId !== recovery.operationId) return
     if (!window.confirm(
-      `Release exact saved operation for ${recovery.name}?\n\nNo write is sent. Its draft remains until this panel closes.`,
+      uiMessage("Release exact saved operation for {0}?\n\nNo write is sent. Its draft remains until this panel closes.", [recovery.name]),
     )) return
     if (!clearAuthoringOperationIntent(exact)) {
       updateRecovery(exact, {
@@ -1935,7 +1909,7 @@ export function AuthoringPanel({
   const releaseDamagedRecovery = recovery => {
     if (!recovery?.inspected) return
     if (!window.confirm(
-      'Release this unreadable recovery record?\n\nContinue only if no retained save still needs recovery.',
+      uiText('Release this unreadable recovery record?\n\nContinue only if no retained save still needs recovery.'),
     )) return
     const storedRecordReleased = clearDamagedAuthoringOperation(recovery)
     if (!storedRecordReleased) {
@@ -1990,7 +1964,7 @@ export function AuthoringPanel({
         ? `${damagedRecoveryCount} damaged recovery record${damagedRecoveryCount === 1 ? ' remains' : 's remain'} quarantined here.`
       : mutationBusy ? 'A save is in progress.'
         : `${dirtyCount} unsaved draft${dirtyCount === 1 ? '' : 's'} will be lost.`
-    if (!window.confirm(`${warning} Close Authoring?`)) return
+    if (!window.confirm(uiMessage("{0} Close Authoring?", [warning]))) return
     allowNavigationRef.current = true
     draftStore.clear(AUTHORING_PANEL_DRAFT_SCOPE)
     onClose?.()
@@ -2021,71 +1995,60 @@ export function AuthoringPanel({
   // Scope in the subtitle: this edits the prompts/skills/knowledge EVERY run shares (`/api/{kind}`),
   // not anything belonging to whichever run a legacy `?panel=authoring` link was opened from.
   return (
-    <Panel title="Authoring — configure the scientist" sub="every run · hot-reloaded next run" onClose={requestClose} wide>
+    <Panel title={uiText("Authoring — configure the scientist")} sub="every run · hot-reloaded next run" onClose={requestClose} wide>
       <div className="toolbar" style={{ marginBottom: 10 }}>
         {AUTHORING_TABS.map(k => <button key={k} className={'btn sm' + (k === kind ? ' primary' : '')}
-          onClick={() => chooseKind(k)}>{k}{dirtyByKind(k) ? ` (${dirtyByKind(k)} unsaved)` : ''}</button>)}
-        {sourceReady && <span className="muted">{data.dir || `no ${kind} dir configured (set ${AUTHORING_KIND_ENV[kind]}, or the ${kind === 'prompts' ? 'Prompt' : kind === 'skills' ? 'Skills' : kind === 'memory_skills' ? 'Memory' : 'Knowledge'} dir in Settings)`}</span>}
+          onClick={() => chooseKind(k)}>{k}{(dirtyByKind(k) ? uiMessage(" ({0} unsaved)", [dirtyByKind(k)]) : '')}</button>)}
+        {sourceReady && <span className="muted">{(data.dir || uiMessage("no {0} dir configured (set {1}, or the {2} dir in Settings)", [kind, AUTHORING_KIND_ENV[kind], kind === 'prompts' ? 'Prompt' : kind === 'skills' ? 'Skills' : kind === 'memory_skills' ? 'Memory' : 'Knowledge']))}</span>}
         {sourceReady && data.truncatedFiles > 0
-          && <span className="muted">{data.truncatedFiles}+ files omitted (cap)</span>}
+          && <span className="muted">{data.truncatedFiles}{uiText("+ files omitted (cap)")}</span>}
         {sourceReady && data.inventoryIncomplete
-          && <span className="muted">Package scan capped; omissions possible</span>}
+          && <span className="muted">{uiText("Package scan capped; omissions possible")}</span>}
       </div>
       {/* The Authoring / Memory boundary is DIRECTION, not subject matter: both hold durable
           knowledge, this one is the half a human writes. Saying so on both panels is the whole
           answer to "what is the difference between authoring and memory". */}
       <div className="muted" style={{ fontSize: 11, marginBottom: 10, lineHeight: 1.5 }}>
-        <b>You</b> write these Markdown files; agents read them during runs. Run-written lessons,
-        cases and meta-notes live in <b>Memory</b>. <b>Prompts</b> and <b>skills</b> have no default
-        directory—configure one in Settings. The exception is <b>memory_skills</b>: those cards are
-        written by the runs and shown here read-only, because the party who has to judge a distilled
-        technique is you.
-      </div>
+        <b>{uiText("You")}</b>{uiText(" write these Markdown files; agents read them during runs. Run-written lessons, cases and meta-notes live in ")}<b>{uiText("Memory")}</b>. <b>{uiText("Prompts")}</b>{uiText(" and ")}<b>{uiText("skills")}</b>{uiText(" have no default directory—configure one in Settings. The exception is ")}<b>{uiText("memory_skills")}</b>{uiText(": those cards are written by the runs and shown here read-only, because the party who has to judge a distilled technique is you.")}</div>
       <div className="muted" style={{ fontSize: 11, marginBottom: 10, lineHeight: 1.5 }}>
         {AUTHORING_KIND_PURPOSE[kind]?.what}{' '}{AUTHORING_KIND_PURPOSE[kind]?.disclosure}
       </div>
-      <PanelResourceNotice resource={source} label={`${kind} files`} onRetry={retry} />
+      <PanelResourceNotice resource={source} label={uiMessage("{0} files", [kind])} onRetry={retry} />
       {dirtyCount > 0 && <div className="notice" role="status" style={{ marginBottom: 10 }}>
-        {dirtyCount} draft{dirtyCount === 1 ? '' : 's'} retained. Switching is safe; closing loses them.
-      </div>}
+        {dirtyCount}{uiText(" draft")}{dirtyCount === 1 ? '' : 's'}{uiText(" retained. Switching is safe; closing loses them.")}</div>}
       {selected && !selectedSourceReconciled && <div className="notice" role="status"
-        style={{ marginBottom: 10 }}>
-        Save and server-copy stay disabled until current {kind} reconciles with this draft.
-      </div>}
+        style={{ marginBottom: 10 }}>{uiText("Save and server-copy stay disabled until current ")}{kind}{uiText(" reconciles with this draft.")}</div>}
       {!storageAvailable && <div className="report-inline-state error" role="alert" style={{ marginBottom: 10 }}>
-        <OpIcon name="alert" size={14} /><span>Recovery storage unavailable; saves are disabled to preserve ambiguous-write identity.</span>
+        <OpIcon name="alert" size={14} /><span>{uiText("Recovery storage unavailable; saves are disabled to preserve ambiguous-write identity.")}</span>
       </div>}
       {damagedRows.map(recovery => <div key={recovery.scope}
         className="report-inline-state error" role="alert" style={{ marginBottom: 10 }}>
         <OpIcon name="alert" size={14} />
-        <span>{recovery.storageMissing
-          ? `Unreadable recovery${recovery.identity ? ` for ${recovery.identity.name}` : ''} changed or disappeared in storage; its exact snapshot is quarantined here.`
-          : recovery.reason || `Unreadable recovery exists${recovery.identity
-          ? ` for ${recovery.identity.name}` : ''}; saves for that scope are locked.`}</span>
+        <span>{(recovery.storageMissing ? uiMessage("Unreadable recovery{0} changed or disappeared in storage; its exact snapshot is quarantined here.", [recovery.identity ? ` for ${recovery.identity.name}` : '']) : (recovery.reason || uiMessage("Unreadable recovery exists{0}; saves for that scope are locked.", [recovery.identity
+          ? ` for ${recovery.identity.name}` : ''])))}</span>
         {!recovery.inspected
           ? <button className="btn sm" onClick={() => setDamagedRecoveries(current => ({
             ...current, [recovery.scope]: { ...current[recovery.scope], inspected: true },
-          }))}>Inspect recovery</button>
+          }))}>{uiText("Inspect recovery")}</button>
           : <>
-            <span className="muted">Stored record {recovery.raw.length} bytes; {recovery.reason
-              ? 'integrity check failed.' : 'operation identity unverified.'}</span>
-            <button className="btn sm danger" onClick={() => releaseDamagedRecovery(recovery)}>Release exact record</button>
+            <span className="muted">{uiText("Stored record ")}{recovery.raw.length}{uiText(" bytes; ")}{((recovery.reason ? uiText('integrity check failed.') : uiText('operation identity unverified.')))}</span>
+            <button className="btn sm danger" onClick={() => releaseDamagedRecovery(recovery)}>{uiText("Release exact record")}</button>
           </>}
       </div>)}
       {Object.values(uncertainSaves).map(recovery => <div key={recovery.scope}
         className="report-inline-state error" role="alert" style={{ marginBottom: 10 }}>
-        <OpIcon name="alert" size={14} /><span>{recovery.message}</span>
+        <OpIcon name="alert" size={14} /><span>{uiText(recovery.message)}</span>
         <button className="btn sm" disabled={mutationBusy} onClick={() => reconcileSave(recovery)}>
-          {saveState?.reconcile && saveState.scope === recovery.scope ? 'Checking…' : 'Check exact operation'}</button>
+          {((saveState?.reconcile && saveState.scope === recovery.scope ? uiText('Checking…') : uiText('Check exact operation')))}</button>
         {['prepared', 'missing'].includes(recovery.phase) && <button className="btn sm" disabled={mutationBusy}
-          onClick={() => retryExactSave(recovery)}>Resume exact save</button>}
+          onClick={() => retryExactSave(recovery)}>{uiText("Resume exact save")}</button>}
         {recovery.releaseAllowed && !recovery.releaseInspected
           && <button className="btn sm" disabled={mutationBusy}
-            onClick={() => updateRecovery(recovery, { releaseInspected: true })}>Inspect recovery</button>}
+            onClick={() => updateRecovery(recovery, { releaseInspected: true })}>{uiText("Inspect recovery")}</button>}
         {recovery.releaseAllowed && recovery.releaseInspected && <>
-          <span className="muted">Operation {recovery.operationId}; expected revision {recovery.expectedRevision.slice(0, 18)}….</span>
+          <span className="muted">{uiText("Operation ")}{recovery.operationId}{uiText("; expected revision ")}{recovery.expectedRevision.slice(0, 18)}….</span>
           <button className="btn sm danger" disabled={mutationBusy}
-            onClick={() => releaseAuthoringRecovery(recovery)}>Release exact recovery</button>
+            onClick={() => releaseAuthoringRecovery(recovery)}>{uiText("Release exact recovery")}</button>
         </>}
       </div>)}
       <div className="authoring-layout">
@@ -2093,11 +2056,10 @@ export function AuthoringPanel({
           {fileRows.map(f => <button type="button" key={f.name}
             className={'run-card authoring-file' + (selectedScope === scopeFor(kind, f.name) ? ' sel' : '')}
             onClick={() => chooseFile(f)}>{f.name}
-            {f.readOnly ? ' • read-only package' : ''}
-            {!documents[scopeFor(kind, f.name)]?.readOnly
-              && documents[scopeFor(kind, f.name)]?.draftText !== documents[scopeFor(kind, f.name)]?.savedText
-              ? ' • unsaved' : ''}{uncertainSaves[scopeFor(kind, f.name)] ? ' • recovery' : ''}</button>)}
-          {sourceReady && fileRows.length === 0 && <div className="muted">no files</div>}
+            {((f.readOnly ? uiText(' • read-only package') : ''))}
+            {((!documents[scopeFor(kind, f.name)]?.readOnly
+              && documents[scopeFor(kind, f.name)]?.draftText !== documents[scopeFor(kind, f.name)]?.savedText ? uiText(' • unsaved') : ''))}{((uncertainSaves[scopeFor(kind, f.name)] ? uiText(' • recovery') : ''))}</button>)}
+          {sourceReady && fileRows.length === 0 && <div className="muted">{uiText("no files")}</div>}
         </div>
         <div className="authoring-editor">
           {selected ? <>
@@ -2112,18 +2074,14 @@ export function AuthoringPanel({
               value={selected.draftText} readOnly={selected.truncated || selected.readOnly}
               onChange={e => editSelected(e.target.value)} />
             {selected.truncated && <div className="report-inline-state error" role="alert">
-              <OpIcon name="alert" size={14} /><span>File exceeds the editor limit; only a prefix is shown, so Save is disabled.</span>
+              <OpIcon name="alert" size={14} /><span>{uiText("File exceeds the editor limit; only a prefix is shown, so Save is disabled.")}</span>
             </div>}
             {selected.conflict && <div className="report-inline-state error" role="alert">
-              <OpIcon name="alert" size={14} /><span>{selected.rootConflict
-                ? 'Authoring directory changed. Draft remains bound to the old directory and cannot write to the new one.'
-                : selected.observationIncomplete
-                  ? 'File list is incomplete, so its revision is unverified. Save stays disabled until a complete refresh.'
-                : 'Server copy changed. Draft retained.'}</span>
+              <OpIcon name="alert" size={14} /><span>{((selected.rootConflict ? uiText('Authoring directory changed. Draft remains bound to the old directory and cannot write to the new one.') : (selected.observationIncomplete ? uiText('File list is incomplete, so its revision is unverified. Save stays disabled until a complete refresh.') : uiText('Server copy changed. Draft retained.'))))}</span>
               {!selected.truncated && !selected.readOnly && selected.observedText != null
                 && /^sha256:[0-9a-f]{64}$/.test(selected.observedRevision || '')
                 && !selectedUncertainSave && selectedSourceReconciled && <button className="btn sm"
-                onClick={() => adoptObservedServerCopy(selected)}>Use server copy</button>}
+                onClick={() => adoptObservedServerCopy(selected)}>{uiText("Use server copy")}</button>}
             </div>}
             {selected.error && <div className="report-inline-state error" role="alert">
               <OpIcon name="alert" size={14} /><span>{selected.error}</span>
@@ -2137,8 +2095,8 @@ export function AuthoringPanel({
                 || !validAuthoringTargetRootId(selected.observedTargetRootId)
                 || !AUTHORING_REVISION_RE.test(selected.observedRevision || '')
                 || selected.draftText === selected.savedText}>
-              {saveState && !saveState.reconcile ? `Saving ${saveState.name}…` : 'Save'}</button>
-          </> : sourceReady && <div className="muted">select a file to edit</div>}
+              {((saveState && !saveState.reconcile ? uiMessage("Saving {0}…", [saveState.name]) : uiText('Save')))}</button>
+          </> : sourceReady && <div className="muted">{uiText("select a file to edit")}</div>}
         </div>
       </div>
     </Panel>
@@ -2157,46 +2115,37 @@ export function AuthoringPanel({
 // rather than deleted because the meta-note beside it carries the STORY and not the recipe
 // (docs/guide/memory.md measures that on the one real row in the shared store).
 const MEMORY_TAB_PURPOSE = {
-  lessons: <><b>What generalizes.</b> One distilled claim per theme — a verdict
-    (supported / tested / failed) plus the nodes it came from — written by the run's own reflection
-    when the run ends. <b>This is the tier that changes the next run</b>: the best fingerprint
-    matches are pasted straight into the next Researcher / Developer prompt.</>,
-  cases: <><b>The winning run's exact configuration.</b> The parameter dict that produced the best
-    metric on this task, the metric itself, and the rationale that proposed them. Upserted at run end
-    and only when the metric BEATS the stored one, so there is exactly one active row per task and
-    objective — a leaderboard, not a history.{' '}
-    <b>Pasted into the next Researcher prompt for the SAME task</b>, one line beside the note below —
-    the note says why it won, this says what to set. Also readable through <code>kb_search</code>,
-    where cases share one top-3 index with the knowledge notes.</>,
-  notes: <><b>One line per finished run</b> — what won, and (when the model was reachable) why it may
-    have won. Injected verbatim into the next run of the <b>same</b> task, last 3. This is the CAUSAL
-    twin of a case: same win, written as the reason instead of as the recipe — and on a real run it
-    names one hyperparameter where the case carries all of them.</>,
-  knowledge: <><b>Free-form Markdown</b> — the only tier a human writes directly. Edit it under
-    Lab → Authoring → knowledge; the agents also write here through their own <code>remember</code>{' '}
-    tool. Read back through <code>kb_search</code>, alongside cases.</>,
+  lessons: <><b>{uiText("What generalizes.")}</b>{uiText(" One distilled claim per theme — a verdict (supported / tested / failed) plus the nodes it came from — written by the run's own reflection when the run ends. ")}<b>{uiText("This is the tier that changes the next run")}</b>{uiText(": the best fingerprint matches are pasted straight into the next Researcher / Developer prompt.")}</>,
+  cases: <><b>{uiText("The winning run's exact configuration.")}</b>{uiText(" The parameter dict that produced the best metric on this task, the metric itself, and the rationale that proposed them. Upserted at run end and only when the metric BEATS the stored one, so there is exactly one active row per task and objective — a leaderboard, not a history.")}{' '}
+    <b>{uiText("Pasted into the next Researcher prompt for the SAME task")}</b>{uiText(", one line beside the note below — the note says why it won, this says what to set. Also readable through ")}<code>{"kb_search"}</code>{uiText(", where cases share one top-3 index with the knowledge notes.")}</>,
+  notes: <><b>{uiText("One line per finished run")}</b>{uiText(" — what won, and (when the model was reachable) why it may have won. Injected verbatim into the next run of the ")}<b>{uiText("same")}</b>{uiText(" task, last 3. This is the CAUSAL twin of a case: same win, written as the reason instead of as the recipe — and on a real run it names one hyperparameter where the case carries all of them.")}</>,
+  knowledge: <><b>{uiText("Free-form Markdown")}</b>{uiText(" — the only tier a human writes directly. Edit it under Lab → Authoring → knowledge; the agents also write here through their own ")}<code>{"remember"}</code>{' '}{uiText("tool. Read back through ")}<code>{"kb_search"}</code>{uiText(", alongside cases.")}</>,
 }
 
 function MemoryCompletenessNotice({ resource, onRetry, error = false, children }) {
+  useUILanguage()
+
   const action = error ? 'Retry' : 'Refresh'
   return <div className={'report-inline-state' + (error ? ' error' : '')} role={error ? 'alert' : 'status'}>
     <OpIcon name="alert" size={14} />
     <span>{children}</span>
     <button type="button" className="btn sm" disabled={!!resource.pending} onClick={onRetry}>
-      {resource.pending ? `${action}ing…` : action}</button>
+      {(resource.pending ? uiMessage("{0}ing…", [action]) : action)}</button>
   </div>
 }
 
 function KbNote({ note }) {
+  useUILanguage()
+
   const [open, setOpen] = useState(false)
   return <div className="mem-card">
     <button type="button" className="memory-note-toggle disclosure-button" aria-expanded={open}
       onClick={() => setOpen(o => !o)}>
       <span style={{ opacity: 0.6, fontSize: 10, marginRight: 4 }}>{open ? '▾' : '▸'}</span>{note.name}
-      {note.truncated && <span className="muted" style={{ marginLeft: 6, fontSize: 10 }}>· prefix only</span>}</button>
+      {note.truncated && <span className="muted" style={{ marginLeft: 6, fontSize: 10 }}>{uiText("· prefix only")}</span>}</button>
     {open && <div style={{ marginTop: 6 }}>
       {note.truncated && <div className="report-inline-state" role="status" style={{ margin: '0 0 8px' }}>
-        <OpIcon name="alert" size={14} /><span>Only the first {AUTHORING_MAX_BYTES / 1024} KiB of this note was returned; the rest is not shown.</span>
+        <OpIcon name="alert" size={14} /><span>{uiText("Only the first ")}{AUTHORING_MAX_BYTES / 1024}{uiText(" KiB of this note was returned; the rest is not shown.")}</span>
       </div>}
       <Markdown text={note.text || note.content || ''} />
     </div>}
@@ -2207,6 +2156,8 @@ function KbNote({ note }) {
 // says "the run that produced this touched these concepts", which is a materially weaker claim than a
 // row tagged from its own evidence, and an operator deciding what to trust needs to see which they have.
 function ConceptChips({ row, selected, onSelect }) {
+  useUILanguage()
+
   const concepts = rowConcepts(row)
   if (!concepts.length) return null
   const source = rowSource(row)
@@ -2216,9 +2167,7 @@ function ConceptChips({ row, selected, onSelect }) {
       <button key={id} type="button"
         className={'chip xs concept-chip' + (id === selected ? ' on' : '') + (inherited ? ' inherited' : '')}
         aria-pressed={id === selected}
-        title={inherited
-          ? `${id} — inherited from this row's run, not from its own evidence. Click to filter.`
-          : `${id} — recorded with this entry. Click to filter.`}
+        title={(inherited ? uiMessage("{0} — inherited from this row's run, not from its own evidence. Click to filter.", [id]) : uiMessage("{0} — recorded with this entry. Click to filter.", [id]))}
         onClick={() => onSelect(id === selected ? '' : id)}>{id}{inherited ? ' ·' : ''}</button>
     ))}</>
   )
@@ -2229,37 +2178,36 @@ function ConceptChips({ row, selected, onSelect }) {
 // most needs to be told the filter cannot help yet, rather than being handed an empty result.
 function ConceptShelfBar({ tierLabel, receipt, concepts, selected, onSelect, mode, onMode, runsIndexed,
                            runsTagged }) {
+  useUILanguage()
+
   const summary = coverageSummary(receipt)
   return (
     <div className="concept-shelf-bar" style={{ marginBottom: 8 }}>
       <div className="conv-toggle" style={{ display: 'flex', gap: 6, flexWrap: 'wrap', alignItems: 'center' }}>
-        <label className="muted" style={{ fontSize: 11 }} htmlFor="mem-concept-pick">Concept</label>
+        <label className="muted" style={{ fontSize: 11 }} htmlFor="mem-concept-pick">{uiText("Concept")}</label>
         <select id="mem-concept-pick" className="sel sm" value={selected}
           onChange={event => onSelect(event.target.value)}>
-          <option value="">All concepts</option>
+          <option value="">{uiText("All concepts")}</option>
           {concepts.map(({ id, depth, subtree }) => (
             <option key={id} value={id}>{' '.repeat(depth * 2)}{id.split('/').pop()} ({subtree})</option>
           ))}
           {/* `—`, never a bare 0: an absent or partial coverage receipt does not know how many rows
               are untagged, and "Untagged (0)" is a claim that everything is classified. */}
-          <option value={UNTAGGED}>
-            Untagged ({summary && summary.untagged !== null ? summary.untagged : '—'})</option>
+          <option value={UNTAGGED}>{uiText("Untagged (")}{summary && summary.untagged !== null ? summary.untagged : '—'})</option>
         </select>
         <span className="spacer" style={{ width: 8 }} />
         {[['flat', 'List'], ['tree', 'Concept tree']].map(([key, label]) => (
           <button key={key} type="button" aria-pressed={mode === key}
-            className={'seg' + (mode === key ? ' on' : '')} onClick={() => onMode(key)}>{label}</button>
+            className={'seg' + (mode === key ? ' on' : '')} onClick={() => onMode(key)}>{uiText(label)}</button>
         ))}
       </div>
       {summary && <div className="muted" style={{ fontSize: 11, marginTop: 6, lineHeight: 1.5 }}>
         {/* The non-negotiable disclosure. Sorting or filtering by an axis that only covers part of the
             data is legitimate; doing it without saying how much it covers is not. */}
-        <b>{summary.tagged === null ? '—' : summary.tagged} of {summary.total}</b> {tierLabel.toLowerCase()} carry concepts
-        {summary.untagged > 0 && <> · <b>{summary.untagged} untagged</b>{mode === 'tree'
-          ? ' (shown under Untagged)' : ' (hidden by any concept filter)'}</>}
-        {summary.coarse && <> · all attribution is run-level, so it is only as precise as a whole run</>}
+        <b>{summary.tagged === null ? '—' : summary.tagged}{uiText(" of ")}{summary.total}</b> {tierLabel.toLowerCase()}{uiText(" carry concepts")}{summary.untagged > 0 && <> · <b>{summary.untagged}{uiText(" untagged")}</b>{((mode === 'tree' ? uiText(' (shown under Untagged)') : uiText(' (hidden by any concept filter)')))}</>}
+        {summary.coarse && <>{uiText(" · all attribution is run-level, so it is only as precise as a whole run")}</>}
         {runsIndexed > 0 && summary.untagged > 0
-          && <> · {runsTagged} of {runsIndexed} runs are concept-tagged</>}
+          && <> · {runsTagged}{uiText(" of ")}{runsIndexed}{uiText(" runs are concept-tagged")}</>}
       </div>}
     </div>
   )
@@ -2269,25 +2217,29 @@ function ConceptShelfBar({ tierLabel, receipt, concepts, selected, onSelect, mod
 // is, and the Untagged group is visually marked rather than dressed up as a concept — it is the honest
 // residue of the axis, and an operator scanning for what to tag next should be able to find it fast.
 function ConceptGroup({ group, children }) {
+  useUILanguage()
+
   const empty = group.rows.length === 0
   return (
     <section className={'concept-group' + (group.untagged ? ' untagged' : '')}
       style={{ marginLeft: group.untagged ? 0 : group.depth * 14, marginBottom: 10 }}>
       <h4 style={{ margin: '8px 0 4px', fontSize: 12, display: 'flex', gap: 6, alignItems: 'baseline' }}>
         {group.untagged
-          ? <span className="muted"><b>Untagged</b> — carries no concept</span>
+          ? <span className="muted"><b>{uiText("Untagged")}</b>{uiText(" — carries no concept")}</span>
           : <><span className="muted">{group.depth > 0 ? group.id.split('/').slice(0, -1).join('/') + '/' : ''}</span>
               <b>{group.id.split('/').pop()}</b></>}
         <span className="grp-n">{group.rows.length}</span>
       </h4>
       {empty
-        ? <div className="muted" style={{ fontSize: 11 }}>Nothing here — every entry in this tier is attributed.</div>
+        ? <div className="muted" style={{ fontSize: 11 }}>{uiText("Nothing here — every entry in this tier is attributed.")}</div>
         : children}
     </section>
   )
 }
 
 export function MemoryPanel({ onClose }) {
+  useUILanguage()
+
   // Everything the run has LEARNED, in one place: distilled lessons, solved-task cases, meta-notes, and
   // the agentic knowledge-base markdown notes (best configs / recipes the agents save + later retrieve).
   const [memory, retryMemory] = usePanelResource(signal => get('/api/memory', { signal }), memoryPayload)
@@ -2348,43 +2300,39 @@ export function MemoryPanel({ onClose }) {
   // group is always rendered so nothing the axis cannot classify goes missing from the view.
   const conceptGroups = rows => groupByConceptTree(applyConcept(rows).shown)
   const filterNotice = (result, noun) => result.hidden > 0 && <div className="muted"
-    style={{ fontSize: 11, marginBottom: 8 }} role="status">
-    Concept filter <b>{concept === UNTAGGED ? 'Untagged' : concept}</b> hid {result.hidden} {noun}
-    {result.hiddenUntagged > 0 && <> — {result.hiddenUntagged} of them because they carry no concept at all</>}.
-    {' '}<button type="button" className="btn xs" onClick={() => setConcept('')}>Clear concept</button>
+    style={{ fontSize: 11, marginBottom: 8 }} role="status">{uiText("Concept filter ")}<b>{((concept === UNTAGGED ? uiText('Untagged') : concept))}</b>{uiText(" hid ")}{result.hidden} {noun}
+    {result.hiddenUntagged > 0 && <> — {result.hiddenUntagged}{uiText(" of them because they carry no concept at all")}</>}.
+    {' '}<button type="button" className="btn xs" onClick={() => setConcept('')}>{uiText("Clear concept")}</button>
   </div>
   return (
-    <Panel title="Memory & knowledge — what the runs have learned" sub={memory.data ? (mem.dir || 'no memory dir') : ''} onClose={onClose} wide>
+    <Panel title={uiText("Memory & knowledge — what the runs have learned")} sub={memory.data ? (mem.dir || 'no memory dir') : ''} onClose={onClose} wide>
       <div className="conv-toggle memory-tabs" style={{ marginBottom: 12 }}>
         {tabs.map(([k, label, n, incomplete]) => <button key={k} aria-pressed={tab === k} className={'seg' + (tab === k ? ' on' : '')}
-          onClick={() => setTab(k)}>{label} <span className="muted">{(k === 'knowledge' ? knowledge : memory).data
+          onClick={() => setTab(k)}>{uiText(label)} <span className="muted">{(k === 'knowledge' ? knowledge : memory).data
             ? `${n}${incomplete ? ' shown' : ''}` : '…'}</span></button>)}
       </div>
       {/* WHAT THIS TAB IS. Four tabs with counts and nothing else left the operator asking what
           Cases were even for. The tiers have different writers and different readers; say so. */}
       <p className="muted memory-tier-blurb">{memoryTierBlurb(tab)}</p>
-      <PanelResourceNotice resource={selectedResource} label={tab === 'knowledge' ? 'Knowledge notes' : 'Cross-run memory'}
+      <PanelResourceNotice resource={selectedResource} label={((tab === 'knowledge' ? uiText('Knowledge notes') : uiText('Cross-run memory')))}
         onRetry={tab === 'knowledge' ? retryKnowledge : retryMemory} />
       {tab !== 'knowledge' && memory.status === 'ready' && selectedReceiptIncomplete
         && <MemoryCompletenessNotice resource={memory} onRetry={retryMemory} error={selectedReceipt.unavailable}>
-          <b>{selectedTierLabel} data is incomplete.</b>{' '}{selectedReceiptIssues.join(' ')}
+          <b>{selectedTierLabel}{uiText(" data is incomplete.")}</b>{' '}{selectedReceiptIssues.join(' ')}
         </MemoryCompletenessNotice>}
       {tab === 'knowledge' && knowledge.status === 'ready' && knowledgeIncomplete
         && <MemoryCompletenessNotice resource={knowledge} onRetry={retryKnowledge}>
-          <b>Knowledge notes are incomplete.</b>{' '}
-          {kb.truncatedFiles > 0 && `${kb.truncatedFiles} Markdown ${kb.truncatedFiles === 1 ? 'entry was' : 'entries were'} not returned. `}
-          {truncatedKnowledgePreviews > 0 && `${truncatedKnowledgePreviews} loaded ${truncatedKnowledgePreviews === 1 ? 'preview contains' : 'previews contain'} only a prefix.`}
+          <b>{uiText("Knowledge notes are incomplete.")}</b>{' '}
+          {(kb.truncatedFiles > 0 && uiMessage("{0} Markdown {1} not returned. ", [kb.truncatedFiles, kb.truncatedFiles === 1 ? 'entry was' : 'entries were']))}
+          {(truncatedKnowledgePreviews > 0 && uiMessage("{0} loaded {1} only a prefix.", [truncatedKnowledgePreviews, truncatedKnowledgePreviews === 1 ? 'preview contains' : 'previews contain']))}
         </MemoryCompletenessNotice>}
       {/* Orientation shown on every tab. The three durable-knowledge surfaces are easy to mistake for
           each other, so each one says what the OTHER two are: this panel is what the RUNS wrote,
           Authoring is what YOU write, Claims & Curation is the portfolio roll-up over several runs. */}
       <div className="muted" style={{ fontSize: 11, marginBottom: 10, lineHeight: 1.5 }}>
         {tab === 'knowledge'
-          ? <>Written by <b>operators or agents</b> through the Knowledge authoring tools; no run
-              provenance is inferred for legacy notes. Edit these in Lab → <b>Authoring</b>.</>
-          : <>Written <b>by runs</b> during cadence/finalization and read-only here. Claims rolled up
-              across the portfolio are <b>Claims &amp; Curation</b> (Lab → Claims &amp; Curation);
-              the cross-run concept map is Runs → <b>Concepts</b>.</>}
+          ? <>{uiText("Written by ")}<b>{uiText("operators or agents")}</b>{uiText(" through the Knowledge authoring tools; no run provenance is inferred for legacy notes. Edit these in Lab → ")}<b>{uiText("Authoring")}</b>.</>
+          : <>{uiText("Written ")}<b>{uiText("by runs")}</b>{uiText(" during cadence/finalization and read-only here. Claims rolled up across the portfolio are ")}<b>{uiText("Claims & Curation")}</b>{uiText(" (Lab → Claims & Curation); the cross-run concept map is Runs → ")}<b>{uiText("Concepts")}</b>.</>}
       </div>
       {/* Per-tab purpose: the four tiers differ in who reads them back, which is the only difference
           an operator can act on. */}
@@ -2392,20 +2340,15 @@ export function MemoryPanel({ onClose }) {
         {MEMORY_TAB_PURPOSE[tab]}
       </div>
       {tab !== 'knowledge' && selectedReceipt?.windowDigest && <div className="muted"
-        style={{ fontSize: 11, marginBottom: 10 }}>
-        Snapshot <code>{selectedReceipt.windowDigest.slice(0, 16)}</code>
-        {selectedReceipt.sourceRows != null && <> · {selectedReceipt.sourceRows} source rows</>}
-        {selectedReceipt.sourceSize != null && <> · {selectedReceipt.sourceSize} bytes total</>}
+        style={{ fontSize: 11, marginBottom: 10 }}>{uiText("Snapshot ")}<code>{selectedReceipt.windowDigest.slice(0, 16)}</code>
+        {selectedReceipt.sourceRows != null && <> · {selectedReceipt.sourceRows}{uiText(" source rows")}</>}
+        {selectedReceipt.sourceSize != null && <> · {selectedReceipt.sourceSize}{uiText(" bytes total")}</>}
       </div>}
-      {tab === 'lessons' && <div className="muted" style={{ fontSize: 11, marginBottom: 10, lineHeight: 1.5 }}>
-        Split by role (§role-split): the <b>Researcher</b> gets R&D / “what technique to try” lessons;
-        the <b>Developer</b> gets only its own “what code change fixed a crash” lessons
-        (untagged/legacy lessons are shared). Cases, notes and the knowledge base are not split.
-      </div>}
+      {tab === 'lessons' && <div className="muted" style={{ fontSize: 11, marginBottom: 10, lineHeight: 1.5 }}>{uiText("Split by role (§role-split): the ")}<b>{uiText("Researcher")}</b>{uiText(" gets R&D / “what technique to try” lessons; the ")}<b>{uiText("Developer")}</b>{uiText(" gets only its own “what code change fixed a crash” lessons (untagged/legacy lessons are shared). Cases, notes and the knowledge base are not split.")}</div>}
       {tab === 'lessons' && <div className="conv-toggle memory-role-tabs" style={{ marginBottom: 8 }}>
         {[['all', 'All'], ['researcher', 'Researcher'], ['developer', 'Developer']].map(([r, label]) =>
           <button key={r} aria-pressed={lessonRole === r} className={'seg' + (lessonRole === r ? ' on' : '')}
-            onClick={() => setLessonRole(r)}>{label}</button>)}
+            onClick={() => setLessonRole(r)}>{uiText(label)}</button>)}
       </div>}
       {tab === 'lessons' && conceptBar('lessons')}
       {tab === 'lessons' && (() => {
@@ -2416,22 +2359,22 @@ export function MemoryPanel({ onClose }) {
         const card = (l, key) => <div key={key} className="mem-card">
           <div>{l.statement}</div>
           <div className="mem-meta" style={{ marginTop: 4, display: 'flex', gap: 6, alignItems: 'center', flexWrap: 'wrap' }}>
-            <span className="chip xs">{l.role || 'shared'}</span>
+            <span className="chip xs">{((l.role || uiText('shared')))}</span>
             {l.kind && <span className="chip xs">{l.kind}</span>}
             {l.outcome && <span className="chip xs">{l.outcome}</span>}
             {l.delta != null && <span className={'chip xs' + (l.delta > 0 ? ' ok' : '')}>Δ{fmt(l.delta)}</span>}
-            {l.confidence != null && <span className="muted" style={{ fontSize: 11 }}>conf {Math.round(l.confidence * 100)}%</span>}
-            {l.evidence_count ? <span className="muted" style={{ fontSize: 11 }}>· {l.evidence_count} evidence</span> : null}
+            {l.confidence != null && <span className="muted" style={{ fontSize: 11 }}>{uiText("conf ")}{Math.round(l.confidence * 100)}%</span>}
+            {l.evidence_count ? <span className="muted" style={{ fontSize: 11 }}>· {l.evidence_count}{uiText(" evidence")}</span> : null}
             {l.evidence_traceable_count != null && <span className="muted" style={{ fontSize: 11 }}>
-              · {l.evidence_traceable_count}/{l.evidence_count || 0} sources traceable</span>}
-            {l.claim_stance && <span className="chip xs">stance {l.claim_stance}</span>}
+              · {l.evidence_traceable_count}/{l.evidence_count || 0}{uiText(" sources traceable")}</span>}
+            {l.claim_stance && <span className="chip xs">{uiText("stance ")}{l.claim_stance}</span>}
             {l.task_id && <span className="muted" style={{ fontSize: 11 }}>· {l.task_id}</span>}
-            {l.run_id && <span className="muted" style={{ fontSize: 11 }}>· run {l.run_id}</span>}
+            {l.run_id && <span className="muted" style={{ fontSize: 11 }}>{uiText("· run ")}{l.run_id}</span>}
             <ConceptChips row={l} selected={concept} onSelect={setConcept} />
           </div>
         </div>
         return <>
-          {conceptOn && filterNotice(result, result.hidden === 1 ? 'lesson' : 'lessons')}
+          {((conceptOn && uiText(filterNotice(result, result.hidden === 1 ? 'lesson' : 'lessons'))))}
           {conceptOn && conceptMode === 'tree' && result.shown.length
             ? conceptGroups(byRole).map(group => <ConceptGroup key={group.id} group={group}>
                 {group.rows.map((l, i) => card(l, i))}
@@ -2449,17 +2392,17 @@ export function MemoryPanel({ onClose }) {
       {tab === 'cases' && conceptBar('cases')}
       {tab === 'cases' && (() => {
         const result = applyConcept(mem.cases || [])
-        const rows = list => list.map((c, i) => <tr key={i}><td>{c.task_id}<div className="muted">{c.direction || 'direction unknown'}</div></td><td className="muted">{c.goal}{c.rationale && <div>{c.rationale}</div>}</td><td>{fmt(c.metric)}</td><td className="muted">{JSON.stringify(c.params)}
-          {c.params_truncated && <span title="Only a bounded parameter projection was returned"
-            aria-label="parameters truncated"> · partial</span>}</td>
-          <td className="muted">{c.run_id || 'legacy / unknown'}</td>
+        const rows = list => list.map((c, i) => <tr key={i}><td>{c.task_id}<div className="muted">{((c.direction || uiText('direction unknown')))}</div></td><td className="muted">{c.goal}{c.rationale && <div>{c.rationale}</div>}</td><td>{fmt(c.metric)}</td><td className="muted">{JSON.stringify(c.params)}
+          {c.params_truncated && <span title={uiText("Only a bounded parameter projection was returned")}
+            aria-label={uiText("parameters truncated")}>{uiText(" · partial")}</span>}</td>
+          <td className="muted">{((c.run_id || uiText('legacy / unknown')))}</td>
           <td><div style={{ display: 'flex', gap: 4, flexWrap: 'wrap' }}>
             <ConceptChips row={c} selected={concept} onSelect={setConcept} /></div></td></tr>)
-        const table = list => <DataTable caption="Stored memory cases" card={false}><table className="tbl">
-          <thead><tr><th>task / objective</th><th>goal / rationale</th><th>metric</th><th>params</th><th>run</th><th>concepts</th></tr></thead>
+        const table = list => <DataTable caption={uiText("Stored memory cases")} card={false}><table className="tbl">
+          <thead><tr><th>{uiText("task / objective")}</th><th>{uiText("goal / rationale")}</th><th>{uiText("metric")}</th><th>{uiText("params")}</th><th>{uiText("run")}</th><th>{uiText("concepts")}</th></tr></thead>
           <tbody>{rows(list)}</tbody></table></DataTable>
         return <>
-          {conceptOn && filterNotice(result, result.hidden === 1 ? 'case' : 'cases')}
+          {((conceptOn && uiText(filterNotice(result, result.hidden === 1 ? 'case' : 'cases'))))}
           {conceptOn && conceptMode === 'tree' && result.shown.length
             ? conceptGroups(mem.cases || []).map(group => <ConceptGroup key={group.id} group={group}>
                 {table(group.rows)}</ConceptGroup>)
@@ -2480,7 +2423,7 @@ export function MemoryPanel({ onClose }) {
             <ConceptChips row={n} selected={concept} onSelect={setConcept} /></div>
         </div>
         return <>
-          {conceptOn && filterNotice(result, result.hidden === 1 ? 'meta-note' : 'meta-notes')}
+          {((conceptOn && uiText(filterNotice(result, result.hidden === 1 ? 'meta-note' : 'meta-notes'))))}
           {conceptOn && conceptMode === 'tree' && result.shown.length
             ? conceptGroups(mem.notes || []).map(group => <ConceptGroup key={group.id} group={group}>
                 {group.rows.map((n, i) => card(n, i))}</ConceptGroup>)
@@ -2491,17 +2434,16 @@ export function MemoryPanel({ onClose }) {
         </>
       })()}
       {tab === 'knowledge' && (kbFiles.length
-        ? <><div className="muted" style={{ fontSize: 11, marginBottom: 6 }}>{kb.dir} — agents save + retrieve these via kb_search</div>
+        ? <><div className="muted" style={{ fontSize: 11, marginBottom: 6 }}>{kb.dir}{uiText(" — agents save + retrieve these via kb_search")}</div>
           {kbFiles.map((n, i) => <KbNote key={i} note={n} />)}</>
-        : knowledge.status === 'ready' && <div className="muted">{kb.dir == null
-          ? 'No knowledge directory is configured.'
-          : knowledgeIncomplete ? 'No knowledge notes are visible in the loaded subset.'
-            : `No knowledge notes yet (${kb.dir}).`}</div>)}
+        : knowledge.status === 'ready' && <div className="muted">{((kb.dir == null ? uiText('No knowledge directory is configured.') : (knowledgeIncomplete ? uiText('No knowledge notes are visible in the loaded subset.') : uiMessage("No knowledge notes yet ({0}).", [kb.dir]))))}</div>)}
     </Panel>
   )
 }
 
 export function RegistryPanel({ state, onClose }) {
+  useUILanguage()
+
   const [resource, retry] = usePanelResource(signal => get('/api/runs', { signal }), runsPayload)
   const [provError, setProvError] = useState('')
   const runs = resource.data || []
@@ -2519,15 +2461,14 @@ export function RegistryPanel({ state, onClose }) {
   const champSource = champ ? objectiveMetricSource(champ) : null
   const champCaveated = objectiveSourceCaveated(champSource)
   return (
-    <Panel title="Solution registry & cross-run" onClose={onClose} wide>
-      <div className="section-h">Champion (this run)</div>
-      {champ ? <div className="kv"><div className="k">node</div><div className="v">#{champ.id} {state.champion != null ? '(promoted)' : '(auto-best)'}</div>
-        <div className="k">metric</div><div className="v">{fmt(champ.confirmed_mean ?? champ.metric)}
+    <Panel title={uiText("Solution registry & cross-run")} onClose={onClose} wide>
+      <div className="section-h">{uiText("Champion (this run)")}</div>
+      {champ ? <div className="kv"><div className="k">{uiText("node")}</div><div className="v">#{champ.id} {((state.champion != null ? uiText('(promoted)') : uiText('(auto-best)')))}</div>
+        <div className="k">{uiText("metric")}</div><div className="v">{fmt(champ.confirmed_mean ?? champ.metric)}
           {champCaveated && <span className="warn" title={objectiveSourceHelp(champSource)}>
             {' · '}{OBJECTIVE_SOURCE_LABEL[champSource.channel]}</span>}</div></div>
-        : <div className="muted">no champion yet</div>}
-      {champCaveated && <div className="muted">
-        This run&rsquo;s champion was selected on a number marked{' '}
+        : <div className="muted">{uiText("no champion yet")}</div>}
+      {champCaveated && <div className="muted">{uiText("This run’s champion was selected on a number marked")}{' '}
         <b>{OBJECTIVE_SOURCE_LABEL[champSource.channel]}</b>. {objectiveSourceHelp(champSource)}
       </div>}
       <div className="toolbar" style={{ marginTop: 6 }}>
@@ -2542,28 +2483,27 @@ export function RegistryPanel({ state, onClose }) {
             if (!downloadBlob(`${state.run_id}_prov.json`, [JSON.stringify(p, null, 2)],
               'application/json')) throw new Error('this browser cannot save a file from the page')
           } catch (error) { setProvError(error?.message || 'unknown error') }
-        }}><OpIcon name="download" size={12} /> W3C-PROV graph (JSON)</button>
+        }}><OpIcon name="download" size={12} />{uiText(" W3C-PROV graph (JSON)")}</button>
       </div>
       {provError && <div className="report-inline-state error" role="alert">
-        <OpIcon name="alert" size={14} /><span>W3C-PROV download failed: {provError}</span></div>}
-      <div className="section-h">Promotions</div>
+        <OpIcon name="alert" size={14} /><span>{uiText("W3C-PROV download failed: ")}{provError}</span></div>}
+      <div className="section-h">{uiText("Promotions")}</div>
       {(state.promotions || []).length
-        ? <DataTable caption="Promoted solution nodes" card={false}><table className="tbl"><thead><tr><th>node</th><th>alias</th></tr></thead><tbody>{state.promotions.map((p, i) => <tr key={i}><td>#{p.node_id}</td><td>{p.alias || 'champion'}</td></tr>)}</tbody></table></DataTable>
-        : <div className="muted">none — use Promote on a node</div>}
-      <div className="section-h">{rankable ? 'Cross-run leaderboard' : 'Cross-run solutions'}</div>
-      <PanelResourceNotice resource={resource} label="Cross-run leaderboard" onRetry={retry} />
+        ? <DataTable caption={uiText("Promoted solution nodes")} card={false}><table className="tbl"><thead><tr><th>{uiText("node")}</th><th>{uiText("alias")}</th></tr></thead><tbody>{state.promotions.map((p, i) => <tr key={i}><td>#{p.node_id}</td><td>{((p.alias || uiText('champion')))}</td></tr>)}</tbody></table></DataTable>
+        : <div className="muted">{uiText("none — use Promote on a node")}</div>}
+      <div className="section-h">{((rankable ? uiText('Cross-run leaderboard') : uiText('Cross-run solutions')))}</div>
+      <PanelResourceNotice resource={resource} label={uiText("Cross-run leaderboard")} onRetry={retry} />
       {runs.length > 0 && !rankable && <div className="muted" style={{ fontSize: 11, marginBottom: 4 }}>
         {/* The REASON, not a guess at it: two runs of one task split only by their protocol or
-            source tree were told "mixed tasks or objectives" (critic 2026-09-26). */}
-        Listed, not ranked: {metricIncomparabilityText(metricIncomparability(runs))}.</div>}
+            source tree were told "mixed tasks or objectives" (critic 2026-09-26). */}{uiText("Listed, not ranked: ")}{uiText(metricIncomparabilityText(metricIncomparability(runs)))}.</div>}
       {/* The caption stays a static literal: dataTableMigration.test.js checks every table region's
           accessible name for uniqueness and meaning, which it can only do statically. So it says what
           the rows ARE, true whether or not they are ranked; the heading and the note above carry the
           ranked/unranked distinction. */}
-      {runs.length > 0 && <DataTable caption="Cross-run best metric per run" card={false}><table className="tbl"><thead><tr><th>run</th><th>task</th><th>phase</th><th>best</th><th>nodes</th></tr></thead><tbody>
-        {rankedRuns.map(r => <tr key={r.run_id}><td>{r.run_id}</td><td className="muted">{r.task_id}</td><td>{r.phase}</td><td>{fmt(r.best_confirmed ?? r.best_metric)}</td><td>{r.nodes}</td></tr>)}
+      {runs.length > 0 && <DataTable caption={uiText("Cross-run best metric per run")} card={false}><table className="tbl"><thead><tr><th>{uiText("run")}</th><th>{uiText("task")}</th><th>{uiText("phase")}</th><th>{uiText("best")}</th><th>{uiText("nodes")}</th></tr></thead><tbody>
+        {rankedRuns.map(r => <tr key={r.run_id}><td>{r.run_id}</td><td className="muted">{r.task_id}</td><td>{uiText(r.phase)}</td><td>{fmt(r.best_confirmed ?? r.best_metric)}</td><td>{r.nodes}</td></tr>)}
       </tbody></table></DataTable>}
-      {resource.status === 'ready' && !runs.length && <div className="muted">No runs in the registry yet.</div>}
+      {resource.status === 'ready' && !runs.length && <div className="muted">{uiText("No runs in the registry yet.")}</div>}
     </Panel>
   )
 }
@@ -2571,15 +2511,17 @@ export function RegistryPanel({ state, onClose }) {
 // Live GPU telemetry (nvidia-smi via /api/gpu). Polls while open so an operator can watch
 // utilization / VRAM / power during a real training run without leaving the browser.
 export function GpuPanel({ onClose }) {
+  useUILanguage()
+
   const [resource, retry] = usePanelResource(signal => get('/api/gpu', { signal }), gpuPayload, '', 2000)
   const data = resource.data
   return (
-    <Panel title="GPU monitor" sub="this host · nvidia-smi · live" onClose={onClose} wide>
-      <PanelResourceNotice resource={resource} label="GPU telemetry" onRetry={retry} />
+    <Panel title={uiText("GPU monitor")} sub="this host · nvidia-smi · live" onClose={onClose} wide>
+      <PanelResourceNotice resource={resource} label={uiText("GPU telemetry")} onRetry={retry} />
       {data && !data.available
-        ? <div className="notice">No GPU / nvidia-smi not available on the server host.</div>
+        ? <div className="notice">{uiText("No GPU / nvidia-smi not available on the server host.")}</div>
         : data && !data.gpus.length
-          ? <div className="notice">No GPU devices reported.</div>
+          ? <div className="notice">{uiText("No GPU devices reported.")}</div>
         : data?.available && (data.gpus || []).map((g, i, gpus) => {
             const gpuLabel = gpus.length > 1
               ? `GPU ${i + 1} of ${gpus.length} · ${g.name}` : g.name
@@ -2597,11 +2539,11 @@ export function GpuPanel({ onClose }) {
                 <Stat n={powerText} l="power draw" />
               </div>
               <div className="kv">
-                <div className="k">GPU util</div><div className="v"><MetricGauge
-                  value={g.util} hot label={`${gpuLabel} utilization`}
+                <div className="k">{uiText("GPU util")}</div><div className="v"><MetricGauge
+                  value={g.util} hot label={uiMessage("{0} utilization", [gpuLabel])}
                   valueText={utilizationText} /></div>
-                <div className="k">VRAM</div><div className="v"><MetricGauge
-                  value={g.mem_used} max={g.mem_total} label={`${gpuLabel} VRAM usage`}
+                <div className="k">{uiText("VRAM")}</div><div className="v"><MetricGauge
+                  value={g.mem_used} max={g.mem_total} label={uiMessage("{0} VRAM usage", [gpuLabel])}
                   valueText={`${fmt(g.mem_used)} of ${fmt(g.mem_total)} MiB`} /></div>
               </div>
             </div>
@@ -2615,6 +2557,8 @@ export function GpuPanel({ onClose }) {
 // is local (one ablation); this is the run-wide W&B-style "which knobs matter" view. Pure UI.
 // The computation lives in report.js::hyperImportance (shared with the Report's Learnings section).
 export function HyperImportancePanel({ state, onClose }) {
+  useUILanguage()
+
   const nodes = Object.values(state.nodes).filter(n => n.status === 'evaluated' && n.metric != null && n.feasible !== false)
   const rows = hyperImportance(state)
   // Rows are sorted with the unmeasurable ones last, so the first NUMERIC importance is the max.
@@ -2622,10 +2566,10 @@ export function HyperImportancePanel({ state, onClose }) {
   // silently rescaled every gauge against a denominator nobody chose.
   const top = rows.find(row => typeof row.imp === 'number')?.imp || 1
   return (
-    <Panel title="Hyperparameter importance" sub={`${nodes.length} evaluated`} onClose={onClose}>
+    <Panel title={uiText("Hyperparameter importance")} sub={`${nodes.length} evaluated`} onClose={onClose}>
       {rows.length
-        ? <><div className="section-h">|correlation| of each param with the metric (run-wide)</div>
-            <DataTable caption="Run-wide hyperparameter importance" card={false}><table className="tbl"><thead><tr><th>param</th><th>importance</th><th>r</th><th>n</th><th>relative importance</th></tr></thead><tbody>
+        ? <><div className="section-h">{uiText("|correlation| of each param with the metric (run-wide)")}</div>
+            <DataTable caption={uiText("Run-wide hyperparameter importance")} card={false}><table className="tbl"><thead><tr><th>{uiText("param")}</th><th>{uiText("importance")}</th><th>r</th><th>n</th><th>{uiText("relative importance")}</th></tr></thead><tbody>
               {/* `row.r >= 0` is TRUE for null, so an unmeasurable param used to sign its own
                   absence as "+—". A param nothing varied gets the honest cell instead: a gauge at
                   0% is a claim, and this row has no measurement to make one from. */}
@@ -2634,15 +2578,13 @@ export function HyperImportancePanel({ state, onClose }) {
                 <td className="muted">{row.r == null ? '—' : `${row.r >= 0 ? '+' : ''}${fmt(row.r, 3)}`}</td>
                 <td className="muted">{row.n}</td>
                 <td style={{ width: 160 }}>{row.imp == null
-                  ? <span className="muted" title={`every evaluated node used the same ${row.k}, so its correlation with the metric is undefined — vary it to measure one`}>not varied</span>
+                  ? <span className="muted" title={uiMessage("every evaluated node used the same {0}, so its correlation with the metric is undefined — vary it to measure one", [row.k])}>{uiText("not varied")}</span>
                   : <MetricGauge value={row.imp} max={top}
-                      label={`${row.k} relative importance`}
+                      label={uiMessage("{0} relative importance", [row.k])}
                       valueText={`${fmt(row.imp / top * 100, 1)}%`} />}</td></tr>)}
             </tbody></table></DataTable>
-            <div className="muted" style={{ marginTop: 8 }}>Sign of r shows direction: with a {state.direction === 'min' ? 'minimize' : 'maximize'} objective,
-              a {state.direction === 'min' ? 'negative' : 'positive'} r means a larger value tends to help. Needs ≥3 evaluated nodes per param,
-              and a param every node set to the same value has no correlation to measure — it reads <b>—</b>, never 0.</div></>
-        : <div className="muted">Not enough numeric-param data yet — run more experiments (≥3 evaluated nodes that share a numeric param).</div>}
+            <div className="muted" style={{ marginTop: 8 }}>{uiText("Sign of r shows direction: with a ")}{((state.direction === 'min' ? uiText('minimize') : uiText('maximize')))}{uiText(" objective, a ")}{((state.direction === 'min' ? uiText('negative') : uiText('positive')))}{uiText(" r means a larger value tends to help. Needs ≥3 evaluated nodes per param, and a param every node set to the same value has no correlation to measure — it reads ")}<b>—</b>{uiText(", never 0.")}</div></>
+        : <div className="muted">{uiText("Not enough numeric-param data yet — run more experiments (≥3 evaluated nodes that share a numeric param).")}</div>}
     </Panel>
   )
 }
@@ -2661,6 +2603,8 @@ export function HyperImportancePanel({ state, onClose }) {
 // The fold runs over the payload this panel ALREADY fetches — no second request, and the whole corpus
 // is grouped once so the panel can also say how many comparable groups exist outside this task.
 export function CrossRunPanel({ state, onClose }) {
+  useUILanguage()
+
   const [resource, retry] = usePanelResource(signal => get('/api/runs', { signal }), runsPayload)
   const runs = resource.data || []
   // TRIMMED, as `crossRunRank.js` groups it (`runIndex.js::runTaskId`): an untrimmed id matched no
@@ -2687,33 +2631,30 @@ export function CrossRunPanel({ state, onClose }) {
   // An unranked row names what holds it unranked — for a refused group, the refusal itself.
   const rankCell = (row, group) => (row.rank == null
     ? <span className="muted" title={unrankedRowTitle(group, row)}>—</span>
-    : <span title={row.tied ? `tied with ${row.tied} other run(s) at this value` : 'rank within this comparable group'}>
-        #{row.rank}{row.tied ? ' (tie)' : ''}</span>)
+    : <span title={((row.tied ? uiMessage("tied with {0} other run(s) at this value", [row.tied]) : uiText('rank within this comparable group')))}>
+        #{row.rank}{((row.tied ? uiText(' (tie)') : ''))}</span>)
   // The caveat rides in the OBJECTIVE cell, beside the number it qualifies, and not in the status
   // column: this table's whole job is to say which recorded value led, and a qualifier one column
   // away from the value is a qualifier an operator scanning a leaderboard does not read. The row
   // keeps its rank — see `crossRunRank.js::buildGroup` for why caveat and not unrank.
   const metricCell = row => <>{fmt(row.value)}
-    {row.confirmed ? ' (confirmed mean)' : ''}
+    {((row.confirmed ? uiText(' (confirmed mean)') : ''))}
     {row.caveats.map(slug => <span className="pill warn" key={slug} style={{ marginLeft: 6 }}
-      title={row.caveatNotice}>{bestMetricCaveatLabel(slug)}</span>)}
-    {row.provisional && <span className="muted" title="this run has not finished; its best can still improve"> · best so far</span>}
+      title={row.caveatNotice}>{uiText(bestMetricCaveatLabel(slug))}</span>)}
+    {row.provisional && <span className="muted" title={uiText("this run has not finished; its best can still improve")}>{uiText(" · best so far")}</span>}
   </>
   return (
-    <Panel title="Same-task run comparison"
+    <Panel title={uiText("Same-task run comparison")}
       sub={resource.data ? `${observations} metric observation${observations === 1 ? '' : 's'}` : ''}
       onClose={onClose} wide>
-      <PanelResourceNotice resource={resource} label="Cross-run results" onRetry={retry} />
+      <PanelResourceNotice resource={resource} label={uiText("Cross-run results")} onRetry={retry} />
       {resource.data && <div className="panel-resource-toolbar">
-        <span className="muted">task ID:</span><code>{task || 'not recorded'}</code>
-        <span className="muted">{tally.groups} group{tally.groups === 1 ? '' : 's'} of this
-          task, {tally.comparableGroups} comparable · ranked within a group only
-          · {GROUP_DEFINITION}</span>
+        <span className="muted">{uiText("task ID:")}</span><code>{((task || 'not recorded'))}</code>
+        <span className="muted">{tally.groups}{uiText(" group")}{tally.groups === 1 ? '' : 's'}{uiText(" of this task, ")}{tally.comparableGroups}{uiText(" comparable · ranked within a group only · ")}{GROUP_DEFINITION}</span>
       </div>}
       {resource.data && !task && <div className="notice resource-warning" role="status">
-        <b>Same-task observations unavailable.</b>
-        <span> This run has no recorded task ID, so no portfolio row can be bound to it. Rows with
-          missing identities are never grouped.</span>
+        <b>{uiText("Same-task observations unavailable.")}</b>
+        <span>{uiText(" This run has no recorded task ID, so no portfolio row can be bound to it. Rows with missing identities are never grouped.")}</span>
       </div>}
       {groups.map(group => {
         const claim = groupClaim(group)
@@ -2726,15 +2667,13 @@ export function CrossRunPanel({ state, onClose }) {
               (`splitClaims`, `unrankedRowTitle`): a fixed title said "provably differ" of a part
               set apart only because it recorded nothing, and a refused group's mark named no
               cause. */}
-          <b>{group.taskId} · {group.direction === 'min' ? 'minimize' : 'maximize'} · {group.size} run{group.size === 1 ? '' : 's'}
+          <b>{group.taskId} · {((group.direction === 'min' ? uiText('minimize') : uiText('maximize')))} · {group.size}{uiText(" run")}{group.size === 1 ? '' : 's'}
             {' · '}{group.partition
-              ? <span title={group.outcome === 'refused'
-                ? 'these runs recorded the same comparability key, and a pair of them is refused all the same: the key groups them, it does not make them one evaluation'
-                : 'these runs recorded the same comparability key, so their numbers were measured against the same declared evaluation inputs'}>evaluation {group.partition}</span>
-              : <span className="warn" title="no run in this group records what its number was measured against; unknown is not the same as comparable">evaluation unrecorded</span>}
-            {group.objective && <>{' · '}<span className="warn" title="an operator retarget made this declared extra metric these runs' objective: their numbers are its values, not the task's own metric, so they are ranked apart from every run ranked by it">ranked by {group.objective}</span></>}
-            {group.split && <>{' · '}<span className="warn" title={splitClaims(group).join(' ')}>{splitLabel(group.split)}</span></>}
-            {group.outcome === 'refused' && <>{' · '}<span className="warn" title={unrankedRowTitle(group)}>not ranked</span></>}.</b>
+              ? <span title={((group.outcome === 'refused' ? uiText('these runs recorded the same comparability key, and a pair of them is refused all the same: the key groups them, it does not make them one evaluation') : uiText('these runs recorded the same comparability key, so their numbers were measured against the same declared evaluation inputs')))}>{uiText("evaluation ")}{group.partition}</span>
+              : <span className="warn" title={uiText("no run in this group records what its number was measured against; unknown is not the same as comparable")}>{uiText("evaluation unrecorded")}</span>}
+            {group.objective && <>{' · '}<span className="warn" title={uiText("an operator retarget made this declared extra metric these runs' objective: their numbers are its values, not the task's own metric, so they are ranked apart from every run ranked by it")}>{uiText("ranked by ")}{group.objective}</span></>}
+            {group.split && <>{' · '}<span className="warn" title={splitClaims(group).join(' ')}>{uiText(splitLabel(group.split))}</span></>}
+            {group.outcome === 'refused' && <>{' · '}<span className="warn" title={unrankedRowTitle(group)}>{uiText("not ranked")}</span></>}.</b>
           <span> {claim.claim}</span>
           <ul style={{ margin: '4px 0 0 16px', padding: 0 }}>
             {claim.refusals.map((line, i) => <li key={i} className="muted">{line}</li>)}
@@ -2742,27 +2681,26 @@ export function CrossRunPanel({ state, onClose }) {
         </div>
       })}
       {groups.length
-        ? <DataTable caption="Same-task per-run metric observations by comparable group" card={false}><table className="tbl">
-            <thead><tr><th>rank</th><th>run</th><th>recorded objective</th><th>nodes</th><th>status</th></tr></thead>
+        ? <DataTable caption={uiText("Same-task per-run metric observations by comparable group")} card={false}><table className="tbl">
+            <thead><tr><th>{uiText("rank")}</th><th>{uiText("run")}</th><th>{uiText("recorded objective")}</th><th>{uiText("nodes")}</th><th>{uiText("status")}</th></tr></thead>
             {groups.map(group => <tbody key={group.key}>
               {/* One region, one caption: `dataTableMigration.test.js` reads captions statically, so a
                   per-group caption cannot exist. The group boundary is a header ROW instead, which is
                   also what keeps two objectives from reading as one ordered list. */}
               <tr className="xr-group"><th colSpan={5} scope="colgroup">
-                {group.taskId} · {group.direction === 'min' ? 'lower is better' : 'higher is better'}
-                {' · '}{group.ranked} of {group.size} ranked
-              </th></tr>
+                {group.taskId} · {((group.direction === 'min' ? uiText('lower is better') : uiText('higher is better')))}
+                {' · '}{group.ranked}{uiText(" of ")}{group.size}{uiText(" ranked")}</th></tr>
               {[...group.rows, ...group.unranked].map(row => <tr key={row.runId}>
                 <td>{rankCell(row, group)}</td>
-                <td><a href={`#/run/${encodeURIComponent(row.runId)}`}>{row.label}</a></td>
+                <td><a href={`#/run/${encodeURIComponent(row.runId)}`}>{uiText(row.label)}</a></td>
                 <td>{metricCell(row)}</td>
                 <td className="muted">{row.nodes}</td>
-                <td className="muted">{row.phase || (row.provisional ? '—' : 'finished')}</td>
+                <td className="muted">{((row.phase || (row.provisional ? '—' : uiText('finished'))))}</td>
               </tr>)}
             </tbody>)}
           </table></DataTable>
         : resource.status === 'ready' && task
-          && <div className="muted">No per-run metric observations for this task ID yet.</div>}
+          && <div className="muted">{uiText("No per-run metric observations for this task ID yet.")}</div>}
       {/* THE TRAJECTORY OVERLAY — one chart per comparable group and never one across groups: the
           axis is the group's own objective, so nothing is rescaled, which is the objection that kept
           this unbuilt (`crossRunRank.js`, header). The series rides on the run row as change points
@@ -2778,22 +2716,17 @@ export function CrossRunPanel({ state, onClose }) {
         </div>
       })}
       {omitted > 0 && <div className="muted" style={{ marginTop: 8 }}>
-        {omitted} additional observation{omitted === 1 ? '' : 's'} omitted by the client render limit.
-      </div>}
+        {omitted}{uiText(" additional observation")}{omitted === 1 ? '' : 's'}{uiText(" omitted by the client render limit.")}</div>}
       {/* Coverage, in the spirit of `conceptForest.js::forestCoverage`: what this screen ranked, and
           the far larger population it says nothing about. */}
-      {coverage && <div className="muted" style={{ marginTop: 8, fontSize: 11 }}>
-        This server holds {coverage.runs} run{coverage.runs === 1 ? '' : 's'}; {coverage.comparableRuns} of
-        them sit in {coverage.comparableGroups} comparable group{coverage.comparableGroups === 1 ? '' : 's'}.
-        {' '}{coverage.noMetric} recorded no metric and {coverage.singletonTasks} task/direction/evaluation
-        {' '}combination{coverage.singletonTasks === 1 ? ' is' : 's are'} the only run of their kind, so
-        nothing on this box ranks them. {/* EVALUATION is the third term since 2026-08-20: a group is
+      {coverage && <div className="muted" style={{ marginTop: 8, fontSize: 11 }}>{uiText("This server holds ")}{coverage.runs}{uiText(" run")}{coverage.runs === 1 ? '' : 's'}; {coverage.comparableRuns}{uiText(" of them sit in ")}{coverage.comparableGroups}{uiText(" comparable group")}{coverage.comparableGroups === 1 ? '' : 's'}.
+        {' '}{coverage.noMetric}{uiText(" recorded no metric and ")}{coverage.singletonTasks}{uiText(" task/direction/evaluation")}{' '}{uiText("combination")}{((coverage.singletonTasks === 1 ? uiText(' is') : uiText('s are')))}{uiText(" the only run of their kind, so nothing on this box ranks them. ")}{/* EVALUATION is the third term since 2026-08-20: a group is
           partitioned by comparability key as well, so a task with several runs can hold several
           singletons — which is the finding, not a rounding error in this sentence. */}
         {/* UNIDENTIFIED is counted too (critic 2026-09-26): without it a box of 3 runs whose one
             partition was refused WHOLE — a smoke-scored champion beside a full-scored one — read
             "0 comparable … 0 no metric, 0 singletons", three runs accounted for by nothing. */}
-        {coverage.unidentified > 0 && ` ${coverage.unidentified} could not be placed in a group: no task id or direction to read the metric with.`}
+        {(coverage.unidentified > 0 && uiMessage(" {0} could not be placed in a group: no task id or direction to read the metric with.", [coverage.unidentified]))}
         {/* A partition whose members provably disagree is SPLIT by what differs (source tree, eval
             profile, scorer, fingerprint) and each part ranked on its own; its rows used to vanish
             into the count above (critic 2026-09-26). Only a part that RECORDED a value another part
@@ -2801,10 +2734,10 @@ export function CrossRunPanel({ state, onClose }) {
             is said to be set apart, and the refused runs are counted on their own, split or not —
             "N of them still disagree after that split" was printed over a group no split
             touched. */}
-        {coverage.splitProvenRuns > 0 && ` ${coverage.splitProvenRuns} run${coverage.splitProvenRuns === 1 ? '' : 's'} share a task and comparability key with others but provably differ from some of them in source tree or evaluation protocol, so ${coverage.splitProvenRuns === 1 ? 'it is' : 'they are'} grouped by that as well.`}
-        {coverage.splitUnrecordedRuns > 0 && ` ${coverage.splitUnrecordedRuns} run${coverage.splitUnrecordedRuns === 1 ? '' : 's'} recorded none of the source tree or protocol facets that split ${coverage.splitUnrecordedRuns === 1 ? 'its' : 'their'} task and key — not recorded, so not comparable with either side — and ${coverage.splitUnrecordedRuns === 1 ? 'is' : 'are'} grouped apart without a proven difference.`}
-        {coverage.refusedRuns > 0 && ` ${coverage.refusedRuns} run${coverage.refusedRuns === 1 ? ' is' : 's are'} shown without a rank: a pair in ${coverage.refusedRuns === 1 ? 'its' : 'their'} group provably disagrees on its evaluation, and no split by source tree or protocol separates them.`}
-        {elsewhere > 0 && ` ${elsewhere} comparable group(s) belong to other task IDs and are deliberately not shown here — their objectives are unrelated to this run.`}
+        {(coverage.splitProvenRuns > 0 && uiMessage(" {0} run{1} share a task and comparability key with others but provably differ from some of them in source tree or evaluation protocol, so {2} grouped by that as well.", [coverage.splitProvenRuns, coverage.splitProvenRuns === 1 ? '' : 's', coverage.splitProvenRuns === 1 ? 'it is' : 'they are']))}
+        {(coverage.splitUnrecordedRuns > 0 && uiMessage(" {0} run{1} recorded none of the source tree or protocol facets that split {2} task and key — not recorded, so not comparable with either side — and {3} grouped apart without a proven difference.", [coverage.splitUnrecordedRuns, coverage.splitUnrecordedRuns === 1 ? '' : 's', coverage.splitUnrecordedRuns === 1 ? 'its' : 'their', coverage.splitUnrecordedRuns === 1 ? 'is' : 'are']))}
+        {(coverage.refusedRuns > 0 && uiMessage(" {0} run{1} shown without a rank: a pair in {2} group provably disagrees on its evaluation, and no split by source tree or protocol separates them.", [coverage.refusedRuns, coverage.refusedRuns === 1 ? ' is' : 's are', coverage.refusedRuns === 1 ? 'its' : 'their']))}
+        {(elsewhere > 0 && uiMessage(" {0} comparable group(s) belong to other task IDs and are deliberately not shown here — their objectives are unrelated to this run.", [elsewhere]))}
       </div>}
     </Panel>
   )
@@ -2819,13 +2752,15 @@ export function CrossRunPanel({ state, onClose }) {
 // Module scope so their identity is stable across SSE frames (ComparePanel re-renders on every live
 // fold); defined inline they remounted the <select> each frame, closing an open dropdown mid-pick.
 function CmpSel({ label, v, set, ids, nodes, currentAttempt = null, selectRef = null }) {
-  return <label className="cmp-select"><span>{label}</span>
-    <select ref={selectRef} className="text" value={v ?? ''} aria-label={label}
+  useUILanguage()
+
+  return <label className="cmp-select"><span>{uiText(label)}</span>
+    <select ref={selectRef} className="text" value={v ?? ''} aria-label={uiText(label)}
             onChange={e => set(Number(e.target.value))}>{ids.map(i => {
               const attempt = i === v && Number.isSafeInteger(currentAttempt)
                 ? currentAttempt : nodes?.[i]?.attempt
               return <option key={i} value={i}>
-                #{i} · attempt {Number.isSafeInteger(attempt) ? attempt : 'unknown'}
+                #{i}{uiText(" · attempt ")}{((Number.isSafeInteger(attempt) ? attempt : uiText('unknown')))}
               </option>
             })}</select>
   </label>
@@ -2910,34 +2845,38 @@ function useNodeResource({ runId, stateRunId, nodeId, expectedGeneration, expect
 }
 
 function CmpCol({ resource, label, surfaceRef = null, onFocusCapture = null, onRetry = null }) {
+  useUILanguage()
+
   const d = resource.data
   const failed = resource.status === 'error'
   return <div ref={surfaceRef} tabIndex={-1} onFocusCapture={onFocusCapture}
     className={`cmp-col${failed ? ' notice resource-error' : d ? '' : ' muted'}`}
     role={failed ? 'alert' : d ? 'group' : 'status'}
-    aria-label={failed ? undefined : d ? `${label} details` : undefined}
+    aria-label={(failed ? undefined : (d ? uiMessage("{0} details", [label]) : undefined))}
     aria-live={failed || d ? undefined : 'polite'}>
     {failed
       ? <>
-          <span>{label}: {resource.error || 'full details could not be loaded.'}</span>
+          <span>{uiText(label)}: {((resource.error || uiText('full details could not be loaded.')))}</span>
           {resource.retryable && <button className="btn sm" onClick={onRetry || resource.retry}
-            aria-label={`Retry ${label} details`}>Retry</button>}
+            aria-label={uiMessage("Retry {0} details", [label])}>{uiText("Retry")}</button>}
         </>
       : d
         ? <>
             <div className="kv">
-              <div className="k">operator</div><div className="v">{d.operator}</div>
-              <div className="k">metric</div><div className="v">{fmt(d.confirmed_mean ?? d.metric)}</div>
-              <div className="k">status</div><div className="v">{d.status}</div>
-              <div className="k">params</div><div className="v">{JSON.stringify(d.idea?.params)}</div>
+              <div className="k">{uiText("operator")}</div><div className="v">{d.operator}</div>
+              <div className="k">{uiText("metric")}</div><div className="v">{fmt(d.confirmed_mean ?? d.metric)}</div>
+              <div className="k">{uiText("status")}</div><div className="v">{uiText(d.status)}</div>
+              <div className="k">{uiText("params")}</div><div className="v">{JSON.stringify(d.idea?.params)}</div>
             </div>
-            <CodeViewer code={d.code || '(no code)'} label={`${label} code`} maxHeight={280} />
+            <CodeViewer code={d.code || '(no code)'} label={uiMessage("{0} code", [label])} maxHeight={280} />
           </>
-        : <>Loading {label} details…</>}
+        : <>{uiText("Loading ")}{uiText(label)}{uiText(" details…")}</>}
   </div>
 }
 
 export function ComparePanel({ state, runId, expectedGeneration, reviewMode = false, onClose, initialPair = null }) {
+  useUILanguage()
+
   const ids = Object.keys(state.nodes).map(Number).sort((a, b) => a - b)
   const [a, setA] = useState(null), [b, setB] = useState(null)
   const [diff, setDiff] = useState(false)   // U4: line diff between ANY two nodes (not just vs parent)
@@ -3042,47 +2981,46 @@ export function ComparePanel({ state, runId, expectedGeneration, reviewMode = fa
     if (resourceB.retryable) resourceB.retry()
     requestAnimationFrame(() => diffSurfaceRef.current?.focus({ preventScroll: true }))
   }
-  if (!ids.length) return <Panel title="Compare nodes" onClose={onClose}>
+  if (!ids.length) return <Panel title={uiText("Compare nodes")} onClose={onClose}>
     <div ref={emptyStateRef} tabIndex={-1} className="muted" role="status"
-      onFocus={() => { detailFocusOwnerRef.current = 'empty' }}>No nodes yet.</div>
+      onFocus={() => { detailFocusOwnerRef.current = 'empty' }}>{uiText("No nodes yet.")}</div>
   </Panel>
   return (
-    <Panel title="Compare nodes" onClose={onClose} wide>
+    <Panel title={uiText("Compare nodes")} onClose={onClose} wide>
       <div className="toolbar" style={{ marginBottom: 10 }}>
-        <CmpSel label="Left node" v={a} set={setA} ids={ids} nodes={state.nodes}
+        <CmpSel label={uiText("Left node")} v={a} set={setA} ids={ids} nodes={state.nodes}
           currentAttempt={displayedAttemptA} selectRef={leftSelectRef} />
-        <span className="muted">vs</span>
-        <CmpSel label="Right node" v={b} set={setB} ids={ids} nodes={state.nodes}
+        <span className="muted">{uiText("vs")}</span>
+        <CmpSel label={uiText("Right node")} v={b} set={setB} ids={ids} nodes={state.nodes}
           currentAttempt={displayedAttemptB} selectRef={rightSelectRef} />
         <span className="spacer" style={{ flex: 1 }} />
         <button className={'btn sm' + (diff ? ' primary' : '')} aria-pressed={diff}
           disabled={!selectionReady}
           onClick={() => setDiff(d => !d)}
-          title="ordered line diff of the two nodes' code">Code diff</button>
+          title={uiText("ordered line diff of the two nodes' code")}>{uiText("Code diff")}</button>
       </div>
       {!selectionReady
-        ? <div className="muted" role="status" aria-live="polite">Preparing node comparison…</div>
+        ? <div className="muted" role="status" aria-live="polite">{uiText("Preparing node comparison…")}</div>
         : diff
-        ? <div ref={diffSurfaceRef} tabIndex={-1} role="group" aria-label="Code comparison details"
+        ? <div ref={diffSurfaceRef} tabIndex={-1} role="group" aria-label={uiText("Code comparison details")}
             onFocusCapture={() => { detailFocusOwnerRef.current = 'diff' }}>
             {diffError
             ? <div className="notice resource-error" role="alert">
-                <span>{diffErrorText || 'Could not load both node details for the diff.'}</span>
+                <span>{((diffErrorText || uiText('Could not load both node details for the diff.')))}</span>
                 {(resourceA.retryable || resourceB.retryable) && <button className="btn sm"
-                  onClick={retryDiff}>Retry failed details</button>}
+                  onClick={retryDiff}>{uiText("Retry failed details")}</button>}
               </div>
             : codeDiff
             ? <CodeViewer diff={codeDiff} copyText={db.code || ''}
-                label={`Code diff #${a} attempt ${displayedAttemptA} to #${b} attempt ${displayedAttemptB}`} maxHeight={460} />
-            : <div className="muted" role="status" aria-live="polite">
-                Loading code for #{a} attempt {displayedAttemptA ?? 'unknown'} and #{b} attempt {displayedAttemptB ?? 'unknown'}…
+                label={uiMessage("Code diff #{0} attempt {1} to #{2} attempt {3}", [a, displayedAttemptA, b, displayedAttemptB])} maxHeight={460} />
+            : <div className="muted" role="status" aria-live="polite">{uiText("Loading code for #")}{a}{uiText(" attempt ")}{((displayedAttemptA ?? uiText('unknown')))}{uiText(" and #")}{b}{uiText(" attempt ")}{((displayedAttemptB ?? uiText('unknown')))}…
               </div>}
           </div>
         : <div className="cmp-cols">
-            <CmpCol resource={resourceA} label={`Node #${a} · attempt ${displayedAttemptA ?? 'unknown'}`}
+            <CmpCol resource={resourceA} label={uiMessage("Node #{0} · attempt {1}", [a, displayedAttemptA ?? 'unknown'])}
               surfaceRef={leftSurfaceRef} onFocusCapture={() => { detailFocusOwnerRef.current = 'left' }}
               onRetry={() => retrySide('left', resourceA, leftSurfaceRef)} />
-            <CmpCol resource={resourceB} label={`Node #${b} · attempt ${displayedAttemptB ?? 'unknown'}`}
+            <CmpCol resource={resourceB} label={uiMessage("Node #{0} · attempt {1}", [b, displayedAttemptB ?? 'unknown'])}
               surfaceRef={rightSurfaceRef} onFocusCapture={() => { detailFocusOwnerRef.current = 'right' }}
               onRetry={() => retrySide('right', resourceB, rightSurfaceRef)} />
           </div>}
@@ -3141,6 +3079,8 @@ const highlightedExplorerText = (value, query) => {
 }
 
 export function EventExplorer({ runId, timeline, historyActive = false, onReturnToLive = null, onClose }) {
+  useUILanguage()
+
   const [f, setF] = useState('')
   const [expandedPayload, setExpandedPayload] = useState(null)
   const [copyStatus, setCopyStatus] = useState(null)
@@ -3215,36 +3155,30 @@ export function EventExplorer({ runId, timeline, historyActive = false, onReturn
     ? `${timeline.rows.length} loaded events`
     : `${timeline.rows.length} loaded of ${timeline.totalEvents} events`
   return (
-    <Panel title="Raw event explorer" sub={totalLabel} onClose={onClose} wide>
+    <Panel title={uiText("Raw event explorer")} sub={totalLabel} onClose={onClose} wide>
       <div className="event-explorer-tools">
-        <input className="text" aria-label="Filter loaded events by type or first 4,000 data characters"
-          placeholder="filter loaded type or first 4k data chars…"
+        <input className="text" aria-label={uiText("Filter loaded events by type or first 4,000 data characters")}
+          placeholder={uiText("filter loaded type or first 4k data chars…")}
           value={f} onChange={event => setF(event.target.value)} />
         <button type="button" className="btn sm" disabled={!timeline.hasMore.older || timeline.loading.older}
-          onClick={timeline.loadOlder}>{timeline.loading.older ? 'Loading…' : 'Load older'}</button>
+          onClick={timeline.loadOlder}>{((timeline.loading.older ? uiText('Loading…') : uiText('Load older')))}</button>
         {timeline.hasMore.newer && <button type="button" className="btn sm" disabled={timeline.loading.newer}
-          onClick={timeline.loadNewer}>{timeline.loading.newer ? 'Loading…' : 'Load newer'}</button>}
+          onClick={timeline.loadNewer}>{((timeline.loading.newer ? uiText('Loading…') : uiText('Load newer')))}</button>}
         <button type="button" className="btn sm ghost" disabled={timeline.loading.tail || (!historyActive && timeline.followingTail && timeline.windowAtTail)}
-          onClick={onReturnToLive || timeline.jumpToLive}>{timeline.loading.tail ? 'Refreshing…' : 'Latest'}</button>
+          onClick={onReturnToLive || timeline.jumpToLive}>{((timeline.loading.tail ? uiText('Refreshing…') : uiText('Latest')))}</button>
       </div>
-      {timeline.totalEvents != null && timeline.totalEvents > timeline.rows.length && <div className="timeline-window-note" role="note">
-        Search covers the loaded window only. Page through the log to inspect other source events.
-      </div>}
-      {timeline.errors.tail && <div className="notice resource-error compact" role="alert">
-        Newest events could not be refreshed. <button type="button" className="btn sm" onClick={() => timeline.retry('tail')}>Retry</button></div>}
-      {timeline.errors.older && <div className="notice resource-error compact" role="alert">
-        Could not load older events; current rows are unchanged. <button type="button" className="btn sm" onClick={timeline.loadOlder}>Retry</button></div>}
-      {timeline.errors.newer && <div className="notice resource-error compact" role="alert">
-        Newer-page refresh failed; loaded rows may be behind. <button type="button" className="btn sm" onClick={timeline.loadNewer}>Retry</button></div>}
-      {timeline.errors.around && <div className="notice resource-error compact" role="alert">
-        Replay window could not be loaded. <button type="button" className="btn sm" onClick={() => timeline.retry('around')}>Retry</button></div>}
+      {timeline.totalEvents != null && timeline.totalEvents > timeline.rows.length && <div className="timeline-window-note" role="note">{uiText("Search covers the loaded window only. Page through the log to inspect other source events.")}</div>}
+      {timeline.errors.tail && <div className="notice resource-error compact" role="alert">{uiText("Newest events could not be refreshed. ")}<button type="button" className="btn sm" onClick={() => timeline.retry('tail')}>{uiText("Retry")}</button></div>}
+      {timeline.errors.older && <div className="notice resource-error compact" role="alert">{uiText("Could not load older events; current rows are unchanged. ")}<button type="button" className="btn sm" onClick={timeline.loadOlder}>{uiText("Retry")}</button></div>}
+      {timeline.errors.newer && <div className="notice resource-error compact" role="alert">{uiText("Newer-page refresh failed; loaded rows may be behind. ")}<button type="button" className="btn sm" onClick={timeline.loadNewer}>{uiText("Retry")}</button></div>}
+      {timeline.errors.around && <div className="notice resource-error compact" role="alert">{uiText("Replay window could not be loaded. ")}<button type="button" className="btn sm" onClick={() => timeline.retry('around')}>{uiText("Retry")}</button></div>}
       {timeline.tornTail && <div className="timeline-window-note warning" role="status">
-        {timeline.sourceTailLimited ? 'Raw source tail exceeded the safety limit.' : 'Only the verified canonical event prefix is shown.'}
+        {((timeline.sourceTailLimited ? uiText('Raw source tail exceeded the safety limit.') : uiText('Only the verified canonical event prefix is shown.')))}
       </div>}
       {timeline.status === 'loading' && !timeline.rows.length
-        ? <div className="timeline-resource muted" role="status">Loading events…</div>
+        ? <div className="timeline-resource muted" role="status">{uiText("Loading events…")}</div>
         : timeline.status !== 'error' && rows.length === 0
-          ? <div className="timeline-resource muted">{query ? 'No matches in the loaded window.' : 'No verified events.'}</div>
+          ? <div className="timeline-resource muted">{((query ? uiText('No matches in the loaded window.') : uiText('No verified events.')))}</div>
           : <VirtualTimeline rows={rows} getKey={explorerEventKey}
               identity={`${runId}:${timeline.generation || 'pending'}:explorer`}
               className="event-explorer-timeline" ariaLabel="Loaded raw events"
@@ -3266,41 +3200,33 @@ export function EventExplorer({ runId, timeline, historyActive = false, onReturn
                   {expandable
                     ? <button type="button" className="event-explorer-toggle" aria-expanded={open}
                         aria-controls={detailsId}
-                        aria-label={`${open ? 'Hide' : 'Show'} full payload for event ${item.event.seq}`}
+                        aria-label={uiMessage("{0} full payload for event {1}", [open ? 'Hide' : 'Show', item.event.seq])}
                         onClick={() => togglePayload(item)}>
                         <span aria-hidden="true">{open ? '▾' : '▸'}</span>
                       </button>
                     : <span className="event-explorer-toggle-placeholder" aria-hidden="true" />}
                   <span className="event-explorer-seq">{item.event.seq}</span>
                   <span className="event-explorer-type">
-                    {highlightedExplorerText(String(item.event.type || ''), query)}
+                    {uiText(highlightedExplorerText(String(item.event.type || ''), query))}
                   </span>
-                  <span className="event-explorer-data">{highlightedExplorerText(preview, query)}</span>
+                  <span className="event-explorer-data">{uiText(highlightedExplorerText(preview, query))}</span>
                   {open && <div id={detailsId} className="event-explorer-detail">
                     <div className="event-explorer-detail-tools">
-                      <span>Full payload · {item.serialized.length.toLocaleString()} characters</span>
+                      <span>{uiText("Full payload · ")}{item.serialized.length.toLocaleString()}{uiText(" characters")}</span>
                       <div className="event-explorer-detail-actions">
-                        <button type="button" className="btn sm ghost" onClick={() => selectPayload(item)}>
-                          Select payload
-                        </button>
+                        <button type="button" className="btn sm ghost" onClick={() => selectPayload(item)}>{uiText("Select payload")}</button>
                         <button type="button" className="btn sm ghost" disabled={status === 'copying'}
                           onClick={() => copyPayload(item)}>
-                          {status === 'copying' ? 'Copying…' : status === 'copied' ? 'Copied' : 'Copy payload'}
+                          {((status === 'copying' ? uiText('Copying…') : (status === 'copied' ? uiText('Copied') : uiText('Copy payload'))))}
                         </button>
                       </div>
                     </div>
-                    {status === 'copied' && <div className="event-explorer-copy-status" role="status">Payload copied.</div>}
-                    {status === 'selected' && <div className="event-explorer-copy-status" role="status">
-                      Payload selected. Press Ctrl+C to copy it.
-                    </div>}
-                    {status === 'error' && <div className="event-explorer-copy-status error" role="status">
-                      Copy failed. Use Select payload, then press Ctrl+C.
-                    </div>}
-                    {status === 'selection-error' && <div className="event-explorer-copy-status error" role="status">
-                      Payload selection is unavailable in this browser.
-                    </div>}
+                    {status === 'copied' && <div className="event-explorer-copy-status" role="status">{uiText("Payload copied.")}</div>}
+                    {status === 'selected' && <div className="event-explorer-copy-status" role="status">{uiText("Payload selected. Press Ctrl+C to copy it.")}</div>}
+                    {status === 'error' && <div className="event-explorer-copy-status error" role="status">{uiText("Copy failed. Use Select payload, then press Ctrl+C.")}</div>}
+                    {status === 'selection-error' && <div className="event-explorer-copy-status error" role="status">{uiText("Payload selection is unavailable in this browser.")}</div>}
                     <pre ref={payloadRef} className="event-explorer-json" role="region" tabIndex={0}
-                      aria-label={`Full payload for event ${item.event.seq}`}>{item.serialized}</pre>
+                      aria-label={uiMessage("Full payload for event {0}", [item.event.seq])}>{item.serialized}</pre>
                   </div>}
                 </div>
               }} />}
@@ -3329,6 +3255,8 @@ const artifactScopeChanged = error => error?.status === 409 || ARTIFACT_SCOPE_ER
 // manifest the UI deliberately makes no file-level production claim. Text files open inline; binary /
 // oversize ones are flagged. Backed by GET /api/runs/{id}/artifacts + /artifact.
 export function ArtifactsPanel({ runId, expectedGeneration, onToast, onClose }) {
+  useUILanguage()
+
   const [roots, setRoots] = useState(null)
   const [err, setErr] = useState(null)
   const [open, setOpen] = useState({})        // root id -> expanded?
@@ -3439,23 +3367,21 @@ export function ArtifactsPanel({ runId, expectedGeneration, onToast, onClose }) 
   const cappedSearch = !!(ql && roots?.some(r => r.truncated))
   const binary = content && content.is_text === false   // the server's verdict, not the extension guess
   return (
-    <Panel title="Files" sub={runId} wide onClose={onClose}>
-      {!generationReady ? <div className="muted">Waiting for the current run identity…</div>
-        : err ? <div className="notice">Could not load files: {err}{' '}
-            <button type="button" className="btn sm" onClick={() => { setErr(null); setReload(n => n + 1) }}>Retry</button>
+    <Panel title={uiText("Files")} sub={runId} wide onClose={onClose}>
+      {!generationReady ? <div className="muted">{uiText("Waiting for the current run identity…")}</div>
+        : err ? <div className="notice">{uiText("Could not load files: ")}{uiText(err)}{' '}
+            <button type="button" className="btn sm" onClick={() => { setErr(null); setReload(n => n + 1) }}>{uiText("Retry")}</button>
           </div>
-        : !roots ? <div className="muted">Loading…</div> :
+        : !roots ? <div className="muted">{uiText("Loading…")}</div> :
         <div className="art-wrap">
           <div className="art-list">
-            <input className="text art-filter" aria-label="Filter loaded files" placeholder="filter loaded files…" value={filter}
+            <input className="text art-filter" aria-label={uiText("Filter loaded files")} placeholder={uiText("filter loaded files…")} value={filter}
                    onChange={e => setFilter(e.target.value)} />
             {ql && <div className="muted art-filter-status" role="status" aria-live="polite" aria-atomic="true">
-              {totalMatches === 0
-                ? 'No matches in the loaded file inventory.'
-                : `${totalMatches} ${totalMatches === 1 ? 'match' : 'matches'} in the loaded file inventory.`}
-              {cappedSearch && ' Some roots reached the listing limit, so other matches may exist.'}
+              {((totalMatches === 0 ? uiText('No matches in the loaded file inventory.') : uiMessage("{0} {1} in the loaded file inventory.", [totalMatches, totalMatches === 1 ? 'match' : 'matches'])))}
+              {((cappedSearch && uiText(' Some roots reached the listing limit, so other matches may exist.')))}
             </div>}
-            {roots.length === 0 && <div className="muted">No files found.</div>}
+            {roots.length === 0 && <div className="muted">{uiText("No files found.")}</div>}
             {roots.map(r => {
               const isOpen = !!open[r.id]
               const matches = matchesByRoot?.get(r.id) || r.files
@@ -3465,15 +3391,12 @@ export function ArtifactsPanel({ runId, expectedGeneration, onToast, onClose }) 
                   <button type="button" className="art-root-h disclosure-button" title={r.path}
                        aria-expanded={isOpen} onClick={() => setOpen(o => ({ ...o, [r.id]: !isOpen }))}>
                     <span className="art-chev">{isOpen ? '▾' : '▸'}</span>
-                    <b>{r.label}</b>
+                    <b>{uiText(r.label)}</b>
                     <span className="muted art-root-n">
-                      {ql ? `${matches.length} ${matches.length === 1 ? 'match' : 'matches'} · ${r.n_files} loaded`
-                        : `${r.n_files}${r.truncated ? ' loaded · cap reached' : ''}`}</span>
+                      {(ql ? uiMessage("{0} {1} · {2} loaded", [matches.length, matches.length === 1 ? 'match' : 'matches', r.n_files]) : `${r.n_files}${r.truncated ? ' loaded · cap reached' : ''}`)}</span>
                   </button>
                   {isOpen && <div className="art-files">
-                    {files.length === 0 ? <div className="muted art-empty">{ql
-                      ? (r.truncated ? 'no match in loaded subset' : 'no match in this root')
-                      : 'empty'}</div>
+                    {files.length === 0 ? <div className="muted art-empty">{((ql ? (r.truncated ? uiText('no match in loaded subset') : uiText('no match in this root')) : uiText('empty')))}</div>
                       : files.map(f => (
                         <button type="button" key={f.path} title={f.path + (f.is_text ? '' : ' · looks binary')}
                              aria-pressed={!!(sel && sel.root === r.id && sel.path === f.path)}
@@ -3483,26 +3406,24 @@ export function ArtifactsPanel({ runId, expectedGeneration, onToast, onClose }) 
                           <span className="art-name">{f.path}</span>
                           <span className="art-size">{fmtBytes(f.size)}</span>
                         </button>))}
-                    {r.truncated && <div className="muted art-empty">{ql
-                      ? `Filter checked ${r.n_files} loaded files; this root may contain more matches.`
-                      : `Listing stopped at ${r.n_files} files; this root may contain more.`}</div>}
+                    {r.truncated && <div className="muted art-empty">{(ql ? uiMessage("Filter checked {0} loaded files; this root may contain more matches.", [r.n_files]) : uiMessage("Listing stopped at {0} files; this root may contain more.", [r.n_files]))}</div>}
                   </div>}
                 </div>
               )
             })}
           </div>
           <div className="art-view">
-            {!sel ? <div className="muted art-hint">Select a file to view its contents.</div> : <>
+            {!sel ? <div className="muted art-hint">{uiText("Select a file to view its contents.")}</div> : <>
               <div className="art-view-h">
                 <span className="art-view-path" title={sel.path}>{sel.path}</span>
                 {content && <span className="muted">{fmtBytes(content.size)}</span>}
               </div>
-              {busy ? <div className="muted">Loading…</div>
-                : binary ? <div className="notice">Binary file — not shown inline ({fmtBytes(content.size)}).</div>
+              {busy ? <div className="muted">{uiText("Loading…")}</div>
+                : binary ? <div className="notice">{uiText("Binary file — not shown inline (")}{fmtBytes(content.size)}).</div>
                 : content ? <>
-                    {content.truncated && <div className="notice art-trunc">Showing the first {fmtBytes(_MAX_VIEW)} — the file is larger.</div>}
-                    <pre className="art-pre" role="region" aria-label={`File ${sel.path} contents`} tabIndex={0}>{content.content}</pre>
-                  </> : <div className="muted art-hint">Could not load this file.</div>}
+                    {content.truncated && <div className="notice art-trunc">{uiText("Showing the first ")}{fmtBytes(_MAX_VIEW)}{uiText(" — the file is larger.")}</div>}
+                    <pre className="art-pre" role="region" aria-label={uiMessage("File {0} contents", [sel.path])} tabIndex={0}>{content.content}</pre>
+                  </> : <div className="muted art-hint">{uiText("Could not load this file.")}</div>}
             </>}
           </div>
         </div>}

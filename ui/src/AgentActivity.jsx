@@ -1,3 +1,4 @@
+import { uiText, useUILanguage } from './uiLanguage.js'
 import React from 'react'
 import { useAssistantLanguage } from './useAssistantLanguage.js'
 
@@ -15,11 +16,13 @@ export function validAgentActivity(value) {
 // Activity is an optional observation. A malformed/failed read must neither show
 // a stale "recent" signal nor hide the measured evidence and checkpoint obligations.
 export default function AgentActivity({ activity, fresh }) {
+  useUILanguage()
+
   const [language] = useAssistantLanguage()
   const ru = language === 'ru'
   if (activity == null) return null // older server
   if (!fresh || !validAgentActivity(activity)) return <span role="status" className="muted">
-    {ru ? 'Активность агента недоступна' : 'Agent activity unavailable'}
+    {((((ru ? 'Активность агента недоступна' : uiText('Agent activity unavailable')))))}
   </span>
   const ago = activity.age_seconds == null ? '' : activity.age_seconds < 60
     ? `${activity.age_seconds}${ru ? ' с' : 's'}`
@@ -35,6 +38,6 @@ export default function AgentActivity({ activity, fresh }) {
   return <span className={'chip' + (activity.status === 'quiet' ? ' warn' : '')}
     role="status" title={explanation + (activity.last_seen_at
       ? ` ${ru ? 'Последнее чтение' : 'Last read'}: ${activity.last_seen_at}` : '')}>
-    {label}
+    {uiText(label)}
   </span>
 }

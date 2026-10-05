@@ -1,3 +1,4 @@
+import { uiText, uiMessage, useUILanguage } from './uiLanguage.js'
 import React, { useEffect, useId, useRef } from 'react'
 import Markdown from './markdown.jsx'
 import { fmt } from './util.js'
@@ -32,18 +33,20 @@ const runMentions = value => {
 // A live inline card for a run referenced with @run:<id> — so a running run shows up right in the chat
 // (a direct ask). Links to the run view; the dot pulses while its engine is live.
 function RunChip({ id, run, interactive = true, onOpen }) {
+  useUILanguage()
+
   const phase = run ? (run.phase || (run.finished ? 'finished' : 'running')) : '—'
   const href = `#/run/${encodeURIComponent(id)}`
   const content = <>
     <span className={'asst-run-dot' + (run && run.engine_running ? ' live' : '')} />
     <b>{id}</b>
-    {run && <span className="muted"> {phase}{run.best_metric != null ? ' · ' + fmt(run.best_metric) : ''}</span>}
+    {run && <span className="muted"> {uiText(phase)}{run.best_metric != null ? ' · ' + fmt(run.best_metric) : ''}</span>}
   </>
   return interactive
     ? <a className="asst-runchip" href={href}
         onClick={onOpen ? event => onOpen(event, href) : undefined}
         title={run ? (run.goal || id) : id}>{content}</a>
-    : <span className="asst-runchip inert" title="Run references are not links in a public transcript">
+    : <span className="asst-runchip inert" title={uiText("Run references are not links in a public transcript")}>
         {content}
       </span>
 }
@@ -69,6 +72,8 @@ const exactRecoveryAvailable = action => !!action
     : action.recovery_postimage_digest == null && action.recovery_postimage_mode == null)
 
 function ToolActivity({ items, live = false }) {
+  useUILanguage()
+
   // The window, the truncation and the numbering live in `assistantToolActivity.js` — pure
   // decisions with a `node --test` sibling, because nothing in the suite mounts this component.
   const { steps, total, limited } = toolActivityProjection(items)
@@ -85,28 +90,30 @@ function ToolActivity({ items, live = false }) {
   return <details className="asst-tool-disclosure">
     <summary className="asst-tool-toggle">
       <OpIcon name="gear" size={12} className="asst-tool-icon" />
-      <span className="asst-tool-label" {...liveProps}>{summary}</span>
+      <span className="asst-tool-label" {...liveProps}>{uiText(summary)}</span>
       <OpIcon name="chevron-down" size={13} className="asst-tool-chevron" />
     </summary>
     <div className="asst-tool-body">
-      {limited && <p className="asst-tool-limit">Showing the latest {steps.length} of {total} steps.</p>}
+      {limited && <p className="asst-tool-limit">{uiText("Showing the latest ")}{steps.length}{uiText(" of ")}{total}{uiText(" steps.")}</p>}
       {/* An explicit `value` per item, never a computed `start`: an unlabelled payload inside the
           window is skipped but still counted in `total`, so `total - shown + 1` was the right first
           ordinal only when every windowed item happened to carry a label. */}
       <ol className="asst-tool-list">
         {steps.map(step => <li key={`${step.position}:${step.label}`} value={step.position}>
-          {step.label}</li>)}
+          {uiText(step.label)}</li>)}
       </ol>
     </div>
   </details>
 }
 
 function AssistantErrorCard({ error, onRetry, retryLabel = 'Retry', retryBusy = false, onOpenSettings }) {
+  useUILanguage()
+
   return <div className={`assistant-error-card ${error.kind}`} role="alert">
     <div className="assistant-error-card__head">
       <span className="assistant-error-card__icon" aria-hidden="true">!</span>
       <div>
-        <strong>{error.title}</strong>
+        <strong>{uiText(error.title)}</strong>
         <p>{error.message}</p>
       </div>
     </div>
@@ -115,7 +122,7 @@ function AssistantErrorCard({ error, onRetry, retryLabel = 'Retry', retryBusy = 
       {error.retryable && onRetry && <button className="btn xs primary"
         aria-disabled={retryBusy || undefined}
         onClick={event => { if (!retryBusy) onRetry(event) }}>{retryLabel}</button>}
-      {onOpenSettings && <button className="btn xs ghost" onClick={onOpenSettings}>Open Settings</button>}
+      {onOpenSettings && <button className="btn xs ghost" onClick={onOpenSettings}>{uiText("Open Settings")}</button>}
     </div>
   </div>
 }
@@ -128,6 +135,8 @@ function Turn({
   revertState,
   language = 'auto',
 }) {
+  useUILanguage()
+
   const publicAudience = audience === 'public'
   const who = m.role === 'user' ? (publicAudience ? 'chat owner' : 'you') : 'assistant'
   const content = m.role === 'user' ? stripCtx(m.content) : m.content
@@ -139,7 +148,7 @@ function Turn({
   return <div className={'feed-msg chat ' + m.role + (hasLaunch ? ' has-launch' : '')
     + (publicAudience ? ' audience-public' : '')}>
     <div className="fm-body">
-      <div className="chat-who">{who}</div>
+      <div className="chat-who">{uiText(who)}</div>
       {/* Live, interleaved activity: prose the agent writes between tool rounds renders as its own
           line; longer tool groups use the same bounded disclosure as persisted legacy steps. */}
       {m.role === 'assistant' && Array.isArray(m.activity) && m.activity.length > 0 &&
@@ -151,19 +160,16 @@ function Turn({
       {m.role === 'assistant' && !(m.activity && m.activity.length) && Array.isArray(m.steps) && m.steps.length > 0 &&
         <div className="asst-tool-legacy"><ToolActivity items={m.steps} /></div>}
       {m.role === 'assistant' && m.streaming && !m.content && !(m.activity && m.activity.length) &&
-        <div className="asst-status thinking"><span className="asst-status-ic">…</span><span> thinking</span></div>}
+        <div className="asst-status thinking"><span className="asst-status-ic">…</span><span>{uiText(" thinking")}</span></div>}
       {m.role === 'assistant' && Array.isArray(m.applied) && m.applied.length > 0 &&
         <div className="asst-steps">{m.applied.map((a, i) => {
           const recovery = revertState?.(a) || {}
           const canRevert = onRevert && exactRecoveryAvailable(a)
           return <span key={i} className="asst-step done">✓ {a.label || a.tool}
-            {canRevert && <button className="asst-undo" title={recovery.done
-              ? 'this exact file change was reverted'
-              : recovery.busy ? 'reverting this exact file change' : 'undo this exact file change'}
+            {canRevert && <button className="asst-undo" title={((recovery.done ? uiText('this exact file change was reverted') : (recovery.busy ? uiText('reverting this exact file change') : uiText('undo this exact file change'))))}
               aria-label={`${recovery.done ? 'Reverted' : recovery.busy ? 'Reverting' : 'Undo'} ${a.label || a.tool || 'file change'}`}
               disabled={recovery.busy || recovery.done}
-              onClick={() => onRevert(a)}>{recovery.done ? 'reverted'
-                : recovery.busy ? 'reverting…' : 'undo'}</button>}</span>
+              onClick={() => onRevert(a)}>{((recovery.done ? uiText('reverted') : (recovery.busy ? uiText('reverting…') : uiText('undo'))))}</button>}</span>
         })}</div>}
       {m.role === 'assistant' && <Todos items={m.todos} />}
       {(m.content || !m.streaming) && <div
@@ -186,7 +192,7 @@ function Turn({
         const draftKey = launchDraftKey({ sessionId: launchSessionId, messageId: launchMessageId,
           messageIndex: launchMessageIndex, proposalId: sp.proposal_id, proposalIndex: i })
         return <LazyBoundary key={draftKey} resetKey={draftKey} language={language} focusOnFailure={false}
-          label={language === 'ru' ? 'Карточка запуска' : 'Launch card'}>
+          label={((language === 'ru' ? 'Карточка запуска' : uiText('Launch card')))}>
           <LaunchCard key={draftKey} spec={sp} chat={launchChat} launchIdentity={draftKey}
           retainedDraft={launchDrafts?.[draftKey]}
           retainedConfigOpen={launchDisclosures?.[draftKey] === true}
@@ -211,6 +217,8 @@ export { MemoTurn as Turn }
 
 // The assistant's live TODO list for a multi-step task.
 function Todos({ items }) {
+  useUILanguage()
+
   if (!items || !items.length) return null
   const mark = (s) => s === 'completed' ? '✓' : (s === 'in_progress' ? '▸' : '○')
   return <div className="asst-todos">{items.map((t, i) =>
@@ -225,6 +233,8 @@ export function PermCard({
   req, onResolve, busy = false, autoFocus = false, suppressAutoFocus = false,
   focusRequest = 0, onFocused = null, onFocusFailed = null,
 }) {
+  useUILanguage()
+
   const titleId = useId()
   const detailsId = useId()
   const cardRef = useRef(null)
@@ -284,44 +294,39 @@ export function PermCard({
     role="alertdialog" aria-modal="false" aria-labelledby={titleId} aria-describedby={detailsId}
     aria-busy={busy ? 'true' : 'false'}>
     <div className="asst-perm-h" id={titleId}>
-      <span className="asst-perm-badge">approval required</span>
-      <b>{a.label || a.tool || 'Unknown mutation'}</b>
+      <span className="asst-perm-badge">{uiText("approval required")}</span>
+      <b>{((a.label || a.tool || uiText('Unknown mutation')))}</b>
       <span className={'asst-perm-risk ' + permission.risk.toLowerCase()}>
-        {permission.risk} risk</span>
+        {permission.risk}{uiText(" risk")}</span>
     </div>
     <dl className="asst-perm-details" id={detailsId}>
-      <div><dt>Scope</dt><dd>{permission.scope}{permission.scopeDigest
+      <div><dt>{uiText("Scope")}</dt><dd>{permission.scope}{permission.scopeDigest
         ? <span className="asst-perm-digest" title={permission.scopeDigest}>
-            {' · ID '}{permission.scopeDigest.slice(0, 12)}…</span> : null}</dd></div>
-      <div><dt>Consequence</dt><dd>{permission.consequence}</dd></div>
-      <div><dt>Mode</dt><dd>{permission.modeLabel}</dd></div>
-      <div><dt>Expiry</dt><dd>{permission.expiresIso
+            {uiText(' · ID ')}{permission.scopeDigest.slice(0, 12)}…</span> : null}</dd></div>
+      <div><dt>{uiText("Consequence")}</dt><dd>{permission.consequence}</dd></div>
+      <div><dt>{uiText("Mode")}</dt><dd>{permission.modeLabel}</dd></div>
+      <div><dt>{uiText("Expiry")}</dt><dd>{permission.expiresIso
         ? <time dateTime={permission.expiresIso}>{permission.expiryLabel}</time>
         : permission.expiryLabel}</dd></div>
-      {permission.canAlways && <div><dt>Remembered grant</dt><dd>
-        This exact action and scope · current turn · {permission.modeLabel} mode · {permission.grantDurationLabel}
+      {permission.canAlways && <div><dt>{uiText("Remembered grant")}</dt><dd>{uiText("This exact action and scope · current turn · ")}{permission.modeLabel}{uiText(" mode · ")}{permission.grantDurationLabel}
       </dd></div>}
     </dl>
     {a.preview && <pre className={'asst-perm-pre' + (isDiff ? ' diff' : '')}
-      aria-label="Proposed action preview">{a.preview}</pre>}
-    {permission.expired && <div className="asst-perm-state" role="status">
-      This approval has expired; waiting for the server to close it.</div>}
+      aria-label={uiText("Proposed action preview")}>{a.preview}</pre>}
+    {permission.expired && <div className="asst-perm-state" role="status">{uiText("This approval has expired; waiting for the server to close it.")}</div>}
     {requiresCaution &&
-      <div className="asst-perm-state warning">
-        Persistent approval is unavailable for {permission.risk === 'HIGH'
-          ? 'high-risk actions' : 'actions without a verified risk classification'}.</div>}
-    {busy && <div className="asst-perm-state" role="status">Submitting your decision…</div>}
+      <div className="asst-perm-state warning">{uiText("Persistent approval is unavailable for ")}{((permission.risk === 'HIGH' ? uiText('high-risk actions') : uiText('actions without a verified risk classification')))}.</div>}
+    {busy && <div className="asst-perm-state" role="status">{uiText("Submitting your decision…")}</div>}
     <div className="asst-perm-actions">
       <button ref={rejectRef} data-permission-reject
         className={'btn xs ' + (requiresCaution ? 'primary' : 'ghost')} disabled={busy}
-        onClick={() => onResolve(req.id, 'deny')}>Reject</button>
+        onClick={() => onResolve(req.id, 'deny')}>{uiText("Reject")}</button>
       {permission.canAlways && <button className="btn xs" disabled={busy || permission.expired}
         onClick={() => onResolve(req.id, 'allow_always')}
-        title={`Remember only this exact action and security scope for the current turn and ${permission.modeLabel} mode (${permission.grantDurationLabel})`}>
-        Allow exact scope · {permission.grantDurationLabel}</button>}
+        title={uiMessage("Remember only this exact action and security scope for the current turn and {0} mode ({1})", [permission.modeLabel, permission.grantDurationLabel])}>{uiText("Allow exact scope · ")}{permission.grantDurationLabel}</button>}
       <button className={'btn xs ' + (requiresCaution ? 'danger' : 'primary')}
         disabled={busy || permission.expired}
-        onClick={() => onResolve(req.id, 'allow_once')}>Approve once</button>
+        onClick={() => onResolve(req.id, 'allow_once')}>{uiText("Approve once")}</button>
     </div>
   </div>
 }

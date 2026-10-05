@@ -29,7 +29,7 @@ SETTINGS_UI_SCHEMA_VERSION = 2
 # here reading as if 207 were derived while it is typed, which is the drift it warns about. The
 # unforgeable gate is `SETTINGS_UI_SCHEMA_KEYSET_REVISION` further down; this integer is the
 # human-readable half the docs sentence quotes, and `_load_schema` refuses when the two disagree.
-SETTINGS_UI_SCHEMA_CATALOGUE_FIELD_COUNT = 251
+SETTINGS_UI_SCHEMA_CATALOGUE_FIELD_COUNT = 252
 # On the KEYSET REVISION below: DERIVED, and deliberately no longer a hand-pinned review gate: a
 # bare integer is satisfied by
 # bumping the integer. That is exactly how `asha_live_kill_confidence` — the threshold that now
@@ -416,7 +416,7 @@ SETTINGS_UI_SCHEMA_SETTINGS_FIELD_COUNT = len(Settings.model_fields)
 # (minionerec-lora-v1 node 2, 2026-10-01: a config-only node's metric withheld over two env
 # assignments no code prints). Rows because they decide which metrics stand. Verified by
 # INTERSECTION: the 249 previous keys plus exactly those two, none removed.
-SETTINGS_UI_SCHEMA_KEYSET_REVISION = "1ec81b07c90ce57a9e2f446eae21884ae1fe82d82c5a45def9cb7d3443311455"
+SETTINGS_UI_SCHEMA_KEYSET_REVISION = "82e12800a60db004cd37eb7ec44c9e3ff75286dece4ca7bf50c741aec956e571"
 _SCHEMA_PATH = Path(__file__).with_name("settings_ui_schema.json")
 _FIELD_TYPES = frozenset({"bool", "enum", "secret", "int", "float", "list", "text"})
 _OPTIONAL_TEXT = ("help", "shortHelp", "shortLabel", "placeholder", "warning", "warningTitle", "warningTone")

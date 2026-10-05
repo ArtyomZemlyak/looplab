@@ -1,3 +1,4 @@
+import { uiText, uiMessage, useUILanguage } from './uiLanguage.js'
 import React, { useEffect, useMemo, useRef, useState } from 'react'
 import { OpIcon } from './icons.jsx'
 import {
@@ -42,6 +43,8 @@ const runLabel = run => run?.label || run?.run_id || ''
 // direction across the contributing runs, and it always names them — an unlabelled 0.94 beside an
 // unlabelled 0.0 invites a comparison between an accuracy and a loss.
 function BestMetric({ best }) {
+  useUILanguage()
+
   if (!best) return null
   const value = Number.isInteger(best.value) ? String(best.value) : best.value.toFixed(4)
   return <span className="pc-metric"
@@ -54,12 +57,14 @@ function BestMetric({ best }) {
 }
 
 function ConceptRow({ row, selected, matched, expanded, forcedOpen, onToggle, onSelect, setRef }) {
+  useUILanguage()
+
   const node = row.node
   return <li className={'pc-row' + (row.depth === 0 ? ' pc-root' : '')}
     style={{ paddingLeft: 4 + row.depth * 17 }}>
     {row.hasChildren
       ? <button type="button" className="pc-twist" aria-expanded={expanded}
-          disabled={forcedOpen} title={forcedOpen ? 'Clear search to collapse this path' : undefined}
+          disabled={forcedOpen} title={((forcedOpen ? uiText('Clear search to collapse this path') : undefined))}
           aria-label={`${expanded ? 'Collapse' : 'Expand'} ${row.id}`}
           onClick={() => onToggle(row.id)}>{expanded ? '▾' : '▸'}</button>
       : <span className="pc-twist pc-twist-leaf" aria-hidden="true">·</span>}
@@ -67,14 +72,14 @@ function ConceptRow({ row, selected, matched, expanded, forcedOpen, onToggle, on
       className={'pc-name' + (selected ? ' on' : '') + (matched ? ' pc-match' : '')
         + (node.tagged ? '' : ' pc-grouping')}
       aria-pressed={selected} title={row.id} onClick={() => onSelect(row.id)}>
-      <span className="pc-label">{node.label}</span>
+      <span className="pc-label">{uiText(node.label)}</span>
       {/* A materialized ancestor is OUR grouping, not something a run said. Saying so is the
           difference between showing a hierarchy and claiming one: nobody tagged `optimization`,
           they tagged `optimization/lr`, and the parent row exists because the id spells it. */}
-      {!node.tagged && <span className="pc-tag-note">grouping</span>}
+      {!node.tagged && <span className="pc-tag-note">{uiText("grouping")}</span>}
       <span className="pc-counts">
-        <span className="pc-runs">{node.runs} run{node.runs === 1 ? '' : 's'}</span>
-        {node.tagged && <span className="pc-exp">{node.directExperiments} exp</span>}
+        <span className="pc-runs">{node.runs}{uiText(" run")}{node.runs === 1 ? '' : 's'}</span>
+        {node.tagged && <span className="pc-exp">{node.directExperiments}{uiText(" exp")}</span>}
         <BestMetric best={node.best} />
       </span>
     </button>
@@ -85,26 +90,25 @@ function ConceptRow({ row, selected, matched, expanded, forcedOpen, onToggle, on
 // spell. `is_a` is the tree; a run naming two ids together is the only evidence of anything else, and
 // the floor is what keeps a single run's two labels from reading as a pattern.
 function Partners({ cooccurrence, node }) {
+  useUILanguage()
+
   const partners = node.tagged ? partnersOf(cooccurrence, node.id) : []
   return <>
-    <h4>Studied alongside</h4>
+    <h4>{uiText("Studied alongside")}</h4>
     {!node.tagged
-      ? <p className="muted">This row is a grouping — no run named it, so nothing was named beside it.
-          Open a concept below it.</p>
+      ? <p className="muted">{uiText("This row is a grouping — no run named it, so nothing was named beside it. Open a concept below it.")}</p>
       : partners.length === 0
-        ? <p className="muted">No concept appeared with this one in {cooccurrence.minRuns}+ runs of this
-            scope. That is a statement about repetition, not about whether the pairing is interesting.</p>
+        ? <p className="muted">{uiText("No concept appeared with this one in ")}{cooccurrence.minRuns}{uiText("+ runs of this scope. That is a statement about repetition, not about whether the pairing is interesting.")}</p>
         : <ul className="pc-partners">
             {partners.slice(0, MAX_DETAIL_PARTNERS).map(partner => <li key={partner.id}>
               <code>{partner.id}</code>
-              <span className="muted">{partner.runs} run{partner.runs === 1 ? '' : 's'}</span>
+              <span className="muted">{partner.runs}{uiText(" run")}{partner.runs === 1 ? '' : 's'}</span>
             </li>)}
           </ul>}
     {/* A pruned node's pairs were never counted. Saying "no partners" for it would turn a bound into
         a finding, which is the same rule the tree's truncation notice follows. */}
     {node.tagged && cooccurrence.pairsOutsideProjectionUnknown
-      && <p className="muted">Pairs touching {cooccurrence.pairSourceNodesPruned} less-used concept(s)
-        were not computed, so this list may be incomplete.</p>}
+      && <p className="muted">{uiText("Pairs touching ")}{cooccurrence.pairSourceNodesPruned}{uiText(" less-used concept(s) were not computed, so this list may be incomplete.")}</p>}
   </>
 }
 
@@ -113,69 +117,65 @@ function Partners({ cooccurrence, node }) {
 // everything under `loss/contrastive/…`; two definitions of "about this concept" would drift.
 function _ConceptMemory({ memory, id, onRetry = null }) {
   const result = useMemo(() => conceptMemory(memory, id), [memory, id])
-  if (memory === null) return <><h4>What the lab learned</h4>
-    <p className="muted" role="status">loading cross-run memory…</p></>
+  if (memory === null) return <><h4>{uiText("What the lab learned")}</h4>
+    <p className="muted" role="status">{uiText("loading cross-run memory…")}</p></>
   // Unreadable is its own answer, and must never be spelled as "empty" — see the fetch's `.catch`.
-  if (memory?.unavailable) return <><h4>What the lab learned</h4>
-    <p className="muted" role="status">Cross-run memory could not be read, so what the lab learned
-      about this concept is unknown — this is not a statement that it learned nothing.</p>
-    {onRetry && <button type="button" className="btn sm ghost" onClick={onRetry}>Try again</button>}</>
+  if (memory?.unavailable) return <><h4>{uiText("What the lab learned")}</h4>
+    <p className="muted" role="status">{uiText("Cross-run memory could not be read, so what the lab learned about this concept is unknown — this is not a statement that it learned nothing.")}</p>
+    {onRetry && <button type="button" className="btn sm ghost" onClick={onRetry}>{uiText("Try again")}</button>}</>
   const notice = conceptMemoryNotice(result)
   return <>
-    <h4>What the lab learned</h4>
+    <h4>{uiText("What the lab learned")}</h4>
     {result.groups.map(group => <div key={group.key} className="pc-memory-group">
-      <div className="section-h">{group.label} · {group.rows.length}</div>
+      <div className="section-h">{uiText(group.label)} · {group.rows.length}</div>
       <ul className="pc-detail-runs">
         {group.rows.slice(0, MAX_DETAIL_RUNS).map((row, index) => <li key={`${group.key}-${index}`}>
-          <span>{String(row._text || '').slice(0, 220) || '(no text)'}</span>
-          <span className="muted">{row.task_id || 'task unknown'}</span>
+          <span>{((String(row._text || '').slice(0, 220) || uiText('(no text)')))}</span>
+          <span className="muted">{((row.task_id || uiText('task unknown')))}</span>
         </li>)}
       </ul>
       {group.rows.length > MAX_DETAIL_RUNS
-        && <p className="muted">+{group.rows.length - MAX_DETAIL_RUNS} more not listed.</p>}
+        && <p className="muted">+{group.rows.length - MAX_DETAIL_RUNS}{uiText(" more not listed.")}</p>}
     </div>)}
-    {notice && <p className="muted" role="status">{notice}</p>}
+    {notice && <p className="muted" role="status">{uiText(notice)}</p>}
   </>
 }
 
 export function ConceptDetail({ forest, cooccurrence, id, runsById, onOpenRun, onClose, detailRef,
   memory = null, onMemoryRetry = null }) {
+  useUILanguage()
+
   const node = id && forest.nodes[id]
   if (!node) return null
   const shown = node.runIds.slice(0, MAX_DETAIL_RUNS)
-  return <aside ref={detailRef} tabIndex={-1} className="pc-detail" aria-label={`Concept ${id}`}>
+  return <aside ref={detailRef} tabIndex={-1} className="pc-detail" aria-label={uiMessage("Concept {0}", [id])}>
     <div className="pc-detail-h">
       <code className="pc-detail-id">{id}</code>
-      <button type="button" className="btn xs" onClick={onClose}>Back to map</button>
+      <button type="button" className="btn xs" onClick={onClose}>{uiText("Back to map")}</button>
     </div>
     <dl className="pc-facts">
-      <div><dt>Runs</dt><dd>{node.runs}</dd><small>this branch</small></div>
-      <div><dt>Experiments</dt>
+      <div><dt>{uiText("Runs")}</dt><dd>{node.runs}</dd><small>{uiText("this branch")}</small></div>
+      <div><dt>{uiText("Experiments")}</dt>
         <dd>{node.tagged ? node.directExperiments : '—'}</dd>
-        <small>{node.tagged ? 'exact tag' : 'grouping only'}</small>
+        <small>{((node.tagged ? uiText('exact tag') : uiText('grouping only')))}</small>
       </div>
-      <div><dt>Best metric</dt>
-        <dd>{node.best
-          ? `${node.best.direction === 'min' ? '↓' : '↑'} ${node.best.value}`
-          : 'not shown'}</dd>
+      <div><dt>{uiText("Best metric")}</dt>
+        <dd>{((node.best ? `${node.best.direction === 'min' ? '↓' : '↑'} ${node.best.value}` : uiText('not shown')))}</dd>
         {node.best && <small>{`${node.best.taskId} · ${node.best.direction}`
           + (node.best.objective ? ` · ranked by ${node.best.objective}` : '')}</small>}
       </div>
     </dl>
-    {!node.best && <p className="muted pc-fact-warning">The runs do not share one task and objective
-      direction, or none scored. A single metric would compare different objectives.</p>}
+    {!node.best && <p className="muted pc-fact-warning">{uiText("The runs do not share one task and objective direction, or none scored. A single metric would compare different objectives.")}</p>}
     <details className="pc-method">
-      <summary>How these counts are defined</summary>
-      <p>Runs count distinct runs tagged with this concept or anything below it.</p>
-      <p>{node.tagged
-        ? 'Experiments count only this exact tag. A subtree total would count experiments with several tags more than once.'
-        : 'No run tagged this id itself; a deeper id spells it as an ancestor.'}</p>
+      <summary>{uiText("How these counts are defined")}</summary>
+      <p>{uiText("Runs count distinct runs tagged with this concept or anything below it.")}</p>
+      <p>{((node.tagged ? uiText('Experiments count only this exact tag. A subtree total would count experiments with several tags more than once.') : uiText('No run tagged this id itself; a deeper id spells it as an ancestor.')))}</p>
       {node.best && <p>{`Best robust metric below this concept, over ${node.best.runs} run(s) of `
         + `${node.best.taskId} (${node.best.direction})`
         + (node.best.objective ? ` — ranked by ${node.best.objective}, an operator retarget, `
           + 'not the task’s own metric.' : '.')}</p>}
     </details>
-    <h4>Evidence</h4>
+    <h4>{uiText("Evidence")}</h4>
     <ul className="pc-detail-runs">
       {shown.map(runId => {
         const run = runsById.get(runId)
@@ -183,12 +183,12 @@ export function ConceptDetail({ forest, cooccurrence, id, runsById, onOpenRun, o
           <button type="button" className="pc-run-link" onClick={() => onOpenRun(runId)}>
             {runLabel(run) || runId}
           </button>
-          <span className="muted">{run?.task_id || 'task unknown'}</span>
+          <span className="muted">{((run?.task_id || uiText('task unknown')))}</span>
         </li>
       })}
     </ul>
     {node.runIds.length > shown.length
-      && <p className="muted">+{node.runIds.length - shown.length} more runs not listed.</p>}
+      && <p className="muted">+{node.runIds.length - shown.length}{uiText(" more runs not listed.")}</p>}
     <_ConceptMemory memory={memory} id={id} onRetry={onMemoryRetry} />
     <Partners cooccurrence={cooccurrence} node={node} />
   </aside>
@@ -197,6 +197,8 @@ export function ConceptDetail({ forest, cooccurrence, id, runsById, onOpenRun, o
 export default function PortfolioConcepts({
   runs = [], scopeLabel = 'All runs', selectedRuns = [], onOpenRun = () => {}, headingRef = null,
 }) {
+  useUILanguage()
+
   const [restrictToSelection, setRestrictToSelection] = useState(false)
   const [expanded, setExpanded] = useState(() => new Set())
   const [selected, setSelected] = useState('')
@@ -316,30 +318,23 @@ export default function PortfolioConcepts({
 
   return <div className="pc-stage">
     <div className="pc-head">
-      <h2 ref={headingRef} tabIndex={-1}>Concepts · {scopeName}</h2>
-      <p className="muted pc-lede">
-        Every concept the runs in this scope were tagged with, as the tree their ids spell out.
-        This is folded from the runs already on screen — changing a filter or a project changes it.
-      </p>
+      <h2 ref={headingRef} tabIndex={-1}>{uiText("Concepts · ")}{scopeName}</h2>
+      <p className="muted pc-lede">{uiText("Every concept the runs in this scope were tagged with, as the tree their ids spell out. This is folded from the runs already on screen — changing a filter or a project changes it.")}</p>
       <div className="pc-controls">
-        <div className="seg pc-scope" role="group" aria-label="Concept scope">
+        <div className="seg pc-scope" role="group" aria-label={uiText("Concept scope")}>
           <button type="button" aria-pressed={!restrictToSelection}
             className={restrictToSelection ? '' : 'on'}
-            onClick={() => setRestrictToSelection(false)}>
-            List scope · {runs.length}
+            onClick={() => setRestrictToSelection(false)}>{uiText("List scope · ")}{runs.length}
           </button>
           <button type="button" aria-pressed={restrictToSelection}
             className={restrictToSelection ? 'on' : ''} disabled={!selectedIds.size}
-            title={selectedIds.size
-              ? 'Restrict to the runs checked in List'
-              : 'Check runs in List to build a subset'}
-            onClick={() => setRestrictToSelection(true)}>
-            Selected · {selectedIds.size}
+            title={((selectedIds.size ? uiText('Restrict to the runs checked in List') : uiText('Check runs in List to build a subset')))}
+            onClick={() => setRestrictToSelection(true)}>{uiText("Selected · ")}{selectedIds.size}
           </button>
         </div>
         <label className="pc-search">
-          <span className="sr-only">Find a concept</span>
-          <input type="search" value={query} placeholder="find a concept…"
+          <span className="sr-only">{uiText("Find a concept")}</span>
+          <input type="search" value={query} placeholder={uiText("find a concept…")}
             onChange={event => {
               setQuery(event.target.value.slice(0, 120))
               setSelected('')
@@ -353,12 +348,11 @@ export default function PortfolioConcepts({
               }
             }} />
         </label>
-        <button type="button" className="btn sm" onClick={expandAll}>Expand all</button>
-        <button type="button" className="btn sm" onClick={collapseAll}>Collapse all</button>
+        <button type="button" className="btn sm" onClick={expandAll}>{uiText("Expand all")}</button>
+        <button type="button" className="btn sm" onClick={collapseAll}>{uiText("Collapse all")}</button>
       </div>
       {search && <p className="pc-search-result" role="status">
-        {matches.size} matching concept{matches.size === 1 ? '' : 's'} highlighted in the tree.
-        {matches.size > 0 && ' Matching paths stay open until search is cleared. Press Enter to focus the first match.'}
+        {matches.size}{uiText(" matching concept")}{matches.size === 1 ? '' : 's'}{uiText(" highlighted in the tree.")}{((matches.size > 0 && uiText(' Matching paths stay open until search is cleared. Press Enter to focus the first match.')))}
       </p>}
     </div>
 
@@ -368,50 +362,36 @@ export default function PortfolioConcepts({
         to prevent for memory rows. */}
     {coverage && <div className={'pc-coverage' + (coverage.complete ? ' pc-complete' : '')}
       role="status">
-      <b>{coverage.tagged} of {coverage.runs} runs</b> carry concept tags
-      {coverage.untagged > 0 && <> · <b>{coverage.untagged} untagged</b></>}
-      {' · '}{coverage.concepts} concept{coverage.concepts === 1 ? '' : 's'} across {coverage.roots} root{coverage.roots === 1 ? '' : 's'}
-      {coverage.complete && <> · every run in scope is tagged</>}
-      {coverage.malformedRuns > 0 && <> · <b>{coverage.droppedIds} unreadable tag(s)</b> in {coverage.malformedRuns} run(s)</>}
+      <b>{coverage.tagged}{uiText(" of ")}{coverage.runs}{uiText(" runs")}</b>{uiText(" carry concept tags")}{coverage.untagged > 0 && <> · <b>{coverage.untagged}{uiText(" untagged")}</b></>}
+      {' · '}{coverage.concepts}{uiText(" concept")}{coverage.concepts === 1 ? '' : 's'}{uiText(" across ")}{coverage.roots}{uiText(" root")}{coverage.roots === 1 ? '' : 's'}
+      {coverage.complete && <>{uiText(" · every run in scope is tagged")}</>}
+      {coverage.malformedRuns > 0 && <> · <b>{coverage.droppedIds}{uiText(" unreadable tag(s)")}</b>{uiText(" in ")}{coverage.malformedRuns}{uiText(" run(s)")}</>}
     </div>}
 
     {/* Checked in List, then filtered out of it. The tree already excludes them — the disagreement
         was only ever in the words, and silently dropping them is how "the runs I picked" and "the
         runs this tree describes" become two different sets nobody mentions. */}
     {selectedOutOfScope > 0 && <p className="muted pc-scope-note" role="status">
-      {selectedOutOfScope} checked run(s) are outside the current list scope and are not in this
-      tree. Clear the list filters to include them.</p>}
+      {selectedOutOfScope}{uiText(" checked run(s) are outside the current list scope and are not in this tree. Clear the list filters to include them.")}</p>}
 
-    {policyState.status !== 'ready' && <div className="notice resource-warning" role="status">
-      Concept governance is {policyState.status === 'loading' ? 'loading' : 'unavailable'}; this tree
-      is temporarily showing raw run-authored ids, so governed merges and purges may be unapplied.
-    </div>}
+    {policyState.status !== 'ready' && <div className="notice resource-warning" role="status">{uiText("Concept governance is ")}{((policyState.status === 'loading' ? uiText('loading') : uiText('unavailable')))}{uiText("; this tree is temporarily showing raw run-authored ids, so governed merges and purges may be unapplied.")}</div>}
     {policyState.status === 'ready' && !governance.complete
-      && <div className="notice resource-warning" role="status">
-        Concept governance is partially applied.
-        {governance.unappliedSplits > 0 && <> {governance.unappliedSplits} split-dependent tag(s) remain raw.</>}
-        {governance.invalidTargets > 0 && <> {governance.invalidTargets} invalid policy/tag target(s) were omitted.</>}
+      && <div className="notice resource-warning" role="status">{uiText("Concept governance is partially applied.")}{governance.unappliedSplits > 0 && <> {governance.unappliedSplits}{uiText(" split-dependent tag(s) remain raw.")}</>}
+        {governance.invalidTargets > 0 && <> {governance.invalidTargets}{uiText(" invalid policy/tag target(s) were omitted.")}</>}
       </div>}
     {policyState.status === 'ready' && governance.capsuleCoverageKnown
       && (governance.unrepresentedRuns > 0 || governance.capsuleIdsOmitted > 0)
-      && <div className="notice resource-warning" role="status">
-        Durable cross-run concept memory does not cover this whole list: {governance.unrepresentedRuns}
-        {' '}visible run(s) have no retained capsule
-        {governance.capsuleIdsOmitted > 0 && <>; {governance.capsuleIdsOmitted} capsule id(s) were omitted from the policy receipt</>}.
-        The tree still shows their run-authored tags, but the agent priors may use a smaller population.
-      </div>}
+      && <div className="notice resource-warning" role="status">{uiText("Durable cross-run concept memory does not cover this whole list: ")}{governance.unrepresentedRuns}
+        {' '}{uiText("visible run(s) have no retained capsule")}{governance.capsuleIdsOmitted > 0 && <>; {governance.capsuleIdsOmitted}{uiText(" capsule id(s) were omitted from the policy receipt")}</>}{uiText(". The tree still shows their run-authored tags, but the agent priors may use a smaller population.")}</div>}
 
-    {forest.truncated && <div className="notice resource-warning" role="status">
-      This scope carries more concepts than the tree renders. Narrow the scope to see the rest.
-    </div>}
+    {forest.truncated && <div className="notice resource-warning" role="status">{uiText("This scope carries more concepts than the tree renders. Narrow the scope to see the rest.")}</div>}
 
     {/* Reported, never merged. Two runs spelling one word differently is evidence the taggers drifted,
         not licence for LoopLab to pick a winner — ConceptView already states that LoopLab does not
         infer a taxonomy, and a global tree that quietly joined these roots would be doing exactly
         that. Renaming them for real is a governed cross-run action, not a render-time guess. */}
     {forest.variants.length > 0 && <details className="pc-variants">
-      <summary>{forest.variants.length} concept{forest.variants.length === 1 ? '' : 's'} spelled
-        more than one way — shown separately, not merged</summary>
+      <summary>{forest.variants.length}{uiText(" concept")}{forest.variants.length === 1 ? '' : 's'}{uiText(" spelled more than one way — shown separately, not merged")}</summary>
       <ul>
         {forest.variants.map(group => <li key={group.key}>
           {group.ids.map(id => <code key={id}>{id}</code>)}
@@ -420,20 +400,15 @@ export default function PortfolioConcepts({
       {/* Remaining variants are the residue after the governed alias/purge lookup. Split-dependent
           ids stay raw and are disclosed above because resolving them needs a server-side sibling-aware
           projection, not a browser guess. */}
-      <p className="muted">These differ only in <code>-</code> versus <code>_</code>. LoopLab does not
-        infer a taxonomy, so it keeps ungoverned variants apart. A governed merge
-        (<code>looplab concept-merge</code>) is applied here once the revisioned policy is available.</p>
+      <p className="muted">{uiText("These differ only in ")}<code>-</code>{uiText(" versus ")}<code>_</code>{uiText(". LoopLab does not infer a taxonomy, so it keeps ungoverned variants apart. A governed merge (")}<code>{"looplab concept-merge"}</code>{uiText(") is applied here once the revisioned policy is available.")}</p>
     </details>}
 
     <div className={'pc-body' + (selected ? ' pc-has-selection' : '')}>
       <div className="pc-tree-shell">
         {coverage?.empty
-          ? <div className="notice resource-empty">
-              No run in this scope carries a concept tag.
-              {coverage.runs > 0 && <> All {coverage.runs} of them ran; none was tagged, which is a
-                fact about tagging and not about what was learned.</>}
+          ? <div className="notice resource-empty">{uiText("No run in this scope carries a concept tag.")}{coverage.runs > 0 && <>{uiText(" All ")}{coverage.runs}{uiText(" of them ran; none was tagged, which is a fact about tagging and not about what was learned.")}</>}
             </div>
-          : <ul ref={treeRef} tabIndex={-1} className="pc-tree" aria-label="Concept tree">
+          : <ul ref={treeRef} tabIndex={-1} className="pc-tree" aria-label={uiText("Concept tree")}>
               {rows.map(row => <ConceptRow key={row.id} row={row}
                 selected={selected === row.id}
                 matched={!!matches?.has(row.id)}
@@ -444,7 +419,7 @@ export default function PortfolioConcepts({
                   ? rowRefs.current.set(row.id, node) : rowRefs.current.delete(row.id)} />)}
             </ul>}
         {search && matches?.size === 0
-          && <div className="notice" role="status">No concept id contains “{search}”.</div>}
+          && <div className="notice" role="status">{uiText("No concept id contains “")}{search}”.</div>}
       </div>
 
       {selected
@@ -452,7 +427,7 @@ export default function PortfolioConcepts({
             onOpenRun={onOpenRun} onClose={closeDetail} detailRef={detailRef} memory={memory}
             onMemoryRetry={() => setMemoryNonce(n => n + 1)} />
         : <aside className="pc-detail pc-detail-idle">
-            <p className="muted">Pick a concept to see which runs are evidence for it, and what the lab has learned about it.</p>
+            <p className="muted">{uiText("Pick a concept to see which runs are evidence for it, and what the lab has learned about it.")}</p>
           </aside>}
 
       <div className="pc-secondary">
@@ -461,11 +436,9 @@ export default function PortfolioConcepts({
             count being zero is exactly the signal that says this tree covers the whole scope —
             conceptShelf.js's rule for memory rows, which is the same rule for runs. */}
         <div className="pc-untagged">
-          <b>Untagged</b>
-          <span>{forest.untagged.runs} run{forest.untagged.runs === 1 ? '' : 's'} in this scope carry
-            no concept at all.</span>
-          {forest.untagged.runs > 0 && <span className="muted">They are not in the tree above. That is
-            a gap in tagging, not evidence that nothing was learned in them.</span>}
+          <b>{uiText("Untagged")}</b>
+          <span>{forest.untagged.runs}{uiText(" run")}{forest.untagged.runs === 1 ? '' : 's'}{uiText(" in this scope carry no concept at all.")}</span>
+          {forest.untagged.runs > 0 && <span className="muted">{uiText("They are not in the tree above. That is a gap in tagging, not evidence that nothing was learned in them.")}</span>}
         </div>
 
         {/* The tree is the `is_a` relation — a concept id spells its own ancestry, so nesting is
@@ -474,23 +447,21 @@ export default function PortfolioConcepts({
             with, counted over DISTINCT runs. This section replaces what the removed
             `portfolio_concept_graph` used to compute over the capsule ledger — same rule, but over
             the population this view is actually showing. */}
-        {!coverage?.empty && <section className="pc-pairs" aria-label="Concept co-occurrence">
+        {!coverage?.empty && <section className="pc-pairs" aria-label={uiText("Concept co-occurrence")}>
           <div className="pc-pairs-h">
-            <h3>Studied together</h3>
-            <div className="seg pc-floor" role="group" aria-label="Co-occurrence threshold">
+            <h3>{uiText("Studied together")}</h3>
+            <div className="seg pc-floor" role="group" aria-label={uiText("Co-occurrence threshold")}>
               {PAIR_FLOORS.map(floor => <button key={floor.value} type="button"
                 aria-pressed={pairFloor === floor.value}
-                className={pairFloor === floor.value ? 'on' : ''} title={floor.hint}
-                onClick={() => setPairFloor(floor.value)}>{floor.label}</button>)}
+                className={pairFloor === floor.value ? 'on' : ''} title={uiText(floor.hint)}
+                onClick={() => setPairFloor(floor.value)}>{uiText(floor.label)}</button>)}
             </div>
           </div>
           {cooccurrence.pairs.length === 0
             ? <p className="muted">
-                {cooccurrence.pairCandidates === 0
-                  ? 'No run in this scope was tagged with two concepts, so there is nothing to pair.'
-                  : `No pair of concepts appeared together in ${cooccurrence.minRuns} or more runs. `
+                {((cooccurrence.pairCandidates === 0 ? uiText('No run in this scope was tagged with two concepts, so there is nothing to pair.') : uiText(`No pair of concepts appeared together in ${cooccurrence.minRuns} or more runs. `
                     + `${cooccurrence.pairCandidates} pairing(s) were seen in a single run — a tagger `
-                    + 'emitting two labels once, which is not yet evidence of a pattern.'}
+                    + 'emitting two labels once, which is not yet evidence of a pattern.')))}
               </p>
             : <>
                 <ol className="pc-pair-list">
@@ -502,12 +473,11 @@ export default function PortfolioConcepts({
                     <button type="button" className="pc-pair" onClick={() => setSelected(pair.b)}>
                       <code>{pair.b}</code>
                     </button>
-                    <span className="pc-pair-n">{pair.runs} run{pair.runs === 1 ? '' : 's'}</span>
+                    <span className="pc-pair-n">{pair.runs}{uiText(" run")}{pair.runs === 1 ? '' : 's'}</span>
                   </li>)}
                 </ol>
                 {cooccurrence.pairs.length > MAX_PAIR_ROWS
-                  && <p className="muted">+{cooccurrence.pairs.length - MAX_PAIR_ROWS} more pair(s)
-                    above the threshold, not listed.</p>}
+                  && <p className="muted">+{cooccurrence.pairs.length - MAX_PAIR_ROWS}{uiText(" more pair(s) above the threshold, not listed.")}</p>}
               </>}
           {/* The RANKING cap, which is a different absence from both of the two below and was the
               only one with no words. `pairsOmitted` is pairs that reached the floor, were counted,
@@ -519,15 +489,11 @@ export default function PortfolioConcepts({
               `partnersOf` then returns a SHORT list for the concepts that fell off while the detail
               pane says "no concept appeared with this one". */}
           {cooccurrence.pairsOmitted > 0 && <p className="muted">
-            {cooccurrence.pairsOmitted} further pair(s) reached this threshold and were counted, but
-            fall outside the ranked set this view keeps. They are missing from the list above and
-            from the partners of any concept they touch.</p>}
+            {cooccurrence.pairsOmitted}{uiText(" further pair(s) reached this threshold and were counted, but fall outside the ranked set this view keeps. They are missing from the list above and from the partners of any concept they touch.")}</p>}
           {/* Two different absences, never merged. The cap above is exact — we counted them and showed
               fewer. A pruned node's pairs were never materialized, so their count is UNKNOWN, and
               printing it as zero would present a bound as a finding. */}
-          {cooccurrence.pairsOutsideProjectionUnknown && <p className="muted">
-            Only the {cooccurrence.pairSourceNodesIncluded} most-used concepts were paired;
-            pairs touching the other {cooccurrence.pairSourceNodesPruned} are unknown, not absent.</p>}
+          {cooccurrence.pairsOutsideProjectionUnknown && <p className="muted">{uiText("Only the ")}{cooccurrence.pairSourceNodesIncluded}{uiText(" most-used concepts were paired; pairs touching the other ")}{cooccurrence.pairSourceNodesPruned}{uiText(" are unknown, not absent.")}</p>}
         </section>}
       </div>
     </div>

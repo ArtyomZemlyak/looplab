@@ -1,3 +1,4 @@
+import { uiText, useUILanguage } from './uiLanguage.js'
 import React, { useState } from 'react'
 import { useAssistantLanguage } from './useAssistantLanguage.js'
 import { harnessText } from './harnessText.js'
@@ -9,10 +10,14 @@ import { receiptCommandId, validReceipt } from './harnessReceiptModel.js'
 export { validReceipt } from './harnessReceiptModel.js'
 
 export default function HarnessReceipt({ runId, generation }) {
+  useUILanguage()
+
   return <ReceiptForm key={`${runId}:${generation}`} runId={runId} generation={generation} />
 }
 
 function ReceiptForm({ runId, generation }) {
+  useUILanguage()
+
   const [language] = useAssistantLanguage()
   const t = text => harnessText(language, text)
   const [kind, setKind] = useState('key')
@@ -66,7 +71,7 @@ function ReceiptForm({ runId, generation }) {
         ? 'Key verification is unavailable in this browser. Read by the original Command ID from Events.'
         : 'Receipt unavailable or changed. Read current state and evidence; absence does not prove no action occurred.')}</p>}
     {row && <div aria-label={t('Saved command receipt')}>
-      <p><strong>{row.event_type} · {row.status}</strong> · {row.id}</p>
+      <p><strong>{row.event_type} · {uiText(row.status)}</strong> · {row.id}</p>
       <p>{resource.data.terminal ? t('Command receipt is terminal; this does not prove an experiment evaluated.')
         : t('Nonterminal receipt. Reading it did not continue the command.')}</p>
       {row.event_seq !== null && <p>{t('Recorded intent event #')}{row.event_seq}{t('; verify it in Events.')}</p>}

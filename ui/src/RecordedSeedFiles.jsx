@@ -1,3 +1,4 @@
+import { uiText, uiMessage, useUILanguage } from './uiLanguage.js'
 import React, { useEffect, useRef, useState } from 'react'
 import { deadlineGet, runNodeApiPath } from './api.js'
 import CodeViewer from './CodeViewer.jsx'
@@ -41,6 +42,8 @@ export function validSeedFilesPage(page, identity, offset, path) {
 }
 
 export default function RecordedSeedFiles({ runId, node, generation, baseDigest, language, draftStore, draftScope }) {
+  useUILanguage()
+
   const ru = language === 'ru'
   const [page, setPage] = useState(null)
   const [file, setFile] = useState(null)
@@ -99,65 +102,46 @@ export default function RecordedSeedFiles({ runId, node, generation, baseDigest,
     deleted: ru ? 'Удаление в правках' : 'Deletion recorded',
     unknown: ru ? 'Правки не проверены' : 'Edits unavailable',
   })[kind]
-  return <section aria-label={ru ? 'Записанные файлы базы' : 'Recorded base files'}>
-    <div className="section-h">{ru ? 'Унаследованная база' : 'Inherited base'}</div>
-    <p className="muted">{ru
-      ? 'Файлы проверенного архива до правок узла. Не включает файлы и данные, подключённые при запуске, и окружение. Без вызова модели.'
-      : 'Verified archive files before node edits. Data, mounts, task assets and environment are not added here. No model request.'}</p>
+  return <section aria-label={((ru ? 'Записанные файлы базы' : uiText('Recorded base files')))}>
+    <div className="section-h">{((ru ? 'Унаследованная база' : uiText('Inherited base')))}</div>
+    <p className="muted">{((ru ? 'Файлы проверенного архива до правок узла. Не включает файлы и данные, подключённые при запуске, и окружение. Без вызова модели.' : uiText('Verified archive files before node edits. Data, mounts, task assets and environment are not added here. No model request.')))}</p>
     <button className="btn sm" disabled={pending} onClick={() => load()}>
-      {pending ? (ru ? 'Чтение…' : 'Reading…') : ru ? 'Открыть файлы базы' : 'Open base files'}</button>
+      {((pending ? (ru ? 'Чтение…' : uiText('Reading…')) : (ru ? 'Открыть файлы базы' : uiText('Open base files'))))}</button>
     {error && <p className="notice resource-warning" role="status">{seedReadError(error, ru)}</p>}
     {page && <>
-      <p className="muted">{ru ? 'Файлы' : 'Files'} {page.total ? page.offset + 1 : 0}–{page.offset + page.files.length} / {page.total}</p>
+      <p className="muted">{((ru ? 'Файлы' : uiText('Files')))} {page.total ? page.offset + 1 : 0}–{page.offset + page.files.length} / {page.total}</p>
       <div className="toolbar">
-        <button className="btn sm" disabled={pending || page.offset === 0} onClick={() => load(Math.max(0, page.offset - 100))}>{ru ? 'Назад' : 'Previous'}</button>
-        <button className="btn sm" disabled={pending || page.next_offset === null} onClick={() => load(page.next_offset)}>{ru ? 'Дальше' : 'Next'}</button>
+        <button className="btn sm" disabled={pending || page.offset === 0} onClick={() => load(Math.max(0, page.offset - 100))}>{((ru ? 'Назад' : uiText('Previous')))}</button>
+        <button className="btn sm" disabled={pending || page.next_offset === null} onClick={() => load(page.next_offset)}>{((ru ? 'Дальше' : uiText('Next')))}</button>
       </div>
     </>}
     {file && <>
       <div ref={preview} tabIndex={-1} className="section-h">{file.path}</div>
-      <p className="muted">{ru
-        ? `Опыт #${node.id} · попытка ${node.attempt} · база ${baseDigest.slice(0, 12)}. Показаны версии исходных файлов, не снимок работающей программы.`
-        : `Experiment #${node.id} · attempt ${node.attempt} · base ${baseDigest.slice(0, 12)}. Source file versions, not a running-program snapshot.`}</p>
+      <p className="muted">{(ru ? `Опыт #${node.id} · попытка ${node.attempt} · база ${baseDigest.slice(0, 12)}. Показаны версии исходных файлов, не снимок работающей программы.` : uiMessage("Experiment #{0} · attempt {1} · base {2}. Source file versions, not a running-program snapshot.", [node.id, node.attempt, baseDigest.slice(0, 12)]))}</p>
       {hasEdit && <>
-        <p className="notice compact" role="status">{mainCode ? (ru
-          ? 'Для solution.py сохранён основной код опыта. Версия базы не включает его. Наличие основного кода не подтверждает, что команда оценивания repo-задачи его запускала.'
-          : 'Main code is recorded separately for solution.py. The base version excludes it. Saved main code does not establish that the repo evaluation command executed it.') : ru
-          ? 'Для этого файла есть отдельная правка опыта. Версия базы не включает её. Защищённые файлы и файлы задачи могут перекрывать правку при запуске.'
-          : 'This file has a separate experiment edit. The base version excludes it. Protected files and task assets may override the edit at runtime.'}</p>
-        <div className="toolbar" aria-label={ru ? 'Версия файла' : 'File version'}>
-          <button className="btn sm" aria-pressed={version === 'base'} onClick={() => setVersion('base')}>{ru ? 'Версия базы' : 'Base version'}</button>
-          <button className="btn sm" aria-pressed={version === 'edit'} onClick={() => setVersion('edit')}>{mainCode
-            ? (ru ? 'Основной код опыта' : 'Experiment main code') : (ru ? 'Правка опыта' : 'Experiment edit')}</button>
+        <p className="notice compact" role="status">{((mainCode ? (ru ? 'Для solution.py сохранён основной код опыта. Версия базы не включает его. Наличие основного кода не подтверждает, что команда оценивания repo-задачи его запускала.' : uiText('Main code is recorded separately for solution.py. The base version excludes it. Saved main code does not establish that the repo evaluation command executed it.')) : (ru ? 'Для этого файла есть отдельная правка опыта. Версия базы не включает её. Защищённые файлы и файлы задачи могут перекрывать правку при запуске.' : uiText('This file has a separate experiment edit. The base version excludes it. Protected files and task assets may override the edit at runtime.'))))}</p>
+        <div className="toolbar" aria-label={((ru ? 'Версия файла' : uiText('File version')))}>
+          <button className="btn sm" aria-pressed={version === 'base'} onClick={() => setVersion('base')}>{((ru ? 'Версия базы' : uiText('Base version')))}</button>
+          <button className="btn sm" aria-pressed={version === 'edit'} onClick={() => setVersion('edit')}>{((mainCode ? (ru ? 'Основной код опыта' : uiText('Experiment main code')) : (ru ? 'Правка опыта' : uiText('Experiment edit'))))}</button>
         </div>
       </>}
-      {overlay.kind === 'deleted' && <p className="notice compact" role="status">{ru
-        ? 'В сохранённых правках файл удалён. Ниже — прежний файл из архива базы, а не восстановленный файл опыта.'
-        : 'Deletion is recorded in the saved edits. Below is the old base file, not a restored experiment file.'}</p>}
-      {overlay.kind === 'unknown' && <p className="notice compact" role="status">{ru
-        ? 'Правки не проверены. Версию базы нельзя считать итоговым файлом опыта.'
-        : 'Edits are unavailable. The base version cannot establish the final experiment file.'}</p>}
-      {overlay.kind === 'path_ambiguity' && <p className="notice compact" role="status">{ru
-        ? 'В правках есть другое написание этого пути. На разных файловых системах оно может означать тот же файл. Ниже — только версия базы; итоговый файл опыта не установлен. Проверьте имена в сохранённых правках выше.'
-        : 'Saved edits contain another spelling of this path. Depending on the filesystem it may name the same file. Below is the base version only; the final experiment file is not established. Check the names in the saved edits above.'}</p>}
+      {overlay.kind === 'deleted' && <p className="notice compact" role="status">{((ru ? 'В сохранённых правках файл удалён. Ниже — прежний файл из архива базы, а не восстановленный файл опыта.' : uiText('Deletion is recorded in the saved edits. Below is the old base file, not a restored experiment file.')))}</p>}
+      {overlay.kind === 'unknown' && <p className="notice compact" role="status">{((ru ? 'Правки не проверены. Версию базы нельзя считать итоговым файлом опыта.' : uiText('Edits are unavailable. The base version cannot establish the final experiment file.')))}</p>}
+      {overlay.kind === 'path_ambiguity' && <p className="notice compact" role="status">{((ru ? 'В правках есть другое написание этого пути. На разных файловых системах оно может означать тот же файл. Ниже — только версия базы; итоговый файл опыта не установлен. Проверьте имена в сохранённых правках выше.' : uiText('Saved edits contain another spelling of this path. Depending on the filesystem it may name the same file. Below is the base version only; the final experiment file is not established. Check the names in the saved edits above.')))}</p>}
       {version === 'edit' && hasEdit
-      ? <CodeViewer code={overlay.text} label={mainCode
-          ? (ru ? `Основной код #${node.id}: ${file.path}` : `Main code #${node.id}: ${file.path}`)
-          : (ru ? `Правка #${node.id}: ${file.path}` : `Edit #${node.id}: ${file.path}`)}
+      ? <CodeViewer code={overlay.text} label={(mainCode ? (ru ? `Основной код #${node.id}: ${file.path}` : uiMessage("Main code #{0}: {1}", [node.id, file.path])) : (ru ? `Правка #${node.id}: ${file.path}` : uiMessage("Edit #{0}: {1}", [node.id, file.path])))}
           language={language} draftStore={draftStore} draftScope={mainCode ? `${draftScope}:main` : `${draftScope}:file:${file.path}`} />
       : file.text_status === 'utf8'
-      ? <CodeViewer code={file.text} label={ru ? `База: ${file.path}` : `Base: ${file.path}`} language={language}
+      ? <CodeViewer code={file.text} label={(ru ? `База: ${file.path}` : uiMessage("Base: {0}", [file.path]))} language={language}
           draftStore={draftStore} draftScope={`${draftScope}:base:${file.path}`} />
-      : <p className="notice compact" role="status">{file.path}: {file.text_status === 'too_large'
-        ? (ru ? 'слишком большой файл для текстового просмотра (лимит 256 КиБ).' : 'too large for text preview (256 KiB limit).')
-        : (ru ? 'бинарный файл; текстовый просмотр недоступен.' : 'binary file; no text preview.')}</p>}
+      : <p className="notice compact" role="status">{file.path}: {((file.text_status === 'too_large' ? (ru ? 'слишком большой файл для текстового просмотра (лимит 256 КиБ).' : uiText('too large for text preview (256 KiB limit).')) : (ru ? 'бинарный файл; текстовый просмотр недоступен.' : uiText('binary file; no text preview.'))))}</p>}
     </>}
-    {page && <ul className="recorded-seed-list" aria-label={ru ? 'Файлы записанной базы' : 'Recorded base file list'}>
+    {page && <ul className="recorded-seed-list" aria-label={((ru ? 'Файлы записанной базы' : uiText('Recorded base file list')))}>
       {page.files.map(row => <li key={row.path}>
         <button className="btn sm ghost" disabled={pending} aria-pressed={file?.path === row.path}
           onClick={() => load(page.offset, row.path)}>{row.path}</button>
-        <span className="muted"> · {overlayLabel(recordedFileOverlay(node, row.path).kind)}</span>
-        <span className="muted" title={row.sha256}> {row.bytes} B · {row.sha256.slice(0, 12)}{row.executable ? ' · executable' : ''}</span>
+        <span className="muted"> · {uiText(overlayLabel(recordedFileOverlay(node, row.path).kind))}</span>
+        <span className="muted" title={row.sha256}> {row.bytes} B · {row.sha256.slice(0, 12)}{((row.executable ? uiText(' · executable') : ''))}</span>
       </li>)}
     </ul>}
   </section>

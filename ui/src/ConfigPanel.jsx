@@ -1,3 +1,4 @@
+import { uiText, uiMessage, useUILanguage } from './uiLanguage.js'
 // The per-run settings panel, lifted out of panels.jsx (doc 25 UI-04). It is a component with its
 // own draft persistence, mutation fencing and reconcile machinery, which is what makes it a module
 // rather than one more function in the hub. panels.jsx re-exports it, so RunView still funnels every
@@ -63,6 +64,8 @@ export function ConfigPanel({
   runId, expectedGeneration, state, live, onClose: closePanel, onToast, draftStore = null,
   navigationGuardOwner = 'panel', publishNavigationGuard = null,
 }) {
+  useUILanguage()
+
   const [cfg, setCfg] = useState(null)
   const [settingsSchema, setSettingsSchema] = useState(null)
   const [form, setForm] = useState(null)
@@ -631,7 +634,7 @@ export function ConfigPanel({
       : configMutationUnknown
         ? 'The last save may or may not have reached the server.'
       : busy ? 'A settings operation is still in progress.' : 'This panel has unsaved changes.'
-    if (window.confirm(`${warning} Close the run settings panel anyway?`)) {
+    if (window.confirm(uiMessage("{0} Close the run settings panel anyway?", [warning]))) {
       allowConfigNavigationRef.current = true
       draftStore?.clear(draftScope)
       closePanel()
@@ -640,79 +643,70 @@ export function ConfigPanel({
   // PanelShell routes Escape, backdrop clicks, and its close button through this single guard.
   const onClose = requestClose
 
-  const rawTable = <DataTable caption="Raw run configuration" card={false}><table className="tbl"><tbody>{cfg && Object.entries(cfg).map(([k, v]) =>
+  const rawTable = <DataTable caption={uiText("Raw run configuration")} card={false}><table className="tbl"><tbody>{cfg && Object.entries(cfg).map(([k, v]) =>
     <tr key={k}><th scope="row" className="muted">{k}</th><td>{typeof v === 'object' ? JSON.stringify(v) : String(v)}</td></tr>)}</tbody></table></DataTable>
 
   return (
-    <Panel title="Run settings" sub={engineLive ? 'live · applies on restart'
+    <Panel title={uiText("Run settings")} sub={engineLive ? 'live · applies on restart'
       : engineStopped ? 'edit · applies on resume' : 'engine status unknown'} onClose={onClose} wide>
       <form className="toolbar" style={{ marginBottom: 12 }}
         onSubmit={event => { event.preventDefault(); setEvalCeiling() }}>
-        <label className="muted" htmlFor={budgetInputId}>set eval ceiling:</label>
+        <label className="muted" htmlFor={budgetInputId}>{uiText("set eval ceiling:")}</label>
         <input id={budgetInputId} className="text" style={{ width: 140 }} type="number"
           max="1000000000000" step="any" inputMode="decimal"
-          aria-label="Cumulative evaluation budget ceiling in seconds"
+          aria-label={uiText("Cumulative evaluation budget ceiling in seconds")}
           aria-describedby={budgetHelpId}
           aria-invalid={hasCeilingInput && !validEvalCeiling ? 'true' : undefined}
-          placeholder="total seconds" value={sec} disabled={controlBusy}
+          placeholder={uiText("total seconds")} value={sec} disabled={controlBusy}
           onChange={e => setSec(e.target.value)} />
         <button className={'btn sm primary'
           + (loweringEvalCeiling || exhaustedEvalCeiling || replacingUnknownEvalCeiling ? ' warn' : '')}
           type="submit"
           disabled={!validEvalCeiling || unchangedEvalCeiling || controlBusy}
-        >set ceiling</button>
+        >{uiText("set ceiling")}</button>
         <span id={budgetHelpId} className={'budget-ceiling-help' + budgetHelpTone}
           role={hasCeilingInput ? 'status' : undefined}>
-          {budgetHelp}
+          {uiText(budgetHelp)}
         </span>
       </form>
       {configMutationUnknown && <div className="report-inline-state error" role="alert" style={{ marginBottom: 12 }}>
         <OpIcon name="alert" size={14} />
         {configMutationUnknown.stage === 'conflict'
-          ? <span><b>Run settings changed elsewhere.</b> Load the current server version, then review
-              your retained draft before saving it against the new version.</span>
-          : <span><b>Save outcome unknown.</b> The request timed out or lost its response. Refresh the
-              authoritative server state; this client will not replay the save automatically.</span>}
+          ? <span><b>{uiText("Run settings changed elsewhere.")}</b>{uiText(" Load the current server version, then review your retained draft before saving it against the new version.")}</span>
+          : <span><b>{uiText("Save outcome unknown.")}</b>{uiText(" The request timed out or lost its response. Refresh the authoritative server state; this client will not replay the save automatically.")}</span>}
         <button className="btn sm" disabled={busy} onClick={reconcileUnknownSave}>
-          {configMutationUnknown.stage === 'conflict' ? 'Load current version' : 'Refresh server state'}
+          {((configMutationUnknown.stage === 'conflict' ? uiText('Load current version') : uiText('Refresh server state')))}
         </button>
       </div>}
       {!form || !settingsSchema ? (loadError
         ? <div className="report-inline-state error" role="alert">
             <OpIcon name="alert" size={14} /><span>{loadError}</span>
-            <button className="btn sm" onClick={() => setLoadNonce(value => value + 1)}>Retry</button>
+            <button className="btn sm" onClick={() => setLoadNonce(value => value + 1)}>{uiText("Retry")}</button>
           </div>
-        : <div className="muted" role="status">Loading run settings…</div>) : <>
+        : <div className="muted" role="status">{uiText("Loading run settings…")}</div>) : <>
         <div className="notice" style={{ marginBottom: 10 }}>
           {engineLive
-            ? <>This run is <b>live</b>. Saving updates its <code>config.snapshot.json</code>, but the running engine keeps its current settings until it restarts — use <b>Pause &amp; resume</b> to stop it (the current experiment finishes first) and continue with the new settings.</>
-            : <>Edits are saved to this run's <code>config.snapshot.json</code> and applied on the next <b>resume</b>.</>}
-          {' '}<span className="sf-dot unsaved">●</span> = changed.
-        </div>
-        {configMeta.pinnedFields.size > 0 && <div className="notice" role="note" style={{ marginBottom: 10 }}>
-          Fields marked <b>launch-pinned</b> show the values recorded in this run's event log and cannot
-          be changed on resume. Start a new run to change holdout or verifier semantics.
-          {configMeta.mismatchFields.length > 0 && <>
-            {' '}A legacy snapshot disagrees for {configMeta.mismatchFields.join(', ')}; the effective
-            launch values are shown and will be repaired when another editable setting is saved.
-          </>}
+            ? <>{uiText("This run is ")}<b>{uiText("live")}</b>{uiText(". Saving updates its ")}<code>{"config.snapshot.json"}</code>{uiText(", but the running engine keeps its current settings until it restarts — use ")}<b>{uiText("Pause & resume")}</b>{uiText(" to stop it (the current experiment finishes first) and continue with the new settings.")}</>
+            : <>{uiText("Edits are saved to this run's ")}<code>{"config.snapshot.json"}</code>{uiText(" and applied on the next ")}<b>{uiText("resume")}</b>.</>}
+          {' '}<span className="sf-dot unsaved">●</span>{uiText(" = changed.")}</div>
+        {configMeta.pinnedFields.size > 0 && <div className="notice" role="note" style={{ marginBottom: 10 }}>{uiText("Fields marked ")}<b>{uiText("launch-pinned")}</b>{uiText(" show the values recorded in this run's event log and cannot be changed on resume. Start a new run to change holdout or verifier semantics.")}{configMeta.mismatchFields.length > 0 && <>
+            {' '}{uiText("A legacy snapshot disagrees for ")}{configMeta.mismatchFields.join(', ')}{uiText("; the effective launch values are shown and will be repaired when another editable setting is saved.")}</>}
         </div>}
         <div className="toolbar" style={{ marginBottom: 10 }}>
           <span className="spacer" style={{ flex: 1 }} />
           <button className="btn sm ghost" disabled={!cfg}
-            title={!cfg ? 'Load the current server version before viewing raw settings' : undefined}
-            onClick={() => setRaw(r => !r)}>{raw ? 'form' : 'raw'}</button>
+            title={((!cfg ? uiText('Load the current server version before viewing raw settings') : undefined))}
+            onClick={() => setRaw(r => !r)}>{((raw ? uiText('form') : uiText('raw')))}</button>
           {invalidCount > 0 && <button type="button"
             className="settings-summary-link settings-save-state is-invalid"
             onClick={focusFirstInvalid}>
-            {invalidCount} invalid setting{invalidCount === 1 ? '' : 's'} — review
-          </button>}
+            {invalidCount}{uiText(" invalid setting")}{invalidCount === 1 ? '' : 's'}{uiText(" — review")}</button>}
           <button className="btn sm ghost" disabled={controlBusy || !hasChanges}
-            onClick={revertConfigDraft}>↺ revert</button>
-          <button className="btn sm primary" disabled={controlBusy || !canSave} onClick={onSave}>Save</button>
+            onClick={revertConfigDraft}>{uiText("↺ revert")}</button>
+          <button className="btn sm primary" disabled={controlBusy || !canSave} onClick={onSave}>{uiText("Save")}</button>
           {engineLive
-            ? <button className="btn sm" disabled={controlBusy || hasChanges} onClick={onPauseResume} title="pause the run, then resume it with the saved settings">Pause &amp; resume ▸</button>
-            : <button className="btn sm" disabled={controlBusy || hasChanges} onClick={onResume} title="continue this run with the saved settings">Resume ▸</button>}
+            ? <button className="btn sm" disabled={controlBusy || hasChanges} onClick={onPauseResume} title={uiText("pause the run, then resume it with the saved settings")}>{uiText("Pause & resume ▸")}</button>
+            : <button className="btn sm" disabled={controlBusy || hasChanges} onClick={onResume} title={uiText("continue this run with the saved settings")}>{uiText("Resume ▸")}</button>}
         </div>
         {/* This panel's `dirty` is changed-vs-saved (unsaved), so feed it as `unsaved` → the amber dot that clears on Save. */}
         {raw ? rawTable : <SettingsForm form={form} onChange={onChange} unsaved={dirty}

@@ -1,3 +1,4 @@
+import { uiText, uiMessage, useUILanguage } from './uiLanguage.js'
 // The RESEARCH view — the board read as a ladder of questions rather than as a lifecycle.
 //
 // The operator's objection is the reason it exists: a chain of sharpening claims ("distillation
@@ -45,6 +46,8 @@ function branchKeys(rows) {
 }
 
 export default function ResearchView({ cards, state, renderCard, onShowLanes, onDiscuss }) {
+  useUILanguage()
+
   const [collapsed, setCollapsed] = useState(() => new Set())
   const [concept, setConcept] = useState('')
   const [query, setQuery] = useState('')
@@ -139,68 +142,59 @@ export default function ResearchView({ cards, state, renderCard, onShowLanes, on
     return next
   })
 
-  const bar = <div className="toolbar research-filter" role="group" aria-label="Find research questions">
+  const bar = <div className="toolbar research-filter" role="group" aria-label={uiText("Find research questions")}>
     <label>
-      <span className="muted">Concept</span>{' '}
+      <span className="muted">{uiText("Concept")}</span>{' '}
       <select value={concept} onChange={e => setConcept(e.target.value)}
-        aria-label="Show only questions naming this concept">
-        <option value="">all ({concepts.length})</option>
+        aria-label={uiText("Show only questions naming this concept")}>
+        <option value="">{uiText("all (")}{concepts.length})</option>
         {concepts.map(id => <option key={id} value={id}>{id}</option>)}
       </select>
     </label>
-    {concept && <button type="button" className="btn sm ghost" onClick={() => setConcept('')}>
-      clear
-    </button>}
+    {concept && <button type="button" className="btn sm ghost" onClick={() => setConcept('')}>{uiText("clear")}</button>}
     <input type="search" className="text research-search" value={query}
-      placeholder="Find a question…" aria-label="Find a research question"
+      placeholder={uiText("Find a question…")} aria-label={uiText("Find a research question")}
       onChange={event => setQuery(event.target.value.slice(0, 160))}
       onKeyDown={event => { if (event.key === 'Escape') setQuery('') }} />
     <button type="button" className="btn sm ghost" disabled={filtering}
-      title={filtering ? 'Clear filters to change branch visibility' : undefined}
-      onClick={() => setCollapsed(new Set(visibleBranches))}>
-      Collapse branches</button>
+      title={((filtering ? uiText('Clear filters to change branch visibility') : undefined))}
+      onClick={() => setCollapsed(new Set(visibleBranches))}>{uiText("Collapse branches")}</button>
     <button type="button" className="btn sm ghost" disabled={filtering}
-      title={filtering ? 'Clear filters to change branch visibility' : undefined}
-      onClick={() => setCollapsed(new Set())}>
-      Expand branches</button>
+      title={((filtering ? uiText('Clear filters to change branch visibility') : undefined))}
+      onClick={() => setCollapsed(new Set())}>{uiText("Expand branches")}</button>
   </div>
 
   if (!questions.length) {
-    return <div className="card-research has-no-questions" role="region" aria-label="Research questions">
+    return <div className="card-research has-no-questions" role="region" aria-label={uiText("Research questions")}>
       <div className="research-empty">
         <div className="research-empty-symbol" aria-hidden="true">?</div>
-        <h2>No research questions yet</h2>
-        <p>No research question registered yet for this run.</p>
-        {all.length > 0 && <p>{all.length} work item{all.length === 1 ? '' : 's'} already exist.
-          They remain available below and in Lanes.</p>}
+        <h2>{uiText("No research questions yet")}</h2>
+        <p>{uiText("No research question registered yet for this run.")}</p>
+        {all.length > 0 && <p>{all.length}{uiText(" work item")}{all.length === 1 ? '' : 's'}{uiText(" already exist. They remain available below and in Lanes.")}</p>}
         {(onDiscuss || onShowLanes) && <div className="research-empty-actions">
-          {onDiscuss && <button type="button" className="btn primary" onClick={onDiscuss}>
-            Discuss a question in Assistant</button>}
-          {onShowLanes && <button type="button" className="btn" onClick={onShowLanes}>
-            View work items in Lanes</button>}
+          {onDiscuss && <button type="button" className="btn primary" onClick={onDiscuss}>{uiText("Discuss a question in Assistant")}</button>}
+          {onShowLanes && <button type="button" className="btn" onClick={onShowLanes}>{uiText("View work items in Lanes")}</button>}
         </div>}
       </div>
       {unfiled.length > 0 && <details className="research-empty-evidence">
-        <summary>{unfiled.length} experiment{unfiled.length === 1 ? '' : 's'} not filed under a question</summary>
+        <summary>{unfiled.length}{uiText(" experiment")}{unfiled.length === 1 ? '' : 's'}{uiText(" not filed under a question")}</summary>
         <div className="research-experiments">{unfiled.map(card => renderCard(card))}</div>
       </details>}
       {offPage.length > 0 && <details className="research-empty-evidence">
-        <summary>{offPage.length} experiment{offPage.length === 1 ? '' : 's'} whose question is not on this page</summary>
+        <summary>{offPage.length}{uiText(" experiment")}{offPage.length === 1 ? '' : 's'}{uiText(" whose question is not on this page")}</summary>
         <div className="research-experiments">{offPage.map(card => renderCard(card))}</div>
       </details>}
     </div>
   }
 
-  return <div className="card-research" role="region" aria-label="Research questions">
+  return <div className="card-research" role="region" aria-label={uiText("Research questions")}>
     <div className="research-overview">
-      <h2>Research questions <span>{questions.length}</span></h2>
-      <p>Each indented question narrows a broader one. Open experiments under a question to inspect
-        its evidence.</p>
+      <h2>{uiText("Research questions ")}<span>{questions.length}</span></h2>
+      <p>{uiText("Each indented question narrows a broader one. Open experiments under a question to inspect its evidence.")}</p>
     </div>
     {bar}
     {filtering && <p className="research-filter-result" role="status">
-      {matchCount} matching {matchCount === 1 ? 'question' : 'questions'} · matching branches are open
-    </p>}
+      {matchCount}{uiText(" matching ")}{((matchCount === 1 ? uiText('question') : uiText('questions')))}{uiText(" · matching branches are open")}</p>}
     <ol className="research-lattice">
       {shown.map((row) => {
         const roll = rollups.get(row.rowKey) || {}
@@ -232,7 +226,7 @@ export default function ResearchView({ cards, state, renderCard, onShowLanes, on
                 aria-expanded={!isCollapsed}
                 aria-label={`${isCollapsed ? 'Show' : 'Hide'} the sharper questions under `
                   + `${_text(row.card.statement) || row.id}`}
-                title={isCollapsed ? 'show the sharper questions under this' : 'hide them'}
+                title={((isCollapsed ? uiText('show the sharper questions under this') : uiText('hide them')))}
                 onClick={() => toggle(row.rowKey)}>{isCollapsed ? '▸' : '▾'}</button>
               : <span className="research-twist" aria-hidden="true" />}
             <span className="research-id">{row.id}</span>
@@ -243,17 +237,12 @@ export default function ResearchView({ cards, state, renderCard, onShowLanes, on
             {/* A row that appears in two places says so where it appears. Without this the operator
                 reads one question as two, and the duplication is deliberate. */}
             {closure && <span className={'chip' + (closure.supported ? ' muted' : ' warn')}
-              title={closure.supported
-                ? `closed (${closure.by}) with ${closure.sharper} sharper question(s) and `
-                  + `${closure.measured} measured experiment(s) behind it`
-                : 'closed with NOTHING narrower behind it — no sharper question was asked and no '
-                  + 'experiment of its own produced evidence'}>
-              {closure.by}{closure.supported ? '' : ' · nothing narrower'}
+              title={(closure.supported ? `closed (${closure.by}) with ${closure.sharper} sharper question(s) and `
+                  + `${closure.measured} measured experiment(s) behind it` : uiMessage("closed with NOTHING narrower behind it — no sharper question was asked and no experiment of its own produced evidence", []))}>
+              {closure.by}{((closure.supported ? '' : uiText(' · nothing narrower')))}
             </span>}
             {row.duplicated && <span className="chip muted"
-              title="this question narrows more than one broader question, so it is listed under each">
-              also listed above
-            </span>}
+              title={uiText("this question narrows more than one broader question, so it is listed under each")}>{uiText("also listed above")}</span>}
           </div>
           <div className="research-row-facts">
             {typeof roll.best === 'number'
@@ -262,63 +251,47 @@ export default function ResearchView({ cards, state, renderCard, onShowLanes, on
               // win. `warn` overrides both — a mixed field is the more important thing to say.
               ? <span className={'chip' + (roll.mixedComparability ? ' warn'
                 : (roll.best > 0 ? ' ok' : ''))}
-                title={roll.mixedComparability
-                  ? `two of the experiments behind these numbers ${COMPARABILITY_REFUSAL_TEXT[
+                title={((roll.mixedComparability ? uiText(`two of the experiments behind these numbers ${COMPARABILITY_REFUSAL_TEXT[
                     roll.comparabilitySplit] || 'were measured under provably different evaluations'}`
-                    + ', so this best won a mixed field'
-                  : `best improvement measured under this question, by ${roll.bestCardId}`}>
-                best {_delta(roll.best)}
-                {roll.bestCardId && roll.bestCardId !== row.id ? ` by ${roll.bestCardId}` : ''}
-                {roll.mixedComparability ? ' · mixed comparability' : ''}
+                    + ', so this best won a mixed field') : uiMessage("best improvement measured under this question, by {0}", [roll.bestCardId])))}>{uiText("best ")}{_delta(roll.best)}
+                {(roll.bestCardId && roll.bestCardId !== row.id ? uiMessage(" by {0}", [roll.bestCardId]) : '')}
+                {((roll.mixedComparability ? uiText(' · mixed comparability') : ''))}
               </span>
               // Absent is SAID and never drawn as a zero — an unanswered question and one answered
               // with no improvement are different findings.
-              : <span className="chip muted">not measured yet</span>}
+              : <span className="chip muted">{uiText("not measured yet")}</span>}
             {typeof roll.own === 'number' && roll.own !== roll.best && <span className="chip muted"
-              title="what this question's OWN experiments reached, before its sharper children">
-              own {_delta(roll.own)}
+              title={uiText("what this question's OWN experiments reached, before its sharper children")}>{uiText("own ")}{_delta(roll.own)}
             </span>}
             {roll.descendants > 0 && <span className="chip muted">
-              {roll.descendants} sharper question{roll.descendants === 1 ? '' : 's'}
+              {roll.descendants}{uiText(" sharper question")}{roll.descendants === 1 ? '' : 's'}
             </span>}
           </div>
           {kids.length > 0 && <details className="research-evidence">
-            <summary>{kids.length} experiment{kids.length === 1 ? '' : 's'} · show evidence</summary>
+            <summary>{kids.length}{uiText(" experiment")}{kids.length === 1 ? '' : 's'}{uiText(" · show evidence")}</summary>
             <div className="research-experiments">{kids.map(child => renderCard(child))}</div>
           </details>}
-          {!isCollapsed && kids.length === 0 && !branch && <div className="muted card-empty">
-            no experiment proposed against this yet
-          </div>}
+          {!isCollapsed && kids.length === 0 && !branch && <div className="muted card-empty">{uiText("no experiment proposed against this yet")}</div>}
         </li>
       })}
-      {shown.length === 0 && <li className="muted card-empty">
-        no question matches the current filters
-      </li>}
+      {shown.length === 0 && <li className="muted card-empty">{uiText("no question matches the current filters")}</li>}
     </ol>
     {/* Always LAST and never inside the ladder: these cards have no position in it. The section is
         rendered only when occupied and suppressed while finding questions. */}
     {!filtering && unfiled.length > 0 && <section className="research-unfiled"
       aria-labelledby="research-unfiled-h">
-      <h3 id="research-unfiled-h" className="research-unfiled-h">
-        Not filed under any question <span className="muted">{unfiled.length}</span>
+      <h3 id="research-unfiled-h" className="research-unfiled-h">{uiText("Not filed under any question ")}<span className="muted">{unfiled.length}</span>
       </h3>
-      <div className="muted card-empty">
-        no question claims {unfiled.length === 1 ? 'this experiment' : 'these experiments'} — the
-        Researcher proposed {unfiled.length === 1 ? 'it' : 'them'} without naming a direction
-      </div>
+      <div className="muted card-empty">{uiText("no question claims ")}{((unfiled.length === 1 ? uiText('this experiment') : uiText('these experiments')))}{uiText(" — the Researcher proposed ")}{((unfiled.length === 1 ? uiText('it') : uiText('them')))}{uiText(" without naming a direction")}</div>
       <div className="research-experiments">{unfiled.map(card => renderCard(card))}</div>
     </section>}
     {/* Same rule as the unfiled block: the parent this card names is off the page. */}
     {!filtering && offPage.length > 0 && <section className="research-unfiled"
       aria-labelledby="research-offpage-h">
-      <h3 id="research-offpage-h" className="research-unfiled-h">
-        Filed under a question not on this page <span className="muted">{offPage.length}</span>
+      <h3 id="research-offpage-h" className="research-unfiled-h">{uiText("Filed under a question not on this page ")}<span className="muted">{offPage.length}</span>
       </h3>
       <div className="muted card-empty">
-        {offPage.length === 1 ? 'this experiment names' : 'these experiments name'} a parent the
-        board did not send — the run has a question for {offPage.length === 1 ? 'it' : 'them'},
-        beyond the row cap this view receives
-      </div>
+        {((offPage.length === 1 ? uiText('this experiment names') : uiText('these experiments name')))}{uiText(" a parent the board did not send — the run has a question for ")}{((offPage.length === 1 ? uiText('it') : uiText('them')))}{uiText(", beyond the row cap this view receives")}</div>
       <div className="research-experiments">{offPage.map(card => renderCard(card))}</div>
     </section>}
   </div>

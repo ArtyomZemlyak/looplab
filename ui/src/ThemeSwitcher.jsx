@@ -1,3 +1,4 @@
+import { uiText, uiMessage, useUILanguage } from './uiLanguage.js'
 import React, { useEffect, useState } from 'react'
 import { useRovingRadioMenu } from './accessibility.jsx'
 
@@ -34,6 +35,8 @@ export function initTheme() {
 }
 
 export default function ThemeSwitcher() {
+  useUILanguage()
+
   const [open, setOpen] = useState(false)
   const { triggerRef, menuRef, close, onKeyDown } = useRovingRadioMenu(open, setOpen)
   const [active, setActive] = useState(() => {
@@ -54,16 +57,15 @@ export default function ThemeSwitcher() {
   const pick = (id) => { setActive(id); close(true) }
 
   return <div className="theme-switch">
-    <button type="button" ref={triggerRef} className="btn sm ghost" title="UI theme" aria-haspopup="menu"
-      aria-expanded={open} aria-controls="theme-switcher-menu" aria-label={`UI theme: ${cur.name}`}
+    <button type="button" ref={triggerRef} className="btn sm ghost" title={uiText("UI theme")} aria-haspopup="menu"
+      aria-expanded={open} aria-controls="theme-switcher-menu" aria-label={uiMessage("UI theme: {0}", [uiText(cur.name)])}
       onClick={() => setOpen(!open)}>
-      <span className="th-dot" style={{ background: cur.ac, boxShadow: `0 0 0 2px ${cur.bg}` }} /> Theme
-    </button>
+      <span className="th-dot" style={{ background: cur.ac, boxShadow: `0 0 0 2px ${cur.bg}` }} />{uiText(" Theme")}</button>
     {open && <>
       <div className="th-backdrop" aria-hidden="true" onClick={() => close(true)} />
-      <div ref={menuRef} id="theme-switcher-menu" className="th-menu" role="menu" aria-label="UI theme"
+      <div ref={menuRef} id="theme-switcher-menu" className="th-menu" role="menu" aria-label={uiText("UI theme")}
         onKeyDown={onKeyDown} onBlur={event => { if (!event.currentTarget.contains(event.relatedTarget)) close(false) }}>
-        <div className="th-menu-h">Design</div>
+        <div className="th-menu-h">{uiText("Design")}</div>
         {THEMES.map(t => <button type="button" key={t.id} role="menuitemradio" aria-checked={t.id === active} tabIndex={-1}
           className={'th-opt' + (t.id === active ? ' on' : '')}
           onClick={() => pick(t.id)}>
@@ -71,7 +73,7 @@ export default function ThemeSwitcher() {
             <span className="th-sw-ac" style={{ background: t.ac }} />
             <span className="th-sw-fg" style={{ background: t.fg }} />
           </span>
-          <span className="th-name"><b>{t.name}</b><span className="th-sub">{t.sub}</span></span>
+          <span className="th-name"><b>{uiText(t.name)}</b><span className="th-sub">{uiText(t.sub)}</span></span>
           {t.id === active && <span className="th-check">✓</span>}
         </button>)}
       </div>

@@ -1,6 +1,6 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { readFileSync } from 'node:fs'
+import { readSourceSync as readFileSync } from './_source.js'
 import {
   INVALID_SETTING_VALUE, coerce, parseSettingValue,
   settingsValidationErrors,

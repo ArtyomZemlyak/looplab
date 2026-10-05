@@ -155,7 +155,7 @@ export default defineConfig({
               // Doc 72: preferences, provenance, recovery and draft models share this dependency
               // direction. Merge their small compression streams; keep all UI entrances lazy.
               // No recursive capture: model imports must not bring a panel or owner component here.
-              test: /[/\\]src[/\\](?:format|urlSafety|util|hooks|runIndex|buildingModel|nodeActivity|conceptId|nodeProjection|conceptChips|conceptSearch|Highlight|markdown|dagViewport|dagProjection|grouping|timelineModel|timelineWindow|useTimeline|useRunRouteState|mergeIntent|traceProjection|traceScrollModel|crossRunPrior|runStateModel|panelPrimitives|useAssistantLanguage|useToast|baseRevision|forkProvenance|stateDelta|runCommandMachine|conceptInspect|conceptShelf|resultMeasurement|inspectorDraftStore|authoringRecoveryStorage|extraMetrics|codeSearch|capabilityRecovery|forkFromSeqModel|commentContract|commentRecoveryStorage)\.(?:js|jsx)$|[/\\]src[/\\]VirtualTimeline\.jsx$/,
+              test: /[/\\]src[/\\](?:format|urlSafety|util|hooks|runIndex|buildingModel|nodeActivity|conceptId|nodeProjection|conceptChips|conceptSearch|Highlight|markdown|dagViewport|dagProjection|grouping|timelineModel|timelineWindow|useTimeline|useRunRouteState|mergeIntent|traceProjection|traceScrollModel|crossRunPrior|runStateModel|panelPrimitives|useToast|baseRevision|forkProvenance|stateDelta|runCommandMachine|conceptInspect|conceptShelf|resultMeasurement|inspectorDraftStore|authoringRecoveryStorage|extraMetrics|codeSearch|capabilityRecovery|forkFromSeqModel|commentContract|commentRecoveryStorage)\.(?:js|jsx)$|[/\\]src[/\\]VirtualTimeline\.jsx$/,
               includeDependenciesRecursively: false,
             },
             {
@@ -174,7 +174,7 @@ export default defineConfig({
               // Keep main.jsx and its styles outside this group: capturing the bootstrap removes
               // the manifest entry facade and makes the security/route proofs unavailable.
               // Optional owner, graph, result, settings and panel entrances remain separate.
-              test: /[/\\]node_modules[/\\](?:react|react-dom|scheduler)[/\\]|[/\\]src[/\\](?:App|OwnerAuth|OwnerWorkspace|LazyBoundary|DensityToggle|globalNav|resourceModel|useScopedResource|reviewRouteApi|api|apiClient|commandStorage|commandProtocol|commandModel|scopeReportActions|runStartOverRecovery|runRouteState|runMode|controlActions|conceptLensApi|crossRunLedger|eventStream|requestDeadline|EnergyToggle|PanelShell|ThemeSwitcher|accessibility|fx|icons|runMapModel|useDialogFocus)\.(?:js|jsx)$|[/\\]src[/\\]looplab-icons-v1\.svg/,
+              test: /[/\\]node_modules[/\\](?:react|react-dom|scheduler)[/\\]|[/\\]src[/\\](?:App|OwnerAuth|OwnerWorkspace|LazyBoundary|DensityToggle|globalNav|resourceModel|useScopedResource|reviewRouteApi|api|apiClient|commandStorage|commandProtocol|commandModel|scopeReportActions|runStartOverRecovery|runRouteState|runMode|controlActions|conceptLensApi|crossRunLedger|eventStream|requestDeadline|EnergyToggle|PanelShell|ThemeSwitcher|accessibility|fx|icons|runMapModel|useDialogFocus|uiLanguage|useAssistantLanguage|LanguageControl)\.(?:js|jsx)$|[/\\]src[/\\]looplab-icons-v1\.svg/,
               includeDependenciesRecursively: false,
             },
           ],

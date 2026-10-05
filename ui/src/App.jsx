@@ -1,3 +1,4 @@
+import { uiText, uiMessage, useUILanguage } from './uiLanguage.js'
 import React, { lazy, useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import OwnerAuth from './OwnerAuth.jsx'
 import LazyBoundary from './LazyBoundary.jsx'
@@ -145,6 +146,8 @@ function cacheCurrentListHistory(navigation, originRunId = null, originControl =
 // Exported so the review route's own state sequence (gate → terminal → retry) can be driven without
 // mounting the whole owner shell; App still renders it directly.
 export function ReviewRoute({ token }) {
+  useUILanguage()
+
   // The shared resource machine (doc 25 UI-06). A missing token is a GATE, not a failed read: there
   // is nothing to request, so the route must not spend a round trip proving it. `gone` is terminal —
   // a revoked capability can only repeat itself — so the classifier names it and no Retry is offered.
@@ -166,21 +169,24 @@ export function ReviewRoute({ token }) {
   if (resource.status !== 'ready') return <main className="auth-gate" data-route-main tabIndex={-1} aria-live="polite">
     <div className="auth-card">
       <div className="auth-mark" aria-hidden="true">{resource.status === 'gone' ? '×' : '◉'}</div>
-      <h1>{resource.status === 'loading' ? 'Opening review…' : resource.status === 'gone' ? 'Review link unavailable' : 'Could not open review'}</h1>
-      <p>{resource.status === 'loading' ? 'Validating this read-only capability.' : reviewError}</p>
-      {resource.status === 'error' && <button className="btn primary" onClick={() => resource.retry()}>Retry</button>}
+      <h1>{((resource.status === 'loading' ? uiText('Opening review…') : (resource.status === 'gone' ? uiText('Review link unavailable') : uiText('Could not open review'))))}</h1>
+      <p>{((resource.status === 'loading' ? uiText('Validating this read-only capability.') : reviewError))}</p>
+      {resource.status === 'error' && <button className="btn primary" onClick={() => resource.retry()}>{uiText("Retry")}</button>}
     </div>
   </main>
   const reviewKey = `${resource.data.id || token}:${resource.data.run_id}`
-  return <LazyBoundary label="run review" mode="route" focusOnReady resetKey={reviewKey}>
+  return <LazyBoundary label={"run review"} mode="route" focusOnReady resetKey={reviewKey}>
     <RunView key={reviewKey} runId={resource.data.run_id} onBack={null}
       reviewMode reviewMeta={resource.data} />
   </LazyBoundary>
 }
 
 function RouteFocus({ label, routeKey, children, autoFocus = true }) {
+  const [, , localeRevision] = useUILanguage()
+
+  useEffect(() => { document.title = `${uiText(label)} · LoopLab` }, [label, localeRevision])
+
   useEffect(() => {
-    document.title = `${label} · LoopLab`
     if (!autoFocus) return undefined
     const frame = requestAnimationFrame(() => {
       if (!document.querySelector('[aria-modal="true"]')) document.querySelector('[data-route-main]')?.focus()
@@ -188,12 +194,14 @@ function RouteFocus({ label, routeKey, children, autoFocus = true }) {
     return () => cancelAnimationFrame(frame)
   }, [routeKey, label, autoFocus])
   return <>
-    <div className="sr-only" role="status" aria-live="polite" aria-atomic="true">{label}</div>
+    <div className="sr-only" role="status" aria-live="polite" aria-atomic="true">{uiText(label)}</div>
     {children}
   </>
 }
 
 export default function App() {
+  useUILanguage()
+
   const initialListHistoryRef = useRef()
   if (initialListHistoryRef.current === undefined) {
     initialListHistoryRef.current = readListHistory() || null
@@ -319,27 +327,27 @@ export default function App() {
   // Everywhere else (list / run / settings) the persistent assistant and attention inbox stay available.
   let content
   const routeKey = `${route.view}:${route.id || route.token || ''}`
-  if (route.view === 'review') return <RouteFocus label={routeLabel} routeKey={routeKey}>
+  if (route.view === 'review') return <RouteFocus label={uiText(routeLabel)} routeKey={routeKey}>
     <ReviewRoute key={route.token || 'invalid-review'} token={route.token} />
   </RouteFocus>
   // The shared read-only chat is a PUBLIC surface: the backend serves /api/assistant/shared/ WITHOUT
   // the owner token (server.py::_unauth_api_ok), so it must bypass the OwnerAuth unlock gate exactly
   // like the review route. Falling through into <OwnerAuth> made a token-protected deployment show
   // recipients the "Unlock LoopLab controls" screen instead of the chat, defeating the share link.
-  if (route.view === 'shared') return <RouteFocus label={routeLabel} routeKey={routeKey}>
-    <LazyBoundary key={routeKey} label="shared Assistant chat" mode="route" focusOnReady resetKey={routeKey}>
+  if (route.view === 'shared') return <RouteFocus label={uiText(routeLabel)} routeKey={routeKey}>
+    <LazyBoundary key={routeKey} label={"shared Assistant chat"} mode="route" focusOnReady resetKey={routeKey}>
       <SharedAssistant sid={route.id} />
     </LazyBoundary>
   </RouteFocus>
-  if (route.view === 'run') content = <LazyBoundary label={`run ${route.id}`} mode="route" focusOnReady resetKey={routeKey}>
+  if (route.view === 'run') content = <LazyBoundary label={uiMessage("run {0}", [route.id])} mode="route" focusOnReady resetKey={routeKey}>
     <RunView key={route.id} runId={route.id} onBack={back} />
   </LazyBoundary>
-  else if (route.view === 'settings') content = <LazyBoundary label="settings" mode="route" focusOnReady resetKey={routeKey}>
+  else if (route.view === 'settings') content = <LazyBoundary label={"settings"} mode="route" focusOnReady resetKey={routeKey}>
     <Settings onBack={back} initialSection={route.initialSection} />
   </LazyBoundary>
   // Portfolio evidence is owner-only, so this experimental preview stays in the
   // authenticated owner plane and never mounts beside the public review/shared early returns above.
-  else if (route.view === 'claims') content = <LazyBoundary label="Claims & Curation" mode="route" focusOnReady resetKey={routeKey}>
+  else if (route.view === 'claims') content = <LazyBoundary label={"Claims & Curation"} mode="route" focusOnReady resetKey={routeKey}>
     <ClaimsCuration onBack={back} />
   </LazyBoundary>
   // Cross-run memory / authored knowledge / host GPU: installation surfaces that used to be reachable
@@ -347,7 +355,7 @@ export default function App() {
   else if (isInstallationRouteView(route.view)) content = <LazyBoundary label={routeLabel} mode="route" focusOnReady resetKey={routeKey}>
     <InstallationView view={route.view} onBack={back} />
   </LazyBoundary>
-  else content = <LazyBoundary label="runs" mode="route" focusOnReady={!restoreListNavigation} resetKey={routeKey}>
+  else content = <LazyBoundary label={"runs"} mode="route" focusOnReady={!restoreListNavigation} resetKey={routeKey}>
     <RunList key={requestedListView || 'runs'}
       initialNavigationState={listNavigationForRoute || listNavigationRef.current}
       restoreFocusRunId={listOriginRunRef.current}
@@ -357,7 +365,7 @@ export default function App() {
       onOpen={open} onGlobalNavigate={globalNavigate} />
   </LazyBoundary>
 
-  return <OwnerAuth label={routeLabel}><RouteFocus label={routeLabel} routeKey={routeKey}
+  return <OwnerAuth label={uiText(routeLabel)}><RouteFocus label={uiText(routeLabel)} routeKey={routeKey}
     autoFocus={!restoreListNavigation}>
     {/* OwnerWorkspace is stable across list/run/settings/claim-ledger changes. Its one Assistant instance keeps
         conversation and draft state; public review/share returns above before owner pollers mount. */}

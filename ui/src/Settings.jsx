@@ -1,3 +1,5 @@
+import { uiText, uiMessage, useUILanguage } from './uiLanguage.js'
+import { setUILanguage } from './uiLanguage.js'
 import React, { useEffect, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react'
 import { createIdempotencyKey, deadlineGet, saveSettings, saveSecret } from './util.js'
 import {
@@ -29,7 +31,7 @@ import { useToast } from './useToast.js'
 import { LlmHealth, readHealthRecovery, unknownTransport } from './LlmHealth.jsx'
 export { LlmHealth, LLM_HEALTH_TIMEOUT_MS } from './LlmHealth.jsx'
 
-const countLabel = (count, singular, plural = `${singular}s`) => `${count} ${count === 1 ? singular : plural}`
+const countLabel = (count, singular, plural = `${singular}s`) => uiText(`${count} ${count === 1 ? singular : plural}`)
 const CREDENTIAL_SOURCE_LABELS = {
   stored: 'Stored secret',
   environment: 'Process environment',
@@ -136,6 +138,8 @@ const launchGuardState = ({
 function CredentialState({
   credential, writeError = '', onRefresh, refreshing = false, refreshDisabled = false,
 }) {
+  useUILanguage()
+
   if (!credential) return null
   const ambient = credential.source === 'environment' || credential.source === 'dotenv'
     || credential.status === 'ambient_override'
@@ -154,9 +158,7 @@ function CredentialState({
         : credential.status === 'incomplete'
           ? {
             title: 'Shared credential pair is incomplete',
-            text: credential.source === 'stored'
-              ? 'The stored shared pair has an endpoint binding but no API key. Enter a key to complete it, or clear the incomplete pair for a local endpoint that needs no credential. Profile credentials are validated separately.'
-              : `The ambient shared source has an endpoint binding but no API key. Complete or remove that pair in the ${CREDENTIAL_SOURCE_LABELS[credential.source] || 'ambient source'}. A key entered here is only a stored fallback; profile credentials are validated separately.`,
+            text: (credential.source === 'stored' ? uiText('The stored shared pair has an endpoint binding but no API key. Enter a key to complete it, or clear the incomplete pair for a local endpoint that needs no credential. Profile credentials are validated separately.') : uiMessage("The ambient shared source has an endpoint binding but no API key. Complete or remove that pair in the {0}. A key entered here is only a stored fallback; profile credentials are validated separately.", [CREDENTIAL_SOURCE_LABELS[credential.source] || 'ambient source'])),
           }
           : null
   const ambientNotice = ambient
@@ -175,50 +177,52 @@ function CredentialState({
         }
     : null
   return <>
-    <dl className="settings-credential-state" aria-label="Shared credential store state">
+    <dl className="settings-credential-state" aria-label={uiText("Shared credential store state")}>
       {[
         ['Stored material', credential.stored],
         ['Shared key', credential.effective],
         ['Matches base URL', credential.active],
       ].map(([label, value]) => <div key={label}>
-        <dt>{label}</dt>
-        <dd className={value ? 'is-yes' : 'is-no'}>{value ? 'Yes' : 'No'}</dd>
+        <dt>{uiText(label)}</dt>
+        <dd className={value ? 'is-yes' : 'is-no'}>{((value ? uiText('Yes') : uiText('No')))}</dd>
       </div>)}
       <div className="is-wide">
-        <dt>Source</dt>
+        <dt>{uiText("Source")}</dt>
         <dd>{CREDENTIAL_SOURCE_LABELS[credential.source]}</dd>
       </div>
       <div className="is-wide">
-        <dt>Status</dt>
+        <dt>{uiText("Status")}</dt>
         <dd>{CREDENTIAL_STATUS_LABELS[credential.status]}</dd>
       </div>
     </dl>
     {writeError && <div id="settings-credential-write-warning"
       className="settings-credential-notice is-danger" role="alert">
       <div>
-        <strong>Replacement key not accepted</strong>
-        <span>{writeError} The typed replacement is excluded; provider checks and launches continue to use the server-resolved saved/profile configuration.</span>
+        <strong>{uiText("Replacement key not accepted")}</strong>
+        <span>{writeError}{uiText(" The typed replacement is excluded; provider checks and launches continue to use the server-resolved saved/profile configuration.")}</span>
       </div>
       {onRefresh && <button type="button" className="btn sm ghost"
         disabled={refreshing || refreshDisabled} onClick={onRefresh}>
-        {refreshing ? 'Refreshing…' : 'Refresh server state'}
+        {((refreshing ? uiText('Refreshing…') : uiText('Refresh server state')))}
       </button>}
     </div>}
     {bindingNotice && <div id="settings-credential-status-warning"
       className={'settings-credential-notice ' + (bindingProblem ? 'is-danger' : 'is-info')}
       role={bindingProblem ? 'alert' : 'note'}>
-      <strong>{bindingNotice.title}</strong>
-      <span>{bindingNotice.text}</span>
+      <strong>{uiText(bindingNotice.title)}</strong>
+      <span>{uiText(bindingNotice.text)}</span>
     </div>}
     {ambientNotice && <div id="settings-credential-ambient-note"
       className="settings-credential-notice is-info" role="note">
-      <strong>{ambientNotice.title}</strong>
-      <span>{ambientNotice.text}</span>
+      <strong>{uiText(ambientNotice.title)}</strong>
+      <span>{uiText(ambientNotice.text)}</span>
     </div>}
   </>
 }
 
 function ResetDefaultsDialog({ hasSecretDraft, onCancel, onConfirm }) {
+  useUILanguage()
+
   const dialogRef = useRef(null)
   useDialogFocus(dialogRef, onCancel, true, { priority: DIALOG_PRIORITY.DESTRUCTIVE })
   return <div className="overlay settings-reset-overlay"
@@ -227,20 +231,14 @@ function ResetDefaultsDialog({ hasSecretDraft, onCancel, onConfirm }) {
       aria-modal="true" aria-labelledby="settings-reset-title"
       aria-describedby={`settings-reset-description${hasSecretDraft
         ? ' settings-reset-credential-warning' : ''} settings-reset-server-note`} tabIndex={-1}>
-      <div className="modal-h"><b id="settings-reset-title">Reset all draft settings?</b></div>
+      <div className="modal-h"><b id="settings-reset-title">{uiText("Reset all draft settings?")}</b></div>
       <div className="modal-b">
-        <p id="settings-reset-description" className="settings-reset-copy">
-          This loads engine defaults for ordinary settings and runtime access controls, including hidden advanced fields.
-        </p>
-        {hasSecretDraft && <p id="settings-reset-credential-warning" className="settings-reset-warning">
-          Typed credential drafts will be discarded. Stored server credentials are unchanged.
-        </p>}
-        <p id="settings-reset-server-note" className="settings-reset-note">
-          Nothing changes on the server until you choose Save.
-        </p>
+        <p id="settings-reset-description" className="settings-reset-copy">{uiText("This loads engine defaults for ordinary settings and runtime access controls, including hidden advanced fields.")}</p>
+        {hasSecretDraft && <p id="settings-reset-credential-warning" className="settings-reset-warning">{uiText("Typed credential drafts will be discarded. Stored server credentials are unchanged.")}</p>}
+        <p id="settings-reset-server-note" className="settings-reset-note">{uiText("Nothing changes on the server until you choose Save.")}</p>
         <div className="modal-actions">
-          <button type="button" className="btn sm" data-dialog-initial-focus onClick={onCancel}>Cancel</button>
-          <button type="button" className="btn sm danger" onClick={onConfirm}>Reset draft</button>
+          <button type="button" className="btn sm" data-dialog-initial-focus onClick={onCancel}>{uiText("Cancel")}</button>
+          <button type="button" className="btn sm danger" onClick={onConfirm}>{uiText("Reset draft")}</button>
         </div>
       </div>
     </section>
@@ -250,6 +248,10 @@ function ResetDefaultsDialog({ hasSecretDraft, onCancel, onConfirm }) {
 // Full-page editor for the engine defaults used by every new run. Per-run overrides remain in each
 // run's Settings panel; this page deliberately starts with the small set most people need.
 export default function Settings({ onBack, initialSection = '' }) {
+  
+
+  const [, , localeRevision] = useUILanguage()
+
   const settingsLaunchSnapshot = useSyncExternalStore(
     subscribeSettingsLaunchGuard, getSettingsLaunchGuard, getSettingsLaunchGuard)
   const [defaults, setDefaults] = useState(null)
@@ -461,7 +463,7 @@ export default function Settings({ onBack, initialSection = '' }) {
   }, [navigationUnsafe, mutationBusy, mutationUnknown, healthRecoveryBlocked])
 
   const visibleGroups = useMemo(() => schema
-    ? filterSettingsGroups(schema.groups, { mode, query }) : [], [mode, query, schema])
+    ? filterSettingsGroups(schema.groups, { mode, query }) : [], [mode, query, schema, localeRevision])
   const visibleStats = useMemo(() => settingsViewStats(visibleGroups), [visibleGroups])
   const hiddenUnsavedKeys = [...unsavedKeys].filter(key => !visibleStats.keys.has(key))
   const hiddenUnsaved = hiddenUnsavedKeys.length
@@ -543,7 +545,7 @@ export default function Settings({ onBack, initialSection = '' }) {
       const data = await timed.promise
       validateSettingsResource(data, schema)
       if (!confirmSettingsLaunchRead(launchRead)) {
-        show('An earlier Settings operation changed while this refresh was in flight; refresh again after it settles')
+        show(uiText('An earlier Settings operation changed while this refresh was in flight; refresh again after it settles'))
         focusSettingsRecovery()
         return
       }
@@ -570,14 +572,10 @@ export default function Settings({ onBack, initialSection = '' }) {
       setCredentialWriteError('')
       setRevisions({ settings: data.settings_revision, secret: data.secret_revision })
       setMutationUnknown(null)
-      show(recovery.preserveSecret
-        ? 'Server state refreshed; the typed API-key draft was not sent, and Test active LLM uses the server-resolved credential'
-        : recovery.stage.endsWith('-conflict')
-        ? 'Current server settings loaded; review the retained draft before saving again'
-        : 'Settings refreshed from the server; the unknown write was not replayed')
+      show(((recovery.preserveSecret ? uiText('Server state refreshed; the typed API-key draft was not sent, and Test active LLM uses the server-resolved credential') : (recovery.stage.endsWith('-conflict') ? uiText('Current server settings loaded; review the retained draft before saving again') : uiText('Settings refreshed from the server; the unknown write was not replayed')))))
       focusProviderHeading()
     } catch {
-      show('Could not refresh authoritative settings; the previous outcome is still unknown')
+      show(uiText('Could not refresh authoritative settings; the previous outcome is still unknown'))
       focusSettingsRecovery()
     } finally {
       finishMutation(mutation)
@@ -585,11 +583,11 @@ export default function Settings({ onBack, initialSection = '' }) {
   }
   const onSave = async () => {
     if (healthRecoveryBlocked) {
-      show('Acknowledge or resolve the LLM provider warning before saving a new configuration')
+      show(uiText('Acknowledge or resolve the LLM provider warning before saving a new configuration'))
       return
     }
     if (invalidCount) {
-      show(`Fix ${countLabel(invalidCount, 'invalid setting')} before saving`)
+      show(uiMessage("Fix {0} before saving", [countLabel(invalidCount, 'invalid setting')]))
       focusFirstInvalid()
       return
     }
@@ -608,7 +606,7 @@ export default function Settings({ onBack, initialSection = '' }) {
         : current)
     }
     const mutation = beginMutation('saving')
-    if (!mutation) { show('A settings update is already in progress'); return }
+    if (!mutation) { show(uiText('A settings update is already in progress')); return }
     const submittedControl = agentControl
     const submittedRevisions = { ...revisions }
     let settingsPatch = null
@@ -639,6 +637,7 @@ export default function Settings({ onBack, initialSection = '' }) {
         setSavedAC(acceptedControl)
         setCredential(result.credential)
         setRevisions(acceptedRevisions)
+        if (Object.hasOwn(settingsPatch, 'output_language')) setUILanguage(result.settings.output_language)
         const formBeforeSecretAck = apiKey
           ? { ...acceptedForm, llm_api_key: submittedForm.llm_api_key }
           : acceptedForm
@@ -687,9 +686,7 @@ export default function Settings({ onBack, initialSection = '' }) {
           setCredentialWriteError(
             `${settingsChanged ? 'The endpoint/settings changes were accepted, but the server' : 'The server'} did not confirm the replacement API key. The previous server-resolved credential state remains authoritative; no new key is assumed. The typed draft is retained but is not part of that credential.`,
           )
-          show(settingsChanged
-            ? 'Endpoint/settings saved, but the replacement API key was not confirmed'
-            : 'The replacement API key was not confirmed')
+          show(((settingsChanged ? uiText('Endpoint/settings saved, but the replacement API key was not confirmed') : uiText('The replacement API key was not confirmed'))))
           return
         }
         setCredentialWriteError('')
@@ -701,10 +698,8 @@ export default function Settings({ onBack, initialSection = '' }) {
       } else if (settingsChanged) setCredentialWriteError('')
       const savedParts = [settingsChanged ? 'Submitted settings saved' : '', apiKey ? 'API key stored securely' : ''].filter(Boolean)
       if (whitespaceOnlyApiKey) {
-        show(settingsChanged
-          ? 'Submitted settings saved; whitespace-only API-key draft discarded — settings applied to new runs'
-          : 'Whitespace-only API-key draft discarded; no server changes were made')
-      } else show(`${savedParts.join(' · ') || 'No persisted changes'} — applied to new runs`)
+        show(((settingsChanged ? uiText('Submitted settings saved; whitespace-only API-key draft discarded — settings applied to new runs') : uiText('Whitespace-only API-key draft discarded; no server changes were made'))))
+      } else show(uiMessage("{0} — applied to new runs", [savedParts.join(' · ') || 'No persisted changes']))
     } catch (error) {
       if (settingsPatch && error?.code === 'settings_revision_conflict') {
         rememberUnknown(
@@ -720,18 +715,18 @@ export default function Settings({ onBack, initialSection = '' }) {
           Object.keys(settingsPatch.agent_control || {}),
         )
       }
-      else show('Save failed: ' + error.message)
+      else show(uiMessage("Save failed: {0}", [error.message]))
     } finally {
       finishMutation(mutation)
     }
   }
   const onClearSecret = async key => {
     if (healthRecoveryBlocked) {
-      show('Acknowledge or resolve the LLM provider warning before changing its credential')
+      show(uiText('Acknowledge or resolve the LLM provider warning before changing its credential'))
       return
     }
     if (!credential?.clearable) {
-      show('The effective credential is read-only here and cannot be cleared')
+      show(uiText('The effective credential is read-only here and cannot be cleared'))
       return
     }
     const clearingIncompletePair = credential.status === 'incomplete'
@@ -745,7 +740,7 @@ export default function Settings({ onBack, initialSection = '' }) {
       : 'Clear the stored API key and its endpoint binding now? This is immediate, separate from Save, and cannot be undone. Any typed replacement stays as an unsaved draft.'
     if (!window.confirm(clearPrompt)) return
     const mutation = beginMutation('clearing secret')
-    if (!mutation) { show('A settings update is already in progress'); return }
+    if (!mutation) { show(uiText('A settings update is already in progress')); return }
     const submittedForm = form
     const submittedRevisions = { ...revisions }
     try {
@@ -762,17 +757,15 @@ export default function Settings({ onBack, initialSection = '' }) {
         secret: resultSecret.secret_revision,
       })
       if (resultSecret.set === false && resultSecret.credential.stored === false) {
-        show(submittedForm?.[key]
-          ? `${clearingIncompletePair ? 'Incomplete stored credential pair' : clearingAmbientFallback ? 'Stored fallback API key and endpoint binding' : 'Stored API key and endpoint binding'} cleared; the typed replacement remains an unsaved draft`
-          : `${clearingIncompletePair ? 'Incomplete stored credential pair' : clearingAmbientFallback ? 'Stored fallback API key and endpoint binding' : 'Stored API key and endpoint binding'} cleared`)
-      } else show('The server did not clear the stored credential material')
+        show((submittedForm?.[key] ? uiMessage("{0} cleared; the typed replacement remains an unsaved draft", [clearingIncompletePair ? 'Incomplete stored credential pair' : clearingAmbientFallback ? 'Stored fallback API key and endpoint binding' : 'Stored API key and endpoint binding']) : uiMessage("{0} cleared", [clearingIncompletePair ? 'Incomplete stored credential pair' : clearingAmbientFallback ? 'Stored fallback API key and endpoint binding' : 'Stored API key and endpoint binding'])))
+      } else show(uiText('The server did not clear the stored credential material'))
     } catch (error) {
       if (error?.code === 'secret_revision_conflict'
           || error?.code === 'settings_revision_conflict') {
         rememberUnknown('secret-clear-conflict', submittedForm)
       }
       else if (unknownTransport(error)) rememberUnknown('secret-clear', submittedForm)
-      else show('Clear failed: ' + error.message)
+      else show(uiMessage("Clear failed: {0}", [error.message]))
     } finally {
       finishMutation(mutation)
     }
@@ -789,9 +782,7 @@ export default function Settings({ onBack, initialSection = '' }) {
     setForm(toForm(defaults, schema))
     setAgentControl({ ...(defaults.agent_control || {}) })
     setResetConfirmOpen(false)
-    show(hasSecretDraft
-      ? 'Engine defaults loaded; credential drafts were discarded as confirmed. Review and Save to apply.'
-      : 'Engine defaults loaded into the draft. Review and Save to apply.')
+    show(((hasSecretDraft ? uiText('Engine defaults loaded; credential drafts were discarded as confirmed. Review and Save to apply.') : uiText('Engine defaults loaded into the draft. Review and Save to apply.'))))
     requestAnimationFrame(() => {
       const target = saveButtonRef.current?.disabled ? saveStateRef.current : saveButtonRef.current
       target?.focus({ preventScroll: true })
@@ -813,7 +804,7 @@ export default function Settings({ onBack, initialSection = '' }) {
     const reloadSchema = options?.reloadSchema === true
     const successMessage = typeof options?.successMessage === 'string'
       ? options.successMessage : 'Server state refreshed; saved credential status is up to date'
-    if (unsaved && !window.confirm('Reload saved settings and discard the current draft changes?')) {
+    if (unsaved && !window.confirm(uiText('Reload saved settings and discard the current draft changes?'))) {
       return false
     }
     const mutation = beginMutation('reloading settings')
@@ -821,10 +812,10 @@ export default function Settings({ onBack, initialSection = '' }) {
     try {
       const result = await load(reloadSchema, true, true)
       if (!result.loaded) {
-        show('Saved settings could not be reloaded; current values and warnings were kept')
+        show(uiText('Saved settings could not be reloaded; current values and warnings were kept'))
         focusSettingsRecovery()
       } else if (!result.reconciled) {
-        show('Settings could not be reconciled yet; wait for earlier activity or browser storage to recover, then refresh again')
+        show(uiText('Settings could not be reconciled yet; wait for earlier activity or browser storage to recover, then refresh again'))
         focusSettingsRecovery()
       } else {
         show(successMessage)
@@ -848,77 +839,73 @@ export default function Settings({ onBack, initialSection = '' }) {
   return <div className="app">
     <div className="topbar">
       <GlobalMenu current="settings" />
-      <button className="btn sm ghost" onClick={requestBack}>← runs</button>
-      <span className="ttl" style={{ fontWeight: 700, fontSize: 15 }}>Settings</span>
-      <span className="muted">model, resources, and limits</span>
+      <button className="btn sm ghost" onClick={requestBack}>{uiText("← runs")}</button>
+      <span className="ttl" style={{ fontWeight: 700, fontSize: 15 }}>{uiText("Settings")}</span>
+      <span className="muted">{uiText("model, resources, and limits")}</span>
       <span className="spacer" style={{ flex: 1 }} />
     </div>
 
     <main className="settings-page" data-route-main tabIndex={-1}>
       {!form || !schema ? (launchGuardExternalPending
-        ? <div className="notice resource-error" role="status"><b ref={recoveryHeadingRef} tabIndex={-1}>An earlier Settings action is still finishing.</b><span>{settingsLaunchSnapshot.reason}</span></div>
+        ? <div className="notice resource-error" role="status"><b ref={recoveryHeadingRef} tabIndex={-1}>{uiText("An earlier Settings action is still finishing.")}</b><span>{uiText(settingsLaunchSnapshot.reason)}</span></div>
         : loadError
-        ? <div className="notice resource-error" role="alert"><b ref={loadErrorHeadingRef} tabIndex={-1}>Could not load settings.</b><span>{loadError}</span><button className="btn sm primary" onClick={retryInitialSettings}>Retry</button></div>
-        : <div className="notice" role="status">Loading settings…</div>) : <>
+        ? <div className="notice resource-error" role="alert"><b ref={loadErrorHeadingRef} tabIndex={-1}>{uiText("Could not load settings.")}</b><span>{loadError}</span><button className="btn sm primary" onClick={retryInitialSettings}>{uiText("Retry")}</button></div>
+        : <div className="notice" role="status">{uiText("Loading settings…")}</div>) : <>
         <section className="settings-overview" aria-labelledby="settings-heading">
           <div className="settings-heading-row">
             <div>
-              <h1 id="settings-heading">Defaults for new runs</h1>
-              <p>Connect a model, choose limits, then return to Assistant. Review overrides on each launch card.</p>
+              <h1 id="settings-heading">{uiText("Defaults for new runs")}</h1>
+              <p>{uiText("Connect a model, choose limits, then return to Assistant. Review overrides on each launch card.")}</p>
             </div>
             <details className="settings-help">
-              <summary>How changes work</summary>
-              <p><span className="sf-dot unsaved">●</span> Amber dots mark edits not yet saved; they disappear after a successful Save.
-                <span className="sf-dot fromdefault">●</span> Customized values differ from the engine default.</p>
-              <p>R, S, and B control whether the Researcher, Strategist, or Boss may change a setting at runtime.</p>
+              <summary>{uiText("How changes work")}</summary>
+              <p><span className="sf-dot unsaved">●</span>{uiText(" Amber dots mark edits not yet saved; they disappear after a successful Save.")}<span className="sf-dot fromdefault">●</span>{uiText(" Customized values differ from the engine default.")}</p>
+              <p>{uiText("R, S, and B control whether the Researcher, Strategist, or Boss may change a setting at runtime.")}</p>
             </details>
           </div>
 
           <div className="settings-toolbar">
             <div className="settings-mode-block">
-              <span id="settings-mode-label" className="settings-control-label">Visible settings</span>
+              <span id="settings-mode-label" className="settings-control-label">{uiText("Visible settings")}</span>
               <div className="settings-mode" role="group" aria-labelledby="settings-mode-label">
                 <button type="button" className={mode === 'essential' ? 'active' : ''}
                         aria-pressed={mode === 'essential'} disabled={searching}
-                        onClick={() => setMode('essential')}>Essential</button>
+                        onClick={() => setMode('essential')}>{uiText("Essential")}</button>
                 <button type="button" className={mode === 'all' ? 'active' : ''}
                         aria-pressed={mode === 'all'} disabled={searching}
-                        onClick={() => setMode('all')}>All</button>
+                        onClick={() => setMode('all')}>{uiText("All")}</button>
               </div>
             </div>
             <div className="settings-search-block">
-              <label className="settings-control-label" htmlFor="settings-search">Find a setting</label>
+              <label className="settings-control-label" htmlFor="settings-search">{uiText("Find a setting")}</label>
               <div className="settings-search-control">
                 <OpIcon name="search" className="t-ic" />
                 <input ref={searchInputRef} id="settings-search" type="search" value={query}
                        aria-describedby={searching ? 'settings-search-scope' : undefined}
-                       placeholder="Name, key, option, or purpose…"
+                       placeholder={uiText("Name, key, option, or purpose…")}
                        onChange={event => setQuery(event.target.value)} />
                 {query && <button type="button" className="settings-search-clear"
-                                  aria-label="Clear settings search" onClick={clearSearch}>×</button>}
+                                  aria-label={uiText("Clear settings search")} onClick={clearSearch}>×</button>}
               </div>
-              {searching && <span id="settings-search-scope" className="settings-search-scope">Search includes advanced settings.</span>}
+              {searching && <span id="settings-search-scope" className="settings-search-scope">{uiText("Search includes advanced settings.")}</span>}
             </div>
           </div>
 
           <div className="settings-summary" role="status" aria-live="polite">
-            <span>{catalogueSummary}</span>
+            <span>{uiText(catalogueSummary)}</span>
             <span className="settings-summary-divider" aria-hidden="true">·</span>
-            <span className={unsaved ? 'is-unsaved' : ''}>{unsaved ? countLabel(unsavedKeys.size, 'unsaved change') : 'No unsaved changes'}</span>
+            <span className={unsaved ? 'is-unsaved' : ''}>{((unsaved ? uiText(countLabel(unsavedKeys.size, 'unsaved change')) : uiText('No unsaved changes')))}</span>
             <span className="settings-summary-divider" aria-hidden="true">·</span>
-            <span>{countLabel(dirty.size, 'customized value')}</span>
-            {hiddenUnsaved > 0 && <button type="button" className="settings-summary-link" onClick={revealChanges}>
-              Review {countLabel(hiddenUnsaved, 'hidden change')}
+            <span>{uiText(countLabel(dirty.size, 'customized value'))}</span>
+            {hiddenUnsaved > 0 && <button type="button" className="settings-summary-link" onClick={revealChanges}>{uiText("Review ")}{uiText(countLabel(hiddenUnsaved, 'hidden change'))}
             </button>}
           </div>
         </section>
 
         <section className="settings-provider-check" aria-labelledby="settings-provider-check-heading">
           <div className="settings-provider-check-copy">
-            <strong ref={providerHeadingRef} id="settings-provider-check-heading" tabIndex={-1}>
-              Saved LLM connection
-            </strong>
-            <span>For Assistant: set Model and Base URL, Save, then Test active LLM. The test may bill; local endpoints may need no key.</span>
+            <strong ref={providerHeadingRef} id="settings-provider-check-heading" tabIndex={-1}>{uiText("Saved LLM connection")}</strong>
+            <span>{uiText("For Assistant: set Model and Base URL, Save, then Test active LLM. The test may bill; local endpoints may need no key.")}</span>
           </div>
           <CredentialState credential={credential} writeError={credentialWriteError}
             onRefresh={mutationUnknown ? reconcileUnknown : reloadSavedSettings}
@@ -936,51 +923,32 @@ export default function Settings({ onBack, initialSection = '' }) {
         </section>
 
         {launchGuardExternalRecovery && <div className="notice resource-error settings-stale-warning" role="alert">
-          <b ref={recoveryHeadingRef} tabIndex={-1}>{launchGuardExternalPending
-            ? 'An earlier Settings action is still finishing.'
-            : 'Refresh Settings before starting a run.'}</b>
-          <span>{launchGuardExternalPending
-            ? settingsLaunchSnapshot.reason
-            : 'The visible values may predate an earlier Settings action. Refresh once more to load a causally newer server snapshot.'}</span>
+          <b ref={recoveryHeadingRef} tabIndex={-1}>{((launchGuardExternalPending ? uiText('An earlier Settings action is still finishing.') : uiText('Refresh Settings before starting a run.')))}</b>
+          <span>{(((launchGuardExternalPending ? uiText(settingsLaunchSnapshot.reason) : uiText('The visible values may predate an earlier Settings action. Refresh once more to load a causally newer server snapshot.'))))}</span>
           {!launchGuardExternalPending && <button className="btn sm primary" disabled={!!mutationBusy}
             onClick={() => reloadSavedSettings({
               reloadSchema: true,
               successMessage: 'Settings reconciled with the current server state',
-            })}>Refresh server state</button>}
+            })}>{uiText("Refresh server state")}</button>}
         </div>}
 
         {loadError && !launchGuardExternalRecovery
           && <div className="notice resource-error settings-stale-warning" role="alert">
-          <b ref={loadErrorHeadingRef} tabIndex={-1}>Could not refresh settings.</b>
-          <span>The last loaded values remain visible, but new runs stay blocked until the current server state is loaded.</span>
+          <b ref={loadErrorHeadingRef} tabIndex={-1}>{uiText("Could not refresh settings.")}</b>
+          <span>{uiText("The last loaded values remain visible, but new runs stay blocked until the current server state is loaded.")}</span>
           <button className="btn sm primary"
             disabled={!!mutationBusy || !!mutationUnknown || launchGuardExternalPending}
             onClick={() => reloadSavedSettings({
               reloadSchema: true,
               successMessage: 'Settings and editor schema refreshed from the server',
-            })}>{mutationBusy === 'reloading settings' ? 'Retrying...' : 'Retry'}</button>
+            })}>{((mutationBusy === 'reloading settings' ? uiText('Retrying...') : uiText('Retry')))}</button>
         </div>}
 
         {mutationUnknown && <div className="notice resource-error" role="alert">
-          <b ref={mutationUnknownHeadingRef} tabIndex={-1}>{mutationUnknown.stage.endsWith('-conflict')
-            ? 'Server state changed in another client.' : 'Update outcome unknown.'}</b>
-          <span>{mutationUnknown.stage === 'settings-conflict'
-            ? 'Your draft is retained. Refresh the current server state before deliberately saving it against the new revision.'
-            : mutationUnknown.stage === 'secret-conflict'
-              ? mutationUnknown.ordinarySettingsAccepted
-                ? 'The endpoint/settings changes were accepted, but another credential update won. The typed replacement is retained. The previous server-resolved credential state remains authoritative, and Test active LLM stays blocked until refresh.'
-                : 'Another credential update won before this replacement. The typed replacement is retained. The previous server-resolved credential state remains authoritative, and Test active LLM stays blocked until refresh.'
-            : mutationUnknown.stage === 'secret-clear-conflict'
-              ? 'Another credential update won before this clear. Refresh before deciding whether to clear the current credential.'
-            : mutationUnknown.stage === 'secret-set'
-              ? mutationUnknown.ordinarySettingsAccepted
-                ? 'The endpoint/settings changes were accepted, but the API-key replacement could not be confirmed. The typed draft is retained; the previous server-resolved credential state remains authoritative, and Test active LLM stays blocked until refresh.'
-                : 'The API-key replacement could not be confirmed. The typed draft is retained; the previous server-resolved credential state remains authoritative, and Test active LLM stays blocked until refresh.'
-            : mutationUnknown.stage === 'secret-clear'
-              ? 'The API-key clear may or may not have reached the server. Do not repeat it blindly.'
-              : 'The settings save may or may not have reached the server. Current edits are kept and will not be replayed automatically.'}</span>
+          <b ref={mutationUnknownHeadingRef} tabIndex={-1}>{((mutationUnknown.stage.endsWith('-conflict') ? uiText('Server state changed in another client.') : uiText('Update outcome unknown.')))}</b>
+          <span>{((mutationUnknown.stage === 'settings-conflict' ? uiText('Your draft is retained. Refresh the current server state before deliberately saving it against the new revision.') : (mutationUnknown.stage === 'secret-conflict' ? (mutationUnknown.ordinarySettingsAccepted ? uiText('The endpoint/settings changes were accepted, but another credential update won. The typed replacement is retained. The previous server-resolved credential state remains authoritative, and Test active LLM stays blocked until refresh.') : uiText('Another credential update won before this replacement. The typed replacement is retained. The previous server-resolved credential state remains authoritative, and Test active LLM stays blocked until refresh.')) : (mutationUnknown.stage === 'secret-clear-conflict' ? uiText('Another credential update won before this clear. Refresh before deciding whether to clear the current credential.') : (mutationUnknown.stage === 'secret-set' ? (mutationUnknown.ordinarySettingsAccepted ? uiText('The endpoint/settings changes were accepted, but the API-key replacement could not be confirmed. The typed draft is retained; the previous server-resolved credential state remains authoritative, and Test active LLM stays blocked until refresh.') : uiText('The API-key replacement could not be confirmed. The typed draft is retained; the previous server-resolved credential state remains authoritative, and Test active LLM stays blocked until refresh.')) : (mutationUnknown.stage === 'secret-clear' ? uiText('The API-key clear may or may not have reached the server. Do not repeat it blindly.') : uiText('The settings save may or may not have reached the server. Current edits are kept and will not be replayed automatically.')))))))}</span>
           <button className="btn sm primary" disabled={!!mutationBusy} onClick={reconcileUnknown}>
-            {mutationBusy === 'reconciling' ? 'Refreshing…' : 'Refresh server state'}
+            {((mutationBusy === 'reconciling' ? uiText('Refreshing…') : uiText('Refresh server state')))}
           </button>
         </div>}
 
@@ -1000,25 +968,23 @@ export default function Settings({ onBack, initialSection = '' }) {
       <span className="spacer" style={{ flex: 1 }} />
       {invalidCount
         ? <button type="button" className="settings-summary-link settings-save-state is-invalid"
-            ref={saveStateRef} onClick={focusFirstInvalid}>{countLabel(invalidCount, 'invalid setting')} — review</button>
+            ref={saveStateRef} onClick={focusFirstInvalid}>{uiText(countLabel(invalidCount, 'invalid setting'))}{uiText(" — review")}</button>
         : <span className={'settings-save-state' + (unsaved ? ' is-unsaved' : '')}
             ref={saveStateRef} role="status" aria-live="polite" tabIndex={-1}>
-          {unsaved ? countLabel(unsavedKeys.size, 'unsaved change') : 'All changes saved'}
+          {((unsaved ? uiText(countLabel(unsavedKeys.size, 'unsaved change')) : uiText('All changes saved')))}
         </span>}
       <button className="btn sm ghost" disabled={!!mutationBusy || !canResetDefaults
         || settingsActionRecoveryBlocked}
               onClick={requestResetToDefaults}
-              title="Reset ordinary settings, runtime access controls, and typed credential drafts">
-        ↻ Reset all
-      </button>
+              title={uiText("Reset ordinary settings, runtime access controls, and typed credential drafts")}>{uiText("↻ Reset all")}</button>
       <button ref={saveButtonRef} className="btn sm primary" disabled={!unsaved || invalidCount > 0
         || !!mutationBusy || !!mutationUnknown || healthRecoveryBlocked
         || settingsActionRecoveryBlocked} onClick={onSave}>
-        {mutationBusy === 'saving' ? 'Saving...' : 'Save'}
+        {((mutationBusy === 'saving' ? uiText('Saving...') : uiText('Save')))}
       </button>
     </div></div>}
     {resetConfirmOpen && <ResetDefaultsDialog hasSecretDraft={hasSecretDraft}
       onCancel={() => setResetConfirmOpen(false)} onConfirm={resetToDefaults} />}
-    {toast && <div className="toast" role="status">{toast}</div>}
+    {toast && <div className="toast" role="status">{uiText(toast)}</div>}
   </div>
 }

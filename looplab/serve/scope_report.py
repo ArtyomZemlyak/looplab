@@ -18,6 +18,8 @@ from typing import Callable, Optional
 from pydantic import BaseModel, Field
 
 from looplab.core.advisory_payloads import sanitize_report_payload
+from looplab.core.output_language import current_output_language
+from looplab.core.prose_locale import authored_text
 from looplab.core.pathsafe import WINDOWS_RESERVED
 from looplab.core.comparison import canonical_comparison_contract, finite_measurement
 from looplab.core.fitness import format_metric
@@ -341,7 +343,8 @@ def _serialized_chars(value: object) -> int:
     return len(json.dumps(value, ensure_ascii=False, separators=(",", ":")))
 
 
-def _sanitize_content(value: object, briefs: list[dict], coverage: dict) -> dict:
+def _sanitize_content(value: object, briefs: list[dict], coverage: dict, *,
+                      output_language="auto") -> dict:
     src = value if isinstance(value, dict) else {}
     groups, observations = _comparison_projection(briefs)
     incomplete_population = bool(
@@ -421,7 +424,7 @@ def _sanitize_content(value: object, briefs: list[dict], coverage: dict) -> dict
         return {
             "schema": 5,
             "headline": "",
-            "verdict": verdict,
+            "verdict": authored_text(verdict, output_language),
             "verdict_authority": "server-derived-v3",
             "narrative_authority": "model-advisory",
             # numeric authority is derived from frozen measurements and an explicit exact
@@ -434,8 +437,8 @@ def _sanitize_content(value: object, briefs: list[dict], coverage: dict) -> dict
             # prose and therefore cannot be crowded out by backslash-heavy or otherwise escape-expanding
             # model output.
             "caveats": [
-                "Narrative sections are model-authored advisory synthesis, not comparison outcomes.",
-                *auto_caveats,
+                authored_text("Narrative sections are model-authored advisory synthesis, not comparison outcomes.", output_language),
+                *(authored_text(text, output_language) for text in auto_caveats),
             ],
             "what_worked": [],
             "what_didnt": [],
@@ -613,7 +616,8 @@ def _build_digest_projection(scope_label: str, briefs: list[dict],
     return digest, included, receipt
 
 
-def _deterministic(scope_label: str, briefs: list, coverage: dict | None = None) -> dict:
+def _deterministic(scope_label: str, briefs: list, coverage: dict | None = None, *,
+                   output_language="auto") -> dict:
     """Offline / no-model fallback: an honest metrics-only rollup so the panel still shows something."""
     n_rep = sum(1 for b in briefs if isinstance(b.get("report"), dict) and b["report"])
     raw = _AggReport(
@@ -625,13 +629,20 @@ def _deterministic(scope_label: str, briefs: list, coverage: dict | None = None)
                    + retarget_note(b.get("objective_key")) for b in briefs[:12]],
         caveats=["Generated without an LLM — only metrics/config, no synthesis."],
     ).model_dump()
+    raw["headline"] = authored_text(raw["headline"], output_language)
+    raw["caveats"] = [authored_text(text, output_language) for text in raw["caveats"]]
+    if output_language == "ru":
+        raw["learnings"] = [f"{b['run_id']}: лучшая метрика {_fmt_metric(b.get('best_metric'))} "
+                            f"({b.get('model') or '?'}, {b.get('policy') or '?'})"
+                            + (f"; цель оценки: {b['objective_key']}" if b.get("objective_key") else "")
+                            for b in briefs[:12]]
     return _sanitize_content(raw, briefs, coverage or {
         "input_rows": len(briefs), "source_runs": len(briefs), "invalid_rows": 0,
         "duplicate_run_rows": 0, "model_runs": len(briefs), "prompt_runs": len(briefs),
         "prompt_omitted_runs": 0, "omitted_runs": 0,
         "prompt_run_ids_digest": _run_ids_digest(briefs), "incomplete": False,
         "max_model_runs": MAX_SCOPE_REPORT_RUNS,
-    })
+    }, output_language=output_language)
 
 
 class _CrossRunTools:
@@ -694,10 +705,12 @@ class _CrossRunTools:
 def generate_scope_report(scope: dict, briefs: list, client, *, parser: str = "tool_call",
                           drill: Optional[Callable[[str, int], str]] = None,
                           max_turns: int = DEFAULT_SCOPE_REPORT_TURNS,
-                          time_budget_s: float = DEFAULT_SCOPE_REPORT_TIME_S) -> dict:
+                          time_budget_s: float = DEFAULT_SCOPE_REPORT_TIME_S,
+                          output_language: str = "auto") -> dict:
     """Synthesize a cross-run report. `scope` = {type,id,label}; `briefs` = per-run dicts (run_id,
     label, task_id, goal, direction, model, policy, best_metric, phase, nodes, report). `drill(run_id,
     node_id) -> str` optionally exposes deep experiment access. Returns a content dict; never raises."""
+    language = current_output_language(client, output_language)
     safe_scope = scope if isinstance(scope, dict) else {}
     label = _text(
         safe_scope.get("label") or f"{safe_scope.get('type')}:{safe_scope.get('id')}",
@@ -720,16 +733,16 @@ def generate_scope_report(scope: dict, briefs: list, client, *, parser: str = "t
         label, projected_briefs, source_coverage)
     if not projected_briefs:
         return _sanitize_content(
-            _AggReport(headline=f"No runs in {label}",
+            _AggReport(headline=authored_text(f"No runs in {label}", language),
                        verdict="nothing to summarize yet").model_dump(),
-            included_briefs, coverage,
+            included_briefs, coverage, output_language=language,
         )
     if not included_briefs:
         # never spend provider budget when the exact evidence receipt proves that no run
         # survived the prompt cap; the deterministic response still exposes the incomplete coverage.
-        return _deterministic(label, included_briefs, coverage)
+        return _deterministic(label, included_briefs, coverage, output_language=language)
     if client is None:
-        return _deterministic(label, included_briefs, coverage)
+        return _deterministic(label, included_briefs, coverage, output_language=language)
     try:
         from looplab.agents.agent import drive_tool_loop
         emit_spec = {"type": "function", "function": {
@@ -792,7 +805,7 @@ def generate_scope_report(scope: dict, briefs: list, client, *, parser: str = "t
                 # every model path stays raw until this single persisted-content boundary.
                 # Copies/wrappers can no longer turn object identity into a second sanitize pass that
                 # duplicates structural caveats and crowds model caveats out of the bounded receipt.
-                return _sanitize_content(cand, included_briefs, coverage)
-        return _deterministic(label, included_briefs, coverage)
+                return _sanitize_content(cand, included_briefs, coverage, output_language=language)
+        return _deterministic(label, included_briefs, coverage, output_language=language)
     except Exception:  # noqa: BLE001 - any model/loop failure -> deterministic, still useful
-        return _deterministic(label, included_briefs, coverage)
+        return _deterministic(label, included_briefs, coverage, output_language=language)

@@ -998,6 +998,20 @@
       "sub": "the model endpoint that proposes ideas and writes code",
       "fields": [
         {
+          "key": "output_language",
+          "label": "Language for generated text",
+          "type": "enum",
+          "options": [
+            "auto",
+            "en",
+            "ru"
+          ],
+          "default": "auto",
+          "help": "Language of all newly authored human prose: Assistant replies, research, plans, hypotheses, lessons, reviews and reports. auto follows the task; en is English; ru is Russian. Identifiers, commands, code, original logs and measured evidence are preserved. Changing the interface language saves this preference for new generation; historical text is not rewritten.",
+          "shortLabel": "Language",
+          "shortHelp": "Language of all screens and new human-readable text. auto follows the task; en is English; ru is Russian. Original evidence and code stay unchanged."
+        },
+        {
           "key": "backend",
           "label": "Role backend",
           "type": "enum",

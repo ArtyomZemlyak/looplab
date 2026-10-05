@@ -243,7 +243,11 @@ def make_roles(task: TaskAdapter, settings, run_dir=None, *, _developer_role: st
     tools; it is None for unit-built roles and the developer-only `make_developer_factory` rebuild, so
     those paths get the legacy single-run view (byte-parity)."""
     if settings.backend != "llm":
-        return task.build_roles()
+        roles = task.build_roles()
+        from looplab.agents.toy_roles import ToyResearcher
+        if isinstance(roles[0], ToyResearcher) and getattr(settings, "output_language", "auto") == "ru":
+            roles[0].output_language = "ru"  # prose only; keep optimizer type, RNG and evaluation
+        return roles
     # Unified self-driving control facade: one engine-facing object implements both role interfaces.
     # It is built from the split roles (flag off) so the rest of this function's wiring is reused;
     # stage clients and their local contexts remain separate behind the facade.

@@ -178,8 +178,8 @@ for (const [target, failure] of [['HarnessCycleBody', 'import'], ['HarnessCycleB
       assert.equal(document.activeElement, opener, 'Close returns to the original opener')
       await click(opener)
       if (!bodyFailure) {
-        await until(() => button('Connect external agent'), 'reopened connection entry')
-        await click(button('Connect external agent'))
+        await until(() => button('Подключить внешнего агента'), 'reopened connection entry')
+        await click(button('Подключить внешнего агента'))
       }
       await until(() => view.container.querySelector('[role="alert"]'), 'reopened failure')
       await React.act(async () => window.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true })))

@@ -25,7 +25,7 @@ test('model-first setup preserves values, permissions, and the selected section 
     assert.deepEqual(tabs.map(tab => tab.textContent), ['Model', 'Experiments & resources', 'Time & model budgets'])
     assert.equal(tabs[0].getAttribute('aria-selected'), 'true')
     assert.deepEqual([...container.querySelectorAll('[name]')].map(input => input.name),
-      ['llm_model', 'llm_base_url', 'llm_api_key', 'backend'])
+      ['output_language', 'llm_model', 'llm_base_url', 'llm_api_key', 'backend'])
     assert.ok(container.querySelector('[name="llm_base_url"]'))
     assert.deepEqual(changes, [], 'opening setup does not change saved defaults')
     await click(tabs[1])

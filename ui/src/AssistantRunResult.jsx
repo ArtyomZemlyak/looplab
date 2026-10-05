@@ -1,3 +1,5 @@
+
+import { uiText, useUILanguage } from './uiLanguage.js'
 import React from 'react'
 import { fmt } from './util.js'
 import { terminalReady, sourceIncomplete, sourceIntegrityNotice,
@@ -14,6 +16,8 @@ const measured = value => value && Number.isSafeInteger(value.node_id) && value.
   && typeof value.confirmed === 'boolean'
 
 export default function AssistantRunResult({ run, onOpen, onAsk, onReady, askDisabled = false, askDisabledReason }) {
+  useUILanguage()
+
   const [language] = useAssistantLanguage()
   const text = (en, ru) => language === 'ru' ? ru : en
   React.useEffect(() => { onReady?.() }, [onReady, run?.run_id, run?.generation])
@@ -46,31 +50,29 @@ export default function AssistantRunResult({ run, onOpen, onAsk, onReady, askDis
     <p>{run.stop_reason === 'error' ? text('The run ended with an error. Review partial results and failures.', 'Запуск завершился с ошибкой. Проверьте частичные результаты и причины сбоев.')
       : text('Review the recorded result before planning another experiment.', 'Проверьте полученный результат перед следующим экспериментом.')}</p>
     {selected ? <>
-      <div className="asst-run-result-metric">{run.objective_key || text('Objective', 'Целевая метрика')} · {direction}</div>
-      <dl><div><dt>{text('First eligible experiment', 'Первый допустимый эксперимент')} · #{first.node_id} · {resultMeasurement(first.confirmed, first.seeds, language).label}</dt>{value(first)}</div>
-        <div><dt>{text('Selected result', 'Выбранный результат')} · #{selected.node_id} · {measurement.label}</dt>{value(selected)}</div></dl>
+      <div className="asst-run-result-metric">{run.objective_key || text('Objective', 'Целевая метрика')} · {uiText(direction)}</div>
+      <dl><div><dt>{text('First eligible experiment', 'Первый допустимый эксперимент')} · #{first.node_id} · {uiText(resultMeasurement(first.confirmed, first.seeds, language).label)}</dt>{value(first)}</div>
+        <div><dt>{text('Selected result', 'Выбранный результат')} · #{selected.node_id} · {uiText(measurement.label)}</dt>{value(selected)}</div></dl>
       <p>{sameNode ? text('The selected result is the first eligible experiment; it does not establish improvement.', 'Выбран первый допустимый эксперимент; улучшение не установлено.')
         : first.confirmed !== selected.confirmed
           ? text('Different measurement types; improvement is not established. Compare evaluation scores and repeat checks separately in Report.',
             'Разные типы измерений; улучшение не установлено. В отчёте сравните основные оценки отдельно от повторных запусков.')
           : text('Read Report to compare values, conditions and repeat checks.', 'В отчёте сравните значения, условия оценки и повторы.')}</p>
       <p className="asst-run-result-caution">{measurement.reliability}</p>
-      {selected.confirmed && <p className="asst-run-result-caution">{resultSpreadText(selected.confirmed_std, language)}</p>}
-      {selected.trust_advisory === true && <p className="asst-run-result-caution">{resultTrustAdvisoryText(language)}</p>}
+      {selected.confirmed && <p className="asst-run-result-caution">{uiText(resultSpreadText(selected.confirmed_std, language))}</p>}
+      {selected.trust_advisory === true && <p className="asst-run-result-caution">{uiText(resultTrustAdvisoryText(language))}</p>}
       <p className="asst-run-result-caution">{text('First eligible is not necessarily the task baseline; detector coverage is not fully verified.',
         'Первый допустимый эксперимент не обязательно является базовым решением задачи; полнота проверок Trust не подтверждена.')}</p>
-      {caveats.length > 0 && <p className="asst-run-result-caution" title={bestMetricCaveatNotice(run)}>
+      {caveats.length > 0 && <p className="asst-run-result-caution" title={uiText(bestMetricCaveatNotice(run))}>
         {text('Recorded caveats:', 'Ограничения:')} {caveats.map(code => resultCaveatText(code, language)).join(' · ')}. {text('Review Report and Trust.', 'Проверьте отчёт и раздел Trust.')}
       </p>}
-    </> : <p className="asst-run-result-caution">{sourceIncomplete(run)
-      ? sourceIntegrityNotice(run) : text('No complete result summary is available. Open Report to inspect the recorded evidence.', 'Полного итога пока нет. Откройте отчёт и проверьте сохранённые данные.')}</p>}
+    </> : <p className="asst-run-result-caution">{((sourceIncomplete(run) ? uiText(sourceIntegrityNotice(run)) : text('No complete result summary is available. Open Report to inspect the recorded evidence.', 'Полного итога пока нет. Откройте отчёт и проверьте сохранённые данные.')))}</p>}
     <div className="asst-run-result-actions">
       {link(report, text('Read Report', 'Открыть отчёт'))}
       {selected && link(nodeHref(selected), text('Open selected code', 'Открыть выбранный код'))}
       {generation && link(hashWithRunRouteState(base, { generation, panel: 'artifacts' }), text('Find artifacts', 'Найти артефакты'))}
       {onAsk && <button className="btn sm ghost" disabled={askDisabled} onClick={onAsk}
-        title={askDisabled ? askDisabledReason || 'Wait for the current action before preparing a question'
-          : text('Prepare a question in this chat; review it before Send', 'Подготовить вопрос в чате; проверьте его перед отправкой')}>{text('Ask about this result', 'Спросить об этом результате')}</button>}
+        title={((askDisabled ? (askDisabledReason || uiText('Wait for the current action before preparing a question')) : text('Prepare a question in this chat; review it before Send', 'Подготовить вопрос в чате; проверьте его перед отправкой')))}>{text('Ask about this result', 'Спросить об этом результате')}</button>}
     </div>
     {onAsk && <div className="asst-run-result-note">{text('Ask prepares a message. Sending it may use a paid model.', 'Кнопка готовит текст вопроса. Отправка может вызвать платную модель.')}</div>}
   </section>

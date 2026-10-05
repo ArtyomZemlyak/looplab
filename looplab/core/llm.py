@@ -3116,7 +3116,8 @@ def make_llm_client_for(settings, *, role: str | None = None, timeout: float | N
             f"role {role!r} overrides the endpoint of profile credential "
             f"{configured_profile_env}; bind that role to a matching profile")
     build = factory if factory is not None else make_llm_client
-    return build(settings, **client_kwargs_for(target, role=role, timeout=timeout))
+    from looplab.core.output_language import language_client
+    return language_client(build(settings, **client_kwargs_for(target, role=role, timeout=timeout)), settings)
 
 
 def llm_credential_consumers(settings) -> tuple[bool, set[str | None]]:
@@ -3395,7 +3396,8 @@ def make_llm_client(settings, *, model: str | None = None,
         extra["wall_timeout"] = wall_timeout
     if retry_after_cap is not None:
         extra["retry_after_cap"] = retry_after_cap
-    return OpenAICompatibleClient(
+    from looplab.core.output_language import language_client
+    return language_client(OpenAICompatibleClient(
         model=mdl, base_url=endpoint, api_key=key,
         temperature=(temperature if temperature is not None else settings.llm_temperature),
         # `llm_budget_usd` 0.0 = no ceiling, which is what every historical caller got.
@@ -3415,4 +3417,4 @@ def make_llm_client(settings, *, model: str | None = None,
         trust_env=bool(getattr(settings, "llm_trust_env", False)),  # direct-connect by default (bypass proxy)
         cache=(getattr(settings, "llm_cache", False) if cache is None else cache),
         **extra,
-    )
+    ), settings)

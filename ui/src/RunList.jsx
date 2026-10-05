@@ -1,3 +1,4 @@
+import { uiText, uiMessage, useUILanguage } from './uiLanguage.js'
 import React, { lazy, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import { get, fmt, fmtDate, fmtAgo, listProjects, createProject, patchProject, deleteProject, assignRun, renameRun,
   createIdempotencyKey, submitRunDeletion, getRunMemoryAttribution, purgeRunMemory,
@@ -345,17 +346,21 @@ export function useResource(read, initial) {
 }
 
 function ResourceNotice({ state, label, retry }) {
+  useUILanguage()
+
   if (state === 'ready') return null
-  if (state === 'loading') return <div className="notice" role="status">{label} loading…</div>
+  if (state === 'loading') return <div className="notice" role="status">{uiText(label)}{uiText(" loading…")}</div>
   const stale = state === 'stale'
   return <div className={'notice ' + (stale ? 'resource-warning' : 'resource-error')}
     role={stale ? 'status' : 'alert'}>
-    {label}: {stale ? 'Last loaded data; refresh failed.' : 'Unavailable.'} <button className="btn sm" onClick={retry}>Retry</button>
+    {uiText(label)}: {((stale ? uiText('Last loaded data; refresh failed.') : uiText('Unavailable.')))} <button className="btn sm" onClick={retry}>{uiText("Retry")}</button>
   </div>
 }
 
 function UnavailableFilterNotice({ id, state, children, actionLabel, disabled, onAction,
   controlRef, fallbackRef, mainRef }) {
+  useUILanguage()
+
   const noticeRef = useRef(null)
   useLayoutEffect(() => () => {
     const owner = noticeRef.current
@@ -586,14 +591,12 @@ export function useListMutation({ actionTimeout = LIST_WRITE_TIMEOUT_MS, reconci
     if (lock.current) return false
     const token = ++version.current
     const update = value => { if (version.current === token) setState(value) }
-    lock.current = true; update({ busy: true, label })
+    lock.current = true; update({ busy: true, label: label })
     try {
       const outcome = await settleWithin(action, actionTimeout)
       let check = null
       if (typeof reconcile === 'function') {
-        update({ busy: true, label: outcome.ok
-          ? 'Refreshing current list…'
-          : 'Checking the current list before retry…' })
+        update({ busy: true, label: (outcome.ok ? uiText('Refreshing current list…') : uiText('Checking the current list before retry…')) })
         check = await settleWithin(reconcile, reconcileTimeout)
       }
       const checkStatus = check ? reconciliationStatus(check) : null
@@ -620,6 +623,8 @@ export function useListMutation({ actionTimeout = LIST_WRITE_TIMEOUT_MS, reconci
 // the uncontrolled inline-rename <input> lost its text/focus mid-edit. All render state is threaded
 // through `ctx`.
 export function TreeNode({ p, depth, ctx }) {
+  useUILanguage()
+
   const { byParent, expanded, sel, setSel, onDrop, toggle, renaming, finishProjectRename, startProjectRename,
           projectBusy, projectError, count, addProject, removeProject } = ctx
   const kids = byParent[p.id] || []
@@ -640,7 +645,7 @@ export function TreeNode({ p, depth, ctx }) {
         : <span className="ptw" aria-hidden="true">·</span>}
       {renaming === p.id
         ? <input className="text ptree-rename" autoFocus readOnly={projectBusy} defaultValue={p.name}
-                 aria-label={`Rename project ${p.name}`}
+                 aria-label={uiMessage("Rename project {0}", [p.name])}
                  onBlur={e => { if (!e.currentTarget.dataset.pending) commitRename(e.currentTarget, e.currentTarget.value, false) }}
                  onKeyDown={e => {
                    if (e.key === 'Enter') {
@@ -656,13 +661,13 @@ export function TreeNode({ p, depth, ctx }) {
             onClick={() => setSel(p.id)}><OpIcon name="folder" className="t-ic" /> {p.name}</button>}
       <span className="pcount">{count(p.id)}</span>
       <span className="pacts">
-        <button className="ic" disabled={projectBusy} aria-label={`Add sub-project inside ${p.name}`}
+        <button className="ic" disabled={projectBusy} aria-label={uiMessage("Add sub-project inside {0}", [p.name])}
           onClick={event => addProject(p.id, event.currentTarget)}>＋</button>
-        <button className="ic" disabled={projectBusy} aria-label={`Rename project ${p.name}`} onClick={event => startProjectRename(p.id, event.currentTarget)}><OpIcon name="pencil" size={12} /></button>
-        <button className="ic" disabled={projectBusy} aria-label={`Delete project ${p.name}`} onClick={event => removeProject(p.id, event.currentTarget)}>✕</button>
+        <button className="ic" disabled={projectBusy} aria-label={uiMessage("Rename project {0}", [p.name])} onClick={event => startProjectRename(p.id, event.currentTarget)}><OpIcon name="pencil" size={12} /></button>
+        <button className="ic" disabled={projectBusy} aria-label={uiMessage("Delete project {0}", [p.name])} onClick={event => removeProject(p.id, event.currentTarget)}>✕</button>
       </span>
     </div>
-    {renaming === p.id && projectBusy && <div className="muted" role="status">Saving project name…</div>}
+    {renaming === p.id && projectBusy && <div className="muted" role="status">{uiText("Saving project name…")}</div>}
     {renaming === p.id && projectError && <div className="flag" role="alert">{projectError}</div>}
     {open && <div className="ptree-children">{kids.map(k => <TreeNode key={k.id} p={k} depth={depth + 1} ctx={ctx} />)}</div>}
   </div>
@@ -670,12 +675,14 @@ export function TreeNode({ p, depth, ctx }) {
 
 // Small centered popup (replaces window.prompt for project create / run rename).
 function Modal({ title, onClose, children, busy = false }) {
+  useUILanguage()
+
   const dialogRef = useRef(null)
   useDialogFocus(dialogRef, busy ? null : onClose)
   return <div className="overlay" onMouseDown={event => { if (!busy && event.target === event.currentTarget) onClose?.() }}>
     <div ref={dialogRef} className="modal" role="dialog" aria-modal="true" aria-label={title} aria-busy={busy} tabIndex={-1}>
       <div className="modal-h"><b>{title}</b><span style={{ flex: 1 }} />
-        <button className="btn sm ghost" disabled={busy} onClick={onClose} aria-label={`Close ${title}`}>✕</button></div>
+        <button className="btn sm ghost" disabled={busy} onClick={onClose} aria-label={uiMessage("Close {0}", [title])}>✕</button></div>
       <div className="modal-b">{children}</div>
     </div>
   </div>
@@ -684,6 +691,8 @@ function Modal({ title, onClose, children, busy = false }) {
 function PromptModal({ title, label, description = '', placeholder, initial = '', confirm = 'Create', allowEmpty = false,
   maxLength, blocked = false, blockedMessage = '',
   confirmationForValue = null, onSubmit, onReconcile, onClose }) {
+  useUILanguage()
+
   const reactId = React.useId().replace(/:/g, '')
   const inputId = `prompt-${reactId}`
   const descriptionId = description ? `${inputId}-description` : undefined
@@ -705,7 +714,7 @@ function PromptModal({ title, label, description = '', placeholder, initial = ''
   }
   return <Modal title={title} onClose={onClose} busy={busy}>
     {label && <label htmlFor={inputId} className="muted"
-      style={{ display: 'block', marginBottom: description ? 4 : 8 }}>{label}</label>}
+      style={{ display: 'block', marginBottom: description ? 4 : 8 }}>{uiText(label)}</label>}
     {description && <div id={descriptionId} className="muted" style={{ marginBottom: 8 }}>{description}</div>}
     <input ref={inputRef} id={inputId} className="text" autoFocus readOnly={busy || blocked}
            aria-label={label || title} aria-describedby={descriptionId}
@@ -716,15 +725,15 @@ function PromptModal({ title, label, description = '', placeholder, initial = ''
            }}
            onKeyDown={e => { if (e.key === 'Enter') go(); if (e.key === 'Escape' && !busy) onClose() }} />
     {confirmation?.message && <div className="notice resource-warning" role="status" aria-live="polite">
-      {confirmation.message}
+      {uiText(confirmation.message)}
     </div>}
     {blocked && blockedMessage && <div className="flag" role="alert">{blockedMessage}</div>}
     {error && <div ref={errorRef} id={errorId} className="flag" role="alert"
-      tabIndex={fieldError ? undefined : -1}>{error}</div>}
+      tabIndex={fieldError ? undefined : -1}>{uiText(error)}</div>}
     <div className="modal-actions">
-      <button className="btn sm ghost" disabled={busy} onClick={onClose}>Cancel</button>
+      <button className="btn sm ghost" disabled={busy} onClick={onClose}>{uiText("Cancel")}</button>
       <button className="btn sm primary" disabled={!ok || busy} onClick={go}>
-        {busy ? 'Saving…' : confirmation?.confirm || confirm}
+        {((busy ? uiText('Saving…') : confirmation?.confirm || confirm))}
       </button>
     </div>
   </Modal>
@@ -834,6 +843,8 @@ const runDeletionProgress = recovery => {
 }
 
 function RunMemoryCascade({ report, checked, disabled, onToggle, bulk = 0 }) {
+  useUILanguage()
+
   // The survey is a preview, so a slow or failed read must not block the deletion — the checkbox
   // simply stays off and says it does not know yet. Consent to a number nobody could show is not
   // consent, so an unknown survey never arrives pre-checked.
@@ -847,8 +858,7 @@ function RunMemoryCascade({ report, checked, disabled, onToggle, bulk = 0 }) {
     <label className="run-delete-cascade-row">
       <input type="checkbox" checked={checked} disabled={blocked}
         onChange={event => onToggle(event.target.checked)} />
-      <span>{bulk ? bulkCascadeLabel(bulk)
-        : report ? cascadeLabel(report) : 'Checking this run’s cross-run memory…'}</span>
+      <span>{((bulk ? uiText(bulkCascadeLabel(bulk)) : (report ? uiText(cascadeLabel(report)) : uiText('Checking this run’s cross-run memory…'))))}</span>
     </label>
     {kept && <p className="run-delete-cascade-kept">{kept}</p>}
     {checked && <ul className="run-delete-cascade-stores">
@@ -860,6 +870,8 @@ function RunMemoryCascade({ report, checked, disabled, onToggle, bulk = 0 }) {
 
 function RunDeleteDialog({ target, currentRun, busy, error, onClose, onConfirm,
   memoryReport, cascade, onCascadeToggle }) {
+  useUILanguage()
+
   const dialogRef = useRef(null)
   const errorRef = useRef(null)
   useDialogFocus(dialogRef, busy ? null : onClose, true,
@@ -879,31 +891,27 @@ function RunDeleteDialog({ target, currentRun, busy, error, onClose, onConfirm,
       aria-modal="true" aria-labelledby="run-delete-title"
       aria-describedby="run-delete-description run-delete-warning"
       aria-busy={busy} tabIndex={-1}>
-      <div className="modal-h"><b id="run-delete-title">Delete this run permanently?</b></div>
+      <div className="modal-h"><b id="run-delete-title">{uiText("Delete this run permanently?")}</b></div>
       <div className="modal-b">
-        <p id="run-delete-description" className="run-delete-copy">
-          This removes the run-owned events, experiments, traces, chat, reports, and review access.
-        </p>
+        <p id="run-delete-description" className="run-delete-copy">{uiText("This removes the run-owned events, experiments, traces, chat, reports, and review access.")}</p>
         <dl className="run-delete-identity">
-          <div><dt>Label</dt><dd>{target.label || '(no display label)'}</dd></div>
-          <div><dt>Run ID</dt><dd><code>{target.runId}</code></dd></div>
-          <div><dt>Deletion identity</dt><dd><code>{target.expectedGeneration || 'unavailable'}</code></dd></div>
-          <div><dt>Sequence</dt><dd><code>{Number.isSafeInteger(target.expectedSeq) ? target.expectedSeq : 'unavailable'}</code></dd></div>
+          <div><dt>{uiText("Label")}</dt><dd>{((target.label || uiText('(no display label)')))}</dd></div>
+          <div><dt>{uiText("Run ID")}</dt><dd><code>{target.runId}</code></dd></div>
+          <div><dt>{uiText("Deletion identity")}</dt><dd><code>{((target.expectedGeneration || 'unavailable'))}</code></dd></div>
+          <div><dt>{uiText("Sequence")}</dt><dd><code>{((Number.isSafeInteger(target.expectedSeq) ? target.expectedSeq : 'unavailable'))}</code></dd></div>
         </dl>
-        <p id="run-delete-warning" className="run-delete-warning">This cannot be undone.</p>
+        <p id="run-delete-warning" className="run-delete-warning">{uiText("This cannot be undone.")}</p>
         <RunMemoryCascade report={memoryReport} checked={cascade} disabled={busy}
           onToggle={onCascadeToggle} />
         {(!targetValid || identityChanged) && <div className="flag run-delete-error" role="alert">
-          {!targetValid
-            ? 'The exact generation or sequence is unavailable. Refresh the list before deleting.'
-            : 'This run changed while the dialog was open. Cancel and reopen Delete from the refreshed card.'}
+          {((!targetValid ? uiText('The exact generation or sequence is unavailable. Refresh the list before deleting.') : uiText('This run changed while the dialog was open. Cancel and reopen Delete from the refreshed card.')))}
         </div>}
-        {error && <div ref={errorRef} className="flag run-delete-error" role="alert" tabIndex={-1}>{error}</div>}
+        {error && <div ref={errorRef} className="flag run-delete-error" role="alert" tabIndex={-1}>{uiText(error)}</div>}
         <div className="modal-actions">
           <button type="button" className="btn sm" data-dialog-initial-focus disabled={busy}
-            onClick={onClose}>Cancel</button>
+            onClick={onClose}>{uiText("Cancel")}</button>
           <button type="button" className="btn sm danger" disabled={blocked}
-            onClick={onConfirm}>{busy ? 'Submitting exact request…' : 'Delete permanently'}</button>
+            onClick={onConfirm}>{((busy ? uiText('Submitting exact request…') : uiText('Delete permanently')))}</button>
         </div>
       </div>
     </section>
@@ -911,6 +919,8 @@ function RunDeleteDialog({ target, currentRun, busy, error, onClose, onConfirm,
 }
 
 function RunBulkDeleteDialog({ dialog, state, onClose, onConfirm, onCascadeToggle }) {
+  useUILanguage()
+
   const dialogRef = useRef(null)
   const running = state?.running === true
   useDialogFocus(dialogRef, running ? null : onClose, true,
@@ -925,35 +935,32 @@ function RunBulkDeleteDialog({ dialog, state, onClose, onConfirm, onCascadeToggl
       <div className="modal-h"><b id="run-bulk-delete-title">
         {bulkDeletionSummary(dialog.plan)}</b></div>
       <div className="modal-b">
-        <p className="run-delete-copy">
-          Each run is deleted through its own exact transaction, one after another. This removes
-          their events, experiments, traces, chat, reports and review access.
-        </p>
+        <p className="run-delete-copy">{uiText("Each run is deleted through its own exact transaction, one after another. This removes their events, experiments, traces, chat, reports and review access.")}</p>
         {/* The LIST, not a count. Twenty runs is exactly the size at which a number stops being
             something the operator can check against what they meant to select. */}
         {ready.length > 0 && <ul className="run-bulk-delete-list">
           {ready.map(target => <li key={target.runId}
             className={state?.done?.includes(target.runId) ? 'done' : ''}>
-            <code>{target.runId}</code>{target.label ? <span> — {target.label}</span> : null}
+            <code>{target.runId}</code>{target.label ? <span> — {uiText(target.label)}</span> : null}
           </li>)}
         </ul>}
         {blocked.length > 0 && <div className="run-bulk-delete-blocked">
-          <b>{blocked.length} cannot be deleted right now:</b>
+          <b>{blocked.length}{uiText(" cannot be deleted right now:")}</b>
           <ul>{blocked.map(item => <li key={item.runId}>
             <code>{item.runId}</code> — {item.reason}</li>)}</ul>
         </div>}
-        <p id="run-bulk-delete-warning" className="run-delete-warning">This cannot be undone.</p>
+        <p id="run-bulk-delete-warning" className="run-delete-warning">{uiText("This cannot be undone.")}</p>
         <RunMemoryCascade report={null} checked={dialog.cascade} disabled={running}
           onToggle={onCascadeToggle} bulk={ready.length} />
-        {running && <div className="flag" role="status">{bulkProgressLabel(state)}</div>}
-        {outcome && <div className={`flag run-delete-error`} role="alert">{outcome.text}</div>}
+        {running && <div className="flag" role="status">{uiText(bulkProgressLabel(state))}</div>}
+        {outcome && <div className={`flag run-delete-error`} role="alert">{uiText(outcome.text)}</div>}
         <div className="modal-actions">
           <button type="button" className="btn sm" data-dialog-initial-focus disabled={running}
-            onClick={onClose}>{state && !running ? 'Close' : 'Cancel'}</button>
+            onClick={onClose}>{((state && !running ? uiText('Close') : uiText('Cancel')))}</button>
           <button type="button" className="btn sm danger"
             disabled={running || !ready.length || (state && !running && !state.stoppedAt)}
             onClick={onConfirm}>
-            {running ? 'Deleting…' : `Delete ${ready.length} permanently`}</button>
+            {((running ? uiText('Deleting…') : uiMessage("Delete {0} permanently", [ready.length])))}</button>
         </div>
       </div>
     </section>
@@ -961,6 +968,8 @@ function RunBulkDeleteDialog({ dialog, state, onClose, onConfirm, onCascadeToggl
 }
 
 function RunDeletionCard({ run, recovery, busy, onRetry, setRef }) {
+  useUILanguage()
+
   const active = recovery.kind === 'active'
   const repairRequired = active && recovery.intent.serverPhase === 'quarantine_ambiguous'
   const urgent = !active || recovery.intent.phase === 'unknown' || repairRequired
@@ -971,15 +980,13 @@ function RunDeletionCard({ run, recovery, busy, onRetry, setRef }) {
     aria-atomic="true" aria-busy={busy}>
     <OpIcon name="alert" size={16} />
     <div className="run-deletion-copy">
-      <div><b>{run?.label || recovery.runId}</b> <span className="pill warn">Deletion recovery</span></div>
+      <div><b>{run?.label || recovery.runId}</b> <span className="pill warn">{uiText("Deletion recovery")}</span></div>
       <div>{runDeletionProgress(recovery)}</div>
-      {active && <div className="muted"><code>{recovery.runId}</code> · generation <code>{recovery.intent.expectedGeneration.slice(0, 12)}…</code></div>}
-      {recovery.storageUnavailable && <div className="flag">This tab could not update its saved recovery record.</div>}
+      {active && <div className="muted"><code>{recovery.runId}</code>{uiText(" · generation ")}<code>{recovery.intent.expectedGeneration.slice(0, 12)}…</code></div>}
+      {recovery.storageUnavailable && <div className="flag">{uiText("This tab could not update its saved recovery record.")}</div>}
     </div>
     {active && <button type="button" className="btn sm" disabled={busy}
-      onClick={() => onRetry(recovery)}>{busy ? 'Checking…'
-        : recovery.intent.phase === 'unknown' ? 'Retry exact deletion'
-          : repairRequired ? 'Check after repair' : 'Check exact deletion'}</button>}
+      onClick={() => onRetry(recovery)}>{((busy ? uiText('Checking…') : (recovery.intent.phase === 'unknown' ? uiText('Retry exact deletion') : (repairRequired ? uiText('Check after repair') : uiText('Check exact deletion')))))}</button>}
   </div>
 }
 
@@ -988,6 +995,8 @@ function RunMenu({ r, projects, supertasks, onOpen, onMove, onSetSuper, onManage
   onDelete, onReconcile, onClose, onBusyChange, mutationLocked = false,
   mutationLockReason = 'Resolve the existing run operation before changing this run', anchor = null,
   positionKey = '', deleteLocked = mutationLocked, deleteLockReason = mutationLockReason }) {
+  useUILanguage()
+
   const menuRef = useRef(null)
   const [menuStyle, setMenuStyle] = useState(null)
   const [busy, error, mutate] = useMutation()
@@ -1043,50 +1052,49 @@ function RunMenu({ r, projects, supertasks, onOpen, onMove, onSetSuper, onManage
   }
   return <>
     <div className="menu-backdrop" onClick={() => close(true)} onDragStart={() => close(true)} />
-    <div ref={menuRef} className="run-menu" role="menu" aria-label={`Actions for ${r.label || r.run_id}`}
+    <div ref={menuRef} className="run-menu" role="menu" aria-label={uiMessage("Actions for {0}", [r.label || r.run_id])}
       style={menuStyle || undefined}
       aria-busy={busy} aria-disabled={busy}
       onClick={e => e.stopPropagation()} onClickCapture={e => { if (busy) { e.preventDefault(); e.stopPropagation() } }} onKeyDown={onKeyDown}
       onBlur={event => { if (!event.currentTarget.contains(event.relatedTarget)) close(false) }}>
-      <div className="mi-label run-menu-context" title={r.label || r.run_id} aria-hidden="true">
-        Run · <b>{r.label || r.run_id}</b>
+      <div className="mi-label run-menu-context" title={r.label || r.run_id} aria-hidden="true">{uiText("Run · ")}<b>{r.label || r.run_id}</b>
       </div>
       <div className="mi-sep" />
-      <button type="button" role="menuitem" tabIndex={-1} className="mi" onClick={() => { close(false); onOpen(r.run_id) }}>↗ Open</button>
+      <button type="button" role="menuitem" tabIndex={-1} className="mi" onClick={() => { close(false); onOpen(r.run_id) }}>{uiText("↗ Open")}</button>
       {mutationLocked && <div className="mi-label" role="status">
         {mutationLockReason}
       </div>}
       <button type="button" role="menuitem" tabIndex={-1} className="mi"
         disabled={mutationLocked} title={mutationLocked ? mutationLockReason : undefined}
-        onClick={() => { close(false); onRename(r) }}><OpIcon name="pencil" size={12} /> Rename</button>
+        onClick={() => { close(false); onRename(r) }}><OpIcon name="pencil" size={12} />{uiText(" Rename")}</button>
       <div className="mi-sep" />
-      <div className="mi-label">Move to project</div>
+      <div className="mi-label">{uiText("Move to project")}</div>
       <div className="mi-scroll">
         <button type="button" role="menuitem" tabIndex={-1} disabled={mutationLocked}
-          className={'mi' + (!r.project_id ? ' on' : '')} onClick={() => act(() => onMove(r, UNASSIGNED))}>○ — unassigned —</button>
+          className={'mi' + (!r.project_id ? ' on' : '')} onClick={() => act(() => onMove(r, UNASSIGNED))}>{uiText("○ — unassigned —")}</button>
         {projects.map(p => <button type="button" role="menuitem" tabIndex={-1} key={p.id} className={'mi' + (r.project_id === p.id ? ' on' : '')}
           disabled={mutationLocked}
           onClick={() => act(() => onMove(r, p.id))}><OpIcon name="folder" className="t-ic" /> {p.name}</button>)}
-        {!projects.length && <div className="mi-empty">no projects yet</div>}
+        {!projects.length && <div className="mi-empty">{uiText("no projects yet")}</div>}
       </div>
       <div className="mi-sep" />
-      <div className="mi-label">Super-task</div>
+      <div className="mi-label">{uiText("Super-task")}</div>
       <div className="mi-scroll">
         <button type="button" role="menuitem" tabIndex={-1} disabled={mutationLocked}
-          className={'mi' + (!r.supertask_id ? ' on' : '')} onClick={() => act(() => onSetSuper(r, UNASSIGNED))}>○ — none —</button>
+          className={'mi' + (!r.supertask_id ? ' on' : '')} onClick={() => act(() => onSetSuper(r, UNASSIGNED))}>{uiText("○ — none —")}</button>
         {supertasks.map(s => <button type="button" role="menuitem" tabIndex={-1} key={s.id} className={'mi' + (r.supertask_id === s.id ? ' on' : '')}
           disabled={mutationLocked}
           onClick={() => act(() => onSetSuper(r, s.id))}><OpIcon name="target" className="t-ic" /> {s.name}</button>)}
-        <button type="button" role="menuitem" tabIndex={-1} className="mi accent" onClick={() => { close(false); onManageSupers() }}>＋ New / manage…</button>
+        <button type="button" role="menuitem" tabIndex={-1} className="mi accent" onClick={() => { close(false); onManageSupers() }}>{uiText("＋ New / manage…")}</button>
       </div>
-      {busy && <div className="muted" role="status">Saving…</div>}
-      {error && <div className="flag" role="alert">{error}</div>}
+      {busy && <div className="muted" role="status">{uiText("Saving…")}</div>}
+      {error && <div className="flag" role="alert">{uiText(error)}</div>}
       <div className="mi-sep" />
       {deleteLocked && (!mutationLocked || deleteLockReason !== mutationLockReason)
         && <div className="mi-label" role="status">{deleteLockReason}</div>}
       <button type="button" role="menuitem" tabIndex={-1} className="mi danger"
         disabled={deleteLocked} title={deleteLocked ? deleteLockReason : undefined}
-        onClick={() => onDelete(r)}>✕ Delete run…</button>
+        onClick={() => onDelete(r)}>{uiText("✕ Delete run…")}</button>
     </div>
   </>
 }
@@ -1095,6 +1103,8 @@ function RunMenu({ r, projects, supertasks, onOpen, onMove, onSetSuper, onManage
 // the ⋮ menu / drag; this is just the CRUD over the buckets themselves.
 function SuperTaskModal({ supertasks, state, onRetry, onCreate, onRename, onDelete,
   onReconcile, onClose }) {
+  useUILanguage()
+
   const [name, setName] = useState('')
   const newTaskRef = useRef(null)
   const [busy, error, mutate] = useMutation()
@@ -1115,29 +1125,29 @@ function SuperTaskModal({ supertasks, state, onRetry, onCreate, onRename, onDele
     if (saved && removed) requestAnimationFrame(() => fallback?.isConnected
       ? fallback.focus({ preventScroll: true }) : newTaskRef.current?.focus({ preventScroll: true }))
   }
-  return <Modal title="Super-tasks" onClose={onClose} busy={busy}>
-    <div className="muted" style={{ marginBottom: 8 }}>A super-task groups runs that attack the same global task (across many runs). Assign runs from a run’s ⋮ menu.</div>
-    <ResourceNotice state={state} label="Super-tasks" retry={onRetry} />
-    {busy && <div className="muted" role="status">Saving super-task changes…</div>}
-    {error && <div className="flag" role="alert">{error}</div>}
+  return <Modal title={uiText("Super-tasks")} onClose={onClose} busy={busy}>
+    <div className="muted" style={{ marginBottom: 8 }}>{uiText("A super-task groups runs that attack the same global task (across many runs). Assign runs from a run’s ⋮ menu.")}</div>
+    <ResourceNotice state={state} label={uiText("Super-tasks")} retry={onRetry} />
+    {busy && <div className="muted" role="status">{uiText("Saving super-task changes…")}</div>}
+    {error && <div className="flag" role="alert">{uiText(error)}</div>}
     <div className="st-new">
-      <input ref={newTaskRef} className="text" autoFocus readOnly={busy} aria-label="New super-task name" placeholder="New super-task name (e.g. nomad2018)" value={name}
+      <input ref={newTaskRef} className="text" autoFocus readOnly={busy} aria-label={uiText("New super-task name")} placeholder={uiText("New super-task name (e.g. nomad2018)")} value={name}
              onChange={e => setName(e.target.value)} onKeyDown={e => { if (e.key === 'Enter') add() }} />
-      <button className="btn sm primary" disabled={busy || !name.trim()} onClick={add}>＋ Create</button>
+      <button className="btn sm primary" disabled={busy || !name.trim()} onClick={add}>{uiText("＋ Create")}</button>
     </div>
     <div className="st-list">
       {supertasks.map(s => <div key={s.id} className="st-row">
         <span className="st-ic"><OpIcon name="target" className="t-ic" /></span>
-        <input className="text st-rename" readOnly={busy} defaultValue={s.name} aria-label={`Rename super-task ${s.name}`}
+        <input className="text st-rename" readOnly={busy} defaultValue={s.name} aria-label={uiMessage("Rename super-task {0}", [s.name])}
                onBlur={e => edit(s, e.currentTarget)}
                onKeyDown={e => {
                  if (e.key === 'Enter') {
                    e.preventDefault(); edit(s, e.currentTarget)
                  }
                }} />
-        <button className="ic" disabled={busy} aria-label={`Delete super-task ${s.name}`} onClick={event => remove(s, event)}>✕</button>
+        <button className="ic" disabled={busy} aria-label={uiMessage("Delete super-task {0}", [s.name])} onClick={event => remove(s, event)}>✕</button>
       </div>)}
-      {state === 'ready' && !supertasks.length && <div className="muted" style={{ padding: '8px 2px', fontSize: 12 }}>No super-tasks yet.</div>}
+      {state === 'ready' && !supertasks.length && <div className="muted" style={{ padding: '8px 2px', fontSize: 12 }}>{uiText("No super-tasks yet.")}</div>}
     </div>
   </Modal>
 }
@@ -1145,6 +1155,8 @@ function SuperTaskModal({ supertasks, state, onRetry, onCreate, onRename, onDele
 export default function RunList({ onOpen, onGlobalNavigate,
   initialNavigationState = null, restoreFocusRunId = null, restoreFocusControl = null,
   onNavigationStateChange = null, onNavigationRestored = null }) {
+  useUILanguage()
+
   const initialNavigationRef = useRef()
   if (initialNavigationRef.current === undefined) {
     initialNavigationRef.current = normalizeListNavigation(initialNavigationState)
@@ -1976,7 +1988,7 @@ export default function RunList({ onOpen, onGlobalNavigate,
   // no filter) → hide the Report button.
   const scope = useMemo(() => {
     if (stFilter !== ALL && stFilter !== UNASSIGNED) return { type: 'supertask', id: stFilter, label: (stName[stFilter] || stFilter) }
-    if (taskFilterExact) return { type: 'task', id: taskFilter, label: 'task ' + taskFilter }
+    if (taskFilterExact) return { type: 'task', id: taskFilter, label: `task ${taskFilter}` }
     if (projectScopeBlocked) return null
     if (sel !== ALL && sel !== UNASSIGNED) return { type: 'project', id: sel, label: (projName[sel] || sel) }
     return null
@@ -2082,11 +2094,9 @@ export default function RunList({ onOpen, onGlobalNavigate,
       // it is the operator watching a progress line for a state machine that has stopped, so the
       // batch takes the server's own sentence and stops on it instead.
       if (receipt.retryable === false) {
-        if (!quiet) setDeletionNotice({ kind: 'error', text: receipt.message
-          || 'This deletion cannot continue until its storage is resolved by hand.' })
+        if (!quiet) setDeletionNotice({ kind: 'error', text: (receipt.message || uiText('This deletion cannot continue until its storage is resolved by hand.')) })
         if (fromDialog) leaveDeleteDialogForRecovery(intent)
-        return { outcome: 'blocked', reason: receipt.message
-          || 'it cannot continue until its storage is resolved by hand' }
+        return { outcome: 'blocked', reason: (receipt.message || uiText('it cannot continue until its storage is resolved by hand')) }
       }
       if (fromDialog) leaveDeleteDialogForRecovery(intent)
       return { outcome: 'pending', reason:
@@ -2347,9 +2357,7 @@ export default function RunList({ onOpen, onGlobalNavigate,
       // travels with the stop for the same reason: `undefined`/'unknown' means this tab never
       // established what happened to THIS run, so the notice may not claim it still exists.
       state.stoppedAt = { runId: target.runId, outcome: verdict?.outcome || 'unknown',
-        reason: verdict?.outcome === 'pending'
-          ? 'the server is still working on it; its recovery record is saved and can be resumed'
-          : (verdict?.reason || 'the deletion did not complete') }
+        reason: (verdict?.outcome === 'pending' ? uiText('the server is still working on it; its recovery record is saved and can be resumed') : (verdict?.reason || uiText('the deletion did not complete'))) }
       break
     }
     // STOP AT THE FIRST FAILURE, deliberately. Whatever refused one deletion — an active engine, a
@@ -2432,16 +2440,16 @@ export default function RunList({ onOpen, onGlobalNavigate,
                     finishProjectRename, startProjectRename, projectBusy, projectError,
                     count, addProject, removeProject }
   const mutationNotice = listMutation?.busy
-    ? <div className="notice" role="status">{listMutation.label}</div>
+    ? <div className="notice" role="status">{uiText(listMutation.label)}</div>
     : listMutation?.error
       ? <div className="notice resource-error" role="alert">{listMutation.error}{' '}
-          <button type="button" className="btn sm" onClick={clearListMutation}>Dismiss</button>
+          <button type="button" className="btn sm" onClick={clearListMutation}>{uiText("Dismiss")}</button>
         </div>
       : null
 
   return (
     <main ref={runsMainRef} className="app" data-route-main tabIndex={-1} aria-busy={navigationBusy}>
-      <h1 className="sr-only">Runs</h1>
+      <h1 className="sr-only">{uiText("Runs")}</h1>
       <div className="topbar home-head">
         {/* The mark is the menu. It was a wordmark here and a second button carrying the same word
             at the far RIGHT of this bar, among the theme/density toggles — two spellings of one
@@ -2450,21 +2458,18 @@ export default function RunList({ onOpen, onGlobalNavigate,
             cross-run memory, authored knowledge and the host's GPUs once hid in a RUN's menu. */}
         <GlobalMenu current="list" disabled={navigationBusy}
           buttonRef={globalMenuButtonRef} onNavigate={openGlobal} />
-        <span className="muted home-subtitle">autonomous R&D — live runs</span>
+        <span className="muted home-subtitle">{uiText("autonomous R&D — live runs")}</span>
         {!firstRunLanding && <button ref={projectsToggleRef} className="btn sm ghost projects-toggle" disabled={navigationBusy} onClick={() => setProjectsOpen(true)}
                 aria-expanded={projectsOpen} aria-controls="projects-drawer">
-          <OpIcon name="folder" className="t-ic" /> Projects
-        </button>}
+          <OpIcon name="folder" className="t-ic" />{uiText(" Projects")}</button>}
         <button className="btn sm primary new-run-cta" disabled={navigationBusy}
-                onClick={() => window.dispatchEvent(new CustomEvent('ll:new-run', { cancelable: true }))}>
-          ＋ New run
-        </button>
+                onClick={() => window.dispatchEvent(new CustomEvent('ll:new-run', { cancelable: true }))}>{uiText("＋ New run")}</button>
         <span className="spacer" style={{ flex: 1 }} />
         {/* Named, because `Lineage` is now the label of TWO different surfaces — this one and the
             run workspace's DAG. The workspace toggle is a `role="toolbar" aria-label="Run workspace
             controls"`, so a screen reader announces its scope; this group announced a bare
             "Lineage, button" with nothing to tell the two apart. */}
-        {!firstRunLanding && <div className="seg" role="group" aria-label="Run list views">
+        {!firstRunLanding && <div className="seg" role="group" aria-label={uiText("Run list views")}>
           {/* LINEAGE, not "Map", and CONCEPTS beside it — because the two answer different questions
               and calling one of them "the map" is why the second one was missing for so long. This
               view draws which run descends from which, inside which project: ancestry, i.e. lineage.
@@ -2477,19 +2482,16 @@ export default function RunList({ onOpen, onGlobalNavigate,
               writes it), so renaming the key would silently retire every saved scope and every
               bookmark that names this view. A label is not a reason to break those. Whoever comes
               next wanting to "finish" the rename: the label is the whole rename. */}
-          <button aria-pressed={view === 'list'} className={view === 'list' ? 'on' : ''} onClick={() => setView('list')}><OpIcon name="list" className="t-ic" /> List</button>
-          <button aria-pressed={view === 'map'} className={view === 'map' ? 'on' : ''} onClick={() => setView('map')}><OpIcon name="map" className="t-ic" /> Lineage</button>
+          <button aria-pressed={view === 'list'} className={view === 'list' ? 'on' : ''} onClick={() => setView('list')}><OpIcon name="list" className="t-ic" />{uiText(" List")}</button>
+          <button aria-pressed={view === 'map'} className={view === 'map' ? 'on' : ''} onClick={() => setView('map')}><OpIcon name="map" className="t-ic" />{uiText(" Lineage")}</button>
           <button aria-pressed={view === 'concepts'} className={view === 'concepts' ? 'on' : ''}
             disabled={projectScopeBlocked}
-            title={projectScopeBlocked
-              ? 'Restore the saved project or use All runs first'
-              : 'Concepts across the runs this list is showing'}
-            onClick={() => setView('concepts')}><OpIcon name="gitbranch" className="t-ic" /> Concepts</button>
+            title={((projectScopeBlocked ? uiText('Restore the saved project or use All runs first') : uiText('Concepts across the runs this list is showing')))}
+            onClick={() => setView('concepts')}><OpIcon name="gitbranch" className="t-ic" />{uiText(" Concepts")}</button>
           <button ref={compareViewButtonRef} aria-pressed={view === 'compare'} className={view === 'compare' ? 'on' : ''}
             disabled={projectScopeBlocked || compareRuns.length < 2}
-            title={projectScopeBlocked ? 'Restore the saved project or use All runs first'
-              : compareRuns.length < 2 ? 'Select at least two runs from List' : 'Compare selected runs'}
-            onClick={event => openComparison(event.currentTarget)}>Compare · {compareRuns.length}</button>
+            title={((projectScopeBlocked ? uiText('Restore the saved project or use All runs first') : (compareRuns.length < 2 ? uiText('Select at least two runs from List') : uiText('Compare selected runs'))))}
+            onClick={event => openComparison(event.currentTarget)}>{uiText("Compare · ")}{compareRuns.length}</button>
         </div>}
         <span className="spacer" style={{ flex: 1 }} />
         <div className="home-actions">
@@ -2501,24 +2503,18 @@ export default function RunList({ onOpen, onGlobalNavigate,
       {missingStartOverRecoveries.map(item => <div key={item.runId}
         className="notice run-start-over-list-recovery"
         role={item.kind === 'corrupt' ? 'alert' : 'status'}>
-        <span><b>Start over recovery</b> · <code>{item.runId}</code>{runListAuthoritative
-          ? ' is temporarily absent from the run list.'
-          : ' is not loaded in the run list yet.'} {item.kind === 'corrupt'
-            ? 'Its saved recovery evidence is invalid.'
-            : 'Its exact request is still preserved in this tab.'}</span>
+        <span><b>{uiText("Start over recovery")}</b> · <code>{item.runId}</code>{((runListAuthoritative ? uiText(' is temporarily absent from the run list.') : uiText(' is not loaded in the run list yet.')))} {((item.kind === 'corrupt' ? uiText('Its saved recovery evidence is invalid.') : uiText('Its exact request is still preserved in this tab.')))}</span>
         <button type="button" className="btn sm primary" data-run-open-id={item.runId}
-          onClick={() => openRun(item.runId)}>
-          Open recovery
-        </button>
+          onClick={() => openRun(item.runId)}>{uiText("Open recovery")}</button>
       </div>)}
       {deletionNotice && <div className={`notice run-deletion-notice ${deletionNotice.kind}`}
         role={deletionNotice.kind === 'error' ? 'alert' : 'status'}>
-        <span>{deletionNotice.text}</span>
+        <span>{uiText(deletionNotice.text)}</span>
         {deletionNotice.retryRunId && <button type="button" className="btn sm"
           disabled={memoryRetryBusy}
           onClick={() => retryMemoryPurge(deletionNotice.retryRunId, deletionNotice.retryIdentity)}>
-          {memoryRetryBusy ? 'Finishing…' : 'Finish memory purge'}</button>}
-        <button type="button" className="btn sm" onClick={() => setDeletionNotice(null)}>Dismiss</button>
+          {((memoryRetryBusy ? uiText('Finishing…') : uiText('Finish memory purge')))}</button>}
+        <button type="button" className="btn sm" onClick={() => setDeletionNotice(null)}>{uiText("Dismiss")}</button>
       </div>}
       {missingDeletionRecoveries.map(recovery => {
         const active = recovery.kind === 'active'
@@ -2532,12 +2528,10 @@ export default function RunList({ onOpen, onGlobalNavigate,
             : deletionRecoveryRefs.current.delete(recovery.runId)}
           className={`notice run-deletion-list-recovery${urgent ? ' attention' : ''}`}
           role={urgent ? 'alert' : 'status'} tabIndex={-1} aria-busy={busy}>
-          <span><b>Deletion recovery</b> · <code>{recovery.runId}</code> {runDeletionProgress(recovery)}</span>
+          <span><b>{uiText("Deletion recovery")}</b> · <code>{recovery.runId}</code> {runDeletionProgress(recovery)}</span>
           {active && <button type="button" className="btn sm"
             disabled={busy} onClick={() => retryRunDeletion(recovery)}>
-            {busy ? 'Checking…'
-              : recovery.intent.phase === 'unknown' ? 'Retry exact deletion'
-                : repairRequired ? 'Check after repair' : 'Check exact deletion'}
+            {((busy ? uiText('Checking…') : (recovery.intent.phase === 'unknown' ? uiText('Retry exact deletion') : (repairRequired ? uiText('Check after repair') : uiText('Check exact deletion')))))}
           </button>}
         </div>
       })}
@@ -2545,8 +2539,8 @@ export default function RunList({ onOpen, onGlobalNavigate,
       <div className={'runlayout' + (projectsOpen ? ' projects-open' : '')}>
         {!firstRunLanding && projectsOpen && <button className="project-backdrop" disabled={projectBusy} aria-disabled={navigationBusy || undefined}
                                  onClick={() => { if (!navigationBusy) setProjectsOpen(false) }}
-                                 aria-label="Close projects" />}
-        {!firstRunLanding && <aside ref={projectsDialogRef} className="psidebar" id="projects-drawer" aria-label="Projects"
+                                 aria-label={uiText("Close projects")} />}
+        {!firstRunLanding && <aside ref={projectsDialogRef} className="psidebar" id="projects-drawer" aria-label={uiText("Projects")}
                role={compactNav && projectsOpen && !projModal ? 'dialog' : undefined}
                aria-modal={compactNav && projectsOpen && !projModal ? 'true' : undefined}
                tabIndex={compactNav ? -1 : undefined}
@@ -2555,23 +2549,23 @@ export default function RunList({ onOpen, onGlobalNavigate,
           {compactNav && projectsOpen && mutationNotice}
           <div inert={listBusy ? '' : undefined}>
             <div className="psidebar-h">
-              <b>Projects</b>
+              <b>{uiText("Projects")}</b>
               <button ref={projectsCloseRef} className="btn sm ghost projects-close" disabled={projectBusy} onClick={() => setProjectsOpen(false)}
-                      aria-label="Close projects">×</button>
-              <button className="btn sm" disabled={projectBusy} onClick={event => addProject(null, event.currentTarget)}>＋ New</button>
+                      aria-label={uiText("Close projects")}>×</button>
+              <button className="btn sm" disabled={projectBusy} onClick={event => addProject(null, event.currentTarget)}>{uiText("＋ New")}</button>
             </div>
             <button ref={projectsAllRef} type="button" className={'ptree-row pseudo' + (sel === ALL ? ' sel' : '')}
                  disabled={projectBusy} onClick={() => chooseProject(ALL)} aria-pressed={sel === ALL}>
-              <span className="ptw">▦</span><span className="pname">All runs</span><span className="pcount">{count(ALL)}</span>
+              <span className="ptw">▦</span><span className="pname">{uiText("All runs")}</span><span className="pcount">{count(ALL)}</span>
             </button>
             <button type="button" className={'ptree-row pseudo' + (sel === UNASSIGNED ? ' sel' : '')}
                  disabled={projectBusy} onClick={() => chooseProject(UNASSIGNED)} aria-pressed={sel === UNASSIGNED}
                  onDragOver={e => { if (!projectBusy) e.preventDefault() }} onDrop={() => { if (!projectBusy) onDrop(UNASSIGNED) }}>
-              <span className="ptw">○</span><span className="pname">Unassigned</span><span className="pcount">{count(UNASSIGNED)}</span>
+              <span className="ptw">○</span><span className="pname">{uiText("Unassigned")}</span><span className="pcount">{count(UNASSIGNED)}</span>
             </button>
-            <nav className="ptree" aria-label="Project folders">
+            <nav className="ptree" aria-label={uiText("Project folders")}>
               {(byParent[null] || []).map(p => <TreeNode key={p.id} p={p} depth={0} ctx={treeCtx} />)}
-              {projectsState === 'ready' && !proj.projects.length && <div className="muted" style={{ padding: 10, fontSize: 12 }}>No projects yet. Create one to organize runs.</div>}
+              {projectsState === 'ready' && !proj.projects.length && <div className="muted" style={{ padding: 10, fontSize: 12 }}>{uiText("No projects yet. Create one to organize runs.")}</div>}
             </nav>
           </div>
         </aside>}
@@ -2582,117 +2576,112 @@ export default function RunList({ onOpen, onGlobalNavigate,
             publishNavigationState({ persist: false })
           }}>
           {!firstRunLanding && <div className="crumbs">
-            <button type="button" className="crumb" disabled={navigationBusy} onClick={() => chooseProject(ALL)}>All runs</button>
+            <button type="button" className="crumb" disabled={navigationBusy} onClick={() => chooseProject(ALL)}>{uiText("All runs")}</button>
             {breadcrumb.map(p => <React.Fragment key={p.id}><span className="sep">/</span>
               <button type="button" className="crumb" disabled={navigationBusy} onClick={() => chooseProject(p.id)}>{p.name}</button></React.Fragment>)}
             {projectScopePending && <><span className="sep">/</span>
-              <span className="crumb" title={`Saved project ${sel}`}>Saved project unavailable</span></>}
+              <span className="crumb" title={uiMessage("Saved project {0}", [sel])}>{uiText("Saved project unavailable")}</span></>}
             {projectScopeMissing && <><span className="sep">/</span>
-              <span className="crumb" title={`Saved project ${sel}`}>Saved project removed</span></>}
-            {sel === UNASSIGNED && <><span className="sep">/</span><span className="crumb">Unassigned</span></>}
+              <span className="crumb" title={uiMessage("Saved project {0}", [sel])}>{uiText("Saved project removed")}</span></>}
+            {sel === UNASSIGNED && <><span className="sep">/</span><span className="crumb">{uiText("Unassigned")}</span></>}
             <span style={{ flex: 1 }} />
             {scope && <div className="view-toggle crumb-report">
-              <button className={'vt report' + (showReport ? ' on' : '')} disabled={navigationBusy} title={`cross-run report for ${scope.label}`}
-                onClick={() => setShowReport(true)}><OpIcon name="doc" size={12} /> Report<span className="vt-scope"> · {scope.label}</span></button>
+              <button className={'vt report' + (showReport ? ' on' : '')} disabled={navigationBusy} title={uiMessage("cross-run report for {0}", [scope.label])}
+                onClick={() => setShowReport(true)}><OpIcon name="doc" size={12} />{uiText(" Report")}<span className="vt-scope"> · {uiText(scope.label)}</span></button>
             </div>}
           </div>}
           {runs && !firstRunLanding && <div className="portfolio-viewbar">
-            <label>Saved view
-              <select ref={savedViewSelectRef} className="sel" aria-label="Saved portfolio view" value={activeSavedView}
+            <label>{uiText("Saved view")}<select ref={savedViewSelectRef} className="sel" aria-label={uiText("Saved portfolio view")} value={activeSavedView}
                 onChange={event => event.target.value
                   ? applySavedView(event.target.value) : commitActiveSavedViewState('')}>
-                <option value="">Custom / unsaved</option>
+                <option value="">{uiText("Custom / unsaved")}</option>
                 {savedViews.map(saved => <option key={saved.name} value={saved.name}>
-                  {saved.name}{saved.name === activeSavedView && activeViewDirty ? ' · modified' : ''}
+                  {saved.name}{((saved.name === activeSavedView && activeViewDirty ? uiText(' · modified') : ''))}
                 </option>)}
               </select>
             </label>
-            <button ref={saveViewButtonRef} className="btn sm" onClick={() => setViewModal(true)}>
-              Save current view
-            </button>
+            <button ref={saveViewButtonRef} className="btn sm" onClick={() => setViewModal(true)}>{uiText("Save current view")}</button>
             <button ref={deleteSavedViewRef} className="btn sm ghost" disabled={!activeView}
-              onClick={deleteSavedView}>Delete</button>
-            {activeViewDirty && <span className="muted" role="status">Modified</span>}
+              onClick={deleteSavedView}>{uiText("Delete")}</button>
+            {activeViewDirty && <span className="muted" role="status">{uiText("Modified")}</span>}
           </div>}
           {viewMessage && <div className="notice resource-warning portfolio-message" role="alert">
-            {viewMessage} <button className="btn xs" onClick={() => setViewMessage('')}>Dismiss</button>
+            {viewMessage} <button className="btn xs" onClick={() => setViewMessage('')}>{uiText("Dismiss")}</button>
           </div>}
           {runs && !firstRunLanding && !projectScopeBlocked && view !== 'compare' && <div className="runbar">
             <OpIcon name="search" className="t-ic" />
-            <input ref={filterInputRef} className="text runbar-q" aria-label="Filter runs" placeholder="filter runs…" value={query}
+            <input ref={filterInputRef} className="text runbar-q" aria-label={uiText("Filter runs")} placeholder={uiText("filter runs…")} value={query}
                    maxLength={MAX_PORTFOLIO_QUERY_LENGTH} onChange={e => setQuery(e.target.value)} />
-            <select className="sel" aria-label="Filter by status" value={statusFilter} onChange={e => setStatusFilter(e.target.value)}>
-              <option value="all">all status</option>
-               <option value="running">running</option>
-               <option value="finalizing">finalizing</option>
-               <option value="paused">paused</option>
-               <option value="approval">approval needed</option>
-               <option value="stalled">stalled</option>
-               <option value="unknown">ownership unknown</option>
-              <option value="finished">finished</option>
+            <select className="sel" aria-label={uiText("Filter by status")} value={statusFilter} onChange={e => setStatusFilter(e.target.value)}>
+              <option value="all">{uiText("all status")}</option>
+               <option value="running">{uiText("running")}</option>
+               <option value="finalizing">{uiText("finalizing")}</option>
+               <option value="paused">{uiText("paused")}</option>
+               <option value="approval">{uiText("approval needed")}</option>
+               <option value="stalled">{uiText("stalled")}</option>
+               <option value="unknown">{uiText("ownership unknown")}</option>
+              <option value="finished">{uiText("finished")}</option>
             </select>
-            <select ref={taskFilterRef} className="sel" aria-label="Filter by task"
+            <select ref={taskFilterRef} className="sel" aria-label={uiText("Filter by task")}
               aria-describedby={taskFilterUnavailable ? 'run-task-filter-warning' : undefined}
               value={taskFilterExact ? taskSelectValue(taskFilter) : TASK_SELECT_ALL}
               onChange={event => {
                 const next = readTaskSelectValue(event.target.value)
                 setTaskFilter(next.id); setTaskFilterExact(next.exact)
               }}>
-              <option value={TASK_SELECT_ALL}>all tasks</option>
+              <option value={TASK_SELECT_ALL}>{uiText("all tasks")}</option>
               {taskFilterUnavailable
-                && <option value={taskSelectValue(taskFilter)}>{taskFilterOptionLabel}</option>}
+                && <option value={taskSelectValue(taskFilter)}>{uiText(taskFilterOptionLabel)}</option>}
               {tasks.map(t => <option key={t} value={taskSelectValue(t)}>{t}</option>)}
             </select>
             <div className="runbar-super-control">
-              <select ref={superFilterRef} className="sel" aria-label="Filter by super-task"
+              <select ref={superFilterRef} className="sel" aria-label={uiText("Filter by super-task")}
                 aria-describedby={superFilterUnavailable ? 'run-super-filter-warning' : undefined}
                 value={stFilter} onChange={e => setStFilter(e.target.value)}>
-                <option value={ALL}>all super-tasks</option>
-                <option value={UNASSIGNED}>— no super-task —</option>
+                <option value={ALL}>{uiText("all super-tasks")}</option>
+                <option value={UNASSIGNED}>{uiText("— no super-task —")}</option>
                 {superFilterUnavailable
-                  && <option value={stFilter}>{superFilterOptionLabel}</option>}
+                  && <option value={stFilter}>{uiText(superFilterOptionLabel)}</option>}
                 {superdata.supertasks.map(s => <option key={s.id} value={s.id}>{s.name}</option>)}
               </select>
-              <button className="btn sm ghost" disabled={navigationBusy} aria-label="Create or manage super-tasks"
-                title="create / manage super-tasks" onClick={event => openSuperTasks(event.currentTarget)}><OpIcon name="target" className="t-ic" /> ＋</button>
+              <button className="btn sm ghost" disabled={navigationBusy} aria-label={uiText("Create or manage super-tasks")}
+                title={uiText("create / manage super-tasks")} onClick={event => openSuperTasks(event.currentTarget)}><OpIcon name="target" className="t-ic" /> ＋</button>
             </div>
             <span className="runbar-spacer" />
             <div className="runbar-sort-control">
               <span className="muted runbar-count">{visible.length}/{scoped.length}</span>
-              <select className="sel" aria-label="Sort runs by" value={sortKey} onChange={e => {
+              <select className="sel" aria-label={uiText("Sort runs by")} value={sortKey} onChange={e => {
                 setSortKey(e.target.value)
                 if (e.target.value === 'metric') setSortDir('asc')
               }}>
-                <option value="time">time</option>
-                <option value="name">name</option>
-                <option value="metric" disabled={!metricSortAvailable}>best metric{metricSortAvailable ? '' : ` (${metricSortOff})`}</option>
-                <option value="task">task</option>
-                <option value="nodes">nodes</option>
-                <option value="phase">phase</option>
+                <option value="time">{uiText("time")}</option>
+                <option value="name">{uiText("name")}</option>
+                <option value="metric" disabled={!metricSortAvailable}>{uiText("best metric")}{metricSortAvailable ? '' : ` (${metricSortOff})`}</option>
+                <option value="task">{uiText("task")}</option>
+                <option value="nodes">{uiText("nodes")}</option>
+                <option value="phase">{uiText("phase")}</option>
               </select>
               <button className="btn sm ghost"
-                      aria-label={`Sort ${sortKey === 'metric' ? (sortDir === 'asc' ? 'best first' : 'worst first') : (sortDir === 'asc' ? 'ascending' : 'descending')}`}
-                      title={sortKey === 'metric' ? (sortDir === 'asc' ? 'best first' : 'worst first') : (sortDir === 'asc' ? 'ascending' : 'descending')}
+                      aria-label={uiMessage("Sort {0}", [uiText(sortKey === 'metric' ? (sortDir === 'asc' ? 'best first' : 'worst first') : (sortDir === 'asc' ? 'ascending' : 'descending'))])}
+                      title={((sortKey === 'metric' ? (sortDir === 'asc' ? uiText('best first') : uiText('worst first')) : (sortDir === 'asc' ? uiText('ascending') : uiText('descending'))))}
                       onClick={() => setSortDir(d => d === 'asc' ? 'desc' : 'asc')}>
-                {sortKey === 'metric' ? (sortDir === 'asc' ? 'best' : 'worst') : (sortDir === 'asc' ? '↑' : '↓')}
+                {((sortKey === 'metric' ? (sortDir === 'asc' ? uiText('best') : uiText('worst')) : sortDir === 'asc' ? '↑' : '↓'))}
               </button>
             </div>
           </div>}
           {!projectScopeBlocked && compareIds.size > 0 && view !== 'compare' && <div className="compare-selection" role="status">
-            <b>{compareRuns.length} selected</b>
-            <span className="muted">{selectionNotice(comparisonScope(compareRuns))}</span>
+            <b>{compareRuns.length}{uiText(" selected")}</b>
+            <span className="muted">{uiText(selectionNotice(comparisonScope(compareRuns)))}</span>
             <button className="btn sm primary" disabled={compareRuns.length < 2}
-              onClick={event => openComparison(event.currentTarget)}>
-              Compare{comparisonScope(compareRuns).omitted
-                ? ` first ${comparisonScope(compareRuns).shown.length}` : ' runs'}</button>
+              onClick={event => openComparison(event.currentTarget)}>{uiText("Compare")}{((comparisonScope(compareRuns).omitted ? uiMessage(" first {0}", [comparisonScope(compareRuns).shown.length]) : uiText(' runs')))}</button>
             <button className="btn sm danger" disabled={listBusy || !!bulkDeleteDialog}
-              onClick={openBulkDelete}>Delete {compareRuns.length}…</button>
+              onClick={openBulkDelete}>{uiText("Delete ")}{compareRuns.length}…</button>
             <button className="btn sm ghost"
-              onClick={event => clearComparison(event.currentTarget)}>Clear</button>
+              onClick={event => clearComparison(event.currentTarget)}>{uiText("Clear")}</button>
           </div>}
-          <ResourceNotice state={runsState} label="Runs" retry={loadRuns} />
-          <ResourceNotice state={projectsState} label="Projects" retry={loadProjects} />
-          {!stModal && <ResourceNotice state={superState} label="Super-tasks" retry={loadSupers} />}
+          <ResourceNotice state={runsState} label={uiText("Runs")} retry={loadRuns} />
+          <ResourceNotice state={projectsState} label={uiText("Projects")} retry={loadProjects} />
+          {!stModal && <ResourceNotice state={superState} label={uiText("Super-tasks")} retry={loadSupers} />}
           {taskFilterUnavailable && <UnavailableFilterNotice id="run-task-filter-warning"
             state={runsState} actionLabel="Use all tasks" disabled={navigationBusy}
             controlRef={taskFilterRef} fallbackRef={filterInputRef} mainRef={runsMainRef}
@@ -2700,10 +2689,10 @@ export default function RunList({ onOpen, onGlobalNavigate,
               setTaskFilter(ALL); setTaskFilterExact(false)
             }, taskFilterRef, focusOwner)}>
             {runsState === 'ready'
-              ? <><b>Selected task “{taskFilter}” has no current runs.</b> Its exact filter is still active.</>
+              ? <><b>{uiText("Selected task “")}{taskFilter}{uiText("” has no current runs.")}</b>{uiText(" Its exact filter is still active.")}</>
               : runsState === 'stale'
-                ? <><b>Selected task “{taskFilter}” is absent from the last loaded runs.</b> Its exact filter stays active until Runs refresh succeeds.</>
-                : <><b>Selected task “{taskFilter}” cannot be verified yet.</b> Its exact filter is still active.</>}
+                ? <><b>{uiText("Selected task “")}{taskFilter}{uiText("” is absent from the last loaded runs.")}</b>{uiText(" Its exact filter stays active until Runs refresh succeeds.")}</>
+                : <><b>{uiText("Selected task “")}{taskFilter}{uiText("” cannot be verified yet.")}</b>{uiText(" Its exact filter is still active.")}</>}
           </UnavailableFilterNotice>}
           {superFilterUnavailable && <UnavailableFilterNotice id="run-super-filter-warning"
             state={superState} actionLabel="Use all super-tasks" disabled={navigationBusy}
@@ -2711,55 +2700,53 @@ export default function RunList({ onOpen, onGlobalNavigate,
             onAction={focusOwner => useAllForUnavailableFilter(
               () => setStFilter(ALL), superFilterRef, focusOwner)}>
             {superState === 'ready'
-              ? <><b>Selected super-task “{stFilter}” no longer exists.</b> Its exact filter is still active.</>
+              ? <><b>{uiText("Selected super-task “")}{stFilter}{uiText("” no longer exists.")}</b>{uiText(" Its exact filter is still active.")}</>
               : superState === 'stale'
-                ? <><b>Selected super-task “{stFilter}” is absent from the last loaded registry.</b> Its exact filter stays active until Super-tasks refresh succeeds.</>
+                ? <><b>{uiText("Selected super-task “")}{stFilter}{uiText("” is absent from the last loaded registry.")}</b>{uiText(" Its exact filter stays active until Super-tasks refresh succeeds.")}</>
                 : superState === 'loading'
-                  ? <><b>Checking selected super-task “{stFilter}”.</b> Its exact filter is still active.</>
-                  : <><b>Selected super-task “{stFilter}” cannot be verified.</b> The registry is unavailable; its exact filter is still active.</>}
+                  ? <><b>{uiText("Checking selected super-task “")}{stFilter}”.</b>{uiText(" Its exact filter is still active.")}</>
+                  : <><b>{uiText("Selected super-task “")}{stFilter}{uiText("” cannot be verified.")}</b>{uiText(" The registry is unavailable; its exact filter is still active.")}</>}
           </UnavailableFilterNotice>}
           {projectScopePending && <div className="notice resource-warning" role="status">
-            <span><b>Saved project cannot be verified yet.</b> Runs stay hidden to preserve this scope.</span>
+            <span><b>{uiText("Saved project cannot be verified yet.")}</b>{uiText(" Runs stay hidden to preserve this scope.")}</span>
             <button type="button" className="btn sm" disabled={navigationBusy}
-              onClick={() => chooseProject(ALL)}>Use All runs</button>
+              onClick={() => chooseProject(ALL)}>{uiText("Use All runs")}</button>
           </div>}
           {projectScopeMissing && <div className="notice resource-warning" role="alert">
-            <span><b>Saved project no longer exists.</b> Switching to All runs.</span>
+            <span><b>{uiText("Saved project no longer exists.")}</b>{uiText(" Switching to All runs.")}</span>
           </div>}
           {(!compactNav || !projectsOpen) && mutationNotice}
           {!projectScopeBlocked && ['ready', 'stale'].includes(runsState) && runs && !scoped.length
             && <div className="notice resource-empty"
               style={firstRunLanding ? { maxWidth: 640, margin: '12vh auto', padding: 28, textAlign: 'center' } : undefined}>
             {firstRunLanding
-              ? <><h2>Start with a goal</h2>
-                  <p>Tell Assistant what to improve, where code or data live, and your time limit. Review its proposal before starting.</p></>
-              : runsState === 'stale' ? 'No runs in the last loaded data here.'
-              : runs.length === 0 && sel === ALL && !hasActiveFilters
-                ? 'No experiments yet. Describe a goal in Assistant to start.' : 'No runs here.'}
+              ? <><h2>{uiText("Start with a goal")}</h2>
+                  <p>{uiText("Tell Assistant what to improve, where code or data live, and your time limit. Review its proposal before starting.")}</p></>
+              : ((runsState === 'stale' ? uiText('No runs in the last loaded data here.') : (runs.length === 0 && sel === ALL && !hasActiveFilters ? uiText('No experiments yet. Describe a goal in Assistant to start.') : uiText('No runs here.'))))}
             {sel === ALL
               ? <button className="btn sm primary" disabled={navigationBusy}
                   onClick={() => window.dispatchEvent(new CustomEvent('ll:new-run', { cancelable: true }))}>
-                  {runs.length === 0 && !hasActiveFilters ? 'Describe a goal in Assistant' : 'Start a new run'}
+                  {((runs.length === 0 && !hasActiveFilters ? uiText('Describe a goal in Assistant') : uiText('Start a new run')))}
                 </button>
-              : <span>Drag a run onto this project, or use its <b>Move</b> menu.</span>}</div>}
+              : <span>{uiText("Drag a run onto this project, or use its ")}<b>{uiText("Move")}</b>{uiText(" menu.")}</span>}</div>}
           {runs && !!scoped.length && !visible.length
             && !taskFilterUnavailable && !superFilterUnavailable
             && <div className="notice" role="status">
-            {runsState === 'stale' ? 'No runs in the last loaded data match the filters.' : 'No runs match the filters.'}
+            {((runsState === 'stale' ? uiText('No runs in the last loaded data match the filters.') : uiText('No runs match the filters.')))}
             {hasActiveFilters && <button type="button" className="btn sm" disabled={navigationBusy}
-              onClick={event => clearFilters(event.currentTarget)}>Clear filters</button>}
+              onClick={event => clearFilters(event.currentTarget)}>{uiText("Clear filters")}</button>}
           </div>}
           {view === 'map' && (!['ready', 'stale'].includes(projectsState) || projectScopeBlocked) && runs
             && <div className="notice resource-warning" role="status">
-              <span>Lineage needs the project list before it can place runs reliably.</span>
-              <button type="button" className="btn sm" onClick={() => setView('list')}>Show List</button>
+              <span>{uiText("Lineage needs the project list before it can place runs reliably.")}</span>
+              <button type="button" className="btn sm" onClick={() => setView('list')}>{uiText("Show List")}</button>
             </div>}
           {view === 'map' && ['ready', 'stale'].includes(projectsState) && !projectScopeBlocked
             && runs && mapRuns.length > 0 && <div className="map-stage">
             {/* `label` is rendered verbatim by LazyBoundary — "Loading run lineage…" and
                 "run lineage could not be opened." — so it is operator-visible text and follows the
                 LABEL, not the `map` route key beside it. */}
-            <LazyBoundary label="run lineage" resetKey={`map:${sel}`}>
+            <LazyBoundary label={"run lineage"} resetKey={`map:${sel}`}>
               <MapView onOpen={id => { if (!navigationBusy) openRun(id) }} runs={mapRuns} projects={proj.projects}
                 collapsed={mapCollapsed} onToggle={toggleMapCluster}
                 initialViewport={mapViewport?.signature === mapViewportSignature
@@ -2780,11 +2767,11 @@ export default function RunList({ onOpen, onGlobalNavigate,
               a silently-empty scope would read as "this lab has studied nothing". */}
           {view === 'concepts' && projectScopeBlocked && runs
             && <div className="notice resource-warning" role="status">
-              <span>Concepts needs a verified project scope before it can tell you which runs it covers.</span>
-              <button type="button" className="btn sm" onClick={() => setView('list')}>Show List</button>
+              <span>{uiText("Concepts needs a verified project scope before it can tell you which runs it covers.")}</span>
+              <button type="button" className="btn sm" onClick={() => setView('list')}>{uiText("Show List")}</button>
             </div>}
           {view === 'concepts' && !projectScopeBlocked && runs
-            && <LazyBoundary label="concept tree" resetKey={`concepts:${sel}`}>
+            && <LazyBoundary label={"concept tree"} resetKey={`concepts:${sel}`}>
               <PortfolioConcepts runs={mapRuns} selectedRuns={compareRuns}
                 scopeLabel={scope?.label || (sel === ALL ? 'All runs'
                   : sel === UNASSIGNED ? 'Unassigned' : (projName[sel] || sel))}
@@ -2793,12 +2780,10 @@ export default function RunList({ onOpen, onGlobalNavigate,
           {/* The comparison — and ONLY the comparison — is bounded. It draws the first COMPARE_MAX of
               the selection and says how many it left out; the rest stay selected for whatever else
               the operator picked them for. */}
-          {view === 'compare' && !projectScopeBlocked && compareRuns.length > 1 && <LazyBoundary label="run comparison"
+          {view === 'compare' && !projectScopeBlocked && compareRuns.length > 1 && <LazyBoundary label={"run comparison"}
             resetKey={comparisonScope(compareRuns).shown.map(run => run.run_id).join(':')}>
-            {comparisonScope(compareRuns).omitted > 0 && <div className="notice compact" role="status">
-              Comparing the first {comparisonScope(compareRuns).shown.length} of {compareRuns.length}
-              {' '}selected runs. The other {comparisonScope(compareRuns).omitted} stay selected.
-            </div>}
+            {comparisonScope(compareRuns).omitted > 0 && <div className="notice compact" role="status">{uiText("Comparing the first ")}{comparisonScope(compareRuns).shown.length}{uiText(" of ")}{compareRuns.length}
+              {' '}{uiText("selected runs. The other ")}{comparisonScope(compareRuns).omitted}{uiText(" stay selected.")}</div>}
             <RunCompare runs={comparisonScope(compareRuns).shown} columns={compareColumns}
               names={{ projects: projName, supertasks: stName }}
               onColumns={setCompareColumns} onRemove={toggleCompare}
@@ -2870,7 +2855,7 @@ export default function RunList({ onOpen, onGlobalNavigate,
                 <input type="checkbox" className="compare-check" draggable={false}
                   data-compare-run-id={r.run_id}
                   checked={compareIds.has(r.run_id)}
-                  aria-label={`Select ${r.label || r.run_id} for comparison`}
+                  aria-label={uiMessage("Select {0} for comparison", [r.label || r.run_id])}
                   onChange={() => toggleCompare(r.run_id)} />
               </label>
               {(() => {
@@ -2879,10 +2864,7 @@ export default function RunList({ onOpen, onGlobalNavigate,
                 const status = effectiveRunStatus(r)
                 const stalled = status === 'stalled'
                 return <span className={'pill phase ' + status}
-                             title={stalled ? 'engine stopped unexpectedly — open the run to resume'
-                                : status === 'unknown' ? 'engine ownership could not be verified; inspect before acting'
-                                : status === 'finalizing' ? 'wrapping up report, lessons, and cost'
-                                : status === 'paused' ? 'paused intentionally' : undefined}>{r.external_harness === true && status === 'running' ? 'engine active' : status}</span>
+                             title={((stalled ? uiText('engine stopped unexpectedly — open the run to resume') : (status === 'unknown' ? uiText('engine ownership could not be verified; inspect before acting') : (status === 'finalizing' ? uiText('wrapping up report, lessons, and cost') : (status === 'paused' ? uiText('paused intentionally') : undefined)))))}>{((r.external_harness === true && status === 'running' ? uiText('engine active') : uiText(status)))}</span>
               })()}
               <a className="run-card-main" data-run-open-id={r.run_id}
                    href={`#/run/${encodeURIComponent(r.run_id)}`}
@@ -2892,11 +2874,11 @@ export default function RunList({ onOpen, onGlobalNavigate,
                      if (navigationBusy) { event.preventDefault(); return }
                      followClientRoute(event, () => openRun(r.run_id))
                    }}
-                   aria-label={`Open run ${r.label || r.run_id}`}>
+                   aria-label={uiMessage("Open run {0}", [r.label || r.run_id])}>
                 <div><b>{r.label || r.run_id}</b>
                   {r.external_harness === true && <span className="pill" style={{ marginLeft: 6 }}
-                    title="The external agent chooses experiments. Its connection is not measured.">External agent</span>}
-                  {startOverLocked && <span className="pill warn" style={{ marginLeft: 6 }}>Start over recovery</span>}
+                    title={uiText("The external agent chooses experiments. Its connection is not measured.")}>{uiText("External agent")}</span>}
+                  {startOverLocked && <span className="pill warn" style={{ marginLeft: 6 }}>{uiText("Start over recovery")}</span>}
                   {r.project_id && projName[r.project_id] && <span className="pill" style={{ marginLeft: 6 }}><OpIcon name="folder" className="t-ic" /> {projName[r.project_id]}</span>}
                   {r.supertask_id && stName[r.supertask_id] && <span className="pill st-pill" style={{ marginLeft: 6 }}><OpIcon name="target" className="t-ic" /> {stName[r.supertask_id]}</span>}</div>
               </a>
@@ -2907,11 +2889,11 @@ export default function RunList({ onOpen, onGlobalNavigate,
                     whose own budget row says 81 nodes). `role="status"` so a screen reader reaches
                     it in the same order a sighted reader does. */}
                 {sourceIncomplete(r) && <div className="pill warn" role="status"
-                  title={sourceIntegrityNotice(r)}>incomplete record</div>}
-                <div>selected <b>{fmt(r.best_confirmed ?? r.best_metric)}</b></div>
-                <div className="muted">{runMeasurement(r).label}</div>
+                  title={uiText(sourceIntegrityNotice(r))}>{uiText("incomplete record")}</div>}
+                <div>{uiText("selected ")}<b>{fmt(r.best_confirmed ?? r.best_metric)}</b></div>
+                <div className="muted">{uiText(runMeasurement(r).label)}</div>
                 {(r.best_confirmed ?? r.best_metric) != null && <div className="muted">
-                  {runMeasurement(r).reliability}</div>}
+                  {uiText(runMeasurement(r).reliability)}</div>}
                 {/* WHAT KIND OF NUMBER that is — touching the value it qualifies, above the
                     `nodes · direction` line rather than at the end of the card, because an operator
                     scanning this column is deciding which configuration to reuse and a caveat they
@@ -2923,19 +2905,19 @@ export default function RunList({ onOpen, onGlobalNavigate,
                     `role="status"` matches the receipt so a screen reader reaches both in order. */}
                 {bestMetricCaveats(r).map(slug => (
                   <div className="pill warn" role="status" key={slug}
-                    title={bestMetricCaveatNotice({ best_metric_caveats: [slug] })}>
-                    {bestMetricCaveatLabel(slug)}</div>))}
-                <div className="muted">{r.nodes} nodes · {r.direction}</div>
+                    title={uiText(bestMetricCaveatNotice({ best_metric_caveats: [slug] }))}>
+                    {uiText(bestMetricCaveatLabel(slug))}</div>))}
+                <div className="muted">{r.nodes}{uiText(" nodes · ")}{r.direction}</div>
                 {/* A NUMBER guard, not a truth test: `mtime` is epoch seconds, so the falsy value is
                     a real timestamp (1970-01-01T00:00:00Z) and `0 && <div/>` renders a bare `0` into
                     the run card instead of rendering nothing. Unreachable from a healthy run today,
                     but this is the exact shape that put 120 stray zeros on the Card board. */}
                 {typeof r.mtime === 'number' && <div className="muted run-when"
-                  title={`started ${fmtDate(r.created)} · updated ${fmtDate(r.mtime)}`}>
+                  title={uiMessage("started {0} · updated {1}", [fmtDate(r.created), fmtDate(r.mtime)])}>
                   {fmtAgo(r.mtime)}</div>}
               </div>
               <div className="run-actions">
-                <button className="ic dots" disabled={navigationBusy} aria-label={`Actions for run ${r.label || r.run_id}`}
+                <button className="ic dots" disabled={navigationBusy} aria-label={uiMessage("Actions for run {0}", [r.label || r.run_id])}
                         aria-haspopup="menu" aria-expanded={!!openMenuRun}
                         onClick={e => {
                           e.stopPropagation()
@@ -2959,10 +2941,10 @@ export default function RunList({ onOpen, onGlobalNavigate,
           })}
           {view === 'list' && displayedRuns.length < visible.length && <div className="run-list-more">
             <button type="button" className="btn sm"
-              onClick={() => setListLimit(listLimit + LIST_PAGE_SIZE)}>Show more</button>
+              onClick={() => setListLimit(listLimit + LIST_PAGE_SIZE)}>{uiText("Show more")}</button>
             <span className="muted">{displayedRuns.length}/{visible.length}</span>
           </div>}
-          {view === 'list' && sel === ALL && runs && <LazyBoundary label="campaign folders"
+          {view === 'list' && sel === ALL && runs && <LazyBoundary label={"campaign folders"}
             resetKey="campaigns"><CampaignRuns /></LazyBoundary>}
         </div>
       </div>
@@ -2978,23 +2960,22 @@ export default function RunList({ onOpen, onGlobalNavigate,
           current => current ? { ...current, cascade: value === true } : current)} />}
 
       {projModal && <PromptModal
-        title={projModal.parent_id ? 'New sub-project' : 'New project'}
-        label={projModal.parent_id ? 'Sub-project name' : 'Project name'}
-        description={projModal.parent_id
-          ? `Inside “${projName[projModal.parent_id]}”.` : 'Group runs into a project folder.'}
-        placeholder="e.g. baseline sweep" confirm="Create"
+        title={((projModal.parent_id ? uiText('New sub-project') : uiText('New project')))}
+        label={((projModal.parent_id ? uiText('Sub-project name') : uiText('Project name')))}
+        description={(projModal.parent_id ? uiMessage("Inside “{0}”.", [projName[projModal.parent_id]]) : uiText('Group runs into a project folder.'))}
+        placeholder={uiText("e.g. baseline sweep")} confirm="Create"
         onSubmit={submitProject} onReconcile={refresh} onClose={closeProjectModal} />}
 
       {runRename && <PromptModal
-        title="Rename run" label={`Display name for ${runRename.run_id} (clear it to fall back to the id).`}
+        title={uiText("Rename run")} label={uiMessage("Display name for {0} (clear it to fall back to the id).", [runRename.run_id])}
         placeholder={runRename.run_id} initial={runRename.label || ''} confirm="Save" allowEmpty
         blocked={runRenameBlocked}
         blockedMessage="This run changed while Rename was open. Cancel and reopen Rename from the refreshed card."
         onSubmit={submitRunRename} onReconcile={loadRuns} onClose={closeRunRename} />}
 
-      {viewModal && <PromptModal title="Save portfolio view"
-        label="View name" description="Saves the current scope, filter, sort, layout, and comparison selection. Use an existing name to review and replace that saved view."
-        placeholder="e.g. active baselines" initial={activeView?.name || ''} confirm="Save view"
+      {viewModal && <PromptModal title={uiText("Save portfolio view")}
+        label={uiText("View name")} description={uiText("Saves the current scope, filter, sort, layout, and comparison selection. Use an existing name to review and replace that saved view.")}
+        placeholder={uiText("e.g. active baselines")} initial={activeView?.name || ''} confirm="Save view"
         maxLength={MAX_PORTFOLIO_VIEW_NAME_LENGTH}
         confirmationForValue={savedViewConfirmation}
         onSubmit={savePortfolioView} onClose={closeViewModal} />}
@@ -3003,7 +2984,7 @@ export default function RunList({ onOpen, onGlobalNavigate,
         onCreate={createSuper} onRename={renameSuper} onDelete={removeSuper}
         onReconcile={reconcileAll} onClose={closeSuperTasks} />}
 
-      {showReport && scope && <LazyBoundary label="scope report" mode="overlay" resetKey={scope.label}
+      {showReport && scope && <LazyBoundary label={"scope report"} mode="overlay" resetKey={scope.label}
         onClose={() => setShowReport(false)}>
         <ScopeReport scope={scope}
           onOpen={(id) => { setShowReport(false); openRun(id) }} onClose={() => setShowReport(false)} />

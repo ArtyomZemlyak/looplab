@@ -16,6 +16,7 @@ from typing import Optional
 from pydantic import BaseModel, Field
 
 from looplab.core.advisory_payloads import sanitize_report_payload
+from looplab.core.output_language import current_output_language
 from looplab.engine.champion_caveats import (CHAMPION_CAVEAT_MERGED_COORDINATES,
                                              CHAMPION_CAVEAT_MIXED_COMPARABILITY,
                                              CHAMPION_CAVEAT_PARAMS_OVERRIDDEN,
@@ -235,7 +236,8 @@ def _report_tools(state: RunState):
 
 
 def generate_report(state: RunState, client, *, parser: str = "tool_call", trigger: str = "",
-                    raise_on_failure: bool = False, evidence_envelope: bool = False) -> dict:
+                    raise_on_failure: bool = False, evidence_envelope: bool = False,
+                    output_language: str = "auto") -> dict:
     """Synthesize one conclusion-first report dict from the run state.
 
     Engine-owned cadence/finalization calls keep the best-effort default and receive deterministic
@@ -252,6 +254,7 @@ def generate_report(state: RunState, client, *, parser: str = "tool_call", trigg
     from looplab.core.evidence import fence_kwargs
     from looplab.core.parse import parse_structured
     from looplab.agents.agent import agentic_struct
+    language = current_output_language(client, output_language)
     try:
         # Build the context INSIDE the try too — a malformed state must degrade to a minimal report,
         # not propagate out of the (un-try'd) _write_report and kill the run.
@@ -273,18 +276,19 @@ def generate_report(state: RunState, client, *, parser: str = "tool_call", trigg
         from looplab.serve.assistant import safe_provider_failure
         failure = safe_provider_failure(e)
         try:
-            content = _deterministic_report(state, failure["message"])
+            content = _deterministic_report(state, failure["message"], output_language=language)
         except Exception:  # noqa: BLE001 — a malformed state must still yield a report
             content = _ReportOut(
-                headline="(report unavailable)",
-                verdict=f"(report generation failed: {failure['message']})").model_dump(mode="json")
+                headline="(отчёт недоступен)" if language == "ru" else "(report unavailable)",
+                verdict="(не удалось составить отчёт: ошибка модели)" if language == "ru"
+                else f"(report generation failed: {failure['message']})").model_dump(mode="json")
     content["at_node"] = len(state.nodes)
     content["trigger"] = trigger
     return sanitize_report_payload(content)
 
 
 
-def _deterministic_report(state: "RunState", message: str) -> dict:
+def _deterministic_report(state: "RunState", message: str, *, output_language="auto") -> dict:
     """The run's own facts when the writer could not be paid for — not an empty placeholder.
 
     EVERY run that ends on the budget ceiling loses its report, because finalization runs AFTER the
@@ -313,7 +317,8 @@ def _deterministic_report(state: "RunState", message: str) -> dict:
                     f"metric={_g(node_metric(best))} ({state.direction}: "
                     f"{'lower' if state.direction == 'min' else 'higher'} is better).")
     else:
-        headline = "No node was evaluated; written without the model."
+        headline = ("No eligible champion; written without the model." if evaluated
+                    else "No node was evaluated; written without the model.")
         champion = ""
     summary = (f"{len(state.nodes)} node(s) — {evaluated} evaluated, {n_fail} failed"
                + (f", {n_invalid} scored but INVALID" if n_invalid else "")
@@ -333,7 +338,45 @@ def _deterministic_report(state: "RunState", message: str) -> dict:
     # them: `advisory_payloads._report_verdict` collapses anything opening with the failure marker
     # down to its canonical phrase, by design, to keep a raw provider exception out of storage.
     out["summary"] = summary
+    if output_language == "ru":
+        out.update(
+            headline=(f"Лучший узел — #{best.id}, метрика={_g(node_metric(best))} "
+                      f"({best.operator}); описание составлено без модели." if best is not None
+                      else ("Нет допустимого лучшего узла; описание составлено без модели." if evaluated
+                            else "Нет оценённых узлов; описание составлено без модели.")),
+            champion_summary=(f"Узел #{best.id}, оператор {best.operator}, params={best.idea.params}, "
+                              f"метрика={_g(node_metric(best))} ({state.direction}: "
+                              f"{'меньше' if state.direction == 'min' else 'больше'} — лучше)."
+                              if best is not None else ""),
+            verdict="(не удалось составить отчёт: ошибка модели)",
+            summary=(f"Узлов: {len(state.nodes)}; оценено: {evaluated}; ошибок: {n_fail}"
+                     + (f"; недействительных оценок: {n_invalid}" if n_invalid else "")
+                     + f". Причина остановки: {state.stop_reason or 'не записана'}."),
+            caveats=_russian_champion_caveats(state),
+        )
     return out
+
+
+def _russian_champion_caveats(state):
+    """Authored caveats for a NEW offline report; replay and measured data stay raw."""
+    labels = {
+        CHAMPION_CAVEAT_SALVAGED: "Метрика лучшего узла восстановлена после ошибки оценки; "
+        "защищённая процедура оценки её не измерила. metric_salvage разрешает её отбор.",
+        CHAMPION_CAVEAT_TRUST_FLAGGED: "У лучшего узла есть сигнал обхода оценки или утечки; "
+        "trust_gate этого запуска не исключил его из отбора.",
+        CHAMPION_CAVEAT_PARAMS_OVERRIDDEN: "Код или конфигурация лучшего узла переопределяет "
+        "заявленные параметры, либо источники параметров расходятся. Число измерено, но "
+        "не подтверждает именно заявленную конфигурацию.",
+        CHAMPION_CAVEAT_MIXED_COMPARABILITY: "Узлы оценивались по разным исходным деревьям "
+        "или протоколам; их числа нельзя считать непосредственно сопоставимыми.",
+        CHAMPION_CAVEAT_MERGED_COORDINATES: "Параметры лучшего узла усреднены по родителям; "
+        "ни один эксперимент не обучал эту конфигурацию.",
+        CHAMPION_CAVEAT_RETARGETED_OBJECTIVE: f"Цель оценки изменена оператором на "
+        f"дополнительную метрику {getattr(state, 'objective_key', None)!r}; это не исходная "
+        "метрика задачи.",
+    }
+    return [labels.get(slug, f"Движок записал оговорку: {slug!r}")
+            for slug in champion_metric_caveats(state)][:32]
 
 
 class ReportWriter:

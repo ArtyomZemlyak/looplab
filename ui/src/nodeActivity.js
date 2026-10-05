@@ -1,3 +1,4 @@
+import { uiMessage } from './uiLanguage.js'
 import { buildingMarkers, evalStageFor, evalStageLabel,
   evalStageShortLabel } from './buildingModel.js'
 
@@ -71,10 +72,10 @@ const runStopped = state => !!state && (state.finished || state.stop_requested
   || state.phase === 'finalizing' || state.engine_running === false)
 
 const stopLabel = (state, subject) => {
-  if (state?.engine_running === false) return `${subject} interrupted · engine stopped`
-  if (state?.stop_requested) return `${subject} stopping · stop requested`
-  if (state?.phase === 'finalizing') return `${subject} no longer running · run is finalizing`
-  return `${subject} no longer running · run finished`
+  if (state?.engine_running === false) return uiMessage("{0} interrupted · engine stopped", [subject])
+  if (state?.stop_requested) return uiMessage("{0} stopping · stop requested", [subject])
+  if (state?.phase === 'finalizing') return uiMessage("{0} no longer running · run is finalizing", [subject])
+  return uiMessage("{0} no longer running · run finished", [subject])
 }
 
 // Exported because it is the ONE spelling of "may this run be doing work right now": `nodeClass`

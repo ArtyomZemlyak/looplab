@@ -1,3 +1,4 @@
+import { uiText, uiMessage, useUILanguage } from './uiLanguage.js'
 import React from 'react'
 import HarnessNextStep from './HarnessNextStep.jsx'
 import AgentActivity from './AgentActivity.jsx'
@@ -10,6 +11,8 @@ const statuses = { recorded: 'записано', pending: 'ожидает отв
   superseded: 'устарело', current: 'актуально', current_evidence_for_idea: 'актуально для этой идеи' }
 
 export default function HarnessCycleBody({ progress, fresh, runId, offset, setOffset, onOpenEvents }) {
+  useUILanguage()
+
   const [language] = useAssistantLanguage()
   const ru = language === 'ru'
   const t = (en, russian) => ru ? russian : en
@@ -25,7 +28,7 @@ export default function HarnessCycleBody({ progress, fresh, runId, offset, setOf
     const oldCurrent = !current && ['current', 'current_evidence_for_idea'].includes(status)
     return <li key={`${kind}-${receipt.action_id || receipt.checkpoint_id || index}`} className="ov-row">
       <b>{receipt.phase_id || (ru ? journalNames[kind] : kind)}</b>{' '}
-      <span className="chip" title={status}>{ru ? statuses[status] || status : status}
+      <span className="chip" title={uiText(status)}>{((ru ? (statuses[status] || uiText(status)) : uiText(status)))}
         {oldCurrent ? t(' at last read', ' при последнем чтении') : ''}</span>{' '}
       {row.lifecycle === 'superseded' && <span className="chip">{t('old evaluator attempt', 'предыдущая попытка оценки')}</span>}
       {receipt.at_node != null && <span className="muted">{t('at node', 'на эксперименте')} {receipt.at_node} · </span>}
@@ -67,7 +70,7 @@ export default function HarnessCycleBody({ progress, fresh, runId, offset, setOf
       {progress.candidate_requirements.effective_concepts && <p>{t('Effective concept tags are required on every submitted candidate.', 'Для каждого кандидата нужны действующие теги концептов.')}</p>}
       {progress.candidate_requirements.hypothesis_statement && <p>{t('A nonempty hypothesis statement is required on every submitted candidate; injection creates a new Card.', 'Для каждого кандидата нужна непустая гипотеза; отправка создаёт новую карточку.')}</p>}
       {perIdea.length ? <ul>{perIdea.map(([name, count]) => <li key={name}>
-        {name}: {ru ? `вариантов для разбора: ${count}; для этой конкретной идеи` : `review ${count} option${count === 1 ? '' : 's'} for the exact Idea`}
+        {name}: {(ru ? `вариантов для разбора: ${count}; для этой конкретной идеи` : uiMessage("review {0} option{1} for the exact Idea", [count, count === 1 ? '' : 's']))}
       </li>)}</ul> : <p>{t('No configured idea-specific review at this node count.', 'На этом числе экспериментов разбор конкретной идеи не требуется.')}</p>}
       <h3>{t('Evaluation questions', 'Вопросы оценки')}</h3>
       <p>{progress.pending_checkpoint_count} {t('pending. Answers remain in the checkpoint history below.', 'без ответа. Ответы сохраняются в истории вопросов ниже.')}</p>

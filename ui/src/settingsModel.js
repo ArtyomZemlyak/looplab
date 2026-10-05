@@ -1,3 +1,4 @@
+import { uiText } from './uiLanguage.js'
 // Pure view-model helpers for the settings UI. Keeping filtering here makes the
 // progressive-disclosure rules testable without React or a browser.
 
@@ -13,6 +14,7 @@ export const ESSENTIAL_SETTING_KEYS = new Set([
   'llm_token_limit',
   'backend',
   'llm_model',
+  'output_language',
   'llm_base_url',
   'llm_api_key',
 ])
@@ -29,7 +31,7 @@ const searchableText = (group, field) => [
   field.shortHelp,
   field.placeholder,
   ...(field.options || []),
-].filter(Boolean).join(' ').toLowerCase()   // locale-INVARIANT: toLocaleLowerCase() folds "I"→"ı"
+].filter(Boolean).flatMap(value => [value, uiText(value)]).join(' ').toLowerCase()   // locale-INVARIANT: toLocaleLowerCase() folds "I"→"ı"
                                             // in tr/az, so "API key" would stop matching a typed "api"
 
 export function normalizeSettingsQuery(query) {
@@ -51,13 +53,13 @@ export function filterSettingsGroups(groups, {
     .map(group => ({
       ...group,
       displayTitle: compact ? group.essentialTitle || group.title : group.title,
-      sub: compact ? group.essentialSub || group.sub : group.sub,
+      sub: (compact ? (group.essentialSub || uiText(group.sub)) : uiText(group.sub)),
       fields: group.fields.filter(field => {
         if (hideSecret && field.type === 'secret') return false
         if (needle) return searchableText(group, field).includes(needle)
         return mode !== 'essential' || ESSENTIAL_SETTING_KEYS.has(field.key)
       }).map(field => compact && field.shortHelp ? {
-        ...field, label: field.shortLabel || field.label, help: field.shortHelp,
+        ...field, label: (field.shortLabel || uiText(field.label)), help: field.shortHelp,
         technicalHelp: field.help,
       } : field).sort((a, b) => compact
         ? Number(a.key === 'backend') - Number(b.key === 'backend') : 0),

@@ -1,3 +1,4 @@
+import { uiText, uiMessage, useUILanguage } from './uiLanguage.js'
 import React, { useEffect, useId, useRef, useState } from 'react'
 import { filterSettingsGroups, normalizeSettingsQuery } from './settingsModel.js'
 import './settings-polish.css'
@@ -9,15 +10,17 @@ import './settings-polish.css'
 // `only` and `hideSecret` keep compact consumers (run settings and launch dialogs) compatible.
 // `mode` and `query` add progressive disclosure to the full Settings page.
 function AgentPills({ f, granted, onToggleAgent, rolePills, interactionDisabled = false }) {
+  useUILanguage()
+
   if (!f.agents || !onToggleAgent) return null
-  return <div className="sf-agents" role="group" aria-label={`Runtime access for ${f.label}`}>
+  return <div className="sf-agents" role="group" aria-label={uiMessage("Runtime access for {0}", [uiText(f.label)])}>
     {f.agents.map(role => {
       const p = rolePills[role]
       const on = granted.includes(role)
       return <button key={role} type="button" className={'agpill' + (on ? ' on' : '')}
                      disabled={interactionDisabled}
-                     aria-pressed={on} aria-label={`${p.title}: ${on ? 'allowed' : 'not allowed'}`}
-                     title={(on ? 'Allowed: ' : 'Not allowed: ') + p.title}
+                     aria-pressed={on} aria-label={`${uiText(p.title)}: ${uiText(on ? 'allowed' : 'not allowed')}`}
+                     title={uiMessage(on ? 'Allowed: {0}' : 'Not allowed: {0}', [uiText(p.title)])}
                      onClick={() => onToggleAgent(f.key, role)}>{p.short}</button>
     })}
   </div>
@@ -26,8 +29,8 @@ function AgentPills({ f, granted, onToggleAgent, rolePills, interactionDisabled 
 // One source of truth for the two-tier change dot (unsaved wins over differs-from-default), shared by
 // the per-field label and the per-tab header so they can never disagree.
 function changeDot(unsaved, changed) {
-  if (unsaved) return <span className="sf-dot unsaved" title="unsaved — clears on Save" aria-label="unsaved">●</span>
-  if (changed) return <span className="sf-dot fromdefault" title="differs from the engine default" aria-label="customized">●</span>
+  if (unsaved) return <span className="sf-dot unsaved" title={uiText("unsaved — clears on Save")} aria-label={uiText("unsaved")}>●</span>
+  if (changed) return <span className="sf-dot fromdefault" title={uiText("differs from the engine default")} aria-label={uiText("customized")}>●</span>
   return null
 }
 
@@ -42,6 +45,8 @@ const credentialSourceLabel = source => ({
 function Field({ idPrefix, f, value, onChange, changed, unsaved, error, granted, onToggleAgent,
                  secretSet, credential, onClearSecret, secretActionDisabled, readOnly, rolePills,
                  interactionDisabled = false, compact = false }) {
+  useUILanguage()
+
   const set = (v) => onChange(f.key, v)
   const inputId = `${idPrefix}-setting-${safeId(f.key)}`
   const helpId = `${inputId}-help`
@@ -65,7 +70,7 @@ function Field({ idPrefix, f, value, onChange, changed, unsaved, error, granted,
     && credential.status === 'incomplete'
 
   if (f.type === 'bool') {
-    input = <label className="switch" title={`Toggle ${f.label}`}>
+    input = <label className="switch" title={uiMessage("Toggle {0}", [f.label])}>
       <input id={inputId} name={f.key} type="checkbox" checked={!!value}
              aria-describedby={describedBy} disabled={readOnly || interactionDisabled}
              onChange={e => set(e.target.checked)} />
@@ -75,7 +80,7 @@ function Field({ idPrefix, f, value, onChange, changed, unsaved, error, granted,
     input = <select id={inputId} name={f.key} className="text" value={value ?? ''}
                     aria-describedby={describedBy} disabled={readOnly || interactionDisabled}
                     onChange={e => set(e.target.value)}>
-      {f.options.map(o => <option key={o || '__default'} value={o}>{o === '' ? 'Use provider default' : o}</option>)}
+      {f.options.map(o => <option key={o || '__default'} value={o}>{o === '' ? uiText('Use provider default') : uiText(o)}</option>)}
     </select>
   } else if (f.type === 'secret') {
     // Write-only credential: the box is always blank (the value is never sent back from the server).
@@ -83,36 +88,16 @@ function Field({ idPrefix, f, value, onChange, changed, unsaved, error, granted,
       <input id={inputId} name={f.key} className="text" type="password" autoComplete="new-password"
              value={value ?? ''} aria-describedby={describedBy}
              disabled={readOnly || interactionDisabled}
-             placeholder={ambientCredential
-               ? ambientEffectiveCredential
-                 ? 'Ambient shared key matches base URL — enter to store a fallback'
-                 : 'Ambient source has no key — enter to store a fallback'
-               : storedCredential
-                 ? incompleteStoredCredential
-                   ? 'API key missing — enter to complete the pair'
-                   : 'Stored — leave blank to keep'
-                 : 'Not set'}
+             placeholder={((ambientCredential ? (ambientEffectiveCredential ? uiText('Ambient shared key matches base URL — enter to store a fallback') : uiText('Ambient source has no key — enter to store a fallback')) : (storedCredential ? (incompleteStoredCredential ? uiText('API key missing — enter to complete the pair') : uiText('Stored — leave blank to keep')) : uiText('Not set'))))}
              onChange={e => set(e.target.value)} />
       {storedCredential && clearableCredential && onClearSecret &&
         <button type="button" className="btn sm ghost"
-                aria-label={incompleteStoredCredential
-                  ? 'Clear incomplete stored credential pair'
-                  : storedFallbackUnderAmbient
-                    ? `Clear stored fallback ${f.label} and endpoint binding`
-                  : `Clear stored ${f.label} and endpoint binding`}
-                title={incompleteStoredCredential
-                  ? 'Remove the orphan stored endpoint binding immediately (separate from Save)'
-                  : storedFallbackUnderAmbient
-                    ? 'Remove the stored fallback key and endpoint binding; the ambient source remains untouched'
-                  : 'Remove the stored key and endpoint binding immediately (separate from Save)'}
+                aria-label={((incompleteStoredCredential ? uiText('Clear incomplete stored credential pair') : storedFallbackUnderAmbient ? uiMessage("Clear stored fallback {0} and endpoint binding", [f.label]) : uiMessage("Clear stored {0} and endpoint binding", [f.label])))}
+                title={((incompleteStoredCredential ? uiText('Remove the orphan stored endpoint binding immediately (separate from Save)') : (storedFallbackUnderAmbient ? uiText('Remove the stored fallback key and endpoint binding; the ambient source remains untouched') : uiText('Remove the stored key and endpoint binding immediately (separate from Save)'))))}
                 disabled={secretActionDisabled}
-                onClick={() => onClearSecret(f.key)}>Clear now</button>}
+                onClick={() => onClearSecret(f.key)}>{uiText("Clear now")}</button>}
       {ambientCredential && <span className="sf-secret-readonly"
-        title={ambientEffectiveCredential
-          ? `The effective credential comes from the ${credentialSourceLabel(credential.source)} and cannot be changed or cleared here.${storedFallbackUnderAmbient ? ' The separate stored fallback can be cleared.' : ''}`
-          : `The ${credentialSourceLabel(credential.source)} controls credential resolution but currently supplies no effective key; it cannot be changed or cleared here.${storedFallbackUnderAmbient ? ' The separate stored fallback can be cleared.' : ''}`}>
-        Ambient source · read-only
-      </span>}
+        title={(ambientEffectiveCredential ? uiMessage("The effective credential comes from the {0} and cannot be changed or cleared here.{1}", [credentialSourceLabel(credential.source), storedFallbackUnderAmbient ? ' The separate stored fallback can be cleared.' : '']) : uiMessage("The {0} controls credential resolution but currently supplies no effective key; it cannot be changed or cleared here.{1}", [credentialSourceLabel(credential.source), storedFallbackUnderAmbient ? ' The separate stored fallback can be cleared.' : '']))}>{uiText("Ambient source · read-only")}</span>}
     </div>
   } else {
     const numeric = f.type === 'int' || f.type === 'float'
@@ -134,48 +119,32 @@ function Field({ idPrefix, f, value, onChange, changed, unsaved, error, granted,
     rolePills={rolePills} interactionDisabled={interactionDisabled} />
   return <div className={'sf-field' + (unsaved ? ' unsaved' : changed ? ' changed' : '') + (error ? ' invalid' : '') + (readOnly ? ' readonly' : '')}>
     <div className="sf-label-row">
-      <label className="sf-label" htmlFor={inputId}>{f.label}{dot}
-        {readOnly && <span className="muted" title="Fixed when this run started"> · launch-pinned</span>}
+      <label className="sf-label" htmlFor={inputId}>{uiText(f.label)}{dot}
+        {readOnly && <span className="muted" title={uiText("Fixed when this run started")}>{uiText(" · launch-pinned")}</span>}
       </label>
       {compact && f.agents && onToggleAgent && !readOnly
-        ? <details className="sf-details sf-runtime-access"><summary>Runtime permissions</summary>
+        ? <details className="sf-details sf-runtime-access"><summary>{uiText("Runtime permissions")}</summary>
           {permissions}
         </details>
         : permissions}
     </div>
     <div className="sf-input">{input}</div>
-    {error && <div id={errorId} className="sf-error" role="alert">{error}</div>}
-    {readOnly && <div id={readOnlyId} className="sf-help" role="note">
-      Fixed when this run started. Create a new run to use a different value; resume and replay keep this recorded value.
-    </div>}
+    {error && <div id={errorId} className="sf-error" role="alert">{uiText(error)}</div>}
+    {readOnly && <div id={readOnlyId} className="sf-help" role="note">{uiText("Fixed when this run started. Create a new run to use a different value; resume and replay keep this recorded value.")}</div>}
     {hasDescription && <div id={helpId} className="sf-help">
-      {f.type === 'secret' && (credential ? <span className="sf-secret-state">
-        Stored material: {storedCredential ? 'yes' : 'no'} · Shared key: {effectiveCredential ? 'yes' : 'no'} · Matches base URL: {activeCredential ? 'yes' : 'no'}.{' '}
-        {ambientCredential
-          ? ambientEffectiveCredential
-            ? `The effective key comes from the ${credentialSourceLabel(credential.source)} and is read-only here. A value entered above is stored only as a fallback pair while that override exists. ${storedCredential ? 'Existing stored material may be a complete pair or only a binding; its key is never exposed. ' : ''}`
-            : `The ${credentialSourceLabel(credential.source)} controls credential resolution but supplies no effective key. A value entered above is stored only as an inactive fallback pair while that ambient source remains selected. ${storedCredential ? 'Existing stored material may be a complete pair or only a binding; its key is never exposed. ' : ''}`
-          : incompleteStoredCredential
-            ? 'The stored pair is missing its API key. Enter a value to complete and rebind it to the saved endpoint, or use Clear now to remove the incomplete pair. '
-          : storedCredential
-            ? 'Enter a value only to replace the stored key. '
-            : 'No credential is stored. '}
-        {storedCredential && clearableCredential
-          ? storedFallbackUnderAmbient
-            ? 'Clear now removes only the stored fallback; the ambient source remains untouched. '
-            : 'Clear now is immediate and separate from Save. '
-          : ''}
+      {f.type === 'secret' && (credential ? <span className="sf-secret-state">{uiText("Stored material: ")}{((storedCredential ? uiText('yes') : uiText('no')))}{uiText(" · Shared key: ")}{((effectiveCredential ? uiText('yes') : uiText('no')))}{uiText(" · Matches base URL: ")}{((activeCredential ? uiText('yes') : uiText('no')))}.{' '}
+        {((ambientCredential ? ambientEffectiveCredential ? uiMessage("The effective key comes from the {0} and is read-only here. A value entered above is stored only as a fallback pair while that override exists. {1}", [credentialSourceLabel(credential.source), storedCredential ? 'Existing stored material may be a complete pair or only a binding; its key is never exposed. ' : '']) : uiMessage("The {0} controls credential resolution but supplies no effective key. A value entered above is stored only as an inactive fallback pair while that ambient source remains selected. {1}", [credentialSourceLabel(credential.source), storedCredential ? 'Existing stored material may be a complete pair or only a binding; its key is never exposed. ' : '']) : (incompleteStoredCredential ? uiText('The stored pair is missing its API key. Enter a value to complete and rebind it to the saved endpoint, or use Clear now to remove the incomplete pair. ') : (storedCredential ? uiText('Enter a value only to replace the stored key. ') : uiText('No credential is stored. ')))))}
+        {((storedCredential && clearableCredential ? (storedFallbackUnderAmbient ? uiText('Clear now removes only the stored fallback; the ambient source remains untouched. ') : uiText('Clear now is immediate and separate from Save. ')) : ''))}
       </span> : <span className="sf-secret-state">
-        {secretSet ? 'A credential is stored. Enter a value only to replace it. ' : 'No credential is stored. '}
-        Clear now is immediate and separate from Save.{' '}
+        {((secretSet ? uiText('A credential is stored. Enter a value only to replace it. ') : uiText('No credential is stored. ')))}{uiText("Clear now is immediate and separate from Save.")}{' '}
       </span>)}
-      {f.help}
+      {uiText(f.help)}
     </div>}
-    {f.technicalHelp && <details className="sf-details"><summary>Technical details</summary>
-      <div className="sf-help">{f.technicalHelp}</div>
+    {f.technicalHelp && <details className="sf-details"><summary>{uiText("Technical details")}</summary>
+      <div className="sf-help">{uiText(f.technicalHelp)}</div>
     </details>}
     {f.warning && <div id={warningId} className={`sf-warning${f.warningTone === 'info' ? ' info' : ''}`} role="note">
-      <strong>{f.warningTitle || 'High-risk experimental setting.'}</strong> {f.warning}
+      <strong>{uiText(f.warningTitle || 'High-risk experimental setting.')}</strong> {uiText(f.warning)}
     </div>}
   </div>
 }
@@ -183,13 +152,15 @@ function Field({ idPrefix, f, value, onChange, changed, unsaved, error, granted,
 function GroupPanel({ group, idPrefix, form, onChange, dirty, unsaved, errors, agentControl,
                       onToggleAgent, secretState, credential, onClearSecret, secretActionDisabled, readOnlyKeys,
                       panelId, labelledBy, searchable, rolePills, interactionDisabled, compact }) {
+  useUILanguage()
+
   const headingId = `${idPrefix}-heading-${safeId(group.title)}`
   return <section className="sf-group" id={panelId}
                   role={labelledBy ? 'tabpanel' : undefined}
                   aria-labelledby={labelledBy || headingId} tabIndex={labelledBy ? 0 : undefined}>
     <div className="sf-group-h">
-      {searchable && <h2 id={headingId}>{group.displayTitle || group.title}</h2>}
-      {group.sub && <span className="muted">{group.sub}</span>}
+      {searchable && <h2 id={headingId}>{uiText(group.displayTitle || group.title)}</h2>}
+      {group.sub && <span className="muted">{uiText(group.sub)}</span>}
     </div>
     <div className="sf-grid">
       {group.fields.map(f => <Field key={f.key} idPrefix={idPrefix} f={f} value={form[f.key]}
@@ -208,6 +179,8 @@ export default function SettingsForm({ form, onChange, dirty, unsaved, errors, o
                                        secretState, credential, onClearSecret, secretActionDisabled, readOnlyKeys, hideSecret,
                                        mode = 'all', query = '', schema, initialGroup = '',
                                        focusKey = '', focusRequest = 0, interactionDisabled = false }) {
+  useUILanguage()
+
   const groups = filterSettingsGroups(schema.groups, { mode, query, only, hideSecret })
   const rolePills = schema.agentRolePills
   // Keep the selected section by stable identity. The Essential catalogue is a sparse subset of
@@ -262,13 +235,13 @@ export default function SettingsForm({ form, onChange, dirty, unsaved, errors, o
   }, [idx, searching])
 
   if (!groups.length) return <div className="settings-empty" role="status">
-    <strong>No settings match “{query.trim()}”</strong>
-    <span>Try a field name, key, option, or a broader term.</span>
+    <strong>{uiText("No settings match “")}{query.trim()}”</strong>
+    <span>{uiText("Try a field name, key, option, or a broader term.")}</span>
   </div>
 
   if (searching) return <div className="settings-form settings-search-results" role="form"
                               data-settings-form={idPrefix}
-                              aria-label="Matching settings">
+                              aria-label={uiText("Matching settings")}>
     {groups.map(gr => <GroupPanel key={gr.title} group={gr} idPrefix={idPrefix} form={form}
       onChange={onChange} dirty={dirty} unsaved={unsaved} errors={errors} agentControl={agentControl}
       onToggleAgent={onToggleAgent} secretState={secretState} credential={credential}
@@ -292,9 +265,9 @@ export default function SettingsForm({ form, onChange, dirty, unsaved, errors, o
 
   const tabId = `${idPrefix}-tab-${idx}`
   const panelId = `${idPrefix}-panel-${idx}`
-  return <div className="settings-form tabbed" role="form" aria-label="Settings fields"
+  return <div className="settings-form tabbed" role="form" aria-label={uiText("Settings fields")}
               data-settings-form={idPrefix}>
-    <div ref={tablistRef} className="tabs sf-tabs" role="tablist" aria-label="Settings sections">
+    <div ref={tablistRef} className="tabs sf-tabs" role="tablist" aria-label={uiText("Settings sections")}>
       {groups.map((gr, index) => <button key={gr.title} type="button" role="tab"
         id={`${idPrefix}-tab-${index}`}
         aria-controls={index === idx ? `${idPrefix}-panel-${index}` : undefined}
@@ -302,7 +275,7 @@ export default function SettingsForm({ form, onChange, dirty, unsaved, errors, o
         className={'tab' + (index === idx ? ' active' : '')}
         onClick={() => setActiveGroup(gr.title)} onKeyDown={event => onTabKeyDown(event, index)}
         title={gr.sub || ''}>
-        {gr.displayTitle || gr.title}{changeDot(groupUnsaved(gr), groupChanged(gr))}
+        {uiText(gr.displayTitle || gr.title)}{changeDot(groupUnsaved(gr), groupChanged(gr))}
       </button>)}
     </div>
     <GroupPanel key={group.title} group={group} idPrefix={idPrefix} form={form}

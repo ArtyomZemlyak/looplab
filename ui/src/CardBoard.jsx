@@ -1,3 +1,4 @@
+import { uiText, uiMessage, useUILanguage } from './uiLanguage.js'
 // The Card board — the authoritative kanban plus the legacy hypothesis fallback it degrades to —
 // lifted out of panels.jsx (doc 25 UI-04). It carries a whole optimistic-control mini-framework
 // (cardControlReflected / _cardWithOptimisticControls / the sentEditRef pruning) and the hypothesis
@@ -123,18 +124,14 @@ function _cardResourceSummary(value, { unavailable = 'unspecified' } = {}) {
 }
 
 function _CardProjectionNotice({ projection, cards }) {
-  if (!isRecord(projection)) return <div className="card-projection-note" role="status">
-    Card coverage receipt unavailable; this older payload may be incomplete.
-  </div>
+  if (!isRecord(projection)) return <div className="card-projection-note" role="status">{uiText("Card coverage receipt unavailable; this older payload may be incomplete.")}</div>
   if (projection.complete === true) return null
   const total = _cardInt(projection.total)
   const returned = _cardInt(projection.returned) ?? cards.length
   const sourceInvalid = projection.source_valid === false
   return <div className="card-projection-note" role="status">
     <OpIcon name="alert" size={12} />
-    <span>{sourceInvalid
-      ? 'Card source was invalid; no complete board can be claimed.'
-      : `Showing ${returned}${total == null ? '' : ` of ${total}`} Cards; clipped or redacted public fields are marked partial.`}</span>
+    <span>{((sourceInvalid ? uiText('Card source was invalid; no complete board can be claimed.') : uiMessage("Showing {0}{1} Cards; clipped or redacted public fields are marked partial.", [returned, total == null ? '' : ` of ${total}`])))}</span>
   </div>
 }
 
@@ -324,30 +321,28 @@ function _CardKanbanCard({
       <button type="button" className="card-lane-open" aria-pressed={selected}
         onClick={event => onOpen?.(card.id, event.currentTarget)}>
         <span className="card-kanban-stmt">
-          <span className="hyp-src" title={source ? `source: ${source}` : 'source unavailable'}>
+          <span className="hyp-src" title={((source ? uiMessage("source: {0}", [source]) : uiText('source unavailable')))}>
             <OpIcon name={_CARD_ICON[source] || 'dot'} size={12} />
           </span>
           <span>{statement}</span>
         </span>
         {latestMeasured && <span className="card-lane-result"
-          title={`Measured metric from evaluated evidence experiment #${latestMeasured.nodeId}; this is separate from the research verdict`}>
-          <span>Measured · #{latestMeasured.nodeId}</span>
+          title={uiMessage("Measured metric from evaluated evidence experiment #{0}; this is separate from the research verdict", [latestMeasured.nodeId])}>
+          <span>{uiText("Measured · #")}{latestMeasured.nodeId}</span>
           <strong>{fmt(latestMeasured.metric)}</strong>
         </span>}
         <span className="card-kanban-meta">
           <span className="chip xs">{card.id}</span>
           {verdict && verdict !== 'open' && <span
             className={'chip xs ' + (verdict === 'supported' ? 'ok' : verdict === 'abandoned' ? 'warn' : '')}
-            title={`research verdict: ${verdict} (distinct from the work status)`}>{verdict}</span>}
-          {priority != null && <span className="chip xs" title="derived priority; 1 is highest">#{priority + 1}</span>}
-          {card.pinned === true && <span className="chip xs warn"><OpIcon name="flag" size={10} /> pinned</span>}
+            title={uiMessage("research verdict: {0} (distinct from the work status)", [verdict])}>{verdict}</span>}
+          {priority != null && <span className="chip xs" title={uiText("derived priority; 1 is highest")}>#{priority + 1}</span>}
+          {card.pinned === true && <span className="chip xs warn"><OpIcon name="flag" size={10} />{uiText(" pinned")}</span>}
           {roll && <span className={'chip xs' + (roll.total === 0 ? ' warn' : '')}
-            title={roll.total === 0
-              ? 'no experiment has run for this work item yet'
-              : `${roll.total} experiment${roll.total === 1 ? '' : 's'} ${roll.substituted ? 'ran under' : 'tested'} this work item`
+            title={((roll.total === 0 ? uiText('no experiment has run for this work item yet') : `${roll.total} experiment${roll.total === 1 ? '' : 's'} ${roll.substituted ? 'ran under' : 'tested'} this work item`
                 + (roll.substituted ? ` · ${roll.substituted} built something else — not a test of it` : '')
-                + (roll.missing ? ` · ${roll.missing} not in this snapshot` : '')}>
-            {(attemptCoverage?.label ?? roll.total)} exp</span>}
+                + (roll.missing ? ` · ${roll.missing} not in this snapshot` : '')))}>
+            {(attemptCoverage?.label ?? roll.total)}{uiText(" exp")}</span>}
           {/* NOT a status, and no longer painted like one. `selection_ready === false` says the Card
               queue will not pick this card up next, which for `work_terminal` / `work_in_flight` is
               simply what a card looks like once its experiment has run or while it is running. The
@@ -358,10 +353,10 @@ function _CardKanbanCard({
             const block = cardSelectionBlock(card)
             return block && !(block.tone === 'lifecycle' && _cardStatus(card) === 'evaluated')
               && <span className={`chip xs${block.tone === 'fault' ? ' warn' : ' quiet'}`}
-              title={block.title}>{block.label}</span>
+              title={uiText(block.title)}>{uiText(block.label)}</span>
           })()}
           {receipt && receipt.complete !== true && <span className="chip xs warn"
-            title={`${omissionCount} public field omission${omissionCount === 1 ? '' : 's'}`}>partial</span>}
+            title={uiMessage("{0} public field omission{1}", [omissionCount, omissionCount === 1 ? '' : 's'])}>{uiText("partial")}</span>}
         </span>
         {concepts.length > 0 && <span className="card-kanban-tags">
           {concepts.slice(0, 3).map(concept => <span key={concept} className="chip xs">{concept}</span>)}
@@ -370,28 +365,26 @@ function _CardKanbanCard({
       {isRecord(controlState?.notice) && <div
         className={'card-control-feedback ' + (controlState.notice.tone || '')}
         role={controlState.notice.tone === 'error' ? 'alert' : 'status'} aria-live="polite">
-        {controlState.notice.text}</div>}
+        {uiText(controlState.notice.text)}</div>}
     </article>
   }
   return <article className="card-kanban-card" data-card-id={card.id} aria-label={statement}
     aria-busy={ownPending ? 'true' : undefined}>
     <div className="card-kanban-stmt">
-      <span className="hyp-src" title={source ? `source: ${source}` : 'source unavailable'}>
+      <span className="hyp-src" title={((source ? uiMessage("source: {0}", [source]) : uiText('source unavailable')))}>
         <OpIcon name={_CARD_ICON[source] || 'dot'} size={12} />
       </span>
       <span>{statement}</span>
     </div>
     <div className="card-kanban-meta">
-      <span className="chip xs" title="durable Card identity">{card.id}</span>
-      {_cardText(card.belief_id) && <span className="chip xs" title="research belief identity">
-        belief {card.belief_id}</span>}
-      {_cardText(card.retry_of) && <span className="chip xs" title="retry of work item">
-        retry of {card.retry_of}</span>}
+      <span className="chip xs" title={uiText("durable Card identity")}>{card.id}</span>
+      {_cardText(card.belief_id) && <span className="chip xs" title={uiText("research belief identity")}>{uiText("belief ")}{card.belief_id}</span>}
+      {_cardText(card.retry_of) && <span className="chip xs" title={uiText("retry of work item")}>{uiText("retry of ")}{card.retry_of}</span>}
       {verdict && verdict !== 'open' && <span
         className={'chip xs ' + (verdict === 'supported' ? 'ok' : verdict === 'abandoned' ? 'warn' : '')}
-        title={`research verdict: ${verdict} (distinct from the work status)`}>{verdict}</span>}
-      {priority != null && <span className="chip xs" title="derived priority; 1 is highest">#{priority + 1}</span>}
-      {card.pinned === true && <span className="chip xs warn"><OpIcon name="flag" size={10} /> pinned</span>}
+        title={uiMessage("research verdict: {0} (distinct from the work status)", [verdict])}>{verdict}</span>}
+      {priority != null && <span className="chip xs" title={uiText("derived priority; 1 is highest")}>#{priority + 1}</span>}
+      {card.pinned === true && <span className="chip xs warn"><OpIcon name="flag" size={10} />{uiText(" pinned")}</span>}
       {/* THE SAME CHIP AS THE LANE CARD, and it has to be: this is the DETAIL PANE (and the whole
           `HypothesisBoard`), i.e. what opens when the operator clicks the card whose lane chip they
           just read. It kept the retired binary chip after the lifecycle/fault split landed one
@@ -401,18 +394,17 @@ function _CardKanbanCard({
           wording is a NEGATIVE pin in cardSelectionBlockers.test.js, so it may not be respelled
           here either: a commented-out copy is the same drift risk as a live one. */}
       {card.selection_ready === true
-        ? <span className="chip xs ok" title="eligible for Card-driven selection">selection ready</span>
+        ? <span className="chip xs ok" title={uiText("eligible for Card-driven selection")}>{uiText("selection ready")}</span>
         : card.selection_ready === false
           ? (() => {
             const block = cardSelectionBlock(card)
             return block && !(block.tone === 'lifecycle' && _cardStatus(card) === 'evaluated')
               && <span className={`chip xs${block.tone === 'fault' ? ' warn' : ' quiet'}`}
-              title={block.title}>{block.label}</span>
+              title={uiText(block.title)}>{uiText(block.label)}</span>
           })()
-          : <span className="chip xs" title="selection readiness was not present in the public projection">readiness unknown</span>}
+          : <span className="chip xs" title={uiText("selection readiness was not present in the public projection")}>{uiText("readiness unknown")}</span>}
       {receipt && receipt.complete !== true && <span className="chip xs warn"
-        title={`${omissionCount} public field omission${omissionCount === 1 ? '' : 's'}`}>
-        partial details{omissionCount ? ` · ${omissionCount}` : ''}</span>}
+        title={uiMessage("{0} public field omission{1}", [omissionCount, omissionCount === 1 ? '' : 's'])}>{uiText("partial details")}{omissionCount ? ` · ${omissionCount}` : ''}</span>}
     </div>
     {/* The two counts are compared, not truth-tested. `a || b || n` YIELDS `n` when a and b are
         falsy, so with no operator, no profile, no params and no space this guard evaluated to the
@@ -421,14 +413,14 @@ function _CardKanbanCard({
         declares no action, across most runs in `runs/`. `_cardText` returning null for an absent
         string is what keeps the first two operands safe; a count has no such spelling. */}
     {(operator || evalProfile || params.length > 0 || spaceCount > 0) && <div className="card-kanban-fact">
-      <span className="card-kanban-k">Action</span>
-      <span>{operator || 'operator unspecified'}</span>
-      {evalProfile && <span>profile {evalProfile}</span>}
+      <span className="card-kanban-k">{uiText("Action")}</span>
+      <span>{((operator || uiText('operator unspecified')))}</span>
+      {evalProfile && <span>{uiText("profile ")}{evalProfile}</span>}
       {params.map(([key, value]) => <span key={key} className={'card-param' + (moved.has(key) ? ' card-param-moved' : '')}>
         {key}={fmt(moved.has(key) ? moved.get(key) : value)}
-        {moved.has(key) && <span className="muted"> (proposed {fmt(value)})</span>}
+        {moved.has(key) && <span className="muted">{uiText(" (proposed ")}{fmt(value)})</span>}
       </span>)}
-      {spaceCount > 0 && <span>{spaceCount} search variable{spaceCount === 1 ? '' : 's'}</span>}
+      {spaceCount > 0 && <span>{spaceCount}{uiText(" search variable")}{spaceCount === 1 ? '' : 's'}</span>}
     </div>}
     {/* WHAT ACTUALLY RAN, and until 2026-08-25 this pane showed the PROPOSAL alone. `card.params`
         is receipt-bound and cannot be corrected; `applied_params` rides beside it on the wire and
@@ -438,26 +430,25 @@ function _CardKanbanCard({
         applied record disagree with their own proposal, the run's champion among them.
         Silent when the two agree, so a card that ran as proposed renders exactly as it always did. */}
     {drift && <div className="card-kanban-fact card-drift">
-      <span className="card-kanban-k">Ran at</span>
+      <span className="card-kanban-k">{uiText("Ran at")}</span>
       <span>
-        <span className="chip xs warn">{drift.moved} of {drift.compared} knobs moved</span>
+        <span className="chip xs warn">{drift.moved}{uiText(" of ")}{drift.compared}{uiText(" knobs moved")}</span>
         {typeof card.applied_params_node === 'number'
-          ? <span className="muted">on experiment #{card.applied_params_node}</span> : null}
+          ? <span className="muted">{uiText("on experiment #")}{card.applied_params_node}</span> : null}
       </span>
     </div>}
     <div className="card-kanban-fact">
-      <span className="card-kanban-k">Declared</span>
-      <span>{declaredResources}{evalTimeout == null ? '' : ` · ${fmt(evalTimeout)}s timeout`}</span>
+      <span className="card-kanban-k">{uiText("Declared")}</span>
+      <span>{uiText(declaredResources)}{(evalTimeout == null ? '' : uiMessage(" · {0}s timeout", [fmt(evalTimeout)]))}</span>
     </div>
     {resourcePin && <div className="card-kanban-fact card-resource-pin">
-      <span className="card-kanban-k">Configured pin</span>
-      <span><span className="chip xs warn">{_cardText(resourcePin.pinned_by) === 'operator'
-        ? 'operator override' : 'pending operator override'}</span> {configuredResources}
-        <span className="card-resource-request">requested {pinResources}</span></span>
+      <span className="card-kanban-k">{uiText("Configured pin")}</span>
+      <span><span className="chip xs warn">{((_cardText(resourcePin.pinned_by) === 'operator' ? uiText('operator override') : uiText('pending operator override')))}</span> {configuredResources}
+        <span className="card-resource-request">{uiText("requested ")}{pinResources}</span></span>
     </div>}
     <div className="card-kanban-fact">
-      <span className="card-kanban-k">Provenance</span>
-      <span>{provenanceBits.length ? provenanceBits.join(' · ') : 'unavailable'}</span>
+      <span className="card-kanban-k">{uiText("Provenance")}</span>
+      <span>{((provenanceBits.length ? provenanceBits.join(' · ') : uiText('unavailable')))}</span>
     </div>
     {/* THE GATE AND ITS BLOCKERS ANSWER "why will the Card queue not pick this up next" — a question
         about a WORK ITEM. A direction is not one: it owns no executable action BY DESIGN, so
@@ -467,27 +458,24 @@ function _CardKanbanCard({
         working exactly as intended. What a direction needs is an experiment filed under it, and
         that is what this says instead. */}
     {!isDirection && <div className="card-kanban-fact">
-      <span className="card-kanban-k">Gate</span>
-      <span>{selection && _cardText(selection.freshness) ? `freshness ${selection.freshness}` : 'freshness unknown'}
-        {selection && _cardText(selection.owner_state) ? ` · owner ${selection.owner_state}` : ''}
-        {selection && typeof selection.action_complete === 'boolean'
-          ? ` · action ${selection.action_complete ? 'complete' : 'incomplete'}` : ''}</span>
+      <span className="card-kanban-k">{uiText("Gate")}</span>
+      <span>{((selection && _cardText(selection.freshness) ? uiMessage("freshness {0}", [selection.freshness]) : uiText('freshness unknown')))}
+        {(selection && _cardText(selection.owner_state) ? uiMessage(" · owner {0}", [selection.owner_state]) : '')}
+        {(selection && typeof selection.action_complete === 'boolean' ? uiMessage(" · action {0}", [selection.action_complete ? 'complete' : 'incomplete']) : '')}</span>
     </div>}
-    {!isDirection && blockers.length > 0 && <div className="card-kanban-blockers" aria-label="Selection blockers">
+    {!isDirection && blockers.length > 0 && <div className="card-kanban-blockers" aria-label={uiText("Selection blockers")}>
       {blockers.slice(0, 5).map(blocker => <span key={blocker} className="chip xs warn">
         {blocker.replaceAll('_', ' ')}</span>)}
       {blockers.length > 5 && <span className="muted">+{blockers.length - 5}</span>}
     </div>}
     {isDirection && <div className="card-kanban-fact">
-      <span className="card-kanban-k">Direction</span>
+      <span className="card-kanban-k">{uiText("Direction")}</span>
       <span>
-        <span className="chip xs chip-direction">not runnable by design</span>
-        <span className="muted">{childCount > 0
-          ? `${childCount} experiment${childCount === 1 ? '' : 's'} filed under it`
-          : 'no experiment filed under it yet'}</span>
+        <span className="chip xs chip-direction">{uiText("not runnable by design")}</span>
+        <span className="muted">{((childCount > 0 ? uiMessage("{0} experiment{1} filed under it", [childCount, childCount === 1 ? '' : 's']) : uiText('no experiment filed under it yet')))}</span>
       </span>
     </div>}
-    {!blockersKnown && <div className="muted card-kanban-unknown">Selection blockers unavailable</div>}
+    {!blockersKnown && <div className="muted card-kanban-unknown">{uiText("Selection blockers unavailable")}</div>}
     {/* WHICH RESEARCH QUESTION THIS ROW BELONGS TO — above the node Lineage below, because the two
         are different relations and were easy to confuse while only one of them was rendered. This
         one is card->card: the DIRECTION this experiment answers, or the experiments answering this
@@ -496,159 +484,148 @@ function _CardKanbanCard({
         different and false statement (see `cardLineageModel.js::cardLineageView`). */}
     {lineage && (lineage.parentId || lineage.children.length > 0
       || lineage.kind === CARD_KIND_DIRECTION) && <div className="card-kanban-fact">
-      <span className="card-kanban-k">Research</span>
+      <span className="card-kanban-k">{uiText("Research")}</span>
       <span>
         {lineage.kind === CARD_KIND_DIRECTION
-          ? <span className="chip xs chip-direction">direction</span> : null}
+          ? <span className="chip xs chip-direction">{uiText("direction")}</span> : null}
         {lineage.parentId ? <>
-          {' answers '}
+          {uiText(' answers ')}
           {lineage.parent && onOpen
             ? <button type="button" className="btn xs ghost"
                 title={_cardText(lineage.parent.statement) || lineage.parentId}
                 onClick={e => onOpen(lineage.parentId, e.currentTarget)}>
                 {_cardText(lineage.parent.statement) || lineage.parentId}
               </button>
-            : <span>{lineage.parentId}{lineage.parent ? '' : ' (not on this page)'}</span>}
+            : <span>{lineage.parentId}{((lineage.parent ? '' : uiText(' (not on this page)')))}</span>}
         </> : null}
         {lineage.children.length > 0 ? <>
           {lineage.parentId ? ' · ' : ' '}
           {rollupChips(lineage.rollup).map(chip => (
-            <span key={chip.key} className="chip xs">{chip.label}</span>
+            <span key={chip.key} className="chip xs">{uiText(chip.label)}</span>
           ))}
-          {rollupChips(lineage.rollup).length === 0
-            ? `${lineage.children.length} experiment${lineage.children.length === 1 ? '' : 's'}`
-            : null}
+          {(rollupChips(lineage.rollup).length === 0 ? uiMessage("{0} experiment{1}", [lineage.children.length, lineage.children.length === 1 ? '' : 's']) : null)}
         </> : null}
         {/* An unanswered direction says so rather than rendering an empty row. */}
-        {lineage.kind === CARD_KIND_DIRECTION && lineage.children.length === 0
-          ? ' — no experiment proposed against this yet' : null}
+        {((lineage.kind === CARD_KIND_DIRECTION && lineage.children.length === 0 ? uiText(' — no experiment proposed against this yet') : null))}
       </span>
     </div>}
     {(parents.length > 0 || scoredAgainst != null) && <div className="card-kanban-fact">
-      <span className="card-kanban-k">Lineage</span>
-      <span>{parents.length ? `parent ${parentLineage}` : ''}
-        {scoredAgainst != null ? `${parents.length ? ' · ' : ''}scored vs ${scoredLineage}` : ''}</span>
+      <span className="card-kanban-k">{uiText("Lineage")}</span>
+      <span>{(parents.length ? uiMessage("parent {0}", [parentLineage]) : '')}
+        {(scoredAgainst != null ? uiMessage("{0}scored vs {1}", [parents.length ? ' · ' : '', scoredLineage]) : '')}</span>
     </div>}
     {(concepts.length > 0 || novelty) && <div className="card-kanban-tags">
-      {novelty && <span className="chip xs">novelty {novelty}</span>}
+      {novelty && <span className="chip xs">{uiText("novelty ")}{novelty}</span>}
       {concepts.map(concept => <span key={concept} className="chip xs">{concept}</span>)}
     </div>}
     {(_cardText(card.merged_into) || _cardText(card.dropped_reason)) && <div className="card-kanban-terminal">
-      {_cardText(card.merged_into) ? `Merged into ${card.merged_into}` : card.dropped_reason}
-      {_cardText(card.dropped_by) ? ` · by ${card.dropped_by}` : ''}
+      {(_cardText(card.merged_into) ? uiMessage("Merged into {0}", [card.merged_into]) : card.dropped_reason)}
+      {(_cardText(card.dropped_by) ? uiMessage(" · by {0}", [card.dropped_by]) : '')}
     </div>}
     {/* Item 6. Everything here was already on the wire and rendered NOWHERE, which is why
         "why is this card here, and what came of it?" had no answer in the UI even though the
         answer shipped. `cardOrigin`/`cardLessons` own the derivations. */}
     {origin.paraphrased && <div className="card-kanban-fact">
-      <span className="card-kanban-k">Seed</span>
-      <span title="The immutable statement captured at card_added — the key the whole Card ledger joins on. The text above is an operator display edit over it.">{origin.seed}</span>
+      <span className="card-kanban-k">{uiText("Seed")}</span>
+      <span title={uiText("The immutable statement captured at card_added — the key the whole Card ledger joins on. The text above is an operator display edit over it.")}>{origin.seed}</span>
     </div>}
     {origin.cues.length > 0 && <div className="card-kanban-fact">
-      <span className="card-kanban-k">Proposed under</span>
+      <span className="card-kanban-k">{uiText("Proposed under")}</span>
       <span>{origin.cues.map(cue => <span key={cue.kind} className="chip xs"
-        title={`steering cue ${cue.kind}${cue.detail.length ? ` · ${cue.detail.join(' · ')}` : ''}`}>
-        {cue.label}{cue.detail.length ? ` · ${cue.detail.join(' · ')}` : ''}</span>)}</span>
+        title={uiMessage("steering cue {0}{1}", [cue.kind, cue.detail.length ? ` · ${cue.detail.join(' · ')}` : ''])}>
+        {uiText(cue.label)}{cue.detail.length ? ` · ${cue.detail.join(' · ')}` : ''}</span>)}</span>
     </div>}
     {origin.rationale && <div className="card-kanban-fact">
-      <span className="card-kanban-k">Rationale</span><span>{origin.rationale}</span>
+      <span className="card-kanban-k">{uiText("Rationale")}</span><span>{origin.rationale}</span>
     </div>}
     {(origin.aliases.length > 0 || origin.createdAtNode != null) && <div className="card-kanban-fact">
-      <span className="card-kanban-k">Formed</span>
-      <span>{origin.createdAtNode != null ? `at node ${origin.createdAtNode}` : ''}
+      <span className="card-kanban-k">{uiText("Formed")}</span>
+      <span>{(origin.createdAtNode != null ? uiMessage("at node {0}", [origin.createdAtNode]) : '')}
         {/* A card that absorbed three sibling proposals looked identical to one minted alone. */}
-        {origin.aliases.length > 0
-          ? `${origin.createdAtNode != null ? ' · ' : ''}absorbed ${origin.aliases.join(', ')}` : ''}</span>
+        {(origin.aliases.length > 0 ? uiMessage("{0}absorbed {1}", [origin.createdAtNode != null ? ' · ' : '', origin.aliases.join(', ')]) : '')}</span>
     </div>}
     {(beliefId || retryOf) && <div className="card-kanban-fact">
-      <span className="card-kanban-k">Belief lineage</span>
-      <span>{beliefId ? `belief ${beliefId}` : 'belief id unavailable'}
-        {retryOf ? ` · retry of ${retryOf}` : ''}</span>
+      <span className="card-kanban-k">{uiText("Belief lineage")}</span>
+      <span>{((beliefId ? uiMessage("belief {0}", [beliefId]) : uiText('belief id unavailable')))}
+        {(retryOf ? uiMessage(" · retry of {0}", [retryOf]) : '')}</span>
     </div>}
     {(lessons.lessons.length > 0 || lessons.unresolved.length > 0) && <div className="card-kanban-fact">
       {/* `.card-kanban-fact` is a 2-column grid whose third and later children span column 2, so
           each lesson is a DIRECT child rather than being nested in one wrapping span. */}
-      <span className="card-kanban-k">Taught</span>
+      <span className="card-kanban-k">{uiText("Taught")}</span>
       {lessons.lessons.map(lesson => <span key={lesson.lessonId}>
         {lesson.statement}{lesson.outcome ? ` (${lesson.outcome})` : ''}
-        {lesson.evidence.length ? ` — from ${lesson.evidence.map(nid => `#${nid}`).join(', ')}` : ''}
+        {(lesson.evidence.length ? uiMessage(" — from {0}", [lesson.evidence.map(nid => `#${nid}`).join(', ')]) : '')}
       </span>)}
       {/* Referenced but not distilled in THIS run's log — an earlier run's lesson carried in as a
           prior. Reported, because a card claiming fewer lessons than it cites is quietly wrong. */}
       {lessons.unresolved.length > 0 && <span className="muted">
-        {lessons.unresolved.length} referenced {lessons.unresolved.length === 1 ? 'lesson was' : 'lessons were'} distilled
-        outside this run and cannot be resolved to their text here.</span>}
+        {lessons.unresolved.length}{uiText(" referenced ")}{((lessons.unresolved.length === 1 ? uiText('lesson was') : uiText('lessons were')))}{uiText(" distilled outside this run and cannot be resolved to their text here.")}</span>}
     </div>}
     {claimRefs.length > 0 && <div className="card-kanban-fact">
-      <span className="card-kanban-k">Research claims</span>
+      <span className="card-kanban-k">{uiText("Research claims")}</span>
       <span>{claimRefs.slice(0, 4).map(ref => <code key={ref}>{ref}</code>)}
-        {claimRefs.length > 4 ? ` · ${claimRefs.length - 4} more` : ''}
-        {' · '}<a href="#/claims">Open Claims &amp; Curation</a></span>
+        {(claimRefs.length > 4 ? uiMessage(" · {0} more", [claimRefs.length - 4]) : '')}
+        {' · '}<a href="#/claims">{uiText("Open Claims & Curation")}</a></span>
     </div>}
     <div className="card-kanban-evidence">
       {evidence.map(nid => <button key={nid} type="button" className="btn xs ghost"
-        aria-label={`Open evidence node #${nid}`}
-        title={substituted.has(nid)
-          ? `node #${nid} is in the evidence list but built something else — not a test of this Card`
-          : `evidence node #${nid}`}
+        aria-label={uiMessage("Open evidence node #{0}", [nid])}
+        title={(substituted.has(nid) ? uiMessage("node #{0} is in the evidence list but built something else — not a test of this Card", [nid]) : uiMessage("evidence node #{0}", [nid]))}
         onClick={() => { onSelect?.(nid); onClose?.() }}>#{nid}</button>)}
       {bestDelta != null && <span className={'chip xs ' + (bestDelta > 0 ? 'ok' : '')}
-        title="best improvement over parent among the evidence">Δ{fmt(bestDelta)}</span>}
+        title={uiText("best improvement over parent among the evidence")}>Δ{fmt(bestDelta)}</span>}
       {evidence.length === 0 && <span className="muted">
-        {evidenceKnown ? 'No evidence nodes' : 'Evidence unavailable'}</span>}
+        {((evidenceKnown ? uiText('No evidence nodes') : uiText('Evidence unavailable')))}</span>}
     </div>
     {onControl && !terminal && <details className="card-kanban-controls">
-      <summary aria-label={`Operator controls for ${card.id}`}>Operator controls</summary>
+      <summary aria-label={uiMessage("Operator controls for {0}", [card.id])}>{uiText("Operator controls")}</summary>
       <form className="card-control-form" onSubmit={event => { event.preventDefault(); saveStatement() }}>
-        <label><span>Display statement</span><textarea className="text card-control-statement"
-          aria-label={`Display statement for ${card.id}`} rows="3" value={statementDraft}
+        <label><span>{uiText("Display statement")}</span><textarea className="text card-control-statement"
+          aria-label={uiMessage("Display statement for {0}", [card.id])} rows="3" value={statementDraft}
           maxLength={4000} disabled={busy} onChange={event => setStatementDraft(event.target.value)} /></label>
         <button type="submit" className="btn xs" disabled={busy || !statementDraft.trim()
-          || statementDraft.trim() === statement}>Save text</button>
+          || statementDraft.trim() === statement}>{uiText("Save text")}</button>
       </form>
       <form className="card-control-form" onSubmit={event => { event.preventDefault(); savePriority() }}>
-        <label><span>Priority (1 is highest)</span><input className="text" type="number" min="1" max="256"
-          aria-label={`Priority for ${card.id}`} value={priorityDraft} disabled={busy}
+        <label><span>{uiText("Priority (1 is highest)")}</span><input className="text" type="number" min="1" max="256"
+          aria-label={uiMessage("Priority for {0}", [card.id])} value={priorityDraft} disabled={busy}
           onChange={event => setPriorityDraft(event.target.value)} /></label>
-        <button type="submit" className="btn xs" disabled={busy || !priorityDraft}>Pin priority</button>
+        <button type="submit" className="btn xs" disabled={busy || !priorityDraft}>{uiText("Pin priority")}</button>
       </form>
       <form className="card-control-resource" onSubmit={event => { event.preventDefault(); saveResources() }}>
         <fieldset disabled={busy}>
-          <legend>Configured resource override</legend>
+          <legend>{uiText("Configured resource override")}</legend>
           <div className="card-control-resource-fields">
-            <label><span>GPUs</span><input className="text" type="number" min="0" step="1"
-              aria-label={`GPU count for ${card.id}`} value={gpuDraft}
+            <label><span>{uiText("GPUs")}</span><input className="text" type="number" min="0" step="1"
+              aria-label={uiMessage("GPU count for {0}", [card.id])} value={gpuDraft}
               onChange={event => {
                 setGpuDraft(event.target.value)
                 if (event.target.value === '0') setMemoryDraft('')
               }} /></label>
-            <label><span>MiB / GPU</span><input className="text" type="number" min="0" step="1"
-              aria-label={`GPU memory in MiB for ${card.id}`} placeholder="inherit declared"
+            <label><span>{uiText("MiB / GPU")}</span><input className="text" type="number" min="0" step="1"
+              aria-label={uiMessage("GPU memory in MiB for {0}", [card.id])} placeholder={uiText("inherit declared")}
               value={memoryDraft} disabled={busy || gpuDraft === '0'}
               onChange={event => setMemoryDraft(event.target.value)} /></label>
           </div>
-          <div className="card-control-help">Validated against the current server GPU envelope;
-            blank memory inherits the declared value. Execution may still wait for local GPU admission.</div>
-          <button type="submit" className="btn xs" disabled={busy || gpuDraft === ''}>Pin resources</button>
+          <div className="card-control-help">{uiText("Validated against the current server GPU envelope; blank memory inherits the declared value. Execution may still wait for local GPU admission.")}</div>
+          <button type="submit" className="btn xs" disabled={busy || gpuDraft === ''}>{uiText("Pin resources")}</button>
         </fieldset>
       </form>
       <div className="card-control-form">
         <button type="button" className="btn xs" disabled={busy} onClick={abandonCard}
-          title="Mark only this Card’s research verdict abandoned; sibling Cards stay unchanged and this Card remains visible">
-          Abandon this Card
-        </button>
+          title={uiText("Mark only this Card’s research verdict abandoned; sibling Cards stay unchanged and this Card remains visible")}>{uiText("Abandon this Card")}</button>
       </div>
       <details className="card-control-danger">
-        <summary>Drop Card…</summary>
+        <summary>{uiText("Drop Card…")}</summary>
         <form className="card-control-form" onSubmit={event => { event.preventDefault(); drop() }}>
-          <label><span>Reason (optional)</span><input className="text" value={dropReason} maxLength={400}
-            aria-label={`Drop reason for ${card.id}`} disabled={busy}
+          <label><span>{uiText("Reason (optional)")}</span><input className="text" value={dropReason} maxLength={400}
+            aria-label={uiMessage("Drop reason for {0}", [card.id])} disabled={busy}
             onChange={event => setDropReason(event.target.value)} /></label>
-          <button type="submit" className="btn xs danger" disabled={busy}>Confirm drop</button>
+          <button type="submit" className="btn xs danger" disabled={busy}>{uiText("Confirm drop")}</button>
         </form>
       </details>
-      {controlsLocked && !ownPending && <div className="card-control-feedback" role="status">
-        Another Card command is still being submitted for this run.</div>}
+      {controlsLocked && !ownPending && <div className="card-control-feedback" role="status">{uiText("Another Card command is still being submitted for this run.")}</div>}
     </details>}
     {/* A SIBLING OF THE CONTROLS DISCLOSURE, NOT A CHILD, and that placement is the whole fix.
         This form lived inside `{onControl && !terminal && <details>}` while requiring
@@ -671,27 +648,25 @@ function _CardKanbanCard({
     {onControl && _cardStatus(card) === 'dropped' && _cardReopenable(card)
       && <form className="card-control-form card-control-reopen"
         onSubmit={event => { event.preventDefault(); reopen() }}>
-        <label><span>Reopen reason (optional)</span><input className="text" value={reopenReason}
-          maxLength={400} aria-label={`Reopen reason for ${card.id}`} disabled={busy}
+        <label><span>{uiText("Reopen reason (optional)")}</span><input className="text" value={reopenReason}
+          maxLength={400} aria-label={uiMessage("Reopen reason for {0}", [card.id])} disabled={busy}
           onChange={event => setReopenReason(event.target.value)} /></label>
         <button type="submit" className="btn xs" disabled={busy}
-          title="Put this stopped Card back on the board; the drop receipt stays in the log">
-          Reopen this Card
-        </button>
+          title={uiText("Put this stopped Card back on the board; the drop receipt stays in the log")}>{uiText("Reopen this Card")}</button>
       </form>}
     {isRecord(controlState?.notice) && <div
       className={'card-control-feedback ' + (controlState.notice.tone || '')}
       role={controlState.notice.tone === 'error' ? 'alert' : 'status'} aria-live="polite">
-      {controlState.notice.text}
+      {uiText(controlState.notice.text)}
       {ownPending && onRecover && <span className="card-control-recovery">
         {ownPending.commandId && <button type="button" className="btn xs ghost"
           disabled={ownPending.phase === 'checking' || ownPending.phase === 'retrying'}
-          onClick={() => onRecover(card.id, 'check')}>Check</button>}
+          onClick={() => onRecover(card.id, 'check')}>{uiText("Check")}</button>}
         {ownPending.retryable && <button type="button" className="btn xs ghost"
           disabled={ownPending.phase === 'checking' || ownPending.phase === 'retrying'}
-          onClick={() => onRecover(card.id, 'retry')}>Retry exact command</button>}
+          onClick={() => onRecover(card.id, 'retry')}>{uiText("Retry exact command")}</button>}
         <button type="button" className="btn xs ghost"
-          onClick={() => onRecover(card.id, 'dismiss')}>Dismiss locally</button>
+          onClick={() => onRecover(card.id, 'dismiss')}>{uiText("Dismiss locally")}</button>
       </span>}
       </div>}
     {controlError && <div className="card-control-feedback error" role="alert">{controlError}</div>}
@@ -708,26 +683,20 @@ function _CardKanbanCard({
 // attempt at the question the card asks, and a retry, a debug child or a repeat is another.
 function _CardAttempts({ attempts, selectedNodeId, onOpenNode, coverage = null, state = null }) {
   const roll = cardAttemptSummary(attempts)
-  return <section className="card-attempts" aria-label="Experiments for this work item">
-    <h3 className="card-attempts-h">
-      Experiments <span className="muted">{coverage?.label ?? roll.total}</span>
+  return <section className="card-attempts" aria-label={uiText("Experiments for this work item")}>
+    <h3 className="card-attempts-h">{uiText("Experiments ")}<span className="muted">{coverage?.label ?? roll.total}</span>
       {roll.missing > 0 && <span className="chip xs warn"
-        title="these attempts are not present in the snapshot being displayed (a historical fold, or trimmed live state)">
-        {roll.missing} unavailable</span>}
+        title={uiText("these attempts are not present in the snapshot being displayed (a historical fold, or trimmed live state)")}>
+        {roll.missing}{uiText(" unavailable")}</span>}
     </h3>
     <details className="card-attempts-explain" open={roll.total === 0}>
-      <summary>How Cards and experiments relate</summary>
+      <summary>{uiText("How Cards and experiments relate")}</summary>
       <p className="muted card-attempts-note">
-      {roll.total === 0
-        // A card with no node at all is a real, reachable state, not an empty-list placeholder:
-        // `engine/card_reservation.py::_record_node_less_card` mints and immediately closes a
-        // rejected proposal that never gets a Node owner. Say so, or the pane reads as "still loading".
-        ? 'No experiment has run for this work item yet. A Card can also close with none — a proposal the engine minted and rejected before building anything.'
-        : `This work item is not itself an experiment: it is the question ${roll.total === 1
+      {((roll.total === 0 ? uiText('No experiment has run for this work item yet. A Card can also close with none — a proposal the engine minted and rejected before building anything.') : `This work item is not itself an experiment: it is the question ${roll.total === 1
           ? 'one experiment' : `these ${roll.total} experiments`} ${roll.substituted ? 'ran under' : 'tested'}.`
           // A substituted build ran under the card and did not test it; "tested" was false for it.
           + (roll.substituted ? ` ${roll.substituted === 1 ? 'One of them' : `${roll.substituted} of them`}`
-            + ' built something else instead of its idea and is not a test of it.' : '')}
+            + ' built something else instead of its idea and is not a test of it.' : '')))}
       </p>
     </details>
     {attempts.length > 0 && <ul className="card-attempt-list">
@@ -767,23 +736,17 @@ function _CardAttempts({ attempts, selectedNodeId, onOpenNode, coverage = null, 
               + (entry.present ? '' : ' missing')}
             aria-pressed={selectedNodeId === entry.nodeId} disabled={!entry.present}
             onClick={() => entry.present && onOpenNode?.(entry.nodeId)}
-            title={entry.present
-              ? `open experiment #${entry.nodeId} in the inspector`
-              : `experiment #${entry.nodeId} is not present in this snapshot`}>
+            title={(entry.present ? uiMessage("open experiment #{0} in the inspector", [entry.nodeId]) : uiMessage("experiment #{0} is not present in this snapshot", [entry.nodeId]))}>
             <span className="card-attempt-id">#{entry.nodeId}</span>
-            <span className="card-attempt-op">{_cardText(node?.idea?.operator)
-              || _cardText(node?.operator) || (entry.present ? 'operator unknown' : 'unavailable')}</span>
+            <span className="card-attempt-op">{((_cardText(node?.idea?.operator)
+              || _cardText(node?.operator) || (entry.present ? uiText('operator unknown') : uiText('unavailable'))))}</span>
             <span className={'chip xs' + (status === 'evaluated' ? ' ok' : status === 'failed' ? ' warn' : '')}
-              title={activityLabel ? `experiment #${entry.nodeId} — ${view.label}` : undefined}>
-              {entry.present ? statusText : 'not in snapshot'}</span>
-            {attempt != null && <span className="muted">attempt {attempt}</span>}
+              title={(activityLabel ? uiMessage("experiment #{0} — {1}", [entry.nodeId, view.label]) : undefined)}>
+              {((entry.present ? uiText(statusText) : uiText('not in snapshot')))}</span>
+            {attempt != null && <span className="muted">{uiText("attempt ")}{attempt}</span>}
             {metric != null && <span className="card-attempt-metric">{fmt(metric)}</span>}
             <span className={'chip xs' + (lane === 'evidence' ? '' : ' warn')}
-              title={lane === 'not a test'
-                ? 'its Developer reported building something else — it ran, but it is not a test of this Card’s idea and does not count in its verdict'
-                : lane === 'evidence'
-                ? 'in the Card’s evidence list — this attempt reached a terminal and fed the verdict'
-                : 'reserved for this Card by its mint stamp, but not yet in the evidence list'}>{lane}</span>
+              title={((lane === 'not a test' ? uiText('its Developer reported building something else — it ran, but it is not a test of this Card’s idea and does not count in its verdict') : (lane === 'evidence' ? uiText('in the Card’s evidence list — this attempt reached a terminal and fed the verdict') : uiText('reserved for this Card by its mint stamp, but not yet in the evidence list'))))}>{uiText(lane)}</span>
           </button>
         </li>
       })}
@@ -848,7 +811,7 @@ function _CardTrace({ card, runId, expectedGeneration, onOpenNode, attempts = []
   const sections = useMemo(() => cardTraceSections(payload), [payload])
   const notice = cardTraceNotice(payload)
 
-  if (payload === null) return <div className="muted" role="status">loading this work item’s trace…</div>
+  if (payload === null) return <div className="muted" role="status">{uiText("loading this work item’s trace…")}</div>
   // The node's own generation, when this snapshot knows it. `null` is not zero: it means "whichever
   // attempt is current", which is what the routes settle an absent one to — asserting 0 for a
   // repaired node would 409 every read.
@@ -861,12 +824,12 @@ function _CardTrace({ card, runId, expectedGeneration, onOpenNode, attempts = []
   // Raw `pending` also includes the queue and cannot be used as an ownership test.
   const workingOn = nodeId => [NODE_ACTIVITY.BUILDING, NODE_ACTIVITY.EVALUATING]
     .includes(nodeActivityStatus(entryOf(nodeId)?.node))
-  const fallback = <div className="muted" role="status">loading trace…</div>
+  const fallback = <div className="muted" role="status">{uiText("loading trace…")}</div>
   return <div className="card-trace">
-    {notice && <div className="muted" role="status">{notice}</div>}
+    {notice && <div className="muted" role="status">{uiText(notice)}</div>}
     {sections.map(section => section.kind === 'research'
       ? <div key={section.key} className="card-trace-section">
-          <div className="section-h">{section.title}</div>
+          <div className="section-h">{uiText(section.title)}</div>
           {/* The same research surface the node's Trace tab shows — one implementation, so the
               proposal reads the same way whichever screen the operator arrived from. */}
           <React.Suspense fallback={fallback}>
@@ -875,7 +838,7 @@ function _CardTrace({ card, runId, expectedGeneration, onOpenNode, attempts = []
           </React.Suspense>
         </div>
       : <div key={section.key} className="card-trace-section">
-          <div className="section-h card-trace-divider">{section.title}</div>
+          <div className="section-h card-trace-divider">{uiText(section.title)}</div>
           <div className="card-trace-row">
             {/* Keyed by NODE, never by `node_created.trace_id`. That trace is where the node was
                 authored — two spans, `Author node` → `materialize_node` — while the Developer's
@@ -886,14 +849,10 @@ function _CardTrace({ card, runId, expectedGeneration, onOpenNode, attempts = []
             <button type="button" className="btn xs ghost" disabled={!section.openable}
               aria-expanded={open === section.key}
               onClick={() => setOpen(cur => (cur === section.key ? null : section.key))}>
-              {open === section.key ? '▾' : '▸'} Developer · build and evaluation
-            </button>
+              {open === section.key ? '▾' : '▸'}{uiText(" Developer · build and evaluation")}</button>
             <button type="button" className="btn xs ghost"
-              onClick={() => onOpenNode?.(Number(section.node.node_id))}>open experiment ›</button>
-            <span className="muted">{fmtInt(section.node.spans)} spans
-              · {fmtInt(section.node.generations)} gen
-              · {fmtInt(section.node.tools)} tools · {fmtInt(section.node.tokens?.total)} tok
-              {section.node.errors ? ` · ${fmtInt(section.node.errors)} error` : ''}</span>
+              onClick={() => onOpenNode?.(Number(section.node.node_id))}>{uiText("open experiment ›")}</button>
+            <span className="muted">{fmtInt(section.node.spans)}{uiText(" spans · ")}{fmtInt(section.node.generations)}{uiText(" gen · ")}{fmtInt(section.node.tools)}{uiText(" tools · ")}{fmtInt(section.node.tokens?.total)}{uiText(" tok")}{(section.node.errors ? uiMessage(" · {0} error", [fmtInt(section.node.errors)]) : '')}</span>
           </div>
           {open === section.key && <div className="card-trace-body">
             <React.Suspense fallback={fallback}>
@@ -918,8 +877,7 @@ function _CardDetailPane({
 }) {
   if (!card) {
     return <div className="card-detail card-detail-empty">
-      <p className="muted">Pick a work item to see its full record — its verdict, the experiments
-        that tested it, its selection gate and its operator controls.</p>
+      <p className="muted">{uiText("Pick a work item to see its full record — its verdict, the experiments that tested it, its selection gate and its operator controls.")}</p>
     </div>
   }
   const inspectingNode = selectedNodeId != null
@@ -928,20 +886,20 @@ function _CardDetailPane({
     return <div className="card-detail card-detail-node">
       <div className="card-detail-crumb">
         <button type="button" className="btn xs ghost" onClick={() => onOpenNode?.(null)}
-          aria-label={`Back to Card ${card.id}`}>‹ {card.id}</button>
-        <span className="muted">experiment #{selectedNodeId} — one attempt at this work item</span>
+          aria-label={uiMessage("Back to Card {0}", [card.id])}>‹ {card.id}</button>
+        <span className="muted">{uiText("experiment #")}{selectedNodeId}{uiText(" — one attempt at this work item")}</span>
       </div>
       {renderInspector(selectedNodeId)}
     </div>
   }
   const latestMeasured = cardLatestMeasuredEvidence(attempts)
   return <div className="card-detail">
-    <h2 className="card-detail-heading">{_cardText(card.statement) || `Card ${card.id}`}</h2>
-    <div className="card-detail-summary" role="group" aria-label="Card result summary">
-      <div><span>Research verdict</span><strong>{_cardText(card.verdict) || 'Open'}</strong></div>
-      <div><span>Latest measured evidence</span><strong>{latestMeasured
+    <h2 className="card-detail-heading">{(_cardText(card.statement) || uiMessage("Card {0}", [card.id]))}</h2>
+    <div className="card-detail-summary" role="group" aria-label={uiText("Card result summary")}>
+      <div><span>{uiText("Research verdict")}</span><strong>{((_cardText(card.verdict) || uiText('Open')))}</strong></div>
+      <div><span>{uiText("Latest measured evidence")}</span><strong>{latestMeasured
         ? <>{fmt(latestMeasured.metric)} <small>#{latestMeasured.nodeId}</small></>
-        : 'No measured score'}</strong></div>
+        : uiText('No measured score')}</strong></div>
     </div>
     <_CardAttempts attempts={attempts} selectedNodeId={selectedNodeId} onOpenNode={onOpenNode}
       coverage={cardAttemptCoverage(attempts, receipt)} state={state} />
@@ -1266,12 +1224,12 @@ function _CardKanban({
   useDialogFocus(detailDrawerRef, closeDetails, !!(pane?.compact && selectedCard),
     { modal: false, priority: DIALOG_PRIORITY.NONMODAL })
   const addBar = canAdd && <div className="toolbar" style={{ marginBottom: 10, gap: 6 }}>
-    <input className="text" style={{ flex: 1 }} aria-label="New hypothesis" disabled={readOnly}
-      placeholder="Pose a hypothesis to test (e.g. “target is right-skewed; a log transform helps”)"
+    <input className="text" style={{ flex: 1 }} aria-label={uiText("New hypothesis")} disabled={readOnly}
+      placeholder={uiText("Pose a hypothesis to test (e.g. “target is right-skewed; a log transform helps”)")}
       value={addDraft} onChange={e => setAddDraft(e.target.value)}
       onKeyDown={e => { if (e.key === 'Enter') addCard() }} />
     <button className="btn sm primary" onClick={addCard}
-      disabled={readOnly || !addDraft.trim()}>+ Add</button>
+      disabled={readOnly || !addDraft.trim()}>{uiText("+ Add")}</button>
   </div>
   // The DIRECTIONS view. One section per research direction, its experiments nested under it, and
   // the experiments nobody filed in a bucket of their own that is never merged away — "unfiled" is
@@ -1309,7 +1267,7 @@ function _CardKanban({
   const filteredLaneCards = laneQuery.trim()
     ? laneCards.filter(card => cardMatchesQuery(card, laneQuery)) : laneCards
   const laneGroups = lanes.map(([key, label, hint]) => ({
-    key, label, hint,
+    key, label: label, hint: hint,
     rows: filteredLaneCards.filter(card => _cardStatus(card) === key).sort(_cardOrder),
   }))
   const occupiedLanes = laneGroups.filter(lane => lane.rows.length)
@@ -1328,52 +1286,49 @@ function _CardKanban({
   // board's own total needs the reconciliation on the surface that shrank.
   const questionNotice = laneQuestions.length > 0 && grouping === 'lanes'
     ? <div className="muted card-question-notice" role="status">
-        {laneQuestions.length} research question{laneQuestions.length === 1 ? '' : 's'} not shown
-        here — a question owns no experiment, so it has no lane.{' '}
-        <button type="button" className="btn sm ghost" onClick={() => setGrouping('research')}>
-          open the Research ladder
-        </button>
+        {laneQuestions.length}{uiText(" research question")}{laneQuestions.length === 1 ? '' : 's'}{uiText(" not shown here — a question owns no experiment, so it has no lane.")}{' '}
+        <button type="button" className="btn sm ghost" onClick={() => setGrouping('research')}>{uiText("open the Research ladder")}</button>
       </div>
     : null
   const groupingBar = <div className="toolbar card-grouping" role="group"
-    aria-label="Group the board by">
+    aria-label={uiText("Group the board by")}>
     {[['lanes', 'Lanes', 'Work by status'],
       ['research', 'Research', 'Questions and experiments'],
-    ].map(([key, label, hint]) => <button key={key} type="button" title={hint}
+    ].map(([key, label, hint]) => <button key={key} type="button" title={uiText(hint)}
       className={'btn sm' + (grouping === key ? ' primary' : '')}
-      aria-pressed={grouping === key} onClick={() => setGrouping(key)}>{label}</button>)}
+      aria-pressed={grouping === key} onClick={() => setGrouping(key)}>{uiText(label)}</button>)}
   </div>
   const searchBar = view && grouping === 'lanes' && <div className="card-filter" role="search">
-      <input ref={laneSearchRef} className="text" type="search" aria-label="Find work items"
-        placeholder="Find by idea, ID or concept" maxLength={120} value={laneQuery}
+      <input ref={laneSearchRef} className="text" type="search" aria-label={uiText("Find work items")}
+        placeholder={uiText("Find by idea, ID or concept")} maxLength={120} value={laneQuery}
         onChange={event => {
           const next = event.target.value
           setLaneQuery(next)
           if (selectedCard && !cardMatchesQuery(selectedCard, next)) onSelectCard?.(null)
         }} />
       {laneQuery && <button type="button" className="btn sm ghost"
-        onClick={() => { setLaneQuery(''); laneSearchRef.current?.focus() }}>Clear</button>}
+        onClick={() => { setLaneQuery(''); laneSearchRef.current?.focus() }}>{uiText("Clear")}</button>}
       {laneQuery.trim() && <span className="card-filter-count" role="status">
-        {filteredLaneCards.length} of {laneCards.length} shown</span>}
+        {filteredLaneCards.length}{uiText(" of ")}{laneCards.length}{uiText(" shown")}</span>}
     </div>
   const board = laneQuery.trim() && !filteredLaneCards.length
-    ? <div className="card-filter-empty" role="status">No work items match this search.</div>
+    ? <div className="card-filter-empty" role="status">{uiText("No work items match this search.")}</div>
     : <>
       {emptyLanes.length > 0 && <div className="card-empty-lanes" role="group"
-        aria-label={laneQuery.trim() ? 'Statuses without matching work items' : 'Empty lifecycle statuses'}>
-        <span className="card-empty-lanes-label">{laneQuery.trim() ? 'No matches in' : 'Empty now'}</span>
+        aria-label={((laneQuery.trim() ? uiText('Statuses without matching work items') : uiText('Empty lifecycle statuses')))}>
+        <span className="card-empty-lanes-label">{((laneQuery.trim() ? uiText('No matches in') : uiText('Empty now')))}</span>
         {emptyLanes.map(({ key, label, hint }) => <span key={key} className="card-empty-lane"
-          title={hint}>{label} <span className="muted">0</span></span>)}
+          title={uiText(hint)}>{uiText(label)} <span className="muted">0</span></span>)}
       </div>}
       <div className={'card-board' + (denseLane ? ' dense-lane' : '')}
-        role="region" aria-label="Card lifecycle kanban">
-        {occupiedLanes.length === 0 && <div className="card-filter-empty">No work items yet.</div>}
+        role="region" aria-label={uiText("Card lifecycle kanban")}>
+        {occupiedLanes.length === 0 && <div className="card-filter-empty">{uiText("No work items yet.")}</div>}
         {occupiedLanes.map(({ key, label, hint, rows }) => {
           const tone = _CARD_FROZEN_STATUSES.has(key) ? ` card-${key}` : ''
           const laneId = `card-lane-${encodeURIComponent(key)}`
           return <section key={key} className={'card-col' + tone} aria-labelledby={laneId}>
-            <h3 id={laneId} className="card-col-h" title={hint}>
-              {label} <span className="muted">{rows.length}</span>
+            <h3 id={laneId} className="card-col-h" title={uiText(hint)}>
+              {uiText(label)} <span className="muted">{rows.length}</span>
             </h3>
             <div className="card-col-cards">{rows.map(renderCard)}</div>
           </section>
@@ -1391,15 +1346,11 @@ function _CardKanban({
       + (pane?.compact ? ' compact' : '') + (detailOpen ? ' detail-open' : '')}>
       <div ref={laneScrollRef} className="card-lanes-wrap">
         <div className="card-lanes-head">
-          <span className="muted">{sub}</span>
+          <span className="muted">{uiText(sub)}</span>
           <_CardProjectionNotice projection={projection} cards={visibleCards} />
-          {missingCardId && <div className="notice resource-warning card-selection-missing" role="status">
-            Card <code>{missingCardId}</code> is not in the loaded board.
-            {(_cardInt(projection?.omitted) ?? 0) > 0
-              ? ` ${projection.omitted} work item${projection.omitted === 1 ? '' : 's'} `
-                + `${projection.omitted === 1 ? 'was' : 'were'} omitted from this snapshot.`
-              : ' This link may be stale.'}
-            <button type="button" className="btn sm ghost" onClick={closeDetails}>Clear selection</button>
+          {missingCardId && <div className="notice resource-warning card-selection-missing" role="status">{uiText("Card ")}<code>{missingCardId}</code>{uiText(" is not in the loaded board.")}{(((_cardInt(projection?.omitted) ?? 0) > 0 ? ` ${projection.omitted} work item${projection.omitted === 1 ? '' : 's'} `
+                + `${projection.omitted === 1 ? 'was' : 'were'} omitted from this snapshot.` : uiText(' This link may be stale.')))}
+            <button type="button" className="btn sm ghost" onClick={closeDetails}>{uiText("Clear selection")}</button>
           </div>}
           {groupingBar}
           {searchBar}
@@ -1409,21 +1360,21 @@ function _CardKanban({
         {grouping === 'research' ? researchBoard : board}
       </div>
       {detailOpen && pane?.compact && <button type="button" className="workspace-scrim"
-        tabIndex={-1} onClick={closeDetails} aria-label="Close work item details" />}
+        tabIndex={-1} onClick={closeDetails} aria-label={uiText("Close work item details")} />}
       {detailOpen && !pane?.compact && pane?.splitter}
       {detailOpen && <aside ref={detailDrawerRef}
         className={'side card-detail-side' + (pane?.compact ? ' compact-drawer' : '')}
         style={pane?.width ? { width: pane.width } : undefined}
         tabIndex={pane?.compact ? -1 : undefined}
         data-route-focus-guard={pane?.compact ? 'true' : undefined}
-        role={pane?.compact ? 'dialog' : 'complementary'} aria-label="Work item details">
+        role={pane?.compact ? 'dialog' : 'complementary'} aria-label={uiText("Work item details")}>
         <div className="pane-grip">
           <strong>{selectedCard?.id}</strong>
           <span className="spacer" style={{ flex: 1 }} />
-          {selectedCard && <button ref={detailCloseRef} className="btn sm ghost" title="close details"
+          {selectedCard && <button ref={detailCloseRef} className="btn sm ghost" title={uiText("close details")}
             data-dialog-initial-focus={pane?.compact ? true : undefined}
-            aria-label={`Close details for ${selectedCard.id}`}
-            onClick={closeDetails}>Close</button>}
+            aria-label={uiMessage("Close details for {0}", [selectedCard.id])}
+            onClick={closeDetails}>{uiText("Close")}</button>}
         </div>
         {/* `runGeneration`, NOT `state?.generation`. The folded run state has no run-level
             `generation` field at all — the generation is an envelope SIBLING of `state` in the
@@ -1448,7 +1399,7 @@ function _CardKanban({
   // minimum grows with occupied lanes, so the board can overflow a 1070px content box.
   // Still a percentage-capped `min()`, so the JupyterHub proxy's
   // narrower window gets a panel that fits rather than one clipped by the browser edge.
-  return <Panel title="Cards" sub={sub} onClose={onClose} size="board">
+  return <Panel title={uiText("Cards")} sub={sub} onClose={onClose} size="board">
     <_CardProjectionNotice projection={projection} cards={visibleCards} />
     {groupingBar}
     {questionNotice}
@@ -1580,9 +1531,7 @@ function _HypothesisFallback({ state, runId, runGeneration, onSelect, onClose, o
       ...restored, storageKey: recovery.key, storageRaw: recovery.raw,
       phase: 'unknown',
       releaseAllowed: false, releaseInspected: false,
-      message: restored.commandId
-        ? 'A saved permanent deletion needs recovery. Check this exact command before another action.'
-        : 'A prior permanent deletion has an unknown outcome. Resume the exact saved request to recover it safely.',
+      message: (restored.commandId ? uiText('A saved permanent deletion needs recovery. Check this exact command before another action.') : uiText('A prior permanent deletion has an unknown outcome. Resume the exact saved request to recover it safely.')),
     } } : {}
   })
   const [deleteNotices, setDeleteNotices] = useState({})
@@ -1605,9 +1554,7 @@ function _HypothesisFallback({ state, runId, runGeneration, onSelect, onClose, o
       const restored = {
         ...inspected.intent, storageKey: inspected.key, storageRaw: inspected.raw,
         phase: 'unknown', releaseAllowed: false, releaseInspected: false,
-        message: inspected.intent.commandId
-          ? 'The saved recovery changed. Check its exact command before another action.'
-          : 'The saved recovery changed. Resume its exact retained request before another action.',
+        message: (inspected.intent.commandId ? uiText('The saved recovery changed. Check its exact command before another action.') : uiText('The saved recovery changed. Resume its exact retained request before another action.')),
       }
       const collection = { [restored.hypothesisId]: restored }
       deleteIntentsRef.current = collection
@@ -1910,7 +1857,7 @@ function _HypothesisFallback({ state, runId, runGeneration, onSelect, onClose, o
       return
     }
     const statement = String(h.statement || '').trim()
-    if (!window.confirm(`Delete this hypothesis permanently?\n\n${statement.slice(0, 500)}\n\nThis removes it from the board and cannot be undone.`)) return
+    if (!window.confirm(uiMessage("Delete this hypothesis permanently?\n\n{0}\n\nThis removes it from the board and cannot be undone.", [statement.slice(0, 500)]))) return
     const intent = {
       runId: String(runId), expectedGeneration: String(runGeneration), hypothesisId,
       idempotencyKey: createIdempotencyKey(), commandId: '', status: 'submitting',
@@ -1942,7 +1889,7 @@ function _HypothesisFallback({ state, runId, runGeneration, onSelect, onClose, o
     if (!current || current.commandId || deleteFlights.current.has(current.hypothesisId)
         || current.idempotencyKey !== intent.idempotencyKey) return
     if (!window.confirm(
-      'Resume the exact saved permanent deletion?\n\nThis reuses the original idempotency identity and payload. It cannot create a second logical deletion.',
+      uiText('Resume the exact saved permanent deletion?\n\nThis reuses the original idempotency identity and payload. It cannot create a second logical deletion.'),
     )) return
     await submitDelete(current)
   }
@@ -2005,7 +1952,7 @@ function _HypothesisFallback({ state, runId, runGeneration, onSelect, onClose, o
         || deleteFlights.current.has(current.hypothesisId)
         || current.idempotencyKey !== intent.idempotencyKey) return
     if (!window.confirm(
-      'Retry this exact failed permanent-deletion command?\n\nThis reuses the same durable command id; it does not submit a new delete intent.',
+      uiText('Retry this exact failed permanent-deletion command?\n\nThis reuses the same durable command id; it does not submit a new delete intent.'),
     )) return
     const durableRetry = updateDeleteIntent(current, {
       phase: 'retrying', releaseAllowed: false, releaseInspected: false,
@@ -2066,7 +2013,7 @@ function _HypothesisFallback({ state, runId, runGeneration, onSelect, onClose, o
     if (!current || !current.releaseAllowed || !current.releaseInspected
         || current.idempotencyKey !== intent.idempotencyKey) return
     if (!window.confirm(
-      'Release this exact permanent-deletion recovery identity?\n\nThis sends no command. Only continue after inspecting the run and accepting that this old outcome cannot be proved.',
+      uiText('Release this exact permanent-deletion recovery identity?\n\nThis sends no command. Only continue after inspecting the run and accepting that this old outcome cannot be proved.'),
     )) return
     if (!clearHypothesisDeleteIntent({ ...current, commandId: current.commandId || '' })) {
       updateDeleteIntent(current, {
@@ -2086,7 +2033,7 @@ function _HypothesisFallback({ state, runId, runGeneration, onSelect, onClose, o
   const releaseDamagedRecovery = () => {
     if (!damagedRecovery || !damagedInspected) return
     if (!window.confirm(
-      'Release this exact unreadable recovery record?\n\nOnly continue after inspecting the current run state and confirming that no permanent deletion still needs recovery.',
+      uiText('Release this exact unreadable recovery record?\n\nOnly continue after inspecting the current run state and confirming that no permanent deletion still needs recovery.'),
     )) return
     if (!clearDamagedHypothesisDeleteRecovery(damagedRecovery)) {
       onToast?.('The recovery record changed or could not be released. It remains protected; inspect it again.')
@@ -2096,9 +2043,7 @@ function _HypothesisFallback({ state, runId, runGeneration, onSelect, onClose, o
           ...refreshed.intent, phase: 'unknown',
           storageKey: refreshed.key, storageRaw: refreshed.raw,
           releaseAllowed: false, releaseInspected: false,
-          message: refreshed.intent.commandId
-            ? 'The recovery record changed to a valid permanent deletion. Check its exact command.'
-            : 'The recovery record changed to a valid id-less deletion. Resume its exact saved request.',
+          message: (refreshed.intent.commandId ? uiText('The recovery record changed to a valid permanent deletion. Check its exact command.') : uiText('The recovery record changed to a valid id-less deletion. Resume its exact saved request.')),
         }
         deleteIntentsRef.current = { [restored.hypothesisId]: restored }
         setDeleteIntents(deleteIntentsRef.current)
@@ -2113,83 +2058,75 @@ function _HypothesisFallback({ state, runId, runGeneration, onSelect, onClose, o
     onRecoveryReleased?.()
   }
   return (
-    <Panel title="Hypotheses" sub={`${hyps.length} tracked — what the run is trying to learn`} onClose={onClose} wide>
+    <Panel title={uiText("Hypotheses")} sub={`${hyps.length} tracked — what the run is trying to learn`} onClose={onClose} wide>
       <div className="toolbar" style={{ marginBottom: 10, gap: 6 }}>
-        <input className="text" style={{ flex: 1 }} aria-label="New hypothesis"
-          placeholder="Pose a hypothesis to test (e.g. “target is right-skewed; a log transform helps”)"
+        <input className="text" style={{ flex: 1 }} aria-label={uiText("New hypothesis")}
+          placeholder={uiText("Pose a hypothesis to test (e.g. “target is right-skewed; a log transform helps”)")}
           value={draft} disabled={deleteLocked} onChange={e => setDraft(e.target.value)}
           onKeyDown={e => { if (e.key === 'Enter') add() }} />
-        <button className="btn sm primary" onClick={add} disabled={!draft.trim() || deleteLocked}>+ Add</button>
+        <button className="btn sm primary" onClick={add} disabled={!draft.trim() || deleteLocked}>{uiText("+ Add")}</button>
       </div>
       {pendingDelete && <div className="report-inline-state" role="status" style={{ marginBottom: 10 }}>
-        <OpIcon name="alert" size={14} /><span>{pendingDelete.message}</span>
+        <OpIcon name="alert" size={14} /><span>{uiText(pendingDelete.message)}</span>
         {pendingDelete.commandId && <button className="btn sm" onClick={() => checkDelete(pendingDelete)}
           disabled={['checking', 'retrying', 'submitting'].includes(pendingDelete.phase)}>
-          {pendingDelete.phase === 'checking' ? 'Checking…' : 'Check exact command'}</button>}
+          {((pendingDelete.phase === 'checking' ? uiText('Checking…') : uiText('Check exact command')))}</button>}
         {pendingDelete.commandId && pendingDelete.phase === 'retryable'
-          && <button className="btn sm" onClick={() => retryDelete(pendingDelete)}>Retry exact command</button>}
+          && <button className="btn sm" onClick={() => retryDelete(pendingDelete)}>{uiText("Retry exact command")}</button>}
         {!pendingDelete.commandId && <button className="btn sm" onClick={() => resumeDelete(pendingDelete)}
           disabled={pendingDelete.phase === 'submitting'}>
-          {pendingDelete.phase === 'submitting' ? 'Submitting…' : 'Resume exact request'}</button>}
+          {((pendingDelete.phase === 'submitting' ? uiText('Submitting…') : uiText('Resume exact request')))}</button>}
         {pendingDelete.releaseAllowed && !pendingDelete.releaseInspected
           && <button className="btn sm" onClick={() => updateDeleteIntent(pendingDelete, {
             releaseInspected: true,
-          }, false)}>Inspect recovery</button>}
+          }, false)}>{uiText("Inspect recovery")}</button>}
         {pendingDelete.releaseAllowed && pendingDelete.releaseInspected && <>
-          <span className="muted">Run {pendingDelete.runId}; generation {pendingDelete.expectedGeneration.slice(0, 12)}…;
-            hypothesis {pendingDelete.hypothesisId}; command {pendingDelete.commandId || 'not recorded'}.</span>
-          <button className="btn sm danger" onClick={() => releaseValidRecovery(pendingDelete)}>
-            Release exact recovery</button>
+          <span className="muted">{uiText("Run ")}{pendingDelete.runId}{uiText("; generation ")}{pendingDelete.expectedGeneration.slice(0, 12)}{uiText("…; hypothesis ")}{pendingDelete.hypothesisId}{uiText("; command ")}{((pendingDelete.commandId || uiText('not recorded')))}.</span>
+          <button className="btn sm danger" onClick={() => releaseValidRecovery(pendingDelete)}>{uiText("Release exact recovery")}</button>
         </>}
       </div>}
       {damagedRecovery && <div className="report-inline-state error" role="alert" style={{ marginBottom: 10 }}>
         <OpIcon name="alert" size={14} />
-        <span>An unreadable permanent-deletion recovery record exists for this exact run generation.
-          Destructive controls stay locked until it is inspected and explicitly released.</span>
+        <span>{uiText("An unreadable permanent-deletion recovery record exists for this exact run generation. Destructive controls stay locked until it is inspected and explicitly released.")}</span>
         {!damagedInspected
-          ? <button className="btn sm" onClick={() => setDamagedInspected(true)}>Inspect recovery</button>
+          ? <button className="btn sm" onClick={() => setDamagedInspected(true)}>{uiText("Inspect recovery")}</button>
           : <>
-            <span className="muted">Run {runId}; generation {String(runGeneration).slice(0, 12)}…;
-              stored record {damagedRecovery.raw.length} bytes. Its command identity cannot be verified.</span>
-            <button className="btn sm danger" onClick={releaseDamagedRecovery}>Release exact record</button>
+            <span className="muted">{uiText("Run ")}{runId}{uiText("; generation ")}{String(runGeneration).slice(0, 12)}{uiText("…; stored record ")}{damagedRecovery.raw.length}{uiText(" bytes. Its command identity cannot be verified.")}</span>
+            <button className="btn sm danger" onClick={releaseDamagedRecovery}>{uiText("Release exact record")}</button>
           </>}
       </div>}
       {ranking && <div className="muted" style={{ marginBottom: 8, fontSize: 12, display: 'flex', gap: 6, alignItems: 'baseline' }}
-        title={ranking.reason || 'predicted before execution'}>
+        title={((ranking.reason || uiText('predicted before execution')))}>
         <OpIcon name="bulb" size={11} />
-        <span>Predicted priority order (FOREAGENT{rankConf != null ? `, ${rankConf}% confidence` : ''})
+        <span>{uiText("Predicted priority order (FOREAGENT")}{(rankConf != null ? uiMessage(", {0}% confidence", [rankConf]) : '')})
           {ranking.reason ? `: ${ranking.reason}` : ''}</span>
       </div>}
       {hyps.length === 0
-        ? <div className="muted">No hypotheses yet. The Researcher states one per experiment (its
-          <code> hypothesis</code> field); deep-research directions and your “+ Add” questions land here too,
-          then get tracked to a verdict as experiments run.</div>
+        ? <div className="muted">{uiText("No hypotheses yet. The Researcher states one per experiment (its")}<code>{" hypothesis"}</code>{uiText(" field); deep-research directions and your “+ Add” questions land here too, then get tracked to a verdict as experiments run.")}</div>
         : <div className="hyp-board">
           {_HYP_COLUMNS.map(([key, label, hint]) => {
             const col = byStatus(key)
             return <div key={key} className={'hyp-col hyp-' + key}>
-              <div className="hyp-col-h" title={hint}>{label} <span className="muted">{col.length}</span></div>
+              <div className="hyp-col-h" title={uiText(hint)}>{uiText(label)} <span className="muted">{col.length}</span></div>
               {col.map(h => {
                 const deletion = ownHypothesisEntry(deleteIntents, h.id)
                 const deleteNotice = ownHypothesisEntry(deleteNotices, h.id) || ''
                 return <div key={h.id} className="hyp-card">
                 <div className="hyp-stmt">
-                  <span className="hyp-src" title={`source: ${h.source}`}>
+                  <span className="hyp-src" title={uiMessage("source: {0}", [h.source])}>
                     <OpIcon name={_HYP_ICON[h.source] || 'dot'} size={12} /></span> {h.statement}
                 </div>
                 <div className="hyp-meta">
-                  {h.priority != null && <span className="chip xs" title={'predicted priority '
-                    + (h.priority + 1) + (rankConf != null ? ` · ${rankConf}% confidence` : '')
-                    + (ranking && ranking.reason ? ` · ${ranking.reason}` : '')}>#{h.priority + 1}</span>}
+                  {h.priority != null && <span className="chip xs" title={uiMessage("predicted priority {0}{1}{2}{3}", [h.priority, 1, rankConf != null ? ` · ${rankConf}% confidence` : '', ranking && ranking.reason ? ` · ${ranking.reason}` : ''])}>#{h.priority + 1}</span>}
                   {(h.evidence || []).slice(0, 8).map(nid => <button key={nid} className="btn xs ghost"
-                    title={`experiment #${nid}`} onClick={() => { onSelect && onSelect(nid); onClose() }}>#{nid}</button>)}
+                    title={uiMessage("experiment #{0}", [nid])} onClick={() => { onSelect && onSelect(nid); onClose() }}>#{nid}</button>)}
                   {h.best_delta != null && <span className={'chip xs ' + (h.best_delta > 0 ? 'ok' : '')}
-                    title="best improvement over parent among the evidence">Δ{fmt(h.best_delta)}</span>}
-                  {key !== 'abandoned' && <button className="btn xs ghost" title="abandon — move to the Abandoned column (keeps the record)"
+                    title={uiText("best improvement over parent among the evidence")}>Δ{fmt(h.best_delta)}</span>}
+                  {key !== 'abandoned' && <button className="btn xs ghost" title={uiText("abandon — move to the Abandoned column (keeps the record)")}
                     disabled={deleteLocked} onClick={() => abandon(h)}><OpIcon name="cross" size={11} /></button>}
-                  <button className="btn xs ghost danger" title="delete this hypothesis permanently (remove from the board)"
-                    disabled={deleteLocked} aria-label={`Delete hypothesis ${h.id} permanently`}
-                    onClick={() => del(h)}>{deletion ? 'Deleting…' : 'Delete'}</button>
+                  <button className="btn xs ghost danger" title={uiText("delete this hypothesis permanently (remove from the board)")}
+                    disabled={deleteLocked} aria-label={uiMessage("Delete hypothesis {0} permanently", [h.id])}
+                    onClick={() => del(h)}>{((deletion ? uiText('Deleting…') : uiText('Delete')))}</button>
                 </div>
                 {deleteNotice && <div className="report-inline-state error" role="alert">
                   <OpIcon name="alert" size={14} /><span>{deleteNotice}</span>
@@ -2215,6 +2152,8 @@ export function CardWorkspace({
   selectedCardId, onSelectCard, selectedNodeId, onSelectNode, renderInspector, pane,
   readOnly = false,
 }) {
+  useUILanguage()
+
   const [, setRecoveryEpoch] = useState(0)
   // MEMOIZED, because `cardRows` returns a fresh array of freshly-spread objects every call.
   // The `visibleCards` memo below (and, through it, the whole `all -> questions -> rows ->
@@ -2246,6 +2185,8 @@ export function CardWorkspace({
 }
 
 export function HypothesisBoard({ state, runId, runGeneration, onSelect, onClose, onToast }) {
+  useUILanguage()
+
   const [, setRecoveryEpoch] = useState(0)
   // MEMOIZED, because `cardRows` returns a fresh array of freshly-spread objects every call.
   // The `visibleCards` memo below (and, through it, the whole `all -> questions -> rows ->

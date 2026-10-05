@@ -1,3 +1,4 @@
+import { uiText, useUILanguage } from './uiLanguage.js'
 import React, { useMemo } from 'react'
 import { safeExternalHref, safeMarkdownHref } from './urlSafety.js'
 
@@ -159,6 +160,8 @@ function parse(src) {
 }
 
 export default function Markdown({ text, className, externalOnly = false }) {
+  useUILanguage()
+
   const parsed = useMemo(() => parse(text), [text])
   let inlineRemaining = MARKDOWN_INLINE_TOKEN_MAX
   let inlineTruncated = false
@@ -186,7 +189,7 @@ export default function Markdown({ text, className, externalOnly = false }) {
   return (
     <div className={'md' + (className ? ' ' + className : '')}>
       {content}
-      {truncated && <p className="muted md-p" role="status">{MARKDOWN_LIMIT_NOTICE}</p>}
+      {truncated && <p className="muted md-p" role="status">{uiText(MARKDOWN_LIMIT_NOTICE)}</p>}
     </div>
   )
 }

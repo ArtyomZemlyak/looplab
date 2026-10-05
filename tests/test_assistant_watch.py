@@ -1127,7 +1127,7 @@ def test_the_server_wires_a_sink_that_records_the_failure(caplog):
                 if isinstance(node, ast.Call) and getattr(node.func, "id", "") == "WatchService")
     wired = {kw.arg for kw in call.keywords}
     assert {"observe_run", "observe_target", "run_turn_fn", "append_turn", "session_exists",
-            "on_error"} == wired, (
+            "on_error", "language_fn"} == wired, (
         "the class names typed observation and turn collaborators plus an error sink")
 
     sink = next(node for node in ast.walk(tree)

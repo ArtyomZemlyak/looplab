@@ -215,6 +215,14 @@ def run_obligations(task, settings, *, generation: str) -> dict:
         "version": 1,
         "generation": generation,
         "reasoning_owner": "external_agent" if external else "looplab",
+        "output_language": {
+            "language": getattr(settings, "output_language", "auto"),
+            "instruction": "Use this language for all newly authored human prose, including "
+                           "candidate explanations, research, reviews, lessons, reports and "
+                           "result commentary. auto follows the user's task. Preserve schema keys, "
+                           "IDs, code, commands, raw logs and measured evidence. This is a language "
+                           "preference, not a new admission or finish gate.",
+        },
         "agent_choices": [phase.id for phase in PHASES],
         "choice_policy": {
             "default": "configured",

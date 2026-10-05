@@ -1,3 +1,4 @@
+import { uiText, uiMessage, useUILanguage } from './uiLanguage.js'
 import React, { useCallback, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import {
   anchoredScrollTop, buildVirtualLayout, DEFAULT_TIMELINE_OVERSCAN, DEFAULT_TIMELINE_ROW_HEIGHT,
@@ -7,6 +8,8 @@ import {
 const defaultKey = row => row.seq
 
 function MeasuredRow({ itemKey, top, position, setSize, onMeasure, itemProps, children }) {
+  useUILanguage()
+
   const ref = useRef(null)
   useLayoutEffect(() => {
     const element = ref.current
@@ -50,6 +53,8 @@ export default function VirtualTimeline({
   getItemProps = null,
   activeIndex = null,
 }) {
+  useUILanguage()
+
   const scrollRef = useRef(null)
   const measurements = useRef(new Map())
   const pendingMeasurements = useRef(new Map())
@@ -324,9 +329,8 @@ export default function VirtualTimeline({
     {!followingTail && (unreadUnknown || unread > 0) && <div className="timeline-unread-status" role="status"
       aria-live="polite" aria-atomic="true">
       <button type="button" className="timeline-unread" onClick={onJumpToLive}
-        aria-label={unreadUnknown ? 'New activity; jump to live'
-          : `${unread} new event${unread === 1 ? '' : 's'}; jump to live`}>
-        {unreadUnknown ? 'new activity · jump to live' : `${unread} new · jump to live`}
+        aria-label={((unreadUnknown ? uiText('New activity; jump to live') : uiMessage("{0} new event{1}; jump to live", [unread, unread === 1 ? '' : 's'])))}>
+        {((unreadUnknown ? uiText('new activity · jump to live') : uiMessage("{0} new · jump to live", [unread])))}
       </button>
     </div>}
   </div>

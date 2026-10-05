@@ -1,3 +1,4 @@
+import { uiText, uiMessage, useUILanguage } from './uiLanguage.js'
 import React, { useEffect, useId, useLayoutEffect, useRef, useState } from 'react'
 import { createIdempotencyKey, llmHealth } from './util.js'
 import { OpIcon } from './icons.jsx'
@@ -5,7 +6,7 @@ import { deadlineRequest } from './requestDeadline.js'
 import { publishModelCheck } from './modelConnection.js'
 import './llm-health.css'
 
-const countLabel = (count, singular, plural = `${singular}s`) => `${count} ${count === 1 ? singular : plural}`
+const countLabel = (count, singular, plural = `${singular}s`) => uiText(`${count} ${count === 1 ? singular : plural}`)
 // Outlive the server's 60s provider wall plus bounded teardown. The interaction
 // test imports this deadline so it cannot silently stop exercising timeout recovery.
 export const LLM_HEALTH_TIMEOUT_MS = 70_000
@@ -77,6 +78,8 @@ export function LlmHealth({
   providerBlockedReason = '',
   copy,
 }) {
+  useUILanguage()
+
   const text = value => copy?.text(value) ?? value
   const recoveryHelp = status => copy?.recoveryHelp(status) ?? status.error
   const noteId = useId()
@@ -416,18 +419,13 @@ export function LlmHealth({
       {providerBlockedReason}
     </span>}
     {unsavedCount > 0 && <span id={draftNoteId} className="llm-health-note">
-      {copy ? copy.draftNote(unsavedCount) : `${countLabel(unsavedCount, 'draft change')} excluded`}
+      {(copy ? copy.draftNote(unsavedCount) : uiMessage("{0} excluded", [countLabel(unsavedCount, 'draft change')]))}
     </span>}
     {visibleStatus && <span className="llm-health-result" role="status" aria-live="polite">
       <span className={'chip llm-health-status ' + (visibleStatus.ok ? 'ok'
         : visibleStatus.unresolved || visibleStatus.configurationChanged || visibleStatus.anotherCheckBusy
           ? 'warn' : 'alarm')}
-                       title={visibleStatus.ok
-                         ? copy ? text(visibleStatus.previousConfiguration ? 'Previous LLM responded' : 'Active LLM responded')
-                           : visibleStatus.previousConfiguration
-                           ? 'The previous saved LLM configuration responded successfully; the current active configuration was not contacted.'
-                           : 'The server-resolved active LLM responded successfully.'
-                         : recoveryHelp(visibleStatus) || 'Check the active provider configuration and network access.'}>
+                       title={((visibleStatus.ok ? (copy ? text(visibleStatus.previousConfiguration ? 'Previous LLM responded' : 'Active LLM responded') : (visibleStatus.previousConfiguration ? uiText('The previous saved LLM configuration responded successfully; the current active configuration was not contacted.') : uiText('The server-resolved active LLM responded successfully.'))) : (recoveryHelp(visibleStatus) || uiText('Check the active provider configuration and network access.'))))}>
         {visibleStatus.ok ? '✓' : visibleStatus.unresolved || visibleStatus.configurationChanged
           || visibleStatus.anotherCheckBusy ? '!' : '×'} {visibleStatus.configurationChanged
           ? text('Reload saved settings')
@@ -441,8 +439,7 @@ export function LlmHealth({
           : visibleStatus.previousConfiguration ? text('Previous LLM failed') : text('Active LLM failed')}
       </span>
       {visibleStatus.previousConfiguration && <span className="llm-health-detail">
-        {copy ? copy.previousConfiguration
-          : 'Result belongs to the previous saved configuration; the current active LLM was not contacted.'}
+        {((copy ? copy.previousConfiguration : uiText('Result belongs to the previous saved configuration; the current active LLM was not contacted.')))}
       </span>}
       {!visibleStatus.ok && visibleStatus.error && <span className="llm-health-detail">{recoveryHelp(visibleStatus)}</span>}
     </span>}

@@ -1,3 +1,5 @@
+import { uiText, uiMessage, useUILanguage } from './uiLanguage.js'
+import LanguageControl from './LanguageControl.jsx'
 import React, {
   lazy, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore,
 } from 'react'
@@ -238,6 +240,8 @@ function writeRunGroupNavigation(value, mode = 'replace') {
 const hubMenuId = label => `panel-hub-${label.toLowerCase().replace(/[^a-z0-9]+/g, '-')}`
 
 function DagEmptyOverlay({ presentation, transport, onAction }) {
+  useUILanguage()
+
   if (!presentation) return null
   let actions = presentation.actions
   if (transport?.failure) {
@@ -255,14 +259,12 @@ function DagEmptyOverlay({ presentation, transport, onAction }) {
         piece of text on an empty canvas. It said "Search canvas" while the toggle button 40px above
         it said `Lineage`, which is the rename's most visible survivor. The KEY is still `dag`; only
         the label moved. */}
-    <span className="dag-empty-eyebrow">Lineage canvas</span>
-    <h2>{presentation.title}</h2>
+    <span className="dag-empty-eyebrow">{uiText("Lineage canvas")}</span>
+    <h2>{uiText(presentation.title)}</h2>
     <p>{presentation.body}</p>
-    {transport?.failure && <p className="dag-empty-command-note">
-      The last run command needs attention. Its exact identity is preserved in Events &amp; timeline.
-    </p>}
+    {transport?.failure && <p className="dag-empty-command-note">{uiText("The last run command needs attention. Its exact identity is preserved in Events & timeline.")}</p>}
     {transport?.busy && <p className="dag-empty-command-note">
-      {pendingAction ? `${pendingAction} command is already in progress.` : 'A run command is already in progress.'}
+      {((pendingAction ? uiMessage("{0} command is already in progress.", [pendingAction]) : uiText('A run command is already in progress.')))}
     </p>}
     {/* A remedy this surface cannot perform, printed as the exact command instead of a button that
         would submit an intent the server rejects. Selectable text on purpose: the alternative is a
@@ -278,13 +280,15 @@ function DagEmptyOverlay({ presentation, transport, onAction }) {
         const disabled = isTransport && (!!transport?.busy || !transport || !generationReady)
         return <button type="button" key={item.id}
           className={'btn' + (item.emphasis === 'primary' ? ' primary' : item.emphasis === 'danger' ? ' danger' : '')}
-          disabled={disabled} onClick={() => onAction(item.id)}>{item.label}</button>
+          disabled={disabled} onClick={() => onAction(item.id)}>{uiText(item.label)}</button>
       })}
     </div>}
   </section>
 }
 
 export default function RunView({ runId, onBack, reviewMode = false, reviewMeta = null }) {
+  useUILanguage()
+
   const { live, seq, generation, eventCount: liveEventCount, connected, degraded: streamDegraded,
     status: runStatus, error: runError, retry: retryRun } =
     useRunState(runId, { pollOnly: reviewMode })
@@ -1108,7 +1112,7 @@ export default function RunView({ runId, onBack, reviewMode = false, reviewMeta 
       return
     }
     if (!window.confirm(
-      `Discard ${total} releasable Comments work item${total === 1 ? '' : 's'} from this browser tab? Current-generation append-only recovery stays protected because it is not safe to release.`,
+      uiMessage("Discard {0} releasable Comments work item{1} from this browser tab? Current-generation append-only recovery stays protected because it is not safe to release.", [total, total === 1 ? '' : 's']),
     )) return
     let cleared = true
     for (const intent of retainedCommentReleasableIntents) {
@@ -1779,9 +1783,9 @@ export default function RunView({ runId, onBack, reviewMode = false, reviewMeta 
   const routeFocusPhase = !live ? `resource:${runStatus}`
     : routeFenceBlocked ? `fence:${generationMismatch ? 'mismatch' : 'pending'}`
     : historyActive && !hist ? `history:${history.status}` : 'ready'
-  const workspaceRouteLabel = `${live?.label || live?.run_id || runId} run workspace · ${
+  const workspaceRouteLabel = uiMessage('{0} run workspace · {1}', [live?.label || live?.run_id || runId, uiText(
     view === 'cards' ? 'Cards' : view === 'concepts' ? 'Concepts'
-      : view === 'report' ? 'Report' : 'Lineage'}`   // must track the view-toggle's label, below
+      : view === 'report' ? 'Report' : 'Lineage')])   // must track the view-toggle's label, below
   useEffect(() => {
     // The dialog owns focus while it is mounting and open. Keeping the opener intact here also lets
     // an explicit Close consume the panel's history entry and restore the exact launching control.
@@ -1806,16 +1810,12 @@ export default function RunView({ runId, onBack, reviewMode = false, reviewMeta 
     <main ref={startOverNoticeRef} className="run-resource-state" data-route-main tabIndex={-1}
       aria-labelledby="run-state" role="alert">
       <div className="resource-state-icon" aria-hidden="true">!</div>
-      <h1 id="run-state">{startOverRecovery.kind === 'unavailable'
-        ? 'Start over recovery storage is unavailable'
-        : 'Saved Start over recovery is invalid'}</h1>
-      <p>{startOverRecovery.kind === 'unavailable'
-        ? 'This tab cannot safely preserve a Start over request. No request can be submitted until recovery storage works again.'
-        : 'LoopLab cannot identify an earlier Start over request safely. Run changes remain locked until its saved recovery evidence is resolved.'}</p>
+      <h1 id="run-state">{((startOverRecovery.kind === 'unavailable' ? uiText('Start over recovery storage is unavailable') : uiText('Saved Start over recovery is invalid')))}</h1>
+      <p>{((startOverRecovery.kind === 'unavailable' ? uiText('This tab cannot safely preserve a Start over request. No request can be submitted until recovery storage works again.') : uiText('LoopLab cannot identify an earlier Start over request safely. Run changes remain locked until its saved recovery evidence is resolved.')))}</p>
       <div className="resource-state-actions">
         {startOverRecovery.kind === 'unavailable' && <button type="button"
-          className="btn primary" onClick={retryStartOverStorage}>Try storage again</button>}
-        {onBack && <button type="button" className="btn" onClick={leaveRetainedPanelRoute}>Back to runs</button>}
+          className="btn primary" onClick={retryStartOverStorage}>{uiText("Try storage again")}</button>}
+        {onBack && <button type="button" className="btn" onClick={leaveRetainedPanelRoute}>{uiText("Back to runs")}</button>}
       </div>
     </main>
   </RunScreen>
@@ -1824,33 +1824,12 @@ export default function RunView({ runId, onBack, reviewMode = false, reviewMeta 
     <main ref={startOverNoticeRef} className="run-resource-state" data-route-main tabIndex={-1}
       aria-labelledby="run-state" role={runStatus === 'error' ? 'alert' : 'status'}>
       {runStatus === 'loading' && <div className="history-spinner" aria-hidden="true" />}
-      <h1 id="run-state">{startOverRequestPending
-        ? 'Submitting the same Start over request…'
-        : runStatus === 'not_found'
-          ? 'Run files are switching…'
-          : runStatus === 'error'
-            ? 'Start over status is unavailable'
-            : startOverIntent.phase === 'unknown'
-              ? 'Start over outcome is not confirmed'
-              : startOverIntent.phase === 'pending'
-                ? 'Checking the saved Start over request…'
-              : 'Starting this run over…'}</h1>
-      <p>{runStatus === 'error'
-        ? `${runError || 'The server could not read this run.'} Recovery remains locked so another operation cannot overlap it.`
-        : runStatus === 'not_found'
-          ? 'The previous event log may already be archived while the replacement generation is starting. The exact request identity is preserved.'
-          : startOverIntent.phase === 'unknown'
-            ? 'The result is not confirmed. Retry the exact saved request; LoopLab will not create a second Start over operation.'
-            : startOverIntent.phase === 'pending'
-              ? 'The server preserved this exact request. LoopLab is checking the same operation automatically; no duplicate will be created.'
-            : startOverIntent.phase === 'submitting'
-              ? 'The exact request is being submitted. No archive is assumed until the server returns its matching operation receipt.'
-              : 'The server accepted this exact operation. Waiting for the replacement run to become readable.'}</p>
+      <h1 id="run-state">{((startOverRequestPending ? uiText('Submitting the same Start over request…') : (runStatus === 'not_found' ? uiText('Run files are switching…') : (runStatus === 'error' ? uiText('Start over status is unavailable') : (startOverIntent.phase === 'unknown' ? uiText('Start over outcome is not confirmed') : (startOverIntent.phase === 'pending' ? uiText('Checking the saved Start over request…') : uiText('Starting this run over…')))))))}</h1>
+      <p>{((runStatus === 'error' ? uiMessage("{0} Recovery remains locked so another operation cannot overlap it.", [runError || 'The server could not read this run.']) : (runStatus === 'not_found' ? uiText('The previous event log may already be archived while the replacement generation is starting. The exact request identity is preserved.') : (startOverIntent.phase === 'unknown' ? uiText('The result is not confirmed. Retry the exact saved request; LoopLab will not create a second Start over operation.') : (startOverIntent.phase === 'pending' ? uiText('The server preserved this exact request. LoopLab is checking the same operation automatically; no duplicate will be created.') : (startOverIntent.phase === 'submitting' ? uiText('The exact request is being submitted. No archive is assumed until the server returns its matching operation receipt.') : uiText('The server accepted this exact operation. Waiting for the replacement run to become readable.')))))))}</p>
       <div className="resource-state-actions">
         <button type="button" className="btn primary" onClick={retryStartOver}
           disabled={startOverRequestPending}>
-          {startOverRequestPending ? 'Waiting for response…'
-            : 'Retry exact request'}
+          {((startOverRequestPending ? uiText('Waiting for response…') : uiText('Retry exact request')))}
         </button>
       </div>
     </main>
@@ -1861,21 +1840,21 @@ export default function RunView({ runId, onBack, reviewMode = false, reviewMeta 
       aria-labelledby="run-state">
       {runStatus === 'not_found' ? <>
         <div className="resource-state-icon" aria-hidden="true">404</div>
-        <h1 id="run-state">Run not found</h1>
-        <p><code>{runId}</code> does not exist or may have been removed.</p>
-        <div className="resource-state-actions">{onBack && <button className="btn primary" onClick={leaveRetainedPanelRoute}>Back to runs</button>}<button className="btn" onClick={retryRun}>Retry</button></div>
+        <h1 id="run-state">{uiText("Run not found")}</h1>
+        <p><code>{runId}</code>{uiText(" does not exist or may have been removed.")}</p>
+        <div className="resource-state-actions">{onBack && <button className="btn primary" onClick={leaveRetainedPanelRoute}>{uiText("Back to runs")}</button>}<button className="btn" onClick={retryRun}>{uiText("Retry")}</button></div>
       </> : runStatus === 'gone' ? <>
         <div className="resource-state-icon" aria-hidden="true">×</div>
-        <h1 id="run-state">Review access ended</h1>
-        <p>{runError || 'This review link expired or was revoked.'}</p>
+        <h1 id="run-state">{uiText("Review access ended")}</h1>
+        <p>{((runError || uiText('This review link expired or was revoked.')))}</p>
       </> : runStatus === 'error' ? <>
         <div className="resource-state-icon" aria-hidden="true">!</div>
-        <h1 id="run-state">Could not load run</h1>
-        <p>{runError || 'Check that the LoopLab server is reachable.'}</p>
-        <div className="resource-state-actions"><button className="btn primary" onClick={retryRun}>Retry</button>{onBack && <button className="btn" onClick={leaveRetainedPanelRoute}>Back to runs</button>}</div>
+        <h1 id="run-state">{uiText("Could not load run")}</h1>
+        <p>{((runError || uiText('Check that the LoopLab server is reachable.')))}</p>
+        <div className="resource-state-actions"><button className="btn primary" onClick={retryRun}>{uiText("Retry")}</button>{onBack && <button className="btn" onClick={leaveRetainedPanelRoute}>{uiText("Back to runs")}</button>}</div>
       </> : <>
         <div className="history-spinner" aria-hidden="true" />
-        <h1 id="run-state">Opening run…</h1><p>Loading the latest search state.</p>
+        <h1 id="run-state">{uiText("Opening run…")}</h1><p>{uiText("Loading the latest search state.")}</p>
       </>}
     </main>
   </RunScreen>
@@ -1884,26 +1863,14 @@ export default function RunView({ runId, onBack, reviewMode = false, reviewMeta 
     <main ref={startOverNoticeRef} className="run-resource-state stale-route-state"
       data-route-main tabIndex={-1} aria-labelledby="run-state" role="alert">
       <div className="resource-state-icon" aria-hidden="true">↻</div>
-      <h1 id="run-state">{startOverReplacementSuperseded
-        ? 'Start over completed, and the run changed again'
-        : startOverHandoff
-          ? 'Opening the verified replacement run…'
-          : 'The run changed while Start over is unresolved'}</h1>
-      <p>{startOverReplacementSuperseded
-        ? 'The exact saved operation produced its verified replacement generation. A newer generation is now visible, so this resolved recovery record can be cleared before opening the current run.'
-        : startOverHandoff
-          ? startOverRouteSyncFailed
-            ? 'The matching operation receipt is verified, but this page could not update its address. Changes remain locked.'
-            : 'The matching operation receipt is verified. Updating this diagnostic address to the new generation.'
-          : 'A different generation is visible, but that alone does not prove which operation created it. Retry the exact saved request to read its receipt.'}</p>
+      <h1 id="run-state">{((startOverReplacementSuperseded ? uiText('Start over completed, and the run changed again') : (startOverHandoff ? uiText('Opening the verified replacement run…') : uiText('The run changed while Start over is unresolved'))))}</h1>
+      <p>{((startOverReplacementSuperseded ? uiText('The exact saved operation produced its verified replacement generation. A newer generation is now visible, so this resolved recovery record can be cleared before opening the current run.') : (startOverHandoff ? (startOverRouteSyncFailed ? uiText('The matching operation receipt is verified, but this page could not update its address. Changes remain locked.') : uiText('The matching operation receipt is verified. Updating this diagnostic address to the new generation.')) : uiText('A different generation is visible, but that alone does not prove which operation created it. Retry the exact saved request to read its receipt.'))))}</p>
       <div className="resource-state-actions">
         <button type="button" className="btn primary" onClick={retryStartOver}
           disabled={startOverRequestPending}>
-          {startOverRequestPending ? 'Waiting for response…'
-            : startOverReplacementSuperseded ? 'Open current run'
-              : startOverHandoff ? 'Retry opening new run' : 'Retry exact request'}
+          {((startOverRequestPending ? uiText('Waiting for response…') : (startOverReplacementSuperseded ? uiText('Open current run') : (startOverHandoff ? uiText('Retry opening new run') : uiText('Retry exact request')))))}
         </button>
-        {onBack && <button type="button" className="btn" onClick={leaveRetainedPanelRoute}>Back to runs</button>}
+        {onBack && <button type="button" className="btn" onClick={leaveRetainedPanelRoute}>{uiText("Back to runs")}</button>}
       </div>
     </main>
   </RunScreen>
@@ -1912,76 +1879,57 @@ export default function RunView({ runId, onBack, reviewMode = false, reviewMeta 
     <main className="run-resource-state stale-route-state" data-route-main tabIndex={-1}
       aria-labelledby="run-state" role={generationMismatch ? 'alert' : 'status'}>
       <div className="resource-state-icon" aria-hidden="true">{generationMismatch ? '↺' : '…'}</div>
-      <h1 id="run-state">{generationMismatch ? 'This diagnostic link targets an earlier run generation' : 'Verifying diagnostic link…'}</h1>
+      <h1 id="run-state">{((generationMismatch ? uiText('This diagnostic link targets an earlier run generation') : uiText('Verifying diagnostic link…')))}</h1>
       {generationMismatch ? <>
-        <p>The run was reset or replaced after this link was created. Node ids and sequence numbers may now mean something else, so LoopLab will not reinterpret the link.</p>
+        <p>{uiText("The run was reset or replaced after this link was created. Node ids and sequence numbers may now mean something else, so LoopLab will not reinterpret the link.")}</p>
         {retainedConfigDraftUnsafe && <p className="notice" role="status">
           {retainedConfigStoredDraftUnsafe ? <>
-            <b>Your unsaved Run settings draft is retained in this tab.</b> Nothing was sent automatically.
-            Open the current generation to load its authoritative settings and review the retained fields.
-          </> : <>
-            <b>A Run settings operation was interrupted by this generation change.</b>{' '}
-            Its server-side outcome may need verification; nothing will be replayed automatically.
-            Open the current generation to inspect the authoritative state.
-          </>}
+            <b>{uiText("Your unsaved Run settings draft is retained in this tab.")}</b>{uiText(" Nothing was sent automatically. Open the current generation to load its authoritative settings and review the retained fields.")}</> : <>
+            <b>{uiText("A Run settings operation was interrupted by this generation change.")}</b>{' '}{uiText("Its server-side outcome may need verification; nothing will be replayed automatically. Open the current generation to inspect the authoritative state.")}</>}
         </p>}
         {retainedAuthoringDraftUnsafe && <p className="notice" role="status">
           {retainedAuthoringDraftCount > 0 && <>
-            <b>{retainedAuthoringDraftCount} unsaved in-memory Authoring draft{retainedAuthoringDraftCount === 1 ? ' is' : 's are'} retained in this tab.</b>
-            {' '}Nothing was saved automatically.{' '}
+            <b>{retainedAuthoringDraftCount}{uiText(" unsaved in-memory Authoring draft")}{((retainedAuthoringDraftCount === 1 ? uiText(' is') : uiText('s are')))}{uiText(" retained in this tab.")}</b>
+            {' '}{uiText("Nothing was saved automatically.")}{' '}
           </>}
           {retainedAuthoringDurableRecoveryCount > 0 && <>
-            <b>{retainedAuthoringDurableRecoveryCount} durable Authoring recovery record{retainedAuthoringDurableRecoveryCount === 1 ? ' remains' : 's remain'} protected in browser storage.</b>
-            {' '}It will be reconciled without automatic replay.{' '}
+            <b>{retainedAuthoringDurableRecoveryCount}{uiText(" durable Authoring recovery record")}{((retainedAuthoringDurableRecoveryCount === 1 ? uiText(' remains') : uiText('s remain')))}{uiText(" protected in browser storage.")}</b>
+            {' '}{uiText("It will be reconciled without automatic replay.")}{' '}
           </>}
           {retainedAuthoringMemoryOnlyRecoveryCount > 0 && <>
-            <b>{retainedAuthoringMemoryOnlyRecoveryCount} exact recovery snapshot{retainedAuthoringMemoryOnlyRecoveryCount === 1 ? ' exists' : 's exist'} only in this tab.</b>
-            {' '}Opening the current generation preserves it; leaving this run discards it.{' '}
-          </>}
-          Open the current generation to refresh the Authoring source and review the retained text.
-        </p>}
+            <b>{retainedAuthoringMemoryOnlyRecoveryCount}{uiText(" exact recovery snapshot")}{((retainedAuthoringMemoryOnlyRecoveryCount === 1 ? uiText(' exists') : uiText('s exist')))}{uiText(" only in this tab.")}</b>
+            {' '}{uiText("Opening the current generation preserves it; leaving this run discards it.")}{' '}
+          </>}{uiText("Open the current generation to refresh the Authoring source and review the retained text.")}</p>}
         {retainedCommentWorkUnsafe && <div className="notice"
           role={retainedCommentRecoveryUnavailable || retainedCommentRecovery.damaged.length > 0
             ? 'alert' : 'status'}>
-          <b>Comments work is retained in this tab.</b>{' '}
-          {retainedCommentDrafts.length > 0
-            ? `${retainedCommentDrafts.length} unsaved draft${retainedCommentDrafts.length === 1 ? '' : 's'} remain in memory. `
-            : ''}
-          {retainedCommentRecovery.valid.length > 0
-            ? `${retainedCommentRecovery.valid.length} exact command recover${retainedCommentRecovery.valid.length === 1 ? 'y is' : 'ies are'} protected in browser storage. `
-            : ''}
-          {retainedCommentRecovery.damaged.length > 0
-            ? `${retainedCommentRecovery.damaged.length} damaged recovery record${retainedCommentRecovery.damaged.length === 1 ? ' needs' : 's need'} review. `
-            : ''}
-          {retainedCommentRecoveryUnavailable
-            ? 'Recovery storage cannot be inspected, so Start over remains blocked until it is available again. '
-            : ''}
-          Nothing will be replayed automatically or rebound to the replacement generation.
-          {(retainedCommentDrafts.length > 0 || retainedCommentRecovery.valid.length > 0) && <details>
-            <summary>View retained Comments work</summary>
+          <b>{uiText("Comments work is retained in this tab.")}</b>{' '}
+          {(retainedCommentDrafts.length > 0 ? uiMessage("{0} unsaved draft{1} remain in memory. ", [retainedCommentDrafts.length, retainedCommentDrafts.length === 1 ? '' : 's']) : '')}
+          {(retainedCommentRecovery.valid.length > 0 ? uiMessage("{0} exact command recover{1} protected in browser storage. ", [retainedCommentRecovery.valid.length, retainedCommentRecovery.valid.length === 1 ? 'y is' : 'ies are']) : '')}
+          {(retainedCommentRecovery.damaged.length > 0 ? uiMessage("{0} damaged recovery record{1} review. ", [retainedCommentRecovery.damaged.length, retainedCommentRecovery.damaged.length === 1 ? ' needs' : 's need']) : '')}
+          {((retainedCommentRecoveryUnavailable ? uiText('Recovery storage cannot be inspected, so Start over remains blocked until it is available again. ') : ''))}{uiText("Nothing will be replayed automatically or rebound to the replacement generation.")}{(retainedCommentDrafts.length > 0 || retainedCommentRecovery.valid.length > 0) && <details>
+            <summary>{uiText("View retained Comments work")}</summary>
             {retainedCommentDrafts.map((text, index) => <pre key={`draft:${index}`}
               className="comment-recovery-payload">{text}</pre>)}
             {retainedCommentRecovery.valid.map(intent => <div key={intent.storageKey}
               className="comment-recovery-payload">
-              <b>{intent.kind === 'create' ? 'New comment' : intent.kind === 'edit'
-                ? 'Comment edit' : intent.resolved ? 'Resolve comment' : 'Reopen comment'}</b>
-              {' '}· experiment #{intent.nodeId} · attempt {intent.nodeGeneration}
+              <b>{((intent.kind === 'create' ? uiText('New comment') : (intent.kind === 'edit' ? uiText('Comment edit') : (intent.resolved ? uiText('Resolve comment') : uiText('Reopen comment')))))}</b>
+              {' '}{uiText("· experiment #")}{intent.nodeId}{uiText(" · attempt ")}{intent.nodeGeneration}
               {intent.text != null && <pre>{intent.text}</pre>}
             </div>)}
           </details>}
           <div className="resource-state-actions">
             {(retainedCommentDrafts.length > 0 || retainedCommentRecovery.valid.length > 0)
               && <button type="button" className="btn"
-                onClick={copyRetainedCommentWork}>Copy Comments work</button>}
+                onClick={copyRetainedCommentWork}>{uiText("Copy Comments work")}</button>}
             {retainedCommentRecoveryUnavailable && <button type="button" className="btn"
-              onClick={refreshCommentOperationRecoveries}>Retry recovery storage</button>}
+              onClick={refreshCommentOperationRecoveries}>{uiText("Retry recovery storage")}</button>}
             {retainedCommentReleasableCount > 0 && <button type="button" className="btn danger"
-              onClick={discardRetainedCommentWork}>{retainedCommentProtectedCreates.length > 0
-                ? 'Discard other work' : 'Discard Comments work'}</button>}
+              onClick={discardRetainedCommentWork}>{((retainedCommentProtectedCreates.length > 0 ? uiText('Discard other work') : uiText('Discard Comments work')))}</button>}
           </div>
         </div>}
         <div className="route-generation-detail">
-          <code>link {routeState.generation?.slice(0, 12)}</code><span>≠</span><code>current {generation?.slice(0, 12)}</code>
+          <code>{"link "}{routeState.generation?.slice(0, 12)}</code><span>≠</span><code>{"current "}{generation?.slice(0, 12)}</code>
         </div>
         <div className="resource-state-actions">
           <button className="btn primary" onClick={() => {
@@ -1993,18 +1941,10 @@ export default function RunView({ runId, onBack, reviewMode = false, reviewMeta 
             }
             route.openCurrentGeneration(retainedPanelRoute
               ? { mode: 'replace', panel: retainedPanelRoute } : undefined)
-          }}>{retainedConfigDraftUnsafe
-              ? retainedConfigStoredDraftUnsafe
-                ? 'Open current generation with settings draft'
-                : 'Open current generation after settings operation'
-              : retainedAuthoringDraftUnsafe
-                ? 'Open current generation with Authoring work'
-                : retainedCommentWorkUnsafe
-                  ? 'Open current generation with Comments recovery'
-                : 'Open current generation'}</button>
-          {onBack && <button className="btn" onClick={leaveRetainedPanelRoute}>Back to runs</button>}
+          }}>{((retainedConfigDraftUnsafe ? (retainedConfigStoredDraftUnsafe ? uiText('Open current generation with settings draft') : uiText('Open current generation after settings operation')) : (retainedAuthoringDraftUnsafe ? uiText('Open current generation with Authoring work') : (retainedCommentWorkUnsafe ? uiText('Open current generation with Comments recovery') : uiText('Open current generation')))))}</button>
+          {onBack && <button className="btn" onClick={leaveRetainedPanelRoute}>{uiText("Back to runs")}</button>}
         </div>
-      </> : <p>Confirming that this node and sequence still belong to the run generation named by the link.</p>}
+      </> : <p>{uiText("Confirming that this node and sequence still belong to the run generation named by the link.")}</p>}
     </main>
   </RunScreen>
   // Liveness reflects the ACTUAL run, not the viewed snapshot: green+breathing only while a
@@ -2032,21 +1972,21 @@ export default function RunView({ runId, onBack, reviewMode = false, reviewMeta 
   if (historyActive && !hist) return <RunScreen reviewPill
     onBack={onBack} onLeave={leaveRetainedPanelRoute} head={<>
       <span className="spacer" />
-      <span className={'live ' + liveStatus}><span className="led" />current run: {liveLabel}</span>
+      <span className={'live ' + liveStatus}><span className="led" />{uiText("current run: ")}{uiText(liveLabel)}</span>
     </>}>
     <div className="history-banner" role="status">
       <span className="history-lock" aria-hidden="true">◷</span>
-      <b>Historical snapshot · gen {gen} · seq {viewSeq} of {seq}</b>
-      <span>read-only</span>
-      <button className="btn sm primary" onClick={returnToLiveAndFocusWorkspace}>Return to live</button>
+      <b>{uiText("Historical snapshot · gen ")}{gen}{uiText(" · seq ")}{viewSeq}{uiText(" of ")}{seq}</b>
+      <span>{uiText("read-only")}</span>
+      <button className="btn sm primary" onClick={returnToLiveAndFocusWorkspace}>{uiText("Return to live")}</button>
     </div>
     <main className="history-resource" data-route-main tabIndex={-1}
       aria-labelledby="run-state">
       {currentHistory?.status === 'error'
-        ? <><h1 id="run-state">Snapshot unavailable</h1><p>{currentHistory.error}</p>
-            <button className="btn" onClick={() => setHistoryRetry(n => n + 1)}>Retry</button></>
-        : <><div className="history-spinner" aria-hidden="true" /><h1 id="run-state">Loading snapshot seq {viewSeq}…</h1>
-            <p>The live workspace is hidden until this exact historical state resolves.</p></>}
+        ? <><h1 id="run-state">{uiText("Snapshot unavailable")}</h1><p>{currentHistory.error}</p>
+            <button className="btn" onClick={() => setHistoryRetry(n => n + 1)}>{uiText("Retry")}</button></>
+        : <><div className="history-spinner" aria-hidden="true" /><h1 id="run-state">{uiText("Loading snapshot seq ")}{viewSeq}…</h1>
+            <p>{uiText("The live workspace is hidden until this exact historical state resolves.")}</p></>}
     </main>
   </RunScreen>
   const state = historyActive ? hist : live
@@ -2098,7 +2038,7 @@ export default function RunView({ runId, onBack, reviewMode = false, reviewMeta 
   // Inspector must not know WHICH view is showing it, only whether "take me to the graph" is a move
   // that goes somewhere. Passing null inside the Lineage view is what keeps it from offering a
   // button that lands you where you already are.
-  const renderNodeInspector = nodeId => <LazyBoundary label="experiment inspector"
+  const renderNodeInspector = nodeId => <LazyBoundary label={"experiment inspector"}
     resetKey={`node:${nodeId}`}>
     <Inspector runId={runId} nodeId={nodeId} state={state} live={live}
       evalStages={liveEvalStages}
@@ -2176,8 +2116,8 @@ export default function RunView({ runId, onBack, reviewMode = false, reviewMeta 
 
   return (
     <main ref={routeMainRef} className={'app' + (reviewMode ? ' review-mode' : '')}
-      data-route-main tabIndex={-1} aria-label={workspaceRouteLabel}>
-      <h1 className="sr-only">{workspaceRouteLabel}</h1>
+      data-route-main tabIndex={-1} aria-label={uiText(workspaceRouteLabel)}>
+      <h1 className="sr-only">{uiText(workspaceRouteLabel)}</h1>
       <div className="topbar run-head">
         {/* The mark IS the menu — one control, not a wordmark with a second button carrying the
             same word beside it. In review mode it stays the inert mark: that route is public (it
@@ -2185,19 +2125,17 @@ export default function RunView({ runId, onBack, reviewMode = false, reviewMeta 
             surfaces. The inert arm is a real mark rather than a disabled trigger, because a dead
             button and a button that opens an empty menu both still advertise that the surfaces
             exist. */}
-        {reviewMode ? <BrandMark /> : <GlobalMenu />}
-        {onBack ? <button className="btn sm ghost" onClick={leaveRetainedPanelRoute}>← runs</button>
-          : <span className="pill">read-only review</span>}
+        {reviewMode ? <><BrandMark /><LanguageControl /></> : <GlobalMenu />}
+        {onBack ? <button className="btn sm ghost" onClick={leaveRetainedPanelRoute}>{uiText("← runs")}</button>
+          : <span className="pill">{uiText("read-only review")}</span>}
         <button type="button" className="btn sm ghost copy-view-btn" onClick={copyViewLink}
-          aria-label={reviewMode ? 'Copy read-only review context' : 'Copy shareable run context'}
-          title={reviewMode
-            ? 'Copy this read-only capability and route context; local visual filters are not included'
-            : 'Copy the run route, selected evidence and snapshot; local graph filters are not included and recipients still need owner access'}>
-          <OpIcon name="link" size={12} /> <span className="copy-view-label">Copy context</span>
+          aria-label={((reviewMode ? uiText('Copy read-only review context') : uiText('Copy shareable run context')))}
+          title={((reviewMode ? uiText('Copy this read-only capability and route context; local visual filters are not included') : uiText('Copy the run route, selected evidence and snapshot; local graph filters are not included and recipients still need owner access')))}>
+          <OpIcon name="link" size={12} /> <span className="copy-view-label">{uiText("Copy context")}</span>
         </button>
         <EnergyToggle />
         <div ref={workspaceToolbarRef} className="view-toggle" role="toolbar"
-          aria-label="Run workspace controls" aria-orientation="horizontal"
+          aria-label={uiText("Run workspace controls")} aria-orientation="horizontal"
           onKeyDown={onWorkspaceToolbarKeyDown} onFocus={onWorkspaceToolbarFocus}>
           {/* LINEAGE, not "Search". This view draws the node DAG — which experiment was derived from
               which, by which operator — so what it shows is ancestry, and that is the word for it.
@@ -2207,20 +2145,18 @@ export default function RunView({ runId, onBack, reviewMode = false, reviewMeta 
               `?view=` URLs and in the `data-workspace-control` ids the toolbar tests drive, and
               renaming a label is no reason to break those. */}
           <button type="button" data-workspace-control="dag" tabIndex={workspaceTabStop === 'dag' ? 0 : -1}
-            aria-pressed={view === 'dag'} className={'vt' + (view === 'dag' ? ' on' : '')} onClick={() => setView('dag')}>Lineage</button>
+            aria-pressed={view === 'dag'} className={'vt' + (view === 'dag' ? ' on' : '')} onClick={() => setView('dag')}>{uiText("Lineage")}</button>
           <button type="button" data-workspace-control="cards" tabIndex={workspaceTabStop === 'cards' ? 0 : -1}
             aria-pressed={view === 'cards'} className={'vt' + (view === 'cards' ? ' on' : '')}
             disabled={reviewMode} onClick={() => setView('cards')}
-            title={reviewMode ? 'The Card board is an operator control surface and is not included in review capabilities'
-              : 'card board — the work items the run is testing, and the experiments under each'}>Cards</button>
+            title={((reviewMode ? uiText('The Card board is an operator control surface and is not included in review capabilities') : uiText('card board — the work items the run is testing, and the experiments under each')))}>{uiText("Cards")}</button>
           <button type="button" data-workspace-control="concepts" tabIndex={workspaceTabStop === 'concepts' ? 0 : -1}
             aria-pressed={view === 'concepts'} className={'vt' + (view === 'concepts' ? ' on' : '')}
             disabled={reviewMode} onClick={() => setView('concepts')}
-            title={reviewMode ? 'Concept frames are not included in review capabilities'
-              : 'concept tree — group experiments by concept, any lens'}>Concepts</button>
+            title={((reviewMode ? uiText('Concept frames are not included in review capabilities') : uiText('concept tree — group experiments by concept, any lens')))}>{uiText("Concepts")}</button>
           <button type="button" data-workspace-control="report" tabIndex={workspaceTabStop === 'report' ? 0 : -1}
             aria-pressed={view === 'report'} className={'vt report' + (view === 'report' ? ' on' : '')} onClick={() => setView('report')}
-            title="conclusion-first run report"><OpIcon name="doc" size={12} /> Report</button>
+            title={uiText("conclusion-first run report")}><OpIcon name="doc" size={12} />{uiText(" Report")}</button>
           <button type="button" data-workspace-control="overview" tabIndex={workspaceTabStop === 'overview' ? 0 : -1}
             aria-pressed={panel === 'overview'} aria-expanded={panel === 'overview'}
             className={'vt' + (panel === 'overview' ? ' on' : '')} disabled={historyActive}
@@ -2228,76 +2164,70 @@ export default function RunView({ runId, onBack, reviewMode = false, reviewMeta 
               if (panel === 'overview') closePanel()
               else { panelReturnFocusRef.current = event.currentTarget; setPanel('overview') }
             }}
-            title="at-a-glance run summary — best metric, budget, strategy, hints">Overview</button>
+            title={uiText("at-a-glance run summary — best metric, budget, strategy, hints")}>{uiText("Overview")}</button>
         </div>
-        <span className="pill phase">{displayedPhase}</span>
+        <span className="pill phase">{uiText(displayedPhase)}</span>
         {/* WHOSE CODE DREW THIS. Beside the phase pill because it qualifies every number on the
             page at once: a server that loaded its modules before the last merge answers 200 with an
             older fold, and nothing else on this screen can tell you so. See `src/serverCode.js`. */}
         {serverCodeStale && <span className="pill warn" title={serverCodeStale.detail}>
-          {serverCodeStale.text}
+          {uiText(serverCodeStale.text)}
         </span>}
         {compactWorkspace
           ? <button type="button"
               className={'muted run-goal' + (compactGoalExpanded ? ' expanded' : '')}
               title={state.goal || state.task_id} aria-expanded={compactGoalExpanded}
-              aria-label={compactGoalExpanded ? 'Show less task' : 'Show full task'}
+              aria-label={((compactGoalExpanded ? uiText('Show less task') : uiText('Show full task')))}
               aria-controls="run-goal-text" aria-describedby="run-goal-meta run-goal-text"
               onClick={() => setCompactGoalExpanded(value => !value)}>
-              <b id="run-goal-meta">{state.label || state.run_id || runId} · {displayedPhase} · gen {gen}</b>
+              <b id="run-goal-meta">{state.label || state.run_id || runId} · {displayedPhase}{uiText(" · gen ")}{gen}</b>
               <span id="run-goal-text" className="run-goal-text">{state.goal || state.task_id}</span>
               <span className="run-goal-toggle" aria-hidden="true">
-                {compactGoalExpanded ? 'show less' : 'show full task'}
+                {((compactGoalExpanded ? uiText('show less') : uiText('show full task')))}
               </span>
             </button>
           : <span className="muted" title={state.goal || state.task_id}>
-              <b>{state.label || state.run_id || runId} · {displayedPhase} · gen {gen}</b>
+              <b>{state.label || state.run_id || runId} · {displayedPhase}{uiText(" · gen ")}{gen}</b>
             </span>}
         <span className={'live ' + (reviewMode ? 'off' : liveStatus)}
           role={reviewMode ? undefined : 'status'} aria-live={reviewMode ? undefined : 'polite'}
           aria-atomic={reviewMode ? undefined : true}>
           <span className="led" aria-hidden="true" />
-          {!reviewMode && <span className="sr-only">Current run status: </span>}
-          {reviewMode ? 'read-only' : liveLabel}
-          {historyActive && <span aria-hidden="true"> · history</span>}
+          {!reviewMode && <span className="sr-only">{uiText("Current run status: ")}</span>}
+          {((reviewMode ? uiText('read-only') : uiText(liveLabel)))}
+          {historyActive && <span aria-hidden="true">{uiText(" · history")}</span>}
         </span>
         <span className="spacer" />
         {/* Wide workspaces keep only the two compact at-a-glance metrics here; the fuller set moved
             to Overview. Compact layouts trade those optional chips for canvas space, while urgent
             reward-hack alerts remain visible and every metric is one tap away through Overview. */}
         {evalSec > 0 && <button type="button" className="chip run-metric-chip" disabled={historyActive}
-          title={historyActive ? 'Historical mode — return live to open Overview'
-            : maxEval != null ? 'eval time — open Overview for the budget bar' : 'eval time — open Overview'}
+          title={((historyActive ? uiText('Historical mode — return live to open Overview') : (maxEval != null ? uiText('eval time — open Overview for the budget bar') : uiText('eval time — open Overview'))))}
           onClick={event => { panelReturnFocusRef.current = event.currentTarget; setPanel('overview') }}>
-          <span className="k">eval</span> {fmtElapsedSeconds(evalSec)}{maxEval != null ? ` / ${fmtElapsedSeconds(maxEval)}` : ''}</button>}
+          <span className="k">{uiText("eval")}</span> {fmtElapsedSeconds(evalSec)}{maxEval != null ? ` / ${fmtElapsedSeconds(maxEval)}` : ''}</button>}
         {cost && <button type="button" className="chip run-metric-chip" disabled={historyActive}
-          title={historyActive ? 'Historical mode — return live to open Overview' : 'tokens — open Overview'}
+          title={((historyActive ? uiText('Historical mode — return live to open Overview') : uiText('tokens — open Overview')))}
           onClick={event => { panelReturnFocusRef.current = event.currentTarget; setPanel('overview') }}>
-          <span className="k">tokens</span> {fmtInt(cost.total_tokens)}</button>}
+          <span className="k">{uiText("tokens")}</span> {fmtInt(cost.total_tokens)}</button>}
         {rewardFlags > 0 && <button type="button" className="chip alarm run-metric-chip" disabled={historyActive}
-          title={historyActive ? 'Historical mode — return live to open Trust' : 'suspicious wins flagged (B5) — open Trust'}
+          title={((historyActive ? uiText('Historical mode — return live to open Trust') : uiText('suspicious wins flagged (B5) — open Trust')))}
           onClick={event => { panelReturnFocusRef.current = event.currentTarget; setPanel('trust') }}>
-          <span className="k"><OpIcon name="alert" size={11} /> hack?</span> {rewardFlags}</button>}
+          <span className="k"><OpIcon name="alert" size={11} />{uiText(" hack?")}</span> {rewardFlags}</button>}
         {finalizing
           ? <span className="chip warn"><OpIcon name="stop" size={11} />
-              {lifecycle.mode === 'finalization-stalled' ? 'finalization stalled'
-                : lifecycle.mode === 'finishing' ? 'finishing' : 'finalizing'}</span>
-          : live.paused && <span className="chip warn"><OpIcon name="pause" size={11} /> paused</span>}
+              {((lifecycle.mode === 'finalization-stalled' ? uiText('finalization stalled') : (lifecycle.mode === 'finishing' ? uiText('finishing') : uiText('finalizing'))))}</span>
+          : live.paused && <span className="chip warn"><OpIcon name="pause" size={11} />{uiText(" paused")}</span>}
       </div>
 
       {configNoticeStatus && <div
         className={`route-state-notice run-config-notice ${configNoticeStatus}`}
         role={configNoticeStatus === 'error' ? 'alert' : 'status'}>
         <OpIcon name="alert" size={13} />
-        <span>{configNoticeStatus === 'retrying'
-          ? 'Retrying run budget…'
-          : configNoticeStatus === 'stale'
-            ? 'Run budget may be stale. Showing the last loaded limit.'
-            : 'Run budget unavailable. Current eval time is visible, but its limit could not be loaded.'}</span>
+        <span>{((configNoticeStatus === 'retrying' ? uiText('Retrying run budget…') : (configNoticeStatus === 'stale' ? uiText('Run budget may be stale. Showing the last loaded limit.') : uiText('Run budget unavailable. Current eval time is visible, but its limit could not be loaded.'))))}</span>
         <button type="button" className="btn xs"
           disabled={configNoticeStatus === 'retrying'}
           onClick={() => configResource.retry()}>
-          {configNoticeStatus === 'retrying' ? 'Retrying…' : 'Retry'}
+          {((configNoticeStatus === 'retrying' ? uiText('Retrying…') : uiText('Retry')))}
         </button>
       </div>}
       {!reviewMode && retainedCommentWorkUnsafe && <div
@@ -2305,51 +2235,33 @@ export default function RunView({ runId, onBack, reviewMode = false, reviewMeta 
         role={retainedCommentRecoveryUnavailable || retainedCommentRecovery.damaged.length > 0
           ? 'alert' : 'status'}>
         <OpIcon name="chat" size={13} />
-        <span>{retainedCommentEntries.length > 0
-          ? `${retainedCommentEntries.length} in-memory Comments work item${retainedCommentEntries.length === 1 ? ' is' : 's are'} retained in this tab. `
-          : ''}
-          {retainedCommentRecovery.valid.length > 0
-            ? `${retainedCommentRecovery.valid.length} exact Comments command recover${retainedCommentRecovery.valid.length === 1 ? 'y is' : 'ies are'} saved in this tab.`
-            : ''}
-          {retainedCommentRecovery.damaged.length > 0
-            ? ` ${retainedCommentRecovery.damaged.length} damaged recovery record${retainedCommentRecovery.damaged.length === 1 ? ' needs' : 's need'} review.`
-            : ''}
-          {retainedCommentRecoveryUnavailable
-            ? ' Comments recovery storage cannot be inspected. Start over remains blocked; retry storage before continuing.'
-            : ''}
-          {retainedCommentValidProtectedCreateCount > 0
-            ? ` ${retainedCommentValidProtectedCreateCount} current-generation new-comment recover${retainedCommentValidProtectedCreateCount === 1 ? 'y stays' : 'ies stay'} protected until the exact command reaches a terminal outcome.`
-            : ''}
-          {retainedCommentDamagedProtectedCreateCount > 0
-            ? ` ${retainedCommentDamagedProtectedCreateCount} damaged new-comment recover${retainedCommentDamagedProtectedCreateCount === 1 ? 'y cannot' : 'ies cannot'} be safely released; restore the exact recovery data before continuing.`
-            : ''}
-          {currentCommentRecovery
-            ? ' Open its experiment to check the same command; nothing replays automatically.'
-            : retainedCommentDurableCount > 0
-              ? ' The saved commands belong to an earlier generation and will not be rebound.'
-              : ' Review the retained work before leaving this run or starting over.'}
+        <span>{(retainedCommentEntries.length > 0 ? uiMessage("{0} in-memory Comments work item{1} retained in this tab. ", [retainedCommentEntries.length, retainedCommentEntries.length === 1 ? ' is' : 's are']) : '')}
+          {(retainedCommentRecovery.valid.length > 0 ? uiMessage("{0} exact Comments command recover{1} saved in this tab.", [retainedCommentRecovery.valid.length, retainedCommentRecovery.valid.length === 1 ? 'y is' : 'ies are']) : '')}
+          {(retainedCommentRecovery.damaged.length > 0 ? uiMessage(" {0} damaged recovery record{1} review.", [retainedCommentRecovery.damaged.length, retainedCommentRecovery.damaged.length === 1 ? ' needs' : 's need']) : '')}
+          {((retainedCommentRecoveryUnavailable ? uiText(' Comments recovery storage cannot be inspected. Start over remains blocked; retry storage before continuing.') : ''))}
+          {(retainedCommentValidProtectedCreateCount > 0 ? uiMessage(" {0} current-generation new-comment recover{1} protected until the exact command reaches a terminal outcome.", [retainedCommentValidProtectedCreateCount, retainedCommentValidProtectedCreateCount === 1 ? 'y stays' : 'ies stay']) : '')}
+          {(retainedCommentDamagedProtectedCreateCount > 0 ? uiMessage(" {0} damaged new-comment recover{1} be safely released; restore the exact recovery data before continuing.", [retainedCommentDamagedProtectedCreateCount, retainedCommentDamagedProtectedCreateCount === 1 ? 'y cannot' : 'ies cannot']) : '')}
+          {((currentCommentRecovery ? uiText(' Open its experiment to check the same command; nothing replays automatically.') : (retainedCommentDurableCount > 0 ? uiText(' The saved commands belong to an earlier generation and will not be rebound.') : uiText(' Review the retained work before leaving this run or starting over.'))))}
         </span>
         {(retainedCommentDrafts.length > 0 || retainedCommentRecovery.valid.length > 0) && <details>
-          <summary>View</summary>
+          <summary>{uiText("View")}</summary>
           {retainedCommentDrafts.map((text, index) => <pre key={`draft:${index}`}
             className="comment-recovery-payload">{text}</pre>)}
           {retainedCommentRecovery.valid.map(intent => <div key={intent.storageKey}
             className="comment-recovery-payload">
-            <b>{intent.kind === 'create' ? 'New comment' : intent.kind === 'edit'
-              ? 'Comment edit' : intent.resolved ? 'Resolve comment' : 'Reopen comment'}</b>
-            {' '}— experiment #{intent.nodeId} — attempt {intent.nodeGeneration}
+            <b>{((intent.kind === 'create' ? uiText('New comment') : (intent.kind === 'edit' ? uiText('Comment edit') : (intent.resolved ? uiText('Resolve comment') : uiText('Reopen comment')))))}</b>
+            {' '}{uiText("— experiment #")}{intent.nodeId}{uiText(" — attempt ")}{intent.nodeGeneration}
             {intent.text != null && <pre>{intent.text}</pre>}
           </div>)}
         </details>}
         {currentCommentRecovery && <button type="button" className="btn xs"
-          onClick={openCurrentCommentRecovery}>Open recovery</button>}
+          onClick={openCurrentCommentRecovery}>{uiText("Open recovery")}</button>}
         {(retainedCommentDrafts.length > 0 || retainedCommentRecovery.valid.length > 0)
-          && <button type="button" className="btn xs" onClick={copyRetainedCommentWork}>Copy</button>}
+          && <button type="button" className="btn xs" onClick={copyRetainedCommentWork}>{uiText("Copy")}</button>}
         {retainedCommentRecoveryUnavailable && <button type="button" className="btn xs"
-          onClick={refreshCommentOperationRecoveries}>Retry storage</button>}
+          onClick={refreshCommentOperationRecoveries}>{uiText("Retry storage")}</button>}
         {retainedCommentReleasableCount > 0 && <button type="button" className="btn xs ghost"
-          onClick={discardRetainedCommentWork}>{retainedCommentProtectedCreates.length > 0
-            ? 'Discard other work…' : 'Discard…'}</button>}
+          onClick={discardRetainedCommentWork}>{((retainedCommentProtectedCreates.length > 0 ? uiText('Discard other work…') : uiText('Discard…')))}</button>}
       </div>}
       {!reviewMode && startOverRecovery.kind !== 'none' && <div
         ref={startOverNoticeRef} tabIndex={-1}
@@ -2358,46 +2270,27 @@ export default function RunView({ runId, onBack, reviewMode = false, reviewMeta 
         role={startOverRecovery.kind === 'active' && startOverIntent?.phase !== 'unknown'
           ? 'status' : 'alert'} aria-live="polite" aria-atomic="true">
         <OpIcon name="alert" size={13} />
-        <span>{startOverRecovery.kind === 'active'
-          ? startOverReplacementSuperseded
-            ? 'The saved Start over operation is verified, and a newer run generation is already visible. Open the current run to clear the resolved recovery lock.'
-            : startOverHandoff && startOverRouteSyncFailed
-              ? 'The new run is ready, but this page could not update its address. Changes stay locked until the current generation is opened safely.'
-            : startOverIntent.phase === 'submitting'
-            ? 'Submitting this exact Start over request. No archive is assumed yet; other changes are locked.'
-            : startOverIntent.phase === 'pending'
-              ? 'The server saved this exact Start over request. Checking the same operation automatically; other changes remain locked.'
-            : startOverIntent.phase === 'accepted'
-              ? 'Start over was accepted. Waiting for the new run generation…'
-              : 'Start-over outcome is not confirmed. Retry the exact saved request; all other changes are locked.'
-          : startOverRecovery.kind === 'unavailable'
-            ? 'Start over is disabled because this tab cannot preserve recovery state.'
-            : 'Saved Start over recovery state is invalid. Changes are locked because an earlier request cannot be identified safely. Close this tab and reopen LoopLab only after confirming no Start over is still running.'}
-          {startOverRecovery.storageUnavailable
-            ? ' This tab can still observe the current request, but its recovery record could not be updated.'
-            : ''}
+        <span>{((startOverRecovery.kind === 'active' ? (startOverReplacementSuperseded ? uiText('The saved Start over operation is verified, and a newer run generation is already visible. Open the current run to clear the resolved recovery lock.') : (startOverHandoff && startOverRouteSyncFailed ? uiText('The new run is ready, but this page could not update its address. Changes stay locked until the current generation is opened safely.') : (startOverIntent.phase === 'submitting' ? uiText('Submitting this exact Start over request. No archive is assumed yet; other changes are locked.') : (startOverIntent.phase === 'pending' ? uiText('The server saved this exact Start over request. Checking the same operation automatically; other changes remain locked.') : (startOverIntent.phase === 'accepted' ? uiText('Start over was accepted. Waiting for the new run generation…') : uiText('Start-over outcome is not confirmed. Retry the exact saved request; all other changes are locked.')))))) : (startOverRecovery.kind === 'unavailable' ? uiText('Start over is disabled because this tab cannot preserve recovery state.') : uiText('Saved Start over recovery state is invalid. Changes are locked because an earlier request cannot be identified safely. Close this tab and reopen LoopLab only after confirming no Start over is still running.'))))}
+          {((startOverRecovery.storageUnavailable ? uiText(' This tab can still observe the current request, but its recovery record could not be updated.') : ''))}
         </span>
         {startOverRecovery.kind === 'active' && <button type="button" className="btn xs"
           onClick={retryStartOver} disabled={startOverRequestPending}>
-          {startOverRequestPending ? 'Waiting for response…'
-            : startOverReplacementSuperseded ? 'Open current run'
-              : startOverHandoff && startOverRouteSyncFailed ? 'Retry opening new run'
-                : 'Retry exact request'}
+          {((startOverRequestPending ? uiText('Waiting for response…') : (startOverReplacementSuperseded ? uiText('Open current run') : (startOverHandoff && startOverRouteSyncFailed ? uiText('Retry opening new run') : uiText('Retry exact request')))))}
         </button>}
         {startOverRecovery.kind === 'unavailable' && <button type="button" className="btn xs"
-          onClick={retryStartOverStorage}>Try storage again</button>}
+          onClick={retryStartOverStorage}>{uiText("Try storage again")}</button>}
       </div>}
       {(routeNotice || attemptFenceNotice || route.issues.length > 0) && <div
         ref={routeNoticeRef} className="route-state-notice" role="status" tabIndex={-1}>
         <OpIcon name="info" size={13} />
         <span>{[...route.issues, routeNotice, attemptFenceNotice].filter(Boolean).join(' ')}</span>
-        <button type="button" className="btn xs ghost" aria-label="Dismiss link-state notice"
+        <button type="button" className="btn xs ghost" aria-label={uiText("Dismiss link-state notice")}
           onClick={() => { setRouteNotice(''); setAttemptFenceNotice(''); route.clearIssues() }}>×</button>
       </div>}
       {copyFallback && <div className="copy-link-fallback" role="status">
-        <label htmlFor="copy-view-fallback">Clipboard blocked — select and copy this link</label>
+        <label htmlFor="copy-view-fallback">{uiText("Clipboard blocked — select and copy this link")}</label>
         <input id="copy-view-fallback" readOnly value={copyFallback} onFocus={event => event.currentTarget.select()} />
-        <button type="button" className="btn xs ghost" onClick={() => setCopyFallback('')} aria-label="Close copy fallback">×</button>
+        <button type="button" className="btn xs ghost" onClick={() => setCopyFallback('')} aria-label={uiText("Close copy fallback")}>×</button>
       </div>}
 
       {/* FIRST banner in the stack, and `role="alert"` rather than `status`: every other notice here
@@ -2409,8 +2302,8 @@ export default function RunView({ runId, onBack, reviewMode = false, reviewMeta 
       {sourceIncomplete(live) && <div className="review-banner" role="alert"
         data-run-source-incomplete>
         <span className="history-lock" aria-hidden="true">◬</span>
-        <b>Incomplete record</b>
-        <span>{sourceIntegrityNotice(live)}</span>
+        <b>{uiText("Incomplete record")}</b>
+        <span>{uiText(sourceIntegrityNotice(live))}</span>
       </div>}
 
       {/* The owner stream could not carry this run's state at its bound (review 2026-09-22, UI-01),
@@ -2418,31 +2311,28 @@ export default function RunView({ runId, onBack, reviewMode = false, reviewMeta 
           moves (`hooks.js::useRunState`). Current to within that probe, not live — said, not implied. */}
       {streamDegraded && <div className="review-banner" role="status" data-run-stream-degraded>
         <span className="history-lock" aria-hidden="true">◌</span>
-        <b>Live updates paused</b>
-        <span>This run&rsquo;s state is too large to stream; it is re-read when the run changes,
-          checked about once a minute.</span>
+        <b>{uiText("Live updates paused")}</b>
+        <span>{uiText("This run’s state is too large to stream; it is re-read when the run changes, checked about once a minute.")}</span>
       </div>}
 
       {reviewMode && <div className="review-banner" role="status">
         <span className="history-lock" aria-hidden="true">◈</span>
-        <b>Read-only review</b>
-        <span>{(reviewMeta?.scopes || []).includes('evidence') ? 'summary + redacted source evidence' : 'summary only'}</span>
-        {reviewMeta?.expires_at && <span>expires {new Date(reviewMeta.expires_at * 1000).toLocaleString()}</span>}
+        <b>{uiText("Read-only review")}</b>
+        <span>{(((reviewMeta?.scopes || []).includes('evidence') ? uiText('summary + redacted source evidence') : uiText('summary only')))}</span>
+        {reviewMeta?.expires_at && <span>{uiText("expires ")}{new Date(reviewMeta.expires_at * 1000).toLocaleString()}</span>}
         <span className="spacer" />
-        {!connected && <span className="review-refresh-warn" role="alert">Refresh interrupted — showing the last received data.</span>}
-        <span>Actions, Assistant, raw logs, artifacts, and owner settings are unavailable.</span>
+        {!connected && <span className="review-refresh-warn" role="alert">{uiText("Refresh interrupted — showing the last received data.")}</span>}
+        <span>{uiText("Actions, Assistant, raw logs, artifacts, and owner settings are unavailable.")}</span>
       </div>}
 
       {historyActive && <div className="history-banner" role="status">
         <span className="history-lock" aria-hidden="true">◷</span>
-        <b>Historical snapshot · gen {gen} · seq {history.resolvedSeq} of {seq}</b>
+        <b>{uiText("Historical snapshot · gen ")}{gen}{uiText(" · seq ")}{history.resolvedSeq}{uiText(" of ")}{seq}</b>
         {/* This said "actions target live and are disabled" until the branch gesture landed, and
             that sentence was the reason for the blanket refusal, not decoration — so it has to stay
             true now that exactly one action does NOT target live. */}
-        <span>{forkAccess.ok
-          ? 'read-only · every action targets live and is disabled, except branching from an experiment'
-          : 'read-only · actions target live and are disabled'}</span>
-        <button className="btn sm primary" onClick={returnToLiveAndFocusWorkspace}>Return to live</button>
+        <span>{((forkAccess.ok ? uiText('read-only · every action targets live and is disabled, except branching from an experiment') : uiText('read-only · actions target live and are disabled')))}</span>
+        <button className="btn sm primary" onClick={returnToLiveAndFocusWorkspace}>{uiText("Return to live")}</button>
       </div>}
 
       {/* All actions now run through the chat (type a /command or just say what to do). The approval
@@ -2451,15 +2341,13 @@ export default function RunView({ runId, onBack, reviewMode = false, reviewMeta 
         <div className="topbar" role={approvalCommand ? 'status' : 'alert'}
           style={{ background: 'rgba(74,163,255,.12)', borderBottom: '1px solid var(--accent-dim)' }}>
           {approvalCommand ? <>
-            <b>{live.phase === 'approval'
-              ? `Human approval required for experiment #${live.approval_subject} — type `
-              : 'Eval spec needs ratification — type '}</b>
+            <b>{((live.phase === 'approval' ? uiMessage("Human approval required for experiment #{0} — type ", [live.approval_subject]) : uiText('Eval spec needs ratification — type ')))}</b>
             <code className="cmd-hint">{approvalCommand}</code>
-            <b>&nbsp;in the chat below.</b>
+            <b>{uiText(" in the chat below.")}</b>
           </> : <>
-            <b>Approval target is missing.</b>
-            <span>Inspect Events before acting; no command has been guessed.</span>
-            <button className="btn sm" onClick={revealEvents}>Show events</button>
+            <b>{uiText("Approval target is missing.")}</b>
+            <span>{uiText("Inspect Events before acting; no command has been guessed.")}</span>
+            <button className="btn sm" onClick={revealEvents}>{uiText("Show events")}</button>
           </>}
         </div>}
 
@@ -2473,12 +2361,12 @@ export default function RunView({ runId, onBack, reviewMode = false, reviewMeta 
               <button type="button" className={'btn sm ghost' + (HUB_OF[panel] === label ? ' on' : '')}
                       aria-haspopup="menu" aria-expanded={openHub === label} aria-controls={hubMenuId(label)}
                       disabled={!items.some(([key]) => panelAllowed(key))}
-                      title={!items.some(([key]) => panelAllowed(key)) ? 'No panels in this group are available in the current view' : undefined}
-                      onClick={event => { hubTriggerRef.current = event.currentTarget; setOpenHub(o => o === label ? null : label) }}>{label} ▾</button>
+                      title={((!items.some(([key]) => panelAllowed(key)) ? uiText('No panels in this group are available in the current view') : undefined))}
+                      onClick={event => { hubTriggerRef.current = event.currentTarget; setOpenHub(o => o === label ? null : label) }}>{uiText(label)} ▾</button>
               {openHub === label && <>
                 <div className="menu-backdrop" aria-hidden="true" onClick={() => closeHub(true)} />
                 <div ref={hubMenuRef} id={hubMenuId(label)} className="run-menu more-menu" role="menu"
-                  aria-label={`${label} panels`} onClick={e => e.stopPropagation()} onKeyDown={onHubKeyDown}
+                  aria-label={uiMessage("{0} panels", [label])} onClick={e => e.stopPropagation()} onKeyDown={onHubKeyDown}
                   onBlur={event => {
                     if (event.relatedTarget !== hubTriggerRef.current && !event.currentTarget.contains(event.relatedTarget)) closeHub(false)
                   }}>
@@ -2486,13 +2374,7 @@ export default function RunView({ runId, onBack, reviewMode = false, reviewMeta 
                     .map(([k, l]) => <button type="button" role="menuitem" tabIndex={-1}
                     key={k} className={'mi' + (panel === k ? ' on' : '')}
                     disabled={!panelAllowed(k)}
-                    title={!panelAllowed(k)
-                      ? reviewMode
-                        ? k === 'compare' && !reviewEvidence
-                          ? 'Requires a review link with redacted evidence'
-                          : 'Unavailable in read-only review'
-                        : 'Unavailable while viewing a historical snapshot'
-                      : undefined}
+                    title={((!panelAllowed(k) ? (reviewMode ? (k === 'compare' && !reviewEvidence ? uiText('Requires a review link with redacted evidence') : uiText('Unavailable in read-only review')) : uiText('Unavailable while viewing a historical snapshot')) : undefined))}
                     onClick={() => {
                       if (!panelAllowed(k)) return
                       panelReturnFocusRef.current = hubTriggerRef.current; closeHub(false); setPanel(k)
@@ -2502,10 +2384,10 @@ export default function RunView({ runId, onBack, reviewMode = false, reviewMeta 
                       mode, which is public and must not advertise installation-wide surfaces —
                       the same rule that leaves the header's LoopLab mark inert in review mode. */}
                   {label === INSTALLATION_LINK_HUB && !reviewMode && <>
-                    <div className="mi-label">Whole installation</div>
+                    <div className="mi-label">{uiText("Whole installation")}</div>
                     {INSTALLATION_LINKS.map(entry => <a key={entry.key} role="menuitem" tabIndex={-1}
-                      className="mi" href={entry.hash} title={entry.title}
-                      onClick={() => closeHub(false)}>{entry.label} ↗</a>)}
+                      className="mi" href={entry.hash} title={uiText(entry.title)}
+                      onClick={() => closeHub(false)}>{uiText(entry.label)} ↗</a>)}
                   </>}
                 </div>
               </>}
@@ -2516,13 +2398,13 @@ export default function RunView({ runId, onBack, reviewMode = false, reviewMeta 
               Settings edits the engine defaults for every future run. Two buttons both labelled
               "Settings", one screen apart, was the sharpest edge of the same conflation. */}
           <button className={'btn sm ghost settings-panel-btn' + (panel === 'config' ? ' on' : '')}
-                  disabled={mutationReadOnlyMode} title="Budgets and knobs for this run only"
-                  onClick={event => { setOpenHub(null); panelReturnFocusRef.current = event.currentTarget; setPanel('config') }}>Run settings</button>
+                  disabled={mutationReadOnlyMode} title={uiText("Budgets and knobs for this run only")}
+                  onClick={event => { setOpenHub(null); panelReturnFocusRef.current = event.currentTarget; setPanel('config') }}>{uiText("Run settings")}</button>
         </div>
       </div>
 
       {!mutationReadOnlyMode && configResource.data?.external_harness === true &&
-        <LazyBoundary label="external agent status" resetKey={`${runId}:${generation}`}>
+        <LazyBoundary label={"external agent status"} resetKey={`${runId}:${generation}`}>
           <HarnessProgressPanel compact runId={runId} expectedGeneration={generation} seq={seq}
             externalMode configStatus="ready"
             engineRunning={live.engine_running} onOpen={event => {
@@ -2532,8 +2414,8 @@ export default function RunView({ runId, onBack, reviewMode = false, reviewMeta 
         </LazyBoundary>}
 
       {mergeFrom != null && !mutationReadOnlyMode && <form className="merge-destination-bar"
-        aria-label={`Choose a merge destination for experiment ${mergeFrom}`} onSubmit={submitMergeTarget}>
-        <label htmlFor="merge-destination-select">Merge <b>#{mergeFrom}</b> with</label>
+        aria-label={uiMessage("Choose a merge destination for experiment {0}", [mergeFrom])} onSubmit={submitMergeTarget}>
+        <label htmlFor="merge-destination-select">{uiText("Merge ")}<b>#{mergeFrom}</b>{uiText(" with")}</label>
         <select ref={mergeSelectRef} id="merge-destination-select" value={mergeTarget} disabled={mergeSubmitting}
           onChange={event => {
             if (!event.target.value) {
@@ -2550,22 +2432,22 @@ export default function RunView({ runId, onBack, reviewMode = false, reviewMeta 
               closeMergeChooser(true)
             }
           }} autoFocus>
-          <option value="">Choose an experiment…</option>
+          <option value="">{uiText("Choose an experiment…")}</option>
           {mergeCandidates.map(node => <option key={node.id} value={node.id}>
-            #{node.id} · {node.operator || 'experiment'} · {nodeActivityView(node, live).shortLabel}
+            #{node.id} · {((node.operator || uiText('experiment')))} · {nodeActivityView(node, live).shortLabel}
           </option>)}
         </select>
         <button ref={mergeConfirmRef} type="submit" className="btn sm primary" disabled={!mergeTarget || mergeSubmitting}>
-          {mergeSubmitting ? 'Merging…' : 'Confirm merge'}
+          {((mergeSubmitting ? uiText('Merging…') : uiText('Confirm merge')))}
         </button>
         <button type="button" className="btn sm ghost" disabled={mergeSubmitting}
-          onClick={() => closeMergeChooser(true)}>Cancel</button>
-        <span className="muted">Graph gestures only choose the pair; nothing is sent until you confirm.</span>
+          onClick={() => closeMergeChooser(true)}>{uiText("Cancel")}</button>
+        <span className="muted">{uiText("Graph gestures only choose the pair; nothing is sent until you confirm.")}</span>
       </form>}
 
       {view === 'report'
         ? <div className="main"><div className="report-scroll">
-            <LazyBoundary label="run report" resetKey={`${runId}:${history.resolvedSeq ?? 'live'}`}>
+            <LazyBoundary label={"run report"} resetKey={`${runId}:${history.resolvedSeq ?? 'live'}`}>
               <ReportView state={state} runId={runId} onToast={showToast}
                 readOnly={mutationReadOnlyMode} historySeq={history.resolvedSeq}
                 observedSeq={historyActive ? history.resolvedSeq : seq}
@@ -2581,7 +2463,7 @@ export default function RunView({ runId, onBack, reviewMode = false, reviewMeta 
             </LazyBoundary>
           </div></div>
         : view === 'cards'
-        ? <LazyBoundary label="card board" resetKey={`${runId}:${generation || 'pending'}`}>
+        ? <LazyBoundary label={"card board"} resetKey={`${runId}:${generation || 'pending'}`}>
             <CardWorkspace state={state} runId={runId} runGeneration={generation}
               onToast={showToast} readOnly={mutationReadOnlyMode}
               selectedCardId={selectedCardId} onSelectCard={selectCard}
@@ -2599,10 +2481,10 @@ export default function RunView({ runId, onBack, reviewMode = false, reviewMeta 
                 splitter: !compactWorkspace && <div className="splitter v"
                   onPointerDown={startDrag('side')} onKeyDown={resizeWithKeys('side')}
                   role="separator" tabIndex={0} aria-orientation="vertical"
-                  aria-label="Resize work item details" aria-valuemin={280}
+                  aria-label={uiText("Resize work item details")} aria-valuemin={280}
                   aria-valuemax={Math.max(280, window.innerWidth - 486)}
                   aria-valuenow={Math.round(sideW)}
-                  title="Drag or use arrow keys to resize" />,
+                  title={uiText("Drag or use arrow keys to resize")} />,
               }} />
           </LazyBoundary>
         : view === 'concepts'
@@ -2614,7 +2496,7 @@ export default function RunView({ runId, onBack, reviewMode = false, reviewMeta 
         ? <div className={'main run-workspace concept-workspace'
             + (selectedId == null ? ' concept-no-selection' : '')
             + (compactWorkspace ? ' compact' : '')}>
-            <LazyBoundary label="concept tree"
+            <LazyBoundary label={"concept tree"}
               resetKey={`${runId}:${generation || 'pending'}:${historyActive ? viewSeq : 'live'}`}>
               <ConceptView runId={runId} generation={generation}
                 sequence={historyActive ? viewSeq : null} state={state}
@@ -2627,48 +2509,45 @@ export default function RunView({ runId, onBack, reviewMode = false, reviewMeta 
               // learns the tree became inspectable at all.
               ? selectedId != null && <button ref={compactInspectorTriggerRef}
                   className="workspace-pane-toggle" onClick={() => setCompactInspectorOpen(true)}
-                  aria-label="Open inspector panel">Inspector · #{selectedId}</button>
+                  aria-label={uiText("Open inspector panel")}>{uiText("Inspector · #")}{selectedId}</button>
               : <>
                 {compactWorkspace
                   ? <button type="button" className="workspace-scrim" tabIndex={-1}
-                      onClick={closeCompactInspector} aria-label="Close inspector panel" />
+                      onClick={closeCompactInspector} aria-label={uiText("Close inspector panel")} />
                   : <div className="splitter v" onPointerDown={startDrag('side')}
                       onKeyDown={resizeWithKeys('side')} role="separator" tabIndex={0}
-                      aria-orientation="vertical" aria-label="Resize inspector"
+                      aria-orientation="vertical" aria-label={uiText("Resize inspector")}
                       aria-valuemin={280} aria-valuemax={Math.max(280, window.innerWidth - 486)}
                       aria-valuenow={Math.round(sideW)}
-                      title="Drag or use arrow keys to resize" />}
+                      title={uiText("Drag or use arrow keys to resize")} />}
                 <aside className={'side card-detail-side' + (compactWorkspace ? ' compact-drawer' : '')}
                   style={{ width: sideW }} ref={compactInspectorRef}
                   tabIndex={compactWorkspace ? -1 : undefined}
                   role={compactWorkspace ? 'dialog' : 'complementary'}
-                  aria-label="Experiment inspector"
+                  aria-label={uiText("Experiment inspector")}
                   data-route-focus-guard={compactWorkspace ? 'true' : undefined}>
                   <div className="pane-grip">
-                    <span className="muted">{conceptPaneTargetState.kind === 'node'
-                      ? `inspector · #${conceptPaneTargetState.nodeId}` : 'inspector'}</span>
+                    <span className="muted">{((conceptPaneTargetState.kind === 'node' ? uiMessage("inspector · #{0}", [conceptPaneTargetState.nodeId]) : uiText('inspector')))}</span>
                     <span className="spacer" style={{ flex: 1 }} />
                     {selectedId != null && <button ref={compactInspectorCloseRef} className="btn sm ghost"
                       data-dialog-initial-focus={compactWorkspace ? true : undefined}
-                      title="clear the inspected experiment"
-                      aria-label={`Close the inspector for experiment ${selectedId}`}
+                      title={uiText("clear the inspected experiment")}
+                      aria-label={uiMessage("Close the inspector for experiment {0}", [selectedId])}
                       onClick={() => {
                         setSelectedId(null)
                         if (compactWorkspace) closeCompactInspector()
                       }}>⟩</button>}
                   </div>
                   {conceptPaneTargetState.kind === 'empty'
-                    ? <div className="insp-empty">Pick an experiment under a concept to inspect it
-                      here — its idea, code, metrics, trust and agent trace, without leaving the tree.</div>
+                    ? <div className="insp-empty">{uiText("Pick an experiment under a concept to inspect it here — its idea, code, metrics, trust and agent trace, without leaving the tree.")}</div>
                     : conceptPaneTargetState.kind === 'absent'
-                      ? <div className="insp-empty" role="status">Experiment #{conceptPaneTargetState.nodeId} is
-                        not in the displayed run snapshot, so there is nothing to inspect for it here.</div>
+                      ? <div className="insp-empty" role="status">{uiText("Experiment #")}{conceptPaneTargetState.nodeId}{uiText(" is not in the displayed run snapshot, so there is nothing to inspect for it here.")}</div>
                       : renderNodeInspector(conceptPaneTargetState.nodeId)}
                 </aside>
               </>}
           </div>
         : <>
-      <LazyBoundary label="concept filter" resetKey={`${runId}:${generation || 'pending'}`}>
+      <LazyBoundary label={"concept filter"} resetKey={`${runId}:${generation || 'pending'}`}>
         <ConceptChipBar key={`concept-filter:${runId}:${generation || 'pending'}`}
           state={state} onHighlight={setConceptHighlight} />
       </LazyBoundary>
@@ -2677,7 +2556,7 @@ export default function RunView({ runId, onBack, reviewMode = false, reviewMeta 
         <div className={'canvas-wrap' + (emptyPresentation ? ' dag-empty' : '')}
           inert={compactWorkspace && showInspector ? '' : undefined}
           aria-hidden={compactWorkspace && showInspector ? 'true' : undefined}>
-          <LazyBoundary label="experiment graph" resetKey={`${runId}:${generation || 'pending'}`}>
+          <LazyBoundary label={"experiment graph"} resetKey={`${runId}:${generation || 'pending'}`}>
             {/* A read-only view still opens the node menu when the ONE admissible gesture is
                 available, and `nodeMenuActions` is what keeps the other nine items off it — they are
                 absent rather than shown-and-then-refused. Everywhere else this is unchanged: no fork
@@ -2701,36 +2580,36 @@ export default function RunView({ runId, onBack, reviewMode = false, reviewMeta 
         </div>
         {compactWorkspace && !showInspector && hasInspectorContext &&
           <button ref={compactInspectorTriggerRef} className="workspace-pane-toggle" onClick={() => setCompactInspectorOpen(true)}
-                  aria-label={`Open ${groupDetailsOpen ? 'group' : 'inspector'} panel`}>
-            {groupDetailsOpen ? 'Group' : `Inspector · #${selectedId}`}
+                  aria-label={uiMessage("Open {0} panel", [groupDetailsOpen ? 'group' : 'inspector'])}>
+            {((groupDetailsOpen ? uiText('Group') : uiMessage("Inspector · #{0}", [selectedId])))}
           </button>}
         {compactWorkspace && showInspector &&
           <button type="button" className="workspace-scrim" tabIndex={-1}
                   onClick={closeCompactInspector}
-                  aria-label={`Close ${groupDetailsOpen ? 'group' : 'inspector'} panel`} />}
+                  aria-label={uiMessage("Close {0} panel", [groupDetailsOpen ? 'group' : 'inspector'])} />}
         {!compactWorkspace && hasInspectorContext && !showInspector
-          ? <button ref={sideRailRef} className="side-rail" title="show panel"
-              onClick={() => setSideC(false)}>‹ {groupDetailsOpen ? 'group' : 'inspector'}</button>
+          ? <button ref={sideRailRef} className="side-rail" title={uiText("show panel")}
+              onClick={() => setSideC(false)}>‹ {((groupDetailsOpen ? uiText('group') : uiText('inspector')))}</button>
           : showInspector && <>
               {!compactWorkspace && <div className="splitter v" onPointerDown={startDrag('side')} onKeyDown={resizeWithKeys('side')}
-                role="separator" tabIndex={0} aria-orientation="vertical" aria-label="Resize inspector"
-                aria-valuemin={280} aria-valuemax={Math.max(280, window.innerWidth - 486)} aria-valuenow={Math.round(sideW)} title="Drag or use arrow keys to resize" />}
+                role="separator" tabIndex={0} aria-orientation="vertical" aria-label={uiText("Resize inspector")}
+                aria-valuemin={280} aria-valuemax={Math.max(280, window.innerWidth - 486)} aria-valuenow={Math.round(sideW)} title={uiText("Drag or use arrow keys to resize")} />}
               <aside className={'side' + (compactWorkspace ? ' compact-drawer' : '')} style={{ width: sideW }}
                      ref={compactInspectorRef} tabIndex={compactWorkspace ? -1 : undefined}
-                     aria-label={groupDetailsOpen ? 'Group details' : 'Experiment inspector'}
+                     aria-label={((groupDetailsOpen ? uiText('Group details') : uiText('Experiment inspector')))}
                      role={compactWorkspace ? 'dialog' : 'complementary'}
                      data-route-focus-guard={compactWorkspace ? 'true' : undefined}>
                 <div className="pane-grip">
-                  <span className="muted">{groupDetailsOpen ? 'group' : 'inspector'}</span>
+                  <span className="muted">{((groupDetailsOpen ? uiText('group') : uiText('inspector')))}</span>
                   <span className="spacer" style={{ flex: 1 }} />
                   <button ref={compactInspectorCloseRef} className="btn sm ghost"
                           data-dialog-initial-focus={compactWorkspace ? true : undefined}
-                          title={compactWorkspace ? 'close panel' : 'collapse panel'}
+                          title={((compactWorkspace ? uiText('close panel') : uiText('collapse panel')))}
                           aria-label={`${compactWorkspace ? 'Close' : 'Collapse'} ${groupDetailsOpen ? 'group details' : 'experiment inspector'}`}
                           onClick={() => compactWorkspace ? closeCompactInspector() : collapseSideInspector()}>⟩</button>
                 </div>
                 {groupDetailsOpen
-                  ? <LazyBoundary label="group details" resetKey={`group:${selectedGroup}`}>
+                  ? <LazyBoundary label={"group details"} resetKey={`group:${selectedGroup}`}>
                       <GroupSummary groupKey={selectedGroup} memberIds={groupMembers}
                         state={state} themeFilter={themeFilter} highlightIds={conceptHighlight}
                         onSelectNode={focusGroupMember} evalStages={liveEvalStages}
@@ -2746,19 +2625,19 @@ export default function RunView({ runId, onBack, reviewMode = false, reviewMeta 
       {!reviewMode && (timelineDeferred || reportTimelineFocusPending)
         && <div className="dock timeline-deferred-trigger" aria-busy={reportTimelineFocusPending}>
         <div className="dock-tabs">
-          <strong>{reportTimelineFocusPending ? 'Loading events & timeline…' : 'Events & timeline'}</strong>
+          <strong>{((reportTimelineFocusPending ? uiText('Loading events & timeline…') : uiText('Events & timeline')))}</strong>
           <span className="spacer" />
           <button type="button" className="btn sm ghost dock-collapse"
-            aria-label="Load events and timeline" aria-expanded="false"
+            aria-label={uiText("Load events and timeline")} aria-expanded="false"
             onClick={activateReportTimeline}>
             <OpIcon name="chevron-up" size={13} />
           </button>
         </div>
       </div>}
       {!reviewMode && !timelineDeferred && !compactWorkspace && !timelineCollapsed && <div className="splitter h" onPointerDown={startDrag('dock')} onKeyDown={resizeWithKeys('dock')}
-        role="separator" tabIndex={0} aria-orientation="horizontal" aria-label="Resize timeline"
-        aria-valuemin={MIN_DOCK_HEIGHT} aria-valuemax={Math.max(MIN_DOCK_HEIGHT, window.innerHeight - 470)} aria-valuenow={Math.round(dockH)} title="Drag or use arrow keys to resize" />}
-      {!reviewMode && !timelineDeferred && <LazyBoundary label="timeline" resetKey={`${runId}:${generation || 'pending'}`}>
+        role="separator" tabIndex={0} aria-orientation="horizontal" aria-label={uiText("Resize timeline")}
+        aria-valuemin={MIN_DOCK_HEIGHT} aria-valuemax={Math.max(MIN_DOCK_HEIGHT, window.innerHeight - 470)} aria-valuenow={Math.round(dockH)} title={uiText("Drag or use arrow keys to resize")} />}
+      {!reviewMode && !timelineDeferred && <LazyBoundary label={"timeline"} resetKey={`${runId}:${generation || 'pending'}`}>
         <Dock runId={runId} live={live} liveSeq={seq} expectedGeneration={generation}
           externalMode={configResource.status === 'ready' ? configResource.data?.external_harness === true : null}
           timeline={timeline} evalStages={liveEvalStages}
@@ -2803,7 +2682,7 @@ export default function RunView({ runId, onBack, reviewMode = false, reviewMeta 
       </LazyBoundary>}
       </>}
 
-      {panel && panelAllowed(panel) && <LazyBoundary label={`${HUB_OF[panel] || panel} panel`}
+      {panel && panelAllowed(panel) && <LazyBoundary label={uiMessage("{0} panel", [HUB_OF[panel] || panel])}
         mode="overlay" resetKey={`${panel}:${runId}@${generation || 'pending'}`} onClose={closePanel}>
       <>
       {panel === 'overview' && panelAllowed('overview') && <OverviewPanel state={state} maxEval={maxEval}
@@ -2861,7 +2740,7 @@ export default function RunView({ runId, onBack, reviewMode = false, reviewMeta 
       </>
       </LazyBoundary>}
 
-      {toast && <div className="toast" role="status" aria-live="polite" aria-atomic="true">{toast}</div>}
+      {toast && <div className="toast" role="status" aria-live="polite" aria-atomic="true">{uiText(toast)}</div>}
     </main>
   )
 }

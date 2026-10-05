@@ -1,3 +1,4 @@
+import { uiText, useUILanguage } from './uiLanguage.js'
 import React from 'react'
 import './launch-guidance.css'
 
@@ -36,12 +37,14 @@ const guidance = {
 
 // Display only. All admission, validation and startup decisions remain in LaunchCard.
 export default function LaunchGuidance({ phase, language = 'auto', notice }) {
+  useUILanguage()
+
   const ru = language === 'ru'
   const row = guidance[phase] || guidance.review
   return <div className="asst-launch-guide">
     <strong>{row[ru ? 2 : 0]}</strong>
     <p>{row[ru ? 3 : 1]}</p>
-    {notice && <details><summary>{ru ? 'Подробный статус' : 'Detailed status'}</summary>
-      <p>{notice}</p></details>}
+    {notice && <details><summary>{((ru ? 'Подробный статус' : uiText('Detailed status')))}</summary>
+      <p>{uiText(notice)}</p></details>}
   </div>
 }

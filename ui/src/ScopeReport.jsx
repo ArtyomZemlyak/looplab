@@ -1,3 +1,4 @@
+import { uiText, uiMessage, useUILanguage } from './uiLanguage.js'
 import React, { useEffect, useRef, useState } from 'react'
 import {
   abandonScopeReportAction, createIdempotencyKey, getScopeReport, genScopeReport,
@@ -203,6 +204,8 @@ async function completedGeneration(value, actionId, type, id) {
 }
 
 function Section({ title, items }) {
+  useUILanguage()
+
   items = list(items).filter(x => typeof x === 'string')
   if (!items.length) return null
   return <div className="sr-sec">
@@ -212,6 +215,8 @@ function Section({ title, items }) {
 }
 
 export function MetricRun({ item, note, onOpen }) {
+  useUILanguage()
+
   const id = text(item?.run_id)
   const ruler = observationRuler(item)
   return <button type="button" className="sr-best" disabled={!id} onClick={() => onOpen?.(id)}>
@@ -226,6 +231,8 @@ export function MetricRun({ item, note, onOpen }) {
 // report is authored from a bounded/redacted projection. Numeric ranking exists only inside an exact
 // server-validated comparison contract; legacy best_runs are counted but their unverified rows stay hidden.
 export default function ScopeReport({ scope, onOpen, onClose }) {
+  useUILanguage()
+
   const dialogRef = useRef(null)
   const requestEpoch = useRef(0)
   const readAbort = useRef(null)
@@ -451,95 +458,78 @@ export default function ScopeReport({ scope, onOpen, onClose }) {
 
   return <div className="overlay" onMouseDown={event => { if (event.target === event.currentTarget) onClose?.() }}>
     <div ref={dialogRef} className="panel sr-panel" role="dialog" aria-modal="true"
-      aria-label={`Report for ${label}`} tabIndex={-1}>
+      aria-label={uiMessage("Report for {0}", [label])} tabIndex={-1}>
       <div className="panel-h">
-        <span className="ttl">Cross-run report · {label}</span>
+        <span className="ttl">{uiText("Cross-run report · ")}{uiText(label)}</span>
         <span className="right" />
         {data?.exists && <button className="btn sm" disabled={busy || uncertain}
           onClick={generateWithConfirmation}>
-          {uncertain ? '… outcome unknown' : busy ? '… generating' : '↻ Regenerate · paid'}</button>}
-        <button className="btn sm ghost" onClick={onClose} aria-label="Close report">✕</button>
+          {((uncertain ? uiText('… outcome unknown') : (busy ? uiText('… generating') : uiText('↻ Regenerate · paid'))))}</button>}
+        <button className="btn sm ghost" onClick={onClose} aria-label={uiText("Close report")}>✕</button>
       </div>
       <div className="panel-b">
         {err && <div className="notice resource-error" role="alert">
-          <span>{err}</span>{' '}
+          <span>{uiText(err)}</span>{' '}
           <button type="button" className="btn sm ghost" disabled={busy}
             onClick={() => setReadRevision(value => value + 1)}>
-            {uncertain ? 'Check paid status' : 'Retry read'}</button>
+            {((uncertain ? uiText('Check paid status') : uiText('Retry read')))}</button>
           {uncertain
             && generationFlights.get(key)?.error?.code === 'scope_report_action_unknown'
             && <button type="button" className="btn sm ghost" disabled={busy}
-              onClick={retrySameAction}>Retry same paid action</button>}
+              onClick={retrySameAction}>{uiText("Retry same paid action")}</button>}
           {uncertain
             && ['scope_report_action_indeterminate', 'scope_report_action_unknown']
               .includes(generationFlights.get(key)?.error?.code)
             && <button type="button" className="btn sm ghost" disabled={busy} onClick={abandon}>
-              {generationFlights.get(key)?.error?.code === 'scope_report_action_unknown'
-                ? 'Discard unaccepted action' : 'Abandon recovery lock'}</button>}
+              {((generationFlights.get(key)?.error?.code === 'scope_report_action_unknown' ? uiText('Discard unaccepted action') : uiText('Abandon recovery lock')))}</button>}
         </div>}
-        {data == null && !err && <div className="notice" role="status">Loading…</div>}
+        {data == null && !err && <div className="notice" role="status">{uiText("Loading…")}</div>}
 
         {data && !data.exists && publicationUnconfirmed && <div className="sr-empty">
-          <div className="notice sr-quarantine" role="alert">
-            A previous paid generation may have completed, but its report publication was not durably
-            confirmed. Generating a replacement starts a new paid action and may incur additional provider
-            cost.
-          </div>
+          <div className="notice sr-quarantine" role="alert">{uiText("A previous paid generation may have completed, but its report publication was not durably confirmed. Generating a replacement starts a new paid action and may incur additional provider cost.")}</div>
           <div className="muted">{runCount === null
-            ? 'The number of runs in this scope could not be read, so generation stays disabled.'
-            : <><b>{runCount}</b> runs are currently in this scope.</>}</div>
+            ? uiText('The number of runs in this scope could not be read, so generation stays disabled.')
+            : <><b>{runCount}</b>{uiText(" runs are currently in this scope.")}</>}</div>
           <button className="btn primary" disabled={busy || uncertain || !runCount}
             onClick={generateReplacement}>
-            {uncertain ? '… outcome unknown' : busy
-              ? '… generating' : 'Generate replacement (may incur cost)'}</button>
+            {((uncertain ? uiText('… outcome unknown') : (busy ? uiText('… generating') : uiText('Generate replacement (may incur cost)'))))}</button>
         </div>}
 
         {data && !data.exists && !publicationUnconfirmed && <div className="sr-empty">
           <div className="muted">{runCount === null
-            ? 'No report. The number of runs in this scope could not be read, so generation stays disabled.'
-            : <>No report — <b>{runCount}</b> runs. Evidence is bounded.</>}
+            ? uiText('No report. The number of runs in this scope could not be read, so generation stays disabled.')
+            : <>{uiText("No report — ")}<b>{runCount}</b>{uiText(" runs. Evidence is bounded.")}</>}
           </div>
           <button className="btn primary" disabled={busy || uncertain || !runCount}
             onClick={generateWithConfirmation}>
-            {uncertain ? '… outcome unknown' : busy ? '… generating' : '✦ Generate report · paid'}</button>
+            {((uncertain ? uiText('… outcome unknown') : (busy ? uiText('… generating') : uiText('✦ Generate report · paid'))))}</button>
         </div>}
 
         {data?.exists && c && <div className="sr-body">
           <div className="sr-meta">
             {evidenceRuns != null && sourceRuns != null
-              ? <span>· evidence {evidenceRuns}/{sourceRuns} runs{c.coverage.incomplete === true ? ' (incomplete)' : ''}</span>
-              : <span>· snapshot: {Array.isArray(data.run_ids) ? data.run_ids.length : '?'} runs</span>}
-            {data.stale === true && <span className="sr-stale"> · {formatUpgrade
-              ? 'report format upgraded — regenerate once'
-              : 'stale snapshot — regenerate'}</span>}
-            {authority.freshness === 'unknown' && <span className="sr-stale"> · snapshot freshness unknown</span>}
+              ? <span>{uiText("· evidence ")}{evidenceRuns}/{sourceRuns}{uiText(" runs")}{((c.coverage.incomplete === true ? uiText(' (incomplete)') : ''))}</span>
+              : <span>{uiText("· snapshot: ")}{Array.isArray(data.run_ids) ? data.run_ids.length : '?'}{uiText(" runs")}</span>}
+            {data.stale === true && <span className="sr-stale"> · {((formatUpgrade ? uiText('report format upgraded — regenerate once') : uiText('stale snapshot — regenerate')))}</span>}
+            {authority.freshness === 'unknown' && <span className="sr-stale">{uiText(" · snapshot freshness unknown")}</span>}
           </div>
-          {!authority.authoritative && <div className="notice sr-quarantine" role="status">
-            Stored report content is quarantined because its authority is unavailable. Regenerate to inspect it.
-          </div>}
-          {authority.authoritative && authority.freshness === 'unknown' && <div className="notice sr-quarantine" role="status">
-            Stored report freshness cannot be verified. Narrative, observations, and outcome claims are withheld.
-          </div>}
+          {!authority.authoritative && <div className="notice sr-quarantine" role="status">{uiText("Stored report content is quarantined because its authority is unavailable. Regenerate to inspect it.")}</div>}
+          {authority.authoritative && authority.freshness === 'unknown' && <div className="notice sr-quarantine" role="status">{uiText("Stored report freshness cannot be verified. Narrative, observations, and outcome claims are withheld.")}</div>}
           {authority.freshness === 'stale' && <div className="notice sr-quarantine" role="status">
-            {formatUpgrade
-              ? 'This report predates the current scope receipt. Regenerate once to migrate it; historical advisory content remains inspectable.'
-              : 'This is a stale historical snapshot. Advisory narrative and observations remain inspectable; snapshot outcome claims are withheld.'}
+            {((formatUpgrade ? uiText('This report predates the current scope receipt. Regenerate once to migrate it; historical advisory content remains inspectable.') : uiText('This is a stale historical snapshot. Advisory narrative and observations remain inspectable; snapshot outcome claims are withheld.')))}
           </div>}
-          {authority.fresh && !authority.verdict && <div className="notice sr-quarantine" role="status">
-            The server did not provide a current authoritative verdict. Report observations remain unranked.
-          </div>}
+          {authority.fresh && !authority.verdict && <div className="notice sr-quarantine" role="status">{uiText("The server did not provide a current authoritative verdict. Report observations remain unranked.")}</div>}
           {authority.verdict && verdict && <div className="sr-verdict">{verdict}</div>}
           {groups.length > 0 && <div className="sr-sec">
-            <div className="sr-h">Comparable cohorts</div>
+            <div className="sr-h">{uiText("Comparable cohorts")}</div>
             {groups.map((group, i) => {
               const declaredRows = scopeObservationRows(group)
               const trusted = authority.inspectable && declaredRows !== null
               const rows = declaredRows || []
               const reason = !trusted ? 'unverified' : status(group?.indeterminate) || 'unavailable'
               return <div className="sr-group" key={text(group?.contract_id) || i}>
-                <div className="muted">{text(group?.metric_uid) || 'metric'} · {text(group?.direction) || '?'} · {trusted ? 'declared observations' : 'unverified'}</div>
-                <div className="muted" role="status">{trusted
-                  ? `No winner — ${reason}.` : 'Cohort withheld — unverified observation contract.'}</div>
+                <div className="muted">{((text(group?.metric_uid) || uiText('metric')))} · {text(group?.direction) || '?'} · {((trusted ? uiText('declared observations') : uiText('unverified')))}</div>
+                <div className="muted" role="status">{((trusted ? uiMessage("No winner — {0}.", [reason]) : uiText('Cohort withheld — unverified observation contract.')))}</div>
                 <div className="sr-bests">{rows.map((item, j) => {
                   const id = text(item?.run_id)
                   const note = list(group?.incomplete_runs).includes(id) ? 'run incomplete' : ''
@@ -549,22 +539,20 @@ export default function ScopeReport({ scope, onOpen, onClose }) {
             })}
           </div>}
           {observations.length > 0 && <div className="sr-sec">
-            <div className="sr-h">Unranked metrics</div>
+            <div className="sr-h">{uiText("Unranked metrics")}</div>
             <div className="sr-bests">{observations.map((item, i) =>
               <MetricRun key={`${item?.run_id}-${i}`} item={item} onOpen={onOpen}
                 note={status(item?.comparison_status) || 'unranked'} />)}</div>
           </div>}
-          {authority.inspectable && !authority.narrative && <div className="notice sr-quarantine" role="status">
-            The narrative is withheld because it has no model-advisory authority marker.
-          </div>}
+          {authority.inspectable && !authority.narrative && <div className="notice sr-quarantine" role="status">{uiText("The narrative is withheld because it has no model-advisory authority marker.")}</div>}
           {authority.narrative && <div className="sr-narrative">
-            <div className="sr-advisory">Model-advisory narrative · not a selection decision</div>
+            <div className="sr-advisory">{uiText("Model-advisory narrative · not a selection decision")}</div>
             {headline && <div className="sr-headline">{headline}</div>}
-            <Section title="What worked" items={c.what_worked} />
-            <Section title="What didn’t" items={c.what_didnt} />
-            <Section title="Learnings" items={c.learnings} />
-            <Section title="Next directions" items={c.next_directions} />
-            <Section title="Caveats" items={c.caveats} />
+            <Section title={uiText("What worked")} items={c.what_worked} />
+            <Section title={uiText("What didn’t")} items={c.what_didnt} />
+            <Section title={uiText("Learnings")} items={c.learnings} />
+            <Section title={uiText("Next directions")} items={c.next_directions} />
+            <Section title={uiText("Caveats")} items={c.caveats} />
           </div>}
         </div>}
       </div>

@@ -1,3 +1,4 @@
+import { uiText, useUILanguage } from './uiLanguage.js'
 import React, { useEffect, useMemo, useRef, useState } from 'react'
 import { createInspectorDraftStore, useInspectorDraftField } from './inspectorDraftStore.js'
 import { codeSearchRows } from './codeSearch.js'
@@ -21,6 +22,8 @@ export default function CodeViewer({
   code = '', diff = null, label = 'Code', maxHeight = 420, copyText = null,
   draftStore: sharedDraftStore = null, draftScope = null, language = 'en', allowCopy = true,
 }) {
+  useUILanguage()
+
   const ru = language === 'ru'
   const fallbackDraftStoreRef = useRef(null)
   if (!fallbackDraftStoreRef.current) fallbackDraftStoreRef.current = createInspectorDraftStore()
@@ -32,7 +35,7 @@ export default function CodeViewer({
     draftStore, scope, 'wrap', false, { disposable: true })
   const [copied, setCopied] = useState(null)
   const copyTextValue = copyText ?? code
-  const copySource = { scope, label, text: copyTextValue }
+  const copySource = { scope, label: label, text: copyTextValue }
   const currentCopySource = useRef(copySource)
   currentCopySource.current = copySource
   const copySerial = useRef(0)
@@ -67,16 +70,16 @@ export default function CodeViewer({
   }
   return <div className={'code-viewer' + (wrap ? ' wrap' : '') + (diff ? ' has-diff' : '')} style={{ '--code-max-h': `${maxHeight}px` }}>
     <div className="code-tools">
-      <label className="code-search"><span className="sr-only">{ru ? 'Поиск' : 'Search'} {label}</span>
+      <label className="code-search"><span className="sr-only">{((ru ? 'Поиск' : uiText('Search')))} {uiText(label)}</span>
         <input value={query} onChange={event => setQuery(event.target.value)} placeholder={`${ru ? 'Поиск' : 'Search'} ${label.toLowerCase()}…`} />
       </label>
-      {query && <span className="muted">{ru ? 'Строк с совпадением:' : 'Matching lines:'} {matches}</span>}
+      {query && <span className="muted">{((ru ? 'Строк с совпадением:' : uiText('Matching lines:')))} {matches}</span>}
       <span className="spacer" />
       <button className={'btn sm ghost' + (wrap ? ' on' : '')} onClick={() => setWrap(value => !value)}
-              aria-pressed={wrap}>{ru ? 'Перенос строк' : 'Wrap'}</button>
-      {allowCopy && <button className="btn sm ghost" onClick={copy}>{sameCopySource(copied, copySource) ? (ru ? 'Скопировано' : 'Copied') : (ru ? 'Копировать' : 'Copy')}</button>}
+              aria-pressed={wrap}>{((ru ? 'Перенос строк' : uiText('Wrap')))}</button>
+      {allowCopy && <button className="btn sm ghost" onClick={copy}>{((sameCopySource(copied, copySource) ? (ru ? 'Скопировано' : uiText('Copied')) : (ru ? 'Копировать' : uiText('Copy'))))}</button>}
     </div>
-    <div className="code-lines" role="region" aria-label={label} tabIndex={0}>
+    <div className="code-lines" role="region" aria-label={uiText(label)} tabIndex={0}>
       {searchedRows.map(({ row, text, ranges }, index) => <div key={index} className={'code-line ' + (row.cls || '')}>
         {diff && <span className="code-old-no">{row.oldNo ?? ''}</span>}
         <span className="code-new-no">{row.newNo ?? ''}</span>

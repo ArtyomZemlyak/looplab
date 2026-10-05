@@ -1,17 +1,23 @@
+import { uiMessage } from './uiLanguage.js'
+import { uiText, useUILanguage } from './uiLanguage.js'
 import React from 'react'
 import { fmt } from './util.js'
 import { ChartFrame } from './accessibility.jsx'
 import { metricCurveProjection, metricCurvePosition } from './metricCurveProjection.js'
 
 const AX = 'var(--fg-mut)', GRID = 'var(--line)'
-function Empty({ children }) { return <div className="muted" style={{ padding: 20 }}>{children}</div> }
+function Empty({ children }) {
+  useUILanguage()
+ return <div className="muted" style={{ padding: 20 }}>{children}</div> }
 
 // Online training/eval curves — a small line chart per logged metric tag (loss, every recall@k, lr,
 // grad norms, …) from a node's TensorBoard series {tag: [{step, value}]}. ALL metrics, not just the
 // objective — the "a la TensorBoard" per-node view.
 export function MetricLines({ series, cols = 2 }) {
+  useUILanguage()
+
   const tags = Object.keys(series || {}).filter(t => (series[t] || []).length > 0).sort()
-  if (!tags.length) return <Empty>no metric curves logged yet — they appear once training starts writing TensorBoard events</Empty>
+  if (!tags.length) return <Empty>{uiText("no metric curves logged yet — they appear once training starts writing TensorBoard events")}</Empty>
   // Group by the tag prefix before the first '/' (TensorBoard convention: train/loss, val/recall@100,
   // …); a tag with no slash falls into "other". Each group is an independent COLLAPSIBLE section so a
   // run that logs dozens of scalars isn't one endless wall of charts.
@@ -27,6 +33,8 @@ export function MetricLines({ series, cols = 2 }) {
 }
 
 function MetricGroup({ name, tags, series, cols }) {
+  useUILanguage()
+
   const [open, setOpen] = React.useState(false)   // groups COLLAPSED by default (expand one to see its curves)
   const groupId = `metric-group-${React.useId().replaceAll(':', '')}`
   return (
@@ -34,7 +42,7 @@ function MetricGroup({ name, tags, series, cols }) {
       <button type="button" className="metric-group-toggle" aria-expanded={open}
         aria-controls={groupId} onClick={() => setOpen(o => !o)}>
         <span style={{ opacity: 0.6, fontSize: 10, width: 10, display: 'inline-block' }}>{open ? '▾' : '▸'}</span>
-        {name} <span className="muted" style={{ fontWeight: 400 }}>· {tags.length} metric{tags.length === 1 ? '' : 's'}</span>
+        {name} <span className="muted" style={{ fontWeight: 400 }}>· {tags.length}{uiText(" metric")}{tags.length === 1 ? '' : 's'}</span>
       </button>
       {open && <div id={groupId} className="metric-group-grid"
         style={{ display: 'grid', gridTemplateColumns: `repeat(${cols}, minmax(0,1fr))`, gap: 10 }}>
@@ -45,11 +53,13 @@ function MetricGroup({ name, tags, series, cols }) {
 }
 
 export function MiniLine({ label, pts, width = 340, height = 130 }) {
+  useUILanguage()
+
   const [hi, setHi] = React.useState(null)   // hover belongs to this projection (tooltip + dot)
   const projection = React.useMemo(() => metricCurveProjection(pts), [pts])
   const plotted = projection.points
   const [minX, maxX, minY, maxY] = projection.bounds
-  if (!pts.length) return <Empty>no metric points recorded</Empty>
+  if (!pts.length) return <Empty>{uiText("no metric points recorded")}</Empty>
   const pad = 30, w = width, h = height
   const X = v => pad + metricCurvePosition(v, minX, maxX) * (w - pad - 8)
   const Y = v => h - pad - metricCurvePosition(v, minY, maxY) * (h - pad - 16)
@@ -69,9 +79,9 @@ export function MiniLine({ label, pts, width = 340, height = 130 }) {
   const csvName = `${String(label).replace(/[^a-z0-9._-]+/gi, '_').slice(0, 80) || 'metric'}.csv`
   return (
     <div style={{ border: `1px solid ${GRID}`, borderRadius: 6, padding: 6, background: 'var(--bg-1)' }}>
-      <ChartFrame title={label}
-        description={`${hp ? `Step ${hp.step}: ${fmt(hp.value)}` : `Latest ${fmt(last)}`} · ${pts.length} points${plotted.length < pts.length
-          ? ` · plot: ${plotted.length} of ${pts.length} points, bucket extrema; exact data in table/CSV` : ''}`}
+      <ChartFrame title={uiText(label)}
+        description={uiMessage("{0} · {1} points{2}", [hp ? `Step ${hp.step}: ${fmt(hp.value)}` : `Latest ${fmt(last)}`, pts.length, plotted.length < pts.length
+          ? ` · plot: ${plotted.length} of ${pts.length} points, bucket extrema; exact data in table/CSV` : ''])}
         columns={columns} rows={pts} pageSize={100} csvName={csvName} className="metric-mini-chart">
       {({ labelledBy }) => <svg width="100%" viewBox={`0 0 ${w} ${h}`}
            role="img" aria-labelledby={labelledBy}
@@ -85,7 +95,7 @@ export function MiniLine({ label, pts, width = 340, height = 130 }) {
           <circle cx={X(hp.step)} cy={Y(hp.value)} r="3.5" fill="none" stroke="var(--fg)" strokeWidth="1.4" /></>}
         <text x={2} y={pad / 2 + 4} fill={AX} fontSize="9">{fmt(maxY)}</text>
         <text x={2} y={h - pad + 4} fill={AX} fontSize="9">{fmt(minY)}</text>
-        <text x={pad} y={h - 6} fill={AX} fontSize="9">step {minX}–{maxX}</text>
+        <text x={pad} y={h - 6} fill={AX} fontSize="9">{uiText("step ")}{minX}–{maxX}</text>
       </svg>}
       </ChartFrame>
     </div>

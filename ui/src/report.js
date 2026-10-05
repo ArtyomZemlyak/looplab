@@ -1,3 +1,4 @@
+import { uiText, uiMessage } from './uiLanguage.js'
 // Run-report analysis: derive the human-readable conclusions ("what worked / what didn't"), the
 // key-improvement waterfall, and per-operator/per-theme effectiveness purely from the folded node
 // set. Mirrors the engine's selection rule — only FEASIBLE evaluated nodes move the frontier — so
@@ -210,18 +211,18 @@ export function nodeChip(node, nodes, state = null) {
   if (isSweep(node)) {
     const sp = node.idea?.space || {}
     const keys = Object.keys(sp)
-    if (!keys.length) return 'swept'
+    if (!keys.length) return uiText('swept')
     const tok = (k) => {
       const vs = (sp[k] || []).filter(v => v != null)
       return (vs.length > 1 && vs.every(v => typeof v === 'number'))
         ? `${k}∈[${fmt(Math.min(...vs))}…${fmt(Math.max(...vs))}]` : k
     }
-    return 'swept ' + (keys.length <= 2 ? keys.map(tok).join(', ') : `${keys.length} params`)
+    return uiText('swept ') + (keys.length <= 2 ? keys.map(tok).join(', ') : uiMessage('{0} params', [keys.length]))
   }
   const parent = parents[0]
   if (!parent) {                                           // draft / root — nothing to diff against
     const what = brief(node.idea?.rationale) || brief(nodeTheme(node, state))
-    return what ? `initial experiment · ${what}` : 'initial experiment'
+    return what ? uiMessage('initial experiment · {0}', [what]) : uiText('initial experiment')
   }
   if (node.idea?.change_summary) return brief(node.idea.change_summary)
   const lbl = paramDiffLabel(paramDiff(node, parent))      // diff vs the resolved parent directly
@@ -367,20 +368,20 @@ export function verdict(state, a) {
   const repeated = finite(best.confirmed_mean) && Number.isSafeInteger(best.confirmed_seeds)
     && best.confirmed_seeds >= 2
   const robustness = repeated ? 'repeat-checked' : finite(best.confirmed_mean) ? 'mean recorded' : 'unconfirmed'
-  const valueLabel = finite(best.confirmed_mean) ? 'confirmation mean' : 'evaluation score'
-  let headline = `Selected #${best.id}: ${valueLabel} ${fmt(metricOf(best))}.`
-  if (outcome === 'baseline') headline += ' This is the first eligible experiment; it does not establish improvement.'
-  else if (outcome === 'uncompared') headline += ' Improvement over the first eligible experiment is not established.'
-  else headline += outcome === 'flat' ? ' Its evaluation score matches the first eligible experiment.'
-    : ` Its evaluation score is ${outcome === 'improved' ? 'better' : 'worse'} by ${fmt(Math.abs(gain))} under matching recorded conditions.`
-  headline += trust === 'suspect' ? ' The result is flagged, treat with caution.'
-    : ' Detector coverage is not fully verified.'
+  const valueLabel = uiText(finite(best.confirmed_mean) ? 'confirmation mean' : 'evaluation score')
+  let headline = uiMessage('Selected #{0}: {1} {2}.', [best.id, valueLabel, fmt(metricOf(best))])
+  if (outcome === 'baseline') headline += uiText(' This is the first eligible experiment; it does not establish improvement.')
+  else if (outcome === 'uncompared') headline += uiText(' Improvement over the first eligible experiment is not established.')
+  else headline += outcome === 'flat' ? uiText(' Its evaluation score matches the first eligible experiment.')
+    : uiMessage(' Its evaluation score is {0} by {1} under matching recorded conditions.', [uiText(outcome === 'improved' ? 'better' : 'worse'), fmt(Math.abs(gain))])
+  headline += trust === 'suspect' ? uiText(' The result is flagged, treat with caution.')
+    : uiText(' Detector coverage is not fully verified.')
   const nextStep = trust === 'suspect' ? 'Review the flagged evidence in Trust before using the selected result.'
     : !comparable && outcome !== 'baseline' ? 'Establish matching evaluation conditions before claiming improvement. Compare evaluation scores and confirmation means separately.'
       : !repeated ? 'Repeat the selected experiment with multiple seeds and inspect Trust before relying on the result.'
         : 'Inspect the spread and evaluation conditions of repeat checks. Multiple seeds alone do not establish generalization or statistical significance.'
   return { outcome, robustness, trust, best, baseline, first, gain, gainPct: null,
-    direction: dir, caveats, headline, nextStep }
+    direction: dir, caveats, headline, nextStep: nextStep }
 }
 
 const reportContext = context => ({
@@ -411,13 +412,13 @@ export function buildModelCard(state, _best = null, context = {}) {
     champion: champion ? { node_id: champion.id, operator: champion.operator,
       metric: champion.confirmed_mean ?? champion.metric, confirmed: champion.confirmed_mean != null,
       params: champion.idea?.params || {}, lineage: champion.parent_ids || [] } : null,
-    verdict: v.headline, verdict_source: 'deterministic',
+    verdict: uiText(v.headline), verdict_source: 'deterministic',
     agent_report_caveats: rep?.caveats || [],
-    deterministic_trust: { status: v.trust, caveats: v.caveats.map(caveat => caveat.text) },
+    deterministic_trust: { status: v.trust, caveats: v.caveats.map(caveat => uiText(caveat.text)) },
     counts: { nodes: nodeCount, evaluated: a.nEval },
-    deterministic_verdict: { headline: v.headline, outcome: v.outcome,
-      robustness: v.robustness, trust: v.trust, caveats: v.caveats.map(caveat => caveat.text),
-      next_step: v.nextStep },
+    deterministic_verdict: { headline: uiText(v.headline), outcome: v.outcome,
+      robustness: v.robustness, trust: v.trust, caveats: v.caveats.map(caveat => uiText(caveat.text)),
+      next_step: uiText(v.nextStep) },
     agent_narrative: rep ? {
       advisory: true, headline: rep.headline, verdict: rep.verdict, summary: rep.summary,
       champion_summary: rep.champion_summary, what_worked: rep.what_worked,
@@ -443,40 +444,40 @@ export function toMarkdown(state, _best, context = {}) {
   const ctx = reportContext(context)
   const champion = v.best || null
   const L = []
-  L.push(`# LoopLab run report — ${state.label || state.run_id || state.task_id}`)
+  L.push(uiMessage("# LoopLab run report — {0}", [state.label || state.run_id || state.task_id]))
   L.push('')
   // Conclusion-first and authority-first: provider prose can explain, never replace, this verdict.
-  L.push(`## Verdict`)
+  L.push(uiMessage("## Verdict", []))
   L.push('')
-  L.push(`**${v.headline}**`)
-  L.push('', `**Next step:** ${v.nextStep}`)
+  L.push(`**${uiText(v.headline)}**`)
+  L.push('', uiMessage("**Next step:** {0}", [uiText(v.nextStep)]))
   if (v.caveats.length) {
     L.push('')
-    L.push('Deterministic trust caveats: ' + v.caveats.map(c => c.text).join('; ') + '.')
+    L.push(uiMessage("Deterministic trust caveats: {0}.", [v.caveats.map(c => uiText(c.text)).join('; ')]))
   }
   L.push('')
-  L.push(`- **Run:** ${state.run_id}`)
-  L.push(`- **Optimization orientation:** ${optimizationLabel(state.direction)}`)
-  L.push(`- **Status:** ${state.phase || (state.finished ? 'finished' : 'running')}${state.stop_reason ? ` (${state.stop_reason})` : ''}`)
-  L.push(`- **Nodes:** ${nodeCount} — ${a.nEval} evaluated, ${Object.values(a.failures || {}).reduce((s, x) => s + x.length, 0)} failed`)
-  if (champion) L.push(`- **Best:** node #${champion.id} · metric ${fmt(champion.confirmed_mean ?? champion.metric)}${champion.confirmed_mean != null ? ` ±${fmt(champion.confirmed_std)} (${champion.confirmed_seeds}×)` : ''} · params ${JSON.stringify(champion.idea?.params)}`)
+  L.push(uiMessage("- **Run:** {0}", [state.run_id]))
+  L.push(uiMessage("- **Optimization orientation:** {0}", [uiText(optimizationLabel(state.direction))]))
+  L.push(uiMessage("- **Status:** {0}{1}", [uiText(state.phase || (state.finished ? 'finished' : 'running')), state.stop_reason ? ` (${state.stop_reason})` : '']))
+  L.push(uiMessage("- **Nodes:** {0} — {1} evaluated, {2} failed", [nodeCount, a.nEval, Object.values(a.failures || {}).reduce((s, x) => s + x.length, 0)]))
+  if (champion) L.push(uiMessage("- **Best:** node #{0} · metric {1}{2} · params {3}", [champion.id, fmt(champion.confirmed_mean ?? champion.metric), champion.confirmed_mean != null ? ` ±${fmt(champion.confirmed_std)} (${champion.confirmed_seeds}×)` : '', JSON.stringify(champion.idea?.params)]))
   // The exported Markdown is what gets pasted into a report or a ticket, so it is the LAST place a
   // `$0` may stand in for "nobody priced this run" — spell the pricing evidence out in full here.
-  if (state.llm_cost) L.push(`- **LLM:** ${state.llm_cost.total_tokens} tokens · `
-    + `${costPricing(state.llm_cost).text} (${costPricing(state.llm_cost).title})`)
-  if (ctx.generation) L.push(`- **Run generation:** ${ctx.generation}`)
-  if (ctx.snapshotSeq != null) L.push(`- **Snapshot event:** #${ctx.snapshotSeq}`)
+  if (state.llm_cost) L.push(uiMessage('- **LLM:** {0} tokens · {1} ({2})', [state.llm_cost.total_tokens,
+    uiText(costPricing(state.llm_cost).text), uiText(costPricing(state.llm_cost).title)]))
+  if (ctx.generation) L.push(uiMessage("- **Run generation:** {0}", [ctx.generation]))
+  if (ctx.snapshotSeq != null) L.push(uiMessage("- **Snapshot event:** #{0}", [ctx.snapshotSeq]))
   if (rep) {
     // Provider prose must remain inside the advisory quote with every platform newline form.
     const quote = text => String(text || '').split(/\r\n?|\n/).forEach(line => L.push(`> ${line}`))
-    L.push('', '## Agent narrative (advisory)', '')
-    quote('**Advisory only — not the deterministic verdict or trust decision.**')
-    quote(`**Node coverage:** ${reportCoverageText(coverage)}`)
-    const receipt = [rep.published_seq != null ? `event #${rep.published_seq}` : 'event unknown',
-      rep.published_at != null ? new Date(rep.published_at * 1000).toISOString() : 'time unknown',
-      rep.trigger ? `trigger ${rep.trigger}` : 'trigger unknown'].join(' · ')
-    quote(`**Published:** ${receipt}`)
-    if (rep.headline) { L.push('>'); quote(`**Agent headline:** ${rep.headline}`) }
+    L.push('', uiText('## Agent narrative (advisory)'), '')
+    quote(uiText('**Advisory only — not the deterministic verdict or trust decision.**'))
+    quote(uiMessage('**Node coverage:** {0}', [uiText(reportCoverageText(coverage))]))
+    const receipt = [rep.published_seq != null ? uiMessage('event #{0}', [rep.published_seq]) : uiText('event unknown'),
+      rep.published_at != null ? new Date(rep.published_at * 1000).toISOString() : uiText('time unknown'),
+      rep.trigger ? uiMessage('trigger {0}', [rep.trigger]) : uiText('trigger unknown')].join(' · ')
+    quote(uiMessage('**Published:** {0}', [receipt]))
+    if (rep.headline) { L.push('>'); quote(uiMessage('**Agent headline:** {0}', [rep.headline])) }
     if (rep.verdict || rep.summary) { L.push('>'); quote(rep.verdict || rep.summary) }
     const advisoryLists = [
       ['Agent caveats', rep.caveats], ['Champion note', rep.champion_summary ? [rep.champion_summary] : []],
@@ -485,34 +486,34 @@ export function toMarkdown(state, _best, context = {}) {
     ]
     advisoryLists.forEach(([label, items]) => {
       if (!items?.length) return
-      L.push('>'); quote(`**${label}:**`); items.forEach(item => quote(`- ${item}`))
+      L.push('>'); quote(`**${uiText(label)}:**`); items.forEach(item => quote(`- ${item}`))
     })
   }
   L.push('')
-  L.push(a.steps.length === 1 ? '## First eligible metric' : '## Recorded metric trajectory')
-  L.push('', 'This numeric frontier may combine evaluation scores and confirmation means. Its changes do not establish a comparable improvement. Use the selected-result verdict above.')
+  L.push((a.steps.length === 1 ? uiText('## First eligible metric') : uiText('## Recorded metric trajectory')))
+  L.push('', uiText('This numeric frontier may combine evaluation scores and confirmation means. Its changes do not establish a comparable improvement. Use the selected-result verdict above.'))
   if (a.steps.length) {
     L.push('')
-    L.push('| step | node | operator | recorded value | measurement | numeric change | what changed |')
+    L.push(uiText('| step | node | operator | recorded value | measurement | numeric change | what changed |'))
     L.push('|---|---|---|---|---|---|---|')
-    a.steps.forEach((s, i) => L.push(`| ${i + 1} | #${s.id} | ${s.operator}${s.theme ? ` (${s.theme})` : ''} | ${fmt(s.to)} | ${s.measurement} | ${s.delta == null ? 'first eligible' : fmt(s.delta)} | ${paramDiffLabel(s.diff)} |`))
-    if (a.steps.length > 1) L.push(`\nRecorded frontier change: **${fmt(a.totalGain)}** across ${a.steps.length} steps (first eligible ${fmt(a.firstBest)} → numeric frontier ${fmt(a.finalBest)}).`)
-  } else L.push('\n_No improving steps recorded yet._')
+    a.steps.forEach((s, i) => L.push(`| ${i + 1} | #${s.id} | ${s.operator}${s.theme ? ` (${s.theme})` : ''} | ${fmt(s.to)} | ${uiText(s.measurement)} | ${s.delta == null ? uiText('first eligible') : fmt(s.delta)} | ${paramDiffLabel(s.diff)} |`))
+    if (a.steps.length > 1) L.push(uiMessage("\nRecorded frontier change: **{0}** across {1} steps (first eligible {2} → numeric frontier {3}).", [fmt(a.totalGain), a.steps.length, fmt(a.firstBest), fmt(a.finalBest)]))
+  } else L.push(uiText('\n_No improving steps recorded yet._'))
   L.push('')
-  L.push('## What didn\'t work')
+  L.push(uiText('## What didn\'t work'))
   const fr = Object.entries(a.failures)
-  if (fr.length) { L.push('\n**Failures by reason:** ' + fr.map(([r, ns]) => `${r} (${ns.length})`).join(', ')) }
-  if (a.regressions.length) { L.push(`\n**Worse evaluation scores:** ${a.regressions.length} under matching recorded parent conditions.`) }
-  if (a.infeasible.length) { L.push(`\n**Infeasible:** ${a.infeasible.length} node(s) violated a constraint and were excluded.`) }
+  if (fr.length) { L.push(uiMessage("\n**Failures by reason:** {0}", [fr.map(([r, ns]) => `${r} (${ns.length})`).join(', ')])) }
+  if (a.regressions.length) { L.push(uiMessage("\n**Worse evaluation scores:** {0} under matching recorded parent conditions.", [a.regressions.length])) }
+  if (a.infeasible.length) { L.push(uiMessage("\n**Infeasible:** {0} node(s) violated a constraint and were excluded.", [a.infeasible.length])) }
   const deadThemes = a.themes.filter(t => t.improved === 0)
-  if (deadThemes.length) L.push(`\n**Primary concept axes without a comparable score improvement:** ${deadThemes.map(t => t.key).join(', ')}. Absence of an improvement is not evidence that an axis failed.`)
-  if (!fr.length && !a.regressions.length && !a.infeasible.length) L.push('\n_No recorded failures or comparable regressions._')
+  if (deadThemes.length) L.push(uiMessage("\n**Primary concept axes without a comparable score improvement:** {0}. Absence of an improvement is not evidence that an axis failed.", [deadThemes.map(t => t.key).join(', ')]))
+  if (!fr.length && !a.regressions.length && !a.infeasible.length) L.push(uiText('\n_No recorded failures or comparable regressions._'))
   L.push('')
-  L.push('## Parent comparison coverage')
-  L.push(`\n${a.compared} compared; ${a.uncompared} not compared. First experiments and missing evidence are not failed experiments. Only evaluation scores are compared; the numeric frontier may include confirmation means.`)
+  L.push(uiText('## Parent comparison coverage'))
+  L.push(uiMessage("\n{0} compared; {1} not compared. First experiments and missing evidence are not failed experiments. Only evaluation scores are compared; the numeric frontier may include confirmation means.", [a.compared, a.uncompared]))
   L.push('')
-  L.push('| operator | nodes | evaluated | compared with parent | better score | not compared | numeric frontier |')
+  L.push(uiText('| operator | nodes | evaluated | compared with parent | better score | not compared | numeric frontier |'))
   L.push('|---|---|---|---|---|---|---|')
-  a.operators.forEach(o => L.push(`| ${o.key} | ${o.count} | ${o.evaluated} | ${o.compared} | ${o.improved} | ${o.uncompared} | ${fmt(o.best)}${o.best != null ? o.bestConfirmed ? ' (confirmation mean)' : ' (evaluation score)' : ''} |`))
+  a.operators.forEach(o => L.push(`| ${o.key} | ${o.count} | ${o.evaluated} | ${o.compared} | ${o.improved} | ${o.uncompared} | ${fmt(o.best)}${o.best != null ? o.bestConfirmed ? uiText(' (confirmation mean)') : uiText(' (evaluation score)') : ''} |`))
   return L.join('\n')
 }

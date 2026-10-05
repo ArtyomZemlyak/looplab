@@ -1,3 +1,4 @@
+import { uiText, uiMessage, useUILanguage } from './uiLanguage.js'
 import React, { useCallback, useContext, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import { ReactFlow, Background, Controls, MiniMap, Handle, Position, Panel,
   useNodesInitialized, useReactFlow, useViewport } from '@xyflow/react'
@@ -93,6 +94,8 @@ const DAG_FIT_OPTIONS = {
 // Wait for React Flow to measure the replacement nodes before fitting. Expanding detail deliberately
 // preserves the user's camera.
 function RefitBoundedGraph({ rootRef, cameraTouchedRef, autoFit, signature, count, mode }) {
+  useUILanguage()
+
   const { fitView } = useReactFlow()
   const nodesInitialized = useNodesInitialized()
   const previousRef = useRef(null)
@@ -140,6 +143,8 @@ function RefitBoundedGraph({ rootRef, cameraTouchedRef, autoFit, signature, coun
 const LodContext = React.createContext(false)
 const LOD_ON = 0.56, LOD_OFF = 0.64   // sub-readable cards become honest overview glyphs
 function LodWatcher({ lod, onChange }) {
+  useUILanguage()
+
   const { zoom } = useViewport()
   useEffect(() => {
     if (!lod && zoom < LOD_ON) onChange(true)
@@ -154,6 +159,8 @@ function LodWatcher({ lod, onChange }) {
 // (--ll-label-zfs) so labels restyle via CSS with NO node re-render; quantized to 0.05 zoom steps so it
 // doesn't thrash the style on every frame.
 function ZoomFontWatcher() {
+  useUILanguage()
+
   const { zoom } = useViewport()
   const q = Math.round(zoom * 20) / 20
   useEffect(() => {
@@ -168,26 +175,30 @@ function ZoomFontWatcher() {
 // different things). Only a fallback or a failed validation shows one faint glyph.
 function agentBadge(rep) {
   if (!rep) return null
-  if (rep.fell_back) return <span className="badge agent-note" title="developer fell back to a simpler build">↩</span>
-  if (rep.ok === false) return <span className="badge agent-note" title="agent validation failed">✗</span>
+  if (rep.fell_back) return <span className="badge agent-note" title={uiText("developer fell back to a simpler build")}>↩</span>
+  if (rep.ok === false) return <span className="badge agent-note" title={uiText("agent validation failed")}>✗</span>
   return null
 }
 
 // Champion lightning is a CSS-only decorative overlay: no per-render SVG paths or inline timers.
-const Bolts = () => <span className="ll-bolts" aria-hidden="true" />
+const Bolts = () => { useUILanguage(); return (<span className="ll-bolts" aria-hidden="true" />) }
 
 function NodeActionTrigger({ nodeId, expanded, onOpen }) {
+  useUILanguage()
+
   return <button type="button" className="node-action-trigger nodrag nopan"
     data-node-action-id={nodeId}
-    aria-label={`Open actions for experiment #${nodeId}`} aria-haspopup="menu" aria-expanded={expanded}
-    title={`Actions for experiment #${nodeId}`}
+    aria-label={uiMessage("Open actions for experiment #{0}", [nodeId])} aria-haspopup="menu" aria-expanded={expanded}
+    title={uiMessage("Actions for experiment #{0}", [nodeId])}
     onPointerDown={e => e.stopPropagation()}
     onClick={e => { e.stopPropagation(); onOpen(nodeId, e) }}>•••</button>
 }
 
 function NodeSelectionTrigger({ nodeId, selected, label, onSelect }) {
+  useUILanguage()
+
   return <button type="button" className="node-select-trigger"
-    data-node-select-id={nodeId} aria-label={label}
+    data-node-select-id={nodeId} aria-label={uiText(label)}
     aria-current={selected ? 'true' : undefined} onClick={() => onSelect(nodeId)} />
 }
 
@@ -217,6 +228,8 @@ export function dagObjectiveSourceLabel(node) {
 const EMPTY_RUN_CONSTANT = new Set()
 
 function ExpNode({ data }) {
+  useUILanguage()
+
   const { node, state, workIds, evalStages, selectedId, onSelect, themeFilter, groupTint,
     onOpenActions, actionsOpen } = data
   const lod = useContext(LodContext)   // overview zoom → render the compact glyph instead of the full card
@@ -263,9 +276,9 @@ function ExpNode({ data }) {
   const { tags: conceptTags, ownCount: ownConceptCount } = useMemo(
     () => orderConceptTags(allConceptTags, runConstant), [allConceptTags, runConstant])
   const conceptPreview = <>
-    {conceptStatus === 'partial' && <span className="nc-tag more" title="Incomplete concept materialization">PARTIAL</span>}
+    {conceptStatus === 'partial' && <span className="nc-tag more" title={uiText("Incomplete concept materialization")}>{uiText("PARTIAL")}</span>}
     {conceptTags.slice(0, 2).map(c => <span key={c} className={'nc-tag' + (runConstant.has(c) ? ' run-wide' : '')}
-      title={runConstant.has(c) ? `${c} — carried by every experiment in this run` : c}>{c.split('/').pop()}</span>)}
+      title={(runConstant.has(c) ? uiMessage("{0} — carried by every experiment in this run", [c]) : c)}>{c.split('/').pop()}</span>)}
   </>
   const confirmed = node.confirmed_mean != null
   // The live stage cursor, decoded ONCE per render pass by the caller and handed down as a Map, so
@@ -354,22 +367,22 @@ function ExpNode({ data }) {
         <span className="spacer" style={{ flex: 1 }} />
         {node.origin?.run_id ? <a className="origin-chip compact" href={`#/run/${encodeURIComponent(node.origin.run_id)}`}
           onClick={(e) => e.stopPropagation()}
-          aria-label={`Open source run ${node.origin.run_id}, experiment ${node.origin.node_id}${node.research_origin ? ', informed by research' : ''}`}
+          aria-label={uiMessage("Open source run {0}, experiment {1}{2}", [node.origin.run_id, node.origin.node_id, node.research_origin ? ', informed by research' : ''])}
           title={`seeded from run ${node.origin.run_id} #${node.origin.node_id}`
             + (node.origin.metric != null ? ` · source metric ${fmt(node.origin.metric)}` : '')
             + seedContractText(node.origin)
             + (node.research_origin ? ' · informed by deep research' : '')}>⤴</a>
           : seed ? <span className="origin-chip compact" role="img"
-          aria-label={`Seeded from run ${seed.name}, experiment ${seed.nodeId}`}
+          aria-label={uiMessage("Seeded from run {0}, experiment {1}", [seed.name, seed.nodeId])}
           title={`seeded from run ${seed.dir} #${seed.nodeId}`
             + (node.origin.metric != null ? ` · source metric ${fmt(node.origin.metric)}` : '')
             + seedContractText(node.origin)}>⤴</span>
           : node.research_origin ? <span className="origin-chip rsch compact" role="img"
-          aria-label="Proposed from deep research directions"
-          title={`proposed just after deep research (${node.research_origin.trigger || 'auto'}) at node ${node.research_origin.at_node} — its directions were steering`}><OpIcon name="bulb" size={11} /></span> : null}
+          aria-label={uiText("Proposed from deep research directions")}
+          title={uiMessage("proposed just after deep research ({0}) at node {1} — its directions were steering", [node.research_origin.trigger || 'auto', node.research_origin.at_node])}><OpIcon name="bulb" size={11} /></span> : null}
         {branch && <span className="origin-chip fork compact" role="img"
-          aria-label={branch.label} title={branch.title}><OpIcon name={branch.icon} size={11} /></span>}
-        {sweep && <span className="badge sweep" title={`intra-node sweep · ${sw.count} trials — open the node's Trials tab`}>⊞ {sw.count}</span>}
+          aria-label={uiText(branch.label)} title={uiText(branch.title)}><OpIcon name={branch.icon} size={11} /></span>}
+        {sweep && <span className="badge sweep" title={uiMessage("intra-node sweep · {0} trials — open the node's Trials tab", [sw.count])}>⊞ {sw.count}</span>}
         {agentBadge(node.agent_report)}
       </div>
       <div className="metric">
@@ -377,32 +390,32 @@ function ExpNode({ data }) {
         {/* delta only where it's meaningful — a merge has several parents, so a single ▲/▼ vs parent[0] would lie */}
         {!isMerge && d && <span className={'delta ' + (d.improved ? 'up' : 'down')}>{d.improved ? '▲' : '▼'}{fmt(Math.abs(d.d), 2)}</span>}
         {/* confirmed = a compact tick, not a restated 'robust …' line; the full ±std lives in the Inspector */}
-        {confirmed && <span className="conf-chip" title={`robust ${fmt(node.confirmed_mean, 3)} ±${fmt(node.confirmed_std, 2)} over ${node.confirmed_seeds} seeds`}>✓{node.confirmed_seeds}×</span>}
+        {confirmed && <span className="conf-chip" title={uiMessage("robust {0} ±{1} over {2} seeds", [fmt(node.confirmed_mean, 3), fmt(node.confirmed_std, 2), node.confirmed_seeds])}>✓{node.confirmed_seeds}×</span>}
       </div>
       {/* A fixed-height graph node gets exactly one context row. Failure/constraint truth wins over
           sweep detail, then merge/change copy. Provenance stays independently reachable in the header. */}
       {activityVisible
         ? <div className="sub"><span className={`activity-chip ${activity.tone}`}
-          title={activity.label}>{activity.shortLabel}</span></div>
+          title={uiText(activity.label)}>{activity.shortLabel}</span></div>
         : node.status === 'failed'
-        ? <div className="sub"><span className="badge reason">{node.error_reason || 'failed'}</span></div>
+        ? <div className="sub"><span className="badge reason">{((node.error_reason || uiText('failed')))}</span></div>
         : node.feasible === false
-          ? <div className="sub"><span className="badge reason">infeasible</span></div>
+          ? <div className="sub"><span className="badge reason">{uiText("infeasible")}</span></div>
           : sweep ? <div className="sub sweep-foot">
             <Spark series={sw.series} width={104} height={16} />
             <span className="spacer" style={{ flex: 1 }} />
-            {sw.failed ? <span className="dot fail" title={`${sw.failed} failed trials`}>●{sw.failed}</span> : null}
+            {sw.failed ? <span className="dot fail" title={uiMessage("{0} failed trials", [sw.failed])}>●{sw.failed}</span> : null}
           </div>
           : isMerge
             ? (() => { const ml = '⊕ ' + mergeThemes.join(' + ')
-                return <div className="merge-line" title={'combines: ' + mergeThemes.join(' + ')}>{ml}</div> })()
+                return <div className="merge-line" title={uiMessage("combines: {0}", [mergeThemes.join(' + ')])}>{ml}</div> })()
             : chg ? <div className="change-chip" title={chg}>{chg}</div> : null}
       <Handle type="source" position={Position.Bottom} style={{ opacity: 0 }} />
     </div>
     {(conceptStatus === 'partial' || conceptTags.length > 0) && (conceptTags.length > 2
       ? <details className="node-concepts expandable nodrag nopan"
           onClick={event => event.stopPropagation()}>
-        <summary aria-label={`Show all ${conceptTags.length} concepts for experiment ${node.id}`}>
+        <summary aria-label={uiMessage("Show all {0} concepts for experiment {1}", [conceptTags.length, node.id])}>
           {conceptPreview}<span className="nc-tag more">+{conceptTags.length - 2}</span>
         </summary>
         <div className="node-concepts-all">{conceptTags.join(' · ')}</div>
@@ -416,14 +429,18 @@ function ExpNode({ data }) {
 // Group region behind an EXPANDED cluster (round-8): a faint band + a compact label pill (replaces
 // the round-6 full-width lane bar that stretched across the cluster). Click the pill to collapse.
 function GroupLane({ data }) {
+  useUILanguage()
+
   const { w, h, label, count, totalCount, matchedCount, filterActive, filterDescription, tint, onToggle } = data
-  return <GroupRegion w={w} h={h} label={label} count={count} totalCount={totalCount}
+  return <GroupRegion w={w} h={h} label={uiText(label)} count={count} totalCount={totalCount}
     matchedCount={matchedCount} filterActive={filterActive} filterDescription={filterDescription}
     tint={tint} onToggle={onToggle} />
 }
 
 // Collapsed group → one aggregate card (semantic zoom). Body selects (group summary); the ▸ expands.
 function GroupSuper({ data }) {
+  useUILanguage()
+
   const { label, count, totalCount, best, series, status, activity, tint, selected, onExpand, onSelect,
     filterActive, filterDescription } = data
   // An older aggregate (or one built before the lane tally existed) carries no `activity`; the dots
@@ -446,32 +463,32 @@ function GroupSuper({ data }) {
   return (
     <SuperShell tint={tint} selected={selected} dimmed={zeroMatch} selectKey={label}
       onClick={() => onSelect(label)}
-      title={`Select collapsed group ${label}, ${matchText}, ${metricText}`}>
+      title={uiMessage("Select collapsed group {0}, {1}, {2}", [label, matchText, metricText])}>
       <Handle type="target" position={Position.Top} style={{ opacity: 0 }} />
       <div className="row">
-        <button type="button" className="grp-chev btn-chev" aria-label={`Expand group ${label}`}
+        <button type="button" className="grp-chev btn-chev" aria-label={uiMessage("Expand group {0}", [label])}
           onClick={(e) => { e.stopPropagation(); onExpand(label) }}>▸</button>
-        <b className="grp-name">{label}</b>
+        <b className="grp-name">{uiText(label)}</b>
         <span className="spacer" style={{ flex: 1 }} />
-        <span className="grp-n" title={matchText}>{countText}</span>
+        <span className="grp-n" title={uiText(matchText)}>{countText}</span>
       </div>
-      <div className="metric">{metricText}</div>
+      <div className="metric">{uiText(metricText)}</div>
       <Spark series={series} />
       {/* Distinct SHAPE per status (✓ evaluated / ✗ failed / ○ pending), not colour alone, so the
           breakdown is legible without colour perception (WCAG 1.4.1). Titles carry the full text. */}
       <div className="grp-dots">
-        {status.evaluated ? <span className="dot ok" title={`${status.evaluated} evaluated`}>✓{status.evaluated}</span> : null}
-        {status.failed ? <span className="dot fail" title={`${status.failed} failed`}>✗{status.failed}</span> : null}
+        {status.evaluated ? <span className="dot ok" title={uiMessage("{0} evaluated", [status.evaluated])}>✓{status.evaluated}</span> : null}
+        {status.failed ? <span className="dot fail" title={uiMessage("{0} failed", [status.failed])}>✗{status.failed}</span> : null}
         {/* The pending dot SPLITS by lane. `status.pending` is the lifecycle census, in which a node
             three hours into training and a node that has not started are the same word — so a
             collapsed group of actively-training experiments read "○3 pending", which is precisely
             what an operator collapses a group to avoid having to expand it to learn. The shapes stay
             distinct from each other and from ✓/✗ so the split survives without colour (WCAG 1.4.1),
             and any pending node the projection cannot place keeps the original ○. */}
-        {lanes.building ? <span className="dot build" title={`${lanes.building} building`}>◐{lanes.building}</span> : null}
-        {lanes.evaluating ? <span className="dot eval" title={`${lanes.evaluating} training / evaluating`}>▶{lanes.evaluating}</span> : null}
-        {lanes.queued ? <span className="dot queued" title={`${lanes.queued} waiting for an evaluation slot`}>◔{lanes.queued}</span> : null}
-        {unplacedPending ? <span className="dot pend" title={`${unplacedPending} pending`}>○{unplacedPending}</span> : null}
+        {lanes.building ? <span className="dot build" title={uiMessage("{0} building", [lanes.building])}>◐{lanes.building}</span> : null}
+        {lanes.evaluating ? <span className="dot eval" title={uiMessage("{0} training / evaluating", [lanes.evaluating])}>▶{lanes.evaluating}</span> : null}
+        {lanes.queued ? <span className="dot queued" title={uiMessage("{0} waiting for an evaluation slot", [lanes.queued])}>◔{lanes.queued}</span> : null}
+        {unplacedPending ? <span className="dot pend" title={uiMessage("{0} pending", [unplacedPending])}>○{unplacedPending}</span> : null}
       </div>
       <Handle type="source" position={Position.Bottom} style={{ opacity: 0 }} />
     </SuperShell>
@@ -501,6 +518,8 @@ export default function Dag({ state, selectedId, onSelect, groupMode = 'none', c
                              onToggleGroup, onSetMode, onCollapseAll, onExpandAll, onAutoCollapse, selectedGroup, onSelectGroup,
                              themeFilter = null, highlightIds: conceptIds = null, onNodeAction, mergeArm = null,
                              nodeMenuActions = null, compact = false, evalStages = null }) {
+  useUILanguage()
+
   const workIds = useMemo(() => workingNodeIds(state), [state])
   const [baseFilter, setBaseFilter] = useState('')
   const bases = useMemo(() => baseChoices(state.nodes), [state.nodes])
@@ -792,7 +811,7 @@ export default function Dag({ state, selectedId, onSelect, groupMode = 'none', c
 
   return (
     <LodContext.Provider value={lod}>
-    <div ref={dagRef} className="dag-wrap" role="region" tabIndex={-1} aria-label="Experiment graph">
+    <div ref={dagRef} className="dag-wrap" role="region" tabIndex={-1} aria-label={uiText("Experiment graph")}>
     {/* Reactor/Energy backdrop + shared SVG defs (the edge gradient + the neon glow filter), mounted
         only while FX is on so there's zero cost otherwise. The defs ids are referenced from CSS. */}
     {fx && <div className="reactor-bg" aria-hidden="true" />}
@@ -865,30 +884,26 @@ export default function Dag({ state, selectedId, onSelect, groupMode = 'none', c
       <Background color="var(--line)" gap={22} />
       <Controls showInteractive={false} />
       <Panel position="top-right" className="grp-control">
-        {bases.some(row => row.digest !== 'unknown') && <label className="base-filter">base{' '}
-          <select className="text" aria-label="Filter experiments by recorded code base" value={baseFilter} onChange={e => setBaseFilter(e.target.value)}>
-            <option value="">All bases</option>{bases.map(row => <option key={row.digest} value={row.digest}>{row.digest === 'unknown' ? 'Unknown' : row.digest.slice(0, 12)} · {row.count}</option>)}
+        {bases.some(row => row.digest !== 'unknown') && <label className="base-filter">{uiText("base")}{' '}
+          <select className="text" aria-label={uiText("Filter experiments by recorded code base")} value={baseFilter} onChange={e => setBaseFilter(e.target.value)}>
+            <option value="">{uiText("All bases")}</option>{bases.map(row => <option key={row.digest} value={row.digest}>{((row.digest === 'unknown' ? uiText('Unknown') : row.digest.slice(0, 12)))} · {row.count}</option>)}
           </select></label>}
-        <span className="muted">group by</span>
-        <select className="text" aria-label="Group experiments by" value={groupMode} onChange={e => onSetMode && onSetMode(e.target.value)}>
+        <span className="muted">{uiText("group by")}</span>
+        <select className="text" aria-label={uiText("Group experiments by")} value={groupMode} onChange={e => onSetMode && onSetMode(e.target.value)}>
           {GROUP_MODES.map(([v, l]) => <option key={v} value={v}>{l}</option>)}
         </select>
         {groupMode !== 'none' && groupKeys.length > 0 && <>
-          <select className="text grp-picker" aria-label="Choose one experiment group"
+          <select className="text grp-picker" aria-label={uiText("Choose one experiment group")}
                   value={activeGroupActionKey} onChange={e => setGroupActionKey(e.target.value)}>
-            <option value="">one group…</option>
+            <option value="">{uiText("one group…")}</option>
             {groupKeys.map(key => <option key={key} value={key}>
-              {key} · {collapsed.has(key) ? 'collapsed' : 'expanded'}
+              {key} · {((collapsed.has(key) ? uiText('collapsed') : uiText('expanded')))}
             </option>)}
           </select>
           <button type="button" className={'btn sm grp-picker-action'
                     + (compact && activeGroupActionKey ? ' primary' : ' ghost')}
                   disabled={!activeGroupActionKey}
-                  aria-label={activeGroupActionKey
-                    ? compact ? `Open group ${activeGroupActionKey}`
-                      : `${collapsed.has(activeGroupActionKey) ? 'Expand' : 'Collapse'} group ${activeGroupActionKey}`
-                    : compact ? 'Choose a group before opening it'
-                      : 'Choose a group before collapsing or expanding it'}
+                  aria-label={((activeGroupActionKey ? compact ? uiMessage("Open group {0}", [activeGroupActionKey]) : uiMessage("{0} group {1}", [collapsed.has(activeGroupActionKey) ? 'Expand' : 'Collapse', activeGroupActionKey]) : (compact ? uiText('Choose a group before opening it') : uiText('Choose a group before collapsing or expanding it'))))}
                   onClick={() => {
                     if (!activeGroupActionKey) return
                     if (compact) {
@@ -899,19 +914,16 @@ export default function Dag({ state, selectedId, onSelect, groupMode = 'none', c
                       setGroupActionKey('')
                     } else onToggleGroup?.(activeGroupActionKey)
                   }}>
-            {activeGroupActionKey
-              ? compact ? 'open group'
-                : collapsed.has(activeGroupActionKey) ? 'expand' : 'collapse'
-              : 'choose group'}
+            {((activeGroupActionKey ? (compact ? uiText('open group') : (collapsed.has(activeGroupActionKey) ? uiText('expand') : uiText('collapse'))) : uiText('choose group')))}
           </button>
-          <button className="btn sm ghost" aria-label="Collapse all groups"
-                  title="collapse all groups" onClick={() => onCollapseAll && onCollapseAll(groupKeys)}>⊟ all</button>
-          <button className="btn sm ghost" aria-label="Expand all groups"
-                  title="expand all groups" onClick={() => onExpandAll && onExpandAll()}>⊞ all</button>
+          <button className="btn sm ghost" aria-label={uiText("Collapse all groups")}
+                  title={uiText("collapse all groups")} onClick={() => onCollapseAll && onCollapseAll(groupKeys)}>{uiText("⊟ all")}</button>
+          <button className="btn sm ghost" aria-label={uiText("Expand all groups")}
+                  title={uiText("expand all groups")} onClick={() => onExpandAll && onExpandAll()}>{uiText("⊞ all")}</button>
           {(groupMode === 'theme' || groupMode === 'niche') && onAutoCollapse &&
-            <button className="btn sm ghost" aria-label="Auto-collapse settled groups"
-                    title="auto-collapse settled groups (keeps the champion, selected, and active groups open)"
-                    onClick={() => onAutoCollapse(true)}>⊟ settled</button>}
+            <button className="btn sm ghost" aria-label={uiText("Auto-collapse settled groups")}
+                    title={uiText("auto-collapse settled groups (keeps the champion, selected, and active groups open)")}
+                    onClick={() => onAutoCollapse(true)}>{uiText("⊟ settled")}</button>}
         </>}
       </Panel>
       {/* lift the toggles above the overview map when it's open — otherwise the minimap (also
@@ -919,32 +931,29 @@ export default function Dag({ state, selectedId, onSelect, groupMode = 'none', c
       <Panel position="bottom-right" className="map-toggles"
         style={{ marginBottom: showMap && !compact ? 152 : 0 }}>
         <button aria-pressed={showLegend}
-                aria-label={showLegend ? 'Hide graph legend' : 'Show graph legend'}
-                className={'btn sm ghost' + (showLegend ? ' primary' : '')} title="node status and operator legend"
-                onClick={() => setShowLegend(v => !v)}>ⓘ status</button>
+                aria-label={((showLegend ? uiText('Hide graph legend') : uiText('Show graph legend')))}
+                className={'btn sm ghost' + (showLegend ? ' primary' : '')} title={uiText("node status and operator legend")}
+                onClick={() => setShowLegend(v => !v)}>{uiText("ⓘ status")}</button>
         <button aria-pressed={!compact && showMap} disabled={compact}
-                aria-label={compact ? 'Overview map unavailable on compact screens'
-                  : showMap ? 'Hide overview map' : 'Show overview map'}
+                aria-label={((compact ? uiText('Overview map unavailable on compact screens') : (showMap ? uiText('Hide overview map') : uiText('Show overview map'))))}
                 className={'btn sm ghost' + (!compact && showMap ? ' primary' : '')}
-                title={compact ? 'Overview map is available on wider screens'
-                  : showMap ? 'hide overview map' : 'show overview map'}
-                onClick={toggleMap}><OpIcon name="map" className="t-ic" />
-          map{!compact && showMap ? ' ✕' : ''}</button>
+                title={((compact ? uiText('Overview map is available on wider screens') : (showMap ? uiText('hide overview map') : uiText('show overview map'))))}
+                onClick={toggleMap}><OpIcon name="map" className="t-ic" />{uiText("map")}{!compact && showMap ? ' ✕' : ''}</button>
       </Panel>
       {showLegend && <Panel position="top-left" className="op-legend">
-        <div className="legend-h">Node status</div>
-        <div className="legend-row"><span className="activity-chip building">building</span><span>code is being built</span></div>
+        <div className="legend-h">{uiText("Node status")}</div>
+        <div className="legend-row"><span className="activity-chip building">{uiText("building")}</span><span>{uiText("code is being built")}</span></div>
         {/* The eval chip now carries the STAGE the node is on when the run's cursor says (`mine 1/3`),
             and falls back to this wording when it does not. Both are legended, because an operator
             who sees `mine 1/3` on a card needs to know it is the same lane as `training / eval`. */}
-        <div className="legend-row"><span className="activity-chip evaluating">training / eval</span><span>evaluation owns the node</span></div>
-        <div className="legend-row"><span className="activity-chip evaluating">train 2/3</span><span>…on that pipeline step, when the run reports one</span></div>
-        <div className="legend-row"><span className="activity-chip queued">waiting for slot</span><span>queued — nothing is running for it yet</span></div>
-        <div className="legend-row"><span className="activity-chip unknown">unknown</span><span>legacy start evidence unavailable</span></div>
-        <div className="legend-h">Operators</div>
+        <div className="legend-row"><span className="activity-chip evaluating">{uiText("training / eval")}</span><span>{uiText("evaluation owns the node")}</span></div>
+        <div className="legend-row"><span className="activity-chip evaluating">{uiText("train 2/3")}</span><span>{uiText("…on that pipeline step, when the run reports one")}</span></div>
+        <div className="legend-row"><span className="activity-chip queued">{uiText("waiting for slot")}</span><span>{uiText("queued — nothing is running for it yet")}</span></div>
+        <div className="legend-row"><span className="activity-chip unknown">{uiText("unknown")}</span><span>{uiText("legacy start evidence unavailable")}</span></div>
+        <div className="legend-h">{uiText("Operators")}</div>
         {OPERATOR_LEGEND.map(o => { const m = operatorMeta(o); return (
           <div className="legend-row" key={o}>
-            <span className="op-icon"><OpIcon name={m.icon} /></span><span>{m.label}</span>
+            <span className="op-icon"><OpIcon name={m.icon} /></span><span>{uiText(m.label)}</span>
           </div>) })}
       </Panel>}
       {showMap && !compact && <MiniMap position="bottom-right" pannable zoomable nodeColor={(n) => {
@@ -964,21 +973,21 @@ export default function Dag({ state, selectedId, onSelect, groupMode = 'none', c
         return 'var(--pending)'
       }} style={{ background: 'var(--bg-1)', width: 180, height: 130 }} />}
     </ReactFlow>
-    {mergeArm != null && <div className="merge-arm-hint">click a node to merge with #{mergeArm} · Esc to cancel</div>}
+    {mergeArm != null && <div className="merge-arm-hint">{uiText("click a node to merge with #")}{mergeArm}{uiText(" · Esc to cancel")}</div>}
     {menu && <>
       <div className="menu-backdrop" onClick={() => closeMenu(true)} onContextMenu={(e) => { e.preventDefault(); closeMenu(true) }} />
-      <div ref={menuRef} className="node-menu" role="menu" aria-label={`Actions for experiment #${menu.nodeId}`}
+      <div ref={menuRef} className="node-menu" role="menu" aria-label={uiMessage("Actions for experiment #{0}", [menu.nodeId])}
            style={compact
              ? { position: 'absolute', left: 8, right: 8, top: 'auto', bottom: 8, maxHeight: 'calc(100% - 16px)' }
              : { left: menu.x, top: menu.y, maxHeight: menu.maxHeight }}
            onClick={e => e.stopPropagation()} onKeyDown={onMenuKeyDown}
            onBlur={event => { if (!event.currentTarget.contains(event.relatedTarget)) closeMenu(false) }}>
-        <div className="nm-h" role="presentation">experiment #{menu.nodeId}</div>
+        <div className="nm-h" role="presentation">{uiText("experiment #")}{menu.nodeId}</div>
         {menuEntries.map(entry => entry.kind === 'heading'
-          ? <div key={entry.id} className="nm-h" role="presentation" style={{ marginTop: 4 }}>{entry.label}</div>
+          ? <div key={entry.id} className="nm-h" role="presentation" style={{ marginTop: 4 }}>{uiText(entry.label)}</div>
           : <button type="button" key={entry.id} role="menuitem" tabIndex={-1}
               className={'nm-item' + (entry.danger ? ' danger' : '')}
-              onClick={() => act(entry.id)}><OpIcon name={entry.icon} size={13} /> {entry.label}</button>)}
+              onClick={() => act(entry.id)}><OpIcon name={entry.icon} size={13} /> {uiText(entry.label)}</button>)}
       </div>
     </>}
     </div>

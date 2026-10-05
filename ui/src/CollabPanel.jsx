@@ -1,3 +1,4 @@
+import { uiText, uiMessage, useUILanguage } from './uiLanguage.js'
 import React, { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react'
 import {
   apiPrefix, createRunReview, listRunReviews, revokeRunReview,
@@ -55,6 +56,8 @@ export default function CollabPanel({
   reviewMode = false, expectedGeneration = null, refreshKey = null,
   PanelComponent = PanelShell, draftStore = null,
 }) {
+  useUILanguage()
+
   const [ttl, setTtl] = useState(7 * 24 * 60 * 60)
   const [includeEvidence, setIncludeEvidence] = useState(false)
   const [linksResource, setLinksResource] = useState({
@@ -323,7 +326,7 @@ export default function CollabPanel({
         const restoreFocus = actionFocusOwned()
         setRecoveryResource({
           ...emptyRecovery(key), loaded: true, intent: confirmed,
-          message: receipt.replayed ? 'The same review link was recovered.' : 'Review link created.',
+          message: (receipt.replayed ? uiText('The same review link was recovered.') : uiText('Review link created.')),
         })
         if (restoreFocus) requestActionFocus(key, 'created')
         if (copyOnSuccess) await copy(url, key)
@@ -476,8 +479,7 @@ export default function CollabPanel({
         return
       }
     } else if (durableIntent) updateRecovery(key, previous => ({
-      ...previous, error: '', message: durableIntent.phase === 'revoking'
-        ? 'Revoking the recovered review link…' : previous.message,
+      ...previous, error: '', message: (durableIntent.phase === 'revoking' ? uiText('Revoking the recovered review link…') : previous.message),
     }))
     const timed = boundedLinkRequest(signal => revokeRunReview(runId, linkId, { signal }))
     const operation = { key, linkId, intent: durableIntent, timed }
@@ -549,101 +551,85 @@ export default function CollabPanel({
   const recoveryConflict = intent?.phase === 'conflict'
   const revokePending = intent?.phase === 'revoking'
 
-  return <PanelComponent title="Comments & sharing" onClose={onClose}>
+  return <PanelComponent title={uiText("Comments & sharing")} onClose={onClose}>
     {!reviewMode && <div className="review-link-builder" aria-busy={recovery.busy ? 'true' : 'false'}>
-      <div className="section-h">Create a read-only review link</div>
-      <p className="muted">The link is bound to this run, expires automatically, can be revoked, and never carries owner controls.</p>
+      <div className="section-h">{uiText("Create a read-only review link")}</div>
+      <p className="muted">{uiText("The link is bound to this run, expires automatically, can be revoked, and never carries owner controls.")}</p>
       <div className="review-link-options">
-        <label>Expires
-          <select value={ttl} disabled={controlsLocked}
+        <label>{uiText("Expires")}<select value={ttl} disabled={controlsLocked}
             onChange={event => setTtl(Number(event.target.value))}>
-            <option value={60 * 60}>1 hour</option><option value={24 * 60 * 60}>1 day</option>
-            <option value={7 * 24 * 60 * 60}>7 days</option>
-            <option value={30 * 24 * 60 * 60}>30 days</option>
+            <option value={60 * 60}>{uiText("1 hour")}</option><option value={24 * 60 * 60}>{uiText("1 day")}</option>
+            <option value={7 * 24 * 60 * 60}>{uiText("7 days")}</option>
+            <option value={30 * 24 * 60 * 60}>{uiText("30 days")}</option>
           </select>
         </label>
         <label className="review-evidence-option"><input type="checkbox" checked={includeEvidence}
           disabled={controlsLocked}
-          onChange={event => setIncludeEvidence(event.target.checked)} /> Include redacted source evidence</label>
+          onChange={event => setIncludeEvidence(event.target.checked)} />{uiText(" Include redacted source evidence")}</label>
       </div>
-      {includeEvidence && <div className="notice warn">Source and result details can still contain sensitive project information. Known credential patterns are redacted; raw logs, prompts, traces, and artifacts remain excluded.</div>}
-      {!recovery.loaded && <div className="muted" role="status">Checking this tab for a saved review link…</div>}
+      {includeEvidence && <div className="notice warn">{uiText("Source and result details can still contain sensitive project information. Known credential patterns are redacted; raw logs, prompts, traces, and artifacts remain excluded.")}</div>}
+      {!recovery.loaded && <div className="muted" role="status">{uiText("Checking this tab for a saved review link…")}</div>}
       {recovery.loaded && !intent && !recovery.invalid
         && !reviewRecoveryGenerationValid(expectedGeneration)
-        && <div ref={recoveryStatusRef} tabIndex={-1} className="muted" role="status">
-          Waiting for the current run version before sharing…
-        </div>}
+        && <div ref={recoveryStatusRef} tabIndex={-1} className="muted" role="status">{uiText("Waiting for the current run version before sharing…")}</div>}
       {recovery.invalid && <div ref={recoveryStatusRef} tabIndex={-1}
         className="notice resource-error review-recovery" role="alert">
         <span>{recovery.error}</span>
         {!['REVIEW_RECOVERY_STORAGE_UNAVAILABLE', 'REVIEW_RECOVERY_CRYPTO_UNAVAILABLE']
           .includes(recovery.invalid)
-          && <button type="button" className="btn sm danger" onClick={discardInvalid}>
-            Discard unreadable recovery
-          </button>}
+          && <button type="button" className="btn sm danger" onClick={discardInvalid}>{uiText("Discard unreadable recovery")}</button>}
       </div>}
       {recovering && <div ref={recoveryStatusRef} tabIndex={-1}
         className="notice warn review-recovery" role="status" aria-live="polite">
-        <b>{recovery.busy ? 'Recovering the same review link…' : 'Review-link creation was not confirmed.'}</b>
-        <span>The exact run version, expiry, evidence scope, and secret are saved in this tab. Recovery replays them without minting a second identity.</span>
+        <b>{((recovery.busy ? uiText('Recovering the same review link…') : uiText('Review-link creation was not confirmed.')))}</b>
+        <span>{uiText("The exact run version, expiry, evidence scope, and secret are saved in this tab. Recovery replays them without minting a second identity.")}</span>
         {!recovery.busy && <button type="button" className="btn sm primary"
-          onClick={() => submitIntent(intent, { copyOnSuccess: true })}>
-          Recover the same review link
-        </button>}
+          onClick={() => submitIntent(intent, { copyOnSuccess: true })}>{uiText("Recover the same review link")}</button>}
       </div>}
       {recoveryConflict && <div ref={recoveryStatusRef} tabIndex={-1}
         className="notice resource-error review-recovery" role="alert">
-        <b>Saved link identity conflict</b>
-        <span>{recovery.error
-          || `A different request already owns ${intent.linkId}. Revoke it before creating another link.`}</span>
+        <b>{uiText("Saved link identity conflict")}</b>
+        <span>{(recovery.error || uiMessage("A different request already owns {0}. Revoke it before creating another link.", [intent.linkId]))}</span>
         <button type="button" className="btn sm danger"
           disabled={revokeView.ids.has(intent.linkId)} onClick={() => revoke(intent.linkId)}>
-          {revokeView.ids.has(intent.linkId) ? 'Revoking…' : 'Revoke conflicting link'}
+          {((revokeView.ids.has(intent.linkId) ? uiText('Revoking…') : uiText('Revoke conflicting link')))}
         </button>
       </div>}
       {revokePending && <div ref={recoveryStatusRef} tabIndex={-1}
         className="notice warn review-recovery" role="status" aria-live="polite">
-        <b>Revocation is not confirmed.</b>
-        <span>{recovery.error
-          || 'Retrying targets the same recovered link and cannot revoke a different link.'}</span>
+        <b>{uiText("Revocation is not confirmed.")}</b>
+        <span>{((recovery.error || uiText('Retrying targets the same recovered link and cannot revoke a different link.')))}</span>
         <button type="button" className="btn sm danger"
           disabled={revokeView.ids.has(intent.linkId)} onClick={() => revoke(intent.linkId)}>
-          {revokeView.ids.has(intent.linkId) ? 'Revoking…' : 'Retry revoke'}
+          {((revokeView.ids.has(intent.linkId) ? uiText('Revoking…') : uiText('Retry revoke')))}
         </button>
       </div>}
       {recovery.error && !recovery.invalid && !recoveryConflict && !revokePending
         && <div className="notice resource-error" role="alert">{recovery.error}</div>}
-      {recovery.message && <div className="notice" role="status" aria-live="polite">{recovery.message}</div>}
+      {recovery.message && <div className="notice" role="status" aria-live="polite">{uiText(recovery.message)}</div>}
       {!intent && !recovery.invalid && recovery.loaded && <button ref={createButtonRef}
         type="button" className="btn sm primary" disabled={controlsLocked} onClick={create}>
-        <OpIcon name="link" size={12} /> Create and copy review link
-      </button>}
+        <OpIcon name="link" size={12} />{uiText(" Create and copy review link")}</button>}
       {createdUrl && <div ref={createdSurfaceRef} className="review-created" role="status" aria-live="polite">
-        <label htmlFor="created-review-url">Review link ready</label>
+        <label htmlFor="created-review-url">{uiText("Review link ready")}</label>
         <div><input ref={createdInputRef} id="created-review-url" readOnly value={createdUrl}
           aria-describedby="created-review-url-note" onFocus={event => event.target.select()} />
-          <button type="button" className="btn sm" aria-label="Copy recovered review link"
-            onClick={() => copy(createdUrl)}>Copy</button></div>
-        <div id="created-review-url-note" className="muted">
-          Expires {dateLabel(intent.expiresAt)}. Available for recovery in this browser tab until you confirm it is saved.
-        </div>
+          <button type="button" className="btn sm" aria-label={uiText("Copy recovered review link")}
+            onClick={() => copy(createdUrl)}>{uiText("Copy")}</button></div>
+        <div id="created-review-url-note" className="muted">{uiText("Expires ")}{uiText(dateLabel(intent.expiresAt))}{uiText(". Available for recovery in this browser tab until you confirm it is saved.")}</div>
         <div className="review-recovery-actions">
-          <button type="button" className="btn sm" onClick={dismissConfirmed}>I’ve saved it</button>
+          <button type="button" className="btn sm" onClick={dismissConfirmed}>{uiText("I’ve saved it")}</button>
           <button type="button" className="btn sm danger"
             disabled={revokeView.ids.has(intent.linkId)} onClick={() => revoke(intent.linkId)}>
-            {revokeView.ids.has(intent.linkId) ? 'Revoking…' : 'Revoke this link'}
+            {((revokeView.ids.has(intent.linkId) ? uiText('Revoking…') : uiText('Revoke this link')))}
           </button>
         </div>
       </div>}
-      <div ref={linksSectionRef} tabIndex={-1} className="section-h">Existing links</div>
+      <div ref={linksSectionRef} tabIndex={-1} className="section-h">{uiText("Existing links")}</div>
       {linksView.status === 'loading' && !linksView.links.length
-        && <div ref={linksStatusRef} tabIndex={-1} className="muted" role="status">
-          Loading review links…
-        </div>}
+        && <div ref={linksStatusRef} tabIndex={-1} className="muted" role="status">{uiText("Loading review links…")}</div>}
       {linksView.status === 'refreshing'
-        && <div ref={linksStatusRef} tabIndex={-1} className="muted" role="status">
-          Refreshing review links…
-        </div>}
+        && <div ref={linksStatusRef} tabIndex={-1} className="muted" role="status">{uiText("Refreshing review links…")}</div>}
       {linksView.links.length > 0 && <div className="review-link-list">{linksView.links.map(link => {
         const expires = dateLabel(link.expires_at)
         const evidence = (link.scopes || []).includes('evidence')
@@ -653,31 +639,28 @@ export default function CollabPanel({
           if (element) linkRowRefs.current.set(rowId, element)
           else linkRowRefs.current.delete(rowId)
         }} tabIndex={-1} className="review-link-row">
-          <div><b>{link.status}</b> · {evidence ? 'summary + evidence' : 'summary'}
-            <div className="muted">expires {expires}</div></div>
+          <div><b>{uiText(link.status)}</b> · {((evidence ? uiText('summary + evidence') : uiText('summary')))}
+            <div className="muted">{uiText("expires ")}{expires}</div></div>
           {activeLink(link) && <button type="button" className="btn sm danger" disabled={rowBusy}
             ref={element => {
               if (element) linkActionRefs.current.set(rowId, element)
               else linkActionRefs.current.delete(rowId)
             }}
-            aria-label={`Revoke ${evidence ? 'summary and evidence' : 'summary'} review link expiring ${expires}`}
-            onClick={() => revoke(link.id)}>{rowBusy ? 'Revoking…' : 'Revoke'}</button>}
+            aria-label={uiMessage("Revoke {0} review link expiring {1}", [evidence ? 'summary and evidence' : 'summary', expires])}
+            onClick={() => revoke(link.id)}>{((rowBusy ? uiText('Revoking…') : uiText('Revoke')))}</button>}
         </div>
       })}</div>}
       {linksView.status === 'ready' && !linksView.links.length
-        && <div className="muted">No review links created yet.</div>}
+        && <div className="muted">{uiText("No review links created yet.")}</div>}
       {['error', 'stale'].includes(linksView.status) && <div className="review-links-error"
         role={linksView.status === 'error' ? 'alert' : 'status'}>
         <span className="muted">{linksView.error}</span>
         <button ref={linksRetryRef} type="button" className="btn sm"
-          onClick={() => refreshLinks({ preserveFocus: true })}>Retry</button>
+          onClick={() => refreshLinks({ preserveFocus: true })}>{uiText("Retry")}</button>
       </div>}
       {revokeView.error && <div className="notice resource-error" role="alert">{revokeView.error}</div>}
     </div>}
-    {!reviewMode && <div className="muted" style={{ margin: '16px 0 8px' }}>
-      Comments are append-only run events. Review-link recipients can read redacted current comments,
-      but cannot add, edit, resolve, reopen, or inspect owner-only version history.
-    </div>}
+    {!reviewMode && <div className="muted" style={{ margin: '16px 0 8px' }}>{uiText("Comments are append-only run events. Review-link recipients can read redacted current comments, but cannot add, edit, resolve, reopen, or inspect owner-only version history.")}</div>}
     <CommentsThread runId={runId} expectedGeneration={expectedGeneration} refreshKey={refreshKey}
       readOnly={reviewMode} reviewMode={reviewMode} global
       draftStore={draftStore} draftSurface="collab"

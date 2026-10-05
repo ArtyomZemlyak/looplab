@@ -1,3 +1,4 @@
+import { uiText, useUILanguage } from './uiLanguage.js'
 import React, { useEffect, useState } from 'react'
 
 const KEY = 'll.density'
@@ -20,6 +21,8 @@ export function initDensity() {
 }
 
 export default function DensityToggle() {
+  useUILanguage()
+
   const [comfortable, setComfortable] = useState(read)
   useEffect(() => { apply(comfortable) }, [comfortable])
   useEffect(() => {
@@ -31,8 +34,7 @@ export default function DensityToggle() {
     return () => window.removeEventListener('storage', sync)
   }, [])
   return <button type="button" className="btn sm ghost density-toggle"
-    aria-pressed={comfortable} title="Switch between compact and comfortable information density"
-    onClick={() => setComfortable(value => !value)}>
-    Aa · {comfortable ? 'Comfortable' : 'Compact'}
+    aria-pressed={comfortable} title={uiText("Switch between compact and comfortable information density")}
+    onClick={() => setComfortable(value => !value)}>{uiText("Aa · ")}{((comfortable ? uiText('Comfortable') : uiText('Compact')))}
   </button>
 }

@@ -68,7 +68,7 @@ for (const target of ['FirstRunModelStatus', 'NewRunStarter', 'AssistantModelChe
       globalThis.fetch = backend
       mounted = await harness.mount(Workspace, { route: { view: 'list' },
         children: React.createElement('main', null, 'Runs workspace'),
-        AssistantComponent: Bar, AttentionComponent: () => null })
+        AssistantComponent: Bar, AttentionComponent: () => null, LanguageComponent: () => null })
       const { container } = mounted
       const button = name => [...container.querySelectorAll('button')].find(row => row.textContent === name)
       const side = container.querySelector('button.cmdbar-drawer-btn')

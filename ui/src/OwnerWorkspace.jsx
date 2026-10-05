@@ -1,3 +1,4 @@
+import { useUILanguage } from './uiLanguage.js'
 import React, { lazy } from 'react'
 import LazyBoundary from './LazyBoundary.jsx'
 
@@ -6,6 +7,7 @@ const lazyOwner = name => lazy(() => import('./OwnerChrome.jsx')
   .then(module => ({ default: module[name] })))
 const AssistantBar = lazyOwner('AssistantBar')
 const AttentionCenter = lazyOwner('AttentionCenter')
+const OwnerLanguageSync = lazyOwner('OwnerLanguageSync')
 let queuedNewRun
 globalThis.addEventListener?.('ll:new-run', event => queueMicrotask(() => {
   if (!event.defaultPrevented) queuedNewRun = event
@@ -21,13 +23,17 @@ const assistantReady = () => {
  * Injectable components keep the persistence contract testable without starting their pollers.
  */
 export default function OwnerWorkspace({ route, children,
-  AssistantComponent = AssistantBar, AttentionComponent = AttentionCenter }) {
+  AssistantComponent = AssistantBar, AttentionComponent = AttentionCenter,
+  LanguageComponent = OwnerLanguageSync }) {
+  useUILanguage()
+
   return <div className="app-shell">
     <div className="app-shell-main">{children}</div>
-    <LazyBoundary label="Attention Center">
+    <LazyBoundary label={"Attention Center"}>
       <AttentionComponent />
+      <LanguageComponent />
     </LazyBoundary>
-    <LazyBoundary label="Assistant">
+    <LazyBoundary label={"Assistant"}>
       <AssistantComponent runId={route.view === 'run' ? route.id : null}
         onReady={assistantReady} />
     </LazyBoundary>

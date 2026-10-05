@@ -1,3 +1,4 @@
+import { uiMessage, useUILanguage } from './uiLanguage.js'
 import React, { createContext, useContext, useRef } from 'react'
 import { useDialogFocus } from './useDialogFocus.js'
 
@@ -20,6 +21,8 @@ export const PanelPresentationContext = createContext('overlay')
 
 /** Shared modal shell kept separate so a small public-safe panel need not download the owner hub. */
 export default function PanelShell({ title, sub, onClose, children, wide, size, className = '' }) {
+  useUILanguage()
+
   const page = useContext(PanelPresentationContext) === 'page'
   const dialogRef = useRef(null)
   useDialogFocus(dialogRef, onClose, !page)
@@ -37,7 +40,7 @@ export default function PanelShell({ title, sub, onClose, children, wide, size, 
       tabIndex={-1} style={width ? { width } : {}}>
       <div className="panel-h"><span className="ttl panel-title">{title}</span>
         {sub && <span className="pill panel-sub" title={typeof sub === 'string' ? sub : undefined}>{sub}</span>}<span className="right" />
-        <button className="btn sm ghost panel-close" aria-label={`Close ${title}`} onClick={onClose}>✕</button>
+        <button className="btn sm ghost panel-close" aria-label={uiMessage("Close {0}", [title])} onClick={onClose}>✕</button>
       </div>
       <div className="panel-b">{children}</div>
     </div>

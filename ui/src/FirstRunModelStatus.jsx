@@ -1,3 +1,4 @@
+import { uiText, useUILanguage } from './uiLanguage.js'
 import React, { useEffect, useState } from 'react'
 import { usePoll } from './hooks.js'
 import { deadlineGet } from './util.js'
@@ -8,6 +9,8 @@ import './assistant-model-check.css'
 const AssistantModelCheck = React.lazy(() => import('./AssistantModelCheck.jsx'))
 
 export default function FirstRunModelStatus({ onSettings, language = 'auto' }) {
+  useUILanguage()
+
   const ru = language === 'ru'
   const [snapshot, setSnapshot] = useState(null)
   const [check, setCheck] = useState(readModelCheck)
@@ -33,14 +36,14 @@ export default function FirstRunModelStatus({ onSettings, language = 'auto' }) {
   }, 30_000, [routeEpoch], { pauseHidden: true })
   const status = modelConnectionView(snapshot, check, language)
   return <div className="asst-new-run-hint asst-model-status">
-    <span role="status" className={status.tone ? `model-connection-${status.tone}` : ''}>{status.text}</span>
-    {!showCheck && <button type="button" className="btn sm" onClick={onSettings}>{ru ? 'Настроить модель' : 'Model settings'}</button>}
+    <span role="status" className={status.tone ? `model-connection-${status.tone}` : ''}>{uiText(status.text)}</span>
+    {!showCheck && <button type="button" className="btn sm" onClick={onSettings}>{((ru ? 'Настроить модель' : uiText('Model settings')))}</button>}
     {!showCheck && <button type="button" className="btn sm ghost" onClick={() => setShowCheck(true)}>
-      {ru ? 'Проверить связь…' : 'Check connection…'}</button>}
+      {((ru ? 'Проверить связь…' : uiText('Check connection…')))}</button>}
     {showCheck && <LazyBoundary resetKey="model-check" language={language} focusOnFailure={false}
-      label={ru ? 'Проверка связи с моделью' : 'Model connection check'}
+      label={((ru ? 'Проверка связи с моделью' : uiText('Model connection check')))}
       failureContent={<button type="button" className="btn sm" onClick={onSettings}>
-        {ru ? 'Настроить модель' : 'Model settings'}</button>}>
+        {((ru ? 'Настроить модель' : uiText('Model settings')))}</button>}>
       <AssistantModelCheck onSettings={onSettings} language={language} />
     </LazyBoundary>}
   </div>

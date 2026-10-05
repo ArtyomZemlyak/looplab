@@ -3,3 +3,5 @@
 // boundary while avoiding two independently compressed copies of their shared owner-shell vocabulary.
 export { default as AssistantBar } from './AssistantBar.jsx'
 export { default as AttentionCenter } from './AttentionCenter.jsx'
+
+export { default as OwnerLanguageSync } from './OwnerLanguageSync.jsx'

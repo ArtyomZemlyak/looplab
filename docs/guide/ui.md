@@ -24,7 +24,10 @@ For the attached run, Assistant chat also shows free short briefs after each com
 evaluation and after finalization. They include the score, confirmation/constraints and
 links to the exact experiment. **Language / Язык** beside the composer offers
 **Auto**, **English** and **Русский**, even before the first run. It sets the
-language of new Assistant replies and completion briefs and is saved in this browser.
+language of the entire interface and all newly generated human prose. The selector is also
+available in the installation header. The browser preference is saved locally; owner
+workspaces also save `output_language` on the server for new runs and model roles. If saving
+fails, a visible retry keeps that distinction explicit. Public review pages never save owner settings.
 Completion results are ordinary Assistant messages in the conversation, placed by their
 recorded completion time between timestamped turns. A current agent interpretation is the
 main text. Until it is available, LoopLab shows a short factual conclusion and next step;
@@ -32,9 +35,20 @@ that fallback does not claim a model analysis. **Measurements and caveats** expa
 exact evidence and attempt links. Unknown legacy times are not invented; such receipts
 remain after the recorded conversation. **Result history** holds earlier receipts and paging.
 Reading results never calls a model, writes an owner turn, or starts an experiment.
-Auto lets the model follow your message language; generated briefs default to English.
-Russian also translates the main chat controls and prepared result questions.
+Auto chooses the browser language for interface copy and lets the model follow the task.
+Russian covers navigation, settings and their help/search, run/Card/concept/research views,
+results, report exports, confirmations and accessibility labels. The Russian catalogue loads
+only when needed; a failed load offers retry. Switching does not remount the workspace.
+New prose from Researcher, Developer, reviews, reports and monitors uses the saved language.
+A running engine retains its launch language until resumed; owner-side generation uses the current
+preference. A model request already submitted retains its original prompt.
 Existing model replies and external agent interpretations keep their original text.
+The catalogue is shipped as a local static asset; no translation service or extra model
+call runs in the browser. For UI changes, wrap authored captions with `uiText` or `uiMessage`,
+add their Russian text to `ui/src/locales/ru.json`, and run `npm run check:locale` in `ui/`.
+Substitution values remain verbatim; translate an owned caption explicitly before passing it
+as a substitution, and never translate user prose, code or identifiers. The build and UI tests
+check catalogue coverage, version/count and placeholder multiplicity.
 Switching language does not send a message or call a model. Retrying an interrupted
 message keeps that message's original language. Earlier results and the detailed selected-result
 comparison are expandable. These reads do not call a model or start work.

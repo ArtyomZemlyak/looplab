@@ -1,3 +1,4 @@
+import { uiText, uiMessage } from './uiLanguage.js'
 export const SCOPE_CONTENT_SCHEMA = 5
 export const SCOPE_VERDICT_AUTHORITY = 'server-derived-v3'
 export const SCOPE_NARRATIVE_AUTHORITY = 'model-advisory'
@@ -35,37 +36,37 @@ export function scopeReportAuthority(value) {
 export function scopeReportGenerationError(error) {
   const code = typeof error?.code === 'string' ? error.code : ''
   if (code === 'SCOPE_REPORT_ACTION_STORAGE_UNAVAILABLE') {
-    return 'Durable paid-action identity is unavailable. Generation stays locked until tab storage is restored.'
+    return uiText('Durable paid-action identity is unavailable. Generation stays locked until tab storage is restored.')
   }
   if (code === 'scope_report_action_indeterminate') {
-    return 'The paid action cannot be proven complete after a server restart. Check again or explicitly abandon its recovery lock before starting another generation.'
+    return uiText('The paid action cannot be proven complete after a server restart. Check again or explicitly abandon its recovery lock before starting another generation.')
   }
   if (code === 'scope_report_action_unknown') {
-    return 'No durable claim exists for this action. Retry this same paid action or durably discard it; a fresh UUID stays disabled.'
+    return uiText('No durable claim exists for this action. Retry this same paid action or durably discard it; a fresh UUID stays disabled.')
   }
   if (code === 'scope_report_action_in_progress') {
-    return 'Another paid generation is already unresolved for this scope. Wait for it or recover that action before starting a new one.'
+    return uiText('Another paid generation is already unresolved for this scope. Wait for it or recover that action before starting a new one.')
   }
   if (code === 'scope_report_action_capacity') {
-    return 'The permanent paid-action ledger is full. Start a new run root or migrate the complete ledger; never delete individual receipts.'
+    return uiText('The permanent paid-action ledger is full. Start a new run root or migrate the complete ledger; never delete individual receipts.')
   }
   if (code === 'scope_report_publication_read_failed') {
-    return 'Generation completed, but the current published report could not be read. Retry the report read.'
+    return uiText('Generation completed, but the current published report could not be read. Retry the report read.')
   }
   if (error?.ambiguous === true || error?.submissionMayHaveSucceeded === true) {
-    return 'Generation outcome is unknown. Check the same paid action status; a new generation is disabled.'
+    return uiText('Generation outcome is unknown. Check the same paid action status; a new generation is disabled.')
   }
-  if (error?.status === 400) return 'No runs in this scope yet.'
+  if (error?.status === 400) return uiText('No runs in this scope yet.')
   if (code === 'scope_report_inputs_changed') {
-    return 'Scope runs changed during generation. Retry from the current scope snapshot.'
+    return uiText('Scope runs changed during generation. Retry from the current scope snapshot.')
   }
   if (error?.status === 413
       || code === 'scope_report_too_large'
       || code === 'scope_report_source_too_large') {
     // use client-owned remediation copy; never echo provider/server detail into UI.
-    return 'Scope exceeds bounded report limits. Generate a narrower child scope or compact oversized run history.'
+    return uiText('Scope exceeds bounded report limits. Generate a narrower child scope or compact oversized run history.')
   }
-  return 'Generation failed.'
+  return uiText('Generation failed.')
 }
 
 // Schema 5 deliberately publishes observations only: no point estimate may become a winner in the
@@ -86,7 +87,7 @@ export function scopeObservationRows(group) {
 // read as the task's own metric (critic 2026-09-27, second pass). '' for every other run.
 export function observationRuler(item) {
   const key = item?.objective_key
-  return typeof key === 'string' && key ? ` · ranked by ${key} (an operator retarget)` : ''
+  return (typeof key === 'string' && key ? uiMessage(" · ranked by {0} (an operator retarget)", [key]) : '')
 }
 
 // JSON tuple encoding avoids identity collisions between values containing separators.

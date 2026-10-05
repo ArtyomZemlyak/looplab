@@ -142,7 +142,8 @@ test('owner auth and public shared chat expose fenced, retryable resource truth 
     assert.equal(sharedStatus.getAttribute('role'), 'status')
     assert.equal(sharedStatus.getAttribute('aria-live'), 'polite')
     assert.equal(sharedStatus.textContent.trim(), 'Loading shared chat.')
-    assert.equal(document.querySelectorAll('[role="status"]').length, 1)
+    assert.equal(document.querySelectorAll(`[id="${sharedStatus.id}"]`).length, 1,
+      'the route resource keeps one permanent status; optional language loading owns its own status')
     const firstSession = {
       meta: { ...SHARED_META, title: 'First shared chat' },
       messages: [{ role: 'assistant', content: 'Last good transcript' }],
@@ -151,7 +152,7 @@ test('owner auth and public shared chat expose fenced, retryable resource truth 
     assert.match(document.body.textContent, /First shared chat.*Last good transcript/)
     assert.equal(document.querySelector('[role="log"]').getAttribute('aria-live'), 'off')
     assert.equal(sharedStatus.textContent.trim(), 'Shared chat loaded. 1 message.')
-    assert.equal(document.querySelectorAll('[role="status"]').length, 1)
+    assert.equal(document.querySelectorAll(`[id="${sharedStatus.id}"]`).length, 1)
 
     // The refresh control now says what it will actually do: a live share can pull newly shared
     // messages, a frozen snapshot can only re-check whether its link still resolves. A lookup for
@@ -166,7 +167,7 @@ test('owner auth and public shared chat expose fenced, retryable resource truth 
     assert.equal(requests.length, 6, 'double refresh stays single-flight')
     assert.equal(sharedStatus.textContent.trim(),
       'Refreshing shared chat. Showing the last loaded transcript.')
-    assert.equal(document.querySelectorAll('[role="status"]').length, 1)
+    assert.equal(document.querySelectorAll(`[id="${sharedStatus.id}"]`).length, 1)
     await fireDeadline(15_000)
     const staleAlert = document.querySelector('[role="alert"]')
     assert.match(staleAlert.textContent, /loading timed out.*last loaded transcript.*Retry/i)

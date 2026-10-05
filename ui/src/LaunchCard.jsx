@@ -1,3 +1,5 @@
+
+import { uiText, useUILanguage } from './uiLanguage.js'
 import React, { useEffect, useId, useMemo, useRef, useState, useSyncExternalStore } from 'react'
 import {
   clearDamagedLaunchTransport, clearLaunchTransport, createIdempotencyKey, getStartStatus,
@@ -130,6 +132,8 @@ const validLaunchPreview = (preview, runId, expectedSource) => isObject(preview)
   && Array.isArray(preview.referenced_paths)
 
 function EnumOptions({ field, value, t }) {
+  useUILanguage()
+
   const options = field.options || []
   const extra = value && !options.includes(String(value)) ? [String(value)] : []
   return <>
@@ -158,6 +162,8 @@ export default function LaunchCard({
   spec, chat = [], onStarted, retainedDraft = null, onDraftChange, launchIdentity = '',
   retainedConfigOpen = false, onConfigOpenChange, onOpenSettings, language = 'auto',
 }) {
+  useUILanguage()
+
   // Presentation only: never feed language or translated text into the draft or startup identity.
   const [russianCopy, setRussianCopy] = useState(null)
   useEffect(() => {
@@ -679,7 +685,7 @@ export default function LaunchCard({
   const errorsForTarget = target => fieldErrorEntries.filter(([path]) => launchErrorTarget(path) === target)
   const targetHasErrors = target => errorsForTarget(target).length > 0
   const errorItem = ([path, error]) => <li key={path}>
-    {path !== 'form' && <><strong>{t(errorLabel(path))}</strong>{': '}</>}{error}
+    {path !== 'form' && <><strong>{t(errorLabel(path))}</strong>{': '}</>}{uiText(error)}
   </li>
   const inlineErrorId = target => `launch-${reactId}-${target}-error`
   const describedBy = (...ids) => ids.filter(Boolean).join(' ') || undefined
@@ -689,7 +695,7 @@ export default function LaunchCard({
     const showPath = target === 'advanced-settings' || target === 'task'
       || (target === 'task_file' && entries.some(([path]) => path !== 'task_file'))
     const content = ([path, error]) => showPath
-      ? <><code>{path}</code>{': '}{error}</> : error
+      ? <><code>{path}</code>{': '}{uiText(error)}</> : error
     return <div id={inlineErrorId(target)} className="asst-launch-field-error">
       {entries.length === 1 ? content(entries[0])
         : <ul>{entries.map(entry => <li key={entry[0]}>{content(entry)}</li>)}</ul>}
@@ -980,7 +986,7 @@ export default function LaunchCard({
     {settingsLaunchBlocked && <div className="asst-launch-recovery">
       <div className="asst-launch-recovery-message" role="status" aria-live="polite" aria-atomic="true">
         <strong>{t('Settings need attention')}</strong>
-        <span>{settingsLaunchReason}</span>
+        <span>{uiText(settingsLaunchReason)}</span>
       </div>
       {onOpenSettings && <button type="button" className="btn sm"
         onClick={onOpenSettings}>{t('Go to Settings')}</button>}
@@ -997,7 +1003,7 @@ export default function LaunchCard({
     <div className="asst-launch-progress"
       role="status" aria-live="polite" aria-atomic="true">
       <LazyBoundary resetKey={transportIdentity} language={cardLanguage} focusOnFailure={false}
-        label={cardLanguage === 'ru' ? 'Следующий шаг' : 'Next step'}
+        label={((cardLanguage === 'ru' ? 'Следующий шаг' : uiText('Next step')))}
         loadingFallback={guidanceNotice} failureContent={guidanceNotice}>
         <LaunchGuidance phase={guidancePhase} language={cardLanguage} notice={guidanceNotice} />
       </LazyBoundary>
