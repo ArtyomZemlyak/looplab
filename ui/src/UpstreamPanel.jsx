@@ -13,8 +13,10 @@ export default function UpstreamPanel({ state, onClose }) {
   const bases = baseChoices(state.nodes)
   const history = Array.isArray(state.upstream_history) ? state.upstream_history : []
   const advances = history.filter(row => row?.type === 'base_advanced')
-  const check = upstreamCheckSummary(history)
   const proposal = upstreamProposalSummary(history)
+  // Once a proposal is visible, its own check is the only relevant verdict.
+  // A new/failed authoring claim must not display a preceding proposal's pass.
+  const check = proposal ? proposal.check : upstreamCheckSummary(history)
   if (!enabled && !bases.some(row => row.digest !== 'unknown') && !history.length) return null
   const discuss = () => {
     const text = enabled && proposal ? upstreamRecoveryDraft(proposal, language) : enabled

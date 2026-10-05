@@ -36,10 +36,12 @@ export function upstreamProposalSummary(history) {
   // clipped gate/start must not become an optimistic "ready" state.
   const check = upstreamCheckSummary(following)
   const advance = following.find(row => row.type === 'base_advanced')
-  const gate = following.find(row => row.type === 'upstream_gate_finished' && row.seq === advance?.gate_seq)
-  const status = advance ? (check?.status === 'passed' && gate?.result?.passed === true ? 'advanced' : 'unknown')
+  // The latest verified check must be the one named by the advancement, and must
+  // precede it. An orphan/abandoned older pass cannot borrow a newer check's proof.
+  const status = advance ? (check?.status === 'passed' && check.seq === advance.gate_seq
+      && check.seq < advance.seq ? 'advanced' : 'unknown')
     : check ? `check_${check.status}` : 'proposed'
-  return { ...result, status, source_node_id: Number.isSafeInteger(proposal.source_node_id)
+  return { ...result, status, check, source_node_id: Number.isSafeInteger(proposal.source_node_id)
     && proposal.source_node_id >= 0 ? proposal.source_node_id : null }
 }
 

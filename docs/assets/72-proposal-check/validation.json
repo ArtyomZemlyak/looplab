@@ -1,0 +1,46 @@
+{
+  "baseline_commit": "166f49a32287ee591402c64d1780e66479c38a16",
+  "regressions_before": {
+    "new_tests": 2,
+    "failed": 2
+  },
+  "tests_after": {
+    "targeted_subset": 19,
+    "replay": 193,
+    "ui": 1974,
+    "documentation": 28,
+    "unique_total": 2195
+  },
+  "scenarios": [
+    "latest proposal check supplies own verdict and costs",
+    "new/failed/abandoned/unknown proposal withdraws earlier check",
+    "orphan/replaced/abandoned/future referenced gate cannot be advanced",
+    "latest verified finish before advance is accepted",
+    "RU/EN live updates preserve button focus; no fetches"
+  ],
+  "bundle": {
+    "js_gzip_before": 643948,
+    "js_gzip_after": 643928,
+    "raw_js_delta": -31,
+    "limit": 633984,
+    "remaining_excess": 9944,
+    "css_gzip": 59635,
+    "only_red": "total_budget"
+  },
+  "checks": [
+    "production build",
+    "native minified client chunk initialization (included in UI suite)",
+    "docs/API/surface/diagram",
+    "strict MkDocs",
+    "diff-check"
+  ],
+  "bounds": {
+    "fresh_browser": false,
+    "mcp_connection": false,
+    "provider_call": false,
+    "training": false,
+    "commands": false,
+    "looplab_worktree_delivery": false,
+    "full_ci": false
+  }
+}

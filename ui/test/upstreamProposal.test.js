@@ -42,6 +42,61 @@ test('recorded advancement requires its own passing gate, never a clipped or unr
   assert.equal(summary([claim, proposal, check, { ...finish, result: { input_identity: 'input', passed: false } }, advance]).status, 'unknown')
 })
 
+test('advancement cannot borrow a different passing check or point to a future gate', () => {
+  const next = { ...check, seq: 5, action_id: 'check-two', request_hash: 'd'.repeat(64) }
+  const nextFinish = { ...finish, ...next, type: 'upstream_gate_finished', seq: 6 }
+  const advance = { type: 'base_advanced', seq: 7, proposal_id: claim.proposal_id, gate_seq: 4 }
+  for (const history of [
+    [claim, proposal, { ...finish, seq: 3 }, { ...check, seq: 4 },
+      { ...finish, seq: 5 }, { ...advance, seq: 6, gate_seq: 3 }],
+    [claim, proposal, check, finish, next, nextFinish, advance],
+    [claim, proposal, check, { ...advance, seq: 4, gate_seq: 5 }, { ...finish, seq: 5 }],
+    [claim, proposal, check, finish, { type: 'upstream_gate_abandoned', seq: 5,
+      proposal_id: claim.proposal_id, claim_action_id: check.action_id },
+      { ...next, seq: 6 }, { ...nextFinish, seq: 7 }, { ...advance, seq: 8 }],
+  ]) assert.equal(summary(history).status, 'unknown')
+  assert.equal(summary([claim, proposal, check, finish, next, nextFinish,
+    { ...advance, gate_seq: 6 }]).status, 'advanced')
+})
+
+test('a new proposal never shows the preceding proposal check as its own in RU or EN', async () => {
+  const harness = await mountLive()
+  const next = { ...claim, seq: 5, action_id: 'next', proposal_id: `up_${'d'.repeat(24)}` }
+  const nextProposal = { ...next, type: 'upstream_proposed', seq: 6, source_node_id: 5 }
+  const nextCheck = { ...check, seq: 7, action_id: 'check-two', proposal_id: next.proposal_id }
+  const nextFinish = { ...finish, ...nextCheck, type: 'upstream_gate_finished', seq: 8,
+    result: { ...finish.result, executions: [{ seconds: 1 }], eval_seconds: 1 } }
+  try {
+    const { default: UpstreamPanel } = await harness.load('/src/UpstreamPanel.jsx')
+    for (const language of ['ru', 'en']) {
+      localStorage.setItem('looplab.language', language)
+      const old = [claim, proposal, check, finish]
+      const state = history => ({ nodes: {}, upstream_enabled: true, upstream_history: history })
+      const view = await harness.mount(UpstreamPanel, { state: state(old) })
+      try {
+        assert.match(view.container.textContent, language === 'ru' ? /Записанная завершённая проверка/ : /Recorded completed check/)
+        const button = view.container.querySelector('button')
+        button.focus()
+        for (const tail of [[next], [next, { ...nextProposal, type: 'upstream_proposal_failed' }],
+          [next, { type: 'upstream_gate_abandoned', seq: 6,
+            proposal_id: next.proposal_id, claim_action_id: next.action_id }],
+          [next, nextProposal], [next, nextProposal, nextCheck],
+          [next, { ...nextProposal, request_hash: 'invalid' }]]) {
+          await view.rerender({ state: state([...old, ...tail]) })
+          assert.doesNotMatch(view.container.textContent, /Записанная завершённая проверка|Recorded completed check/)
+          assert.equal(document.activeElement, button)
+        }
+        await view.rerender({ state: state([...old, next, nextProposal, nextCheck, nextFinish]) })
+        assert.match(view.container.textContent, language === 'ru' ? /Выполнений: 1 · 1.0 с/ : /1 explicit executions · 1.0 s/)
+        assert.deepEqual(harness.fetch.calls, [])
+      } finally { await view.unmount() }
+    }
+  } finally {
+    localStorage.removeItem('looplab.language')
+    await harness.close()
+  }
+})
+
 test('recovery handoff preserves original identity in a Russian draft and never calls the server', async () => {
   const harness = await mountLive()
   const received = []

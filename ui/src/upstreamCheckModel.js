@@ -31,7 +31,7 @@ export function upstreamCheckSummary(history) {
       || finish.result?.input_identity !== start.input_identity
       || typeof finish.result?.passed !== 'boolean') return unknown
   const result = finish.result
-  return { status: result.passed ? 'passed' : 'failed',
+  return { status: result.passed ? 'passed' : 'failed', seq: finish.seq,
     executions: Array.isArray(result.executions) ? result.executions.length : null,
     seconds: Number.isFinite(result.eval_seconds)
       && result.eval_seconds >= 0 ? result.eval_seconds : null }

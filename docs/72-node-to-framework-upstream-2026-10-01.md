@@ -4077,7 +4077,7 @@ merge этим проходом не проверены.
    превышение total JS: 13317 B после §20.42, 13380 B после §20.43,
    12884 B после §20.46, 13121 B после §20.47, 13324 B после §20.48,
    13308 B после §20.49; 13734 B после §20.50; 13894 B после §20.51;
-   9940 B после §20.53; 9964 B после §20.54;
+   9940 B после §20.53; 9964 B после §20.54; 9944 B после §20.55;
    потолки не повышены. Нужны дальнейшее
    уменьшение исходного кода/повторов и полный CI. Один lazy import не снижает
    сумму всех assets; нельзя выдавать route budget за зелёный общий gate.
@@ -6934,3 +6934,51 @@ Total JS остаётся единственным red bundle gate: **9964 B** �
 в этом increment нет. Production browser из §20.53 не заявляется повторно.
 OPEN §19.17 по цельному onboarding/recovery, effective manifest, retention,
 target-relative delivery и полному CI сохраняются.
+
+### 20.55. Новый proposal не наследует проверку предыдущего изменения — 2026-10-05
+
+**Ревью и воспроизведение.** Исходный commit —
+`166f49a32287ee591402c64d1780e66479c38a16`. Сводка последнего proposal уже
+различала authoring и checks, но `UpstreamPanel` отдельно выбирал последний
+check из всей истории. Новый unfinished/failed/proposed proposal отображался
+рядом со старым `passed` предыдущего изменения. В RU/EN это оставляло человеку
+самому разбирать, к чему относятся verdict и cost.
+
+Второй дефект был в `advanced` hint: достаточно было любого проверенного pass
+и любого raw passing finish, названного `gate_seq`. Проверка самого referenced
+finish могла отсутствовать, быть отменена или предшествовать более новому check;
+также принималась ссылка на будущий finish. Серверный stopped-engine CAS и
+проверка latest gate в `engine/upstream.py::advance` это не разрешают. Это
+ошибки диагностического UI, не обход серверной проверки.
+
+**Исправлено.** Proposal summary возвращает собственную check summary.
+Карточка использует её verdict/executions/cost; новый, failed, abandoned или
+unknown proposal не наследует старый pass. Пока proposal records не доступны,
+отдельная retained check history остаётся читаемой с прежними caveats. Проверенная
+check summary содержит seq своего finish. Статус `advanced` требует, чтобы этот
+же finish был назван в `gate_seq` и предшествовал advance. Убраны отдельный поиск
+raw finish и повторная сводка всей истории на обычном пути. Recovery identity,
+source-node provenance, Assistant draft и серверные write fences сохраняются.
+
+**Проверено.** Две новые регрессии red до исправления. Pure matrix отвергает
+orphan/replaced/abandoned/future referenced gate, но принимает advance с latest
+verified finish. Live RU/EN карточка проходит old pass → new unfinished → failed
+→ abandoned → proposed → check unfinished → unavailable → own passed с execution
+count/cost. Фокус кнопки Assistant сохраняется; fetch calls пусты. Целевые
+19 тестов — подмножество полного UI suite. Replay-first 193 passed; полный UI
+1974 passed без fail/skip/cancel; docs/API/surface/diagram 28 passed. Всего
+**2195 уникальных тестов**. Production build, native minified chunk initialization
+в полном UI suite, strict MkDocs и diff-check проходят.
+
+JS gzip **643948 → 643928 B (−20 B)**; raw JS −31 B, CSS прежние 59635 B.
+Total JS остаётся единственным red bundle gate: **9944 B** сверх прежнего лимита
+633984 B. Остальные size/reachability/static-cycle/integer-boolean guards проходят.
+Full-cycle body остаётся dynamic и отсутствует в compact static closure.
+[bundles.json](assets/72-proposal-check/bundles.json) и
+[validation.json](assets/72-proposal-check/validation.json) фиксируют измерения.
+
+Новой browser сессии, MCP connection, provider call, обучения, commands или
+доставки из **worktree LoopLab** в пользовательский task repo не было. Это live
+React проверка принадлежности диагностического verdict и minified build, не
+сквозная приёмка восстановления/доставки. OPEN §19.17 по onboarding/recovery,
+effective manifest, retention, target-relative delivery и полному CI остаются.
