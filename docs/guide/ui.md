@@ -1295,10 +1295,13 @@ Language and progress refreshes do not retry a failed body; recovery reloads exp
 Connection help render errors retain requirements/history; recovery form render errors
 retain verified instructions and the MCP client choice. These local errors restore focus
 to recovery only when the focused control disappeared, preserving focus elsewhere.
+After an explicit connection click, loaded help inherits focus from the replaced button;
+a late import preserves another control used while waiting. This moves focus only and
+does not connect an MCP client or start work.
 Assistant command suggestions use
 `AssistantBar.jsx::suggestionPop` and `.cmdbar-pop`, not the retired `.cmd-suggest` styles.
 Run `npm run check:bundle` after building: passing a route budget does not imply the
-total byte budget passed. Current measurements and remaining excess are in doc 72 §20.48.
+total byte budget passed. Current measurements and remaining excess are in doc 72 §20.49.
 
 Production HTML and non-versioned assets revalidate. Only content-hashed files listed by Vite's build manifest
 receive long-lived immutable caching. Eligible ordinary responses can use gzip when the client accepts it;

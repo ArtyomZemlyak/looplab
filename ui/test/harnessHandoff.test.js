@@ -84,9 +84,14 @@ test('connection help loads after an explicit click and opens with one fenced re
     const view = await harness.mount(HarnessConnection, { runId: 'demo', generation, seq: 12 })
     assert.equal(globalThis.fetch.calls.length, 0)
     assert.equal(view.container.querySelector('button').textContent, 'Подключить внешнего агента')
-    await React.act(async () => view.container.querySelector('button').click())
+    await React.act(async () => {
+      view.container.querySelector('button').focus()
+      view.container.querySelector('button').click()
+    })
     await until(() => view.container.textContent.includes('C:/Runs/demo'), 'loaded connection help')
     assert.ok(view.container.querySelector('.harness-handoff').open)
+    assert.ok(document.activeElement === view.container.querySelector('.harness-handoff > summary'),
+      'the newly opened instruction inherits focus from the removed connection trigger')
     assert.equal(globalThis.fetch.calls.length, 1)
     assert.equal(reads[0].searchParams.get('expected_generation'), generation)
     assert.match(view.container.textContent, /Продолжить работу после потери/)
@@ -94,6 +99,44 @@ test('connection help loads after an explicit click and opens with one fenced re
   } finally {
     localStorage.removeItem('looplab.language')
     await harness.close()
+  }
+})
+
+test('delayed connection import preserves focus moved to another control and reads only on request', async () => {
+  let release
+  globalThis.__looplabConnectionFocus = new Promise(resolve => { release = resolve })
+  const harness = await mountLive({ visible: true, plugins: [{
+    name: 'doc72-delayed-connection-import', enforce: 'pre', transform(code, id) {
+      if (id.replaceAll('\\', '/').endsWith('/src/HarnessHandoff.jsx')) return {
+        code: `await globalThis.__looplabConnectionFocus;\n${code}`, map: null }
+    },
+  }] })
+  let view
+  try {
+    localStorage.clear()
+    const { default: Connection } = await harness.load('/src/HarnessConnection.jsx')
+    globalThis.fetch = fetchStub({ '/api/runs/demo/harness-handoff': handoff })
+    function Surface() {
+      return React.createElement(React.Fragment, null,
+        React.createElement(Connection, { runId: 'demo', generation, seq: 12 }),
+        React.createElement('input', { 'aria-label': 'Next question', defaultValue: 'Keep this question' }))
+    }
+    view = await harness.mount(Surface)
+    const trigger = view.container.querySelector('button')
+    trigger.focus()
+    await React.act(async () => trigger.click())
+    await until(() => view.container.textContent.includes('Loading connection help'), 'pending import')
+    assert.equal(globalThis.fetch.calls.length, 0)
+    const next = view.container.querySelector('input')
+    await React.act(async () => { next.focus(); release() })
+    await until(() => view.container.textContent.includes('C:/Runs/demo'), 'delayed connection help')
+    assert.ok(document.activeElement === next, 'late import must not take focus from another control')
+    assert.equal(next.value, 'Keep this question')
+    assert.ok(view.container.querySelector('.harness-handoff').open)
+    assert.equal(globalThis.fetch.calls.length, 1)
+    assert.ok(globalThis.fetch.calls.every(call => call.method === 'GET'))
+  } finally {
+    release(); await view?.unmount(); await harness.close(); delete globalThis.__looplabConnectionFocus
   }
 })
 

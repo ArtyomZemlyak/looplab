@@ -1,0 +1,84 @@
+{
+  "date": "2026-10-05",
+  "source_parent": "1bde21ec7fe8e89f827848553a450486f259b991",
+  "scope": "doc72: transfer focus from explicitly requested connection trigger to loaded help, preserving another control reached during import",
+  "regression_before_fix": {
+    "command": "node --test --test-timeout=30000 test/harnessHandoff.test.js",
+    "passed": 6,
+    "failed": 1,
+    "reason": "successful connection help load loses focus when the original trigger is removed"
+  },
+  "tests": [
+    {
+      "command": ".venv/Scripts/python.exe -m pytest -o addopts=\"\" -q tests/test_events_replay.py --basetemp=.tmp/doc72-connection-focus/replay",
+      "passed": 193
+    },
+    {
+      "cwd": "ui",
+      "command": "node --test --test-timeout=30000 --test-concurrency=4 test/*.test.js",
+      "passed": 1960,
+      "failed": 0,
+      "skipped": 0,
+      "cancelled": 0
+    },
+    {
+      "cwd": "ui",
+      "command": "node --test --test-timeout=30000 test/harnessHandoff.test.js test/harnessCycleFailure.test.js test/harnessReceipt.test.js test/harnessCycleRequirements.test.js",
+      "passed": 15,
+      "included_in_full_ui_total": true
+    },
+    {
+      "command": ".venv/Scripts/python.exe -m pytest -o addopts=\"\" -q tests/test_api_reference.py tests/test_documentation_contracts.py tests/test_doc_surface_budgets.py tests/test_architecture_diagram_geometry.py --basetemp=.tmp/doc72-connection-focus/docs",
+      "passed": 28
+    },
+    {
+      "command": ".venv/Scripts/python.exe -m mkdocs build --strict --site-dir .tmp/doc72-connection-focus/site",
+      "exit": 0
+    },
+    { "command": "git diff --check", "exit": 0 }
+  ],
+  "production_build": {
+    "command": "node node_modules/vite/bin/vite.js build --outDir ../.tmp/doc72-connection-focus/ui-dist-final",
+    "exit": 0
+  },
+  "bundle_gate": {
+    "command": "node scripts/check-bundle.mjs --dist ../.tmp/doc72-connection-focus/ui-dist-final",
+    "exit": 1,
+    "total_js_gzip": 647292,
+    "total_js_budget": 633984,
+    "remaining_excess": 13308,
+    "js_gzip_delta": -16,
+    "js_raw_delta": 305,
+    "total_css_gzip": 59635,
+    "compact_panel_js_gzip": 121411,
+    "full_body_dynamic": true,
+    "other_size_reachability_cycle_boolean_gates_pass": true,
+    "ceilings_changed": false
+  },
+  "browser": {
+    "fixture": "previously measured private demo, no new ML run",
+    "generation": "c9c4a8536df883c4ed7c11fe91ce41523ec67d129252a8591c36bb423adf4f4d",
+    "event_seq": 79,
+    "build": "normal final production build without instrumentation",
+    "actions": ["Enter opens Agent cycle", "Enter opens connection help", "Tab reaches MCP client select", "Escape returns to Agent cycle opener"],
+    "summary_focused_after_load": true,
+    "client_select_focused_after_tab": true,
+    "escape_focus": "Цикл агента",
+    "modals_after_escape": 0,
+    "draft_retained": true,
+    "alerts": 0,
+    "non_get_requests": [],
+    "fullhd": { "width": 1920, "height": 1080, "dialog_client": 1088, "dialog_scroll": 1088 },
+    "screenshot": "01-keyboard-handoff.jpg",
+    "screenshot_viewport": { "width": 1280, "height": 720 },
+    "cleanup": "draft cleared without sending, viewport reset, temporary tab closed, private server stopped"
+  },
+  "unique_tests": 2181,
+  "limitations": [
+    "delayed module import verified via live React/Vite, not an artificial production browser network delay",
+    "no new ML run, engine command, provider call, scoped credential setup or MCP client connection",
+    "no LoopLab worktree lifecycle, target repo merge or delivery acceptance",
+    "unsaved draft and original receipt key persistence across full reload not claimed",
+    "total JS budget remains red"
+  ]
+}

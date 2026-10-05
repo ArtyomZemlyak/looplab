@@ -1,4 +1,4 @@
-import React, { useState } from 'react'
+import React, { useEffect, useRef, useState } from 'react'
 import { get, runApiPath } from './util.js'
 import { useScopedResource } from './useScopedResource.js'
 import { PANEL_REQUEST_TIMEOUT_MS, RUN_GENERATION_RE } from './panelPrimitives.js'
@@ -9,12 +9,20 @@ import { useAssistantLanguage } from './useAssistantLanguage.js'
 import { harnessText } from './harnessText.js'
 import LazyBoundary from './LazyBoundary.jsx'
 
-export default function HarnessHandoff({ runId, generation, seq, defaultOpen = false }) {
+export default function HarnessHandoff({ runId, generation, seq, defaultOpen = false, focusOrigin = null }) {
   const [language] = useAssistantLanguage()
   const t = text => harnessText(language, text)
   const [open, setOpen] = useState(defaultOpen)
   const [copied, setCopied] = useState(null)
   const [client, setClient] = useState('codex')
+  const summaryRef = useRef(null)
+  useEffect(() => {
+    // An explicit connection click replaces its trigger after the module loads.
+    // Preserve another control reached while waiting, and never infer a new read.
+    if (focusOrigin && (document.activeElement === focusOrigin || document.activeElement === document.body)) {
+      summaryRef.current?.focus({ preventScroll: true })
+    }
+  }, [focusOrigin])
   const scope = `${runId}:${generation}`
   const resource = useScopedResource(signal => get(runApiPath(runId, '/harness-handoff')
     + `?expected_generation=${generation}`, { cache: 'no-store', signal }).then(value => {
@@ -42,7 +50,7 @@ export default function HarnessHandoff({ runId, generation, seq, defaultOpen = f
     }
   }
   return <details className="harness-handoff" open={open} onToggle={event => setOpen(event.currentTarget.open)}>
-    <summary>{t('Connect external agent')}</summary>
+    <summary ref={summaryRef}>{t('Connect external agent')}</summary>
     {open && <>
       <p>{t('Use a stdio MCP client on a machine with LoopLab installed. The URL must be reachable from that client.')}</p>
       {!fresh && <p role="status">{resource.status === 'error' || resource.status === 'stale'

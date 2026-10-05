@@ -1,4 +1,4 @@
-import React, { useState } from 'react'
+import React, { useRef, useState } from 'react'
 import { useScopedResource } from './useScopedResource.js'
 import { useAssistantLanguage } from './useAssistantLanguage.js'
 import { PANEL_REQUEST_TIMEOUT_MS } from './panelPrimitives.js'
@@ -11,6 +11,7 @@ export default function HarnessConnection({ runId, generation, seq }) {
   const [language] = useAssistantLanguage()
   const ru = language === 'ru'
   const scope = `${runId}:${generation}`
+  const focusOrigin = useRef(null)
   const resource = useScopedResource(() => import('./HarnessHandoff.jsx')
     .then(module => ({ Component: module.default })), {
     scope, gate: wanted ? null : 'idle', timeout: PANEL_REQUEST_TIMEOUT_MS,
@@ -19,11 +20,13 @@ export default function HarnessConnection({ runId, generation, seq }) {
     const Component = resource.data.Component
     return <LazyBoundary label={ru ? 'Подключить внешнего агента' : 'Connect external agent'}
       resetKey={scope} language={language} focusOnFailure="if-lost">
-      <Component key={scope} runId={runId} generation={generation} seq={seq} defaultOpen />
+      <Component key={scope} runId={runId} generation={generation} seq={seq} defaultOpen
+        focusOrigin={focusOrigin.current?.scope === scope ? focusOrigin.current.element : null} />
     </LazyBoundary>
   }
   return <div>
-    <button type="button" className="btn" disabled={!!resource.pending} onClick={() => {
+    <button type="button" className="btn" disabled={!!resource.pending} onClick={event => {
+      focusOrigin.current = { scope, element: event.currentTarget }
       if (wanted) resource.retry()
       else setWanted(true)
     }}>{ru ? 'Подключить внешнего агента' : 'Connect external agent'}</button>

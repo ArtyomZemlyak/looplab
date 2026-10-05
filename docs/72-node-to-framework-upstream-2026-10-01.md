@@ -4075,7 +4075,8 @@ merge этим проходом не проверены.
    bundle budgets. §20.42 снижает JS на 4719 B и CSS на 174 B: общая CSS,
    DAG CSS и review DAG JS теперь проходят прежние пределы. Осталось
    превышение total JS: 13317 B после §20.42, 13380 B после §20.43,
-   12884 B после §20.46, 13121 B после §20.47, 13324 B после §20.48;
+   12884 B после §20.46, 13121 B после §20.47, 13324 B после §20.48,
+   13308 B после §20.49;
    потолки не повышены. Нужны дальнейшее
    уменьшение исходного кода/повторов и полный CI. Один lazy import не снижает
    сумму всех assets; нельзя выдавать route budget за зелёный общий gate.
@@ -6606,3 +6607,65 @@ dynamic. Total JS превышает прежний предел 633984 B на *
 
 Документальные проверки — 28 passed; strict MkDocs и diff-check проходят.
 Всего 2180 уникальных тестов: 193 replay + 1959 UI + 28 docs.
+
+### 20.49. Успешное подключение инструкции сохраняет фокус — 2026-10-05
+
+**Ревью и воспроизведение.** Исходный commit —
+`1bde21ec7fe8e89f827848553a450486f259b991`. После защиты ошибок оставался дефект
+нормального открытия: `HarnessConnection` заменял кнопку готовым handoff,
+а фокус уходил на body. Это уже наблюдалось при normal-build проверке §20.48.
+Существующий live тест открытия усилен проверкой реального фокуса: до правки
+он red. Добавлен gated Vite import сценарий, в котором пользователь успевает
+перейти к другому полю, пока модуль ещё загружается.
+
+**Исправлено.** Явный click сохраняет origin DOM element вместе с run/generation
+scope. Готовый `HarnessHandoff` получает origin только для того же scope и
+передаёт фокус своему summary, если он ещё на trigger или потерян при его
+удалении. Если другой контрол уже получил фокус, handoff его сохраняет.
+Standalone handoff без явного origin не получает autofocusing. Обычные обновления
+контекста и языка не создают новый focus intent. Перенос использует
+`preventScroll`; существующие error boundaries и recovery defaults сохранены.
+Это focus handoff, не подключение процесса MCP или измерение agent liveness.
+
+**Проверено.** Replay-first — 193 passed; полный UI suite — 1960 passed,
+без fail/skip/cancel. Целевые handoff, cycle failures, receipt и damaged/stale
+requirements tests — 15 passed, подмножество полного набора. Проверка нормального
+открытия подтверждает default-open summary focus и один generation-fenced GET.
+При удержанном module import запросов к API нет; после перехода к другому input
+загрузка сохраняет его фокус и текст, затем выполняет один GET handoff. Прежние
+ошибки импорта/отрисовки, local focus recovery и original receipt lookup проходят.
+Production build проходит.
+
+**Production browser.** Штатная final сборка без instrumentation обслуживалась
+private server с прежним demo, event #79. Enter открыл Agent cycle, затем
+инструкцию. Фокус после замены trigger был на открытом summary даже пока API
+ещё читался; появление инструкции само по себе не объявляется успешным MCP
+подключением. После готового handoff Tab перевёл фокус к MCP client select.
+Escape закрыл диалог и вернул его к «Цикл агента»; черновик остался.
+FullHD client/scroll диалога — 1088/1088px; alerts — 0.
+
+Browser log содержит только GET. Scope credential не настраивался, клиент MCP
+не подключался, provider calls, commands, engine work, новые тренировки и repo
+delivery не выполнялись. Временный черновик очищен без отправки, viewport
+возвращён, собственная вкладка закрыта и private server остановлен.
+Снимок при штатных 1280×720 показывает фокус на summary после открытия:
+
+![Клавиатурный фокус остаётся в открывшейся инструкции](assets/72-connection-focus/01-keyboard-handoff.jpg)
+
+**Размеры и ограничения.** JS gzip 647308 → 647292 B (−16 B), compact panel
+closure 121376 → 121411 B; CSS прежние 59635 B. Разница gzip всей сборки не
+означает сокращение raw кода: raw JS вырос на 305 B. Full cycle body остаётся
+dynamic. Total JS всё ещё превышает предел 633984 B на **13308 B**; этот gate
+red. Остальные size/reachability/cycle/integer-boolean guards проходят, потолки
+не изменены. [bundles.json](assets/72-connection-focus/bundles.json) и
+[validation.json](assets/72-connection-focus/validation.json) фиксируют измерения.
+
+Это исправление клавиатурного пути загрузки. Приёмка полного RU/EN onboarding,
+live MCP, effective manifest, критические dependency outages и lifecycle/retention/
+доставка **worktree LoopLab** в пользовательский repo остаются OPEN.
+Задержка import проверена в live React/Vite; искусственный сетевой delay в
+production browser здесь не вводился. Сохранение draft или original key через
+полный reload не заявляется.
+
+Документальные проверки — 28 passed; strict MkDocs и diff-check проходят.
+Всего 2181 уникальный тест: 193 replay + 1960 UI + 28 docs.
