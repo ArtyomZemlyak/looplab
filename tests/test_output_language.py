@@ -197,3 +197,16 @@ def test_language_messages_is_idempotent_so_a_wrapped_client_never_doubles_the_d
     once = language_messages([{"role": "system", "content": "s"}, {"role": "user", "content": "u"}], "ru")
     assert language_messages(once, "ru") == once
     assert once[0]["content"].count("[LoopLab output language") == 1
+
+
+def test_every_russian_prose_template_is_reachable_through_its_own_sentence():
+    """A generic template must not shadow a longer sibling (`run {0} to reach {1}` used to swallow
+    `run {0} experiment {1} to reach {2}`, printing a mixed-language notice)."""
+    import re
+    from looplab.core.prose_locale import _RU, authored_text
+    for key, value in _RU.items():
+        if "{0}" not in key:
+            continue
+        sample = re.sub(r"\{(\d+)\}", lambda m: f"v{m[1]}x", key)
+        expected = re.sub(r"\{(\d+)\}", lambda m: f"v{m[1]}x", value)
+        assert authored_text(sample, "ru") == expected, key
