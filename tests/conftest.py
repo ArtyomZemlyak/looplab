@@ -293,6 +293,7 @@ def _isolate_shared_origin_detection(_isolation_patch):
     _isolation_patch.delenv("LOOPLAB_UI_TOKEN", raising=False)
     _isolation_patch.delenv("LOOPLAB_UI_REQUIRE_AUTH", raising=False)
     _isolation_patch.delenv("LOOPLAB_UI_CHECK_ORIGIN", raising=False)
+    _isolation_patch.delenv("LOOPLAB_UI_AUTO_RESUME", raising=False)
 
 
 @pytest.fixture(autouse=True)

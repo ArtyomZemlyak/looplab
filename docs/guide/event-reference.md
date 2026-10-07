@@ -23,7 +23,7 @@ The event type itself is the contract's identity and is never renamed or reused;
 
 <!-- generated: event types -->
 
-175 event types — 123 folded into `RunState`, 52 diagnostic; 1155 declared payload keys; 30 types whose whole payload is stored by the fold.
+175 event types — 123 folded into `RunState`, 52 diagnostic; 1156 declared payload keys; 30 types whose whole payload is stored by the fold.
 
 | type | fold | records | required keys | optional keys |
 |---|---|---|---|---|
@@ -160,7 +160,7 @@ The event type itself is the contract's identity and is never renamed or reused;
 | `research_completed` | folded | One deep-research memo: its claims with evidence bindings, plan, literature and verifier verdicts. | `at_node`, `memo`, `served_manual`, `trigger` | `attempt_id`, `converged_skips`, `memo_id` |
 | `restart` | folded | The operator handed a paused run to a replacement owner. | — | — |
 | `resume` | folded | The operator resumed a paused run. | — | — |
-| `resume_requested` | folded | A durable resume intent, appended before the engine is spawned. | `mode` | `launch_claim`, `request_seq` |
+| `resume_requested` | folded | A durable resume intent, appended before the engine is spawned. | `mode` | `auto_resume`, `launch_claim`, `request_seq` |
 | `resume_served` | folded | The replacement owner acquired the singleton lock and served the resume. | — | `activity_recovery`, `engine_owner_boundary` |
 | `reward_hack_suspected` | folded | The reward-hack scan's signals about one node's code, over a named code digest. | `code_digest`, `evidence_version`, `generation`, `node_id`, `signals` | `attempt` |
 | `run_abort` | folded | The run was aborted, with the reason. | `reason` | — |

@@ -2281,7 +2281,7 @@ EVENT_PAYLOAD_KEYS: dict[str, PayloadContract] = {
     "resume_requested": PayloadContract(
         "A durable resume intent, appended before the engine is spawned.",
         required=("mode",),
-        optional=("launch_claim", "request_seq"),
+        optional=("auto_resume", "launch_claim", "request_seq"),
     ),
     "resume_served": PayloadContract(
         "The replacement owner acquired the singleton lock and served the resume.",
