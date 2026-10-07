@@ -13,7 +13,6 @@ import math
 
 from looplab.core.idea_report import idea_not_tested
 from looplab.core.models import NODE_CONCEPT_PROVENANCE_CLASSIFIER
-from looplab.engine.comparability import comparability_status, record_of
 from looplab.events.replay_selection import promotion_eligible_nodes
 from looplab.search.concept_projection import current_concept_projection
 
@@ -87,6 +86,9 @@ def concept_effects(state, concept_ids, *, subtree: bool = False,
     Work is bounded before matching; exceeding the budget abstains for the whole
     projection rather than selecting a convenient prefix of experiments.
     """
+    # Deferred: `search` may not import `engine` at module level (tests/test_package_layering.py);
+    # `engine/comparability.py` is a stdlib-only leaf, so this is a cached module lookup per call.
+    from looplab.engine.comparability import comparability_status, record_of
     ids = sorted(set(concept_ids))
     if state.direction not in ("min", "max"):
         return {cid: empty_effect("direction_unknown", status="unavailable") for cid in ids}
@@ -210,3 +212,25 @@ def concept_effects(state, concept_ids, *, subtree: bool = False,
                              "no_matching_context_or_phase")
         result[cid] = out
     return result
+
+
+def concept_rollup_with_effects(state) -> dict:
+    """`events/digest.py::concept_rollup` plus each row's `effect` and `subtree_effects`.
+
+    Lives here, not in `events/`: the estimator needs `search` and `engine`, and `events` may
+    import only `core` at any level (tests/test_package_layering.py).
+    """
+    from looplab.events.digest import concept_rollup
+    out = concept_rollup(state)
+    effects = concept_effects(state, out)
+    # Ancestor effects need union presence, never a sum of descendants' contributions.
+    ancestors = {"/".join(cid.split("/")[:i]) for cid in out
+                 for i in range(1, len(cid.split("/")) + 1)}
+    subtree_effects = concept_effects(state, ancestors, subtree=True)
+    emitted = set()
+    for cid, row in out.items():
+        row["effect"] = effects[cid]
+        row["subtree_effects"] = {parent: subtree_effects[parent] for parent in sorted(ancestors)
+                                  if parent not in emitted and (cid == parent or cid.startswith(parent + "/"))}
+        emitted.update(row["subtree_effects"])
+    return out

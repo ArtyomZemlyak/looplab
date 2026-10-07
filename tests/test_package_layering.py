@@ -116,7 +116,8 @@ DEFERRED: dict[tuple[str, str], str] = {
     ("harness", "search"): "`progress` builds the run's policy to say what it would select, "
                            "per progress read",
     ("harness", "serve"): "`mcp_server.phase_info` describes a phase's command fields from the "
-                          "UI-free protocol's canonical wire tables, per MCP call",
+                          "UI-free protocol's canonical wire tables, per MCP call; "
+                          "`client_requests` derives a saved command's durable id per save",
     ("judgebench", "adapters"): "`bait` reads the MLE-bench extras at audit time",
     ("judgebench", "agents"): "the agent-trajectory ladder drives the real `drive_tool_loop` "
                               "inside one bench case (doc 27 §4 rungs 2/4/5); deferred so the "
@@ -130,6 +131,8 @@ DEFERRED: dict[tuple[str, str], str] = {
     ("judgebench", "trust"): "`bait` invokes the structured judge at audit time",
     ("search", "adapters"): "`speculation_quality` builds the toy task for its calibration "
                             "benchmark",
+    ("search", "engine"): "`concept_effects` reads the stdlib-only `engine/comparability` leaf "
+                          "per estimate",
     ("search", "trust"): "`foresight`/`graded_novelty` call the verifier inside a scoring step, "
                          "and `operators.feature_engineering_verdicts` applies the >1-SE rule "
                          "(`trust/gate.py`) to one CV ledger row",

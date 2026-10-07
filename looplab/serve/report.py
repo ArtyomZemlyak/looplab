@@ -24,7 +24,7 @@ from looplab.engine.champion_caveats import (CHAMPION_CAVEAT_MERGED_COORDINATES,
                                              CHAMPION_CAVEAT_SALVAGED,
                                              CHAMPION_CAVEAT_TRUST_FLAGGED,
                                              champion_metric_caveats)
-from looplab.events.digest import (concept_rollup, experiments_digest, metric_scored_invalid, node_metric,
+from looplab.events.digest import (experiments_digest, metric_scored_invalid, node_metric,
                                    node_theme)
 from looplab.core.models import NodeStatus, RunState, activation_unverified
 
@@ -106,7 +106,8 @@ def _report_context(state: RunState) -> str:
     else:
         lines.append("Champion: none yet (no feasible evaluated node).")
     lines.extend(_parent_score_evidence(state))
-    concepts = concept_rollup(state)
+    from looplab.search.concept_effects import concept_rollup_with_effects
+    concepts = concept_rollup_with_effects(state)
     if concepts:
         lines.append("Concept contrasts: matched complete other-concept sets and evaluation rulers; "
                      "observational with/without evidence, not causal ablations. Positive gain "

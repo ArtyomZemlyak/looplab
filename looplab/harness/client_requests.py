@@ -17,7 +17,6 @@ from urllib.parse import quote, urlsplit
 from looplab.core.atomicio import strict_atomic_write_bytes
 from looplab.core.node_evidence import read_bounded_regular_file
 from looplab.events.eventstore import interprocess_lock
-from looplab.serve.command_identity import command_identity
 
 MAX_RECORD_BYTES = 1100 * 1024
 MAX_RECORDS = 2000
@@ -120,6 +119,8 @@ class ClientRequests:
         self._key(request["idempotency_key"])
         if request["path"] != f"/api/runs/{quote(run_id, safe='')}/commands":
             raise ValueError("invalid command path")
+        # Deferred: `harness` reaches `serve` only inside a call (tests/test_package_layering.py).
+        from looplab.serve.command_identity import command_identity
         return command_identity(request["idempotency_key"])[0]
 
     def save(self, run_id, generation, body, key, *, credential=""):
