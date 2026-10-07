@@ -3606,8 +3606,9 @@ class EvaluateMixin:
                                 interpreter=getattr(getattr(self, "sandbox", None), "python", None),
                                 env=env)
 
-    async def _eval_infra_pause(self, a: "EvalAttempt") -> bool:
-        """Probe the box after a failed attempt; on a fault, PAUSE the run and answer True.
+    async def _eval_infra_pause(self, a: "EvalAttempt", *, failed: bool = True) -> bool:
+        """Probe the box — after a failed attempt (`failed`), or before a launch — and on a fault
+        PAUSE the run and answer True.
 
         The probe runs in a worker thread (a dead mount can block a `stat` for its whole timeout,
         and the loop must keep its heartbeats). The pause is node-less, `reason: "infra_unavailable"`
@@ -3624,7 +3625,8 @@ class EvaluateMixin:
         faults = await anyio.to_thread.run_sync(functools.partial(probe, targets))
         if not faults:
             return False
-        detail = self._redact(f"evaluation of node {a.node_id} failed and the box did not answer: "
+        what = "failed" if failed else "was about to launch"
+        detail = self._redact(f"evaluation of node {a.node_id} {what} and the box did not answer: "
                               f"{describe(faults)}")[:400]
         _LOG.warning("node %s: %s — pausing the run; the attempt is withheld, not charged to the "
                      "candidate. Fix the box and resume.", a.node_id, detail)
@@ -4340,13 +4342,22 @@ class EvaluateMixin:
         a.res = None
         a.canary_failed = False
         a.canary_ran = False
+        # THE BOX BEFORE THE LAUNCH (`runtime/infra_probe.py`, incident 2026-10-06). A launch on a dead
+        # data mount or a vanished interpreter is hours of GPU spent to learn what a `stat` answers in
+        # milliseconds — and, on a resume after a container restart, it is the FIRST thing the run does.
+        # A fault pauses the run here, and the one pause decision below withholds this attempt exactly
+        # as it withholds one under an operator pause: no terminal, the node stays pending.
+        infra_paused = (not fold(self.store.read_all()).halted
+                        and await self._eval_infra_pause(a, failed=False))
         # ONE pause decision, and the devices follow it (critic 2026-09-29, MEDIUM-1): a withheld
         # attempt takes nothing back — on a busy pool the reclaim WAITS, and a paused engine sat on
         # the pool for devices it would never use — and a launching one is re-pinned before it
         # launches. The rule is asked again only when the reclaim took devices back, because that
         # take may have waited: a pause landing during the wait withholds the attempt, and the
         # devices it took go back when the lane settles (`_settle_eval_resource_reservation`).
-        if ((a.launches and self._pause_withholds_attempt(a))
+        # The FIRST launch is asked too when the probe just paused the run: ADMIT asked before it, on a
+        # run that was not paused yet.
+        if (((a.launches or infra_paused) and self._pause_withholds_attempt(a))
                 or (await self._reclaim_devices_for_attempt(a)
                     and self._pause_withholds_attempt(a))):
             a.sp.set("eval_withheld", "paused_before_launch")
@@ -4354,7 +4365,8 @@ class EvaluateMixin:
                       a.node_id, a.attempt)
             # Nothing of THIS attempt ran: the one before it is on its `node_repaired` /
             # `deps_installed` row. The row closes the busy interval (doc 69 69.12a).
-            await self._record_eval_withheld(a, "before_launch", 0.0)
+            await self._record_eval_withheld(
+                a, "before_launch", 0.0, reason="infra_unavailable" if infra_paused else "paused")
             return PHASE_RETURN
         a.launches += 1
         a._t0 = time.time()

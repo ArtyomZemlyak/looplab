@@ -188,3 +188,61 @@ def test_an_already_paused_run_gets_no_second_pause_row(tmp_path, already):
     assert anyio.run(engine._eval_infra_pause, _A()) is True
     pauses = [e for e in engine.store.read_all() if e.type == "pause"]
     assert len(pauses) == 1 and fold(engine.store.read_all()).pause_reason == already
+
+
+# ------------------------------------------------------------------ the box BEFORE the launch
+
+def _engine_with_mount(tmp_path):
+    data = tmp_path / "mnt" / "corpus"
+    data.mkdir(parents=True)
+    engine = make_engine(tmp_path / "run")
+    engine._repo_spec = {"data": {"corpus": {"path": str(data), "mount": True}}}
+    engine.store.append("node_created", {
+        "node_id": 0, "parent_ids": [], "operator": "draft",
+        "idea": {"operator": "draft", "params": {"x": 1.0}, "rationale": "r"}, "code": "print(1)"})
+    evals = []
+
+    def fake_run_eval(node, workdir, env=None, profile=None, cancel=None, start_stage=None):
+        evals.append(node.code)
+        return RunResult(exit_code=0, stdout='{"metric": 0.5}', metric=0.5, timed_out=False,
+                         stderr="")
+
+    engine._run_eval = fake_run_eval
+    return engine, data, evals
+
+
+def test_a_mount_gone_before_the_launch_launches_nothing_and_pauses(tmp_path):
+    """The resume-after-restart case: the first thing the run does is launch on a dead mount."""
+    engine, data, evals = _engine_with_mount(tmp_path)
+    shutil.rmtree(data)
+    anyio.run(engine._evaluate, 0, anyio.CapacityLimiter(1), None)
+    events = engine.store.read_all()
+    st = fold(events)
+    assert evals == [], "an evaluation was launched on a box whose declared mount is gone"
+    assert st.paused and st.pause_reason == "infra_unavailable"
+    assert st.nodes[0].status.value == "pending"
+    withheld = [e.data for e in events if e.type == "eval_attempt_withheld"]
+    assert [(w["at"], w["reason"]) for w in withheld] == [("before_launch", "infra_unavailable")]
+    assert "was about to launch" in [e.data for e in events if e.type == "pause"][-1]["detail"]
+
+
+def test_after_the_box_is_fixed_a_resume_evaluates_the_node_uncharged(tmp_path):
+    engine, data, evals = _engine_with_mount(tmp_path)
+    shutil.rmtree(data)
+    anyio.run(engine._evaluate, 0, anyio.CapacityLimiter(1), None)
+    data.mkdir(parents=True)                         # the operator remounts…
+    engine.store.append("resume", {})                # …and resumes
+    anyio.run(engine._evaluate, 0, anyio.CapacityLimiter(1), None)
+    st = fold(engine.store.read_all())
+    assert evals == ["print(1)"] and not st.paused
+    assert st.nodes[0].status.value == "evaluated" and st.nodes[0].metric == 0.5
+    assert not any(e.type in ("node_repaired", "deps_installed", "node_failed")
+                   for e in engine.store.read_all()), "the box's fault was charged to the candidate"
+
+
+def test_a_healthy_box_launches_as_before(tmp_path):
+    engine, _data, evals = _engine_with_mount(tmp_path)
+    anyio.run(engine._evaluate, 0, anyio.CapacityLimiter(1), None)
+    st = fold(engine.store.read_all())
+    assert evals == ["print(1)"] and not st.paused
+    assert not any(e.type == "eval_attempt_withheld" for e in engine.store.read_all())
