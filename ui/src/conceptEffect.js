@@ -17,11 +17,15 @@ export function validConceptEffect(e) {
   const ids = e.pairs.flatMap(p => [p.with_node, p.without_node])
   if (new Set(ids).size !== ids.length) return false
   const values = ['estimate', 'mean', 'low', 'high']
-  return e.status === 'matched'
-    ? e.n_pairs > 0 && e.n_contexts > 0
-      && values.every(k => typeof e[k] === 'number' && Number.isFinite(e[k]))
-      && e.low <= e.estimate && e.estimate <= e.high
-    : e.n_pairs === 0 && values.every(k => e[k] === null)
+  if (e.status !== 'matched') return e.n_pairs === 0 && values.every(k => e[k] === null)
+  if (!(e.n_pairs > 0 && e.n_contexts > 0
+    && values.every(k => typeof e[k] === 'number' && Number.isFinite(e[k])) && e.low <= e.high)) return false
+  // Twin of `search/concept_effects.py::valid_effect`: a float mean of equal deltas can land one ulp
+  // outside them (seven deltas of -0.21987892246138063 average to -0.21987892246138066), and a row
+  // written before the producer clamped it is a durable fact. The slack is a RELATIVE 1e-12 of the
+  // range's magnitude — rounding noise, never a different number — and exactly zero for [0, 0].
+  const slack = 1e-12 * Math.max(Math.abs(e.low), Math.abs(e.high))
+  return e.low - slack <= e.estimate && e.estimate <= e.high + slack
 }
 export function conceptEffectValue(e) {
   return validConceptEffect(e) && e.status === 'matched' ? e.estimate : null

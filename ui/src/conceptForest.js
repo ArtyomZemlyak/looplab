@@ -103,10 +103,13 @@ export function applyConceptPolicy(runs = [], policy = null) {
 // The `concepts` rollup of ONE run, canonicalized: `[{id, count, bestMetric}]` sorted by id, plus the
 // number of entries that could not be canonicalized. `dropped` is not cosmetic — without it a run whose
 // tags were all malformed reads as "never tagged", which blames the operator for a producer's bug.
+// `effectsInvalidated` is the ungoverned twin of `applyConceptPolicy`'s `concept_effects_invalidated`:
+// the server measured every effect over the RAW spellings, so once two spellings fold into one id no
+// receipt in this run describes the merged concept (or its ancestors' merged subtrees) any more.
 export function runConceptEntries(run) {
   const raw = isRecord(run) && isRecord(run.concepts) ? run.concepts : {}
   const byId = conceptMap()
-  let dropped = 0
+  let dropped = 0, merged = 0
   for (const key of Object.keys(raw)) {
     const id = normalizeConceptId(key)
     if (!id) { dropped += 1; continue }
@@ -120,12 +123,16 @@ export function runConceptEntries(run) {
       ...(value.effect ? { effect: value.effect } : {}),
       ...(value.subtree_effects ? { subtreeEffects: value.subtree_effects } : {}) }
     else {
+      // ...but an effect is not summable: the first spelling's receipt would read as the whole
+      // concept's. The merged row carries none, and the run's effects are void (see above).
+      merged += 1
+      delete current.effect; delete current.subtreeEffects
       current.count += count
       if (bestMetric != null) current.bestMetric = current.bestMetric == null
         ? bestMetric : pickBetter(current.bestMetric, bestMetric, run?.direction)
     }
   }
-  return { entries: Object.keys(byId).sort().map(id => byId[id]), dropped }
+  return { entries: Object.keys(byId).sort().map(id => byId[id]), dropped, effectsInvalidated: merged > 0 }
 }
 
 // Direction-aware "better". An unknown/absent direction has no better — returning the incumbent keeps
@@ -190,7 +197,7 @@ export function buildConceptForest(runs = [], { runsById = null } = {}) {
   }
 
   for (const run of rows) {
-    const { entries, dropped } = runConceptEntries(run)
+    const { entries, dropped, effectsInvalidated } = runConceptEntries(run)
     if (dropped) { droppedIds += dropped; malformedRuns += 1 }
     if (!entries.length) { untaggedRunIds.push(run.run_id); continue }
     taggedRuns += 1
@@ -206,7 +213,7 @@ export function buildConceptForest(runs = [], { runsById = null } = {}) {
       for (let cursor = node; cursor; cursor = cursor.parent ? nodes[cursor.parent] : null) {
         const effect = entry.subtreeEffects?.[cursor.id]
         if (run.source_integrity?.complete === true && !run.concept_effects_invalidated
-          && validConceptEffect(effect)) cursor.effects.set(run.run_id, effect)
+          && !effectsInvalidated && validConceptEffect(effect)) cursor.effects.set(run.run_id, effect)
         const seen = cursor.contributors.get(run.run_id)
         cursor.contributors.set(run.run_id, seen === undefined || seen == null
           ? entry.bestMetric

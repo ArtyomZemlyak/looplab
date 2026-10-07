@@ -30,6 +30,19 @@ test('a run row is read through the canonical id boundary', () => {
   assert.equal(dropped, 1)
 })
 
+test('two spellings merged into one id carry no effect, and void the run\'s effects', () => {
+  // The server measured each receipt over its OWN spelling; the first one is not the merged concept's.
+  const effect = { v: 1, estimate: 0.2 }
+  const merged = runConceptEntries(run('r', {
+    'Loss/A': { ...tag(2), effect, subtree_effects: { loss: effect } }, 'loss/a': tag(1),
+  }))
+  assert.deepEqual(merged.entries, [{ id: 'loss/a', count: 3, bestMetric: null }])
+  assert.equal(merged.effectsInvalidated, true)
+  const single = runConceptEntries(run('r', { 'loss/a': { ...tag(2), effect, subtree_effects: { loss: effect } } }))
+  assert.equal(single.effectsInvalidated, false)
+  assert.deepEqual(single.entries[0].subtreeEffects, { loss: effect })
+})
+
 test('an unusable tag is REPORTED, never quietly turned into "never tagged"', () => {
   // Blaming a producer bug on the operator is the failure this counter exists to prevent.
   const forest = buildConceptForest([run('r', { '///': tag(2) })])

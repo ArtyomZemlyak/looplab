@@ -1,4 +1,16 @@
 // Loaded only when Russian copy is requested. User data stays in opaque substitutions.
+//
+// A placeholder key is ALSO a pattern, so `uiText` can translate a string some helper already
+// formatted (`${n} files`) — but only when the match is unambiguous. A key that is almost all
+// placeholder (`{0} of {1}`, `by {0}`, `Run {0}`) matches any English phrase that happens to hold
+// its one short word, and every server message, file path and already-translated label reaches
+// `uiText` too: "Best of the batch" read `Best от the batch`, "by the way" read `:: :: the way`.
+// So a key whose literal text does not identify the sentence by itself (fewer than
+// `MIN_ANCHOR_WORDS` words or `MIN_ANCHOR_LETTERS` letters) may only bind VALUE-LIKE captures — one
+// token holding a digit or no letter at all (`3`, `#12`, `e5small-v9`, `1.2`). An English phrase
+// left untranslated is readable; a mistranslated one is wrong.
+const MIN_ANCHOR_WORDS = 2, MIN_ANCHOR_LETTERS = 8
+const valueLike = capture => !/\s/.test(capture) && (/\d/.test(capture) || !/\p{L}/u.test(capture))
 export function decodeCatalogue(page) {
   const data = page?.messages
   if (page?.schema !== 1 || page.language !== 'ru' || !data || Array.isArray(data)
@@ -12,15 +24,19 @@ export function decodeCatalogue(page) {
       if (/^\{\d+\}$/.test(piece)) { indices.push(Number(piece.slice(1, -1))); return '(.*?)' }
       return piece.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
     }).join('')
-    return { key, indices, literals, regex: new RegExp('^' + regex + '$') }
+    const literal = literals.join(' ')
+    const anchored = (literal.match(/\p{L}{2,}/gu) || []).length >= MIN_ANCHOR_WORDS
+      && (literal.match(/\p{L}/gu) || []).length >= MIN_ANCHOR_LETTERS
+    return { key, indices, literals, anchored, regex: new RegExp('^' + regex + '$') }
   })
   return value => {
     const key = value.replace(/\s+/g, ' ').trim()
     let translated = Object.hasOwn(data, key) ? data[key] : undefined
-    if (translated === undefined) for (const pattern of patterns) {
+    if (translated === undefined && !/[Ѐ-ӿ]/.test(key)) for (const pattern of patterns) {
       if (!pattern.literals.every(literal => !literal || key.includes(literal))) continue
       const match = pattern.regex.exec(key)
       if (!match) continue
+      if (!pattern.anchored && !match.slice(1).every(valueLike)) continue
       const values = new Map()
       let consistent = true
       pattern.indices.forEach((index, position) => {

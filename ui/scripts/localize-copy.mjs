@@ -23,6 +23,9 @@ const human = (s) =>
   /[a-zA-Z]{2}/.test(s) &&
   !/[\u0400-\u04ff]/.test(s) &&
   !/^(#[/]|https?:|[./].*[/]|[A-Z_]+\s*=)/.test(s);
+// A shell command is copied and pasted, never translated: the Russian catalogue once rendered
+// `looplab finalize <runs>/{0}` as `Завершить процесс <unes>/{0}`. Paths are opaque the same way.
+const command = (s) => /^(looplab |git |python |npm )/.test(s);
 const hasJSX = (n) =>
   n &&
   typeof n === "object" &&
@@ -323,8 +326,11 @@ export function localizeSource(source, filename = "fixture.jsx") {
       const sentence = (x) =>
         (x?.type === "StringLiteral" &&
           /[a-zA-Z] [a-zA-Z]/.test(x.value) &&
-          !/^(looplab |git |python |npm |[./])/.test(x.value)) ||
+          !command(x.value) &&
+          !/^[./]/.test(x.value)) ||
         (x?.type === "TemplateLiteral" &&
+          !command(x.quasis[0]?.value.cooked || "") &&
+          !/^[./]/.test(x.quasis[0]?.value.cooked || "") &&
           x.quasis.some((q) =>
             /[a-zA-Z] [a-zA-Z]/.test(q.value.cooked || ""),
           )) ||
@@ -443,6 +449,7 @@ export function localizeSource(source, filename = "fixture.jsx") {
     if (
       n.type === "StringLiteral" &&
       /[a-zA-Z] [a-zA-Z]/.test(n.value) &&
+      !command(n.value) &&
       !/[\n<>]/.test(n.value) &&
       !/^(?:[.#]|\d+(?:px|vh)|[\w-]+ (?:var\(|solid |dashed ))/.test(n.value)
     )
@@ -464,6 +471,7 @@ export function localizeSource(source, filename = "fixture.jsx") {
         .join("");
       if (
         /[a-zA-Z] [a-zA-Z]/.test(key) &&
+        !command(key) &&
         !/[<>{}\n].*[<>{}\n].*[<>{}\n]/.test(key.replace(/\{\d+\}/g, ""))
       )
         add(key);

@@ -1,7 +1,7 @@
 {
   "schema": 1,
   "language": "ru",
-  "count": 7667,
+  "count": 7665,
   "messages": {
     "# LoopLab run report — {0}": "# Отчёт запуска LoopLab — {0}",
     "## Agent narrative (advisory)": "## Пояснения агента (рекомендации)",
@@ -2799,6 +2799,7 @@
     "These {0} runs record no comparability key they could be grouped by, and a pair": "Эти {0} не регистрируют никакого ключа сопоставимости, по которым их можно было бы сгруппировать, и пару",
     "They are not in the tree above. That is a gap in tagging, not evidence that nothing was learned in them.": "Они не на дереве, наверху, это - пробел в пометке, а не доказательство того, что в них ничего не было усвоено.",
     "This approval has expired; waiting for the server to close it.": "Срок действия этого разрешения истек; он ожидает закрытия сервера.",
+    "This browser cannot verify file contents: SHA-256 is only available in a secure context (HTTPS or localhost). The file is not shown unverified. Open the UI over HTTPS or on localhost.": "Этот браузер не может проверить содержимое файла: SHA-256 доступен только в защищённом контексте (HTTPS или localhost). Файл не показан без проверки. Откройте интерфейс по HTTPS или через localhost.",
     "This browser does not support desktop notifications.": "Этот браузер не поддерживает уведомления о рабочем столе.",
     "This cannot be undone.": "Это нельзя исправить.",
     "This chat has a live public link. Open the full Assistant to revoke it.": "В этом разговоре есть прямая связь с общественностью.",
@@ -3589,9 +3590,6 @@
     "loading…": "Загрузка...",
     "loads recipes and code mid-run.": "Загрузить рецепты и код на середину.",
     "log Y": "лог. Y",
-    "looplab concept-merge": "logelab концептуальная слияние",
-    "looplab finalize <runs>/{0}": "Завершить процесс <unes>/{0}",
-    "looplab ui --run-root {0}": "logelab ui -- roun-rot {0}",
     "looplab/core/prompts.py::PROMPT_KEYS": "linklab/kree/prompts.py::PROMPT_KEYS",
     "loss/contrastive": "потеря/разрушение",
     "lower is better": "меньше — лучше",
