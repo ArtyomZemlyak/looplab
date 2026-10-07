@@ -151,6 +151,19 @@ def _opaque_id(run_id: str, generation: str, seq: int, kind: str) -> str:
     return hashlib.sha256(raw).hexdigest()
 
 
+# The pause reasons the ENGINE writes when the BOX failed, with the owner alert each raises. Keyed on
+# the writers' own literals (`engine/evaluate.py`); an operator's pause carries neither.
+BOX_FAULT_PAUSE_REASONS: dict[str, tuple[str, str]] = {
+    "infra_unavailable": (
+        "Run paused: the box did not answer",
+        "A declared mount, the run directory or the eval interpreter was unreachable. Fix the box "
+        "and resume; the withheld experiment re-runs, charged to nobody."),
+    "engine_error": (
+        "Run paused after an engine error",
+        "The engine itself raised while evaluating. Inspect Events, fix the box, then resume."),
+}
+
+
 def _item(run_id: str, generation: str, event: Event, kind: str, *, severity: str,
           title: str, detail: str, browser: bool, active: bool = False,
           node_id: int | None = None, node_generation: int | None = None,
@@ -597,6 +610,21 @@ def project_event_attention(run_id: str, events: Iterable[Event]) -> dict:
                 browser=True, active=True, node_id=pause_node_id,
                 node_generation=pause_generation,
             )
+            if item:
+                items.append(item)
+
+    # THE ENGINE PAUSED ITSELF OVER THE BOX (incident 2026-10-06). A node-less pause whose reason
+    # is one the ENGINE writes for a box fault — `engine_error` (`evaluate.py::_contain_eval_crash`)
+    # or `infra_unavailable` (`evaluate.py::_eval_infra_pause`) — raised nothing anywhere: the
+    # developer-crash item above needs a node owner, and a paused run is excluded from the
+    # "engine stopped" item. A dead data mount then sat silent for hours. The detail is a fixed
+    # sentence, never the pause row's own text (which quotes paths and exception messages).
+    if state.paused and pause_node_id is None:
+        box = BOX_FAULT_PAUSE_REASONS.get(str(state.pause_reason or ""))
+        pause = accepted_event(state.pause_event_seq, EV_PAUSE) if box else None
+        if pause is not None:
+            item = _item(run_id, generation, pause, "run_failed", severity="danger",
+                         title=box[0], detail=box[1], browser=True, active=True)
             if item:
                 items.append(item)
 
