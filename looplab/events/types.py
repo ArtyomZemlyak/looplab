@@ -951,13 +951,15 @@ EV_EVAL_CANARY_FINISHED = "eval_canary_finished"
 # no other row carries; the next terminal of the same lifecycle sums it
 # (`engine/evaluate.py::_durable_withheld_seconds`), and the occupancy closes the busy interval at
 # it. `at` names the withhold point (`EVAL_WITHHELD_POINTS`), `reason` whether the run was paused or
-# stopping.
+# stopping — or `infra_unavailable`: the attempt failed and the engine's own probe of the declared
+# paths found the BOX broken (`runtime/infra_probe.py`), so the engine paused the run itself and the
+# failure was charged to nobody (`engine/evaluate.py::EvaluateMixin._eval_infra_pause`).
 #
 # DIAGNOSTIC for `eval_canary_*`'s reason: appended from the eval child, per attempt. The fold never
 # reads it; the charge reaches the run through the lifecycle's one terminal.
 EV_EVAL_ATTEMPT_WITHHELD = "eval_attempt_withheld"
 EVAL_WITHHELD_POINTS = ("admit", "before_launch", "after_canary", "decide_repair")
-EVAL_WITHHELD_REASONS = ("paused", "stopping")
+EVAL_WITHHELD_REASONS = ("paused", "stopping", "infra_unavailable")
 EV_WORKSPACE_SEEDED = "workspace_seeded"
 # FOLDED (moved out of DIAGNOSTIC_EVENTS): the start of an arbitrary operator `run_setup` command is
 # the only evidence that its side effects may have been applied. Without folding it, a kill between
@@ -1725,7 +1727,7 @@ EVENT_PAYLOAD_KEYS: dict[str, PayloadContract] = {
         optional=(),
     ),
     "eval_attempt_withheld": PayloadContract(
-        "A pause (or a stop) withheld a lifecycle's evaluation work; the seconds it had already spent, for its next terminal.",
+        "A pause, a stop or an infra_unavailable pause withheld a lifecycle's evaluation; its seconds, for its next terminal.",
         required=("at", "attempt", "eval_seconds", "generation", "node_id", "reason"),
         optional=(),
     ),

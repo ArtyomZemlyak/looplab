@@ -1,0 +1,190 @@
+"""The engine asks the BOX before it blames the candidate (`runtime/infra_probe.py`).
+
+Incident 2026-10-06: a container restart wiped `/var/tmp` and the operator's network data mount then
+answered `ENOTCONN` for hours. Every eval that ran meanwhile died non-zero, classified `crash`, and
+bought a paid triage plus Developer repairs of a training script with nothing wrong in it — a
+`reject_idea` closing a lineage over a mount. These tests drive the real `_evaluate` chain with a
+declared mount that goes away mid-evaluation, and the probe's own truth table.
+"""
+from __future__ import annotations
+
+import errno
+import os
+import shutil
+import sys
+import threading
+
+import anyio
+import pytest
+
+from factories import make_engine
+from looplab.events.replay import fold
+from looplab.runtime import infra_probe
+from looplab.runtime.command_eval import RunResult
+
+
+# ------------------------------------------------------------------ the probe's truth table
+
+def test_a_healthy_box_answers_with_no_fault(tmp_path):
+    data = tmp_path / "data"
+    data.mkdir()
+    (data / "x.csv").write_text("a\n1\n")
+    targets = infra_probe.declared_targets(
+        run_dir=tmp_path, repo_spec={"data": {"d": {"path": str(data)}}},
+        interpreter=sys.executable, env={"ROOT": str(data)})
+    assert infra_probe.probe(targets) == []
+    assert not list(tmp_path.glob(".looplab-infra-probe*")), "the write probe cleans up after itself"
+
+
+def test_a_declared_mount_that_is_gone_is_a_fault_but_an_undeclared_env_output_is_not(tmp_path):
+    targets = infra_probe.declared_targets(
+        repo_spec={"data": {"d": {"path": str(tmp_path / "gone")}},
+                   "references": [{"name": "r", "path": str(tmp_path / "gone-ref")}]},
+        env={"OUT_DIR": str(tmp_path / "not-yet-written")})
+    faults = infra_probe.probe(targets)
+    assert [(f.role, f.cause) for f in faults] == [("mount", "ENOENT"), ("mount", "ENOENT")]
+
+
+def test_an_infra_errno_on_an_env_path_is_a_fault(tmp_path, monkeypatch):
+    real_stat = os.stat
+    dead = str(tmp_path / "dead-mount")
+
+    def _stat(path, *a, **k):
+        if os.fspath(path) == dead:
+            raise OSError(errno.ENOTCONN, "Transport endpoint is not connected", dead)
+        return real_stat(path, *a, **k)
+
+    monkeypatch.setattr(infra_probe.os, "stat", _stat)
+    faults = infra_probe.probe([("env_path", dead)])
+    assert [(f.role, f.cause) for f in faults] == [("env_path", "ENOTCONN")]
+    assert "Transport endpoint" in infra_probe.describe(faults)
+
+
+def test_a_missing_interpreter_is_a_fault(tmp_path):
+    faults = infra_probe.probe([("interpreter", str(tmp_path / "envs" / "py" / "bin" / "python"))])
+    assert [f.cause for f in faults] == ["missing"]
+
+
+def test_an_unwritable_run_dir_is_a_fault(tmp_path, monkeypatch):
+    def _open(*a, **k):
+        raise OSError(errno.ENOSPC, "No space left on device")
+
+    monkeypatch.setattr(infra_probe.os, "open", _open)
+    faults = infra_probe.probe([("run_dir", str(tmp_path))])
+    assert [(f.role, f.cause) for f in faults] == [("run_dir", "ENOSPC")]
+
+
+def test_a_hanging_mount_is_a_timeout_and_then_hung_without_a_second_thread(tmp_path, monkeypatch):
+    release = threading.Event()
+    real_stat = os.stat
+    hang = str(tmp_path / "nfs")
+    calls = []
+
+    def _stat(path, *a, **k):
+        if os.fspath(path) == hang:
+            calls.append(path)
+            release.wait(5)
+        return real_stat(path, *a, **k)
+
+    monkeypatch.setattr(infra_probe.os, "stat", _stat)
+    try:
+        first = infra_probe.probe_target("mount", hang, timeout=0.05)
+        second = infra_probe.probe_target("mount", hang, timeout=0.05)
+        assert first is not None and first.cause == "timeout"
+        assert second is not None and second.cause == "hung"
+        assert len(calls) == 1, "a path known to hang must not stack a second stuck probe"
+    finally:
+        release.set()
+
+
+def test_env_values_that_are_not_plain_absolute_paths_are_not_targets(tmp_path):
+    targets = infra_probe.declared_targets(env={
+        "LR": "3e-4", "NO_PROXY": "a.example,b.example", "REL": "data/x",
+        "PATHLIST": f"/a{os.pathsep}/b", "ROOT": "/srv/data"})
+    assert targets == [("env_path", "/srv/data")]
+
+
+# ------------------------------------------------------------------ driven through `_evaluate`
+
+class _FixDev:
+    last_files: dict = {}
+    last_deleted: list = []
+
+    def __init__(self):
+        self.repairs = 0
+
+    def repair(self, idea, code, err):
+        self.repairs += 1
+        return "raise SystemExit(1)\n"
+
+
+def _chain(tmp_path, *, lose_mount: bool):
+    data = tmp_path / "mnt" / "corpus"
+    data.mkdir(parents=True)
+    dev = _FixDev()
+    engine = make_engine(tmp_path / "run", developer=dev)
+    engine._inline_repair = True
+    engine._inline_repair_attempts = 2
+    engine._inline_repair_reasons = ("crash",)
+    engine._repo_spec = {"data": {"corpus": {"path": str(data), "mount": True}}}
+    engine.store.append("node_created", {
+        "node_id": 0, "parent_ids": [], "operator": "draft",
+        "idea": {"operator": "draft", "params": {"x": 1.0}, "rationale": "r"},
+        "code": "raise SystemExit(1)"})
+    evals, triages = [], []
+
+    def fake_run_eval(node, workdir, env=None, profile=None, cancel=None, start_stage=None):
+        evals.append(node.code)
+        if lose_mount:
+            shutil.rmtree(data)                       # the mount went away under the training
+        return RunResult(exit_code=1, stdout="", metric=None, timed_out=False,
+                         stderr="OSError: [Errno 107] Transport endpoint is not connected")
+
+    def fake_triage(*a, **k):
+        triages.append(1)
+        return {"action": "repair", "rationale": "fix it", "failure_kind": "crash"}
+
+    engine._run_eval = fake_run_eval
+    engine._triage_crash = fake_triage
+    anyio.run(engine._evaluate, 0, anyio.CapacityLimiter(1), None)
+    events = engine.store.read_all()
+    return dev, evals, triages, events, fold(events)
+
+
+def test_a_mount_lost_mid_eval_pauses_the_run_and_charges_nothing_to_the_candidate(tmp_path):
+    dev, evals, triages, events, st = _chain(tmp_path, lose_mount=True)
+    assert len(evals) == 1 and dev.repairs == 0 and not triages, (
+        f"{len(evals)} evals, {len(triages)} triages, {dev.repairs} repairs over a dead mount")
+    assert st.paused and st.pause_reason == "infra_unavailable", st.pause_reason
+    assert st.nodes[0].status.value == "pending", "the box failing is not a verdict on the node"
+    assert not any(e.type in ("node_evaluated", "node_failed") for e in events)
+    withheld = [e.data for e in events if e.type == "eval_attempt_withheld"]
+    assert [(w["at"], w["reason"]) for w in withheld] == [("decide_repair", "infra_unavailable")]
+    pause = [e.data for e in events if e.type == "pause"][-1]
+    assert "corpus" in pause["detail"] and "ENOENT" in pause["detail"], pause
+
+
+def test_a_healthy_box_still_triages_and_repairs_the_candidate(tmp_path):
+    """The control arm: the same stderr TEXT on a box whose mount answers is the candidate's —
+    the text alone never decides (a candidate could print it to buy an uncharged retry)."""
+    dev, evals, triages, _events, st = _chain(tmp_path, lose_mount=False)
+    assert triages and dev.repairs == 2 and len(evals) == 3
+    assert not st.paused
+    assert st.nodes[0].status.value == "failed"
+
+
+@pytest.mark.parametrize("already", ["operator"])
+def test_an_already_paused_run_gets_no_second_pause_row(tmp_path, already):
+    data = tmp_path / "mnt"
+    data.mkdir()
+    engine = make_engine(tmp_path / "run")
+    engine._repo_spec = {"data": {"corpus": {"path": str(data)}}}
+    engine.store.append("pause", {"reason": already})
+    shutil.rmtree(data)
+
+    class _A:
+        node_id = 0
+
+    assert anyio.run(engine._eval_infra_pause, _A()) is True
+    pauses = [e for e in engine.store.read_all() if e.type == "pause"]
+    assert len(pauses) == 1 and fold(engine.store.read_all()).pause_reason == already

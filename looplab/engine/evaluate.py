@@ -3591,6 +3591,48 @@ class EvaluateMixin:
                          "pending and those seconds are charged nowhere", a.node_id, at,
                          exc_info=True)
 
+    def _infra_probe_targets(self) -> list:
+        """What the infra probe asks about (`runtime/infra_probe.py::declared_targets`): the run
+        directory, the operator's declared editables / data / reference mounts, the eval interpreter
+        the sandbox names, and the absolute paths in the DECLARED eval environment. `getattr`
+        throughout: test doubles and non-repo tasks reach the failure path without a repo spec."""
+        from looplab.runtime.infra_probe import declared_targets
+        try:
+            env = self._declared_eval_env({}, getattr(self, "_eval_spec", None)) or {}
+        except (TypeError, ValueError, AttributeError):   # a malformed declaration probes no env path
+            env = {}
+        return declared_targets(run_dir=getattr(self, "run_dir", None),
+                                repo_spec=getattr(self, "_repo_spec", None),
+                                interpreter=getattr(getattr(self, "sandbox", None), "python", None),
+                                env=env)
+
+    async def _eval_infra_pause(self, a: "EvalAttempt") -> bool:
+        """Probe the box after a failed attempt; on a fault, PAUSE the run and answer True.
+
+        The probe runs in a worker thread (a dead mount can block a `stat` for its whole timeout,
+        and the loop must keep its heartbeats). The pause is node-less, `reason: "infra_unavailable"`
+        with the faults in `detail`, so `RunState.pause_reason` and `looplab inspect` name the path
+        that went away; it is skipped when an auto-pause would change nothing
+        (`speculation.py::auto_pause_is_redundant`). No terminal is written: the caller withholds
+        the attempt and the node stays pending, so the resume re-runs it on a healthy box. A failure
+        whose probe finds nothing proceeds to the ordinary repair path, unchanged."""
+        from looplab.engine.speculation import auto_pause_is_redundant
+        from looplab.runtime.infra_probe import describe, probe
+        targets = self._infra_probe_targets()
+        if not targets:
+            return False
+        faults = await anyio.to_thread.run_sync(functools.partial(probe, targets))
+        if not faults:
+            return False
+        detail = self._redact(f"evaluation of node {a.node_id} failed and the box did not answer: "
+                              f"{describe(faults)}")[:400]
+        _LOG.warning("node %s: %s — pausing the run; the attempt is withheld, not charged to the "
+                     "candidate. Fix the box and resume.", a.node_id, detail)
+        async with self._write_lock:
+            if not auto_pause_is_redundant(fold(self.store.read_all())):
+                self.store.append(EV_PAUSE, {"reason": "infra_unavailable", "detail": detail})
+        return True
+
     def _eval_canary_due(self, a: "EvalAttempt") -> bool:
         """Does THIS attempt owe an eval canary before its full eval (`engine/eval_canary.py`)?
 
@@ -4853,6 +4895,19 @@ class EvaluateMixin:
             a.triage_outcome = ("abandon", "the run is stopping (a finalize was requested): no further "
                                 "repair of this node")
             return PHASE_SETTLED
+        # THE BOX, BEFORE THE CANDIDATE (incident 2026-10-06, `runtime/infra_probe.py`). Everything
+        # below treats this failure as the CANDIDATE's — a dependency round, a paid triage, a Developer
+        # repair, a `reject_idea` that closes the lineage. When the engine's own probe of the paths the
+        # operator declared finds the box broken (a dead data mount, a full or read-only run directory,
+        # a vanished interpreter), none of that can help: the run is paused HERE and the attempt is
+        # withheld exactly as the paused branch below withholds one, so the node stays pending and its
+        # chain resumes, uncharged, once the operator fixes the box and resumes. AFTER the stop check
+        # (a stop is final and the finish waits on this worker), BEFORE the pause check (that branch is
+        # what withholds the attempt, and it must name why).
+        withheld_reason = "paused"
+        if not halted.paused and await self._eval_infra_pause(a):
+            withheld_reason = "infra_unavailable"
+            halted = fold(self.store.read_all())
         if halted.paused:
             # AN INTERVENTION RECORDED AFTER THIS ATTEMPT'S WATCHER CLOSED owns the terminal, as at
             # `_pause_withholds_attempt`'s third clause: a withheld return left a reset's old
@@ -4865,7 +4920,8 @@ class EvaluateMixin:
                 return PHASE_RETURN
             # The attempt that just failed has no `node_repaired` row (no repair was bought), so its
             # seconds ride on the withheld row to the chain's next terminal (doc 69 69.12a).
-            await self._record_eval_withheld(a, "decide_repair", a.attempt_eval_seconds)
+            await self._record_eval_withheld(a, "decide_repair", a.attempt_eval_seconds,
+                                             reason=withheld_reason)
             return PHASE_RETURN
         if self.external_harness:
             # The external session reads the terminal failure and decides whether to submit a
