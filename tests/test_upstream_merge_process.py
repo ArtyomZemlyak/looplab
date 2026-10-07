@@ -90,6 +90,36 @@ def test_conflict_exit_counts_never_install_conflict_markers(monkeypatch, code):
     assert upstream_workspace.merge_text(OLD, NEW, EDIT) is None
 
 
+def test_binary_merge_is_a_conflict_with_real_git_not_a_refusal():
+    """Regression: real Git exits 255 ("Cannot merge binary files") on these bytes.
+
+    Before Git failures became typed refusals every non-zero exit was a conflict, and a
+    binary file must stay one: a refusal escapes `rebase_overlay` and fails the node's
+    evaluation instead of keeping it on its original base."""
+    assert upstream_workspace.merge_text(b"a\x00b\n", b"c\x00d\n", b"text\n") is None
+    # A NUL past Git's 8000-byte scan is a conflict too: the rule is the superset.
+    late = b"x" * 9000 + b"\x00\n"
+    assert upstream_workspace.merge_text(late, b"y\n" + late, late + b"z\n") is None
+
+
+@pytest.mark.parametrize("which", ["old", "new", "overlay"])
+def test_binary_side_is_decided_before_git_is_spawned(monkeypatch, which):
+    monkeypatch.setattr(subprocess, "run", lambda *a, **k: pytest.fail("Git spawned for binary"))
+    sides = {"old": OLD, "new": NEW, "overlay": EDIT}
+    sides[which] = sides[which] + b"\x00"
+    assert upstream_workspace.merge_text(sides["old"], sides["new"], sides["overlay"]) is None
+
+
+def test_rebase_overlay_lists_binary_file_as_conflict(tmp_path):
+    old_archive, new_archive = tmp_path / "old", tmp_path / "new"
+    old_archive.mkdir(); new_archive.mkdir()
+    (old_archive / "blob.bin").write_bytes(b"a\x00b\n")
+    (new_archive / "blob.bin").write_bytes(b"c\x00d\n")
+    out, removed, conflicts = upstream_workspace.rebase_overlay(
+        {"blob.bin": "text\n"}, [], old_archive, new_archive)
+    assert (out, removed, conflicts) == ({}, [], ["blob.bin"])
+
+
 def test_rebase_git_failure_preserves_real_two_base_pending_workspace(tmp_path, monkeypatch):
     from tests.test_upstream_multibase import twice, materialize, RATE_GENERAL
     from looplab.events.replay import fold

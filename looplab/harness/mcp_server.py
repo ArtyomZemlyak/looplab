@@ -231,7 +231,7 @@ class HarnessAPI:
         route = self._path(path)
         saved = None
         parts = unquote(urlsplit(path).path).split("/")
-        from looplab.harness.client_requests import ACTION_ROUTES, ClientActions
+        from looplab.harness.client_requests import ACTION_ROUTES, ClientActions, ClientRequestRefused
         suffix = "/".join(parts[4:])
         if (self.requests is not None and verb == "POST" and parts[1:3] == ["api", "runs"]
                 and (suffix == "commands" or suffix in ACTION_ROUTES)):
@@ -256,8 +256,14 @@ class HarnessAPI:
                          "request_sha256": row["request_sha256"], "server_effects": "unobserved"}
                 body = row["request"]["body"]
                 route = canonical.lstrip("/")  # Same encoded path HTTPX uses for literal Unicode IDs.
-            except (OSError, ValueError, RecursionError, EventStoreLockError, InterprocessLockContended):
+            except (OSError, ValueError, RecursionError, EventStoreLockError,
+                    InterprocessLockContended) as exc:
                 # Only this client-side preflight failed: no network write has begun.
+                if isinstance(exc, ClientRequestRefused):
+                    # The AUTHORED request was refused (identity conflict, missing key,
+                    # embedded credential), not the store: say that, in fixed words.
+                    return {"status": None, "code": exc.code, "outcome": "not_sent",
+                            "message": exc.message}
                 return {"status": None, "code": "client_request_unavailable", "outcome": "not_sent",
                         "message": "Original request could not be durably saved. Inspect the client request store and original key/action_id/body before sending; no HTTP request was made."}
         try:

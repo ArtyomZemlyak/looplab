@@ -116,6 +116,8 @@ def _run_git(root, *argv, timeout=30, conflict_counts=False):
         raise
     # merge-file reports 1..127 conflicts; errors are negative exit values
     # (usually 255 through the OS) or fatal 128, never a scientific verdict.
+    # Content Git declares unmergeable (binary) is also 255, so `merge_text`
+    # decides it BEFORE spawning Git; a 255 that reaches here is a process fault.
     if result.returncode and not (conflict_counts and 1 <= result.returncode <= 127):
         # core.longpaths fixes ref locks, not every Git cwd/worktree limit
         # (doc 72 §20.18). Do not reflect stderr: it may contain host paths or
@@ -222,6 +224,16 @@ def merge_text(old, new, overlay):
         return overlay
     if None in (old, new, overlay):
         return None  # add/delete conflict; never guess
+    if any(b"\0" in body for body in (old, new, overlay)):
+        # Binary content is a CONFLICT, as every non-zero merge-file exit was before
+        # Git failures became refusals: `rebase_overlay` then keeps the node on its
+        # original base. Git itself answers it with exit 255 ("Cannot merge binary
+        # files", a NUL in the first 8000 bytes), the same code as a process fault,
+        # and its stderr is localized; so decide it here, on the bytes, before Git.
+        # A NUL ANYWHERE is a superset of Git's window, so a Git version with a
+        # wider scan can never turn this back into a refusal; the cost is a
+        # conflict (never a guess) for a text file with a late NUL.
+        return None
     with tempfile.TemporaryDirectory(prefix="looplab-upstream-merge-") as td:
         paths = [Path(td) / str(i) for i in range(3)]
         for p, body in zip(paths, (overlay, old, new)):
