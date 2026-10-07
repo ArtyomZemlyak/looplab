@@ -1244,3 +1244,31 @@ def test_a_purge_leaves_a_dense_log_that_can_still_be_appended_to(tmp_path):
     appended = store.append("resume", {})
     assert appended.seq == len(seqs)
     assert set(fold(store.read_all()).nodes) == {0}
+
+
+def test_inject_experiment_is_absent_by_default_and_submits_an_artifact_when_wired(tmp_path):
+    """doc 73 §1.4: the Assistant may add a node — an ARTIFACT that prepares data, or a node that
+    uses one — through the same `inject_node` command the UI writes. A tool is part of the model's
+    prompt, so the provider hides it unless the host wires `Settings.assistant_inject_tool`."""
+    rd = tmp_path / "svc"
+    _run(rd)
+    off = RunControlTools(tmp_path, alive_fn=lambda _rd: False, mode="auto")
+    assert "inject_experiment" not in {s["function"]["name"] for s in off.specs()}
+    assert "unknown tool" in off.execute("inject_experiment", {"run_id": "svc", "rationale": "x"})
+
+    commands = _RecordingCommands(tmp_path, append=False)
+    t = RunControlTools(tmp_path, alive_fn=lambda _rd: False, mode="auto",
+                        command_service=commands, allow_inject=True)
+    assert "inject_experiment" in {s["function"]["name"] for s in t.specs()}
+    assert "completed" in t.execute("inject_experiment", {
+        "run_id": "svc", "rationale": "build the 50-item history shards", "kind": "artifact"})
+    assert "completed" in t.execute("inject_experiment", {
+        "run_id": "svc", "rationale": "train on the shards", "uses": [7], "parent_id": 1})
+    assert [call[1] for call in commands.calls] == ["inject_node", "inject_node"]
+    first, second = commands.calls[0][2], commands.calls[1][2]
+    assert first == {"idea": {"operator": "inject", "rationale": "build the 50-item history shards"},
+                     "node_kind": "artifact"}
+    assert second["uses"] == [7] and second["parent_id"] == 1 and "node_kind" not in second
+    assert "kind must be" in t.execute("inject_experiment", {"run_id": "svc", "rationale": "x",
+                                                             "kind": "dataset"})
+    assert "needs a rationale" in t.execute("inject_experiment", {"run_id": "svc"})

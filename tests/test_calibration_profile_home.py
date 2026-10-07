@@ -430,7 +430,10 @@ from looplab.search.speculation_calibration import (SPECULATION_CALIBRATION_PROF
 #               field False.
 # 2026-10-05: output_language adds one field, none removed; removing it re-derives
 # 742355ff. auto preserves previous prompts, but the full settings envelope legitimately grows.
-_EXPECTED_DIGEST = "sha256:853eacae2c4676f5aa4c77a8268512740a52a17a371bde55080dbc4d6eb90340"
+# 2026-10-07: two server-level Assistant switches, none removed — assistant_result_commentary
+# (b2e5caea, which left this pin red) and assistant_inject_tool (doc 73 §1.4). INERT for a
+# calibration replicate: neither is read by the engine.
+_EXPECTED_DIGEST = "sha256:33bc49b6216121d00d41d4d572aaefc9068d629319131783a0bccf8c2f260f27"
 #   2026-09-06  + endgame_reserve_frac (doc 52 row 18: the plan's endgame reserve the dispatcher
 #               honours). The 'field set changed too' branch: 220 -> 221, both pins re-set. A
 #               calibration replicate runs the toy workload under `EngineOptions`, whose reserve is
@@ -949,7 +952,9 @@ _EXPECTED_DIGEST = "sha256:853eacae2c4676f5aa4c77a8268512740a52a17a371bde55080db
 #   2026-10-01  + activation_check, activation_unverified_gate: 281 -> 283; see the digest history.
 #   2026-10-05  + concept_tag_hygiene: 283 -> 284; see the digest history.
 # 2026-10-05: output_language joins the merged concept hygiene schema: 284 -> 285.
-_EXPECTED_FIELD_COUNT = 285
+# 2026-10-05: assistant_result_commentary (b2e5caea) landed without moving this pin: 285 -> 286.
+# 2026-10-07: assistant_inject_tool (doc 73 §1.4, the Assistant's inject_experiment tool): 286 -> 287.
+_EXPECTED_FIELD_COUNT = 287
 
 
 def test_the_digest_did_not_change_when_the_profile_moved():

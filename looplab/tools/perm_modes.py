@@ -129,6 +129,7 @@ _ACTION_RISK = {
     ("run_control", "set_run_concepts"): RISK_CONSEQUENTIAL,   # sets the run base concepts (reversible, LWW)
     ("run_control", "extend_budget"): RISK_CONSEQUENTIAL,
     ("run_control", "set_directive"): RISK_CONSEQUENTIAL,
+    ("run_control", "inject_experiment"): RISK_CONSEQUENTIAL,   # adds one node; spends a build + eval
     ("run_control", "delete_node"): RISK_HIGH,
     ("run_control", "delete_run"): RISK_HIGH,
     ("run_control", "set_trust_gate"): RISK_HIGH,
@@ -171,6 +172,7 @@ _ACTION_CONSEQUENCE = {
     ("run_control", "set_run_concepts"): "Replaces the scoped run's base concept set with the reviewed list.",
     ("run_control", "extend_budget"): "Increases the scoped run budget by the reviewed amounts.",
     ("run_control", "set_directive"): "Writes or replaces the reviewed directive on the scoped run.",
+    ("run_control", "inject_experiment"): "Adds one reviewed node to the scoped run; its build and evaluation spend budget.",
     ("run_control", "delete_node"): "Permanently removes the reviewed node subtree from the run.",
     ("run_control", "delete_run"): "Permanently deletes the scoped run directory.",
     ("run_control", "set_trust_gate"): "Changes the scoped run's trust-enforcement policy.",

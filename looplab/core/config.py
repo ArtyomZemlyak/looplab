@@ -2604,6 +2604,11 @@ class Settings(BaseSettings):
 
     # UI-server background prose only; never a search/evaluation gate. Legacy runs stay off.
     assistant_result_commentary: bool = True
+    # The Assistant's `inject_experiment` tool (doc 73 §1.4): add a node — an experiment, an ARTIFACT
+    # node that prepares what later nodes read, or a node that `uses` produced artifacts — through the
+    # same `inject_node` command the UI writes, behind a confirm card. A tool is part of the model's
+    # prompt, so `RunControlTools` defaults it OFF; this server-level switch turns it on. Not run-pinned.
+    assistant_inject_tool: bool = True
     # === LLM / transport ==================================================================
     llm_base_url: str = "http://localhost:11434/v1"  # Ollama OpenAI-compatible endpoint
     llm_temperature: float = 0.6

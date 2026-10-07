@@ -1814,7 +1814,7 @@ class ShareStore:
 def system_prompt(mode: str, *, repo_root: Path = REPO_ROOT, knowledge_dir: str | None = None,
                   cross_run_tools: bool = False, taxonomy_tools: bool = False,
                   work_cycle: bool = False, standing_work: bool = False,
-                  response_language: str = "auto") -> str:
+                  response_language: str = "auto", inject_tool: bool = False) -> str:
     from looplab.serve.assistant_language import language_directive
 
     mode = normalize_mode(mode)
@@ -1874,7 +1874,11 @@ def system_prompt(mode: str, *, repo_root: Path = REPO_ROOT, knowledge_dir: str 
            "inherit), and the DESTRUCTIVE delete_node / delete_run. And you can adjust a "
            "LIVE run's settings: extend_budget (more nodes/time — REOPENS a finished run so the budget "
            "is used), set_directive (a standing steer for the agents, e.g. 'use only sklearn'), and "
-           "set_trust_gate (audit/gate/block). Each is gated by your mode and may raise a confirm card.\n")
+           "set_trust_gate (audit/gate/block). Each is gated by your mode and may raise a confirm card.\n"
+           + ("You can also ADD a node with inject_experiment: an experiment, an ARTIFACT node "
+              "(kind='artifact': prepares data the next experiments read; succeeds without a metric and "
+              "is never ranked), or a node that uses=[artifact ids] once those are evaluated.\n"
+              if inject_tool else ""))
         + "When the user wants to START a new autonomous-ML run, call `propose_run` with a run name + an "
         "inline COMPOSABLE `task` (goal + direction + the fields you have: repo / dataset / cmd / "
         "kaggle — there is NO `kind` field, the engine infers the task from what you describe) or a "
@@ -2028,7 +2032,8 @@ def build_tools(run_root, alive_fn: Optional[Callable] = None, mode: str = DEFAU
                 command_key_namespace=command_key_namespace,
                 mutation_journal_path=mutation_journal_path,
                 mutation_recovery=True,
-                trace_rewrite=trace_rewrite_fns()))
+                trace_rewrite=trace_rewrite_fns(),
+                allow_inject=bool(getattr(settings, "assistant_inject_tool", False))))
         providers.append(TodoTools(on_todos=on_todos))
         return CompositeTools(providers)
 
@@ -2071,7 +2076,9 @@ def build_tools(run_root, alive_fn: Optional[Callable] = None, mode: str = DEFAU
                                       command_key_namespace=command_key_namespace,
                                       mutation_journal_path=mutation_journal_path,
                                       mutation_recovery=mutation_recovery,
-                                      trace_rewrite=trace_rewrite_fns())]
+                                      trace_rewrite=trace_rewrite_fns(),
+                                      allow_inject=bool(getattr(settings, "assistant_inject_tool",
+                                                                False)))]
     providers.append(TodoTools(on_todos=on_todos))
     if work_cycle:
         providers.append(WorkCheckpointTools())
@@ -2372,7 +2379,9 @@ def run_turn(client, run_root, messages: list, instruction: str, mode: str = DEF
         mode, knowledge_dir=(getattr(settings, "knowledge_dir", None) if settings else None),
         cross_run_tools=_has_cross_run, taxonomy_tools=_has_taxonomy,
         work_cycle=work_cycle, standing_work=watches is not None,
-        response_language=response_language)}]
+        response_language=response_language,
+        # The same switch that adds the tool, and only outside `plan` (the provider is mutating).
+        inject_tool=(mode != "plan" and bool(getattr(settings, "assistant_inject_tool", False))))}]
     for m in messages:
         role = m.get("role")
         # A user turn may carry `raw` — the full model-facing instruction (attached-file contents,

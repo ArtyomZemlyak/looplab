@@ -1021,6 +1021,15 @@
           "shortHelp": "Brief background Assistant explanations of completed internal experiments. Uses the run model budget; does not wait for a chat message."
         },
         {
+          "key": "assistant_inject_tool",
+          "label": "Assistant can add nodes",
+          "type": "bool",
+          "default": true,
+          "help": "Gives the Assistant an inject_experiment tool: it can add one node to a run behind a confirm card — an experiment, an ARTIFACT node that prepares data later nodes read (it succeeds without a metric and is never ranked), or a node that uses produced artifacts. Each added node spends a build and an evaluation. Off removes the tool from the Assistant.",
+          "shortLabel": "Assistant adds nodes",
+          "shortHelp": "Lets the Assistant add experiment or data-preparation nodes, each behind a confirm card."
+        },
+        {
           "key": "backend",
           "label": "Role backend",
           "type": "enum",
