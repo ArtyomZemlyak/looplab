@@ -187,7 +187,10 @@ def declared_targets(*, run_dir=None, repo_spec: Optional[dict] = None,
     for _name, ds in (spec.get("data") or {}).items():
         _add("mount", ds.get("path") if isinstance(ds, dict) else ds)
     for ref in spec.get("references") or []:
-        if isinstance(ref, dict):
+        # Only a MOUNTED reference is something the eval reads; a context-only one
+        # (`ReferenceSpec.mount` False, the default) is read by agents at build time, and its
+        # absence must not pause an evaluation that never touches it.
+        if isinstance(ref, dict) and ref.get("mount") is True:
             _add("mount", ref.get("path"))
     if interpreter:
         _add("interpreter", interpreter)

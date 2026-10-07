@@ -84,12 +84,13 @@ def evaluate_track_cmd(
     metrics (`extra_metrics_imported`, `source: track <name>`), never over them; `--apply` holds
     `engine.lock`. A recorded key can then be the objective (`metric_retarget`).
     """
+    from looplab.core.errors import ConfigRefusal
     from looplab.maintenance.evaluate_track import evaluate_track
+    from looplab.maintenance.import_metrics import MetricsInputRefusal
     try:
         typer.echo(evaluate_track(run_dir, track, nodes, apply=apply))
-    except (OSError, ValueError) as exc:
-        typer.echo(f"evaluate-track: {exc}")
-        raise typer.Exit(2)
+    except MetricsInputRefusal as exc:
+        raise ConfigRefusal(f"evaluate-track: {exc}") from None
 
 
 @app.command(name="import-metrics")
@@ -111,12 +112,12 @@ def import_metrics_cmd(
     `declared` channel with NO direction and are marked reconstructed key by key; `--apply` holds the
     run's `engine.lock`, so it never writes beside an engine.
     """
-    from looplab.maintenance.import_metrics import import_metrics
+    from looplab.core.errors import ConfigRefusal
+    from looplab.maintenance.import_metrics import MetricsInputRefusal, import_metrics
     try:
         typer.echo(import_metrics(run_dir, file, source=source, apply=apply, precision=precision))
-    except (OSError, ValueError) as exc:
-        typer.echo(f"import-metrics: {exc}")
-        raise typer.Exit(2)
+    except MetricsInputRefusal as exc:
+        raise ConfigRefusal(f"import-metrics: {exc}") from None
 
 
 @app.command(name="backfill-score-metrics")

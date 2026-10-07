@@ -39,10 +39,13 @@ def test_a_healthy_box_answers_with_no_fault(tmp_path):
 def test_a_declared_mount_that_is_gone_is_a_fault_but_an_undeclared_env_output_is_not(tmp_path):
     targets = infra_probe.declared_targets(
         repo_spec={"data": {"d": {"path": str(tmp_path / "gone")}},
-                   "references": [{"name": "r", "path": str(tmp_path / "gone-ref")}]},
+                   "references": [{"name": "r", "path": str(tmp_path / "gone-ref"), "mount": True},
+                                  {"name": "ctx", "path": str(tmp_path / "context-only")}]},
         env={"OUT_DIR": str(tmp_path / "not-yet-written")})
     faults = infra_probe.probe(targets)
     assert [(f.role, f.cause) for f in faults] == [("mount", "ENOENT"), ("mount", "ENOENT")]
+    assert str(tmp_path / "context-only") not in {p for _r, p in targets}, (
+        "a context-only reference is read by agents at build time, never by the eval")
 
 
 def test_an_infra_errno_on_an_env_path_is_a_fault(tmp_path, monkeypatch):
@@ -279,3 +282,18 @@ def test_an_oserror_on_a_healthy_box_is_still_engine_error(tmp_path, monkeypatch
     st = fold(engine.store.read_all())
     assert st.nodes[0].status.value == "failed" and st.nodes[0].error_reason == "engine_error"
     assert st.paused and st.pause_reason == "engine_error"
+
+
+def test_an_oserror_on_a_broken_box_of_a_STOPPING_run_still_writes_its_terminal(tmp_path, monkeypatch):
+    """A finalize drains and finishes; a node left pending would end the run without a terminal."""
+    engine, data, _evals = _engine_with_mount(tmp_path)
+
+    def dead_materialize(a):
+        engine.store.append("run_abort", {"reason": "finalized"})   # the stop lands mid-build
+        shutil.rmtree(data, ignore_errors=True)
+        raise OSError(errno.ENOTCONN, "Transport endpoint is not connected", str(data))
+
+    monkeypatch.setattr(engine, "_eval_prepare_workdir", dead_materialize)
+    anyio.run(engine._evaluate, 0, anyio.CapacityLimiter(1), None)
+    st = fold(engine.store.read_all())
+    assert st.nodes[0].status.value == "failed" and st.nodes[0].error_reason == "engine_error"

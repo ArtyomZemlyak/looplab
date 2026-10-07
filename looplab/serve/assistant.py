@@ -1797,6 +1797,14 @@ class ShareStore:
         return summary
 
 
+def assistant_inject_enabled(settings) -> bool:
+    """The ONE reading of `Settings.assistant_inject_tool` (doc 73 §1.4): it decides both whether
+    the run-control provider carries `inject_experiment` and whether the system prompt names it,
+    and two spellings of it could hand the model a tool its prompt never mentions (or the reverse).
+    A host that passes no settings, or an object without the field, gets no tool."""
+    return getattr(settings, "assistant_inject_tool", False) is True
+
+
 # --------------------------------------------------------------------------- system prompt + toolset
 # The guard below names the CHANNEL, and since 2026-09-03 every tool result carries the label it
 # names: `drive_tool_loop`'s `tool_result_label` fences each result between `UNTRUSTED_RUN_EVIDENCE`
@@ -2033,7 +2041,7 @@ def build_tools(run_root, alive_fn: Optional[Callable] = None, mode: str = DEFAU
                 mutation_journal_path=mutation_journal_path,
                 mutation_recovery=True,
                 trace_rewrite=trace_rewrite_fns(),
-                allow_inject=bool(getattr(settings, "assistant_inject_tool", False))))
+                allow_inject=assistant_inject_enabled(settings)))
         providers.append(TodoTools(on_todos=on_todos))
         return CompositeTools(providers)
 
@@ -2077,8 +2085,7 @@ def build_tools(run_root, alive_fn: Optional[Callable] = None, mode: str = DEFAU
                                       mutation_journal_path=mutation_journal_path,
                                       mutation_recovery=mutation_recovery,
                                       trace_rewrite=trace_rewrite_fns(),
-                                      allow_inject=bool(getattr(settings, "assistant_inject_tool",
-                                                                False)))]
+                                      allow_inject=assistant_inject_enabled(settings))]
     providers.append(TodoTools(on_todos=on_todos))
     if work_cycle:
         providers.append(WorkCheckpointTools())
@@ -2381,7 +2388,7 @@ def run_turn(client, run_root, messages: list, instruction: str, mode: str = DEF
         work_cycle=work_cycle, standing_work=watches is not None,
         response_language=response_language,
         # The same switch that adds the tool, and only outside `plan` (the provider is mutating).
-        inject_tool=(mode != "plan" and bool(getattr(settings, "assistant_inject_tool", False))))}]
+        inject_tool=(mode != "plan" and assistant_inject_enabled(settings)))}]
     for m in messages:
         role = m.get("role")
         # A user turn may carry `raw` — the full model-facing instruction (attached-file contents,

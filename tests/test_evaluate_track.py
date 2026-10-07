@@ -98,3 +98,19 @@ def test_the_last_json_object_is_read_and_filtered():
     assert parse_track_output(stdout) == {"FUR@200": 0.3, "beams": 200.0}
     assert parse_track_output(stdout, keys=["FUR@200"], prefix="w07/") == {"w07/FUR@200": 0.3}
     assert parse_track_output("no json here") == {}
+
+
+def test_a_bad_input_is_a_refusal_and_a_bug_keeps_its_traceback(tmp_path, monkeypatch):
+    """The operator's own input is refused on purpose (`ConfigRefusal`, one line, exit 2); a plain
+    `ValueError` from anywhere else is a bug and is never printed as a tidy refusal."""
+    rd, _store = _run(tmp_path)
+    out = _cli(rd, "--nodes", "three")
+    assert out.exit_code == 2 and "--nodes must be 'all'" in out.output
+    from looplab.maintenance import evaluate_track as module
+
+    def _bug(*_a, **_k):
+        raise ValueError("an internal defect")
+
+    monkeypatch.setattr(module, "evaluate_track", _bug)
+    out = _cli(rd)
+    assert out.exit_code == 1 and isinstance(out.exception, ValueError)

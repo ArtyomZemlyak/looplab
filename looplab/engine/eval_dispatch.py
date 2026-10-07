@@ -383,6 +383,12 @@ class EvalDispatchMixin:
         (`runtime/infra_probe.py`), and re-running pip into it could only fail."""
         from looplab.core.models import run_setup_key
         from looplab.runtime import deps
+        # ONLY THE INSTALL LOOPLAB DERIVED (`_settle_declared_deps`): it installs the declaration
+        # into the eval interpreter (`deps.declaration_argv(python=sandbox.python)`), so the probe
+        # asks the interpreter the install wrote to. An operator's own `run_setup` may install
+        # elsewhere (another env, a container) and may not be idempotent — it stays exactly-once.
+        if not getattr(self, "_deps_setup_derived", False):
+            return []
         try:
             decl = self._declared_deps()
         except (OSError, ValueError, TypeError):

@@ -2144,6 +2144,13 @@ class NodeBuildMixin:
                     # The original work item survives a rerun; only a re-proposal that MINTED a
                     # replacement card may close the one it superseded (`replacement_card`).
                     drop_card=replacement_card,
+                    # …and so does what the node IS (doc 73 §1.4): a rebuilt artifact is still an
+                    # artifact, a rebuilt consumer still reads its producers. The fold builds a fresh
+                    # Node from this row, so a key left out here would silently make it a ranked
+                    # experiment. Absent on every other node, as on its first creation.
+                    **({"node_kind": "artifact"} if getattr(node, "kind", None) == "artifact"
+                       else {}),
+                    **({"uses": list(node.uses)} if getattr(node, "uses", None) else {}),
             ):
                 return
             if is_developer_stuck(code):

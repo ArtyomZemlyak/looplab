@@ -1776,7 +1776,12 @@ def _on_confirm_eval(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
 def _apply_objective(st: RunState, n) -> None:
     """`n.metric` on the run's OBJECTIVE: the task's own metric, or — under an operator retarget
     (doc 68 68.2) — its DECLARED extra metric `st.objective_key` (`core/models.py::objective_value`),
-    None where it has none: unranked, never ranked on another scale."""
+    None where it has none: unranked, never ranked on another scale. An ARTIFACT node (doc 73
+    §1.4) is ranked on neither: an operator import or a declared reader may leave it a key the
+    objective names, and a preparation step is never a candidate for champion."""
+    if getattr(n, "kind", None) == "artifact":
+        n.metric = None
+        return
     n.metric = (n.task_metric if st.objective_key is None
                 else objective_value(n.extra_metrics, n.extra_metrics_provenance, st.objective_key,
                                      n.extra_metrics_direction, st.direction))

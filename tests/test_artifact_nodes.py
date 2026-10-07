@@ -190,3 +190,61 @@ def test_an_injected_artifact_carries_its_kind_end_to_end(tmp_path):
               if e.type == "node_created" and e.data.get("node_id") != art.id]
     assert others and all("node_kind" not in d and "uses" not in d for d in others), (
         "a node that is not an artifact keeps its historical payload shape")
+
+
+def test_a_rebuilt_artifact_is_still_an_artifact(tmp_path):
+    """A `node_reset` from implement re-emits `node_created` for the same id, and the fold builds a
+    fresh Node from that row: the rebuild must carry `node_kind`/`uses`, or the preparation step
+    silently becomes a ranked experiment."""
+    from looplab.events.eventstore import EventStore
+    from test_control import _engine as control_engine
+    rd = tmp_path / "run"
+    store = EventStore(rd / "events.jsonl")
+    store.append("inject_node", {"idea": {"operator": "manual", "params": {"x": 0.5},
+                                          "rationale": "prepare"},
+                                 "parent_id": None, "code": None, "node_kind": "artifact"})
+    state = anyio.run(control_engine(rd).run)
+    art = next(n for n in state.nodes.values() if n.operator == "manual")
+    store.append("node_reset", {"node_id": art.id, "from_stage": "implement"})
+    state = anyio.run(control_engine(rd).run)
+    rebuilt = state.nodes[art.id]
+    assert rebuilt.attempt == 1 and rebuilt.kind == "artifact" and rebuilt.metric is None
+    creates = [e.data for e in store.read_all()
+               if e.type == "node_created" and e.data.get("node_id") == art.id]
+    assert len(creates) == 2 and creates[-1]["node_kind"] == "artifact"
+
+
+def test_an_artifact_is_never_ranked_on_a_retargeted_objective():
+    """An import or a declared reader may leave an artifact the key a retarget names; it is still
+    never ranked, and it is not counted as an UNRANKED experiment either."""
+    from looplab.core.models import objective_coverage
+    from looplab.events.eventstore import Event
+    rows, seq = [], iter(range(100))
+
+    def add(kind, data):
+        rows.append(Event(seq=next(seq), ts=0.0, type=kind, data=data))
+
+    add("run_started", {"run_id": "r", "task_id": "t", "direction": "max"})
+    for nid, extra in ((0, {"node_kind": "artifact"}), (1, {})):
+        add("node_created", {"node_id": nid, "parent_ids": [], "operator": "inject",
+                             "idea": {"operator": "inject"}, "code": "x", **extra})
+        add("node_evaluated", {"node_id": nid, "generation": 0, "metric": None if nid == 0 else 0.1,
+                               "violations": [], "extra_metrics": {"FUR@200": 0.9 - nid / 2},
+                               "extra_metrics_provenance": {"FUR@200": "declared"}})
+    add("metric_retarget", {"key": "FUR@200"})
+    st = fold(rows)
+    assert st.nodes[0].metric is None and st.nodes[1].metric == 0.4
+    assert st.best_node_id == 1
+    assert objective_coverage(st) == ("FUR@200", [1], [])
+
+
+def test_a_failed_artifact_is_never_salvaged(tmp_path):
+    engine = make_engine(tmp_path / "run")
+    engine._inline_repair = False
+    asked = []
+    engine._salvage_eval_metric = lambda *a, **k: asked.append(1)
+    _created(engine, 0, node_kind="artifact")
+    _evaluate(engine, 0, RunResult(exit_code=1, stdout='{"metric": 0.5}', metric=0.5,
+                                   timed_out=False, stderr="Traceback: killed"))
+    assert fold(engine.store.read_all()).nodes[0].status.value == "failed"
+    assert asked == [], "salvage is not even asked for an artifact"

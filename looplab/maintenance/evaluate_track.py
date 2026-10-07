@@ -14,7 +14,7 @@ over them, marked reconstructed key by key, with `source: "track <name>"`.
 THE PRECONDITION, and why it is strict. A track measures the node's ARTIFACTS, so it must be sure
 the workdir holds what the node's evaluation produced: the node is evaluated in its CURRENT
 lifecycle, and the workdir's `.looplab-manifest` stamp equals the digest of the node's code and
-lifecycle (`engine/evaluate.py::_workdir_manifest_digest`) — the stamp the engine writes after the
+lifecycle (`engine/evaluate.py::workdir_manifest_digest`) — the stamp the engine writes after the
 files are on disk. A reset, a rebuild or a missing stamp is REFUSED for that node, never measured.
 A dry run (the default) runs nothing; `--apply` runs the tracks while holding the run's
 `engine.lock` (the backfill's `offline_run`), so no engine rebuilds a workdir under them.
@@ -29,14 +29,15 @@ from typing import Optional
 
 from looplab.events.eventstore import EventStore
 from looplab.events.replay import fold
+from looplab.maintenance.import_metrics import MetricsInputRefusal
 
 
 def read_track(run_dir: Path, track: str) -> dict:
-    """The declared `eval.tracks.<track>` from the run's task snapshot. Raises ValueError."""
+    """The declared `eval.tracks.<track>` from the run's task snapshot. Raises MetricsInputRefusal."""
     try:
         data = json.loads((Path(run_dir) / "task.snapshot.json").read_text(encoding="utf-8"))
     except (OSError, ValueError) as exc:
-        raise ValueError(f"cannot read task.snapshot.json: {exc}") from None
+        raise MetricsInputRefusal(f"cannot read task.snapshot.json: {exc}") from None
     # The snapshot's own block, under either spelling the task schema accepts (`cmd`, alias
     # `eval`) — read raw rather than through `adapters/task_schema.py`, which this package does not
     # reach (`tests/test_package_layering.py`).
@@ -44,10 +45,10 @@ def read_track(run_dir: Path, track: str) -> dict:
     tracks = (spec or {}).get("tracks") if isinstance(spec, dict) else None
     if not isinstance(tracks, dict) or track not in tracks:
         named = ", ".join(sorted(tracks)) if isinstance(tracks, dict) and tracks else "none"
-        raise ValueError(f"the task declares no eval.tracks.{track} (declared: {named})")
+        raise MetricsInputRefusal(f"the task declares no eval.tracks.{track} (declared: {named})")
     entry = tracks[track]
     if not isinstance(entry, dict) or not isinstance(entry.get("command"), list) or not entry["command"]:
-        raise ValueError(f"eval.tracks.{track} has no command")
+        raise MetricsInputRefusal(f"eval.tracks.{track} has no command")
     return entry
 
 
@@ -81,7 +82,7 @@ def parse_track_output(stdout: str, *, keys=None, prefix: str = "") -> dict[str,
 
 def track_refusal(run_dir: Path, node) -> Optional[str]:
     """Why this node's workdir may NOT be measured, or None."""
-    from looplab.engine.evaluate import _workdir_manifest_digest
+    from looplab.engine.evaluate import workdir_manifest_digest
     if getattr(node.status, "value", node.status) != "evaluated" or node.task_metric is None:
         return "not evaluated in its current lifecycle"
     workdir = Path(run_dir) / "nodes" / f"node_{node.id}"
@@ -89,7 +90,7 @@ def track_refusal(run_dir: Path, node) -> Optional[str]:
     try:
         if workdir.is_symlink() or not workdir.is_dir():
             return "its workdir is gone"
-        if stamp.read_text(encoding="ascii").strip() != _workdir_manifest_digest(node):
+        if stamp.read_text(encoding="ascii").strip() != workdir_manifest_digest(node):
             return "its workdir holds another lifecycle's or code's files (manifest stamp differs)"
     except OSError:
         return "its workdir carries no readable manifest stamp"
@@ -115,7 +116,8 @@ def evaluate_track(run_dir: Path, track: str, nodes: str, *, apply: bool) -> str
             try:
                 ids = sorted({int(x) for x in nodes.split(",") if x.strip()})
             except ValueError:
-                raise ValueError(f"--nodes must be 'all' or a comma list of ids, not {nodes!r}") from None
+                raise MetricsInputRefusal(
+                    f"--nodes must be 'all' or a comma list of ids, not {nodes!r}") from None
         lines, recorded = [], 0
         for nid in ids:
             node = state.nodes.get(nid)

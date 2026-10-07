@@ -1357,6 +1357,12 @@ def _workdir_manifest_digest(node) -> str:
         option=orjson.OPT_SORT_KEYS)).hexdigest()
 
 
+# The PUBLIC name of the same function, for the readers outside `engine/` that must agree with the
+# stamp byte for byte — `maintenance/evaluate_track.py::track_refusal` measures a workdir only when
+# its stamp is this digest. The private name stays: tests and in-package callers spell it.
+workdir_manifest_digest = _workdir_manifest_digest
+
+
 def _canary_code_digest(node) -> str:
     """The eval canary's `code_digest`: `_workdir_manifest_digest` less the activation manifest.
 
@@ -3298,7 +3304,11 @@ class EvaluateMixin:
                     events = self.store.read_all()
                     state = fold(events)
                     node = state.nodes.get(node_id)
-                    if faults:
+                    # …EXCEPT ON A RUN THAT IS STOPPING. A finalize drains in-flight evaluation and
+                    # finishes; leaving this node pending would end the run with a node that has no
+                    # terminal (`_pause_withholds_attempt`'s stop clause, the same defect). The stop is
+                    # final, so the box fault closes the node as `engine_error` below, as it always did.
+                    if faults and not (state.finished or state.stop_requested):
                         if not auto_pause_is_redundant(state):
                             self.store.append(EV_PAUSE, {
                                 "reason": "infra_unavailable",
@@ -4133,6 +4143,11 @@ class EvaluateMixin:
                     self.store.append(EV_STAGE_FINISHED,
                                       {"node_id": a.node_id, **_st, "generation": a.generation})
         await self._eval_write_terminal(a)
+        # …and the operator's copy-out, as the driver starts it after a live terminal: the dead
+        # process settled `ok` and never reached its own `start_artifact_sync`, so without this a
+        # recovered node's workdir is the one evaluated workdir `eval.artifact_sync` never copies.
+        from looplab.engine.artifact_sync import start_artifact_sync
+        start_artifact_sync(self, a.node_id, a.generation)
         return PHASE_RETURN
 
     def _settled_workdir_evidence(self, a: "EvalAttempt", claim_ts, settle_seq: int):
@@ -4819,6 +4834,12 @@ class EvaluateMixin:
             # A FAILED CANARY IS NEVER SALVAGED: the only numbers and files it produced measured a
             # slice, in a scratch directory, and no rung may turn them into this node's metric
             # (`engine/eval_canary.py`). The node's workdir holds nothing from this attempt either.
+            a.salvaged = None
+            return PHASE_NEXT
+        if getattr(a.node, "kind", None) == "artifact":
+            # AN ARTIFACT IS NEVER SALVAGED (doc 73 §1.4): it has no metric to recover, and a
+            # recovered number would settle a FAILED preparation step as evaluated — every
+            # consumer would then read a half-written workdir. Its failure goes to repair.
             a.salvaged = None
             return PHASE_NEXT
         if a.watchdog_reason:

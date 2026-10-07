@@ -286,6 +286,8 @@ def objective_coverage(state) -> Optional[tuple[str, list[int], list[int]]]:
         return None
     carrying, unranked = [], []
     for n in state.evaluated_nodes():
+        if getattr(n, "kind", None) == "artifact":
+            continue                        # never ranked on any objective (doc 73 §1.4)
         value = objective_value(n.extra_metrics, n.extra_metrics_provenance, key,
                                 n.extra_metrics_direction, state.direction)
         (carrying if value is not None else unranked).append(n.id)

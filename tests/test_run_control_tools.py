@@ -1269,6 +1269,43 @@ def test_inject_experiment_is_absent_by_default_and_submits_an_artifact_when_wir
     assert first == {"idea": {"operator": "inject", "rationale": "build the 50-item history shards"},
                      "node_kind": "artifact"}
     assert second["uses"] == [7] and second["parent_id"] == 1 and "node_kind" not in second
+    assert second["parent_generations"] == {"1": 0}
+    assert "no node #9" in t.execute("inject_experiment", {"run_id": "svc", "rationale": "x",
+                                                           "parent_id": 9})
     assert "kind must be" in t.execute("inject_experiment", {"run_id": "svc", "rationale": "x",
                                                              "kind": "dataset"})
     assert "needs a rationale" in t.execute("inject_experiment", {"run_id": "svc"})
+
+
+def test_inject_experiment_fences_a_reset_parent_on_its_current_generation(tmp_path):
+    """A parent that was ever reset is REFUSED by the server's inject validation without a
+    `parent_generations` fence ("parent generation is required after node reset"); the tool reads
+    the parent's current lifecycle and sends it."""
+    rd = tmp_path / "svc"
+    store = _run(rd)
+    store.append("node_reset", {"node_id": 1, "mode": "eval"})
+    generation = fold(store.read_all()).nodes[1].attempt
+    assert generation >= 1
+    commands = _RecordingCommands(tmp_path, append=False)
+    t = RunControlTools(tmp_path, alive_fn=lambda _rd: False, mode="auto",
+                        command_service=commands, allow_inject=True)
+    assert "completed" in t.execute("inject_experiment", {
+        "run_id": "svc", "rationale": "branch from the re-evaluated node", "parent_id": 1})
+    assert commands.calls[0][2]["parent_generations"] == {"1": generation}
+
+
+def test_the_inject_switch_has_one_reader():
+    """The provider's tool and the prompt's mention of it read the SAME function, so the model is
+    never handed a tool its prompt does not name (or told of one it does not have)."""
+    import inspect
+    from types import SimpleNamespace
+
+    from looplab.core.config import Settings
+    from looplab.serve import assistant
+    from tests._source_scan import code_text
+    assert assistant.assistant_inject_enabled(Settings()) is True
+    assert assistant.assistant_inject_enabled(Settings(assistant_inject_tool=False)) is False
+    assert assistant.assistant_inject_enabled(SimpleNamespace()) is False
+    assert assistant.assistant_inject_enabled(None) is False
+    body = code_text(inspect.getsource(assistant))
+    assert body.count('"assistant_inject_tool"') == 1, "a second spelling of the switch"

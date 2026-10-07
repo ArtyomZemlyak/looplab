@@ -485,12 +485,23 @@ class RunControlTools:
         if parent is not None:
             if isinstance(parent, bool) or not isinstance(parent, int):
                 return "(parent_id must be a node id)"
+            # The parent's CURRENT lifecycle, read where the tool decides, and sent as the
+            # `parent_generations` fence the server's CAS checks: without it a parent that was ever
+            # reset is refused outright ("parent generation is required after node reset"), and a
+            # reset between this read and the submit is a 409, never a child of the new bytes.
+            from looplab.events.eventstore import EventStore
+            from looplab.events.replay import fold
+            parent_node = fold(EventStore(rd / "events.jsonl").read_all()).nodes.get(parent)
+            if parent_node is None:
+                return f"(no node #{parent} in {rid})"
             data["parent_id"] = parent
+            data["parent_generations"] = {str(parent): parent_node.attempt}
         blocked, formed_generation = self._gate(
             name, rid, rd, f"inject {'an artifact' if kind == 'artifact' else 'a node'} into {rid}: "
                            f"{rationale[:60]}",
             scope={"run_id": rid, "node_kind": data.get("node_kind", "experiment"),
                    "uses": data.get("uses", []), "parent_id": parent,
+                   "parent_generations": data.get("parent_generations", {}),
                    "rationale_digest": hashlib.sha256(rationale.encode("utf-8")).hexdigest()})
         if blocked:
             return blocked

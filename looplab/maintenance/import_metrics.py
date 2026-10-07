@@ -31,26 +31,36 @@ from looplab.events.eventstore import EventStore
 from looplab.events.replay import fold
 
 
+class MetricsInputRefusal(ValueError):
+    """The operator's input to an import or a track (`maintenance/evaluate_track.py`) refused ON
+    PURPOSE. The CLI re-raises exactly this type as `core/errors.py::ConfigRefusal` — this package
+    does not reach `core` (`tests/test_package_layering.py`) — so a plain `ValueError` from anywhere
+    else is still a bug and keeps its traceback instead of being printed as a tidy refusal."""
+
+
 def read_metrics_file(path: Path) -> dict[int, dict[str, float]]:
-    """`{node_id: {key: value}}` from FILE. Raises ValueError naming the first bad entry."""
-    data = json.loads(Path(path).read_text(encoding="utf-8"))
+    """`{node_id: {key: value}}` from FILE. Raises MetricsInputRefusal naming the first bad entry."""
+    try:
+        data = json.loads(Path(path).read_text(encoding="utf-8"))
+    except (OSError, ValueError) as exc:
+        raise MetricsInputRefusal(f"cannot read {path}: {exc}") from None
     if isinstance(data, dict) and isinstance(data.get("nodes"), dict):
         data = data["nodes"]
     if not isinstance(data, dict):
-        raise ValueError("the file must be a JSON object {node_id: {metric: value}}")
+        raise MetricsInputRefusal("the file must be a JSON object {node_id: {metric: value}}")
     out: dict[int, dict[str, float]] = {}
     for raw_id, metrics in data.items():
         try:
             node_id = int(raw_id)
         except (TypeError, ValueError):
-            raise ValueError(f"node id {raw_id!r} is not an integer") from None
+            raise MetricsInputRefusal(f"node id {raw_id!r} is not an integer") from None
         if not isinstance(metrics, dict) or not metrics:
-            raise ValueError(f"node {node_id}: expected a non-empty {{metric: value}} object")
+            raise MetricsInputRefusal(f"node {node_id}: expected a non-empty {{metric: value}} object")
         clean: dict[str, float] = {}
         for key, value in metrics.items():
             if (not isinstance(key, str) or not key.strip() or isinstance(value, bool)
                     or not isinstance(value, (int, float)) or not math.isfinite(value)):
-                raise ValueError(f"node {node_id}: {key!r}={value!r} is not a finite number")
+                raise MetricsInputRefusal(f"node {node_id}: {key!r}={value!r} is not a finite number")
             clean[key.strip()] = float(value)
         out[node_id] = clean
     return out
@@ -91,7 +101,7 @@ def import_metrics(run_dir: Path, file: Path, *, source: str, apply: bool,
     from looplab.events.types import EV_EXTRA_METRICS_IMPORTED
     from looplab.maintenance.backfill_applied_params import offline_run
     if not source or not source.strip():
-        raise ValueError("--source is required: say what measured these numbers")
+        raise MetricsInputRefusal("--source is required: say what measured these numbers")
     metrics = read_metrics_file(file)
     with offline_run(Path(run_dir), hold=apply) as refusal:
         if refusal:
