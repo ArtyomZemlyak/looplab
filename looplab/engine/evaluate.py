@@ -3444,6 +3444,10 @@ class EvaluateMixin:
                             break
                         # loop -> re-run the eval with the corrected code (reusing earlier stages when safe)
                     await self._eval_write_terminal(a)
+                    # The operator's copy-out of this workdir (`eval.artifact_sync`), AFTER the
+                    # terminal and in its own thread: it never holds this slot or moves the node.
+                    from looplab.engine.artifact_sync import start_artifact_sync
+                    start_artifact_sync(self, a.node_id, a.generation)
         except (anyio.get_cancelled_exc_class(), *_EVAL_DELIBERATE_STOPS) as exc:
             # A deliberate stop is not a node failure. Cancellation is how a reset, an operator abort
             # and a run stop reach this worker; answering one with a `node_failed` would invent a

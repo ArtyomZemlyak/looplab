@@ -419,6 +419,16 @@ copied into an idea. Host tiers only — a Docker tier binds no other node's wor
 directory is already readable to an eval and never writable, so the parent's files can be read,
 not changed. Off, the variable is absent and the task snapshot's `eval` dump is byte-identical.
 
+**Copying a finished node's workdir to durable storage (`eval.artifact_sync`, off by default).**
+`{"artifact_sync": {"command": ["mc", "cp", "-r", "{workdir}", "minio/bucket/{run_id}/node_{node_id}/"], "timeout": 1800}}`
+runs YOUR argv (no shell) after each node's terminal, with the host environment `run_setup` gets
+so the tool finds its own credentials. Placeholders: `{workdir}`, `{run_dir}`, `{run_id}`,
+`{node_id}`, `{generation}`; any other brace stays literal. It runs in a background thread, so the
+eval slot (and its GPU lease) is free during the upload; the interpreter waits for an in-flight copy
+at exit, up to its `timeout`. Its receipt is the diagnostic `artifact_synced` row, its output
+`<run>/artifact_sync.log`; a failed copy is reported there and never fails, pauses or re-runs the
+node. Absent, nothing runs and the snapshot's `eval` dump is unchanged.
+
 A host launch also sizes the BLAS/OpenMP pools: `OMP_NUM_THREADS`, `OPENBLAS_NUM_THREADS`,
 `MKL_NUM_THREADS` and `VECLIB_MAXIMUM_THREADS` default to the CPUs the engine's process may actually
 use — its affinity mask bounded by its cgroup CFS quota (`cpu.max`, or v1 `cpu.cfs_quota_us`),

@@ -942,6 +942,12 @@ EV_EVAL_INVOCATION_RECOVERED = "eval_invocation_recovered"
 # through the attempt's ordinary repair rows and the node's one terminal.
 EV_EVAL_CANARY_STARTED = "eval_canary_started"
 EV_EVAL_CANARY_FINISHED = "eval_canary_finished"
+# THE OPERATOR'S COPY-OUT RAN (`eval.artifact_sync`, `engine/artifact_sync.py`; incident 2026-10-06:
+# a 10-hour training's checkpoint lived only on a mount that went away). After a node's terminal the
+# engine runs the operator's own command (`mc cp`, `rsync`…) over the node's workdir in a background
+# thread; this row is its receipt. DIAGNOSTIC: appended from that thread, after the terminal, and read
+# by nothing that decides — a copy that failed is reported, never a reason to fail the node.
+EV_ARTIFACT_SYNCED = "artifact_synced"
 # A PAUSE (or a stop) WITHHELD THIS LIFECYCLE'S EVALUATION WORK, and what it had already spent
 # (doc 69 69.12a). A withheld attempt returns with NO terminal — the node stays pending, and the
 # re-dispatch after the pause lifts continues the chain — so the seconds it had consumed (a passed
@@ -1250,7 +1256,7 @@ DIAGNOSTIC_EVENTS: frozenset[str] = frozenset({
     EV_PRIOR_INJECTED, EV_MEMORY_READ,
     EV_EVAL_INVOCATION_CLAIMED, EV_EVAL_INVOCATION_SETTLED, EV_EVAL_INVOCATION_RECOVERED,
     EV_EVAL_CANARY_STARTED, EV_EVAL_CANARY_FINISHED, EV_EVAL_ATTEMPT_WITHHELD,
-    EV_TASK_CHANGED,
+    EV_TASK_CHANGED, EV_ARTIFACT_SYNCED,
 })
 
 # ROWS THAT CANNOT MOVE A DECISION FENCE — one named predicate, because each fence spelling its own
@@ -1729,6 +1735,12 @@ EVENT_PAYLOAD_KEYS: dict[str, PayloadContract] = {
     "eval_attempt_withheld": PayloadContract(
         "A pause, a stop or an infra_unavailable pause withheld a lifecycle's evaluation; its seconds, for its next terminal.",
         required=("at", "attempt", "eval_seconds", "generation", "node_id", "reason"),
+        optional=(),
+    ),
+    "artifact_synced": PayloadContract(
+        "The operator's eval.artifact_sync command ran over a node's workdir after its terminal.",
+        required=("command", "exit_code", "generation", "node_id", "seconds", "stderr_tail",
+                  "timed_out"),
         optional=(),
     ),
     "eval_canary_finished": PayloadContract(

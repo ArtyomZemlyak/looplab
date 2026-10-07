@@ -1,0 +1,126 @@
+"""The operator's COPY-OUT of a finished node's workdir (`eval.artifact_sync`).
+
+WHY (incident 2026-10-06). A 1.5B training ran ten hours on an 8-GPU box; its checkpoint lived on a
+network mount that went away, and the only way forward was to train again from zero. LoopLab kept
+every byte of the run's RECORD, and none of the artifacts the record is about: `export-bundle`
+deliberately leaves node workdirs out ("data mounts and checkpoints are the box's"), and nothing else
+ever copied one anywhere.
+
+WHAT. When the task declares `eval.artifact_sync: {command: [...], timeout: …}`, the engine runs that
+argv after a node's terminal — the operator's own `mc cp` / `aws s3 cp` / `rsync`, with the host
+environment `run_setup` gets, so the tool finds its own credentials — over the node's workdir. Each
+argument may name `{workdir}`, `{run_dir}`, `{run_id}`, `{node_id}` and `{generation}`; nothing else in
+it is interpreted (no shell, no `str.format`: a literal brace in an argument stays a brace).
+
+THREE PROPERTIES, each the reason for a choice:
+
+* IN A BACKGROUND THREAD, after the terminal. A copy of gigabytes is minutes of wall clock, and doing
+  it inside `_evaluate` would hold the eval slot — the GPU lease — for an upload. The thread is
+  NON-daemon, so the interpreter waits for an in-flight copy at exit (bounded by its `timeout`)
+  instead of killing the copy of the run's last node.
+* A RECEIPT, NEVER A VERDICT. The `artifact_synced` row is DIAGNOSTIC (invariant #1: appendable from a
+  thread, fold-ignored, fence-neutral). A failed copy is reported in it and in `artifact_sync.log`; it
+  never fails, pauses or re-runs the node, whose metric is already on its terminal.
+* WHAT THE OPERATOR DECLARED, ONLY. The engine never picks a destination or a tool; an absent
+  declaration runs nothing.
+"""
+from __future__ import annotations
+
+import logging
+import re
+import threading
+import time
+from pathlib import Path
+from typing import Optional
+
+from looplab.events.types import EV_ARTIFACT_SYNCED
+
+_LOG = logging.getLogger(__name__)
+
+PLACEHOLDERS: tuple[str, ...] = ("workdir", "run_dir", "run_id", "node_id", "generation")
+_PLACEHOLDER_RE = re.compile(r"\{(" + "|".join(PLACEHOLDERS) + r")\}")
+_STDERR_TAIL = 400
+
+# The threads started in THIS process, so a test (or a caller that must know the copies are done)
+# can wait on them. Pruned of finished threads on every start.
+_INFLIGHT: list = []
+_INFLIGHT_LOCK = threading.Lock()
+
+
+def render_argv(argv, values: dict) -> list[str]:
+    """`argv` with every KNOWN placeholder replaced; anything else is left exactly as written."""
+    return [_PLACEHOLDER_RE.sub(lambda m: str(values[m.group(1)]), str(arg)) for arg in argv]
+
+
+def sync_spec(eval_spec) -> Optional[dict]:
+    """The declared `eval.artifact_sync`, or None when there is none to run."""
+    spec = (eval_spec or {}).get("artifact_sync") if isinstance(eval_spec, dict) else None
+    if not isinstance(spec, dict):
+        return None
+    command = spec.get("command")
+    if not isinstance(command, list) or not command or not all(isinstance(a, str) for a in command):
+        return None
+    return spec
+
+
+def start_artifact_sync(engine, node_id: int, generation: int) -> Optional[threading.Thread]:
+    """Start the declared copy-out of node `node_id`'s workdir in a background thread, or None
+    (nothing declared, or no workdir to copy). Never raises."""
+    spec = sync_spec(getattr(engine, "_eval_spec", None))
+    if spec is None:
+        return None
+    run_dir = Path(engine.run_dir)
+    workdir = run_dir / "nodes" / f"node_{node_id}"
+    try:
+        if not workdir.is_dir():
+            return None
+    except OSError:
+        return None
+    values = {"workdir": str(workdir), "run_dir": str(run_dir), "run_id": run_dir.name,
+              "node_id": node_id, "generation": generation}
+    argv = render_argv(spec["command"], values)
+    try:
+        timeout = float(spec.get("timeout") or 1800.0)
+    except (TypeError, ValueError):
+        timeout = 1800.0
+    worker = threading.Thread(target=_run, args=(engine, node_id, generation, argv, workdir,
+                                                  run_dir, timeout),
+                              name=f"looplab-artifact-sync:{node_id}", daemon=False)
+    with _INFLIGHT_LOCK:
+        _INFLIGHT[:] = [t for t in _INFLIGHT if t.is_alive()]
+        _INFLIGHT.append(worker)
+    worker.start()
+    return worker
+
+
+def wait_for_inflight(timeout: Optional[float] = None) -> bool:
+    """Join every copy this process started; True when none is still running."""
+    with _INFLIGHT_LOCK:
+        threads = list(_INFLIGHT)
+    deadline = None if timeout is None else time.monotonic() + timeout
+    for t in threads:
+        t.join(None if deadline is None else max(0.0, deadline - time.monotonic()))
+    return not any(t.is_alive() for t in threads)
+
+
+def _run(engine, node_id, generation, argv, workdir, run_dir, timeout) -> None:
+    from looplab.runtime.sandbox import _run_argv
+    redact = getattr(engine, "_redact", None) or (lambda text: text)
+    started = time.monotonic()
+    try:
+        rc, _out, err, timed = _run_argv(argv, str(workdir), timeout,
+                                         log_path=str(run_dir / "artifact_sync.log"))
+    except (OSError, ValueError) as exc:          # no such tool, an unusable cwd
+        rc, err, timed = -1, f"{type(exc).__name__}: {exc}", False
+    seconds = round(time.monotonic() - started, 3)
+    if rc != 0 or timed:
+        _LOG.warning("artifact sync of node %s failed (exit %s%s); the node is unaffected — see "
+                     "artifact_sync.log", node_id, rc, ", timed out" if timed else "")
+    try:
+        engine.store.append(EV_ARTIFACT_SYNCED, {
+            "node_id": node_id, "generation": generation,
+            "command": [redact(a) for a in argv], "exit_code": rc, "timed_out": bool(timed),
+            "seconds": seconds, "stderr_tail": redact(str(err or "")[-_STDERR_TAIL:])})
+    except OSError:
+        _LOG.warning("artifact sync of node %s: could not record its receipt", node_id,
+                     exc_info=True)
