@@ -61,6 +61,7 @@ looplab atlas           Capped Atlas summary: explored / thin / contradictory (P
 looplab repair-candidates Which files this run's nodes had to fix, ranked by DISTINCT nodes
 looplab backfill-applied-params Repair the record where a node's PROPOSED params are not what RAN (offline, append-only)
 looplab backfill-score-metrics Recover the objectives a score stage measured and the record kept one of (offline, append-only)
+looplab import-metrics  Import metrics measured AFTER the run beside each node's live ones (offline, append-only)
 looplab smoke           Ping the configured LLM endpoint (self-test)
 looplab approve         Ratify a paused run (HITL / onboarding)
 looplab bench           Capability self-benchmark across tasks
@@ -2053,6 +2054,28 @@ looplab cross-run-concepts MEMORY_DIR [--top 20] [--json]
 | `--json` | off | Emit the bounded overview, per-run cards, and capsule source-completeness/omission receipts as JSON |
 
 ---
+
+## `import-metrics`
+
+**Imports metrics an operator measured after the run, beside each node's live ones.** The case it was
+built for (2026-10-06): a run's nodes were scored at @20; a scoring service later re-scored their
+checkpoints at @200, and the run was to be ranked by @200 (`metric_retarget`). `backfill-score-metrics`
+could not carry those numbers — it recovers only what the run's own `score.log` printed, and only into
+an EMPTY map.
+
+```bash
+looplab import-metrics runs/v11 at200.json --source "scoring service, 200 beams"          # DRY RUN
+looplab import-metrics runs/v11 at200.json --source "scoring service, 200 beams" --apply  # write
+looplab inspect runs/v11      # after a retarget: "N of M evaluated node(s) carry it; UNRANKED: …"
+```
+
+`at200.json` is `{"<node_id>": {"<metric>": value}}` (or the same under `"nodes"`). One folded
+`extra_metrics_imported` row per node, bound to its current lifecycle, carrying only the keys the node
+does not already have: a live value is never overwritten, so a second `--apply` writes nothing. The
+values ride the `declared` channel with NO direction, and the reconstruction marker names each
+imported key (`extra_metrics_backfill.keys`), so the UI labels exactly those keys `reconstructed`.
+`--source` is required and kept on every row; `--precision N` records how coarse the values are.
+`--apply` holds the run's `engine.lock` and refuses a live run.
 
 ## `backfill-score-metrics`
 

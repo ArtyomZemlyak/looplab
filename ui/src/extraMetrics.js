@@ -118,6 +118,16 @@ export function extraMetricIsBackfilled(node) {
   return !!(record && typeof record === 'object' && !Array.isArray(record) && record.backfilled)
 }
 
+// Is THIS key's value a reconstruction? The browser half of
+// `looplab/core/models.py::extra_metric_key_is_backfilled`. An operator IMPORT
+// (`looplab import-metrics`, 2026-10-07) adds reconstructed keys BESIDE live ones and names them in
+// the marker's `keys`; a marker without `keys` keeps its historical meaning — the whole map.
+export function extraMetricKeyIsBackfilled(node, key) {
+  if (!extraMetricIsBackfilled(node)) return false
+  const keys = node.extra_metrics_backfill.keys
+  return Array.isArray(keys) ? keys.includes(key) : true
+}
+
 // How many decimals this value was PRINTED to, or null. `null` is not "full precision" — it is
 // "nobody wrote it down", which is the answer for every live measurement and for a reconstruction
 // whose log did not say. A surface rendering a tie must say which of the three it is looking at.
@@ -135,13 +145,13 @@ export function extraMetricPrecision(node, key) {
 // print "declared" with no hint that the number was recovered from a log.
 export function extraMetricSourceLabel(node, key) {
   const channel = extraMetricChannel(node, key)
-  if (!extraMetricIsBackfilled(node)) return EXTRA_METRIC_CHANNEL_LABEL[channel]
+  if (!extraMetricKeyIsBackfilled(node, key)) return EXTRA_METRIC_CHANNEL_LABEL[channel]
   return `${EXTRA_METRIC_CHANNEL_LABEL[channel]} · ${EXTRA_METRIC_RECONSTRUCTED_LABEL}`
 }
 
 export function extraMetricSourceHelp(node, key) {
   const channel = extraMetricChannel(node, key)
-  if (!extraMetricIsBackfilled(node)) return EXTRA_METRIC_CHANNEL_HELP[channel]
+  if (!extraMetricKeyIsBackfilled(node, key)) return EXTRA_METRIC_CHANNEL_HELP[channel]
   const decimals = extraMetricPrecision(node, key)
   const precision = decimals == null ? '' : ` Printed to ${decimals} decimal place(s).`
   return `${EXTRA_METRIC_CHANNEL_HELP[channel]} ${EXTRA_METRIC_RECONSTRUCTED_HELP}${precision}`
@@ -152,6 +162,6 @@ export function extraMetricSourceHelp(node, key) {
 // reconstructed` is still a caveat, and rendering it unmarked because the channel is `declared` is
 // the inversion this whole block exists to close.
 export function extraMetricCaveated(node, key) {
-  return !extraMetricIsDeclared(node, key) || extraMetricIsBackfilled(node)
+  return !extraMetricIsDeclared(node, key) || extraMetricKeyIsBackfilled(node, key)
 }
 

@@ -104,7 +104,7 @@ from looplab.events.types import (
     EV_NODE_RESET,
     EV_NODE_OVERLAY_REBASED,
     EV_APPLIED_PARAMS_BACKFILLED,
-    EV_SCORE_METRICS_BACKFILLED,
+    EV_SCORE_METRICS_BACKFILLED, EV_EXTRA_METRICS_IMPORTED,
     EV_NODE_TOMBSTONED, EV_NODE_VALUE_ESTIMATED, EV_PAUSE, EV_STAGE_FINISHED,
     EV_PROXY_SCORED,
     EV_RESTART, EV_RESUME, EV_RESUME_REQUESTED,
@@ -1305,6 +1305,49 @@ def _on_score_metrics_backfilled(st: RunState, e: Event, d: dict, ctx: "_FoldCtx
     # nothing in this run ever said which way is better about it.
     # Recovered DECLARED values rank on a retargeted objective like live ones (doc 68 68.2); the
     # backfill marker above is what says they were recovered.
+    _apply_objective(st, node)
+
+
+def _on_extra_metrics_imported(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
+    """An operator IMPORTED metrics measured after the run (`maintenance/import_metrics.py`).
+
+    The sibling above writes only into an EMPTY map; this one writes BESIDE a live one, and keeps
+    the same rule per KEY: a key the node already carries is a live record and is never overwritten
+    (which is also what makes a re-applied row a no-op). Every key it adds is a reconstruction, and
+    the marker says so key by key (`keys`, `core/models.py::EXTRA_METRIC_BACKFILL_KEYS`): a marker
+    the node already had WITHOUT `keys` covered its whole map, so those keys join the list too.
+
+    Same lifecycle binding and the same channel as the sibling — `declared`, because the operator's
+    own scoring program measured these numbers — and, like it, NO direction: a retarget onto an
+    imported key ranks by it, and the ★ row carries the reconstruction caveat."""
+    node_id = _coerce_node_id(d)
+    node = st.nodes.get(node_id) if node_id is not None else None
+    if node is None or node.task_metric is None or not _generation_matches(node, d):
+        return
+    found = normalize_extra_metrics(d.get("extra_metrics"))
+    live = dict(node.extra_metrics or {})
+    added = {k: v for k, v in found.items() if k not in live}
+    if not added:
+        return
+    marker = dict(node.extra_metrics_backfill or {})
+    if marker.get("backfilled") and not isinstance(marker.get("keys"), list):
+        reconstructed = set(live)            # a whole-map marker: every existing key was recovered
+    else:
+        reconstructed = set(marker.get("keys") or [])
+    reconstructed |= set(added)
+    decimals = dict(marker.get("precision_decimals") or {})
+    raw_decimals = d.get("precision_decimals")
+    if isinstance(raw_decimals, dict):
+        decimals.update({k: v for k, v in raw_decimals.items() if k in added})
+    node.extra_metrics = {**live, **added}
+    node.extra_metrics_provenance = normalize_extra_metric_channels(
+        {**(node.extra_metrics_provenance or {}), **{k: EXTRA_METRIC_DECLARED for k in added}})
+    node.extra_metrics_backfill = normalize_extra_metric_backfill({
+        "backfilled": True,
+        "backfilled_at": d.get("imported_at"),
+        "precision_decimals": decimals,
+        "keys": sorted(reconstructed),
+    })
     _apply_objective(st, node)
 
 
@@ -2585,6 +2628,7 @@ _OWN_HANDLERS = {
     EV_NODE_TOMBSTONED: _on_node_tombstoned,
     EV_APPLIED_PARAMS_BACKFILLED: _on_applied_params_backfilled,
     EV_SCORE_METRICS_BACKFILLED: _on_score_metrics_backfilled,
+    EV_EXTRA_METRICS_IMPORTED: _on_extra_metrics_imported,
     EV_RESUME_REQUESTED: _on_resume_requested,
     EV_RESUME_SERVED: _on_resume_served,
     EV_RESTART: _on_restart,

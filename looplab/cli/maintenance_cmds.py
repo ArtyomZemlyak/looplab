@@ -67,6 +67,33 @@ def backfill_applied_params(
     typer.echo(backfill(Path(run_root), dry_run=not apply, only=only))
 
 
+@app.command(name="import-metrics")
+def import_metrics_cmd(
+    run_dir: Path = typer.Argument(..., help="The run directory."),
+    file: Path = typer.Argument(..., help="JSON {node_id: {metric: value}} measured after the run."),
+    source: str = typer.Option(..., "--source",
+                               help="What measured these numbers (kept on every row)."),
+    precision: Optional[int] = typer.Option(None, "--precision",
+                                            help="Decimals the values were printed to, if coarse."),
+    apply: bool = typer.Option(False, "--apply",
+                               help="Actually append. Without it this is a DRY RUN."),
+):
+    """Import metrics measured AFTER the run, beside each node's live ones (2026-10-06: nodes
+    scored at @20, re-scored at @200 by a service, to be ranked by @200 via `metric_retarget`).
+
+    One folded `extra_metrics_imported` row per node, bound to its current lifecycle, holding only
+    the keys the node does not already carry: a live value is never overwritten. The values ride the
+    `declared` channel with NO direction and are marked reconstructed key by key; `--apply` holds the
+    run's `engine.lock`, so it never writes beside an engine.
+    """
+    from looplab.maintenance.import_metrics import import_metrics
+    try:
+        typer.echo(import_metrics(run_dir, file, source=source, apply=apply, precision=precision))
+    except (OSError, ValueError) as exc:
+        typer.echo(f"import-metrics: {exc}")
+        raise typer.Exit(2)
+
+
 @app.command(name="backfill-score-metrics")
 def backfill_score_metrics(
     run_root: Path = typer.Argument(..., help="The run root (e.g. runs/) — every run under it."),

@@ -509,6 +509,17 @@ def inspect(run_dir: Path = typer.Argument(...)):
         # same as the other runs", and a line printed only when a key exists would make its absence
         # invisible on exactly the runs where it matters most. The pairwise refusal lives in
         # `looplab comparability`, which is where an operator asks about more than one run.
+        # WHAT A RETARGET LEFT OUT OF THE RANKING (doc 68 68.2). Printed only while one is in force,
+        # so every other run's output is unchanged.
+        from looplab.core.models import objective_coverage
+        _coverage = objective_coverage(state)
+        if _coverage is not None:
+            _key, _carrying, _unranked = _coverage
+            _shown = ", ".join(str(i) for i in _unranked[:20]) + (" …" if len(_unranked) > 20 else "")
+            typer.echo(f"objective: ranked by {_key!r} (operator metric_retarget) — "
+                       f"{len(_carrying)} of {len(_carrying) + len(_unranked)} evaluated node(s) "
+                       "carry it on the declared channel"
+                       + (f"; UNRANKED: {_shown}" if _unranked else ""))
         _best = state.best()
         _record = comparability_record_of(_best) if _best is not None else None
         if _record:

@@ -460,7 +460,7 @@ metric — one an `eval.metrics` reader recorded, never a number the candidate p
 objective every node is ranked by, and `"key": null` ranks by the task's own metric again. It is a
 folded intent: no engine is needed, a stopped run is re-ranked the moment it lands and a live one at
 its next fold (`events/replay.py::_on_metric_retarget`). Each node keeps its task metric beside the
-objective's; a node that never recorded the key is unranked; everything MEASURED on the old objective
+objective's; a node that never recorded the key is unranked (`looplab inspect` names them, and `looplab import-metrics` carries values measured after the run in beside the live ones); everything MEASURED on the old objective
 stops standing — confirmation means and their per-seed memo, verifier scores, the completion
 certificate — so the confirm phase measures again, on the new key, and stamps every row with the key
 it measured (`objective_key`). A `goal` restates `RunState.goal` (the launch goal stays in

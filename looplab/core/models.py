@@ -272,6 +272,26 @@ def objective_value(extra_metrics, provenance, key, directions=None,
     return float(value)
 
 
+def objective_coverage(state) -> Optional[tuple[str, list[int], list[int]]]:
+    """Under an operator retarget (doc 68 68.2): `(key, carrying, unranked)` — the evaluated nodes
+    whose value on the objective `key` is readable (`objective_value`) and the ones it UNRANKS. None
+    when no retarget is in force.
+
+    The intake accepts a retarget as soon as ONE evaluated node carries the key, by design; every
+    other node then silently leaves the ranking. Measured 2026-10-06: a run scored at @20 and
+    retargeted to @200 would have unranked every node scored before the scorer printed @200. This
+    is the count a reader is owed beside the ranking — a RECORD, never a gate."""
+    key = getattr(state, "objective_key", None)
+    if not isinstance(key, str) or not key:
+        return None
+    carrying, unranked = [], []
+    for n in state.evaluated_nodes():
+        value = objective_value(n.extra_metrics, n.extra_metrics_provenance, key,
+                                n.extra_metrics_direction, state.direction)
+        (carrying if value is not None else unranked).append(n.id)
+    return key, sorted(carrying), sorted(unranked)
+
+
 def row_objective(stamp) -> Optional[str]:
     """The objective a CONFIRMATION row was measured on (doc 68 68.2), read off its
     `objective_key` stamp: the key, or None — the task's own metric, which every row written before
@@ -365,7 +385,13 @@ def normalize_extra_metric_channels(value, *, max_items: int = 256) -> dict[str,
 # which must not read as the guarded channel, while an absent backfill marker means the fold never
 # applied a reconstruction to this node — which it demonstrably did not, since no log written
 # before the backfill tool existed can contain its event.
-EXTRA_METRIC_BACKFILL_KEYS = ("backfilled", "backfilled_at", "precision_decimals")
+#
+# …AND `keys` SINCE 2026-10-07, the one exception that sentence now has. An operator IMPORT of
+# metrics measured after the run (`extra_metrics_imported`, `maintenance/import_metrics.py`: an
+# @200 scored by a service for nodes the run scored at @20) is added BESIDE the live keys, never
+# over them, so that node's map is part measured, part reconstructed. The marker then names the
+# reconstructed `keys`; a marker WITHOUT `keys` keeps its historical meaning — the whole map.
+EXTRA_METRIC_BACKFILL_KEYS = ("backfilled", "backfilled_at", "precision_decimals", "keys")
 
 
 def normalize_extra_metric_backfill(value, *, max_items: int = 256) -> dict:
@@ -393,6 +419,11 @@ def normalize_extra_metric_backfill(value, *, max_items: int = 256) -> dict:
             kept[key[:200]] = int(raw)
         if kept:
             out["precision_decimals"] = kept
+    keys = value.get("keys")
+    if isinstance(keys, list):
+        named = sorted({k[:200] for k in keys if isinstance(k, str) and k})[:max_items]
+        if named:
+            out["keys"] = named
     return out
 
 
@@ -404,6 +435,16 @@ def extra_metric_is_backfilled(node) -> bool:
     """
     record = getattr(node, "extra_metrics_backfill", None)
     return bool(isinstance(record, dict) and record.get("backfilled"))
+
+
+def extra_metric_key_is_backfilled(node, key: str) -> bool:
+    """Is THIS key's value a reconstruction? The marker's `keys` when it names them (an operator
+    import beside live values), else the whole-map answer of `extra_metric_is_backfilled`."""
+    record = getattr(node, "extra_metrics_backfill", None)
+    if not (isinstance(record, dict) and record.get("backfilled")):
+        return False
+    keys = record.get("keys")
+    return key in keys if isinstance(keys, list) else True
 
 
 def extra_metric_precision(node, key: str):

@@ -84,3 +84,21 @@ test('two recovered nodes that render identically are still marked', () => {
   assert.equal(a.extra_metrics['ndcg@100'], b.extra_metrics['ndcg@100'])
   assert.ok(extraMetricIsBackfilled(a) && extraMetricIsBackfilled(b))
 })
+
+test('an import marks only the keys it added, beside live ones (2026-10-07)', async () => {
+  const { extraMetricKeyIsBackfilled: perKey, extraMetricSourceLabel: label,
+    extraMetricCaveated: caveated } = await import('../src/extraMetrics.js')
+  const node = {
+    extra_metrics: { 'FUR@20': 0.13, 'FUR@200': 0.36 },
+    extra_metrics_provenance: { 'FUR@20': 'declared', 'FUR@200': 'declared' },
+    extra_metrics_backfill: { backfilled: true, keys: ['FUR@200'] },
+  }
+  assert.equal(perKey(node, 'FUR@200'), true)
+  assert.equal(perKey(node, 'FUR@20'), false, 'a live key is not a reconstruction')
+  assert.equal(caveated(node, 'FUR@20'), false)
+  assert.equal(caveated(node, 'FUR@200'), true)
+  assert.ok(label(node, 'FUR@200').includes('reconstructed'))
+  assert.ok(!label(node, 'FUR@20').includes('reconstructed'))
+  const whole = { ...node, extra_metrics_backfill: { backfilled: true } }
+  assert.equal(perKey(whole, 'FUR@20'), true, 'a marker without keys is the whole map, as before')
+})

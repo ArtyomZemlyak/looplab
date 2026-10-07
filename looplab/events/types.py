@@ -948,6 +948,14 @@ EV_EVAL_CANARY_FINISHED = "eval_canary_finished"
 # thread; this row is its receipt. DIAGNOSTIC: appended from that thread, after the terminal, and read
 # by nothing that decides — a copy that failed is reported, never a reason to fail the node.
 EV_ARTIFACT_SYNCED = "artifact_synced"
+# AN OPERATOR IMPORT OF METRICS MEASURED AFTER THE RUN (`maintenance/import_metrics.py`, `looplab
+# import-metrics`; incident 2026-10-06: nodes scored at @20 were re-scored at @200 by a service, and
+# `metric_retarget` to @200 would have unranked every one of them). FOLDED
+# (`events/replay.py::_on_extra_metrics_imported`): each key the node does NOT already carry is added
+# on the `declared` channel and named in the reconstruction marker's `keys`; a key the node already
+# carries is a LIVE record and is never overwritten. Written by a CLI holding `engine.lock`, so never
+# beside an engine (invariant #1).
+EV_EXTRA_METRICS_IMPORTED = "extra_metrics_imported"
 # A PAUSE (or a stop) WITHHELD THIS LIFECYCLE'S EVALUATION WORK, and what it had already spent
 # (doc 69 69.12a). A withheld attempt returns with NO terminal — the node stays pending, and the
 # re-dispatch after the pause lifts continues the chain — so the seconds it had consumed (a passed
@@ -1742,6 +1750,11 @@ EVENT_PAYLOAD_KEYS: dict[str, PayloadContract] = {
         required=("command", "exit_code", "generation", "node_id", "seconds", "stderr_tail",
                   "timed_out"),
         optional=(),
+    ),
+    "extra_metrics_imported": PayloadContract(
+        "An operator imported metrics measured after the run for one node, beside its live ones.",
+        required=("extra_metrics", "generation", "imported_at", "node_id", "source"),
+        optional=("attempt", "precision_decimals"),   # `attempt`: read by `_generation_matches`
     ),
     "eval_canary_finished": PayloadContract(
         "The eval canary's result: whether the node's stage chain survived the task's tiny slice.",

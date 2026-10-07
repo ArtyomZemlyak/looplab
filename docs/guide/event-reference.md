@@ -23,7 +23,7 @@ The event type itself is the contract's identity and is never renamed or reused;
 
 <!-- generated: event types -->
 
-174 event types — 122 folded into `RunState`, 52 diagnostic; 1148 declared payload keys; 30 types whose whole payload is stored by the fold.
+175 event types — 123 folded into `RunState`, 52 diagnostic; 1155 declared payload keys; 30 types whose whole payload is stored by the fold.
 
 | type | fold | records | required keys | optional keys |
 |---|---|---|---|---|
@@ -93,6 +93,7 @@ The event type itself is the contract's identity and is never renamed or reused;
 | `eval_invocation_settled` | diagnostic | That evaluator invocation returned, with the outcome and the seconds it charged. | `attempt`, `eval_seconds`, `generation`, `invocation_id`, `node_id`, `outcome` | `result` |
 | `eval_noise_floor` | folded | The repeated-seed spread of ONE candidate's metric: the run's own evaluation noise floor. | `generation`, `mean`, `metrics`, `n`, `node_id`, `profile`, `search_metric`, `seeds`, `sem`, `spread`, `std` | `mid_search`, `protocol_mixed`, `protocol_profile`, `reason` |
 | `eval_noise_seed` | folded | One repeat of that candidate's evaluation, with its seed, metric and eval seconds. | `eval_seconds`, `generation`, `metric`, `node_id`, `seed` | `protocol_profile`, `superseded` |
+| `extra_metrics_imported` | folded | An operator imported metrics measured after the run for one node, beside its live ones. | `extra_metrics`, `generation`, `imported_at`, `node_id`, `source` | `attempt`, `precision_decimals` |
 | `finalization_finished` | folded | The wrap-up for one finish (keyed by that finish's seq) completed. | `finish_seq` | — |
 | `finalize_step` | diagnostic | One replay-safe step gate inside a single logical finalization. | — | `after_seq`, `finish_data`, `finish_report_planned`, `outcome`, `scope`, `step` |
 | `force_ablate` | folded | The operator asked for an ablation of one node. | `node_id` | `attempt`, `generation` |

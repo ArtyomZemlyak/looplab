@@ -1363,3 +1363,23 @@ def test_a_retargeted_lessons_id_and_a_long_keys_clause_are_pinned():
     key = "recall_at_10_on_the_held_out_filtered_split_" + "x" * 60
     full = "a statement long enough to be cut" + retargeted_lesson_note(key)
     assert keep_retarget_clause(full, full[:20]).endswith(retargeted_lesson_note(key))
+
+
+def test_inspect_names_the_nodes_a_retarget_left_unranked(tmp_path):
+    """The intake accepts a retarget once ONE node carries the key; the rest leave the ranking
+    silently. `looplab inspect` states the count (2026-10-06: @20 nodes under an @200 objective)."""
+    from typer.testing import CliRunner
+
+    from looplab.cli import app
+    from looplab.core.models import objective_coverage
+
+    assert objective_coverage(fold(_rows())) is None, "no retarget, no line"
+    key, carrying, unranked = objective_coverage(fold(_rows(_retarget())))
+    assert (key, carrying, unranked) == ("filtered", [0, 1], [2, 3])
+    rd = _server_run(tmp_path, _retarget())
+    out = CliRunner().invoke(app, ["inspect", str(rd)])
+    assert out.exit_code == 0, out.output
+    assert ("objective: ranked by 'filtered' (operator metric_retarget) — 2 of 4 evaluated "
+            "node(s) carry it on the declared channel; UNRANKED: 2, 3") in out.output
+    plain = CliRunner().invoke(app, ["inspect", str(_server_run(tmp_path, name="plain"))])
+    assert "objective:" not in plain.output
