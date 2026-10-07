@@ -1261,6 +1261,37 @@ class ArtifactSyncSpec(BaseModel):
         return value
 
 
+class TrackSpec(BaseModel):
+    """One `eval.tracks.<name>` entry: a further evaluation the OPERATOR declares, run on demand
+    (`looplab evaluate-track`) over an already evaluated node's preserved workdir — drift weeks,
+    @200 where the search scored @20, any second ruler (doc 73 §1.4). An argv, no shell; arguments
+    may name `{workdir}`, `{run_dir}`, `{run_id}`, `{node_id}`, `{generation}`. Its stdout's LAST
+    JSON object holds the numbers: every finite numeric value, or only `keys` when declared, each
+    recorded as `key_prefix + key`. The track never touches the node's own metric."""
+
+    _refuse_unknown = model_validator(mode="before")(
+        classmethod(refuse_unknown_task_keys))
+
+    command: list[str]
+    timeout: float = 3600.0
+    keys: Optional[list[str]] = None
+    key_prefix: str = ""
+
+    @field_validator("command")
+    @classmethod
+    def _track_argv(cls, value):
+        if not value or not all(isinstance(x, str) and x for x in value):
+            raise ValueError("eval.tracks.<name>.command must be a non-empty argv of strings")
+        return value
+
+    @field_validator("timeout")
+    @classmethod
+    def _track_timeout(cls, value):
+        if not (value > 0):
+            raise ValueError("eval.tracks.<name>.timeout must be a positive number of seconds")
+        return value
+
+
 class EvalSpec(BaseModel):
     """The operator's trusted evaluation (the agent does not author this)."""
 
@@ -1304,7 +1335,12 @@ class EvalSpec(BaseModel):
             payload.pop("parent_workdirs_env", None)
         if self.artifact_sync is None and isinstance(payload, dict):
             payload.pop("artifact_sync", None)
+        if not self.tracks and isinstance(payload, dict):
+            payload.pop("tracks", None)
         return payload
+    # FURTHER EVALUATIONS, run on demand over a settled node's artifacts (`TrackSpec`, doc 73 §1.4).
+    # Empty (the default) = none, and the dump keeps its pre-field shape.
+    tracks: dict[str, TrackSpec] = Field(default_factory=dict)
     # THE OPERATOR'S COPY-OUT (`ArtifactSyncSpec`, `engine/artifact_sync.py`): None (the default) =
     # nothing runs and the dump keeps its pre-field shape.
     artifact_sync: Optional["ArtifactSyncSpec"] = None

@@ -419,6 +419,8 @@ copied into an idea. Host tiers only — a Docker tier binds no other node's wor
 directory is already readable to an eval and never writable, so the parent's files can be read,
 not changed. Off, the variable is absent and the task snapshot's `eval` dump is byte-identical.
 
+**Further evaluations on demand (`eval.tracks`, none by default).** `{"tracks": {"at200": {"command": [...], "keys": [...], "key_prefix": "", "timeout": 3600}}}` declares evaluators that never run during the search: `looplab evaluate-track RUN at200 --nodes all --apply` runs one over each settled node's preserved workdir (refusing a node whose workdir is not its evaluated code) and records the numbers beside the live metrics — see the [CLI reference](cli-reference.md#evaluate-track).
+
 **Copying a finished node's workdir to durable storage (`eval.artifact_sync`, off by default).**
 `{"artifact_sync": {"command": ["mc", "cp", "-r", "{workdir}", "minio/bucket/{run_id}/node_{node_id}/"], "timeout": 1800}}`
 runs YOUR argv (no shell) after each node's terminal, with the host environment `run_setup` gets

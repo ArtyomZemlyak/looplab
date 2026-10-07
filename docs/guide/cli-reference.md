@@ -62,6 +62,7 @@ looplab repair-candidates Which files this run's nodes had to fix, ranked by DIS
 looplab backfill-applied-params Repair the record where a node's PROPOSED params are not what RAN (offline, append-only)
 looplab backfill-score-metrics Recover the objectives a score stage measured and the record kept one of (offline, append-only)
 looplab import-metrics  Import metrics measured AFTER the run beside each node's live ones (offline, append-only)
+looplab evaluate-track  Run a declared eval.tracks evaluator over settled nodes' workdirs (offline, append-only)
 looplab smoke           Ping the configured LLM endpoint (self-test)
 looplab approve         Ratify a paused run (HITL / onboarding)
 looplab bench           Capability self-benchmark across tasks
@@ -2054,6 +2055,29 @@ looplab cross-run-concepts MEMORY_DIR [--top 20] [--json]
 | `--json` | off | Emit the bounded overview, per-run cards, and capsule source-completeness/omission receipts as JSON |
 
 ---
+
+## `evaluate-track`
+
+**Runs a declared evaluation track over settled nodes' preserved workdirs** (doc 73 §1.4): the
+@200 of nodes the search scored @20, drift weeks, any second ruler. The task declares it:
+
+```json
+"eval": {"tracks": {"at200": {"command": ["python", "score_service.py", "--beams", "200",
+                                          "--ckpt", "{workdir}/out/final"],
+                              "keys": ["InCart_FilteredUnseenRecall@200"], "timeout": 3600}}}
+```
+
+```bash
+looplab evaluate-track runs/v12 at200                     # DRY RUN — prints each argv
+looplab evaluate-track runs/v12 at200 --nodes 3,5 --apply # run and record
+```
+
+The command's LAST stdout JSON object holds the numbers (`keys` filters, `key_prefix` renames).
+A node is measured only when it is evaluated in its current lifecycle AND its workdir's
+`.looplab-manifest` stamp matches its code — a reset or rebuilt workdir is refused, never measured.
+Results land beside the live metrics through the same row `import-metrics` writes
+(`extra_metrics_imported`, `source: track <name>`, reconstructed key by key); a recorded key can be the
+objective (`metric_retarget`). `--apply` holds `engine.lock`; output goes to `<run>/track_<name>.log`.
 
 ## `import-metrics`
 

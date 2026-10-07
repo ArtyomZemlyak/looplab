@@ -67,6 +67,31 @@ def backfill_applied_params(
     typer.echo(backfill(Path(run_root), dry_run=not apply, only=only))
 
 
+@app.command(name="evaluate-track")
+def evaluate_track_cmd(
+    run_dir: Path = typer.Argument(..., help="The run directory."),
+    track: str = typer.Argument(..., help="A name under the task's eval.tracks."),
+    nodes: str = typer.Option("all", "--nodes", help="'all' evaluated nodes, or ids: 3,5,7."),
+    apply: bool = typer.Option(False, "--apply",
+                               help="Actually run and record. Without it this is a DRY RUN."),
+):
+    """Run a declared evaluation TRACK over settled nodes' preserved workdirs (doc 73 §1.4).
+
+    `eval.tracks.<name>` is an operator argv (`{workdir}`, `{node_id}`, … placeholders) whose last
+    stdout JSON object holds the numbers: @200 for nodes scored @20, drift weeks, a second ruler.
+    Each node must be evaluated in its current lifecycle with its workdir's manifest stamp matching
+    its code — otherwise it is refused, never measured. Results are recorded beside the live
+    metrics (`extra_metrics_imported`, `source: track <name>`), never over them; `--apply` holds
+    `engine.lock`. A recorded key can then be the objective (`metric_retarget`).
+    """
+    from looplab.maintenance.evaluate_track import evaluate_track
+    try:
+        typer.echo(evaluate_track(run_dir, track, nodes, apply=apply))
+    except (OSError, ValueError) as exc:
+        typer.echo(f"evaluate-track: {exc}")
+        raise typer.Exit(2)
+
+
 @app.command(name="import-metrics")
 def import_metrics_cmd(
     run_dir: Path = typer.Argument(..., help="The run directory."),
