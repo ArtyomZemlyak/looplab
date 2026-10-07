@@ -340,6 +340,7 @@
         "space": {},
         "theme": null
       },
+      "kind": null,
       "metric": 53.054167369999995,
       "metric_provenance": null,
       "model_arm": "",
@@ -362,6 +363,7 @@
       "tombstoned": false,
       "triage_rationale": "",
       "trials": [],
+      "uses": [],
       "value_prior": null,
       "verifier_score": null,
       "violations": []
@@ -410,6 +412,7 @@
         "space": {},
         "theme": null
       },
+      "kind": null,
       "metric": 35.66064084999999,
       "metric_provenance": null,
       "model_arm": "",
@@ -432,6 +435,7 @@
       "tombstoned": false,
       "triage_rationale": "",
       "trials": [],
+      "uses": [],
       "value_prior": null,
       "verifier_score": null,
       "violations": []
@@ -480,6 +484,7 @@
         "space": {},
         "theme": null
       },
+      "kind": null,
       "metric": 8.51019194,
       "metric_provenance": null,
       "model_arm": "",
@@ -505,6 +510,7 @@
       "tombstoned": false,
       "triage_rationale": "",
       "trials": [],
+      "uses": [],
       "value_prior": null,
       "verifier_score": null,
       "violations": []
@@ -553,6 +559,7 @@
         "space": {},
         "theme": null
       },
+      "kind": null,
       "metric": 9.73679185,
       "metric_provenance": null,
       "model_arm": "",
@@ -580,6 +587,7 @@
       "tombstoned": false,
       "triage_rationale": "",
       "trials": [],
+      "uses": [],
       "value_prior": null,
       "verifier_score": null,
       "violations": []
@@ -628,6 +636,7 @@
         "space": {},
         "theme": null
       },
+      "kind": null,
       "metric": 17.17538701,
       "metric_provenance": null,
       "model_arm": "",
@@ -652,6 +661,7 @@
       "tombstoned": false,
       "triage_rationale": "",
       "trials": [],
+      "uses": [],
       "value_prior": null,
       "verifier_score": null,
       "violations": []
@@ -700,6 +710,7 @@
         "space": {},
         "theme": null
       },
+      "kind": null,
       "metric": 5.57026258,
       "metric_provenance": null,
       "model_arm": "",
@@ -727,6 +738,7 @@
       "tombstoned": false,
       "triage_rationale": "",
       "trials": [],
+      "uses": [],
       "value_prior": null,
       "verifier_score": null,
       "violations": []
@@ -775,6 +787,7 @@
         "space": {},
         "theme": null
       },
+      "kind": null,
       "metric": 6.688963449999999,
       "metric_provenance": null,
       "model_arm": "",
@@ -803,6 +816,7 @@
       "tombstoned": false,
       "triage_rationale": "",
       "trials": [],
+      "uses": [],
       "value_prior": null,
       "verifier_score": null,
       "violations": []
@@ -851,6 +865,7 @@
         "space": {},
         "theme": null
       },
+      "kind": null,
       "metric": 4.482711760000001,
       "metric_provenance": null,
       "model_arm": "",
@@ -875,6 +890,7 @@
       "tombstoned": false,
       "triage_rationale": "",
       "trials": [],
+      "uses": [],
       "value_prior": null,
       "verifier_score": null,
       "violations": []

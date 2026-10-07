@@ -3114,6 +3114,17 @@ class Settings(BaseSettings):
     # the implement note follow the same answer, and an EMPTY stage declaration is accepted.
     # One reader: `adapters/repo_developer.py::scorer_status_enabled`.
     developer_scorer_status: bool = True
+    # THE DEVELOPER IS TOLD WHAT THE UPSTREAM LANE PROMOTED (doc 73 §2.3, track 3). The lane (doc 72)
+    # promotes a champion's general capability into the base behind a named flag whose default keeps
+    # the old behaviour; the Researcher's brief named it, the role that writes the code did not, so a
+    # Developer re-implemented what the base already carried, or repaired around a failure a promoted
+    # fix had cured. ON, every build turn that states the wall-clock budget also lists the run's
+    # promotions — flag, default, enabled value, source experiment, summary
+    # (`core/upstream_board.py::developer_base_note`). A run that never promoted anything renders
+    # its historical bytes either way. It changes a PROMPT and buys no call: the constructor
+    # defaults it OFF and a pre-field snapshot resumes OFF (its `LEGACY_CONFIG_SNAPSHOT_DEFAULTS`
+    # row). One reader: `adapters/repo_developer.py::upstream_board_enabled`.
+    upstream_board_brief: bool = True
     # A5 (docs/60 §60.9): seed every chain root (Researcher propose, Developer stages/plan/step/
     # implement/repair) with a small block carrying what EARLIER phases of this run already read —
     # the reference file, the manifest, the config — verbatim under `established_context_bytes`,
@@ -4228,6 +4239,12 @@ LEGACY_CONFIG_SNAPSHOT_DEFAULTS: dict[str, object] = {
     # every commit before this one; `tests/test_stages_scorer_status.py` holds that `false` is the
     # historical turn byte for byte.
     "developer_scorer_status": False,
+    # THE DEVELOPER'S PROMOTED-CAPABILITIES PARAGRAPH, added 2026-10-07 defaulting ON (doc 73 §2.3).
+    # (a) holds. (b) is the rows above's DIFFERENT-PROMPT ground: ON, a run whose upstream lane has
+    # promoted a capability gains a paragraph in every build turn, so a resumed run would change what
+    # its Developer is told mid-log. (c) is `False`, pointable at every commit before this one;
+    # `tests/test_upstream_board.py` holds that `false` is the historical turn byte for byte.
+    "upstream_board_brief": False,
     # THE RESEARCHER'S NODE-FOLLOWING REPO VIEW, added 2026-09-29 defaulting ON (WP-TOOLS T3). (a)
     # holds. (b) is the rows above's DIFFERENT-PROMPT ground: ON, the Researcher's and deep
     # research's repo tools gain a `node_id` argument and a `[view: …]` line, read the parent's (or

@@ -176,6 +176,18 @@ SIGNALS: tuple[SignalRoute, ...] = (
         inject="looplab.serve.llm_context:_attention_states",
         consumer="boss/assistant (human intervention)",
         call_sites=(("looplab/serve/llm_context.py", "_attention_states(st)"),)),
+    SignalRoute(
+        name="upstream_promotions",
+        produced_by="engine/upstream.py advance (EV_BASE_ADVANCED, the doc 72 lane)",
+        folded_into="RunState.upstream_history / RunState.upstream_base",
+        # The fold the engine binds onto the Developer for its build (`bind_state`), the channel
+        # its wall-clock budget note already reads — no setattr, so every wrapper is transparent.
+        channel="context",
+        inject="looplab.core.upstream_board:developer_base_note",
+        consumer="Developer (repo build turns, under Settings.upstream_board_brief)",
+        call_sites=(("looplab/adapters/repo_developer.py",
+                     "developer_base_note(getattr(self, \"_memory_state\", None))"),
+                    ("looplab/adapters/repo_developer.py", "+ self._upstream_base_note()"))),
 )
 
 

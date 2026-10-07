@@ -509,8 +509,7 @@ def inspect(run_dir: Path = typer.Argument(...)):
         # same as the other runs", and a line printed only when a key exists would make its absence
         # invisible on exactly the runs where it matters most. The pairwise refusal lives in
         # `looplab comparability`, which is where an operator asks about more than one run.
-        # WHAT A RETARGET LEFT OUT OF THE RANKING (doc 68 68.2). Printed only while one is in force,
-        # so every other run's output is unchanged.
+        # WHAT A RETARGET LEFT OUT OF THE RANKING (doc 68 68.2), only while one is in force.
         from looplab.core.models import objective_coverage
         _coverage = objective_coverage(state)
         if _coverage is not None:
@@ -520,6 +519,10 @@ def inspect(run_dir: Path = typer.Argument(...)):
                        f"{len(_carrying)} of {len(_carrying) + len(_unranked)} evaluated node(s) "
                        "carry it on the declared channel"
                        + (f"; UNRANKED: {_shown}" if _unranked else ""))
+        # THE UPSTREAM BOARD (doc 73 §2.3); [] for a run that never used the upstream lane.
+        from looplab.core.upstream_board import board_lines
+        for _line in board_lines(state):
+            typer.echo(_line)
         _best = state.best()
         _record = comparability_record_of(_best) if _best is not None else None
         if _record:

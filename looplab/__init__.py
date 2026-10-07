@@ -526,6 +526,7 @@ _LAYOUT = {
     "upstream_requests": "engine",
     "infra_probe": "runtime",  # the box before the candidate (incident 2026-10-06)
     "artifact_sync": "engine",  # the operator's copy-out of a finished node's workdir
+    "upstream_board": "core",  # the one reading of the upstream lane's folded history (doc 73)
 }
 
 

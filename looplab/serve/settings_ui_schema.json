@@ -1464,6 +1464,13 @@
           "help": "The repo STAGES phase is told the scoring command is FIXED and protected and that it reads what the earlier stages produce. That is true of the command, and of the code it runs only when the write tools refuse that code. ON, when the file the command runs is one the Developer could edit — or no file can be named — the phase is told so: an edit to it changes the measurement, and work the command already does (prep, training) runs again inside the score stage. Every phase's instructions then say the same, and the phase may declare no stages at all: the command runs alone. Measured on a MiniOneRec run: an unprotected shell scorer that trained by itself was trained a second time by a declared train stage (~8 GPU-hours). A frozen scorer's prompt is unchanged. Off = the pre-2026-09-30 prompt, byte for byte."
         },
         {
+          "key": "upstream_board_brief",
+          "label": "Developer: state the capabilities promoted into the base",
+          "type": "bool",
+          "default": true,
+          "help": "When the upstream lane has promoted a champion's general capability into the run's base (behind a named flag whose default keeps the old behaviour), every Developer build turn lists those promotions — flag, default and enabled value, source experiment, summary — so the role that writes the code switches a flag on instead of re-implementing it, and does not repair around a failure a promoted fix already cured. A run that never promoted anything is unchanged. Off = the pre-2026-10-07 prompt, byte for byte."
+        },
+        {
           "key": "established_context",
           "label": "Carry earlier phases' reads into each new phase",
           "type": "bool",
