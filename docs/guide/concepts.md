@@ -753,6 +753,29 @@ Standalone legacy CLI `stop`, `finalize`, `resume`, and `approve` commands are n
 the server sequencer and must not be run concurrently with an active server-owned command. Migrating
 those direct CLI paths is an explicit compatibility boundary.
 
+### Artifact nodes: preparation other nodes use (doc 73 §1.4)
+
+Not every node is an experiment. An `inject_node` carrying `"node_kind": "artifact"` is a node whose
+pipeline **produces** something other nodes read — a prepared dataset for the next ten experiments:
+
+```jsonc
+{"type": "inject_node", "data": {"idea": {"operator": "inject", "rationale": "build the shards"},
+                                 "node_kind": "artifact"}}
+// once it is evaluated:
+{"type": "inject_node", "data": {"idea": {"operator": "inject", "rationale": "train on them"},
+                                 "uses": [17]}}
+```
+
+An artifact is built and repaired like any node, and it SUCCEEDS on a clean pipeline with no metric:
+the engine's own classifier says the run exited 0, broke no stage contract and printed no number.
+Its metric is always None, even when the runner prints one, so it is never feasible, never the
+champion, not killed by the proxy or ASHA, and not an attempt the plateau counts. A node that names it
+in `uses` gets `LOOPLAB_USES_WORKDIRS` — the artifacts' absolute workdirs, `os.pathsep`-joined —
+which its eval may read (the run directory is readable, never writable, to an eval). `uses` must name
+artifact nodes that are ALREADY produced; the command refuses `inject_uses_not_produced` /
+`inject_uses_not_artifact` otherwise, so a consumer never races its producer. Both keys land on
+`node_created` only when set, so every other node keeps its payload shape.
+
 ### Branching from a snapshot (fork-to-branch)
 
 An operator reading a **historical snapshot** can see the moment they want to branch from. Every

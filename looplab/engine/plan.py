@@ -257,6 +257,8 @@ def plateau_nodes(state, *, floor: int = 0) -> tuple[Optional[int], int]:
             continue
         if str(getattr(node, "error_reason", "") or "") in _PLATEAU_SILENT_REASONS:
             continue
+        if getattr(node, "kind", None) == "artifact":
+            continue                  # doc 73 §1.4: a preparation step, not an attempt at the goal
         count += 1
     return leader, count
 

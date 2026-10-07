@@ -1960,6 +1960,13 @@ class Node(BaseModel):
     # means a SIBLING RUN and is redacted from every review capability for that reason. Audit/UI
     # only; eval/confirmation/best-selection treat the node like any other injected one.
     forked_from: Optional[dict] = None
+    # AN ARTIFACT NODE (doc 73 §1.4): `"artifact"` for an operator-injected node that PRODUCES what
+    # other nodes read (a prepared dataset) — it succeeds on a clean pipeline with no metric, is never
+    # ranked (no metric => not feasible) and is not an attempt the plateau counts. None = an
+    # experiment, which is every node of every log before this field. `uses`: the produced artifact
+    # nodes this node reads (`LOOPLAB_USES_WORKDIRS`). Both folded from `node_created`.
+    kind: Optional[str] = None
+    uses: list[int] = Field(default_factory=list)
     # Deep-research provenance: set when this node was proposed right after a deep-research memo (its
     # directions were the active steering). {"at_node","trigger"} of the memo. None otherwise. Audit/UI
     # only (a 💡 chip) — shows where research landed in the tree; never affects search/selection.

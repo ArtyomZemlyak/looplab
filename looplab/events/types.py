@@ -1945,8 +1945,8 @@ EVENT_PAYLOAD_KEYS: dict[str, PayloadContract] = {
         # were declared from the request allow-list, the same misreading as the comment rows
         # (review 2026-09-22, EVT-05).
         optional=(
-            "code", "deleted", "files", "forked_from", "idea", "origin", "parent_generations",
-            "parent_id", "parent_ids"
+            "code", "deleted", "files", "forked_from", "idea", "node_kind", "origin",
+            "parent_generations", "parent_id", "parent_ids", "uses"
         ),
         stored_whole=True,
     ),
@@ -2058,8 +2058,8 @@ EVENT_PAYLOAD_KEYS: dict[str, PayloadContract] = {
         optional=(
             "attempt", "card_build_generation", "deleted", "eval_start_boundary",
             "footprint_finalized", "forked_from", "generation", "materialize_aborted_intent",
-            "model_arm", "origin", "parent_generations", "research_origin", "seed",
-            "simplified", "speculative"
+            "model_arm", "node_kind", "origin", "parent_generations", "research_origin", "seed",
+            "simplified", "speculative", "uses"
         ),
     ),
     "node_eval_started": PayloadContract(

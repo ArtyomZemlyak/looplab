@@ -477,6 +477,9 @@ def _on_node_created(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
             # historical snapshot) and edited its idea. Additive with a reader-side default, so old
             # logs fold byte-identically (invariant 5).
             forked_from=d.get("forked_from"),
+            kind=("artifact" if d.get("node_kind") == "artifact" else None),
+            uses=([x for x in d["uses"][:32] if type(x) is int and x >= 0]
+                  if isinstance(d.get("uses"), list) else []),
             research_origin=d.get("research_origin"),   # 💡 proposed just after a deep-research memo
             model_arm=str(d.get("model_arm") or "")[:64],  # doc 52 row 19: the routed model arm
             # doc 67 67.5: the node's parent with one block commented out, or None — and the cut it

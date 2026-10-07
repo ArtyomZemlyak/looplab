@@ -829,6 +829,36 @@ def _normalize_metric_retarget(ctx: _ControlIntake) -> dict:
 
 # ------------------------------------------------------------------ inject_node
 
+def _normalize_artifact_fields(ctx: _ControlIntake) -> None:
+    """`node_kind` and `uses` on an inject (doc 73 §1.4). `node_kind` is `"artifact"` or absent.
+    `uses` names artifact nodes that are ALREADY PRODUCED — evaluated in their current lifecycle —
+    so the consumer never waits on, or races, a producer: an operator or the Assistant injects the
+    consumers once the preparation is done. Refused, never coerced, so a typo cannot silently become
+    an experiment that reads nothing."""
+    data = ctx.data
+    if "node_kind" in data:
+        if data["node_kind"] != "artifact":
+            raise HTTPException(400, "node_kind must be \"artifact\" (or absent for an experiment)")
+    if "uses" not in data:
+        return
+    uses = data["uses"]
+    if (not isinstance(uses, list) or not uses or len(uses) > 32
+            or any(isinstance(x, bool) or not isinstance(x, int) or x < 0 for x in uses)):
+        raise HTTPException(400, "uses must be a non-empty list of at most 32 node ids")
+    if len(set(uses)) != len(uses):
+        raise HTTPException(400, "uses names a node twice")
+    state = ctx.state()
+    for nid in uses:
+        node = state.nodes.get(nid)
+        if node is None or getattr(node, "kind", None) != "artifact":
+            raise HTTPException(409, {"code": "inject_uses_not_artifact",
+                                      "message": f"uses: #{nid} is not an artifact node"})
+        if node.status.value != "evaluated" or node.tombstoned:
+            raise HTTPException(409, {"code": "inject_uses_not_produced",
+                                      "message": f"uses: artifact #{nid} has not been produced yet; "
+                                                 "inject its consumers once it is"})
+
+
 def _import_cross_run_source(ctx: _ControlIntake) -> None:
     """Replace a `{source_run, source_node}` reference with the source node's durable snapshot."""
     data = ctx.data
@@ -1023,6 +1053,7 @@ def _normalize_inject_node(ctx: _ControlIntake) -> dict:
             400, f"inject_node has unknown field(s): {', '.join(sorted(unknown_inject))}")
     if data.get("parent_id") is not None and data.get("parent_ids") is not None:
         raise HTTPException(400, "inject_node accepts parent_id or parent_ids, not both")
+    _normalize_artifact_fields(ctx)
     idea = data.get("idea")
     if not isinstance(idea, dict) or not idea:
         raise HTTPException(400, "idea must be a non-empty JSON object")

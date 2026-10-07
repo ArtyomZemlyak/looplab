@@ -4011,7 +4011,9 @@ class EvaluateMixin:
         # record in the next phase (RECOVER_SETTLED), and predicting it wrote `proxy_skipped` over a
         # real result (crit_v46, driven). The GPU-pin exit above keeps its order on purpose — the
         # recovery may still decide to re-run, and a re-run must never launch unpinned.
+        # An ARTIFACT node (doc 73 §1.4) predicts no metric and is never killed for one.
         if (self.proxy_scorer is not None and self.proxy_kill_fraction > 0
+                and getattr(a.node, "kind", None) != "artifact"
                 and settled_ok_awaiting_terminal(a.events_at_start, a.node_id, a.generation) is None):
             # The pair, not the point estimate (doc 52 row 17): the kill abstains on a candidate
             # whose nearest evaluated neighbour is beyond the explored region's own radius, and
@@ -4519,6 +4521,7 @@ class EvaluateMixin:
             # log's latest INTERMEDIATE metric and ranks it against finished siblings; advisory
             # unless asha_live_kill. Same command-eval gate (needs a live log + the metric spec).
             if (not self.external_harness and getattr(self, "_asha_live", False)
+                    and getattr(a.node, "kind", None) != "artifact"   # no metric curve to rank
                     and isinstance(getattr(self, "_eval_spec", None), dict)):
                 _mspec = self._eval_spec.get("metric") or {}
                 _tg.start_soon(self._monitor_asha, a.node_id, a.generation, a.workdir, cancel,
@@ -4640,6 +4643,18 @@ class EvaluateMixin:
         # before the silence. NOT for a real deadline timeout (that is still mid-training).
         a.ok = (a.res.metric is not None and not a.res.timed_out
               and (a.res.exit_code == 0 or getattr(a.res, "stalled", False)))
+        # AN ARTIFACT NODE (doc 73 §1.4) succeeds on a CLEAN pipeline with no metric: the engine's own
+        # classifier says the run exited 0, broke no stage contract and only printed no number
+        # (`triage._failure_reason == "no_metric"`). Any other reason — a crash, a timeout, a missing
+        # declared output — is still a failure and takes the ordinary repair path.
+        #
+        # …AND AN ARTIFACT IS NEVER RANKED, even when its pipeline prints a number: an operator's
+        # runner prints its metric on every mode, and a recorded one would make the preparation step
+        # feasible — a candidate for champion. The printed line stays in the stage log; the node's
+        # metric is None (`feasible_nodes` then excludes it).
+        if getattr(a.node, "kind", None) == "artifact":
+            a.res.metric = None
+            a.ok = _failure_reason(a.res) == "no_metric"
         # THE NODE'S OWN ACTIVATION CONTRACT (`engine/activation.py`). Asked of a SUCCESS, before the
         # invocation settles, because a success is exactly what it can overturn: a declared marker
         # that nothing printed means the number measured the path this node meant to replace. The

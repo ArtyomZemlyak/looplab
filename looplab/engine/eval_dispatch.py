@@ -928,6 +928,22 @@ class EvalDispatchMixin:
                 paths.append(str(wd.resolve()))
         return {self.PARENT_WORKDIRS_ENV: os.pathsep.join(paths)} if paths else {}
 
+    USES_WORKDIRS_ENV = "LOOPLAB_USES_WORKDIRS"
+
+    def _uses_workdirs_env(self, node) -> dict:
+        """`{LOOPLAB_USES_WORKDIRS: <abs workdirs>}` for the artifact nodes `node.uses` names whose
+        workdir exists, `os.pathsep`-joined in declaration order; `{}` for every other node."""
+        run_dir = getattr(self, "run_dir", None)
+        uses = getattr(node, "uses", None) or []
+        if run_dir is None or not uses:
+            return {}
+        paths = []
+        for nid in uses:
+            wd = Path(run_dir) / "nodes" / f"node_{nid}"
+            if type(nid) is int and wd.is_dir() and not wd.is_symlink():
+                paths.append(str(wd.resolve()))
+        return {self.USES_WORKDIRS_ENV: os.pathsep.join(paths)} if paths else {}
+
     def _run_eval(self, node, workdir, env=None, profile=None, cancel=None, start_stage=_UNSET,
                   canary=None):
         """Eval dispatcher: RepoTask runs the operator's command + reads its metric;
@@ -969,6 +985,11 @@ class EvalDispatchMixin:
         parents = self._parent_workdirs_env(node)
         if parents:
             env = {**(env or {}), **parents}
+        # …and the ARTIFACT nodes this node declares it uses (doc 73 §1.4), unconditionally: `uses`
+        # exists only on a node an operator injected naming them, so nothing else carries it.
+        used = self._uses_workdirs_env(node)
+        if used:
+            env = {**(env or {}), **used}
         if canary is not None:
             # The canary's env (`LOOPLAB_CANARY=1` + the task's `eval.canary.env`) wins over every
             # declared layer: it is what makes this run tiny.
