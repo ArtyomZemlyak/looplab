@@ -221,7 +221,12 @@ def test_read_only_chat_cannot_reauthor_a_monitor_with_wider_pinned_permissions(
     assert "switch the chat back" in out and store.get(record["id"]) == record
 
 
-def test_router_wakeup_performs_an_actual_permitted_repair_and_posts_in_the_same_chat(tmp_path, monkeypatch):
+@pytest.mark.parametrize("owner_default", ["auto", "en"])
+def test_router_wakeup_performs_an_actual_permitted_repair_and_posts_in_the_same_chat(
+        tmp_path, monkeypatch, owner_default):
+    # With an English owner default the chat's explicit Russian still wins on the wake-up, as it
+    # does on an interactive turn.
+    monkeypatch.setenv("LOOPLAB_OUTPUT_LANGUAGE", owner_default)
     from fastapi.testclient import TestClient
     from looplab.serve.server import make_app
     target = tmp_path / "training.cfg"
