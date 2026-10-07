@@ -1268,7 +1268,19 @@ class EvalSpec(BaseModel):
         payload = handler(self)
         if self.scorer_boundary is None and isinstance(payload, dict):
             payload.pop("scorer_boundary", None)
+        # …and the same for `parent_workdirs_env` while it is off: every snapshot written before it
+        # existed, and every task that does not ask for it, keeps its byte-identical dump.
+        if not self.parent_workdirs_env and isinstance(payload, dict):
+            payload.pop("parent_workdirs_env", None)
         return payload
+    # THE PARENT'S ARTIFACTS, NAMED (incident 2026-10-06: "continue node 43 for a second epoch").
+    # True: every stage of a node's eval gets `LOOPLAB_PARENT_WORKDIRS`, the absolute workdirs of
+    # the node's parents that exist, joined by `os.pathsep` in `parent_ids` order — so an operator's
+    # runner can warm-start or fine-tune from a parent's final weights without an absolute path
+    # copied into an idea. Host tiers only (the Docker tiers bind no other node's workdir). READ
+    # access is the run directory's existing tier (`runtime/read_allowlist.py`); the record rule still
+    # refuses a write there. Off (the default) = byte-identical: no variable, no dump key.
+    parent_workdirs_env: bool = False
     # THE EVAL CANARY (`CanarySpec`): the env that makes this eval tiny + its wall-clock cap. Read
     # only under `Settings.eval_canary`; None (the default) = no canary, whatever the setting says.
     canary: Optional[CanarySpec] = None

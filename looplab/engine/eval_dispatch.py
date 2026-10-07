@@ -10,6 +10,7 @@ through their source modules keeps working."""
 from __future__ import annotations
 
 import logging
+import os
 import time
 from pathlib import Path
 from typing import Optional
@@ -903,6 +904,27 @@ class EvalDispatchMixin:
             return env
         return {**(env or {}), **declared}
 
+    PARENT_WORKDIRS_ENV = "LOOPLAB_PARENT_WORKDIRS"
+
+    def _parent_workdirs_env(self, node) -> dict:
+        """`{LOOPLAB_PARENT_WORKDIRS: <abs workdirs>}` when the task's eval asks for it
+        (`EvalSpec.parent_workdirs_env`) and the node has a parent whose workdir exists; `{}`
+        otherwise, so an eval that did not ask carries nothing new."""
+        es = getattr(self, "_eval_spec", None) or {}
+        if not es.get("parent_workdirs_env"):
+            return {}
+        run_dir = getattr(self, "run_dir", None)
+        if run_dir is None:
+            return {}
+        paths = []
+        for pid in getattr(node, "parent_ids", None) or []:
+            if isinstance(pid, bool) or not isinstance(pid, int):
+                continue
+            wd = Path(run_dir) / "nodes" / f"node_{pid}"
+            if wd.is_dir() and not wd.is_symlink():
+                paths.append(str(wd.resolve()))
+        return {self.PARENT_WORKDIRS_ENV: os.pathsep.join(paths)} if paths else {}
+
     def _run_eval(self, node, workdir, env=None, profile=None, cancel=None, start_stage=_UNSET,
                   canary=None):
         """Eval dispatcher: RepoTask runs the operator's command + reads its metric;
@@ -939,6 +961,11 @@ class EvalDispatchMixin:
         # the read-fence marker), which is safe because `validate_env_map` refuses every name the
         # engine owns, so a declaration can never overwrite one.
         env = self._declared_eval_env(env, self._eval_spec)
+        # The parents' workdirs, when the task asks (`EvalSpec.parent_workdirs_env`), on top of the
+        # declared layers — the engine owns the name — and under the canary's layer below.
+        parents = self._parent_workdirs_env(node)
+        if parents:
+            env = {**(env or {}), **parents}
         if canary is not None:
             # The canary's env (`LOOPLAB_CANARY=1` + the task's `eval.canary.env`) wins over every
             # declared layer: it is what makes this run tiny.
