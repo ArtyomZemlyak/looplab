@@ -191,3 +191,9 @@ def test_offline_report_does_not_claim_no_evaluations_when_only_excluded_results
     assert "Нет допустимого лучшего узла" in report["headline"]
     assert "оценено: 1" in report["summary"]
     assert state.nodes[1].metric == 0.125
+
+
+def test_language_messages_is_idempotent_so_a_wrapped_client_never_doubles_the_directive():
+    once = language_messages([{"role": "system", "content": "s"}, {"role": "user", "content": "u"}], "ru")
+    assert language_messages(once, "ru") == once
+    assert once[0]["content"].count("[LoopLab output language") == 1
