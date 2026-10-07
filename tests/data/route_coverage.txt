@@ -9,21 +9,22 @@ POST /api/assistant/permissions/{req_id}	tests/test_approval_preview_bound.py te
 GET /api/assistant/progress	tests/test_assistant_endpoint.py
 POST /api/assistant/revert	tests/test_assistant_endpoint.py
 GET /api/assistant/sessions	tests/test_assistant_endpoint.py
-POST /api/assistant/sessions	tests/test_approval_preview_bound.py tests/test_assistant_endpoint.py tests/test_assistant_final_answer_scope.py tests/test_assistant_mega_review.py tests/test_assistant_p3.py tests/test_assistant_streaming.py tests/test_assistant_watch.py tests/test_principal.py tests/test_provider_error_redaction.py
+POST /api/assistant/sessions	tests/test_approval_preview_bound.py tests/test_assistant_endpoint.py tests/test_assistant_final_answer_scope.py tests/test_assistant_mega_review.py tests/test_assistant_monitor.py tests/test_assistant_p3.py tests/test_assistant_streaming.py tests/test_assistant_watch.py tests/test_principal.py tests/test_provider_error_redaction.py
 DELETE /api/assistant/sessions/{sid}	tests/test_assistant_endpoint.py tests/test_assistant_watch.py
-GET /api/assistant/sessions/{sid}	tests/test_assistant_endpoint.py tests/test_assistant_final_answer_scope.py tests/test_assistant_mega_review.py tests/test_assistant_p3.py tests/test_assistant_streaming.py tests/test_assistant_watch.py
+GET /api/assistant/sessions/{sid}	tests/test_assistant_endpoint.py tests/test_assistant_final_answer_scope.py tests/test_assistant_mega_review.py tests/test_assistant_monitor.py tests/test_assistant_p3.py tests/test_assistant_streaming.py tests/test_assistant_watch.py
 POST /api/assistant/sessions/{sid}/cancel	tests/test_assistant_endpoint.py
 POST /api/assistant/sessions/{sid}/fork	tests/test_assistant_endpoint.py
 GET /api/assistant/sessions/{sid}/fork/{action_id}	tests/test_assistant_endpoint.py
 POST /api/assistant/sessions/{sid}/message	tests/test_approval_preview_bound.py tests/test_assistant_endpoint.py tests/test_assistant_final_answer_scope.py tests/test_assistant_mega_review.py tests/test_principal.py
-POST /api/assistant/sessions/{sid}/message_stream	tests/test_assistant_endpoint.py tests/test_assistant_mega_review.py tests/test_assistant_streaming.py tests/test_provider_error_redaction.py
+POST /api/assistant/sessions/{sid}/message_stream	tests/test_assistant_endpoint.py tests/test_assistant_mega_review.py tests/test_assistant_monitor.py tests/test_assistant_streaming.py tests/test_provider_error_redaction.py
 DELETE /api/assistant/sessions/{sid}/share	tests/test_assistant_endpoint.py tests/test_assistant_p3.py
 POST /api/assistant/sessions/{sid}/share	tests/test_assistant_endpoint.py tests/test_assistant_mega_review.py tests/test_assistant_p3.py
 GET /api/assistant/sessions/{sid}/shares	tests/test_assistant_endpoint.py tests/test_assistant_p3.py
 GET /api/assistant/shared	tests/test_assistant_endpoint.py tests/test_assistant_mega_review.py tests/test_assistant_p3.py
 GET /api/assistant/watches	tests/test_assistant_watch.py
-POST /api/assistant/watches	tests/test_assistant_watch.py
-DELETE /api/assistant/watches/{watch_id}	tests/test_assistant_watch.py
+POST /api/assistant/watches	tests/test_assistant_monitor.py tests/test_assistant_watch.py
+DELETE /api/assistant/watches/{watch_id}	tests/test_assistant_monitor.py tests/test_assistant_watch.py
+PATCH /api/assistant/watches/{watch_id}	tests/test_assistant_monitor.py
 GET /api/attention	tests/test_attention.py
 GET /api/auth/status	tests/test_review_capabilities.py
 POST /api/auth/verify	tests/test_review_capabilities.py
