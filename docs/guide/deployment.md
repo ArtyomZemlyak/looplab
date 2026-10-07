@@ -126,6 +126,10 @@ They are off by default, so opening a proxied URL needs no hostname allow-list f
 With checks enabled, `LOOPLAB_UI_HOSTS` allows public hostnames; their HTTPS/default-port
 origins are accepted. Other origins may be listed explicitly in `LOOPLAB_UI_CORS`.
 CORS response-read policy remains separate from these checks.
+Even with the checks off, a mutating `/api/` request the browser itself marks
+`Sec-Fetch-Site: cross-site` is refused (403) unless its Origin is listed in `LOOPLAB_UI_CORS`:
+a page on another site cannot launch a run through the open UI. This needs no configuration.
+Proxied same-origin pages and CLI/TUI clients are unaffected.
 
 For a shared/public server, opt into auth and URL checks or use an authenticated proxy:
 

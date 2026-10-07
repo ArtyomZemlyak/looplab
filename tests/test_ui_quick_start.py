@@ -72,3 +72,28 @@ def test_scoped_harness_can_coexist_with_open_owner_ui_without_becoming_owner(tm
         for route in ['/api/start', '/api/settings', '/api/auth/verify']:
             assert client.post(route, headers=agent, json={}).status_code == 403
         assert client.get('/api/runs', headers={'X-LoopLab-Token': 'wrong'}).status_code == 401
+
+
+def test_open_quick_start_still_refuses_a_browser_cross_site_mutation(tmp_path):
+    """The configuration-free floor: a page on another site cannot fire a no-preflight POST at the
+    open control plane, while the proxied same-origin SPA and header-less CLI/TUI clients pass."""
+    app = make_app(tmp_path)
+    writes = []
+
+    @app.post('/api/quick-start-test')
+    def write():
+        writes.append(1)
+        return {'ok': True}
+
+    with TestClient(app, base_url='http://quick.proxy.example') as client:
+        attack = {'Origin': 'https://evil.example', 'Sec-Fetch-Site': 'cross-site',
+                  'Content-Type': 'text/plain'}
+        assert client.post('/api/quick-start-test', headers=attack).status_code == 403
+        assert writes == []
+        assert client.post('/api/quick-start-test', headers={
+            'Origin': 'https://public.proxy.example', 'Sec-Fetch-Site': 'same-origin'}).status_code == 200
+        assert client.post('/api/quick-start-test').status_code == 200
+        # The configured cross-origin dev reader (the Vite default) is not a cross-site attack.
+        assert client.post('/api/quick-start-test', headers={
+            'Origin': 'http://127.0.0.1:5173', 'Sec-Fetch-Site': 'cross-site'}).status_code == 200
+        assert writes == [1, 1, 1]
