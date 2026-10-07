@@ -131,8 +131,6 @@ DEFERRED: dict[tuple[str, str], str] = {
     ("judgebench", "trust"): "`bait` invokes the structured judge at audit time",
     ("search", "adapters"): "`speculation_quality` builds the toy task for its calibration "
                             "benchmark",
-    ("search", "engine"): "`concept_effects` reads the stdlib-only `engine/comparability` leaf "
-                          "per estimate",
     ("search", "trust"): "`foresight`/`graded_novelty` call the verifier inside a scoring step, "
                          "and `operators.feature_engineering_verdicts` applies the >1-SE rule "
                          "(`trust/gate.py`) to one CV ledger row",

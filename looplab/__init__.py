@@ -512,6 +512,16 @@ _LAYOUT = {
     "workspace": "engine",
     "workspace_seed": "engine",  # shared eval/Developer candidate filesystem primitives
     "seed_archive": "engine",  # run-owned verified copied-base bytes
+    "comparability_rule": "core",  # the pure comparison RULE `engine/comparability.py` re-exports
+    "concept_effects": "search",  # matched with/without concept contrasts (observational)
+    "output_language": "core",  # the one prose-language directive for every model role
+    "prose_locale": "core",  # Russian copy for server-authored English notices
+    "seed_files": "serve",  # the recorded seed-archive file listing behind the seed-files route
+    "assistant_monitor": "serve",  # scheduled chat turns' monitor controls
+    "result_commentary": "serve",  # server-owned background result interpretations
+    # Two modules share this stem (`harness/upstream_requests.py` is the client side); the flat alias
+    # names the engine's retained-request reader.
+    "upstream_requests": "engine",
     "scorer_boundary": "core",  # explicit operator files and same-read seed evidence
     "seed_base": "engine",  # immutable initial selection of a recorded run/bundle seed
     "bundle_bases": "engine",  # evidence-bound copied bases in reviewer bundles

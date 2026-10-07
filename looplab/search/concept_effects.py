@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import math
 
+from looplab.core.comparability_rule import comparability_status, record_of
 from looplab.core.idea_report import idea_not_tested
 from looplab.core.models import NODE_CONCEPT_PROVENANCE_CLASSIFIER
 from looplab.events.replay_selection import promotion_eligible_nodes
@@ -95,9 +96,6 @@ def concept_effects(state, concept_ids, *, subtree: bool = False,
     Work is bounded before matching; exceeding the budget abstains for the whole
     projection rather than selecting a convenient prefix of experiments.
     """
-    # Deferred: `search` may not import `engine` at module level (tests/test_package_layering.py);
-    # `engine/comparability.py` is a stdlib-only leaf, so this is a cached module lookup per call.
-    from looplab.engine.comparability import comparability_status, record_of
     ids = sorted(set(concept_ids))
     if state.direction not in ("min", "max"):
         return {cid: empty_effect("direction_unknown", status="unavailable") for cid in ids}
