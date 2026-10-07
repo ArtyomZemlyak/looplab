@@ -361,7 +361,10 @@ class EvalDispatchMixin:
                 self._do_run_setup(cmd, declared=(self._declared_deps()
                                                   if getattr(self, "_deps_setup_derived", False)
                                                   else None),
-                                   reverified_missing=reverified_missing)
+                                   # Only when non-empty: an override of `_do_run_setup` written
+                                   # before the keyword existed keeps working for every first run.
+                                   **({"reverified_missing": reverified_missing}
+                                      if reverified_missing else {}))
             except RunSetupRefusal as exc:
                 self._run_setup_refusal = exc
                 raise
