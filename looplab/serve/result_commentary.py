@@ -206,7 +206,11 @@ class ResultCommentaryService:
                                             and r["completed_at"] >= self.started_at for r in receipts)):
                             self._remember_idle(rd, before)
                             return  # Opening old finished runs must not pay for their history.
-                        after_seq = -1 if recent or store is not None else max(
+                        # A store from ANOTHER generation is no licence to explain history: a run
+                        # restored or replaced while the server was down would otherwise buy one
+                        # paid call per historical node. Only nodes completed after this server
+                        # started (or a run started since) are new.
+                        after_seq = -1 if recent else max(
                             (r["completed_seq"] for r in receipts if r["kind"] == "node"
                              and (r["completed_at"] is None or r["completed_at"] < self.started_at)), default=-1)
                         store = _Store(generation=generation, after_seq=after_seq)
@@ -241,6 +245,12 @@ class ResultCommentaryService:
                             job = _Job(receipt_id=row["id"], evidence_token=token, status="generating")
                             store.jobs[token] = job
                             _save(rd, store)  # Strict claim BEFORE any provider request.
+                            # Whether a provider request may have been sent. Settings, state, the
+                            # metered client and the headroom check all fail BEFORE it (a spend
+                            # ceiling, pending cost accounting, damaged settings): nothing was
+                            # billed, so the claim is released for a later tick instead of marking
+                            # this experiment's explanation failed forever.
+                            requested = False
                             try:
                                 current = self.srv.llm_settings(rd)
                                 current = current.model_copy(update={"llm_timeout": min(current.llm_timeout, 30.0)})
@@ -261,6 +271,7 @@ class ResultCommentaryService:
                                     accountant = getattr(client, "accountant", None)
                                     if accountant is not None:
                                         accountant.require_headroom(0.000001, "result interpretation")
+                                    requested = True
                                     reply = client.complete_text(messages, max_tokens=400)
                                     if not isinstance(reply, str):
                                         raise ValueError("invalid model reply")
@@ -271,6 +282,13 @@ class ResultCommentaryService:
                                     job.status = "ready"
                                     _save(rd, store)  # Keep paid content before publishing/accounting.
                             except Exception:  # noqa: BLE001 - no repeat billing after uncertain call
+                                if not requested and job.status == "generating":
+                                    del store.jobs[token]
+                                    _save(rd, store)
+                                    # Retry once the log or the config moves (a raised ceiling, a
+                                    # settled cost), not on every 2 s tick of an idle run.
+                                    self._remember_idle(rd, before)
+                                    return
                                 if job.status != "ready":
                                     job.status = "failed"
                                     job.summary = ""
