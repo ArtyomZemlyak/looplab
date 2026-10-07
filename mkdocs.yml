@@ -161,6 +161,7 @@ nav:
       - MLE-bench runbook: MLEBENCH.md
   - Design records:
       - Index: 00-INDEX.md
+      - Node kinds and auto upstream, plan (2026-10-07): 73-node-kinds-and-auto-upstream-2026-10-07.md
       - From node to framework, upstream (2026-10-01): 72-node-to-framework-upstream-2026-10-01.md
       - Onboarding and entry barriers (2026-09-30): 71-onboarding-and-entry-barriers-2026-09-30.md
       - External-works synergy III (2026-09-25): 67-external-works-synergy-2026-09-25.md
