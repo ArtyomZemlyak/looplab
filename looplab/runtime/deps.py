@@ -700,6 +700,43 @@ def installed_versions(dists, *, python: Optional[str] = None,
     return {k: str(v) for k, v in got.items()} if isinstance(got, dict) else {}
 
 
+def absent_distributions(dists, *, python: Optional[str] = None,
+                         timeout: float = 60.0) -> Optional[list[str]]:
+    """The names in `dists` the eval interpreter does NOT have, sorted — or None when the question
+    could not be asked (the interpreter did not start, the probe timed out or printed nothing).
+
+    `installed_versions`' sibling with the opposite failure contract, on purpose: a receipt may read
+    "could not observe" as `{}`, but a DECISION to re-run an install must not read it as "everything
+    is gone" — None leaves the decision with the caller (incident 2026-10-06: a container restart
+    wiped the env that a durable `run_setup_finished` still vouched for)."""
+    names = sorted({str(d).strip() for d in (dists or []) if str(d or "").strip()})
+    if not names:
+        return []
+    probe = ("import json, sys\n"
+             "from importlib.metadata import version\n"
+             "out = []\n"
+             "for n in json.loads(sys.argv[1]):\n"
+             "    try:\n"
+             "        version(n)\n"
+             "    except Exception:\n"
+             "        out.append(n)\n"
+             "sys.stdout.write(json.dumps({'absent': out}))\n")
+    try:
+        import json as _json
+        proc = subprocess.run([python or sys.executable, "-c", probe, _json.dumps(names)],
+                              capture_output=True, text=True, encoding="utf-8", errors="replace",
+                              timeout=timeout, env={k: v for k, v in os.environ.items()
+                                                    if k.upper().startswith("PIP_")
+                                                    or not is_secret_env(k, v)})
+        got = _json.loads(proc.stdout or "null")
+    except (OSError, subprocess.SubprocessError, ValueError):
+        return None
+    absent = got.get("absent") if isinstance(got, dict) else None
+    if proc.returncode != 0 or not isinstance(absent, list):
+        return None
+    return sorted(str(n) for n in absent)
+
+
 def version_delta(before: dict, after: dict) -> dict[str, dict]:
     """`{distribution -> {"before", "after", "direction"}}` for every distribution whose version
     CHANGED, where direction is `added` | `removed` | `changed`.

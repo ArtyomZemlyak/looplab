@@ -2308,7 +2308,7 @@ EVENT_PAYLOAD_KEYS: dict[str, PayloadContract] = {
     "run_setup_started": PayloadContract(
         "The task's setup command started, in a named working directory.",
         required=("after_interrupted_attempt", "command", "cwd"),
-        optional=(),
+        optional=("reverified_missing",),
     ),
     "run_started": PayloadContract(
         "The run's launch record: task, goal, direction, and the settings pinned at launch (invariant #6).",
