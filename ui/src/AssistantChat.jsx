@@ -7,6 +7,7 @@ import { permissionPresentation } from './assistantPermission.js'
 import { launchDraftKey } from './launchDraftStore.js'
 import { OpIcon } from './icons.jsx'
 import { toolActivityProjection } from './assistantToolActivity.js'
+import { lastEventClock } from './assistantProgressModel.js'
 import { turnPropsEqual } from './assistantTranscriptModel.js'
 import LazyBoundary from './LazyBoundary.jsx'
 import './assistant-tool-activity.css'
@@ -159,8 +160,19 @@ function Turn({
       {/* Persisted legacy steps share the live activity presentation when no timeline is available. */}
       {m.role === 'assistant' && !(m.activity && m.activity.length) && Array.isArray(m.steps) && m.steps.length > 0 &&
         <div className="asst-tool-legacy"><ToolActivity items={m.steps} /></div>}
+      {/* A REPLAYED turn says so (2026-10-06): a turn whose reply never landed — the server
+          restarted, the stream dropped — is re-run with its exact identity when the chat reopens,
+          and without this line the operator watched the same activity appear again and could not
+          send ("Так ну и че?" went nowhere). */}
+      {m.role === 'assistant' && m.streaming && m.recoveryNeeded &&
+        <div className="asst-status recovering" role="status">
+          {uiText("Re-running the interrupted turn: its reply was never saved (the server restarted or the connection dropped). A new message can be sent when it finishes.")}</div>}
       {m.role === 'assistant' && m.streaming && !m.content && !(m.activity && m.activity.length) &&
         <div className="asst-status thinking"><span className="asst-status-ic">…</span><span>{uiText(" thinking")}</span></div>}
+      {/* LIVENESS without a ticking timer: the time the turn last MOVED. A stalled turn shows a time
+          that stops changing. */}
+      {m.role === 'assistant' && m.streaming && lastEventClock(m.lastEventAt) &&
+        <div className="asst-status live muted">{uiText("working · last activity at")} {lastEventClock(m.lastEventAt)}</div>}
       {m.role === 'assistant' && Array.isArray(m.applied) && m.applied.length > 0 &&
         <div className="asst-steps">{m.applied.map((a, i) => {
           const recovery = revertState?.(a) || {}

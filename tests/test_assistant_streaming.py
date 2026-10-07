@@ -213,3 +213,53 @@ def test_the_sse_drain_does_not_consume_a_threadpool_worker_per_event(tmp_path, 
 
     assert len(tokens) == 60, len(tokens)          # the events really were forwarded one by one…
     assert len(hops) < 20, (len(hops), len(tokens))   # …without a pool hop each
+
+
+def test_the_polled_progress_keeps_prose_out_of_the_answer(tmp_path, monkeypatch):
+    """2026-10-06: behind a dropped stream the client copies the polled `text` into the ANSWER
+    bubble, and `text` mixed every round's prose with the answer tokens — so the operator read the
+    model's narration as its reply. Prose is `activity` now; `text` is the answer alone."""
+    import threading
+
+    gate, seen = threading.Event(), {}
+
+    def fake_run_turn(_client, _root, _history, instruction, mode, *, on_text=None, on_step=None,
+                      reply_sink=None, **_kw):
+        on_text("Let me look at the runs first.")
+        on_step({"tool": "read_run", "label": "reading run v11"})
+        on_step({"tool": "read_run", "label": "reading run v11"})
+        on_text("The listing is cut; reading the experiment.")
+        reply_sink("Node 37 measured 0.1312")
+        assert gate.wait(timeout=5)
+        return {"ok": True, "reply": "Node 37 measured 0.1312", "steps": [], "applied": [],
+                "proposals": [], "todos": [], "refs": [], "mode": mode}
+
+    monkeypatch.setattr("looplab.serve.server.make_llm_client", lambda s, **_kw: _StreamFake())
+    monkeypatch.setattr("looplab.serve.routers.assistant._assistant_run_turn", fake_run_turn)
+    client = TestClient(make_app(tmp_path))
+    sid = client.post("/api/assistant/sessions", json={"mode": "plan"}).json()["id"]
+
+    def _consume():
+        with client.stream("POST", f"/api/assistant/sessions/{sid}/message_stream",
+                           json={"instruction": "what did #37 measure?", "mode": "plan"}) as r:
+            for _ in r.iter_lines():
+                pass
+
+    t = threading.Thread(target=_consume, daemon=True)
+    t.start()
+    import time
+    deadline = time.monotonic() + 5
+    while time.monotonic() < deadline:
+        p = client.get("/api/assistant/progress", params={"session": sid}).json()
+        if p["active"] and p["text"]:
+            seen = p
+            break
+        time.sleep(0.02)
+    gate.set()
+    t.join(timeout=10)
+    assert seen["text"] == "Node 37 measured 0.1312", seen
+    assert seen["activity"] == [
+        {"type": "text", "content": "Let me look at the runs first."},
+        {"type": "tools", "labels": ["reading run v11", "reading run v11"]},
+        {"type": "text", "content": "The listing is cut; reading the experiment."}]
+    assert isinstance(seen["last_event"], float)

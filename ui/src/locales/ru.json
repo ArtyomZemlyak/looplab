@@ -1,7 +1,7 @@
 {
   "schema": 1,
   "language": "ru",
-  "count": 7667,
+  "count": 7671,
   "messages": {
     "# LoopLab run report — {0}": "# Отчёт запуска LoopLab — {0}",
     "## Agent narrative (advisory)": "## Пояснения агента (рекомендации)",
@@ -7669,6 +7669,10 @@
     "Explanation unavailable; measured result saved. No automatic retry. Discuss the result in chat.": "Пояснение недоступно; измеренный итог сохранён. Автоповтор выключен. Можно обсудить результат в чате.",
     "For new internal LLM runs, the UI server writes one brief Assistant interpretation after each completed experiment and finalized run. Background model calls are charged to the run and never delay evaluation. Reads do not trigger generation. External agents publish their own interpretations; offline toy runs and historical snapshots stay off. Disable to show measured facts only. Interrupted uncertain requests are not automatically billed again.": "Для новых внутренних запусков с LLM сервер UI пишет краткое пояснение ассистента после каждого завершённого эксперимента и завершения всего запуска. Фоновые обращения к модели учитываются в бюджете запуска и не задерживают оценку. Чтение результатов не запускает генерацию. Внешний агент публикует свои пояснения; для автономного режима toy и старых конфигураций функция выключена. Выключите для показа только измеренных фактов. Прерванные запросы с неизвестным исходом автоматически не повторяются.",
     "No detailed Assistant report has been published. Recorded outcomes remain available; discuss them in chat or refresh the report.": "Подробный отчёт ассистента ещё не опубликован. Измеренные результаты доступны выше; обсудите их в чате или обновите отчёт.",
-    "Paid AI action: provider charges may apply. One request identity will be saved when you start, so you can safely leave and resume.": "Платное действие модели: провайдер может списать средства. При запуске запрос будет сохранён — можно будет уйти со страницы и вернуться к нему позже."
+    "Paid AI action: provider charges may apply. One request identity will be saved when you start, so you can safely leave and resume.": "Платное действие модели: провайдер может списать средства. При запуске запрос будет сохранён — можно будет уйти со страницы и вернуться к нему позже.",
+    "Re-running the interrupted turn: its reply was never saved (the server restarted or the connection dropped). A new message can be sent when it finishes.": "Повторяю прерванный ход: его ответ не был сохранён (сервер перезапускался или оборвалось соединение). Новое сообщение можно отправить, когда он закончится.",
+    "working · last activity at": "в работе · последнее событие в",
+    "asst-status recovering": "asst-status recovering",
+    "asst-status live muted": "asst-status live muted"
   }
 }

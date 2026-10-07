@@ -724,6 +724,7 @@ def build_router(srv) -> APIRouter:
             _asst_turn_done[sid] = threading.Event()
             _asst_epoch[sid] = epoch
             _asst_progress[sid] = {"steps": [], "todos": [], "text": "", "updated": time.time(),
+                                   "activity": [], "last_event": time.time(),
                                    "owner": cancel_ev, "epoch": epoch}
 
     def _release_turn(sid: str, cancel_ev: "threading.Event", epoch: str) -> None:
@@ -868,7 +869,17 @@ def build_router(srv) -> APIRouter:
             p = _asst_progress.get(session)
             return {"steps": list(p["steps"]) if p else [],
                     "todos": list(p.get("todos", [])) if p else [],
-                    "text": p.get("text", "") if p else "",   # live answer-so-far (proxy-buffered SSE fallback)
+                    # The live ANSWER so far (proxy-buffered SSE fallback) — answer tokens ONLY. The
+                    # model's prose between tool rounds is `activity`, never this (2026-10-06: a
+                    # dropped stream put every round's narration into the answer bubble).
+                    "text": p.get("text", "") if p else "",
+                    # The turn's ordered activity, in the client's own shape: `{type: text}` segments
+                    # and `{type: tools, labels}` groups, bounded.
+                    "activity": [dict(seg, labels=list(seg["labels"])) if seg.get("type") == "tools"
+                                 else dict(seg) for seg in p.get("activity", [])] if p else [],
+                    # When this turn last did anything (a step, a prose segment, an answer token):
+                    # the liveness a waiting operator reads. None when no turn is active.
+                    "last_event": p.get("last_event") if p else None,
                     "active": bool(p)}
 
     @router.post("/api/assistant/sessions/{sid}/cancel")
@@ -1697,6 +1708,19 @@ def build_router(srv) -> APIRouter:
         return (instruction, eff_mode, history, cancel_ev, s, turn_id, recover_turn, turn_epoch,
                 current_live_ids, language)
 
+    def _activity_append(p: dict, seg: dict) -> None:
+        """Append one segment to a progress entry's ordered `activity` (caller holds `_perm_lock`):
+        consecutive tool steps merge into one group, as the client's own stream handler merges them;
+        the list keeps its newest 40 segments and a group its newest 40 labels. Stamps `last_event`."""
+        activity = p.setdefault("activity", [])
+        last = activity[-1] if activity else None
+        if seg.get("type") == "tools" and last is not None and last.get("type") == "tools":
+            last["labels"] = (last["labels"] + seg["labels"])[-40:]
+        else:
+            activity.append(seg)
+            del activity[:-40]
+        p["last_event"] = time.time()
+
     def _make_progress_hooks(sid: str, cancel_ev: "threading.Event", q=None):
         """The per-turn `on_step`/`on_todos` callbacks. `q` (stream endpoint only) additionally mirrors
         each event onto the SSE queue — and its hooks carry the STRICTER owner guard (`not
@@ -1709,7 +1733,9 @@ def build_router(srv) -> APIRouter:
             with _perm_lock:
                 p = _asst_progress.get(sid)   # owner-guarded: only OUR turn touches its progress entry
                 if p is not None and p.get("owner") is cancel_ev and (q is None or not cancel_ev.is_set()):
-                    p["steps"] = (p["steps"] + [ev.get("label") or ev.get("tool") or "…"])[-40:]
+                    label = ev.get("label") or ev.get("tool") or "…"
+                    p["steps"] = (p["steps"] + [label])[-40:]
+                    _activity_append(p, {"type": "tools", "labels": [label]})
                     if q is None:
                         p["updated"] = time.time()
             if q is not None:
@@ -2084,20 +2110,31 @@ def build_router(srv) -> APIRouter:
         _on_step, _on_todos = _make_progress_hooks(sid, cancel_ev, q)
 
         def _progress_text(piece):
-            # Mirror the live assistant output into the POLLED progress channel too, not only the SSE
-            # queue: behind a buffering proxy (jupyter-server-proxy / nginx) the token/text SSE events
-            # arrive batched at the very END, so a client that also polls /progress still watches the
-            # answer form live. Owner-guarded + last-8KB capped like `steps`.
+            # Mirror the live ANSWER into the POLLED progress channel too, not only the SSE queue:
+            # behind a buffering proxy (jupyter-server-proxy / nginx) the token SSE events arrive
+            # batched at the very END, so a client that also polls /progress still watches the answer
+            # form live. Owner-guarded + last-8KB capped like `steps`. Answer tokens ONLY — the prose
+            # between tool rounds goes to `activity` (`_progress_prose`), because the fallback writes
+            # `text` into the answer bubble.
             if not piece:
                 return
             with _perm_lock:
                 p = _asst_progress.get(sid)
                 if p is not None and p.get("owner") is cancel_ev and not cancel_ev.is_set():
                     p["text"] = (p.get("text", "") + piece)[-8000:]
+                    p["last_event"] = time.time()
+
+        def _progress_prose(content):
+            if not content:
+                return
+            with _perm_lock:
+                p = _asst_progress.get(sid)
+                if p is not None and p.get("owner") is cancel_ev and not cancel_ev.is_set():
+                    _activity_append(p, {"type": "text", "content": str(content)[:4000]})
 
         def _on_text(content):
             q.put((SSE_TEXT, content))        # interstitial assistant prose (between tool rounds)
-            _progress_text(content)
+            _progress_prose(content)
 
         def _reply_sink(piece):
             q.put((SSE_TOKEN, piece))
