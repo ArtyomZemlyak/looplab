@@ -162,6 +162,11 @@ class UpstreamLane:
             raise UpstreamRefusal("upstream_manifest_unavailable", f"Inspect {relative}: restore the original bounded regular proposal manifest before acting")
         try:
             manifest = json.loads(raw)
+            if not isinstance(manifest, dict):
+                # A manifest is an object. Without this, "is it readable" leaned on the parser's
+                # recursion limit: Python 3.13 parses 1200-deep nesting that 3.11/3.12 refuse, so
+                # the same damaged file read as `changed` there and `unavailable` here.
+                raise ValueError("proposal manifest is not an object")
             manifest_hash = digest(manifest)
         except (ValueError, RecursionError) as exc:
             # JSON/Unicode/nonfinite/depth failures concern this retained source,
