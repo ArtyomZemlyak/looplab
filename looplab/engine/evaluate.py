@@ -3272,14 +3272,43 @@ class EvaluateMixin:
         """
         from looplab.engine.speculation import auto_pause_is_redundant
         from looplab.events.types import EV_PAUSE
+        from looplab.runtime.infra_probe import describe, probe
 
         detail = self._crash_detail(exc)
         try:
             with anyio.CancelScope(shield=True):
+                # AN OSError ON A BROKEN BOX IS NOT THIS NODE'S END (incident 2026-10-06). A dead data
+                # mount under `_materialize`'s seed copy raises ENOTCONN here, and `engine_error` closed
+                # the node for good: after the operator remounted and resumed, the idea was gone. When
+                # the engine's own probe of the declared paths (`runtime/infra_probe.py`) finds the box
+                # broken, NO terminal is written — the node stays pending and is re-dispatched on the
+                # resume, like an attempt a pause withheld — and the pause names the fault. Asked only
+                # for an OSError: a KeyError on a hand-edited node is not about the box, whatever its
+                # mounts say. The attempt the raise cut short goes uncharged, as below.
+                faults: list = []
+                if isinstance(exc, OSError):
+                    try:
+                        targets = self._infra_probe_targets()
+                        if targets:
+                            faults = await anyio.to_thread.run_sync(
+                                functools.partial(probe, targets))
+                    except (OSError, RuntimeError):   # no thread to probe in: engine_error stands
+                        faults = []
                 async with self._write_lock:
                     events = self.store.read_all()
                     state = fold(events)
                     node = state.nodes.get(node_id)
+                    if faults:
+                        if not auto_pause_is_redundant(state):
+                            self.store.append(EV_PAUSE, {
+                                "reason": "infra_unavailable",
+                                "detail": self._redact(
+                                    f"evaluation of node {node_id} raised {detail} and the box did "
+                                    f"not answer: {describe(faults)}")[:400]})
+                        _LOG.warning("evaluation of node %s raised on a broken box (%s); the node "
+                                     "stays pending and the run is paused", node_id,
+                                     describe(faults))
+                        return
                     # Only if this lifecycle is still open. A body that already wrote its own
                     # terminal and then raised on the way out (a tracer teardown, a span export) must
                     # not get a second one — the fold is idempotent on duplicates, but the second row

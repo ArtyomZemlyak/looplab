@@ -246,3 +246,36 @@ def test_a_healthy_box_launches_as_before(tmp_path):
     st = fold(engine.store.read_all())
     assert evals == ["print(1)"] and not st.paused
     assert not any(e.type == "eval_attempt_withheld" for e in engine.store.read_all())
+
+
+# ------------------------------------------------------------------ the ENGINE raising on a broken box
+
+def test_an_oserror_on_a_broken_box_keeps_the_node_pending_and_pauses(tmp_path, monkeypatch):
+    """`_materialize` copying the seed off a dead mount raised ENOTCONN, and `engine_error` closed
+    the node for good: after the remount and resume the idea was gone."""
+    engine, data, _evals = _engine_with_mount(tmp_path)
+
+    def dead_materialize(a):
+        shutil.rmtree(data, ignore_errors=True)
+        raise OSError(errno.ENOTCONN, "Transport endpoint is not connected", str(data))
+
+    monkeypatch.setattr(engine, "_eval_prepare_workdir", dead_materialize)
+    anyio.run(engine._evaluate, 0, anyio.CapacityLimiter(1), None)
+    events = engine.store.read_all()
+    st = fold(events)
+    assert st.nodes[0].status.value == "pending", "a dead mount ended the node"
+    assert not any(e.type in ("node_evaluated", "node_failed") for e in events)
+    assert st.paused and st.pause_reason == "infra_unavailable"
+
+
+def test_an_oserror_on_a_healthy_box_is_still_engine_error(tmp_path, monkeypatch):
+    engine, _data, _evals = _engine_with_mount(tmp_path)
+
+    def broken(a):
+        raise OSError(errno.EACCES, "Permission denied", "/somewhere/else")
+
+    monkeypatch.setattr(engine, "_eval_prepare_workdir", broken)
+    anyio.run(engine._evaluate, 0, anyio.CapacityLimiter(1), None)
+    st = fold(engine.store.read_all())
+    assert st.nodes[0].status.value == "failed" and st.nodes[0].error_reason == "engine_error"
+    assert st.paused and st.pause_reason == "engine_error"

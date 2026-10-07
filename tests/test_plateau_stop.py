@@ -92,6 +92,18 @@ def test_what_is_not_an_attempt_does_not_count():
     assert plateau_nodes(st) == (3, 1)
 
 
+def test_an_engine_error_is_the_box_not_an_attempt():
+    """Incident 2026-10-06: a box fault (`engine_error`: a full disk, a read-only run dir) is no
+    attempt at the experiment, and counting it let a broken box end the search as a plateau.
+    MUTATION: count it like `crash`."""
+    st = _state(leader=3, settled=(6, 7, 8),
+                statuses={7: NodeStatus.failed, 8: NodeStatus.failed})
+    st.nodes[7].error_reason = "engine_error"
+    st.nodes[8].error_reason = "crash"
+    assert plateau_nodes(st) == (3, 2)
+    assert plateau_stop_due(st, 3) is None
+
+
 def test_a_bounded_episode_counts_only_while_its_row_is_current():
     plan = build_plan(max_nodes=100, n_seeds=2, reserve_frac=0.2, at_node=0)
     episode = replan(plan, max_nodes=100, n_seeds=2, reserve_frac=0.2, at_node=5, stall_rung=2,
