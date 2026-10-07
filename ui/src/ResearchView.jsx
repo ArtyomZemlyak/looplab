@@ -13,7 +13,7 @@ import React, { useMemo, useState } from 'react'
 
 import { cardIsDirection, childrenByParent, descendantsOf } from './cardLineageModel.js'
 import { isRecord } from './panelPrimitives.js'
-import { UNGROUPED_ID, latticeRollups, latticeRows, questionClosure,
+import { UNGROUPED_ID, inferQuestionFiling, latticeRollups, latticeRows, questionClosure,
   offPageParentExperiments, unfiledExperiments } from './questionLattice.js'
 import { COMPARABILITY_REFUSAL_TEXT } from './runIndex.js'
 
@@ -73,13 +73,16 @@ export default function ResearchView({ cards, state, renderCard, onShowLanes, on
   // The rule lives in `cardLineageModel.js` beside the kind predicate it asks — see the comment
   // there for why a nested question must not be grouped here, and why it was moved out of this
   // file at all (a replica of an inline loop cannot catch that loop being inverted).
-  const childKids = useMemo(() => childrenByParent(all), [all])
+  // Experiments nobody filed are drawn under the question their CONCEPTS match, marked as such
+  // (`inferQuestionFiling`); the rollups below keep reading the authored `all`.
+  const filed = useMemo(() => inferQuestionFiling(all), [all])
+  const childKids = useMemo(() => childrenByParent(filed), [filed])
 
   const rows = useMemo(() => latticeRows(questions), [questions])
   // The complement of the ladder. Without it a parentless experiment is drawn by NOTHING here, and
   // the Directions tab's "Not filed under any direction" group stays the only surface that has it —
   // which is exactly why that tab cannot be retired until this exists.
-  const unfiled = useMemo(() => unfiledExperiments(all), [all])
+  const unfiled = useMemo(() => unfiledExperiments(filed), [filed])
   // The third bucket that makes the ladder TOTAL. A card whose `parent_card_id` names a card this
   // page does not hold — clipped by the 256-row wire cap — is not unfiled and is under no visible
   // question, so before this it rendered nowhere at all. It gets its own counted section rather
@@ -269,7 +272,13 @@ export default function ResearchView({ cards, state, renderCard, onShowLanes, on
           </div>
           {kids.length > 0 && <details className="research-evidence">
             <summary>{kids.length}{uiText(" experiment")}{kids.length === 1 ? '' : 's'}{uiText(" · show evidence")}</summary>
-            <div className="research-experiments">{kids.map(child => renderCard(child))}</div>
+            <div className="research-experiments">{kids.map(child => child.question_inferred
+              ? <div key={child.id} className="research-inferred">
+                  <span className="chip muted research-inferred-chip"
+                    title={uiText("No question names this experiment; it is shown here because its concepts overlap this question's the most. Not counted in this question's best.")}>
+                    {uiText("filed by concepts")}: {child.question_inferred.shared.join(', ')}</span>
+                  {renderCard(child)}</div>
+              : renderCard(child))}</div>
           </details>}
           {!isCollapsed && kids.length === 0 && !branch && <div className="muted card-empty">{uiText("no experiment proposed against this yet")}</div>}
         </li>

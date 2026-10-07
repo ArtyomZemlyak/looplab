@@ -3580,3 +3580,6 @@ body.asst-side-open .app-shell-main { margin-right: var(--asst-side-w, 440px); }
    detail rather than one screen away. */
 .pc-memory-group { margin-bottom: 10px; }
 .pc-memory-group .pc-detail-runs li { display: block; margin-bottom: 6px; line-height: 1.4; }
+
+.research-inferred { display: flex; flex-direction: column; gap: 2px; }
+.research-inferred-chip { align-self: flex-start; }

@@ -395,3 +395,40 @@ test('a substituted build is not a measured experiment behind the question', () 
   const closure = questionClosure(retired, latticeRollups({ nodes }, [retired], latticeRows([retired])).get('q2'))
   assert.equal(closure.supported, false)
 })
+
+test('an unfiled experiment is filed under the question its concepts overlap most — marked, never authored', async () => {
+  const { inferQuestionFiling } = await import('../src/questionLattice.js')
+  const q = (id, tags, extra = {}) => ({ id, card_kind: 'direction', concept_tags: tags, ...extra })
+  const x = (id, tags, extra = {}) => ({ id, card_kind: 'experiment', concept_tags: tags, ...extra })
+  const cards = [
+    q('Q-lora', ['lora']),
+    q('Q-lora-emb', ['lora', 'embeddings']),
+    q('Q-drift', ['drift']),
+    x('E-injected', ['lora', 'embeddings', 'qwen']),          // overlaps Q-lora-emb most
+    x('E-narrow', ['lora']),                                  // ties 1-1: the narrower Q-lora wins
+    x('E-filed', ['drift'], { parent_card_id: 'Q-lora' }),    // an AUTHORED edge is never moved
+    x('E-untagged', []),
+    x('E-stranger', ['tokenizer']),
+  ]
+  const out = new Map(inferQuestionFiling(cards).map(c => [c.id, c]))
+  assert.equal(out.get('E-injected').parent_card_id, 'Q-lora-emb')
+  assert.deepEqual(out.get('E-injected').question_inferred, { shared: ['embeddings', 'lora'] })
+  assert.equal(out.get('E-narrow').parent_card_id, 'Q-lora')
+  assert.equal(out.get('E-filed').parent_card_id, 'Q-lora')
+  assert.equal(out.get('E-filed').question_inferred, undefined)
+  assert.equal(out.get('E-untagged').parent_card_id, undefined)
+  assert.equal(out.get('E-stranger').parent_card_id, undefined)
+  assert.equal(cards[3].parent_card_id, undefined, 'the input cards are not mutated')
+  assert.deepEqual(unfiledExperiments(inferQuestionFiling(cards)).map(c => c.id),
+    ['E-stranger', 'E-untagged'])
+})
+
+test('a tie the narrower rule cannot break leaves the card unfiled', async () => {
+  const { inferQuestionFiling } = await import('../src/questionLattice.js')
+  const cards = [
+    { id: 'Q-a', card_kind: 'direction', concept_tags: ['a', 'x'] },
+    { id: 'Q-b', card_kind: 'direction', concept_tags: ['b', 'x'] },
+    { id: 'E', card_kind: 'experiment', concept_tags: ['x'] },
+  ]
+  assert.equal(inferQuestionFiling(cards).find(c => c.id === 'E').parent_card_id, undefined)
+})
