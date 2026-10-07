@@ -322,6 +322,10 @@ function ExpNode({ data }) {
     conceptTruth || null,
     seed ? `seeded from run ${seed.name}, experiment ${seed.nodeId}${seedContractText(node.origin)}` : null,
     node.research_origin ? 'proposed from deep research directions' : null,
+    // doc 73 §1.4: an ARTIFACT node prepares data for later nodes, succeeds without a metric and is
+    // never ranked; a node that `uses` artifacts reads their workdirs.
+    node.kind === 'artifact' ? 'artifact node, never ranked' : null,
+    node.uses?.length ? `uses artifacts ${node.uses.map(id => '#' + id).join(', ')}` : null,
     // An operator branch is a statement about WHO WROTE THIS IDEA, so it belongs in the selection
     // label beside the other two provenance facts rather than only in a hover title a screen reader
     // never reaches.
@@ -380,6 +384,12 @@ function ExpNode({ data }) {
           : node.research_origin ? <span className="origin-chip rsch compact" role="img"
           aria-label={uiText("Proposed from deep research directions")}
           title={uiMessage("proposed just after deep research ({0}) at node {1} — its directions were steering", [node.research_origin.trigger || 'auto', node.research_origin.at_node])}><OpIcon name="bulb" size={11} /></span> : null}
+        {node.kind === 'artifact' && <span className="origin-chip artifact compact" role="img"
+          aria-label={uiText("Artifact node")}
+          title={uiText("Artifact node: prepares data for later nodes, succeeds without a metric and is never ranked")}>▣</span>}
+        {node.uses?.length > 0 && <span className="origin-chip uses compact" role="img"
+          aria-label={uiMessage("Uses artifacts {0}", [node.uses.map(id => '#' + id).join(', ')])}
+          title={uiMessage("Reads the workdirs of artifact nodes {0} (LOOPLAB_USES_WORKDIRS)", [node.uses.map(id => '#' + id).join(', ')])}>⇠</span>}
         {branch && <span className="origin-chip fork compact" role="img"
           aria-label={uiText(branch.label)} title={uiText(branch.title)}><OpIcon name={branch.icon} size={11} /></span>}
         {sweep && <span className="badge sweep" title={uiMessage("intra-node sweep · {0} trials — open the node's Trials tab", [sw.count])}>⊞ {sw.count}</span>}

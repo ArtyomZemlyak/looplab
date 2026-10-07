@@ -776,6 +776,13 @@ artifact nodes that are ALREADY produced; the command refuses `inject_uses_not_p
 `inject_uses_not_artifact` otherwise, so a consumer never races its producer. Both keys land on
 `node_created` only when set, so every other node keeps its payload shape.
 
+It stays what it is: a retargeted objective never ranks it (even when an import left it the key),
+a failed artifact is never metric-salvaged, and a rebuild (`node_reset` from implement) carries
+`node_kind`/`uses` forward. The run graph marks an artifact with ▣ and a consumer with ⇠; the
+Assistant creates either through its `inject_experiment` tool (`Settings.assistant_inject_tool`).
+The producer's workdir is read as it stands when the consumer runs — resetting an artifact while
+consumers wait is not fenced yet (doc 73, status table).
+
 ### Branching from a snapshot (fork-to-branch)
 
 An operator reading a **historical snapshot** can see the moment they want to branch from. Every

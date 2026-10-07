@@ -1990,6 +1990,11 @@ pre.code.event-json { max-height: 220px; }
    to see before they read the idea itself. */
 .node-card .origin-chip.fork { color: var(--fg); cursor: default; font-weight: 600; }
 .node-card .origin-chip.fork:hover { border-color: var(--line); }
+/* doc 73 §1.4: an artifact node (prepares data, never ranked) and a node that uses artifacts. */
+.node-card .origin-chip.artifact,
+.node-card .origin-chip.uses { color: var(--fg-dim); cursor: default; }
+.node-card .origin-chip.artifact:hover,
+.node-card .origin-chip.uses:hover { border-color: var(--line); }
 .node-card .origin-chip.compact { flex: none; max-width: none; margin-top: 0; padding: 0 3px;
   line-height: 16px; text-align: center; }
 .node-card.dim { opacity: .28; filter: saturate(.5); }
