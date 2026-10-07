@@ -113,3 +113,34 @@ def test_metrics_exclude_aborted_and_tombstoned_history(tmp_path):
 
     assert res["baseline"] == 0.4
     assert set(res["rows"]) == {"data/live"}
+
+
+def test_effect_is_unavailable_when_rows_are_not_the_recorded_membership(tmp_path):
+    # The rows count what `tags` says; the effect estimator reads the RECORDED membership. Handed any
+    # other map (a CLI's heuristic or unpersisted LLM tags), a row said N experiments while its
+    # effect said `n_with=0` (review 2026-10-07). It now says WHY there is no effect instead.
+    st, recorded = _run(tmp_path, [(["base"], 0.5), (["base", "c"], 0.9), (["base"], 0.4)])
+    row = recorded["rows"]["c"]
+    assert row["effect"]["reason"] != "membership_not_recorded"
+    assert row["effect"]["n_with"] == row["touched"] == 1        # one population, both halves
+
+    other = {0: frozenset({"x/y"}), 1: frozenset({"x/y"}), 2: frozenset({"base"})}
+    graph, _ = graph_from_node_concepts(st.node_concepts)
+    res = concept_metrics(st, graph, other)
+    assert res["rows"]["x/y"]["touched"] == 2                    # the rows still describe `tags`
+    for bucket in ("rows", "rollup"):
+        for cid, r in res[bucket].items():
+            assert r["effect"]["status"] == "unavailable", (bucket, cid)
+            assert r["effect"]["reason"] == "membership_not_recorded", (bucket, cid)
+            assert r["effect_delta"] is None and r["effect_pairs"] == 0
+
+
+def test_heuristic_default_tags_never_borrow_the_recorded_effect(tmp_path, monkeypatch):
+    from looplab.search import concept_tagging
+    st, _ = _run(tmp_path, [(["base"], 0.5), (["base", "c"], 0.9)])
+    graph, _ = graph_from_node_concepts(st.node_concepts)
+    monkeypatch.setattr(concept_tagging, "tag_nodes_heuristic",
+                        lambda state, g: {0: frozenset({"c"}), 1: frozenset({"c"})})
+    res = concept_metrics(st, graph)                              # tags omitted -> heuristic
+    assert res["rows"]["c"]["touched"] == 2
+    assert res["rows"]["c"]["effect"]["reason"] == "membership_not_recorded"

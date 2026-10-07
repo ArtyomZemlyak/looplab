@@ -164,3 +164,48 @@ def test_budget_abstains_instead_of_selecting_a_score_biased_prefix(monkeypatch)
     monkeypatch.setattr(module, "MAX_EFFECT_WORK", 1)
     e = effect(run([([], 0.1, []), (["c"], 0.5, [0])]))
     assert e["status"] == "unavailable" and e["reason"] == "analysis_limit"
+
+
+# Seven equal deltas whose float mean rounds one ulp PAST them (review 2026-10-07): the mean of
+# seven -0.21987892246138063 is -0.21987892246138066, so an unclamped estimate sat outside
+# [low, high], `valid_effect` refused it, and the WHOLE cross-run capsule carrying it was dropped.
+_ULP_DELTA = -0.21987892246138063
+
+
+def _seven_equal_pairs():
+    rows = []
+    for i in range(7):
+        rows.extend([([], 0.0, []), (["c"], _ULP_DELTA, [2 * i])])
+    return run(rows)
+
+
+def test_a_mean_of_equal_deltas_is_clamped_into_its_pair_range():
+    import math
+    assert math.fsum(d / 7 for d in [_ULP_DELTA] * 7) < _ULP_DELTA   # the defect is real
+    e = effect(_seven_equal_pairs())
+    assert e["status"] == "matched" and e["n_pairs"] == 7 and e["n_contexts"] == 1
+    assert e["low"] == e["high"] == _ULP_DELTA
+    assert e["estimate"] == _ULP_DELTA and e["mean"] == _ULP_DELTA
+    assert valid_effect(e)
+
+
+def test_reader_tolerates_an_old_row_one_ulp_outside_but_stays_strict():
+    e = effect(_seven_equal_pairs())
+    old_row = {**e, "estimate": -0.21987892246138066, "mean": -0.21987892246138066}
+    assert valid_effect(old_row)                                 # rounding noise is the same number
+    assert not valid_effect({**e, "estimate": _ULP_DELTA - 1e-9})   # a different number is not
+    assert not valid_effect({**e, "estimate": _ULP_DELTA + 1e-9})
+    assert not valid_effect({**e, "low": 0.0, "high": -1.0, "estimate": -0.5})   # inverted range
+    zero = {**e, "low": 0.0, "high": 0.0, "estimate": 0.0, "mean": 0.0}
+    assert valid_effect(zero) and not valid_effect({**zero, "estimate": 5e-324})
+
+
+def test_capsule_store_keeps_a_capsule_whose_old_effect_is_one_ulp_outside(tmp_path):
+    from looplab.engine.concept_capsules import ConceptCapsuleStore, build_concept_capsule
+    e = effect(_seven_equal_pairs())
+    old_row = {**e, "estimate": -0.21987892246138066}
+    cap = build_concept_capsule(run_id="r", fingerprint=["toy"], direction="max", concepts=["c"],
+                                concept_outcomes={"c": 0.5}, concept_effects={"c": old_row})
+    store = ConceptCapsuleStore(tmp_path / "concept_capsules.jsonl")
+    assert store.add(cap) is True
+    assert [c["run_id"] for c in store.all()] == ["r"]

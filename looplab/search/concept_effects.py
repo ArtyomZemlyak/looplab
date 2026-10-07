@@ -69,9 +69,18 @@ def valid_effect(value) -> bool:
             or value["n_contexts"] > n):
         return False
     if value["status"] == "matched":
-        return (n > 0 and value["n_contexts"] > 0
+        if not (n > 0 and value["n_contexts"] > 0
                 and all(value.get(key) is not None for key in numbers)
-                and value["low"] <= value["estimate"] <= value["high"])
+                and value["low"] <= value["high"]):
+            return False
+        # The estimate is a median of per-context MEANS, and a float mean of equal deltas can land
+        # one ulp outside them (seven deltas of -0.21987892246138063 average to
+        # -0.21987892246138066). The producer now clamps it, but a row written before that is a
+        # durable fact: refusing it here dropped the WHOLE cross-run capsule. The slack is a
+        # RELATIVE 1e-12 of the range's magnitude — rounding noise, never a different number —
+        # and is exactly zero for an all-zero range.
+        slack = 1e-12 * max(abs(value["low"]), abs(value["high"]))
+        return value["low"] - slack <= value["estimate"] <= value["high"] + slack
     return n == 0 and all(value.get(key) is None for key in numbers)
 
 
@@ -189,7 +198,10 @@ def concept_effects(state, concept_ids, *, subtree: bool = False,
             if out["status"] == "unavailable":
                 break
             if context_deltas:
-                contexts.append(math.fsum(d / len(context_deltas) for d in context_deltas))
+                # Clamped into the context's own range: the float mean of equal deltas can round
+                # one ulp past them, and `valid_effect` holds the estimate inside [low, high].
+                context_mean = math.fsum(d / len(context_deltas) for d in context_deltas)
+                contexts.append(min(max(context_mean, min(context_deltas)), max(context_deltas)))
         if mixed:
             out = empty_effect("mixed_evaluation_conditions")
             result[cid] = out
@@ -199,9 +211,13 @@ def concept_effects(state, concept_ids, *, subtree: bool = False,
             mid = len(ordered) // 2
             estimate = (ordered[mid] if len(ordered) % 2 else
                         ordered[mid - 1] / 2 + ordered[mid] / 2)
+            low, high = min(deltas), max(deltas)
+            # Both averages are clamped into the pair range they summarise (rounding only — see the
+            # per-context clamp above); `valid_effect` refuses an estimate outside [low, high].
+            mean = math.fsum(d / len(contexts) for d in contexts)
             out.update(status="matched", reason="observational_not_causal",
-                       estimate=estimate, mean=math.fsum(d / len(contexts) for d in contexts),
-                       low=min(deltas), high=max(deltas), n_pairs=len(deltas), n_contexts=len(contexts),
+                       estimate=min(max(estimate, low), high), mean=min(max(mean, low), high),
+                       low=low, high=high, n_pairs=len(deltas), n_contexts=len(contexts),
                        positive=sum(d > 0 for d in deltas), negative=sum(d < 0 for d in deltas),
                        neutral=sum(d == 0 for d in deltas), pairs=pairs,
                        pairs_omitted=len(deltas) - len(pairs))

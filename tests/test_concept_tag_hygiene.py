@@ -268,6 +268,63 @@ def test_a_recorded_decision_is_never_re_decided():
     assert syntactic_renames(["x/lr/1e-3"], {}, decided={"x/lr/1e-3"}) == {}
 
 
+# A value segment in the MIDDLE of an id is a qualifier (`strip_value_segments`), so the pass may not
+# strip it by way of the PARENT. It did (review 2026-10-07): the parent recursion went through the
+# value strip, so `lora/r16/dropout` and `lora/r64/dropout` BOTH became `lora/dropout` — two distinct
+# concepts merged by a frozen `concept_consolidation` decision. The vocabulary below is a grown
+# graph's (every ancestor present, as `ConceptGraph.ensure` builds it).
+_MIDDLE_VALUES = ["lora", "lora/r16", "lora/r64", "lora/r16/dropout", "lora/r64/dropout",
+                  "lora_x", "lora-x", "lora_x/r16", "lora_x/r16/dropout",
+                  "optimization", "optimization/lr", "optimization/lr/1e-3"]
+
+
+def test_a_middle_value_segment_is_never_stripped_through_the_parent():
+    rename = syntactic_renames(_MIDDLE_VALUES, {})
+    assert "lora/r16/dropout" not in rename and "lora/r64/dropout" not in rename
+    # the two dropouts stay two concepts: no target is shared by two non-value leaves
+    assert "lora/dropout" not in rename.values()
+    # the spelling fold still carries a child under its parent, keeping the middle `r16`
+    assert rename["lora_x/r16/dropout"] == "lora-x/r16/dropout"
+    # `lora_x/r16` on its OWN is a trailing value: it is its knob, re-spelled (mint time agrees)
+    assert rename["lora_x/r16"] == "lora-x"
+    # a TRAILING value is still its knob, as before
+    assert rename["optimization/lr/1e-3"] == "optimization/lr"
+    assert rename["lora/r16"] == "lora" and rename["lora/r64"] == "lora"
+
+
+def test_the_consolidation_pass_agrees_with_mint_time_hygiene():
+    # Every id the pass renames lands where `hygienic_concept_id` would have put it at mint time
+    # (folding aside: the fold group here has one spelling per level, so only values move).
+    vocab = ["lora", "lora/r16", "lora/r64", "lora/r16/dropout", "lora/r64/dropout",
+             "metrics", "metrics/r2", "model", "model/qwen", "model/qwen/7b", "model/qwen/0.5b",
+             "optimization", "optimization/lr", "optimization/lr/1e-3", "optimization/lr/3e-4"]
+    graph = ConceptGraph(task_type="t")
+    for cid in vocab:
+        graph.ensure(cid)
+    rename = syntactic_renames(vocab, {})
+    for cid in vocab:
+        assert rename.get(cid, cid) == hygienic_concept_id(cid, graph), cid
+    # Pinned AS THE VALUE GRAMMAR STANDS (`concept_tagging.py::_VALUE_KNOB_PREFIXES` reads `r2` as
+    # the `r` knob at 2, and `7b` as a number with a magnitude suffix): both halves strip these
+    # alike, so a grammar change moves mint time and consolidation together.
+    assert rename["metrics/r2"] == "metrics"
+    assert rename["model/qwen/7b"] == rename["model/qwen/0.5b"] == "model/qwen"
+
+
+def test_consolidating_middle_values_keeps_distinct_concepts_and_their_tags():
+    graph = ConceptGraph(task_type="t")
+    for cid in _MIDDLE_VALUES:
+        graph.ensure(cid)
+    tags = {1: frozenset({"lora/r16/dropout"}), 2: frozenset({"lora/r64/dropout"})}
+    # a model that merges nothing, so only the syntactic pre-pass decides (the no-client fallback
+    # is its own label-clustering rule, not this pass)
+    out_graph, out_tags, rename = consolidate_concepts(
+        graph, tags, client=_Client({"merges": []}), concept_tag_hygiene=True)
+    assert out_tags[1] == {"lora/r16/dropout"} and out_tags[2] == {"lora/r64/dropout"}
+    assert "lora/r16/dropout" in out_graph and "lora/r64/dropout" in out_graph
+    assert "lora/dropout" not in out_graph and "lora/dropout" not in rename.values()
+
+
 def _vocab_graph():
     g = ConceptGraph(task_type="t")
     for cid in _FRAGMENTED:

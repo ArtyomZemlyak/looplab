@@ -184,26 +184,36 @@ def syntactic_renames(ids, tags: dict, *, decided=()) -> dict:
 
     memo: dict[str, str] = {}
 
-    def _canon(cid: str) -> str:
+    def _spell(cid: str) -> str:
+        # The SPELLING half only, level by level. An ancestor is re-spelled through this and NEVER
+        # through `_canon`: a value segment in the MIDDLE of an id is a name's qualifier
+        # (`strip_value_segments`' own rule, and `hygienic_concept_id` at mint time follows it), so
+        # `lora/r16/dropout` keeps its `r16`. Routing the parent through the value strip turned it
+        # into `lora/dropout` — and `lora/r64/dropout` too: two distinct concepts merged by a
+        # recorded, frozen `concept_consolidation` decision (review 2026-10-07).
         if cid in memo:
             return memo[cid]
         out = cid
         if cid not in decided:
-            stripped = concept_tagging.strip_value_segments(cid)
-            if stripped and stripped != cid:
-                out = _canon(stripped)              # a value leaf is its knob
+            parent, _, leaf = cid.rpartition("/")
+            members = by_key.get(fold(cid), [cid])
+            if any(m in decided for m in members):
+                # A recorded id is in this fold group: it is the spelling, untouched.
+                leaf = sorted(m for m in members if m in decided)[0].rpartition("/")[2]
             else:
-                parent, _, leaf = cid.rpartition("/")
-                members = by_key.get(fold(cid), [cid])
-                if any(m in decided for m in members):
-                    # A recorded id is in this fold group: it is the spelling, untouched.
-                    leaf = sorted(m for m in members if m in decided)[0].rpartition("/")[2]
-                else:
-                    best = min(members, key=lambda m: (-uses.get(m, 0), m))
-                    leaf = best.rpartition("/")[2]
-                out = f"{_canon(parent)}/{leaf}" if parent else leaf
+                best = min(members, key=lambda m: (-uses.get(m, 0), m))
+                leaf = best.rpartition("/")[2]
+            out = f"{_spell(parent)}/{leaf}" if parent else leaf
         memo[cid] = out
         return out
+
+    def _canon(cid: str) -> str:
+        if cid in decided:
+            return cid
+        # Only the TRAILING value segments are the knob's value (`optimization/lr/1e-3` -> its knob);
+        # what remains is then spelled like any other id, its ancestors included.
+        stripped = concept_tagging.strip_value_segments(cid)
+        return _spell(stripped if stripped else cid)
 
     return {cid: _canon(cid) for cid in ids if _canon(cid) != cid}
 
