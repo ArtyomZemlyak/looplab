@@ -210,3 +210,21 @@ def test_every_russian_prose_template_is_reachable_through_its_own_sentence():
         sample = re.sub(r"\{(\d+)\}", lambda m: f"v{m[1]}x", key)
         expected = re.sub(r"\{(\d+)\}", lambda m: f"v{m[1]}x", value)
         assert authored_text(sample, "ru") == expected, key
+
+
+def test_damaged_global_settings_never_take_down_a_run_scoped_paid_path(tmp_path):
+    """Only the display language is read from the global settings; the run's snapshot is the
+    contract, so a broken UI settings store keeps the snapshot's own language instead of raising."""
+    import json
+    from looplab.serve.llm_context import llm_settings
+    snapshot = Settings(output_language="en", llm_model="run-model")
+    (tmp_path / "config.snapshot.json").write_text(json.dumps(snapshot.model_dump(mode="json")), encoding="utf-8")
+    class Store:
+        def load_ui_settings(self):
+            return {"max_nodes": "not-a-number"}
+        def resolve_settings(self, overrides):
+            return Settings(**overrides)
+        def resolve_snapshot_settings(self, config):
+            return Settings(**config)
+    settings = llm_settings(Store(), tmp_path)
+    assert settings.output_language == "en" and settings.llm_model == "run-model"
