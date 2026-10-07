@@ -18,7 +18,6 @@ from looplab.core.config import read_config_snapshot
 from looplab.core.fitness import is_usable_metric
 from looplab.core.node_evidence import read_bounded_regular_file
 from looplab.engine.champion_caveats import champion_metric_caveats
-from looplab.engine.comparability import comparability_status, record_of
 from looplab.events.replay import flagged_node_ids, fold
 from looplab.events.eventstore import EventStoreLockError, interprocess_lock
 from looplab.events.eval_occupancy import _lifecycle
@@ -27,7 +26,7 @@ from looplab.events.run_generation import run_generation_token
 from looplab.engine.finalize import incomplete_finalize_scope
 from looplab.serve.engine_proc import _engine_liveness
 from looplab.serve.http import refusal
-from looplab.serve.node_comparison import completion_score_comparison
+from looplab.serve.node_comparison import completion_parents, completion_score_comparison
 from looplab.serve.run_result_summary import current_trust_signals
 from looplab.core.redact import redact_secrets
 
@@ -105,15 +104,8 @@ def _receipts(srv, rd: Path, expected_generation: str) -> tuple[str, list[dict]]
         if node.tombstoned or node.status not in ("evaluated", "failed"):
             continue
         aborted = node.id in state.aborted_nodes
-        parents = []
-        for pid in node.parent_ids[:8]:
-            parent = state.nodes.get(pid)
-            if parent is None or parent.tombstoned or parent.status != "evaluated" or pid in state.aborted_nodes:
-                continue
-            if node.parent_generations.get(str(pid)) != parent.attempt:
-                continue  # Resetting a parent cannot rewrite the child's historical comparison.
-            parents.append({"node_id": pid, "attempt": parent.attempt, "score": _score(parent),
-                            "comparability": comparability_status(record_of(node), record_of(parent))})
+        parents = [{**p, "score": _score(state.nodes[p["node_id"]])}
+                   for p in completion_parents(node, state)]
         row = {"id": f"node:{node.id}:{node.attempt}", "kind": "node", "node_id": node.id,
                "attempt": node.attempt, "status": "aborted" if aborted else node.status.value,
                "completed_seq": terminal_seq.get((node.id, node.attempt), -1),
