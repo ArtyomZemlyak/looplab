@@ -510,13 +510,19 @@ class RunControlTools:
         track = str(args.get("track") or "").strip()[:80]
         if not track:
             return "(evaluate_track needs `track`: a name under the task's eval.tracks)"
+        from looplab.engine.track_lane import MAX_TRACK_NODE_IDS
         raw = args.get("node_ids")
-        if raw in (None, [], "all"):
+        # The server intake's own shape, refused here as it refuses it (review 2026-10-08): an
+        # EXPLICIT empty list is not "every node" — it read as `all` and ran the track over the
+        # whole run — and a list past the bound is refused, never silently cut to its first ids.
+        if raw is None or raw == "all":
             node_ids = "all"
-        elif isinstance(raw, list) and all(type(x) is int and x >= 0 for x in raw):
-            node_ids = sorted(set(raw))[:256]
+        elif (isinstance(raw, list) and raw and len(raw) <= MAX_TRACK_NODE_IDS
+              and all(type(x) is int and x >= 0 for x in raw)):
+            node_ids = sorted(set(raw))
         else:
-            return "(node_ids must be a list of node ids, or omitted for every evaluated node)"
+            return (f"(node_ids must be a non-empty list of up to {MAX_TRACK_NODE_IDS} node ids, "
+                    "or omitted for every evaluated node)")
         data = {"track": track, "node_ids": node_ids}
         blocked, formed_generation = self._gate(
             name, rid, rd, f"run track {track} on {rid}",

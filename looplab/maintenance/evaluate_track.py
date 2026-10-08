@@ -15,19 +15,24 @@ THE PRECONDITION, and why it is strict. A track measures the node's ARTIFACTS, s
 the workdir holds what the node's evaluation produced: the node is evaluated in its CURRENT
 lifecycle, and the workdir's `.looplab-manifest` stamp equals the digest of the node's code and
 lifecycle (`engine/evaluate.py::workdir_manifest_digest`) — the stamp the engine writes after the
-files are on disk. A reset, a rebuild or a missing stamp is REFUSED for that node, never measured.
-A dry run (the default) runs nothing; `--apply` runs the tracks while holding the run's
-`engine.lock` (the backfill's `offline_run`), so no engine rebuilds a workdir under them.
+files are on disk. A reset, a rebuild, a linked workdir or a missing stamp is REFUSED for that node,
+never measured. A dry run (the default) runs nothing; `--apply` runs the tracks while holding the
+run's `engine.lock` (the backfill's `offline_run`), so no engine rebuilds a workdir under them.
+
+ONE STEP, TWO LANES (review 2026-10-08). The per-node step — the argv over the ABSOLUTE run
+directory, the run, the log written apart from it, the refusal re-asked after the command, the
+reading of its output — is the live lane's (`engine/track_lane.py::run_track_on_node`), and so are
+the declaration's validation (`track_spec`) and the refusal (`track_refusal`); this module keeps
+only what is offline's: the snapshot read, the lock, and the report.
 """
 from __future__ import annotations
 
 import json
 import time
 from pathlib import Path
-from typing import Optional
 
 from looplab.events.eventstore import EventStore
-from looplab.events.replay import fold
+from looplab.events.replay import fold, plan_extra_metrics_import
 from looplab.maintenance.import_metrics import MetricsInputRefusal
 
 
@@ -45,114 +50,108 @@ def read_track(run_dir: Path, track: str) -> dict:
     if not isinstance(tracks, dict) or track not in tracks:
         named = ", ".join(sorted(tracks)) if isinstance(tracks, dict) and tracks else "none"
         raise MetricsInputRefusal(f"the task declares no eval.tracks.{track} (declared: {named})")
-    entry = tracks[track]
-    if not isinstance(entry, dict) or not isinstance(entry.get("command"), list) or not entry["command"]:
+    entry = track_spec(spec, track)          # the live lane's reading of the same declaration
+    if entry is None:
         raise MetricsInputRefusal(f"eval.tracks.{track} has no command")
     return entry
 
 
-# The track's two rules are the LIVE engine's (`engine/track_lane.py`), re-exported here under the
-# names this module always had: one reading of a track's output and one refusal, offline or live.
-from looplab.engine.track_lane import parse_track_output, track_refusal  # noqa: E402,F401
+# The track's rules are the LIVE engine's (`engine/track_lane.py`), re-exported here under the names
+# this module always had: one reading of a track's output and one refusal, offline or live.
+from looplab.engine.track_lane import (MAX_TRACK_NODE_IDS, parse_track_output,  # noqa: E402,F401
+                                       run_track_on_node, track_argv, track_refusal, track_spec)
+
+
+def parse_nodes(nodes: str):
+    """`--nodes`: `"all"`, or the sorted distinct ids of a comma list. Raises MetricsInputRefusal."""
+    if nodes.strip().lower() == "all":
+        return "all"
+    try:
+        ids = sorted({int(x) for x in nodes.split(",") if x.strip()})
+    except ValueError:
+        raise MetricsInputRefusal(
+            f"--nodes must be 'all' or a comma list of ids, not {nodes!r}") from None
+    if not ids or any(i < 0 for i in ids):
+        raise MetricsInputRefusal(f"--nodes must name at least one node id >= 0, not {nodes!r}")
+    return ids
 
 
 def evaluate_track(run_dir: Path, track: str, nodes: str, *, apply: bool) -> str:
     """Plan (and with `apply`, run and record) `track` over `nodes` (`"all"` or `"3,5"`)."""
-    from looplab.engine.artifact_sync import (append_tool_log, mask_tool_text, passthrough_env,
-                                              render_argv, sync_cwd)
+    from looplab.engine.artifact_sync import passthrough_env
     from looplab.events.types import EV_EXTRA_METRICS_IMPORTED
     from looplab.maintenance.backfill_applied_params import offline_run
-    from looplab.runtime.sandbox import run_argv
-    run_dir = Path(run_dir)
+    # ABSOLUTE (review 2026-10-08): `{workdir}` rendered relative to a command run FROM that workdir
+    # resolved twice. The report still names the directory as the operator typed it.
+    named, run_dir = Path(run_dir), Path(run_dir).absolute()
     spec = read_track(run_dir, track)
+    wanted = parse_nodes(nodes)
     with offline_run(run_dir, hold=apply) as refusal:
         if refusal:
-            return f"{run_dir}: skipped — {refusal}"
+            return f"{named}: skipped — {refusal}"
         store = EventStore(str(run_dir / "events.jsonl"))
         state = fold(store.read_all())
-        if nodes.strip().lower() == "all":
-            ids = sorted(n.id for n in state.evaluated_nodes())
-        else:
-            try:
-                ids = sorted({int(x) for x in nodes.split(",") if x.strip()})
-            except ValueError:
-                raise MetricsInputRefusal(
-                    f"--nodes must be 'all' or a comma list of ids, not {nodes!r}") from None
+        ids = sorted(n.id for n in state.evaluated_nodes()) if wanted == "all" else wanted
+        # The declared credentials by NAME (`artifact_sync.py::passthrough_env`).
+        env = passthrough_env(spec)
         lines, recorded = [], 0
         for nid in ids:
             node = state.nodes.get(nid)
-            why = "no such node" if node is None else track_refusal(run_dir, node)
+            why = track_refusal(run_dir, node)
             if why:
                 lines.append(f"  node {nid}: refused — {why}")
                 continue
-            workdir = run_dir / "nodes" / f"node_{nid}"
-            argv = render_argv(spec["command"], {
-                "workdir": str(workdir), "run_dir": str(run_dir), "run_id": run_dir.name,
-                "node_id": nid, "generation": node.attempt})
             if not apply:
-                lines.append(f"  node {nid}: would run {' '.join(argv)}")
+                lines.append(f"  node {nid}: would run "
+                             f"{' '.join(track_argv(spec, run_dir, nid, node.attempt))}")
                 continue
-            started = time.monotonic()
-            try:
-                # The declared credentials by NAME, and the working directory they imply, as the
-                # copy-out (`engine/artifact_sync.py::sync_cwd`).
-                env = passthrough_env(spec)
-                rc, out, err, timed = run_argv(argv, sync_cwd(workdir, run_dir, spec),
-                                               float(spec.get("timeout") or 3600.0), env=env)
-                # MASKED at the write boundary (round 3): the passthrough values and every known
-                # secret, never the tool's raw bytes (`artifact_sync.py::append_tool_log`).
-                append_tool_log(run_dir / f"track_{track}.log", argv, out, err, env)
-            except (OSError, ValueError) as exc:
-                lines.append(f"  node {nid}: could not run — {type(exc).__name__}: "
-                             f"{mask_tool_text(str(exc), env)}")
+            run = run_track_on_node(spec, track, run_dir, nid, node.attempt, env=env,
+                                    declared=env, check=lambda: track_refusal(run_dir, node))
+            if run.outcome == "refused":
+                lines.append(f"  node {nid}: refused — {run.detail}")
                 continue
-            seconds = round(time.monotonic() - started, 1)
-            values = parse_track_output(out, keys=spec.get("keys"), prefix=str(spec.get("key_prefix") or ""))
-            if rc != 0 or timed or not values:
-                tail = mask_tool_text((err or "").strip(), env).splitlines()[-1:] or [""]
-                lines.append(f"  node {nid}: failed (exit {rc}{', timed out' if timed else ''}, "
-                             f"{len(values)} value(s), {seconds}s) {tail[0][:200]}")
+            if run.outcome != "ok":
+                lines.append(f"  node {nid}: failed ({run.detail}) [{run.seconds}s]")
                 continue
-            live = set(node.extra_metrics or {})
-            fresh = {k: v for k, v in values.items() if k not in live}
-            kept = sorted(set(values) & live)
+            # THE FOLD'S OWN RULE (`core/models.py::plan_extra_metrics_import`): only the keys it
+            # will keep are written, and the report says which it did not.
+            fresh, kept, dropped = plan_extra_metrics_import(node.extra_metrics, run.values)
             if fresh:
                 store.append(EV_EXTRA_METRICS_IMPORTED, {
                     "node_id": nid, "generation": node.attempt, "extra_metrics": fresh,
                     "source": f"track {track}"[:400], "imported_at": round(time.time(), 3)})
                 recorded += 1
-            lines.append(f"  node {nid}: {', '.join(f'{k}={v:.6g}' for k, v in sorted(values.items()))}"
-                         f" ({seconds}s)" + (f"; already carried, kept: {', '.join(kept)}" if kept else ""))
-    head = (f"{run_dir}: track {track!r} — recorded on {recorded} node(s)" if apply
-            else f"{run_dir}: track {track!r} — dry run, nothing executed (--apply runs it)")
+            lines.append(
+                f"  node {nid}: {', '.join(f'{k}={v:.6g}' for k, v in sorted(run.values.items()))}"
+                f" ({run.seconds}s)" + (f"; already carried, kept: {', '.join(kept)}" if kept else "")
+                + (f"; past the 256-key bound, not recorded: {', '.join(dropped[:8])}"
+                   if dropped else ""))
+    head = (f"{named}: track {track!r} — recorded on {recorded} node(s)" if apply
+            else f"{named}: track {track!r} — dry run, nothing executed (--apply runs it)")
     return "\n".join([head, *lines])
 
 
 def request_live_track(run_dir: Path, track: str, nodes: str) -> str:
     """Queue `track` over `nodes` for the run's LIVE engine (`engine/track_lane.py`): one
     `track_requested` control intent, validated as the server's intake validates it (the track is
-    declared, the ids exist). Holds no lock: a control intent is the one thing a CLI may append
-    beside a running engine (invariant #1)."""
+    declared, the ids exist, at most `MAX_TRACK_NODE_IDS` of them). Holds no lock: a control intent
+    is the one thing a CLI may append beside a running engine (invariant #1)."""
     from looplab.events.types import EV_TRACK_REQUESTED
     run_dir = Path(run_dir)
     read_track(run_dir, track)
+    node_ids = parse_nodes(nodes)
     store = EventStore(str(run_dir / "events.jsonl"))
     state = fold(store.read_all())
-    if nodes.strip().lower() == "all":
-        node_ids = "all"
-    else:
-        try:
-            node_ids = sorted({int(x) for x in nodes.split(",") if x.strip()})
-        except ValueError:
-            raise MetricsInputRefusal(
-                f"--nodes must be 'all' or a comma list of ids, not {nodes!r}") from None
+    if node_ids != "all":
+        if len(node_ids) > MAX_TRACK_NODE_IDS:
+            raise MetricsInputRefusal(f"--nodes names {len(node_ids)} ids; one request may name at "
+                                      f"most {MAX_TRACK_NODE_IDS}")
         missing = [n for n in node_ids if n not in state.nodes]
-        if missing or not node_ids:
-            raise MetricsInputRefusal(f"no node(s) {missing or nodes!r} in this run")
+        if missing:
+            raise MetricsInputRefusal(f"no node(s) {missing[:8]} in this run")
     store.append(EV_TRACK_REQUESTED, {"track": track, "node_ids": node_ids})
     position = len(state.track_requests) - state.tracks_done
     return (f"{run_dir}: track {track!r} queued for the live engine"
             + (f" behind {position} earlier request(s)" if position else "")
             + " — its numbers land as `extra_metrics_imported` rows (source: track "
             + f"{track}); a stopped run serves it on its next resume")
-

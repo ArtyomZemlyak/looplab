@@ -37,7 +37,9 @@ THREE PROPERTIES, each the reason for a choice:
   copy is NOT retried on resume: the operator's command is not known to be idempotent, so the
   started row is what tells them to run it again.
 * WHAT THE OPERATOR DECLARED, ONLY. The engine never picks a destination or a tool; an absent
-  declaration runs nothing.
+  declaration runs nothing. The placeholders render ABSOLUTE paths, and a workdir holding a link out
+  of itself that is not a declared mount is never copied (`links_outside`, review 2026-10-08): the
+  host tool would upload what the candidate's link names.
 """
 from __future__ import annotations
 
@@ -143,6 +145,72 @@ def workdir_stamp(workdir: Path) -> Optional[bytes]:
     return read_bounded_regular_file(Path(workdir) / ".looplab-manifest", 256)
 
 
+# How many workdir entries `links_outside` walks before it gives up — and REFUSES the copy, because a
+# link past the bound is a link nobody checked (a candidate can write a million empty files as
+# cheaply as one link). A runaway bound, not a knob: a scandir walk is ~1 s per million entries.
+LINK_SCAN_ENTRIES = 1_000_000
+_LINKS_NAMED = 8
+
+
+def declared_mounts(engine) -> dict:
+    """`{name in the workdir: declared source path}` for every data source and mounted reference the
+    engine links into a node's workdir (`engine/workspace_seed.py::link_input`) — the links out of
+    a workdir that are the OPERATOR's, not the candidate's."""
+    spec = getattr(engine, "_repo_spec", None) or {}
+    out: dict = {}
+    for name, entry in (spec.get("data") or {}).items():
+        path = entry.get("path") if isinstance(entry, dict) else entry
+        if isinstance(name, str) and name and isinstance(path, str) and path:
+            out[name] = path
+    for ref in spec.get("references") or []:
+        if isinstance(ref, dict) and ref.get("mount") and isinstance(ref.get("name"), str) \
+                and isinstance(ref.get("path"), str) and ref["name"] and ref["path"]:
+            out[ref["name"]] = ref["path"]
+    return out
+
+
+def links_outside(workdir, mounts=None) -> tuple[list, bool]:
+    """`(names, complete)`: the symlinks under `workdir` whose target resolves OUTSIDE it, relative
+    names in walk order, and whether the walk saw every entry (`LINK_SCAN_ENTRIES`). A declared
+    mount (`declared_mounts`) at its own name, still naming its declared source, is not one.
+
+    WHY (review 2026-10-08). The copy-out runs on the HOST with the operator's credentials, and a
+    tool that follows links (`aws s3 cp`, `mc cp`) uploads what a link names: a candidate on a
+    Docker tier — which cannot read `/root/.aws/credentials` itself — could plant
+    `ckpt -> /root/.aws/credentials` in its workdir, dangling in the container and live on the
+    host. A HARD link is not checked: one cannot be made across the container boundary, and a
+    host-tier candidate reads such a file directly anyway. Never follows a link while walking."""
+    workdir = str(workdir)
+    root = os.path.realpath(workdir)
+    allowed = {os.path.normpath(n): os.path.realpath(p) for n, p in (mounts or {}).items()}
+    found: list = []
+    seen = 0
+    stack = [workdir]
+    while stack:
+        try:
+            listing = os.scandir(stack.pop())
+        except OSError:
+            continue
+        with listing:
+            for entry in listing:
+                seen += 1
+                if seen > LINK_SCAN_ENTRIES:
+                    return found, False
+                try:
+                    if entry.is_symlink():
+                        rel = os.path.relpath(entry.path, workdir)
+                        target = os.path.realpath(entry.path)
+                        if allowed.get(os.path.normpath(rel)) == target:
+                            continue
+                        if target != root and not target.startswith(root.rstrip(os.sep) + os.sep):
+                            found.append(rel)
+                    elif entry.is_dir(follow_symlinks=False):
+                        stack.append(entry.path)
+                except OSError:
+                    continue
+    return found, True
+
+
 def engine_owns_run(engine) -> bool:
     """Whether `engine` is still inside its run's lifetime — the window in which it holds
     `engine.lock` and may append to the event log (round 3, critic c3 item 1).
@@ -172,7 +240,10 @@ def start_artifact_sync(engine, node_id: int, generation: int) -> Optional[str]:
     spec = sync_spec(getattr(engine, "_eval_spec", None))
     if spec is None:
         return None
-    run_dir = Path(engine.run_dir)
+    # ABSOLUTE before anything is rendered (review 2026-10-08, reproduced): under a relative
+    # `looplab run --out runs/demo` the argv named `{workdir}` relative while the command ran FROM
+    # that workdir, so `mc cp -r runs/demo/nodes/node_3 …` resolved twice and copied nothing.
+    run_dir = Path(engine.run_dir).absolute()
     # A REAL directory at both components, never a link (review 2026-10-08): `is_dir()` followed a
     # linked `nodes/node_N`, and the operator's command — run with the host's credentials — would
     # have uploaded whatever the link names. `node_workdir` is the refusal the log readers and
@@ -201,7 +272,10 @@ def start_artifact_sync(engine, node_id: int, generation: int) -> Optional[str]:
     try:
         engine.store.append(EV_ARTIFACT_SYNC_STARTED, {
             "node_id": node_id, "generation": generation, "sync_id": sync_id})
-    except OSError:
+    except (OSError, RuntimeError):
+        # RuntimeError too, as the receipt's append below (review 2026-10-08): the Replay and
+        # deletion write fences refuse a writer with RuntimeError subclasses, and this function
+        # promises never to raise — its caller is `_evaluate`, after the node's terminal.
         _LOG.warning("artifact sync of node %s: could not record its start; not running it",
                      node_id, exc_info=True)
         return None
@@ -318,7 +392,7 @@ def _mask_cut_edges(text: str, spellings) -> str:
     return text
 
 
-def mask_tool_text(text, env=None) -> str:
+def mask_tool_text(text, env=None, *, cut_edges: bool = True) -> str:
     """`text` as it may be WRITTEN anywhere: the passthrough VALUES this command was handed masked by
     identity — whatever their names, which `core/redact.py`'s env screen judges by shape and so would
     miss for `MC_HOST_minio` — in every spelling a tool prints them (`_spellings`), and any fragment
@@ -327,8 +401,10 @@ def mask_tool_text(text, env=None) -> str:
     entropy pass is not applied to a tool log, whose paths and hashes it would eat). A value under 4
     characters is not masked: it is no credential, and replacing it everywhere would garble the log.
 
-    `text` must be ONE captured stream (or one argv): the cut sits at its edges, so a caller holding
-    several masks each before joining them (`append_tool_log`)."""
+    `text` must be ONE captured stream: the cut sits at its edges, so a caller holding several masks
+    each before joining them (`append_tool_log`). `cut_edges=False` for a text NO capture cut — an
+    argv, an exception's message (review 2026-10-08): an edge that merely looks like the start or
+    the end of a passthrough value there is an ordinary word, and masking it garbled the record."""
     from looplab.core.redact import redact_output_tail
     text = str(text or "")
     values = {v for v in (env or {}).values() if isinstance(v, str) and len(v) >= 4}
@@ -336,7 +412,7 @@ def mask_tool_text(text, env=None) -> str:
     for value in sorted(spellings, key=len, reverse=True):
         if value in text:
             text = text.replace(value, _MASK)
-    if spellings:
+    if spellings and cut_edges:
         text = _mask_cut_edges(text, spellings)
     return redact_output_tail(text, entropy=False)
 
@@ -352,7 +428,7 @@ def append_tool_log(path, argv, out, err, env=None) -> None:
     # EACH STREAM MASKED ON ITS OWN, then joined (critic c3 item 5): the 64 KB capture cut sits at
     # the head of `out` and of `err`, which are the middle of the joined body, where an edge
     # fragment can no longer be told from ordinary text.
-    body = (f"$ {mask_tool_text(' '.join(str(a) for a in argv), env)}\n"
+    body = (f"$ {mask_tool_text(' '.join(str(a) for a in argv), env, cut_edges=False)}\n"
             + (f"{mask_tool_text(out, env)}\n" if out else "")
             + (f"{mask_tool_text(err, env)}\n" if err else ""))
     with _LOG_WRITE_LOCK, open(path, "a", encoding="utf-8") as fh:
@@ -383,7 +459,16 @@ def drain_before_release(engine, timeout: Optional[float] = None) -> bool:
     timeout = FINAL_DRAIN_S if timeout is None else timeout
     _LOG.info("waiting up to %.0fs for %d artifact copy-out(s) before the run is released",
               timeout, pending)
-    done = wait_for_inflight(timeout, engine=engine)
+    try:
+        done = wait_for_inflight(timeout, engine=engine)
+    except KeyboardInterrupt:
+        # A SECOND Ctrl-C while the run is being released (review 2026-10-08): the operator wants
+        # out now. Stop waiting and say what that leaves; the caller's own `finally` still retires
+        # the tracer (`Engine.retire_tracer`), after which no queued copy starts (`engine_owns_run`).
+        _LOG.warning("artifact sync: wait for %d copy-out(s) interrupted; the run is released and "
+                     "a queued copy will not start (its artifact_sync_started row stays open)",
+                     pending)
+        raise
     if not done:
         _LOG.warning("artifact sync: copy-outs still pending after %.0fs; the run is released and "
                      "a queued copy will not start (its artifact_sync_started row stays open)",
@@ -396,9 +481,10 @@ def _run(engine, node_id, generation, argv, workdir, run_dir, timeout, env=None,
     from looplab.runtime.sandbox import _run_argv
     _engine_redact = getattr(engine, "_redact", None) or (lambda text: text)
 
-    def redact(text):
-        # The passthrough values first (`mask_tool_text`), then the engine's own funnel.
-        return _engine_redact(mask_tool_text(text, env))
+    def redact(text, cut_edges=True):
+        # The passthrough values first (`mask_tool_text`), then the engine's own funnel. An argv
+        # entry was never cut, so its edges are not masked as if it had been.
+        return _engine_redact(mask_tool_text(text, env, cut_edges=cut_edges))
 
     # A COPY WHOSE ENGINE IS GONE IS NOT STARTED (critic c3 item 1). The non-daemon workers outlive
     # `Engine.run`, and a copy still queued then would run — and append its receipt — after the lock
@@ -418,7 +504,19 @@ def _run(engine, node_id, generation, argv, workdir, run_dir, timeout, env=None,
     # copy runs as it always did.)
     refused = accepted_stamp is not None and before != accepted_stamp
     out, err, rc, timed = "", "", None, False
+    # …NOR ONE WHOSE WORKDIR LINKS OUT OF ITSELF (review 2026-10-08): the host tool would upload
+    # what the candidate's link names (`links_outside`). Refused, and the receipt names the links.
+    linked: list = []
     if not refused:
+        outside, complete = links_outside(workdir, declared_mounts(engine))
+        if outside or not complete:
+            linked = outside or ["…"]
+            err = ("not run: the workdir links outside itself: "
+                   + ", ".join(outside[:_LINKS_NAMED]) + (" …" if len(outside) > _LINKS_NAMED else "")
+                   if outside else
+                   f"not run: the workdir holds more than {LINK_SCAN_ENTRIES} entries, and a link "
+                   "past them could not be checked")
+    if not refused and not linked:
         try:
             rc, out, err, timed = _run_argv(argv, cwd or str(workdir), timeout,
                                             env=dict(env or {}))
@@ -436,6 +534,8 @@ def _run(engine, node_id, generation, argv, workdir, run_dir, timeout, env=None,
     if refused:
         _LOG.warning("artifact sync of node %s (lifecycle %s) not run: the workdir was rebuilt "
                      "while the copy was queued", node_id, generation)
+    elif linked:
+        _LOG.warning("artifact sync of node %s not run: %s", node_id, err)
     elif rc != 0 or timed:
         _LOG.warning("artifact sync of node %s failed (exit %s%s); the node is unaffected — see "
                      "artifact_sync.log", node_id, rc, ", timed out" if timed else "")
@@ -449,9 +549,11 @@ def _run(engine, node_id, generation, argv, workdir, run_dir, timeout, env=None,
         engine.store.append(EV_ARTIFACT_SYNCED, {
             "node_id": node_id, "generation": generation,
             **({"sync_id": sync_id} if sync_id else {}),
-            "command": [redact(a) for a in argv], "exit_code": rc, "timed_out": bool(timed),
+            "command": [redact(a, cut_edges=False) for a in argv], "exit_code": rc,
+            "timed_out": bool(timed),
             **({"workdir_changed": True} if changed else {}),
-            **({"skipped": "workdir_changed"} if refused else {}),
+            **({"skipped": "workdir_changed"} if refused
+               else {"skipped": "workdir_links_outside"} if linked else {}),
             "seconds": seconds,
             # Redacted WHOLE, then cut (`engine/audit.py::Engine._redact`): a cut first can leave
             # the tail of a secret that straddled it unmasked.

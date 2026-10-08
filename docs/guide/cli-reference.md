@@ -2105,18 +2105,25 @@ looplab evaluate-track runs/v12 at200 --nodes 3,5 --apply # run and record
 ```
 
 The command's LAST stdout JSON object holds the numbers (`keys` filters, `key_prefix` renames).
-A node is measured only when it is evaluated in its current lifecycle AND its workdir's
-`.looplab-manifest` stamp matches its code — a reset or rebuilt workdir is refused, never measured.
+A node is measured only when it is evaluated in its current lifecycle AND its workdir — a real
+directory, not a link — carries a `.looplab-manifest` stamp matching its code
+(`eval_dispatch.py::produced_workdir`, the rule a parent's and a used artifact's workdir answer to):
+a reset or rebuilt workdir is refused, never measured, before the command and again after it.
 Results land beside the live metrics through the same row `import-metrics` writes
-(`extra_metrics_imported`, `source: track <name>`, reconstructed key by key); a recorded key can be the
-objective (`metric_retarget`). `--apply` holds `engine.lock`; output goes to `<run>/track_<name>.log`,
-written once the command exits with the `env_passthrough` values and every known secret masked, as is
-the failure line printed here.
+(`extra_metrics_imported`, `source: track <name>`, reconstructed key by key) — only the keys the node
+does not carry yet, inside its 256-key map, and the report names a key it kept or could not fit; a
+recorded key can be the objective (`metric_retarget`). `--apply` holds `engine.lock`; output goes to
+`<run>/track_<name>.log`, written once the command exits with the `env_passthrough` values and every
+known secret masked, as is the failure line printed here; a log that cannot be written leaves the
+measurement recorded. The placeholders render ABSOLUTE paths, also for a relative `RUN`. An unreadable
+run directory is a one-line refusal (exit 2), like a bad `--nodes`.
 `--live` queues the same track for the run's RUNNING engine instead (a `track_requested` intent; no
-stop, no `engine.lock`): it runs in a background worker on the run's own GPU pool — a track declaring
-`gpus: N` leases N devices from it — and the main task records its numbers; a stopped run keeps the
-request queued until it resumes (`engine/track_lane.py`). The Assistant's `evaluate_track` tool and
-the command API write the same intent.
+stop, no `engine.lock`; at most 256 ids): it runs in a background worker on the run's own GPU pool — a
+track declaring `gpus: N` leases N devices from it — and the main task records its numbers; a stopped
+run keeps the request queued until it resumes (`engine/track_lane.py`). A search that ends with a
+request queued serves it before it claims its finish; a stop, a pause or the spent wall clock cancels
+the one running and keeps the queue for the next engine, with no receipt. The Assistant's
+`evaluate_track` tool and the command API write the same intent.
 The command runs from the node's workdir (`score_service.py` above is a file there); a track
 declaring `env_passthrough` (credential NAMES read from the engine's environment) runs from the run
 directory instead — decided by the declaration, not by which names this host holds — so it names the
@@ -2142,7 +2149,11 @@ does not already have: a live value is never overwritten, so a second `--apply` 
 values ride the `declared` channel with NO direction, and the reconstruction marker names each
 imported key (`extra_metrics_backfill.keys`), so the UI labels exactly those keys `reconstructed`.
 `--source` is required and kept on every row; `--precision N` records how coarse the values are.
-`--apply` holds the run's `engine.lock` and refuses a live run.
+`--apply` holds the run's `engine.lock` and refuses a live run. The node's map holds at most 256 keys:
+the report counts only what the fold will keep and names any key past that bound
+(`core/models.py::plan_extra_metrics_import`, the fold's own rule). An import is no live record for
+`backfill-score-metrics`: a score-log backfill applied after it lands beside it, exactly as if it had
+come first. An unreadable run directory or file is a one-line refusal (exit 2).
 
 ## `backfill-score-metrics`
 

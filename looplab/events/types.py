@@ -962,7 +962,9 @@ EV_ARTIFACT_SYNCED = "artifact_synced"
 # retry: the operator's command is not known to be idempotent). DIAGNOSTIC for the same reasons.
 # A copy whose workdir was rebuilt while it waited in the queue is closed WITHOUT running, its
 # `artifact_synced` saying `skipped: "workdir_changed"` and `exit_code: null` (critic c3 item 1); one
-# whose engine ended first is never started and its start row stays open.
+# whose workdir links outside itself is closed the same way with `skipped: "workdir_links_outside"`
+# (review 2026-10-08, `engine/artifact_sync.py::links_outside`); one whose engine ended first is
+# never started and its start row stays open.
 EV_ARTIFACT_SYNC_STARTED = "artifact_sync_started"
 # AN OPERATOR IMPORT OF METRICS MEASURED AFTER THE RUN (`maintenance/import_metrics.py`, `looplab
 # import-metrics`; incident 2026-10-06: nodes scored at @20 were re-scored at @200 by a service, and

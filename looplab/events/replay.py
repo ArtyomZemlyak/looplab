@@ -30,7 +30,8 @@ from looplab.core.models import (Event, Idea, Node, NodeStatus, RunState, Trial,
                      EXTRA_METRIC_DECLARED, normalize_extra_metric_backfill,
                      normalize_extra_metric_channels, normalize_extra_metric_directions, normalize_extra_metrics,
                      normalize_activation_record, normalize_researcher_footprint,
-                     run_setup_key, search_outcome)
+                     run_setup_key, search_outcome,
+                     extra_metrics_are_imports_only, plan_extra_metrics_import)
 # No longer read here — the concept family's materializer inherits through it — but still readable
 # from this module as it always was (`tests/test_shared_identity_rules.py` derives the card ledger's
 # display set from it).
@@ -1347,7 +1348,8 @@ def _on_score_metrics_backfilled(st: RunState, e: Event, d: dict, ctx: "_FoldCtx
     """Apply objectives a score stage MEASURED and the record never kept.
 
     THE SAME RULE AS ITS SIBLING, and the whole safety of the mechanism: **a live record always
-    wins.** This writes only where the node's `extra_metrics` is empty. A backfill re-reads a
+    wins.** This writes only where the node's `extra_metrics` is empty — or holds operator IMPORTS
+    only, which are no live record (`_backfill_beside_imports`, review 2026-10-08). A backfill re-reads a
     `score.log` long after the eval, and a reconstruction may never overwrite a measurement made
     while the run was happening — which is also what makes a second pass idempotent by CONSTRUCTION
     rather than by a check that could drift.
@@ -1380,10 +1382,18 @@ def _on_score_metrics_backfilled(st: RunState, e: Event, d: dict, ctx: "_FoldCtx
     # legacy one and binds as it always did (`event_generation_binds`).
     if not _generation_matches(node, d):
         return
-    if node.extra_metrics:
-        return                      # a LIVE record. Never overwritten. This is the idempotence.
+    # A LIVE record — a measurement, or an earlier backfill — is never overwritten; this is the
+    # idempotence. An operator IMPORT is not one (`core/models.py::extra_metrics_are_imports_only`):
+    # it lands BESIDE, so the order of an import and this row must not decide what the node carries.
+    imports_only = extra_metrics_are_imports_only(node)
+    if node.extra_metrics and not imports_only:
+        return
     found = d.get("extra_metrics")
     if not isinstance(found, dict) or not found:
+        return
+    if imports_only:
+        _backfill_beside_imports(node, normalize_extra_metrics(found), d)
+        _apply_objective(st, node)
         return
     node.extra_metrics = normalize_extra_metrics(found)
     node.extra_metrics_provenance = normalize_extra_metric_channels(
@@ -1415,6 +1425,33 @@ def _on_score_metrics_backfilled(st: RunState, e: Event, d: dict, ctx: "_FoldCtx
     _apply_objective(st, node)
 
 
+def _backfill_beside_imports(node, found: dict, d: dict) -> None:
+    """A score-log backfill landing AFTER operator imports: the node it describes as if it had come
+    first (review 2026-10-08). Its recovered values win a key both name — the import would have kept
+    them, a live record winning — and the imports keep the rest inside the 256-key bound, in name
+    order, exactly as `_on_extra_metrics_imported` would have added them beside it. The marker keeps
+    the import's `sources` only for the keys still imported; the FIRST reconstruction's time stands
+    (here the import's, by the log's own order)."""
+    marker = dict(node.extra_metrics_backfill or {})
+    room = max(0, 256 - len(found))
+    imported = dict(sorted((k, v) for k, v in (node.extra_metrics or {}).items()
+                           if k not in found)[:room])
+    decimals = {k: v for k, v in (marker.get("precision_decimals") or {}).items() if k in imported}
+    if isinstance(d.get("precision_decimals"), dict):
+        decimals.update(d["precision_decimals"])
+    node.extra_metrics = {**found, **imported}
+    node.extra_metrics_provenance = normalize_extra_metric_channels(
+        {k: EXTRA_METRIC_DECLARED for k in node.extra_metrics})
+    node.extra_metrics_backfill = normalize_extra_metric_backfill({
+        "backfilled": True,
+        "backfilled_at": (marker.get("backfilled_at") if marker.get("backfilled_at") is not None
+                          else d.get("read_at")),
+        "precision_decimals": decimals,
+        "keys": sorted(node.extra_metrics),
+        "sources": {k: v for k, v in (marker.get("sources") or {}).items() if k in imported},
+    })
+
+
 def _on_extra_metrics_imported(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
     """An operator IMPORTED metrics measured after the run (`maintenance/import_metrics.py`).
 
@@ -1431,14 +1468,13 @@ def _on_extra_metrics_imported(st: RunState, e: Event, d: dict, ctx: "_FoldCtx")
     node = st.nodes.get(node_id) if node_id is not None else None
     if node is None or node.task_metric is None or not _generation_matches(node, d):
         return
-    found = normalize_extra_metrics(d.get("extra_metrics"))
     live = dict(node.extra_metrics or {})
     # The map stays inside the SAME 256-key bound every other writer of it is held to
     # (`normalize_extra_metrics`), and the marker names every reconstructed key within it: an
     # unbounded merge let a late-sorting imported key fall off the marker's capped `keys` and read
-    # as a LIVE measurement (critic 2026-10-08). Keys past the bound are dropped, in name order.
-    room = max(0, 256 - len(live))
-    added = dict(sorted((k, v) for k, v in found.items() if k not in live)[:room])
+    # as a LIVE measurement (critic 2026-10-08). Keys past the bound are dropped, in name order —
+    # by `core/models.py::plan_extra_metrics_import`, the rule each writer reports through too.
+    added, _kept, _dropped = plan_extra_metrics_import(live, d.get("extra_metrics"))
     if not added:
         return
     marker = dict(node.extra_metrics_backfill or {})

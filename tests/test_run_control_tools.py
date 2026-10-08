@@ -1379,6 +1379,24 @@ def test_evaluate_track_is_absent_by_default_and_queues_a_request_when_wired(tmp
     assert "needs `track`" in t.execute("evaluate_track", {"run_id": "svc"})
 
 
+def test_evaluate_track_refuses_what_the_server_intake_refuses(tmp_path):
+    """review 2026-10-08: an explicit `[]` read as `all` and ran the track over the whole run, and
+    257 ids were silently cut to 256 where the server's intake refuses them. Both are refused now,
+    and nothing is submitted."""
+    rd = tmp_path / "svc"
+    _run(rd)
+    commands = _RecordingCommands(tmp_path, append=False)
+    t = RunControlTools(tmp_path, alive_fn=lambda _rd: False, mode="auto",
+                        command_service=commands, allow_tracks=True)
+    for bad in ([], list(range(257)), [1, -2], "some"):
+        out = t.execute("evaluate_track", {"run_id": "svc", "track": "at200", "node_ids": bad})
+        assert "non-empty list of up to 256" in out, (bad, out)
+    assert commands.calls == []
+    assert "queued" in t.execute("evaluate_track", {"run_id": "svc", "track": "at200",
+                                                    "node_ids": list(range(256))})
+    assert commands.calls[0][2]["node_ids"] == list(range(256))
+
+
 def test_the_track_switch_has_one_reader():
     from types import SimpleNamespace
 

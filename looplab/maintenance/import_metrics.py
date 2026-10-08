@@ -28,7 +28,7 @@ from pathlib import Path
 from typing import Optional
 
 from looplab.events.eventstore import EventStore
-from looplab.events.replay import fold
+from looplab.events.replay import fold, plan_extra_metrics_import
 
 
 class MetricsInputRefusal(ValueError):
@@ -80,11 +80,14 @@ def plan_import(run_dir: Path, metrics: dict[int, dict[str, float]], *, source: 
         if node.task_metric is None:
             notes.append(f"node {node_id}: not evaluated in its current lifecycle")
             continue
-        live = set(node.extra_metrics or {})
-        fresh = {k: v for k, v in metrics[node_id].items() if k not in live}
-        kept = sorted(set(metrics[node_id]) & live)
+        # THE FOLD'S OWN RULE (`core/models.py::plan_extra_metrics_import`): the report names what
+        # the fold will keep, and a key past the map's 256-key bound is said, never "imported".
+        fresh, kept, dropped = plan_extra_metrics_import(node.extra_metrics, metrics[node_id])
         if kept:
             notes.append(f"node {node_id}: already carries {', '.join(kept)} — kept, not overwritten")
+        if dropped:
+            notes.append(f"node {node_id}: {len(dropped)} key(s) past the map's 256-key bound, not "
+                         f"imported: {', '.join(dropped[:8])}{' …' if len(dropped) > 8 else ''}")
         if not fresh:
             continue
         row = {"node_id": node_id, "generation": node.attempt, "extra_metrics": fresh,

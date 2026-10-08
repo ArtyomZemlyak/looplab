@@ -173,3 +173,142 @@ def test_a_tool_that_echoes_a_passthrough_secret_leaves_it_in_no_file(tmp_path, 
     assert "host ***REDACTED_ENV***" in log and "error: ***REDACTED_ENV***" in log, log
     assert "Zq8vR2kLp0sWx7Tn" not in log
     assert "Zq8vR2kLp0sWx7Tn" not in (tmp_path / "run" / "events.jsonl").read_text()
+
+
+# ------------------------------------------------------------------ review 2026-10-08
+
+_MARK = ("import pathlib, sys; pathlib.Path(sys.argv[1]).write_text('ran'); "
+         "sys.exit(0 if pathlib.Path(sys.argv[2]).is_dir() else 4)")
+
+
+def _synced(engine):
+    assert artifact_sync.wait_for_inflight(30)
+    return [e.data for e in engine.store.read_all() if e.type == "artifact_synced"]
+
+
+def test_a_relative_run_dir_renders_absolute_placeholders(tmp_path, monkeypatch):
+    """Reproduced: under `looplab run --out runs/demo` the argv named `{workdir}` relative to a
+    command run FROM that workdir, so it resolved twice — `runs/demo/nodes/node_0/runs/demo/…`."""
+    import os
+    from pathlib import Path
+    monkeypatch.chdir(tmp_path)
+    engine = make_engine(Path("run"))
+    assert not Path(engine.run_dir).is_absolute()
+    (tmp_path / "run" / "nodes" / "node_0").mkdir(parents=True)
+    engine._eval_spec = {"artifact_sync": {"command": [
+        sys.executable, "-c", _MARK, str(tmp_path / "ran.txt"), "{workdir}"]}}
+    artifact_sync.start_artifact_sync(engine, 0, 0)
+    rows = _synced(engine)
+    assert rows[-1]["exit_code"] == 0, rows[-1]
+    assert os.path.isabs(rows[-1]["command"][-1])
+
+
+def test_a_workdir_linking_outside_itself_is_never_copied(tmp_path):
+    """A candidate on a Docker tier cannot read `/root/.aws/credentials`, but it can leave
+    `ckpt -> /root/.aws/credentials` in its workdir, and the HOST tool would upload what it names."""
+    import os
+    engine = make_engine(tmp_path / "run")
+    wd = tmp_path / "run" / "nodes" / "node_0"
+    (wd / "sub").mkdir(parents=True)
+    secret = tmp_path / "home" / ".aws" / "credentials"
+    secret.parent.mkdir(parents=True)
+    secret.write_text("aws_secret_access_key=x")
+    os.symlink(secret, wd / "sub" / "ckpt")
+    os.symlink("sub", wd / "inside")                           # a link inside the workdir is fine
+    engine._eval_spec = {"artifact_sync": {"command": [
+        sys.executable, "-c", _MARK, str(tmp_path / "ran.txt"), "{workdir}"]}}
+    artifact_sync.start_artifact_sync(engine, 0, 0)
+    row = _synced(engine)[-1]
+    assert not (tmp_path / "ran.txt").exists(), "the command never ran"
+    assert row["skipped"] == "workdir_links_outside" and row["exit_code"] is None
+    assert os.path.join("sub", "ckpt") in row["stderr_tail"] and "inside" not in row["stderr_tail"]
+
+
+def test_a_declared_data_mount_is_the_operators_link_not_the_candidates(tmp_path):
+    import os
+    engine = make_engine(tmp_path / "run")
+    data = tmp_path / "datasets" / "train"
+    data.mkdir(parents=True)
+    wd = tmp_path / "run" / "nodes" / "node_0"
+    wd.mkdir(parents=True)
+    os.symlink(data, wd / "data")
+    engine._repo_spec = {"data": {"data": {"path": str(data), "mount": True}}}
+    engine._eval_spec = {"artifact_sync": {"command": [
+        sys.executable, "-c", _MARK, str(tmp_path / "ran.txt"), "{workdir}"]}}
+    artifact_sync.start_artifact_sync(engine, 0, 0)
+    assert _synced(engine)[-1]["exit_code"] == 0
+    # …but the same name repointed by the candidate is not the declared mount any more.
+    os.unlink(wd / "data")
+    os.symlink(tmp_path / "home", wd / "data")
+    artifact_sync.start_artifact_sync(engine, 0, 1)
+    assert _synced(engine)[-1].get("skipped") == "workdir_links_outside"
+
+
+def test_a_start_row_a_write_fence_refuses_is_no_raise(tmp_path, monkeypatch):
+    """The function promises never to raise; a Replay/deletion fence refuses with RuntimeError."""
+    engine = make_engine(tmp_path / "run")
+    (tmp_path / "run" / "nodes" / "node_0").mkdir(parents=True)
+    engine._eval_spec = {"artifact_sync": {"command": [sys.executable, "-c", "print(1)"]}}
+
+    class _WriteFence(RuntimeError):            # the shape of the store's write-fence refusals
+        pass
+
+    def _fenced(*_a, **_k):
+        raise _WriteFence("a Replay owns this run")
+
+    monkeypatch.setattr(engine.store, "append", _fenced)
+    assert artifact_sync.start_artifact_sync(engine, 0, 0) is None
+
+
+def test_an_argv_is_not_masked_as_if_a_capture_had_cut_it(tmp_path, monkeypatch):
+    """`mask_tool_text`'s cut-edge rule is for a CAPTURED stream; an argv word that only looks like
+    the start of a passthrough value was masked in the log line and the receipt."""
+    secret = "bucketprod-Zq8vR2kLp0"
+    monkeypatch.setenv("MC_HOST_minio", secret)
+    engine = make_engine(tmp_path / "run")
+    (tmp_path / "run" / "nodes" / "node_0").mkdir(parents=True)
+    engine._eval_spec = {"artifact_sync": {"command": [sys.executable, "-c", "pass", "bucketprod"],
+                                           "env_passthrough": ["MC_HOST_minio"]}}
+    artifact_sync.start_artifact_sync(engine, 0, 0)
+    row = _synced(engine)[-1]
+    assert row["command"][-1] == "bucketprod", row["command"]
+    assert (tmp_path / "run" / "artifact_sync.log").read_text().splitlines()[0].endswith(
+        "bucketprod")
+    # A captured stream's edge still is: the cut can leave a value's prefix at its tail.
+    assert artifact_sync.mask_tool_text("tail bucketprod", {"K": secret}).endswith("***")
+
+
+def test_a_second_ctrl_c_during_the_release_wait_still_retires_the_tracer(monkeypatch):
+    import pytest
+    from looplab.engine.orchestrator import Engine
+    shut = []
+
+    class _Tracer:
+        def shutdown(self, timeout_millis):
+            shut.append(timeout_millis)
+            return True
+
+    host = Engine.__new__(Engine)
+    host.tracer = _Tracer()
+
+    def _interrupted(_engine, timeout=None):
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(artifact_sync, "drain_before_release", _interrupted)
+    with pytest.raises(KeyboardInterrupt):
+        Engine.retire_tracer(host)
+    assert shut, "the terminal barrier is reached whatever the wait ends in"
+
+
+def test_the_release_wait_says_what_an_interrupt_leaves(monkeypatch, caplog):
+    import pytest
+    host = object()
+    monkeypatch.setitem(artifact_sync._PENDING_BY_OWNER, id(host), 2)
+
+    def _interrupted(timeout=None, engine=None):
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(artifact_sync, "wait_for_inflight", _interrupted)
+    with pytest.raises(KeyboardInterrupt), caplog.at_level("WARNING"):
+        artifact_sync.drain_before_release(host, timeout=5)
+    assert "interrupted" in caplog.text and "stays open" in caplog.text
