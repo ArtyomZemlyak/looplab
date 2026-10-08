@@ -9,11 +9,13 @@ export const RUN_ROUTE_TABS = ['Overview', 'Comments', 'Trials', 'Trace', 'Code'
 // and the menu item would look broken with no error anywhere. Membership is not permission — whether
 // the panel may OPEN is `RunView.jsx::HISTORY_SAFE_PANELS`, and whether it may SUBMIT is
 // `forkFromSeqModel.js::forkGestureAccess`. It is deliberately NOT in `REVIEW_SAFE_PANEL_NAMES`
-// below: branching steers the run, which no review capability grants.
+// below: branching steers the run, which no review capability grants. `inject` is the hand-authored
+// experiment / artifact form (`InjectNodePanel.jsx`, doc 73 §1.4): owner-only for the same reason,
+// and absent from both safe sets in `RunView.jsx`, so a snapshot or a start-over never opens it.
 export const RUN_ROUTE_PANELS = [
   'overview', 'queue', 'research', 'agent', 'failures', 'trust', 'pareto', 'data',
   'compare', 'sensitivity', 'importance', 'crossrun', 'artifacts', 'registry', 'memory',
-  'collab', 'authoring', 'events', 'gpu', 'config', 'fork',
+  'collab', 'authoring', 'events', 'gpu', 'config', 'fork', 'inject',
 ]
 // The Card board is no longer a panel: it is the `cards` workspace view. `?panel=hypotheses` was a
 // live deep link (and the run menu's own spelling), so it is MIGRATED rather than rejected —

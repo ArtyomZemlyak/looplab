@@ -784,6 +784,13 @@ A node built FROM a consumer (an improve, a merge, an ablation) inherits its par
 the copied code still finds its data. On a Docker tier each used workdir is bound read-only at its
 own path. The canary (`eval_canary`) is skipped for an artifact: it passes only on a metric.
 
+**The Researcher may propose them too**, under `Settings.researcher_artifacts` (off by default;
+`agents/artifact_ideas.py`). On, its emit schema shows `node_kind` and `uses` and its user turn
+lists the run's PRODUCED ARTIFACTS, so it can have an expensive preparation step done once and have
+later experiments read it. The two fields ride the idea (`Idea.node_kind`/`Idea.uses`, hidden from
+every other run's schema and omitted from every dump when empty); the fold makes such a node an
+artifact and keeps only `uses` ids that name artifact nodes.
+
 **The consumer fence** (`engine/artifact_fence.py`). A consumer reads exactly the artifact it was
 admitted with, or does not run. While a producer is being produced again (an operator `node_reset`
 put it back to pending) its consumers WAIT — their evaluation is not dispatched until it settles. A

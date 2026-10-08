@@ -1102,6 +1102,12 @@ def _normalize_inject_node(ctx: _ControlIntake) -> dict:
     unknown_idea = set(idea) - set(Idea.model_fields)
     if unknown_idea:
         raise HTTPException(400, f"idea has unknown field(s): {', '.join(sorted(unknown_idea))}")
+    # `Idea.node_kind`/`Idea.uses` carry a RESEARCHER's artifact proposal (doc 73 §1.4,
+    # `agents/artifact_ideas.py`); an inject states them at the TOP LEVEL, where
+    # `_normalize_artifact_fields` refuses an unproduced producer. Inside the idea they would skip it.
+    if {"node_kind", "uses"} & set(idea):
+        raise HTTPException(400, "put node_kind and uses at the top level of inject_node, "
+                                 "not inside its idea")
     operator = idea.get("operator")
     if not isinstance(operator, str) or not operator.strip():
         raise HTTPException(400, "idea.operator must be a non-empty string")

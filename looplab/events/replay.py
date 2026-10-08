@@ -401,6 +401,20 @@ def _inherited_uses(st: RunState, parent_ids: list) -> list:
     return out[:32]
 
 
+def _idea_uses(st: RunState, declared) -> list:
+    """The artifacts a RESEARCHER-proposed idea declares it reads (doc 73 §1.4, stage 3;
+    `core/models.py::Idea.uses`), kept only where the id names an artifact node already in the fold
+    — a proposal is a model's text, so an id that names nothing, or an experiment, costs the link and
+    never a malformed node. Whether the producer is PRODUCED is the consumer fence's question at
+    evaluation time (`engine/artifact_fence.py`), not the fold's."""
+    out: list = []
+    for used in declared or []:
+        producer = st.nodes.get(used)
+        if used not in out and getattr(producer, "kind", None) == "artifact":
+            out.append(used)
+    return out[:32]
+
+
 def _on_node_created(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
     # Don't let a duplicate node_created RESURRECT a settled node (invariant #2 "first terminal
     # wins"): if the id already exists AND is in a TERMINAL state (evaluated/failed), skip the event.
@@ -473,6 +487,7 @@ def _on_node_created(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
     )
     try:
         receipt = _simplification_receipt(d, parent_ids, st)
+        idea = Idea(**d["idea"])
         n = Node(
             id=nid,
             parent_ids=parent_ids,
@@ -484,7 +499,7 @@ def _on_node_created(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
                 for parent_id in parent_ids
             },
             operator=d["operator"],
-            idea=Idea(**d["idea"]),
+            idea=idea,
             code=d.get("code", ""),
             files=d.get("files", {}) or {},
             deleted=d.get("deleted", []) or [],
@@ -495,9 +510,13 @@ def _on_node_created(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
             # historical snapshot) and edited its idea. Additive with a reader-side default, so old
             # logs fold byte-identically (invariant 5).
             forked_from=d.get("forked_from"),
-            kind=("artifact" if d.get("node_kind") == "artifact" else None),
+            # The operator's inject writes the top-level keys; a Researcher's proposal carries them
+            # on its idea (doc 73 §1.4, stage 3) — absent on every other idea, so nothing changes.
+            kind=("artifact" if d.get("node_kind") == "artifact" or idea.node_kind == "artifact"
+                  else None),
             uses=([x for x in d["uses"][:32] if type(x) is int and x >= 0]
-                  if isinstance(d.get("uses"), list) else _inherited_uses(st, parent_ids)),
+                  if isinstance(d.get("uses"), list)
+                  else (_idea_uses(st, idea.uses) or _inherited_uses(st, parent_ids))),
             research_origin=d.get("research_origin"),   # 💡 proposed just after a deep-research memo
             model_arm=str(d.get("model_arm") or "")[:64],  # doc 52 row 19: the routed model arm
             # doc 67 67.5: the node's parent with one block commented out, or None — and the cut it

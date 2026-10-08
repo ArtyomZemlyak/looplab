@@ -610,7 +610,7 @@ class LLMResearcher:
     def __init__(self, client: LLMClient, space_hint: str = "",
                  bounds: Optional[dict] = None, parser: str = "tool_call",
                  prompts: Optional[PromptStore] = None, track_hypotheses: bool = True,
-                 offer_sweep: bool = True):
+                 offer_sweep: bool = True, artifact_ideas: bool = False):
         self.client = client
         self.space_hint = space_hint
         self.bounds = bounds
@@ -620,6 +620,9 @@ class LLMResearcher:
         # P6: offer the intra-node sweep only when the active Developer implements `idea.space`
         # (make_roles sets this post-construction; default True keeps direct constructions as-is).
         self.offer_sweep = offer_sweep
+        # A Researcher that may PROPOSE artifact nodes (doc 73 §1.4, `agents/artifact_ideas.py`):
+        # OFF here because it changes the emit schema and the user turn; `make_roles` sets it.
+        self.artifact_ideas = bool(artifact_ideas)
 
     def propose(self, state: RunState, parent: Optional[Node]) -> Idea:
         # Operator steering (Phase 5 `hint` control events): fold them into the prompt so a live
@@ -636,6 +639,8 @@ class LLMResearcher:
         # - _novelty_hint — slice 2/4: the Strategist's novelty stance directive + coverage gaps
         #   (EXPLORE a new theme / EXPLOIT the leader). Empty when stance is "balanced" (today).
         cues = collect_hint_cues(self, RESEARCHER_PROMPT_CUES)
+        _artifacts = getattr(self, "artifact_ideas", False) is True
+        from looplab.agents.artifact_ideas import artifact_cue, drop_artifact_fields, emission_model
         hyp_sys = _hypothesis_system_suffix(self.track_hypotheses)
         prompt_attempt = int(getattr(self, "_board_prompt_attempt", 0))
         self._board_prompt_attempt = prompt_attempt + 1
@@ -692,7 +697,8 @@ class LLMResearcher:
                                                      verdict_support=bool(getattr(
                                                          self, "_verdict_support", False)))
                                         + "\n" + self.space_hint +
-                                        hint_block + cues +
+                                        hint_block + cues
+                                        + (artifact_cue(state) if _artifacts else "") +
                                         "\nPropose the next Idea (operator, params, rationale, concept_mode, "
                                         "concepts/concepts_added/concepts_removed"
                                         + (", hypothesis" if self.track_hypotheses else "") +
@@ -738,10 +744,12 @@ class LLMResearcher:
             try:
                 # modern model output must choose full vs delta explicitly. The durable
                 # Idea reader stays tolerant for historical/future logs, so writers cross this boundary.
-                parsed = parse_structured(self.client, messages, IdeaEmission, self.parser)
+                parsed = parse_structured(self.client, messages, emission_model(_artifacts),
+                                          self.parser)
                 # Preserve the long-standing injectable parser seam used by custom integrations/test
                 # doubles: the real parser returns IdeaEmission, while a trusted adapter may return Idea.
                 idea = parsed.to_idea() if isinstance(parsed, IdeaEmission) else Idea.model_validate(parsed)
+                idea = drop_artifact_fields(idea, _artifacts)
                 break
             except ParseError as e:
                 last = e

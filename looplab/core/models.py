@@ -8,6 +8,7 @@ from typing import Any, Literal, Optional
 
 from pydantic import (BaseModel, ConfigDict, Field, field_serializer, field_validator,
                       model_serializer, model_validator)
+from pydantic.json_schema import SkipJsonSchema
 
 from looplab.core.cards import (
     CARD_ACTION_DIGEST_V1_FIELDS as _CARD_ACTION_DIGEST_V1_FIELDS,
@@ -1040,6 +1041,35 @@ class Idea(BaseModel):
     # eval_profile); None => today's behavior. Timeout is NOT here — it stays the single canonical
     # eval_timeout, clamped to a Settings ceiling (docs/23 owner decision 3).
     footprint: Optional[dict] = None
+    # A RESEARCHER-PROPOSED ARTIFACT (doc 73 §1.4, stage 3): `node_kind: "artifact"` asks for a node
+    # that PRODUCES what later experiments read (a prepared dataset) instead of a candidate, and
+    # `uses` names the produced artifact nodes THIS experiment reads (`LOOPLAB_USES_WORKDIRS`). The
+    # fold derives `Node.kind`/`Node.uses` from them when `node_created` carries no top-level key
+    # (`events/replay.py::_on_node_created`, `_idea_uses`), keeping only real artifact producers, so a
+    # wrong id costs the link and never a malformed node.
+    #
+    # HIDDEN FROM THE JSON SCHEMA (`SkipJsonSchema`) and OMITTED FROM EVERY DUMP WHEN EMPTY
+    # (`_omit_absent_concept_mode`): `IdeaEmission.model_json_schema()` IS the Researcher's emit
+    # tool, so a visible field would change the prompt of every run. Only
+    # `ArtifactIdeaEmission`, chosen under `Settings.researcher_artifacts`, shows them to the model.
+    node_kind: SkipJsonSchema[Optional[str]] = None
+    uses: SkipJsonSchema[list[int]] = Field(default_factory=list)
+
+    @field_validator("node_kind", mode="before")
+    @classmethod
+    def _read_node_kind(cls, value):
+        return "artifact" if value == "artifact" else None
+
+    @field_validator("uses", mode="before")
+    @classmethod
+    def _read_uses(cls, value):
+        if not isinstance(value, list):
+            return []
+        out: list[int] = []
+        for item in value[:32]:
+            if type(item) is int and item >= 0 and item not in out:
+                out.append(item)
+        return out
 
     @field_validator("card_id", "parent_card_id", mode="before")
     @classmethod
@@ -1171,6 +1201,13 @@ class Idea(BaseModel):
         payload = handler(self)
         if self.concept_mode is None and isinstance(payload, dict):
             payload.pop("concept_mode", None)
+        # …and the two artifact fields (doc 73 §1.4) when empty, so every idea that names neither —
+        # every idea of every run before them — dumps byte for byte as before.
+        if isinstance(payload, dict):
+            if self.node_kind is None:
+                payload.pop("node_kind", None)
+            if not self.uses:
+                payload.pop("uses", None)
         return payload
 
     @field_validator("concepts", "concepts_added", "concepts_removed", mode="before")
@@ -1394,6 +1431,27 @@ class IdeaEmission(Idea):
     def to_idea(self) -> Idea:
         """Cross the strict writer boundary into the forward-compatible durable model."""
         return Idea.model_validate(self.model_dump(mode="json"))
+
+
+class ArtifactIdeaEmission(IdeaEmission):
+    """`IdeaEmission` with the two artifact fields VISIBLE to the model (doc 73 §1.4, stage 3) — the
+    emit schema of a Researcher built under `Settings.researcher_artifacts`. Everything else, the
+    strict concept envelope included, is inherited unchanged."""
+
+    node_kind: Optional[Literal["artifact"]] = Field(
+        default=None,
+        description=(
+            'Optional. "artifact" makes this a PREPARATION node instead of an experiment: its '
+            "pipeline produces something later experiments read (a cleaned/split/featurized "
+            "dataset, a cache), it succeeds on a clean run with NO metric and is never ranked. "
+            "Propose one only when several later experiments would otherwise each redo the same "
+            "expensive preparation. Omit for an ordinary experiment."))
+    uses: list[int] = Field(
+        default_factory=list, max_length=32,
+        description=(
+            "Optional. The node ids of PRODUCED artifact nodes this experiment reads, exactly as "
+            "listed under PRODUCED ARTIFACTS; its evaluation gets their directories in the "
+            "LOOPLAB_USES_WORKDIRS environment variable (os.pathsep-joined, read-only)."))
 
 
 # The optimization direction a task's metric is scored under. There is no safe default: a task that

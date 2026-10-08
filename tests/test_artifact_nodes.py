@@ -152,6 +152,16 @@ def test_uses_must_name_a_produced_artifact(_client):
     # (The inject then waits on an engine to acknowledge it; the engine half is driven below.)
 
 
+def test_an_inject_may_not_carry_the_artifact_fields_inside_its_idea(_client):
+    """`Idea.node_kind`/`Idea.uses` are the Researcher's channel (doc 73 §1.4, stage 3); inside an
+    inject's idea they would skip the top-level produced-artifact refusal."""
+    client, _store = _client
+    for extra in ({"uses": [0]}, {"node_kind": "artifact"}):
+        answer = _inject(client, {"idea": {"operator": "inject", "rationale": "r", **extra}})
+        assert _code(answer)[0] == "rejected", answer.json()
+        assert "top level of inject_node" in str(answer.json()), answer.json()
+
+
 def test_node_kind_is_artifact_or_absent(_client):
     client, _store = _client
     status, code = _code(_inject(client, {"idea": {"operator": "inject"}, "node_kind": "dataset"}))

@@ -358,6 +358,8 @@ def make_roles(task: TaskAdapter, settings, run_dir=None, *, _developer_role: st
         researcher.offer_sweep = _offer_sweep     # plain LLMResearcher path (ctor default is True)
     except Exception:  # noqa: BLE001 — duck-typed researchers without settable attrs are fine
         pass
+    from looplab.agents.artifact_ideas import mark_artifact_researcher   # doc 73 §1.4
+    _artifact_ideas = mark_artifact_researcher(researcher, settings)
     # `researcher_tools` is the master switch for the tool-using Researcher: an explicit opt-out yields
     # a PLAIN LLMResearcher even when other tool sources (knowledge_dir — now on by default — cross-run,
     # skills) are configured, so the flag's meaning stays "no tool loop", not just "no run-introspection".
@@ -376,7 +378,7 @@ def make_roles(task: TaskAdapter, settings, run_dir=None, *, _developer_role: st
             loop_opts=loop_opts_from_settings(settings),     # B1 stuck + C1 self-plan + C2 summary
             offer_sweep=_offer_sweep,      # P6/P21: sweep offer only where idea.space is honored
             handoff=_handoff_dev,          # P25: summary call only for the run_phase repo Developer
-            evidence_envelope=envelope_enabled(settings),   # TAT-02: its tool results fenced
+            evidence_envelope=envelope_enabled(settings), artifact_ideas=_artifact_ideas,  # TAT-02
         )
     # The third gate, applied last because it RANKS whatever the two above settled on.
     _ranked_developer = best_of_n_developer(task, settings, developer, param_search=_param_search)

@@ -112,7 +112,7 @@ def test_neither_module_is_a_god_module_again():
     extraction happened (`normalize_task` -> `adapters/task_schema.py`) and the cap FOLLOWED the
     file down. A cap is only a decision if it can move either way for a stated reason.
     """
-    for rel, cap in (("adapters/tasks.py", 233), ("agents/factory.py", 406),
+    for rel, cap in (("adapters/tasks.py", 233), ("agents/factory.py", 408),
                      ("agents/developer_backends.py", 203),
                      ("adapters/task_schema.py", 231)):
     #
@@ -247,6 +247,11 @@ def test_neither_module_is_a_god_module_again():
     # function-local import, the isinstance guard and the assignment, with the build bound first.
     # 401 -> 405 measured (the commit landed them without the raise, and this test went red); the
     # raise pays for those four lines and keeps one line of headroom.
+    #
+    # 406 -> 408, 2026-10-08, doc 73 §1.4 (`Settings.researcher_artifacts`): `make_roles` reads the
+    # flag once and hands it to both Researchers — the function-local import and the call for the
+    # plain path (the tool-using constructor's keyword shares an existing line). 405 -> 407
+    # measured; the raise pays for those two lines and keeps one line of headroom.
         lines = len((_PKG / rel).read_text(encoding="utf-8").splitlines())
         assert lines < cap, f"{rel} is back to {lines} lines"
 

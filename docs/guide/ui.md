@@ -953,11 +953,17 @@ about *that run's event log*, and every panel behind it reads `/api/runs/<id>/�
 
 | Hub | Panels |
 |---|---|
-| **Progress** | Queue · Research · Failures |
+| **Progress** | Queue · Research · Agent cycle · Failures · Add experiment |
 | **Trust** | Trust · Pareto / diversity · Data quality |
 | **Analysis** | Compare · Sensitivity · Importance · Cross-run |
 | **Lab** | Files · Registry · Comments & sharing · Events |
 | **Run settings** | budgets and knobs for **this run only** |
+
+**Add experiment** (`?panel=inject`, doc 73 §1.4) is the hand-authored `inject_node`: a description the
+Developer builds from, the kind (an experiment, or an ARTIFACT node that produces files later experiments
+read and is never ranked), an optional parent fenced by the attempt you saw, the produced artifacts it
+`uses`, and optional numeric parameters. The rules of what is sent are `ui/src/injectNodeModel.js`; the
+server refuses an unproduced artifact (`inject_uses_not_produced`) whatever the form allowed.
 
 **The LoopLab menu** is the ◉ LoopLab mark itself, top-left, carrying a `▾`: click the mark and the
 menu opens. It is the same on every owner screen — including

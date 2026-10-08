@@ -25,6 +25,8 @@ from looplab.core.evidence import fence_kwargs, fence_untrusted
 from looplab.core.llm import BudgetExceeded
 from looplab.core.llm_budget import thread_committed_tokens, thread_committed_usd_exact
 from looplab.core.models import Idea, IdeaEmission, Node, RunState
+from looplab.agents.artifact_ideas import (artifact_cue, drop_artifact_fields, emission_model,
+                                           strip_artifact_fields)
 from looplab.core.parse import ParseError, parse_structured
 from looplab.core.prompts import PromptStore, render
 from looplab.agents.answered_by_context import answered_by_context, offers_tool
@@ -453,14 +455,21 @@ class ToolUsingResearcher:
     # The untrusted-evidence fence on this role's tool results (review 2026-09-22, TAT-02). A CLASS
     # default too, so an instance built without `__init__` reads OFF — the historical request.
     evidence_envelope = False
+    # A Researcher that may PROPOSE artifact nodes (doc 73 §1.4, `agents/artifact_ideas.py`). A CLASS
+    # default too, OFF, so an instance built without `__init__` asks the historical schema.
+    artifact_ideas = False
 
     def __init__(self, client, tools, space_hint: str = "",
                  bounds: Optional[dict] = None, parser: str = "tool_call",
                  max_turns: int = 0, prompts: Optional[PromptStore] = None,
                  context_budget_chars: int | None = None, time_budget_s: float = 0.0,
                  loop_opts: Optional[dict] = None, offer_sweep: bool = True,
-                 handoff: bool = True, established=None, evidence_envelope: bool = False):
+                 handoff: bool = True, established=None, evidence_envelope: bool = False,
+                 artifact_ideas: bool = False):
         self.client = client
+        # OFF at the constructor because it changes the emit schema and the user turn (CLAUDE.md);
+        # `make_roles` passes `researcher_artifacts_enabled(settings)`.
+        self.artifact_ideas = bool(artifact_ideas)
         # THE FENCE ON WHAT ITS TOOLS RETURN (`core/evidence.py`; review 2026-09-22, TAT-02). The
         # Researcher proposes from the run's own experiments, the repository, knowledge, memory and
         # the literature — every one of them text the model did not write — and with this on each
@@ -504,7 +513,7 @@ class ToolUsingResearcher:
         return {"type": "function", "function": {
             "name": "emit", "description": "Emit the final Idea for the next experiment.",
             # expose the strict modern writer schema, not the tolerant durable reader.
-            "parameters": IdeaEmission.model_json_schema()}}
+            "parameters": emission_model(self.artifact_ideas).model_json_schema()}}
 
     @staticmethod
     def _sanitize(args: dict) -> dict:
@@ -530,7 +539,8 @@ class ToolUsingResearcher:
         # message so it re-emits, instead of being silently turned into a no-op idea. Returns an error
         # string to reject, or None to accept.
         try:
-            idea = IdeaEmission.model_validate(self._sanitize(args))
+            idea = emission_model(self.artifact_ideas).model_validate(
+                strip_artifact_fields(self._sanitize(args), self.artifact_ideas))
         except Exception as e:  # noqa: BLE001
             return (f"it didn't parse ({str(e)[:180]}). Emit an object with `operator`, numeric "
                     "`params`, and a `rationale` naming WHAT you change and WHY")
@@ -550,7 +560,8 @@ class ToolUsingResearcher:
         # `cards`: the board window to bind a Card claim against, when it is not this instance's
         # last-published one — an alternative binds against its SESSION's (`ProposalSession`).
         try:
-            emitted = IdeaEmission.model_validate(self._sanitize(args))
+            emitted = emission_model(self.artifact_ideas).model_validate(
+                strip_artifact_fields(self._sanitize(args), self.artifact_ideas))
             idea = bind_idea_to_board_card(
                 emitted.to_idea(),
                 getattr(self, "_visible_board_cards", []) if cards is None else cards)
@@ -589,8 +600,10 @@ class ToolUsingResearcher:
         # `ParseError` on its way out. `_fallback` is ALSO the `drive_tool_loop(fallback=…)` callback,
         # where a raise has no handler at all, so relying on that conversion was the fragile half.
         idea = forced_structured(
-            self.client, messages, IdeaEmission, self.parser,
-            nudge="Emit the Idea now.", then=lambda out: out.to_idea(), on_fail=_degraded)
+            self.client, messages, emission_model(self.artifact_ideas), self.parser,
+            nudge="Emit the Idea now.",
+            then=lambda out: drop_artifact_fields(out.to_idea(), self.artifact_ideas),
+            on_fail=_degraded)
         return _clamp_fill(idea, self.bounds)
 
     def propose(self, state: RunState, parent: Optional[Node], *,
@@ -660,7 +673,8 @@ class ToolUsingResearcher:
                 + answered_by_context(tools)
                 + _established_block(_researcher_workspace(getattr(self, "_established", None),
                                                            tools))
-                + hint_block + cue +
+                + hint_block + cue
+                + (artifact_cue(state) if self.artifact_ideas else "") +
                 "\nDecide the next experiment — a parameter change OR a structural one (architecture, "
                 "loss, data, training) if that's the stronger move. Consult knowledge if useful, then emit."},
         ]

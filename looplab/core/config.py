@@ -3229,6 +3229,14 @@ class Settings(BaseSettings):
     # the task data (schema/profile/asset) mid-loop, instead of seeing only best+parent. Advisory —
     # never changes best-selection. Off = the legacy single-shot Researcher (richer digest still added).
     researcher_tools: bool = True
+    # A RESEARCHER THAT MAY PROPOSE ARTIFACT NODES (doc 73 §1.4, stage 3; `agents/artifact_ideas.py`).
+    # ON, the Researcher's emit schema shows `node_kind` and `uses` (`ArtifactIdeaEmission`) and its
+    # user turn lists the run's PRODUCED ARTIFACTS, so it can have an expensive preparation step done
+    # ONCE (a node that produces files and is never ranked) and have later experiments read it through
+    # `LOOPLAB_USES_WORKDIRS`. OFF (the default) is the historical schema and prompt byte for byte. It
+    # changes a paid prompt, so the Researchers default it OFF at their constructors and it is run-pinned.
+    # One reader: `agents/artifact_ideas.py::researcher_artifacts_enabled`.
+    researcher_artifacts: bool = False
     # THE RESEARCHER READS THE CODE IT IS IMPROVING (WP-TOOLS T3, 2026-09-29). The Researcher's
     # `repo_read`/`repo_grep`/`repo_list` always showed the run's STARTING code: on MiniOneRec inf13
     # the proposal improving node 15 read the 1,410-line base `service/latency_engine.py` believing
@@ -3811,6 +3819,10 @@ def unknown_snapshot_keys(data) -> list[str]:
 # Keep their historical effective behavior when newer product defaults become active: re-entry must not
 # silently add paid calls, interventions, concurrency or a different selection policy to an old run.
 LEGACY_CONFIG_SNAPSHOT_DEFAULTS: dict[str, object] = {
+    # A RESEARCHER THAT MAY PROPOSE ARTIFACT NODES, added 2026-10-08 defaulting OFF (doc 73 §1.4). ON
+    # it changes the Researcher's emit schema and user turn, so a resumed pre-field run keeps its
+    # historical request; `tests/test_researcher_artifacts.py` holds that `false` is byte for byte.
+    "researcher_artifacts": False,
     "assistant_result_commentary": False,
     "parallel_build": 1,
     "eval_parallel": None,

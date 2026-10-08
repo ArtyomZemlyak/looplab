@@ -1796,6 +1796,15 @@
           "help": "On (default): the agentic Researcher, Deep Research, agentic Strategist, and unified pilot can read the run's own experiments (list/read/find-analogous/themes/code) and task data (schema/profile) mid-loop. Off: the Researcher uses its legacy single-shot proposal path (the richer default digest is still added), while the other shared-provider roles likewise lose these pull tools."
         },
         {
+          "key": "researcher_artifacts",
+          "label": "Researcher can propose artifact nodes",
+          "type": "bool",
+          "default": false,
+          "help": "Lets the Researcher propose a preparation node (an artifact: it produces files such as a prepared dataset, succeeds without a metric and is never ranked) and have later experiments read it. Off keeps the Researcher's historical prompt.",
+          "shortLabel": "Researcher artifacts",
+          "shortHelp": "Lets the Researcher propose preparation nodes that later experiments read."
+        },
+        {
           "key": "researcher_repo_view_follows_node",
           "label": "Researcher reads the code it improves",
           "type": "bool",
