@@ -2188,8 +2188,16 @@ def upstream_auto(run_dir: Path = typer.Argument(..., help="Run whose upstream a
     rollout, champion integrator) and the engine's own checks and advances on its next turn; an
     operation the operator queued is still served. `--on` lets them resume. Appended as the control
     intent itself — the engine reads it, the fold keeps the last one (`RunState.upstream_auto_paused`)
-    — so it works on a live or a stopped run alike."""
+    — so it works on a live or a stopped run alike.
+
+    The reason is normalized exactly as the control intake does
+    (`serve/control_validation.py::_normalize_upstream_auto_set`): stripped, and left out when blank,
+    so the two writers of one row never disagree. A refusal — the run moved, or a Replay or a
+    deletion fences its log — is one line on stderr at exit 2."""
+    from looplab.core.run_deletion import RunDeletionFenceError, RunDeletionStorageError
+    from looplab.core.run_reset import RunResetFenceError, RunResetStorageError
     from looplab.events.types import EV_UPSTREAM_AUTO_SET
+    reason = reason.strip()
     if len(reason) > 300:
         raise typer.BadParameter("--reason is at most 300 characters")
     store = _require_run_dir(run_dir, healthy=True)
@@ -2201,7 +2209,13 @@ def upstream_auto(run_dir: Path = typer.Argument(..., help="Run whose upstream a
         store.append(EV_UPSTREAM_AUTO_SET, {"enabled": enabled, **({"reason": reason} if reason else {})},
                      expected_last_seq=events[-1].seq if events else -1)
     except EventStoreConcurrencyError:
-        typer.echo(f"run {run_dir.name} changed while the switch was being set; retry")
+        typer.echo(f"run {run_dir.name} changed while the switch was being set; retry", err=True)
+        raise typer.Exit(2)
+    except (RunResetFenceError, RunResetStorageError, RunDeletionFenceError,
+            RunDeletionStorageError) as exc:
+        # A fence that cannot be read is not an absent fence (the `inspect --readmodel` rule): both
+        # the proven and the unprovable case refuse, as one line rather than a traceback.
+        typer.echo(f"refusing to switch the upstream automation of {run_dir.name}: {exc}", err=True)
         raise typer.Exit(2)
     typer.echo(f"run {run_dir.name}: upstream automation {'on' if enabled else 'OFF'}"
                + (f" ({reason})" if reason else ""))

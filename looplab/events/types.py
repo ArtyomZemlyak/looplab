@@ -1179,7 +1179,10 @@ EV_UPSTREAM_AUTO_SET = "upstream_auto_set"
 # AN AUTOMATIC STEP THE LIVE ENGINE HELD BACK (doc 73 §4.2 G3/G4): a passed gate past
 # `Settings.upstream_advances_per_hour` (`op: advance`, once per proposal), or the author past
 # `Settings.upstream_author_usd` (`op: author`, once). DIAGNOSTIC — the audit of a cap, like
-# `lane_authored`; the cap itself is re-read from the log and the settings every turn.
+# `lane_authored`; the cap itself is re-read from the log and the settings every turn. Also an
+# automatic check or advance the lane REFUSED for a reason about the proposal itself
+# (`reason: "refused:<code>"`, once per proposal and op): `upstream_serve.py::auto_next_op` reads it
+# back off the raw log and never asks that step again, in this process or the next.
 EV_LANE_HELD = "lane_held"
 # THE AUTOMATED AUTHOR's record (doc 73 §2.5, `engine/upstream_author.py`): one row per source
 # lifecycle it paid to draft for — drafted (the lane's own propose rows follow under the same action
@@ -1269,6 +1272,26 @@ SETUP_THREAD_APPENDABLE: frozenset[str] = frozenset({
 # types from the provider's own `ast.Call` nodes.
 ASSISTANT_APPENDABLE: frozenset[str] = frozenset({
     EV_TRUST_GATE_CHANGED, EV_NODE_TOMBSTONED,
+})
+
+# Invariant #1's FIFTH writer: the live upstream lane's QUEUE (doc 73 §2.5). `UpstreamLane.
+# _queue_if_live` (engine/upstream.py) appends this FOLDED type from whatever process asked — the
+# API's upstream routes, the Assistant's upstream tools, MCP — while an engine is ALIVE. It is not a
+# control intent: the lane validates the body itself (the Maintainer contract, the retained request
+# and its hash) under its own `.upstream.lock` with a durable append, so routing it through
+# `serve/protocol.py::CONTROL_EVENTS` would open a second, weaker intake for the same row. Declared
+# here instead, for the reason the other registries exist: the seam was reachable while the engine
+# ran and named nowhere (critic 2026-10-08).
+#
+# What membership REQUIRES: its position keys nothing but its own queue. The fold appends one
+# `lane_op_requests` entry per row and `lane_op_done {idx}` advances the cursor through a POSITION
+# among those rows only (`_advance_request_cursor`), so a request landing anywhere after the receipts
+# of the requests before it folds to the same state; it is never inside a paid proposal's receipt
+# window (`_proposal_receipt_fence` asserts nothing it moves). Asserted at the append site and
+# guarded in both directions by `tests/test_lane_queue_appendable.py`, which re-derives the writers
+# by AST and proves the splice neutrality on a fold.
+LANE_QUEUE_APPENDABLE: frozenset[str] = frozenset({
+    EV_LANE_OP_REQUESTED,
 })
 
 # Conditional extension for legacy Hypothesis/Policy selection only. ``hypothesis_merged`` became a
@@ -1420,7 +1443,7 @@ EVENT_PAYLOAD_KEYS: dict[str, PayloadContract] = {
     "lane_authored": PayloadContract("The automated upstream author settled one source lifecycle: drafted, declined by its critic, skipped or failed.", required=('action_id', 'outcome', 'source_node_id', 'track'), optional=('code', 'cost_usd', 'hunk_hashes', 'reason')),
     "upstream_hint_issued": PayloadContract("The bounded notice the live engine issued to the Developer sessions at work after a base advance.", required=('advance_seq', 'hint_id', 'kind', 'proposal_id', 'sessions', 'text'), optional=('source_node_id',), stored_whole=True),
     "upstream_auto_set": PayloadContract("The operator's kill switch for every automatic upstream step of a live run.", required=('enabled',), optional=('reason',), stored_whole=True),
-    "lane_held": PayloadContract("The live engine held an automatic upstream step back at a cap: an advance past the hourly limit, the author past its budget.", required=('op', 'reason'), optional=('proposal_id',)),
+    "lane_held": PayloadContract("An automatic upstream step held back: at a cap (hourly advances, the author's budget) or for good (`refused:<code>`).", required=('op', 'reason'), optional=('proposal_id',)),
     "upstream_hint_delivered": PayloadContract("A Developer session heard an upstream notice at a tool-loop turn boundary.", required=('hint_id', 'session'), optional=('node_id',)),
     "lane_op_done": PayloadContract("The live engine settled a queued upstream operation; the lane's own rows carry what it did.", required=('idx', 'op', 'outcome'), optional=('action_id', 'code', 'seq')),
     "ablate": PayloadContract(

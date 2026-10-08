@@ -46,7 +46,7 @@ from looplab.events.types import (BACKGROUND_APPENDABLE, DIAGNOSTIC_EVENTS,
     EV_SPEC_APPROVED, EV_SPEC_PROPOSED, PAUSE_REASON_EXTERNAL_OBLIGATIONS)
 from looplab.engine.artifact_fence import defer_waiting_consumers
 from looplab.engine.track_lane import cancel_track_lane, drain_track_requests, serve_track_requests
-from looplab.engine.upstream_serve import serve_upstream_requests
+from looplab.engine.upstream_serve import drain_upstream_job, serve_upstream_requests
 from looplab.engine.ablation import AblationMixin
 from looplab.engine.metric_salvage import settle_mode as settle_metric_salvage_mode
 from looplab.engine.widths import LLM_WIDTH_MAX
@@ -2324,6 +2324,10 @@ class Engine(ConfirmPhaseMixin, NoiseFloorMixin, AblationMixin, NoveltyGateMixin
         # clean finish: before this, the child's raise cancelled the drain and the run ended on the
         # ceiling, and it still does — after the siblings have landed, before `finalize_run`.
         await self._raise_deferred_eval_budget_stop()
+        # The live upstream lane's ONE operation in flight is settled, not dropped (doc 73 §2.5): a
+        # claimed gate's charges and verdict, a claimed proposal's rows — waited for like the
+        # evaluations above. Nothing new starts (`upstream_serve.py::drain_upstream_job`).
+        await drain_upstream_job(self)
         # The operator's queued evaluation TRACKS are answered before a FINISHING run closes (doc 73
         # §1.4) — a question asked of a running search is not dropped because the search ended
         # first. A PAUSE only cancels the one in flight: its request stays queued for the resume.

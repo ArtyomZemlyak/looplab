@@ -100,27 +100,48 @@ def _attempted(events) -> tuple[set, int]:
     return ids, sum(1 for e in authored if e.data.get("outcome") in PAID_OUTCOMES)
 
 
-def _sources(state, events) -> list[tuple[str, object]]:
-    """`(track, node)` in the order the author asks them: repaired lifecycles newest first, then the
-    champion — a repaired champion appears on both tracks (its fix, then its capability). Evaluated,
-    live nodes only; the lane's own eligibility is checked after."""
+def _repaired_ids(state, events) -> set:
+    """Ids of the nodes whose CURRENT lifecycle a repair changed (`node_repaired` bound to it)."""
     from looplab.events.replay import event_generation_binds
-    out, seen = [], set()
-    repaired = []
+    out = set()
     for e in events:
         if e.type != "node_repaired":
             continue
         node = state.nodes.get(e.data.get("node_id"))
         if node is not None and event_generation_binds(e.data, node.attempt):
-            repaired.append(node)
-    for node in sorted(repaired, key=lambda n: -n.id):
-        if node.id not in seen and node.status.value == "evaluated" and not node.tombstoned:
-            seen.add(node.id)
+            out.add(node.id)
+    return out
+
+
+def _sources(state, events, repaired=None) -> list[tuple[str, object]]:
+    """`(track, node)` in the order the author asks them: repaired lifecycles newest first, then the
+    champion — a repaired champion appears on both tracks (its fix, then its capability). Evaluated,
+    live nodes only; the lane's own eligibility is checked after."""
+    repaired = _repaired_ids(state, events) if repaired is None else repaired
+    out = []
+    for node in sorted((state.nodes[i] for i in repaired), key=lambda n: -n.id):
+        if node.status.value == "evaluated" and not node.tombstoned:
             out.append(("repair", node))
     best = state.nodes.get(state.best_node_id) if state.best_node_id is not None else None
     if best is not None and not best.tombstoned:
         out.append(("champion", best))
     return out
+
+
+def _nomination_key(node, state, revision, repaired: bool) -> tuple:
+    """What a source with NO eligible capability hunk is memoized against (`author_next`): only a
+    later promotion (the base revision) or — for a REPAIRED lifecycle alone — the pending nodes
+    that can carry its repair's trigger can make one appear. A repair hunk's trigger is a pending
+    node whose file on one of the source's own paths holds a failing value the repair replaced
+    (`upstream_state.py::upstream_candidates`), so those files are the key; an unrepaired source's
+    hunks never depend on the pending set at all. Keyed on every pending id instead, the memo was
+    recomputed — a whole-log fold and a per-hunk replay of the repair — on nearly every node."""
+    if not repaired:
+        return (revision,)
+    from looplab.engine.upstream_state import digest
+    paths = sorted(set(node.files) | set(node.deleted))
+    return (revision, tuple(sorted((n.id, n.attempt, digest([n.files.get(p) for p in paths]))
+                                   for n in state.pending_nodes() if n.id != node.id)))
 
 
 def _draft_path(rd, action_id: str):
@@ -141,14 +162,8 @@ def retain_draft(rd, body: dict) -> None:
 
 
 def retained_draft(rd, action_id: str) -> Optional[dict]:
-    import json
-
-    from looplab.core.node_evidence import read_bounded_regular_file
-    raw = read_bounded_regular_file(_draft_path(rd, action_id), 2 * 1024 * 1024 + 1)
-    try:
-        body = json.loads(raw) if raw is not None and len(raw) <= 2 * 1024 * 1024 else None
-    except ValueError:
-        return None
+    from looplab.engine.upstream_state import read_retained_json
+    body = read_retained_json(_draft_path(rd, action_id))
     return body if isinstance(body, dict) and body.get("action_id") == action_id else None
 
 
@@ -168,15 +183,16 @@ def unproposed_draft(rd, events) -> Optional[tuple[dict, dict]]:
     return None
 
 
-def author_next(rd, task, state, events, *, skipped=None) -> Optional[dict]:
+def author_next(rd, task, state, events, *, skipped=None, active=None) -> Optional[dict]:
     """The next source to author from, or None. `{"action_id", "track", "node", "rows", "archive",
     "revision"}`.
 
     `skipped` is the caller's per-process memo, `{action_id: signature}`, ADDED TO here when it is a
     dict. A source the lane can never take (unmeasured, built on an older base — the base only
     advances — or with no readable archive) is memoized for good (`None`); one with no eligible
-    capability hunk is memoized against the active base revision and the pending node ids, because
-    a repair hunk whose trigger nodes are still pending becomes nominable once they settle."""
+    capability hunk is memoized against what could make one appear (`_nomination_key`), because a
+    repair hunk whose trigger nodes are still pending becomes nominable once they settle.
+    `active` is the caller's `active_base` of exactly these events (the live engine caches it)."""
     from looplab.core.errors import UpstreamRefusal
     from looplab.engine.seed_archive import verified_seed_archive
     from looplab.engine.upstream_state import (_source_receipt, active_base, repair_probe_covers,
@@ -187,17 +203,20 @@ def author_next(rd, task, state, events, *, skipped=None) -> Optional[dict]:
     ids, spent = _attempted(events)
     if spent >= AUTHOR_MAX_PER_RUN:
         return None
-    try:
-        active = active_base(events, task.seed_base)
-    except Exception:  # noqa: BLE001 — an unreadable base is the lane's refusal to state; the author waits
-        return None
+    if active is None:
+        try:
+            active = active_base(events, task.seed_base)
+        except Exception:  # noqa: BLE001 — an unreadable base is the lane's refusal to state; the author waits
+            return None
     memo = skipped if isinstance(skipped, dict) else {}
-    pending = (active["revision"], tuple(sorted(n.id for n in state.pending_nodes())))
-    by_seq = {e.seq: e for e in events}
-    for track, node in _sources(state, events):
+    repaired = _repaired_ids(state, events)
+    by_seq = None
+    for track, node in _sources(state, events, repaired):
         action_id = author_action_id(node, track)
-        if action_id in ids or (action_id in memo and memo[action_id] in (None, pending)):
+        key = _nomination_key(node, state, active["revision"], node.id in repaired)
+        if action_id in ids or (action_id in memo and memo[action_id] in (None, key)):
             continue
+        by_seq = {e.seq: e for e in events} if by_seq is None else by_seq
         try:
             receipt = _source_receipt(node, by_seq)
         except UpstreamRefusal:
@@ -210,13 +229,14 @@ def author_next(rd, task, state, events, *, skipped=None) -> Optional[dict]:
         if archive is None:
             memo[action_id] = None
             continue
-        rows = [r for r in upstream_candidates(rd, task, events, source_node_id=node.id)["rows"]
+        rows = [r for r in upstream_candidates(rd, task, events, source_node_id=node.id,
+                                               state=state, archive=archive)["rows"]
                 if r["classification"] == "capability"
                 and (track == "champion" or r["origin"] == "repair")
                 and not (r["origin"] == "repair" and r["pending_trigger_nodes"]
                          and not repair_probe_covers(r, upstream.get("repair_probes", [])))]
         if not rows:
-            memo[action_id] = pending
+            memo[action_id] = key
             continue
         return {"action_id": action_id, "track": track, "node": node, "rows": rows,
                 "archive": archive, "revision": active["revision"]}
@@ -224,10 +244,21 @@ def author_next(rd, task, state, events, *, skipped=None) -> Optional[dict]:
 
 
 def _read(archive, path) -> Optional[str]:
+    """A nominated file's BASE text: "" for a path the source ADDED (absent from the base), None —
+    the source is not authored — for one present but unreadable (a link, a directory, a FIFO, not
+    UTF-8). Reading an unreadable base file as empty showed the Maintainer a base with no such file,
+    and its "full contents" patch then replaced code it never saw (critic 2026-10-08)."""
     from looplab.core.node_evidence import read_bounded_regular_file
-    raw = read_bounded_regular_file(archive / path, AUTHOR_FILE_CHARS * 4 + 1)
+    target = archive / path
+    raw = read_bounded_regular_file(target, AUTHOR_FILE_CHARS * 4 + 1)
     if raw is None:
-        return ""
+        try:
+            target.lstat()
+        except FileNotFoundError:
+            return ""
+        except OSError:
+            return None
+        return None
     try:
         return raw.decode("utf8")
     except UnicodeError:
@@ -290,30 +321,34 @@ def build_body(pick, draft, critique, *, generation: str) -> dict:
                        "reviewer": AUTHOR_CRITIC_REVIEWER}}
 
 
-def precheck_draft(pick, body) -> Optional[str]:
+def precheck_draft(pick, body, task) -> Optional[str]:
     """Why the lane would refuse this body whatever the critic says — or None. Run between the draft
-    and the critic, so a draft that cannot be absorbed does not buy the second call: the request's
-    own bounds (`normalize_request`: 2 MiB, 128 hunks), the documented flag, and the rule
-    `UpstreamLane._propose_admit` refuses `upstream_capability_not_absorbed` by — the nominated code
-    paths (less a repair's pending recipe) must all be in the patch, and it must implement one."""
+    and the critic, so a draft that cannot be absorbed does not buy the second call. Every rule is
+    the LANE'S OWN FUNCTION, called, never restated (a restated copy had already drifted: it missed
+    the edit surface and the case-folded recipe collision — critic 2026-10-08): the request's bounds
+    (`normalize_request`), the Maintainer contract (`Maintainer.validate`), the edit surface and
+    protected names of the patch and of the recipe (`checked_overlay`), the absorbed implementation
+    (`upstream.py::absorbed_implementation`) and the shared-patch boundary
+    (`upstream.py::validate_shared_patch`) — the order `UpstreamLane._propose_admit` asks them in."""
+    from looplab.agents.maintainer import Maintainer
     from looplab.core.errors import UpstreamRefusal
-    from looplab.engine.activation import is_config_path
+    from looplab.engine.upstream import absorbed_implementation, validate_shared_patch
     from looplab.engine.upstream_spec import normalize_request
+    from looplab.engine.upstream_workspace import checked_overlay
     try:
         normalize_request("propose", body)
+        Maintainer().validate(body)
+        spec = task.repo_spec()
+        checked_overlay(spec, body["files"], body["deleted"])
+        checked_overlay(spec, body["recipe_files"], body.get("recipe_deleted", []))
+        implementation, _recipes, patch = absorbed_implementation(pick["rows"], body)
+        if not implementation or not implementation <= patch:
+            return "upstream_capability_not_absorbed"
+        validate_shared_patch(task.upstream, body, implementation)
     except UpstreamRefusal as exc:
         return exc.code
-    doc = body["files"].get(body["documentation_path"])
-    if not isinstance(doc, str) or body["flag"]["name"] not in doc:
-        return "upstream_maintainer_invalid"
-    patch = set(body["files"]) | set(body["deleted"])
-    nominated = {r["path"] for r in pick["rows"]}
-    repair_recipes = {r["path"] for r in pick["rows"] if r["origin"] == "repair"
-                      and r["pending_trigger_nodes"] and is_config_path(r["path"])}
-    implementation = (nominated - repair_recipes) | {
-        p for p in patch if not is_config_path(p) and p != body["documentation_path"]}
-    if not implementation or not implementation <= patch:
-        return "upstream_capability_not_absorbed"
+    except ValueError:      # a path the scorer-boundary grammar refuses (`checked_overlay`)
+        return "upstream_patch_invalid"
     return None
 
 
@@ -338,8 +373,20 @@ def author_draft(engine, pick, *, generation: str) -> dict:
     label = judge_evidence_kwargs(engine).get("tool_result_label") or ""
     draft = parse_structured(client, author_messages(pick["track"], context, evidence_label=label),
                              MaintainerDraft)
+    # The Maintainer's summary and flag values land in the log too (the proposal, `base_advanced`,
+    # the hint every Developer reads): through the engine's ONE redaction funnel
+    # (`engine/audit.py::Engine._redact`) like the critic's reason below — before the precheck, so
+    # what is checked is what is proposed. The flag NAME is an identifier the documentation must
+    # spell, so it is checked (`Maintainer.validate`), never rewritten.
+    redact = getattr(engine, "_redact", None)
+    if callable(redact):
+        draft = draft.model_copy(update={
+            "summary": redact(draft.summary),
+            "flag": draft.flag.model_copy(update={"default": redact(draft.flag.default),
+                                                  "enabled": redact(draft.flag.enabled)})})
     unchecked = MaintainerCritique(verdict="pass", reason="(pending)")
-    refusal = precheck_draft(pick, build_body(pick, draft, unchecked, generation=generation))
+    refusal = precheck_draft(pick, build_body(pick, draft, unchecked, generation=generation),
+                             engine.task)
     if refusal is not None:
         return {"outcome": "rejected", "code": refusal}
     critique = parse_structured(
@@ -347,7 +394,6 @@ def author_draft(engine, pick, *, generation: str) -> dict:
         MaintainerCritique)
     # The critic's prose lands in the log twice (the row and the proposal): through the engine's ONE
     # redaction funnel first (`engine/audit.py::Engine._redact`).
-    redact = getattr(engine, "_redact", None)
     reason = (redact(critique.reason) if callable(redact) else critique.reason)[:500]
     critique = critique.model_copy(update={"reason": reason or "(no reason given)"})
     if critique.verdict != "pass":

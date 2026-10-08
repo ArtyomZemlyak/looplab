@@ -37,8 +37,17 @@ by a Developer bound at launch names its authored base on `node_created` (`base_
 What still refuses is a queued inject or fork (`UpstreamLane._advance_prepare`).
 
 AN INTERRUPTED GATE stays what doc 72 made it: an unresolved claim the operator abandons. This engine
-never re-runs one on its own, and an auto operation the lane refused is asked again only after
-`AUTO_RETRY_AFTER_S`.
+never re-runs one on its own. An auto operation the lane refused for a reason that can pass
+(`TRANSIENT_REFUSALS`) is asked again only after `AUTO_RETRY_AFTER_S`, and the proposals behind it are
+served meanwhile; one refused for a reason about the proposal itself is said once on a `lane_held`
+row (`refused:<code>`) and never asked again by this lane — a failed gate is the operator's to re-buy.
+
+THE LOOP'S EXIT (`drain_upstream_job`, after the evaluations drain): an operation whose CLAIM landed
+is waited for and settled — its bought charges and verdict, or its proposal — like an adopted
+evaluation; one still admitting is dropped unclaimed (a queued request stays queued for the next
+engine); a draft the author paid for is recorded and proposed by the next engine from its retained
+body. Nothing starts a new phase once the run halted or, for an automatic step, while the operator's
+kill switch is on.
 """
 from __future__ import annotations
 
@@ -53,7 +62,6 @@ from typing import Optional
 _LOG = logging.getLogger(__name__)
 
 UPSTREAM_MODES = ("off", "propose", "auto")
-LIVE_OPS = ("propose", "check", "advance")
 # The lane rows that ANSWER an action id — the ACK side `UpstreamLane._retry` reads.
 OP_KINDS = {
     "propose": {"upstream_proposal_started", "upstream_proposed", "upstream_proposal_failed"},
@@ -61,9 +69,16 @@ OP_KINDS = {
     "advance": {"base_advanced"},
 }
 _STARTED = ("upstream_proposal_started", "upstream_gate_started")
-# An auto operation the lane REFUSED (a queued inject blocks an advance, a source changed) is asked
+# An auto operation the lane REFUSED for a passing reason (a queued inject blocks an advance) is asked
 # again only after this long — the refusal is cheap, but asking every loop turn would be a busy loop.
 AUTO_RETRY_AFTER_S = 300.0
+# The lane's refusals that say nothing about the PROPOSAL: the run's state moves past them (a queued
+# inject is built, a claim is resolved, a concurrent append completes the log the worker read). Any
+# other `UpstreamRefusal` of an automatic step — the source changed, the manifest is gone, the gate's
+# evidence moved — refuses that proposal for good, so it is recorded once and not asked again.
+TRANSIENT_REFUSALS = frozenset({"upstream_work_pending", "upstream_claim_unresolved",
+                                "run_generation_conflict", "upstream_base_conflict",
+                                "upstream_engine_running", "upstream_source_unavailable"})
 
 
 def hint_receipt_sink(engine):
@@ -99,15 +114,19 @@ def _issue_hint(engine, store, proposal: dict, advanced) -> None:
 
 def _unhinted_advance(events):
     """`(base_advanced, upstream_proposed data)` of a LIVE advance whose hint row is missing — the
-    engine died between the two appends — or None."""
-    issued = {e.data.get("proposal_id") for e in events if e.type == "upstream_hint_issued"}
+    engine died between the two appends — or None. One pass over the log: it runs every loop turn."""
+    issued, proposed, advances = set(), {}, []
     for e in events:
-        if (e.type == "base_advanced" and e.data.get("in_engine") is True
-                and e.data.get("proposal_id") not in issued):
-            proposal = next((p.data for p in events if p.type == "upstream_proposed"
-                             and p.data.get("proposal_id") == e.data.get("proposal_id")), None)
-            if proposal is not None:
-                return e, proposal
+        if e.type == "upstream_hint_issued":
+            issued.add(e.data.get("proposal_id"))
+        elif e.type == "upstream_proposed":
+            proposed.setdefault(e.data.get("proposal_id"), e.data)
+        elif e.type == "base_advanced" and e.data.get("in_engine") is True:
+            advances.append(e)
+    for e in advances:
+        pid = e.data.get("proposal_id")
+        if pid not in issued and pid in proposed:
+            return e, proposed[pid]
     return None
 
 
@@ -145,6 +164,33 @@ def resolve_upstream_mode(settings, upstream) -> tuple[str, str]:
     return mode, ""
 
 
+def armed_row(events):
+    """The latest `lane_armed` row — what the last engine that served this run armed with — or None."""
+    return next((e for e in reversed(events) if e.type == "lane_armed"), None)
+
+
+def served_mode(events, settings, upstream, *, alive: bool) -> tuple[str, str]:
+    """`(mode, reason)` the lane is SERVED in, for a reader deciding what to do now (the lane's read,
+    its live queue, the Assistant's and MCP's `upstream_status`). A LIVE engine serves the mode it
+    armed with (its `lane_armed` row) until it restarts, whatever a `PUT /config` wrote into the
+    snapshot since; a stopped run — or an engine that has not armed yet — answers from the launched
+    settings and the task's declaration (`resolve_upstream_mode`)."""
+    if alive:
+        armed = armed_row(events)
+        if armed is not None:
+            mode = armed.data.get("mode")
+            return (mode if mode in UPSTREAM_MODES else "off"), str(armed.data.get("reason") or "")
+    return resolve_upstream_mode(settings, upstream)
+
+
+def auto_switched_off(events) -> bool:
+    """The operator's kill switch as the log last set it (`upstream_auto_set`, doc 73 §4.2 G2) — the
+    same reading `RunState.upstream_auto_paused` folds, for a reader holding only the events."""
+    switch = next((e for e in reversed(events) if e.type == "upstream_auto_set"
+                   and type(e.data.get("enabled")) is bool), None)
+    return switch is not None and switch.data["enabled"] is False
+
+
 def run_settings(run_dir):
     """The run's LAUNCHED settings (`config.snapshot.json`) — the same read the API, the Assistant's
     tools and MCP build their lane from, so a gate's `input_identity` agrees across the three paths.
@@ -159,16 +205,22 @@ def run_settings(run_dir):
 LIVE_QUEUE_ROWS = 50
 
 
+def lane_queue_cursor(events) -> int:
+    """`RunState.lane_ops_done` without folding the whole log: the fold's two queue handlers are the
+    only ones that touch it and read nothing else, so folding just their rows is the same value."""
+    from looplab.engine.shared import engine_fold as fold
+    return int(fold([e for e in events if e.type in ("lane_op_requested", "lane_op_done")]).lane_ops_done or 0)
+
+
 def live_queue(events, cursor: Optional[int] = None) -> dict:
     """The live lane's queue as a reader sees it (API, UI, the Assistant): the last
     `LIVE_QUEUE_ROWS` requests in order, each with its receipt once the engine settled it, and how
     many still wait. WAITING is the fold's own answer — `RunState.lane_ops_done`, the cursor
     `_advance_request_cursor` moves, which a receipt advances THROUGH its position — so a request
     below the cursor whose own receipt is missing reads `settled`, never `pending` forever.
-    `cursor` is that fold's value when the caller has it; folded here otherwise."""
+    `cursor` is that fold's value when the caller has it; derived here otherwise (`lane_queue_cursor`)."""
     if cursor is None:
-        from looplab.engine.shared import engine_fold as fold
-        cursor = int(fold(events).lane_ops_done or 0)
+        cursor = lane_queue_cursor(events)
     requests = [e for e in events if e.type == "lane_op_requested"]
     done = {}
     for e in events:
@@ -210,7 +262,7 @@ def upstream_live_view(run_dir, events, *, cursor: Optional[int] = None) -> Opti
     upstream = upstream if isinstance(upstream, dict) and upstream else None
     if upstream is None and not any(e.type == "lane_op_requested" for e in events):
         return None
-    armed = next((e for e in reversed(events) if e.type == "lane_armed"), None)
+    armed = armed_row(events)
     if armed is not None:
         mode = armed.data.get("mode") if armed.data.get("mode") in UPSTREAM_MODES else "off"
         reason, author, configured = str(armed.data.get("reason") or ""), armed.data.get("author") is True, False
@@ -225,16 +277,15 @@ def upstream_live_view(run_dir, events, *, cursor: Optional[int] = None) -> Opti
                  "source_node_id": e.data.get("source_node_id"), "outcome": e.data.get("outcome")}
                 for e in events if e.type == "lane_authored"]
     # doc 73 §4.2 G2-G4: the kill switch as the log last set it, the caps that held a step back,
-    # and what the author has spent.
-    switch = next((e for e in reversed(events) if e.type == "upstream_auto_set"
-                   and type(e.data.get("enabled")) is bool), None)
+    # and what the author has spent. Whether an engine serves the run NOW is not a fact of the log
+    # (this body caches with it): the UI reads it beside, off the payload's `engine_running`.
     held = [{"seq": e.seq, "op": e.data.get("op"), "reason": e.data.get("reason"),
              **({"proposal_id": e.data["proposal_id"]} if e.data.get("proposal_id") else {})}
             for e in events if e.type == "lane_held"]
     return {"mode": mode, "reason": reason, "author": author, "configured": configured,
             "queue": live_queue(events, cursor), "authored": authored[-LIVE_AUTHORED_ROWS:],
             "authored_total": len(authored),
-            "auto_paused": switch is not None and switch.data["enabled"] is False,
+            "auto_paused": auto_switched_off(events),
             "held": held[-LIVE_AUTHORED_ROWS:], "author_spent_usd": round(author_spent_usd(events), 6)}
 
 
@@ -250,6 +301,11 @@ def upstream_board_lines(run_dir, state, events) -> list[str]:
         return out
     head = f"upstream lane: {live['mode']}" + (" (as configured; no engine armed it yet)"
                                                if live["configured"] else "")
+    # The view is a fact of the LOG (the mode the last engine armed with); whether one serves the
+    # run NOW is the lock's — said only when the probe is definite.
+    from looplab.engine.run_lifecycle import engine_liveness
+    if not live["configured"] and engine_liveness(Path(run_dir)) is False:
+        head += " (no engine serving it now: the mode it last served)"
     if live["reason"]:
         head += f" — {live['reason']}"
     if live["auto_paused"]:
@@ -282,25 +338,43 @@ def claims_unresolved(events) -> bool:
     return any(e.type in _STARTED and e.data.get("action_id") not in finished | abandoned for e in rows)
 
 
-def auto_next_op(events, seed_base) -> Optional[tuple[str, dict]]:
-    """The next operation `auto` takes, or None. Pure over the log.
+REFUSED_PREFIX = "refused:"
+
+
+def refused_for_good(events) -> set:
+    """`(op, proposal_id)` pairs whose AUTOMATIC step the lane refused for a reason about the
+    proposal itself — the `lane_held {reason: "refused:<code>"}` rows `_settle` records once."""
+    return {(e.data.get("op"), e.data.get("proposal_id")) for e in events
+            if e.type == "lane_held" and str(e.data.get("reason") or "").startswith(REFUSED_PREFIX)}
+
+
+def auto_next_op(events, seed_base, *, active=None, skip=()) -> Optional[tuple[str, dict]]:
+    """The next operation `auto` takes, or None. Pure over the log (and `skip`).
 
     The OLDEST proposal against the current base that still waits: one with no gate claim is
     CHECKED (once — a failed gate is the operator's to re-buy under a new action id), one whose
     latest gate passed and whose evidence no later claim superseded is ADVANCED. Nothing while any
     claim is unresolved (the lane would refuse it anyway). Action ids are deterministic, so a
-    re-entry after a crash is the lane's own idempotent retry."""
+    re-entry after a crash is the lane's own idempotent retry.
+
+    A proposal whose step the lane refused for good (`refused_for_good`) is passed over, and so is
+    one whose action id is in `skip` — the caller's recent PASSING refusals — so a proposal the lane
+    cannot take never stands in front of the ones behind it (critic 2026-10-08: oldest-first with a
+    refusal remembered only in memory held the whole lane, and the author behind it, for good).
+    `active` is the caller's `active_base` of exactly these events (`_active` caches it)."""
     from looplab.engine.upstream_state import active_base
     from looplab.events.run_generation import run_generation_token
-    try:
-        active = active_base(events, seed_base)
-    except Exception:  # noqa: BLE001 — an unreadable base is the lane's refusal to state, not ours
-        return None
+    if active is None:
+        try:
+            active = active_base(events, seed_base)
+        except Exception:  # noqa: BLE001 — an unreadable base is the lane's refusal to state, not ours
+            return None
     rows = [e for e in events if e.type.startswith("upstream_") or e.type == "base_advanced"]
     if claims_unresolved(events):
         return None
     generation = run_generation_token(events)
     advanced = {e.data.get("proposal_id") for e in rows if e.type == "base_advanced"}
+    refused, skip = refused_for_good(events), set(skip)
     for proposed in (e for e in rows if e.type == "upstream_proposed"):
         pid = proposed.data.get("proposal_id")
         if pid in advanced or proposed.data.get("expected_base_revision") != active["revision"]:
@@ -308,11 +382,15 @@ def auto_next_op(events, seed_base) -> Optional[tuple[str, dict]]:
         mine = [e for e in rows if e.data.get("proposal_id") == pid and e.seq > proposed.seq]
         gates = [e for e in mine if e.type == "upstream_gate_finished"]
         if not any(e.type == "upstream_gate_started" for e in mine):
+            if ("check", pid) in refused or f"auto-check-{pid}" in skip:
+                continue
             return "check", {"expected_generation": generation, "action_id": f"auto-check-{pid}",
                              "proposal_id": pid}
         if gates and gates[-1].data.get("result", {}).get("passed") is True and not any(
                 e.seq > gates[-1].seq and e.type in ("upstream_gate_started", "upstream_gate_abandoned")
                 for e in mine):
+            if ("advance", pid) in refused or f"auto-advance-{pid}" in skip:
+                continue
             return "advance", {"expected_generation": generation, "action_id": f"auto-advance-{pid}",
                                "proposal_id": pid, "expected_base_revision": active["revision"],
                                "evidence_token": gates[-1].data.get("evidence_token")}
@@ -348,7 +426,12 @@ class UpstreamServe:
     def __init__(self) -> None:
         self.job: Optional[UpstreamJob] = None
         self.armed: Optional[dict] = None
+        # `(op, action_id) -> monotonic time` of an automatic step refused for a PASSING reason
+        # (`TRANSIENT_REFUSALS`), skipped by `auto_next_op` until `AUTO_RETRY_AFTER_S` has gone by.
         self.refused_auto: dict = {}
+        # `(key, active_base)`: the base the loop's automatic decisions read, keyed on what moves it
+        # (`_active`) — `active_base` re-verifies the selected archive, which is not free per turn.
+        self.active_cache: Optional[tuple] = None
         # Source lifecycles the author found nothing to nominate in (`author_next(skipped=)`).
         self.author_skipped: dict = {}
         # The mode this engine armed with, recorded once on the diagnostic `lane_armed` row.
@@ -393,7 +476,11 @@ def current_base(engine) -> Optional[dict]:
     return _arm(engine).get("current")
 
 
-_CHAIN_ATTRS = ("inner", "developer", "fallback", "base")
+# `repair_developer`: the facade's REPAIR backend when the operator routed repair to another model
+# (`agents/factory.py`, `UnifiedAgent._for_stage`) — the member that actually writes a repair, so a
+# chain that skipped it rebound the implement Developer and stamped a base the repair never read
+# (critic 2026-10-08). `engine/costs.py::_CHILD_ATTRS` names the same child for the same reason.
+_CHAIN_ATTRS = ("inner", "developer", "repair_developer", "fallback", "base")
 
 
 def _developer_chain(developer):
@@ -453,14 +540,15 @@ def sync_developer_base(engine, developer, pinned=None):
         dict(target) if target is not None else dict(launch))
 
 
-def lifecycle_base(engine, node) -> Optional[dict]:
+def lifecycle_base(engine, node, events=None) -> Optional[dict]:
     """The base node `node`'s CURRENT lifecycle was seeded on, while this engine serves the live
     lane; None otherwise, or before its current generation was seeded. The same reading
-    `upstream_workspace.py::materialization_plan` pins a started lifecycle with (`seeded_basis`)."""
+    `upstream_workspace.py::materialization_plan` pins a started lifecycle with (`seeded_basis`).
+    `events` is the caller's read of the log, when it holds one."""
     if base_stamp(engine) is None or node is None:
         return None
     from looplab.engine.upstream_workspace import seeded_basis
-    events = engine.store.read_all()
+    events = engine.store.read_all() if events is None else events
     created = getattr(node, "creation_event_seq", None)
     if created is None:
         return None
@@ -468,17 +556,20 @@ def lifecycle_base(engine, node) -> Optional[dict]:
     return dict(selector) if seeded_now and isinstance(selector, dict) else None
 
 
-def files_base(engine, node) -> Optional[dict]:
-    """The base `node.files` are an overlay OF — what a node built from them with no Developer call
-    (a simplification) must name: its seeded lifecycle base, else the base its own `node_created`
-    named. None while the lane is off or when neither is recorded (the creation prefix then rules,
-    as on every stopped-lane row)."""
+def files_base(engine, node, events=None) -> Optional[dict]:
+    """The base `node.files` are an overlay OF — what a node built from them must name: with no
+    Developer call (a simplification, an inject shipping a fork's files) as its own base, and with
+    one (an improve, a merge, a rebuild) as the base the Developer is PINNED to, because the call
+    edits those files and the overlay it returns is still theirs. Its seeded lifecycle base, else
+    the base its own `node_created` named. None while the lane is off or when neither is recorded
+    (the creation prefix then rules, as on every stopped-lane row)."""
     if base_stamp(engine) is None or node is None:
         return None
-    seeded = lifecycle_base(engine, node)
+    events = engine.store.read_all() if events is None else events
+    seeded = lifecycle_base(engine, node, events)
     if seeded is not None:
         return seeded
-    created = next((e for e in engine.store.read_all() if e.type == "node_created"
+    created = next((e for e in events if e.type == "node_created"
                     and e.seq == getattr(node, "creation_event_seq", None)), None)
     named = created.data.get("base_selector") if created is not None else None
     return dict(named) if isinstance(named, dict) else None
@@ -561,33 +652,68 @@ def _code(exc) -> str:
     return str(getattr(exc, "code", None) or type(exc).__name__)[:80]
 
 
-async def _settle(engine, lane, job: UpstreamJob) -> bool:
-    """The MAIN task's half of one finished phase. True when it appended."""
+def _active(engine, events) -> dict:
+    """`active_base` of `events` for the loop's automatic decisions, CACHED on the serve object.
+
+    `active_base` re-verifies the selected archive (`seed_base.py::selected_seed_base`: the origin
+    run's log and the archive's bytes) and `auto_next_op` and `author_next` each asked for it on
+    every loop turn (critic 2026-10-08). Its answer moves only with the run's generation, the last
+    `base_advanced` row and the launch selector, so those three are the key; a refusal is never
+    cached — it raises to the caller each time, as before. The lane's own admit, in the worker,
+    still verifies from scratch."""
+    from looplab.engine.upstream_state import active_base
+    from looplab.events.run_generation import run_generation_token
+    serve = engine._upstream_serve
+    seed = (getattr(engine, "_repo_spec", None) or {}).get("seed_base")
+    last = next((e.seq for e in reversed(events) if e.type == "base_advanced"), None)
+    key = (run_generation_token(events), last, repr(seed))
+    cached = getattr(serve, "active_cache", None)
+    if cached is not None and cached[0] == key:
+        return cached[1]
+    active = active_base(events, seed)
+    serve.active_cache = (key, active)
+    return active
+
+
+def _stopping(state, job: UpstreamJob) -> bool:
+    """No NEW phase may start: the run halted (paused, finishing, stop requested), or — for an
+    automatic step, `idx` None — the operator's kill switch is on (doc 73 §4.2 G2)."""
+    return bool(getattr(state, "halted", False)) or (
+        job.idx is None and getattr(state, "upstream_auto_paused", False) is True)
+
+
+async def _settle(engine, lane, job: UpstreamJob, *, stopping: bool = False) -> bool:
+    """The MAIN task's half of one finished phase. True when it appended.
+
+    `stopping` (`_stopping`, or the loop's exit drain): a phase whose CLAIM landed is settled as
+    always — its charges, verdict or proposal — but no new phase starts. An admitted operation is
+    dropped UNCLAIMED instead of claimed (a queued request stays queued for the next engine, an
+    automatic one is derived again), an admitted advance is not committed, and a drafted proposal
+    is recorded and left to the next engine (`_settle_author`)."""
+    from looplab.core.errors import UpstreamRefusal
     store = engine.store
     receipt: Optional[dict] = None
     if job.op == "author":
-        return await _settle_author(engine, lane, job)
+        return await _settle_author(engine, lane, job, stopping=stopping)
+    if stopping and job.phase == "admit" and job.error is None and job.out[0] == "ctx":
+        engine._upstream_serve.job = None
+        _LOG.info("upstream %s %s not started: the run halted or its automation is switched off",
+                  job.op, job.body.get("action_id"))
+        return False
+    # Whether a refusal is about the PROPOSAL (recorded once, never asked again) or about the run's
+    # state (`TRANSIENT_REFUSALS`, asked again later). Only the lane's own deliberate refusals can be
+    # the former: anything else a worker raised (an `OSError`) is the box's, and passes.
+    for_good = False
     async with engine._write_lock:
         if job.phase == "admit":
             if job.error is not None:
                 receipt = {"outcome": "refused", "code": _code(job.error)}
+                for_good = (isinstance(job.error, UpstreamRefusal)
+                            and receipt["code"] not in TRANSIENT_REFUSALS)
             elif job.out[0] == "ack":
                 receipt = {"outcome": "succeeded", "seq": job.out[1].get("seq")}
             elif job.op == "advance":
-                from looplab.engine.upstream_state import active_base
-                prepared = job.out[1]
-                current = active_base(store.read_all(), engine._repo_spec.get("seed_base"))["revision"]
-                if current != prepared["proposal"]["expected_base_revision"]:
-                    receipt = {"outcome": "refused", "code": "upstream_base_conflict"}
-                else:
-                    advanced = lane._advance_commit(prepared, store.append)
-                    _issue_hint(engine, store, prepared["proposal"], advanced)
-                    receipt = {"outcome": "succeeded", "seq": advanced.seq}
-                    # The Developers build on the promoted base from their NEXT call
-                    # (`sync_developer_base`), and a node built by one that has not rebound yet
-                    # names its own base on `node_created`.
-                    selector = prepared["proposal"]["selector"]
-                    _arm(engine)["current"] = {k: selector[k] for k in ("run_dir", "event_seq", "digest")}
+                receipt = _advance_settle(engine, lane, job.out[1])
             else:
                 job.ctx = job.out[1]
                 if job.op == "propose":
@@ -631,14 +757,49 @@ async def _settle(engine, lane, job: UpstreamJob) -> bool:
                            "source_node_id": job.authored["source_node_id"], "outcome": "refused"}
                 refusal["code"] = receipt.get("code") or "refused"
                 store.append("lane_authored", refusal)
+            elif for_good and job.op in ("check", "advance") and job.body.get("proposal_id"):
+                # Refused for a reason about the proposal itself: said ONCE, durably, and
+                # `auto_next_op` passes the proposal over from now on — in this process and the next.
+                store.append("lane_held", {"op": job.op, "reason": REFUSED_PREFIX + receipt["code"],
+                                           "proposal_id": job.body["proposal_id"]})
     if receipt.get("outcome") == "refused":
         _LOG.info("upstream %s %s refused: %s", job.op, job.body.get("action_id"), receipt.get("code"))
     engine._upstream_serve.job = None
     return True
 
 
+def _advance_settle(engine, lane, prepared) -> dict:
+    """The MAIN task's commit of an admitted advance, under the write lock: the lane's two
+    re-checks against the log as it is NOW — the worker admitted it against an older read — then
+    `base_advanced` and its hint. Refused (never raised) when the base moved, when the base cannot
+    be read, or when an inject or fork was queued meanwhile (`upstream_work_pending`, the rule
+    `UpstreamLane._advance_prepare` applies in the worker)."""
+    from looplab.core.errors import UpstreamRefusal
+    from looplab.engine.shared import engine_fold as fold
+    from looplab.engine.upstream_state import active_base
+    store = engine.store
+    events = store.read_all()
+    try:
+        current = active_base(events, engine._repo_spec.get("seed_base"))["revision"]
+    except (UpstreamRefusal, OSError) as exc:     # an unreadable base: refused on the receipt, not raised
+        return {"outcome": "refused", "code": _code(exc)}
+    if current != prepared["proposal"]["expected_base_revision"]:
+        return {"outcome": "refused", "code": "upstream_base_conflict"}
+    state = fold(events)
+    if (len(state.inject_requests) > state.injects_done
+            or len(state.fork_requests) > state.forks_done):
+        return {"outcome": "refused", "code": "upstream_work_pending"}
+    advanced = lane._advance_commit(prepared, store.append)
+    _issue_hint(engine, store, prepared["proposal"], advanced)
+    # The Developers build on the promoted base from their NEXT call (`sync_developer_base`), and a
+    # node built by one that has not rebound yet names its own base on `node_created`.
+    selector = prepared["proposal"]["selector"]
+    _arm(engine)["current"] = {k: selector[k] for k in ("run_dir", "event_seq", "digest")}
+    return {"outcome": "succeeded", "seq": advanced.seq}
+
+
 def _author_work(engine, pick, generation):
-    """The author's worker: its two paid calls under a span (`_paid_progress`), the body back."""
+    """The author's worker: its two paid calls under a span (`_op_span`), the body back."""
     import contextlib
 
     from looplab.engine.upstream_author import author_draft
@@ -662,9 +823,11 @@ def _author_work(engine, pick, generation):
             pick["cost_usd"] = float("inf")
 
 
-async def _settle_author(engine, lane, job: UpstreamJob) -> bool:
+async def _settle_author(engine, lane, job: UpstreamJob, *, stopping: bool = False) -> bool:
     """The MAIN task's half of an authoring job: the `lane_authored` row, then — for a drafted
     proposal — the same job continues as the lane's `propose` (its own refusals, rows and Git work).
+    Not while `stopping`: the draft is retained (`retain_draft`) and its row says `drafted`, so the
+    next engine whose automation runs proposes it unpaid (`unproposed_draft`).
     A spend ceiling the worker met is the run's to stop on: raised here, after the job is cleared."""
     from looplab.core.errors import budget_stop_leaf
     pick, serve = job.ctx, engine._upstream_serve
@@ -680,7 +843,7 @@ async def _settle_author(engine, lane, job: UpstreamJob) -> bool:
         if isinstance(pick.get("cost_usd"), float):
             row["cost_usd"] = pick["cost_usd"]
         engine.store.append("lane_authored", row)
-        if out["outcome"] == "drafted":
+        if out["outcome"] == "drafted" and not stopping:
             job.authored = {k: row[k] for k in ("action_id", "track", "source_node_id", "hunk_hashes")}
             job.op, job.body, job.ctx, job.out = "propose", out["body"], None, None
             _start(engine, lane, job)
@@ -694,7 +857,7 @@ async def _settle_author(engine, lane, job: UpstreamJob) -> bool:
     return True
 
 
-def _start_author(engine, armed, state, events) -> None:
+def _start_author(engine, armed, state, events, *, active=None) -> None:
     """Start the automated author on the next source, when it is on and one is due."""
     from looplab.engine.upstream_author import author_next, upstream_author_setting
     from looplab.events.run_generation import run_generation_token
@@ -711,7 +874,8 @@ def _start_author(engine, armed, state, events) -> None:
             k: row.get(k) for k in ("action_id", "track", "source_node_id", "hunk_hashes")})
         _start(engine, _lane(engine, armed["settings"]), serve.job)
         return
-    pick = author_next(engine.run_dir, engine.task, state, events, skipped=serve.author_skipped)
+    pick = author_next(engine.run_dir, engine.task, state, events, skipped=serve.author_skipped,
+                       active=active)
     if pick is None:
         return
     generation = run_generation_token(events)
@@ -723,20 +887,12 @@ def _start_author(engine, armed, state, events) -> None:
 def _queued_body(lane, request: dict) -> dict:
     """A queued request's exact body: inline for check/advance, the retained request file for a
     propose (verified against its hash, as the stopped lane's exact recovery does)."""
-    import json
-
     from looplab.core.errors import UpstreamRefusal
-    from looplab.core.node_evidence import read_bounded_regular_file
-    from looplab.engine.upstream_state import digest
+    from looplab.engine.upstream_state import digest, read_retained_json
     from looplab.engine.upstream_workspace import owned_path
     if request.get("op") != "propose":
         return dict(request.get("body") or {})
-    raw = read_bounded_regular_file(owned_path(lane.rd, str(request.get("request_path") or "")),
-                                    2 * 1024 * 1024 + 1)
-    try:
-        body = json.loads(raw) if raw is not None and len(raw) <= 2 * 1024 * 1024 else None
-    except ValueError:
-        body = None
+    body = read_retained_json(owned_path(lane.rd, str(request.get("request_path") or "")))
     if not isinstance(body, dict) or digest(body) != request.get("request_hash"):
         raise UpstreamRefusal("upstream_request_unavailable", "The queued proposal's retained request changed")
     return body
@@ -751,7 +907,8 @@ async def serve_upstream_requests(engine, state) -> bool:
     if job is not None:
         if not job.done:
             return False
-        return await _settle(engine, _lane(engine, _arm(engine)["settings"]), job)
+        return await _settle(engine, _lane(engine, _arm(engine)["settings"]), job,
+                             stopping=_stopping(state, job))
     requests = getattr(state, "lane_op_requests", None) or []
     done = int(getattr(state, "lane_ops_done", 0) or 0)
     if not requests and getattr(engine, "_repo_spec", {}).get("upstream") is None:
@@ -800,7 +957,14 @@ async def serve_upstream_requests(engine, state) -> bool:
     # check, no automatic advance. Operator-queued operations above are still served.
     if getattr(state, "upstream_auto_paused", False):
         return False
-    nxt = auto_next_op(events, engine._repo_spec.get("seed_base"))
+    from looplab.core.errors import UpstreamRefusal
+    try:
+        active = _active(engine, events)
+    except (UpstreamRefusal, OSError):  # an unreadable base is the lane's to state; nothing automatic starts
+        return False
+    now = time.monotonic()
+    skip = {aid for (_op, aid), at in serve.refused_auto.items() if now - at < AUTO_RETRY_AFTER_S}
+    nxt = auto_next_op(events, engine._repo_spec.get("seed_base"), active=active, skip=skip)
     if nxt is None:
         from looplab.engine.upstream_author import author_spent_usd, author_usd_cap, upstream_author_setting
         cap_usd = author_usd_cap(armed["settings"])
@@ -811,22 +975,44 @@ async def serve_upstream_requests(engine, state) -> bool:
                     engine.store.append("lane_held", {"op": "author", "reason": f"cost_cap:{cap_usd:g}usd"})
                 return True
             return False
-        _start_author(engine, armed, state, events)
+        _start_author(engine, armed, state, events, active=active)
         return False
     op, body = nxt
     per_hour = advances_per_hour(armed["settings"])
     if op == "advance" and per_hour and auto_advances_in_window(events, time.time()) >= per_hour:
         # THE HOURLY CAP (doc 73 §4.2 G3): the passed gate waits; said once per proposal.
         if not any(e.type == "lane_held" and e.data.get("proposal_id") == body["proposal_id"]
+                   and not str(e.data.get("reason") or "").startswith(REFUSED_PREFIX)
                    for e in events):
             async with engine._write_lock:
                 engine.store.append("lane_held", {"op": "advance", "reason": f"rate_cap:{per_hour}/h",
                                                   "proposal_id": body["proposal_id"]})
             return True
         return False
-    refused_at = serve.refused_auto.get((op, body["action_id"]))
-    if refused_at is not None and time.monotonic() - refused_at < AUTO_RETRY_AFTER_S:
-        return False
     serve.job = UpstreamJob(op=op, body=body, idx=None)
     _start(engine, _lane(engine, armed["settings"]), serve.job)
     return False
+
+
+async def drain_upstream_job(engine) -> None:
+    """THE LOOP'S EXIT (`orchestrator.py`, after `_drain_adopted_evals`): settle the one operation in
+    flight instead of dropping it.
+
+    Before this, every `break` out of the loop (a pause, a stop, the run finishing) left `serve.job`
+    as it was: a gate whose claim had landed never got its charges or its verdict appended, so the
+    claim stood unresolved — which refuses every later lane operation, the automatic check and the
+    author included, until the operator abandons it — and its daemon thread was orphaned (critic
+    2026-10-08). A claimed operation is now waited for like an adopted evaluation — the same barrier,
+    for the same reason: the gate leases the run's devices like one and bounds every execution by
+    the run's own per-evaluation ceiling (`upstream_gate.py::execute_gate`) — and settled; nothing
+    new starts (`_settle(stopping=True)`). A raising exit (a crash, a hard budget stop) still leaves
+    the claim as doc 72 designed it: unresolved, for the operator to abandon."""
+    import anyio
+    serve = getattr(engine, "_upstream_serve", None)
+    if serve is None:
+        return
+    while serve.job is not None:
+        job = serve.job
+        while not job.done:
+            await anyio.sleep(0.05)
+        await _settle(engine, _lane(engine, _arm(engine)["settings"]), job, stopping=True)

@@ -339,5 +339,110 @@ def test_the_kill_switch_from_the_cli_and_the_inspect_lines(tmp_path, monkeypatc
     assert calls == [], "the switch holds the author"
     shown = runner.invoke(app, ["inspect", str(lane.rd)])
     assert "upstream lane: auto" in shown.output and "automation OFF" in shown.output, shown.output
+    assert "no engine serving it now" in shown.output, "the armed mode of an engine that is gone"
     assert runner.invoke(app, ["upstream-auto", str(lane.rd), "--on"]).exit_code == 0
     assert fold(store.read_all()).upstream_auto_paused is False
+
+
+def test_the_cli_reason_is_normalized_like_the_control_intake_and_refusals_go_to_stderr(tmp_path, monkeypatch):
+    """Critic 2026-10-08: the CLI kept a blank or padded reason the `/commands` intake strips, and a
+    Replay/deletion fence on the log escaped as a traceback."""
+    from typer.testing import CliRunner
+
+    from looplab.cli import app
+    from looplab.core.run_reset import RunResetFenceError
+    from looplab.events.eventstore import EventStore
+    lane, store, generation, body = fixture(tmp_path)
+    runner = CliRunner()
+    assert runner.invoke(app, ["upstream-auto", str(lane.rd), "--off", "--reason", "   "]).exit_code == 0
+    assert runner.invoke(app, ["upstream-auto", str(lane.rd), "--on", "--reason", "  back  "]).exit_code == 0
+    rows = [e.data for e in store.read_all() if e.type == "upstream_auto_set"]
+    assert rows == [{"enabled": False}, {"enabled": True, "reason": "back"}]
+
+    def fenced(self, *a, **k):
+        raise RunResetFenceError("Replay op_123 is unresolved")
+    monkeypatch.setattr(EventStore, "append", fenced)
+    refused = runner.invoke(app, ["upstream-auto", str(lane.rd), "--off"])
+    assert refused.exit_code == 2, refused.output
+    assert "Replay op_123 is unresolved" in refused.stderr and "Traceback" not in refused.output
+
+
+# ------------------------------------------------------------------------------- critic 2026-10-08
+def test_the_precheck_asks_the_lanes_own_rules_edit_surface_included(tmp_path, monkeypatch):
+    """A draft that writes outside the edit surface (the declared scorer) is refused by the lane's
+    `checked_overlay` — the precheck used to restate a subset of the rules and missed it, so the
+    critic was paid for a draft the lane refused."""
+    lane, store, generation, body = fixture(tmp_path)
+    calls = []
+    draft = _champion_draft()
+    draft["files"] = {**draft["files"], "score.py": "print('rigged')\n"}
+    _model(monkeypatch, draft, calls=calls)
+    _serve(_live_engine(lane, store))
+    row, = [e.data for e in store.read_all() if e.type == "lane_authored"]
+    assert row["outcome"] == "rejected" and row["code"] == "upstream_patch_forbidden", row
+    assert [name for name, _ in calls] == ["MaintainerDraft"], "the critic is not bought"
+
+
+def test_the_precheck_refuses_a_recipe_colliding_with_shared_code_by_case(tmp_path):
+    from looplab.core.errors import UpstreamRefusal
+    from looplab.engine.upstream import validate_shared_patch
+    from looplab.engine.upstream_author import precheck_draft
+    lane, store, generation, body = fixture(tmp_path)
+    pick = author_next(lane.rd, lane.task, fold(store.read_all()), store.read_all())
+    draft = MaintainerDraft.model_validate(_champion_draft())
+    passed = build_body(pick, draft, MaintainerCritique(verdict="pass", reason="r"),
+                        generation=generation)
+    assert precheck_draft(pick, passed, lane.task) is None
+    collide = {**passed, "recipe_files": {**passed["recipe_files"], "TRAIN.PY": "x = 1\n"}}
+    with pytest.raises(UpstreamRefusal) as lane_says:
+        validate_shared_patch(lane.task.upstream, collide, {"train.py"})
+    assert lane_says.value.code == "upstream_capability_not_absorbed", "NTFS writes one onto the other"
+    assert precheck_draft(pick, collide, lane.task) is not None
+
+
+def test_an_unreadable_base_file_skips_the_source_never_reads_as_empty(tmp_path):
+    from looplab.engine.upstream_author import _read
+    archive = tmp_path / "archive"
+    (archive / "pkg").mkdir(parents=True)
+    (archive / "train.py").write_text("x = 1\n", encoding="utf8")
+    (archive / "link.py").symlink_to(archive / "train.py")
+    assert _read(archive, "train.py") == "x = 1\n"
+    assert _read(archive, "added.py") == "", "a file the source ADDED has no base text"
+    assert _read(archive, "pkg") is None, "a directory is not an empty file"
+    assert _read(archive, "link.py") is None, "nor is a link the bounded reader refuses"
+
+
+def test_the_maintainers_summary_and_flag_values_go_through_the_redaction_funnel(tmp_path, monkeypatch):
+    lane, store, generation, body = fixture(tmp_path)
+    draft = _champion_draft()
+    draft["summary"] = "Momentum through recipe.env; token=hunter2"
+    draft["flag"] = {"name": "MOMENTUM", "default": "0.0", "enabled": "0.2-hunter2"}
+    _model(monkeypatch, draft)
+    engine = _live_engine(lane, store)
+    engine._redact = lambda text: str(text).replace("hunter2", "[REDACTED]")
+    _serve(engine)
+    proposed, = [e.data for e in store.read_all() if e.type == "upstream_proposed"]
+    assert "hunter2" not in proposed["summary"] and "[REDACTED]" in proposed["summary"]
+    assert proposed["flag"]["enabled"] == "0.2-[REDACTED]" and proposed["flag"]["name"] == "MOMENTUM"
+
+
+def test_a_source_with_nothing_to_nominate_is_not_reread_on_every_new_node(tmp_path, monkeypatch):
+    """The memo's key for an UNREPAIRED source is the base revision alone: a pending node appearing
+    cannot give it a capability hunk, so it is not re-derived (a whole-log fold and per-hunk repair
+    replays) on every node."""
+    import looplab.engine.upstream_state as upstream_state
+    lane, store, generation, body = fixture(tmp_path, source_files={"recipe.env": "MOMENTUM=0.2\n"})
+    store.append("resume", {})
+    real, calls = upstream_state.upstream_candidates, []
+
+    def counted(*a, **k):
+        calls.append(k.get("source_node_id"))
+        return real(*a, **k)
+    monkeypatch.setattr(upstream_state, "upstream_candidates", counted)
+    memo = {}
+    assert author_next(lane.rd, lane.task, fold(store.read_all()), store.read_all(), skipped=memo) is None
+    assert calls == [0], "a recipe-only champion nominates nothing"
+    store.append("node_created", {"node_id": 1, "operator": "improve", "parent_ids": [0],
+                                  "idea": {"operator": "improve"}, "files": {"recipe.env": "MOMENTUM=0.3\n"}})
+    assert author_next(lane.rd, lane.task, fold(store.read_all()), store.read_all(), skipped=memo) is None
+    assert calls == [0], "a new pending node changes nothing for an unrepaired source"
