@@ -895,6 +895,9 @@ def test_a_run_attempt_that_never_returned_carries_no_result_from_the_attempt_be
         # run dir, mount or interpreter, so it has nothing to probe and launches as before.
         _eval_infra_pause = Engine._eval_infra_pause
         _infra_probe_targets = Engine._infra_probe_targets
+        # The pre-launch artifact-use check runs for real: this host's node pins no artifact use,
+        # so it refuses nothing and launches as before.
+        _refuse_unusable_artifacts = Engine._refuse_unusable_artifacts
         _declared_eval_env = Engine._declared_eval_env
         store = types.SimpleNamespace(read_all=lambda: [])
 
