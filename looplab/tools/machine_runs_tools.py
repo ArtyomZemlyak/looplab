@@ -365,7 +365,19 @@ class MachineRunsTools(ForeignRunReader):
         # spent its turn re-reading. The rest is one call away and that call is named.
         goal = str(st.goal or st.task_id or "")
         if full_goal:
-            start = goal_offset if type(goal_offset) is int and 0 <= goal_offset < len(goal) else 0
+            # A provider may send the offset as "3200" or 3200.0: coerce an integral value (as
+            # `node_id` is), and REFUSE one that names no page — silently answering page 0 named
+            # a continuation the caller had already spent, and the model looped on it.
+            start = 0
+            if goal_offset is not None:
+                try:
+                    start = int(goal_offset) if float(goal_offset) == int(float(goal_offset)) else -1
+                except (TypeError, ValueError, OverflowError):
+                    start = -1
+                if start < 0 or (start >= len(goal) and start != 0):
+                    return (f"(goal_offset {goal_offset!r} names no page: the goal of run {run_id} "
+                            f"is {len(goal)} chars; pass an integer from 0 to "
+                            f"{max(len(goal) - 1, 0)}, or omit it for the first page)")
             end = min(len(goal), start + READ_RUN_GOAL_PAGE_CHARS)
             more = (f"\n[goal continues: read_run(run_id, full_goal=true, goal_offset={end})]"
                     if end < len(goal) else "\n[end of goal]")

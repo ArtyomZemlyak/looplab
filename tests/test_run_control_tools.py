@@ -1387,3 +1387,12 @@ def test_the_track_switch_has_one_reader():
     assert assistant.assistant_track_enabled(Settings()) is True
     assert assistant.assistant_track_enabled(Settings(assistant_track_tool=False)) is False
     assert assistant.assistant_track_enabled(SimpleNamespace()) is False
+
+
+def test_a_long_single_line_preview_shows_its_head_not_only_the_cut_receipt():
+    from looplab.tools.perm_modes import APPROVAL_PREVIEW_CHARS, clip_approval_preview
+    text = "set_directive(r)\nreplace: no\ntext:\n" + "word " * 2000
+    card = clip_approval_preview(text)
+    assert len(card) <= APPROVAL_PREVIEW_CHARS
+    assert card.count("word") > 100, "the reviewer reads a head of the directive itself"
+    assert clip_approval_preview(card) == card, "idempotent: the router re-bounds every preview"

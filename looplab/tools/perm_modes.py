@@ -61,8 +61,11 @@ def clip_approval_preview(text: str, cap: int = APPROVAL_PREVIEW_CHARS) -> str:
     while True:
         head = text[:max(0, budget)]
         newline = head.rfind("\n")
-        if newline >= 0:
-            head = head[:newline + 1]        # a diff is read line by line: never end mid-line
+        # A diff is read line by line: never end mid-line — unless the last line break sits in the
+        # first half of the budget. One very long line (a whitespace-collapsed directive) otherwise
+        # left a card showing only its header and the cut receipt: nothing of what was approved.
+        if newline >= 0 and newline + 1 >= budget // 2:
+            head = head[:newline + 1]
         rest = text[len(head):]
         lines = len(rest.splitlines())
         receipt = _PREVIEW_CUT.format(omitted=len(rest), total=len(text), lines=lines,
