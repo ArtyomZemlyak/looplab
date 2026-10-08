@@ -306,7 +306,10 @@ def resolve_refusing_loops(path) -> Path:
     that is refused as a loop (`_unresolved_link_in`). Fail-closed on purpose: a link left for any
     other reason (an unreadable target on Windows) is no safer to hand a containment test."""
     import errno
-    requested = Path(path)
+    # The caller's own path class is kept: a `Path` subclass (the Windows-rendering emulation the
+    # near-miss tests drive, `tests/_windows_emulation.py`) must answer in its own spelling, which
+    # the containment test beside it compares against.
+    requested = path if isinstance(path, Path) else Path(path)
     try:
         return requested.resolve(strict=True)
     except FileNotFoundError:

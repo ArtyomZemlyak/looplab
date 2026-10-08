@@ -45,7 +45,6 @@ passthrough values in every spelling and at the capture cut (`artifact_sync.py::
 """
 from __future__ import annotations
 
-import json
 import logging
 import math
 import threading
@@ -53,6 +52,8 @@ import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional
+
+from looplab.core.jsonutil import bounded_json_loads
 
 _LOG = logging.getLogger(__name__)
 
@@ -91,12 +92,13 @@ def parse_track_output(stdout: str, *, keys=None, prefix: str = "") -> dict[str,
         if not (line.startswith("{") and line.endswith("}")):
             continue
         try:
-            obj = json.loads(line)
+            obj = bounded_json_loads(line)
         except (ValueError, RecursionError):
-            # RecursionError too (review 2026-10-08): a line nested past the decoder's stack is the
-            # tool's malformed output, not a crash of the lane — `runtime/command_eval.py`'s rule.
-            # Not `core/jsonutil.py::strict_json_loads`: it refuses a WHOLE line over one `NaN`
-            # value, and a scorer's NaN on one key must not cost its other numbers.
+            # `core/jsonutil.py::bounded_json_loads` (review 2026-10-08): a line nested past the
+            # candidate-JSON depth bound is the tool's malformed output, not a crash of the lane —
+            # on 3.13 `json.loads` parses a few thousand levels and the next walk would raise.
+            # Not `strict_json_loads`: it refuses a WHOLE line over one `NaN` value, and a scorer's
+            # NaN on one key must not cost its other numbers.
             continue
         if isinstance(obj, dict):
             found = obj
