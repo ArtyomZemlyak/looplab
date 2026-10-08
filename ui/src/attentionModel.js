@@ -19,6 +19,10 @@ export const ATTENTION_KINDS = new Set([
   // `succeeded` — its postcondition is the engine's ack — so without this nothing said it was parked.
   'request_parked',
   'external_checkpoint',
+  // An `eval.artifact_sync` copy-out that started and never closed: the engine stopped first, and
+  // nothing retries it (the operator's command is not known to be idempotent). The server shows it
+  // only once no engine runs; NOT needs-action — re-running a copy is the operator's choice.
+  'artifact_sync_unfinished',
 ])
 const SEVERITIES = new Set(['action', 'warning', 'danger', 'success'])
 const SEVERITY_PRIORITY = Object.freeze({ danger: 4, action: 3, warning: 2, success: 1 })
@@ -65,6 +69,7 @@ const COPY = Object.freeze({
   // The FALLBACK: the server's measured sentence (`events/parked_requests.py::parked_request_detail`)
   // says which request and how many slots are taken; this row is for a payload that carries none.
   request_parked: ['Operator request waiting for node budget', 'A queued experiment waits for a node slot: the node budget is spent. Extend it with budget_extend add_nodes.', 'Open Events'],
+  artifact_sync_unfinished: ['Artifact copy-out did not finish', 'A copy-out of this experiment started and has no receipt: the engine stopped first. Run the eval.artifact_sync command for it again.', 'Inspect experiment'],
   external_checkpoint: ['External agent answer needed', 'Read the current evaluation question and allowed responses in Agent cycle. Agent connection is not measured.', 'Open Agent cycle'],
   assistant_permission: ['Assistant approval needed', 'Open Assistant to review the exact action and scope.', 'Open Assistant'],
 })
@@ -110,7 +115,7 @@ export function attentionHref(item) {
     state.panel = 'failures'
     if (hasExactNode) state.nodeId = exactNodeId
   } else if ((item.kind === 'train_monitor' || item.kind === 'train_overrun'
-              || item.kind === 'asha') && hasExactNode) {
+              || item.kind === 'asha' || item.kind === 'artifact_sync_unfinished') && hasExactNode) {
     state.nodeId = exactNodeId          // deep-link to the evaluating node (its live training curve)
   } else state.panel = 'events'
   // A run generation can contain several lifecycles for the same numeric node after a reset/retry.

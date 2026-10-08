@@ -1658,7 +1658,14 @@ class Engine(ConfirmPhaseMixin, NoiseFloorMixin, AblationMixin, NoveltyGateMixin
         Drains accepted work and, on its bounded timeout, atomically abandons anything that has not
         crossed the lifecycle writer fence. Python still cannot interrupt an in-progress filesystem
         call; a crossed writer keeps the fence until it is done.
+
+        The copy-outs this engine accepted are waited for FIRST, bounded
+        (`engine/artifact_sync.py::drain_before_release`): a queued copy is started only while its
+        engine still owns the run, and this barrier is what says it no longer does
+        (`artifact_sync.py::engine_owns_run`). A no-op when it accepted none.
         """
+        from looplab.engine.artifact_sync import drain_before_release
+        drain_before_release(self)
         _trace_shutdown = getattr(getattr(self, "tracer", None), "shutdown", None)
         if not callable(_trace_shutdown):
             return

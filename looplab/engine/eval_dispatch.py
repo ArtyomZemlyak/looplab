@@ -94,6 +94,21 @@ def artifact_unavailable_text(refused) -> str:
         f"({r['why']})" for r in refused)[:400]
 
 
+# The attribute `_run_eval` sets on the `RunResult` it returns WITHOUT launching because a pinned use
+# moved after RUN_ATTEMPT's check (critic c3 item 6). An attribute rather than an exit code: no
+# number is the engine's alone, and the candidate's own process may exit 2. RUN_ATTEMPT reads it
+# through `artifact_refusal` and ends the lifecycle `artifact_unavailable` on that verdict
+# (`evaluate.py::EvaluateMixin._settle_artifact_refusal`), so triage, repair and the crash
+# statistics never see a launch that never was.
+ARTIFACT_REFUSAL_ATTR = "artifact_refused"
+
+
+def artifact_refusal(res) -> list:
+    """The refused uses `_run_eval` tagged `res` with, or `[]` (every launched result)."""
+    refused = getattr(res, ARTIFACT_REFUSAL_ATTR, None)
+    return list(refused) if isinstance(refused, list) else []
+
+
 class _DeferredBudgetStop:
     """A task-group facade that DEFERS a background task's `BudgetExceeded` instead of letting it
     cancel that group's siblings -- used by `_dispatch_evals` for exactly one caller,
@@ -1078,16 +1093,21 @@ class EvalDispatchMixin:
             env = {**(env or {}), **parents}
         # …and the ARTIFACT nodes this node uses (doc 73 §1.4), unconditionally: `uses` exists only
         # on a node an operator injected naming them and on the nodes built from it, which inherit
-        # it in the fold (`events/replay.py::_inherited_uses`), so nothing else carries it.
+        # it in the fold (`events/replay.py::inherited_uses`), so nothing else carries it.
         _used_paths, _used_refused = self._resolve_uses(node)
         if _used_refused:
             # A pinned artifact moved between RUN_ATTEMPT's check
-            # (`EvaluateMixin._refuse_unusable_artifacts`) and here. Never launch without it:
-            # a plain failed result, nothing executed, like the protected-script preflight below.
+            # (`EvaluateMixin._refuse_unusable_artifacts`) and here. Never launch without it, and
+            # never as a CRASH (critic c3 item 6): the result is TAGGED (`ARTIFACT_REFUSAL_ATTR`), and
+            # RUN_ATTEMPT ends the lifecycle on this verdict — the engine terminal
+            # `artifact_unavailable` — so no triage or repair ever sees it. A caller that reads
+            # only the `RunResult` (confirm, the noise floor) sees nothing ran: exit 2, no metric.
             from looplab.runtime import command_eval
-            return command_eval.RunResult(
+            refused_result = command_eval.RunResult(
                 exit_code=2, stdout="", metric=None, timed_out=False,
                 stderr=artifact_unavailable_text(_used_refused))
+            setattr(refused_result, ARTIFACT_REFUSAL_ATTR, list(_used_refused))
+            return refused_result
         used = ({self.USES_WORKDIRS_ENV: os.pathsep.join(_used_paths)} if _used_paths else {})
         if used:
             env = {**(env or {}), **used}

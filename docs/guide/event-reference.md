@@ -23,7 +23,7 @@ The event type itself is the contract's identity and is never renamed or reused;
 
 <!-- generated: event types -->
 
-182 event types — 127 folded into `RunState`, 55 diagnostic; 1203 declared payload keys; 30 types whose whole payload is stored by the fold.
+182 event types — 127 folded into `RunState`, 55 diagnostic; 1204 declared payload keys; 30 types whose whole payload is stored by the fold.
 
 | type | fold | records | required keys | optional keys |
 |---|---|---|---|---|
@@ -38,7 +38,7 @@ The event type itself is the contract's identity and is never renamed or reused;
 | `approval_granted` | folded | The operator ratified the node the run paused on (HITL). | `generation`, `node_id` | `attempt` |
 | `approval_requested` | folded | The run paused for a human decision about one node, at a named log position. | `after_seq`, `generation`, `metric`, `node_id` | `attempt` |
 | `artifact_sync_started` | diagnostic | The operator's eval.artifact_sync command is about to run over a node's workdir; its artifact_synced row closes it. | `generation`, `node_id`, `sync_id` | — |
-| `artifact_synced` | diagnostic | The operator's eval.artifact_sync command ran over a node's workdir after its terminal. | `command`, `exit_code`, `generation`, `node_id`, `seconds`, `stderr_tail`, `timed_out` | `sync_id`, `workdir_changed` |
+| `artifact_synced` | diagnostic | The operator's eval.artifact_sync command ran over a node's workdir after its terminal. | `command`, `exit_code`, `generation`, `node_id`, `seconds`, `stderr_tail`, `timed_out` | `skipped`, `sync_id`, `workdir_changed` |
 | `asha_rank` | diagnostic | One ASHA tick's ranking of a running node against its comparable population. | `comparable_population`, `direction`, `endpoint_underperforming`, `generation`, `intermediate`, `kill_comparable`, `node_id`, `population`, `quantile`, `resource_underperforming`, `underperforming` | `checkpoint_id`, `resource`, `resource_key`, `source`, `stop_refusal` |
 | `asha_verdict` | diagnostic | The ASHA judge's call on a persistently underperforming node: stop or spare, with confidence. | `comparable_population`, `confidence`, `direction`, `generation`, `intermediate`, `kill`, `node_id`, `quantile`, `reason`, `status`, `stop_decided`, `under_streak` | `confidence_valid`, `kill_superseded_by`, `resource`, `resource_key`, `train_monitor_status` |
 | `base_advanced` | folded · whole | Explicit CAS — the stopped lane's, or the live engine's (`in_engine`): only future lifecycles adopt the verified base. | `action_id`, `evidence_token`, `flag`, `from_revision`, `gate_seq`, `hunk_hashes`, `proposal_id`, `request_hash`, `selector`, `source_node_id`, `summary` | `in_engine` |

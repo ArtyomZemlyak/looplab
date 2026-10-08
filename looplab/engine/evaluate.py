@@ -801,8 +801,11 @@ def _durable_monitor_verdicts(events, node_id: int, generation: int) -> list[dic
 # evaluator command (review 2026-09-22, the ENG2-08 tail). Left unsettled, that claim read on resume
 # as an invocation a dead process had left open, and the next attempt of the same key was stamped
 # `after_interrupted_attempt` — an at-least-once repeat of an evaluator that had never been invoked.
+# `artifact_refused` is the other: `_run_eval` found a pinned artifact gone at its last instant, after
+# RUN_ATTEMPT's check, and launched nothing (critic c3 item 6, `eval_dispatch.py::artifact_refusal`).
 EVAL_INVOCATION_OUTCOMES: frozenset[str] = frozenset(
-    {"ok", "failed", "superseded", "aborted", "gpu_unpinnable", "setup_refused"})
+    {"ok", "failed", "superseded", "aborted", "gpu_unpinnable", "setup_refused",
+     "artifact_refused"})
 
 
 def eval_invocation_id(run_reference, node_id, generation, attempt) -> str:
@@ -4021,6 +4024,12 @@ class EvaluateMixin:
                 except OSError:
                     pass
             return True
+        from looplab.engine.eval_dispatch import artifact_refusal
+        if artifact_refusal(res):
+            # Nothing launched — a pinned artifact moved (critic c3 item 6). Handed back AS IS, so
+            # RUN_ATTEMPT settles it on the use verdict instead of the crash path a failed canary takes.
+            a.res = res
+            return False
         a.res = canary_failure_result(
             res, detail=detail, log_dir=str(scratch), env_names=spec["env"], expired=expired,
             account_redact=self._redact if canary_failure_account(self) else None)
@@ -4643,19 +4652,27 @@ class EvaluateMixin:
         without it is a number measured on other data — or on nothing, read as a success. Nothing of
         the candidate runs here, so it is no `FAILURE_REASONS` word: triage and repair, which would
         pay to "fix" code that is not at fault, never see it. The operator's remedy is a rebuild of
-        the consumer (`node_reset` from implement re-pins it) or a fresh inject.
+        the consumer (`node_reset` from implement re-pins it) or a fresh inject. (A lifecycle the
+        producer is STILL producing never reaches this check: ADMIT returned for it,
+        `engine/artifact_fence.py::uses_waiting`.)
 
         WHAT WAS READ, on a launch that goes ahead, is the pins on `node_created` — the eval cannot
         run on anything else — and on this attempt's span as `uses_read`."""
         pins = getattr(a.node, "uses_attempts", None) or {}
         if not pins:
             return False
-        from looplab.engine.eval_dispatch import artifact_unavailable_text
         _paths, refused = await anyio.to_thread.run_sync(
             self._resolve_uses, a.node, fold(self.store.read_all()))
         if not refused:
             a.sp.set("uses_read", dict(pins))
             return False
+        await self._write_artifact_unavailable(a, refused)
+        return True
+
+    async def _write_artifact_unavailable(self, a: "EvalAttempt", refused) -> None:
+        """The ONE writer of the `artifact_unavailable` terminal: each refused use, its pinned
+        lifecycle and why (`eval_dispatch.py::artifact_unavailable_text`)."""
+        from looplab.engine.eval_dispatch import artifact_unavailable_text
         a.sp.set("artifact_unavailable", [r["node_id"] for r in refused])
         async with self._write_lock:
             self.store.append(EV_NODE_FAILED, {
@@ -4663,6 +4680,22 @@ class EvaluateMixin:
                 "error": artifact_unavailable_text(refused), "reason": "artifact_unavailable",
                 "eval_seconds": a.charged_eval_seconds()})
             self._maybe_crash()
+
+    async def _settle_artifact_refusal(self, a: "EvalAttempt") -> bool:
+        """RUN_ATTEMPT's half of the race refusal (critic c3 item 6): when `_run_eval` launched
+        nothing because a pinned use moved after `_refuse_unusable_artifacts` passed
+        (`eval_dispatch.py::artifact_refusal`), close the invocation as `artifact_refused` and end
+        the lifecycle `artifact_unavailable` on the verdict `_run_eval` itself read at the launch
+        instant — instead of handing an exit-2 result to SETTLE_OUTCOME, where it read as the
+        candidate's crash and bought a triage and a repair. A lifecycle generation only grows, so
+        that verdict cannot be undone by a later read. True when it settled."""
+        from looplab.engine.eval_dispatch import artifact_refusal
+        refused = artifact_refusal(a.res)
+        if not refused:
+            return False
+        await self._settle_eval_invocation(a, "artifact_refused", 0.0)
+        a.sp.set("artifact_refused_at_launch", [r.get("node_id") for r in refused])
+        await self._write_artifact_unavailable(a, refused)
         return True
 
     async def _eval_run_attempt(self, a: "EvalAttempt") -> str:
@@ -4793,6 +4826,12 @@ class EvaluateMixin:
                 if not await self._eval_run_canary(a, cancel):
                     cancel.set()
                     _tg.cancel_scope.cancel()
+                    # A canary that never launched because a pinned artifact moved is no failed
+                    # canary (critic c3 item 6): shielded, like the GPU-pin terminal, because the
+                    # scope was just cancelled.
+                    with anyio.CancelScope(shield=True):
+                        if await self._settle_artifact_refusal(a):
+                            return PHASE_RETURN
                     return PHASE_NEXT
                 a.canary_ran = True
                 if self._pause_withholds_attempt(a):
@@ -4914,6 +4953,10 @@ class EvaluateMixin:
                 return PHASE_RETURN
             cancel.set()                  # eval finished on its own …
             _tg.cancel_scope.cancel()     # … stop the watcher now (no poll-interval latency)
+        # NOTHING LAUNCHED: a pinned artifact moved after the check above (critic c3 item 6). An
+        # engine outcome on the same verdict, never this attempt's crash.
+        if await self._settle_artifact_refusal(a):
+            return PHASE_RETURN
         if self.external_harness and getattr(self, "_eval_spec", None) and not a._seen.get("kind"):
             # A short command evaluation can finish before the first live-monitor tick.
             # Inspect its final attributed log once so enabled monitoring cannot vanish merely

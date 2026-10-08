@@ -21,6 +21,13 @@ THREE PROPERTIES, each the reason for a choice:
   uplink); the rest wait in this process's queue, in terminal order. The workers are NON-daemon, so
   the interpreter waits for the queued and in-flight copies at exit (each bounded by its `timeout`)
   instead of killing the copy of the run's last node; a worker exits as soon as the queue is empty.
+  A QUEUED COPY IS CHECKED AGAIN WHEN IT STARTS (round 3, critic c3 item 1): the workdir stamp is
+  captured when the copy is ACCEPTED, so a node reset while its copy waited in the queue is refused
+  (`skipped: "workdir_changed"`) instead of uploading the next lifecycle under this one's
+  `{generation}`; and a QUEUED copy whose engine's lifetime has ended (`engine_owns_run`) is not
+  started at all — another engine may own the run directory by then. Its start row stays open, which
+  `unfinished_syncs` reports (`looplab inspect`, the attention feed); a copy already running still
+  closes its own row.
 * A RECEIPT, NEVER A VERDICT, OPENED BEFORE IT IS CLOSED. The `artifact_sync_started` row is written
   when the copy is accepted (round 3), the `artifact_synced` row when it ends, both keyed by
   `sync_id`; a started row with no synced row is a copy an engine death interrupted, queued or
@@ -43,8 +50,12 @@ import time
 import uuid
 from pathlib import Path
 from typing import Optional
+from urllib.parse import quote, quote_plus
 
 from looplab.core.node_evidence import node_workdir
+# `unfinished_syncs` — the started-and-never-closed pairing — lives beside the fold so the CLI and
+# the attention feed read it without the engine; re-exported here as the SAME function.
+from looplab.events.replay import unfinished_syncs  # noqa: F401 — re-exported
 from looplab.events.types import EV_ARTIFACT_SYNC_STARTED, EV_ARTIFACT_SYNCED
 
 _LOG = logging.getLogger(__name__)
@@ -68,6 +79,17 @@ _QUEUE: collections.deque = collections.deque()
 _PENDING = 0
 _WORKERS = 0
 _COND = threading.Condition()
+# …and the same pending count PER ACCEPTING ENGINE (`id(engine)`; the queued job holds the engine, so
+# the id cannot be reused while its count is positive), so an engine ending waits for ITS copies and
+# never for another engine's in the same process (`drain_before_release`).
+_PENDING_BY_OWNER: dict[int, int] = {}
+
+# How long an ending engine waits for the copy-outs it accepted before it gives up its run
+# (`drain_before_release`). A queued copy found after the end is never started (`engine_owns_run`),
+# so without the wait the copies of a run's LAST nodes — queued behind the bound when the search
+# finished — were exactly the ones skipped. Bounded, and by the default copy `timeout`: one slow
+# upload must not hold a finished run's lock forever; what is left open is reported unfinished.
+FINAL_DRAIN_S = 1800.0
 
 
 def render_argv(argv, values: dict) -> list[str]:
@@ -121,14 +143,27 @@ def workdir_stamp(workdir: Path) -> Optional[bytes]:
     return read_bounded_regular_file(Path(workdir) / ".looplab-manifest", 256)
 
 
-def unfinished_syncs(events) -> list[dict]:
-    """The `artifact_sync_started` rows no `artifact_synced` row closed, in log order: copies an
-    engine death interrupted (or, on a live engine, copies still queued or running). Pure."""
-    closed = {e.data.get("sync_id") for e in events
-              if e.type == EV_ARTIFACT_SYNCED and isinstance(e.data, dict) and e.data.get("sync_id")}
-    return [dict(e.data) for e in events
-            if e.type == EV_ARTIFACT_SYNC_STARTED and isinstance(e.data, dict)
-            and e.data.get("sync_id") not in closed]
+def engine_owns_run(engine) -> bool:
+    """Whether `engine` is still inside its run's lifetime — the window in which it holds
+    `engine.lock` and may append to the event log (round 3, critic c3 item 1).
+
+    The signal is the engine's own trace exporter: `Engine.retire_tracer` is THE terminal barrier
+    that "must end before the lifecycle lock may be released" (`engine/orchestrator.py::Engine.run`),
+    so a shut-down exporter means the owner is done and its lock is released or about to be. A
+    queued copy found here after that is NOT started: a resumed engine or a Replay may own the run
+    directory by then, and would be resetting the very workdir the copy reads. Conservative by
+    design — the CLI may still hold the lock for its finish report — because the cost of the miss is
+    one open `artifact_sync_started` row the operator re-runs, and the cost of the other error is an
+    upload of bytes another owner is rewriting. A host with no tracer (a hand-built test engine) owns
+    its run for as long as it exists."""
+    exporter = getattr(getattr(engine, "tracer", None), "exporter", None)
+    metrics = getattr(exporter, "metrics", None)
+    if not callable(metrics):
+        return True
+    try:
+        return not bool(metrics().get("shutdown", False))
+    except (AttributeError, OSError, RuntimeError, TypeError, ValueError):
+        return True
 
 
 def start_artifact_sync(engine, node_id: int, generation: int) -> Optional[str]:
@@ -156,6 +191,10 @@ def start_artifact_sync(engine, node_id: int, generation: int) -> Optional[str]:
     except (TypeError, ValueError):
         timeout = 1800.0
     sync_id = uuid.uuid4().hex[:16]
+    # THE STAMP OF THE LIFECYCLE THIS COPY IS FOR, taken NOW, at acceptance (critic c3 item 1): with
+    # the bounded pool the copy may wait in the queue for minutes, and a stamp read when it STARTS
+    # would vouch for whatever lifecycle a reset re-materialized meanwhile.
+    accepted_stamp = workdir_stamp(workdir)
     # THE START ROW FIRST, then the queue: a copy the log does not say was accepted must never run,
     # and one it does say was accepted is visible as unfinished from this instant — queued behind
     # the bound or running — until its `artifact_synced` row lands.
@@ -167,7 +206,7 @@ def start_artifact_sync(engine, node_id: int, generation: int) -> Optional[str]:
                      node_id, exc_info=True)
         return None
     _submit((engine, node_id, generation, argv, workdir, run_dir, timeout,
-             passthrough_env(spec), sync_id, sync_cwd(workdir, run_dir, spec)))
+             passthrough_env(spec), sync_id, sync_cwd(workdir, run_dir, spec), accepted_stamp))
     return sync_id
 
 
@@ -177,6 +216,7 @@ def _submit(job) -> None:
     with _COND:
         _QUEUE.append(job)
         _PENDING += 1
+        _PENDING_BY_OWNER[id(job[0])] = _PENDING_BY_OWNER.get(id(job[0]), 0) + 1
         if _WORKERS >= MAX_CONCURRENT_SYNCS:
             return
         _WORKERS += 1
@@ -184,11 +224,23 @@ def _submit(job) -> None:
 
 
 def _spawn() -> None:
-    """Start one worker, whose slot the caller already counted in `_WORKERS`."""
+    """Start one worker, whose slot the caller already counted in `_WORKERS`.
+
+    NO THREAD TO BE HAD (interpreter shutting down, a thread limit) gives the slot back and LEAVES
+    THE QUEUE AS IT IS (critic c3 item 7): this used to drain the whole queue inline, and the caller
+    is `_evaluate` on the event loop — minutes of uploads with every session turn, watcher and
+    heartbeat frozen behind them. A copy left queued keeps its open start row; the next `_submit`
+    (or a finishing worker) starts a worker for it, and a process that ends first leaves it reported
+    as unfinished, which is what the start row is for."""
+    global _WORKERS
     try:
         threading.Thread(target=_worker, name="looplab-artifact-sync", daemon=False).start()
-    except RuntimeError:          # no thread to be had (interpreter shutting down): drain it here
-        _worker()
+    except RuntimeError:
+        with _COND:
+            _WORKERS -= 1
+            _COND.notify_all()
+        _LOG.warning("artifact sync: no worker thread could be started; %d copy-out(s) stay queued "
+                     "(their artifact_sync_started rows stay open)", len(_QUEUE))
 
 
 def _worker() -> None:
@@ -210,10 +262,17 @@ def _worker() -> None:
                     return
                 job = _QUEUE.popleft()
             try:
-                _run(*job[:8], sync_id=job[8], cwd=job[9])
+                _run(*job[:8], sync_id=job[8], cwd=job[9],
+                     accepted_stamp=job[10] if len(job) > 10 else None)
             finally:
                 with _COND:
                     _PENDING -= 1
+                    owner = id(job[0])
+                    left = _PENDING_BY_OWNER.get(owner, 1) - 1
+                    if left > 0:
+                        _PENDING_BY_OWNER[owner] = left
+                    else:
+                        _PENDING_BY_OWNER.pop(owner, None)
                     _COND.notify_all()
     finally:
         if not clean:
@@ -230,21 +289,55 @@ def _worker() -> None:
 # `artifact_sync.log`.
 _LOG_WRITE_LOCK = threading.Lock()
 _MASK = "***REDACTED_ENV***"
+# The shortest piece of a passthrough value masked where a CUT left only part of it (critic c3 item
+# 5): `run_argv` keeps the last 64 KB of each stream, so a secret printed across that boundary
+# survives as its suffix at the stream's head (a timeout kill can leave a prefix at its tail).
+# Six characters, not four: a fragment is matched only AT the cut, but a shorter one is common
+# enough in ordinary output that the log would lose words that were never the secret.
+_MIN_CUT_FRAGMENT = 6
+
+
+def _spellings(value: str) -> set:
+    """`value` as a tool may print it: verbatim, and the percent-encoded forms a URL or a query
+    string carries (`quote` with and without `/` kept, `quote_plus`) — critic c3 item 5: an
+    `MC_HOST_*` key echoed inside a URL is the encoded spelling, which an identity match missed."""
+    return {value, quote(value, safe=""), quote(value), quote_plus(value)}
+
+
+def _mask_cut_edges(text: str, spellings) -> str:
+    """Mask a fragment of any spelling that a cut left at the HEAD (its suffix) or the TAIL (its
+    prefix) of `text`: the longest one at least `_MIN_CUT_FRAGMENT` long, per edge."""
+    head = max((k for s in spellings for k in range(_MIN_CUT_FRAGMENT, len(s))
+                if text.startswith(s[-k:])), default=0)
+    if head:
+        text = _MASK + text[head:]
+    tail = max((k for s in spellings for k in range(_MIN_CUT_FRAGMENT, len(s))
+                if text.endswith(s[:k])), default=0)
+    if tail and len(text) - tail >= (len(_MASK) if head else 0):
+        text = text[:len(text) - tail] + _MASK
+    return text
 
 
 def mask_tool_text(text, env=None) -> str:
     """`text` as it may be WRITTEN anywhere: the passthrough VALUES this command was handed masked by
     identity — whatever their names, which `core/redact.py`'s env screen judges by shape and so would
-    miss for `MC_HOST_minio` — then the always-on screen (`redact_output_tail`: this box's own secret
-    env values and every known credential shape; the entropy pass is not applied to a tool log, whose
-    paths and hashes it would eat). A value under 4 characters is not masked: it is no credential,
-    and replacing it everywhere would garble the log."""
+    miss for `MC_HOST_minio` — in every spelling a tool prints them (`_spellings`), and any fragment
+    of one a capture cut left at the text's edge (`_mask_cut_edges`); then the always-on screen
+    (`redact_output_tail`: this box's own secret env values and every known credential shape; the
+    entropy pass is not applied to a tool log, whose paths and hashes it would eat). A value under 4
+    characters is not masked: it is no credential, and replacing it everywhere would garble the log.
+
+    `text` must be ONE captured stream (or one argv): the cut sits at its edges, so a caller holding
+    several masks each before joining them (`append_tool_log`)."""
     from looplab.core.redact import redact_output_tail
     text = str(text or "")
     values = {v for v in (env or {}).values() if isinstance(v, str) and len(v) >= 4}
-    for value in sorted(values, key=len, reverse=True):
+    spellings = {sp for v in values for sp in _spellings(v)}
+    for value in sorted(spellings, key=len, reverse=True):
         if value in text:
             text = text.replace(value, _MASK)
+    if spellings:
+        text = _mask_cut_edges(text, spellings)
     return redact_output_tail(text, entropy=False)
 
 
@@ -256,20 +349,50 @@ def append_tool_log(path, argv, out, err, env=None) -> None:
     passthrough secret in a run-directory file every later eval may read. The output is captured
     (bounded, as `run_argv` returns it) and written once, after the process exits, before anything
     else can read it; the price is that the log is no longer tail-able while the copy runs."""
-    body = (f"$ {' '.join(str(a) for a in argv)}\n"
-            + (f"{out}\n" if out else "") + (f"{err}\n" if err else ""))
+    # EACH STREAM MASKED ON ITS OWN, then joined (critic c3 item 5): the 64 KB capture cut sits at
+    # the head of `out` and of `err`, which are the middle of the joined body, where an edge
+    # fragment can no longer be told from ordinary text.
+    body = (f"$ {mask_tool_text(' '.join(str(a) for a in argv), env)}\n"
+            + (f"{mask_tool_text(out, env)}\n" if out else "")
+            + (f"{mask_tool_text(err, env)}\n" if err else ""))
     with _LOG_WRITE_LOCK, open(path, "a", encoding="utf-8") as fh:
-        fh.write(mask_tool_text(body, env))
+        fh.write(body)
 
 
-def wait_for_inflight(timeout: Optional[float] = None) -> bool:
-    """Wait until every copy this process accepted has finished; True when none is pending."""
+def wait_for_inflight(timeout: Optional[float] = None, engine=None) -> bool:
+    """Wait until every copy this process accepted — or, given `engine`, every copy THAT engine
+    accepted — has finished; True when none is pending."""
     with _COND:
-        return _COND.wait_for(lambda: _PENDING == 0, timeout)
+        if engine is None:
+            return _COND.wait_for(lambda: _PENDING == 0, timeout)
+        return _COND.wait_for(lambda: not _PENDING_BY_OWNER.get(id(engine)), timeout)
+
+
+def drain_before_release(engine, timeout: Optional[float] = None) -> bool:
+    """Called by an ending engine BEFORE its terminal barrier (`engine/orchestrator.py::Engine.
+    retire_tracer`), while it still owns the run: wait, bounded, for the copy-outs it accepted, so a
+    copy still queued behind `MAX_CONCURRENT_SYNCS` when the search ended starts under the owner that
+    accepted it instead of being skipped by `engine_owns_run` the moment the barrier closes. True
+    when nothing of it is pending; on the bound, what is left keeps its open start row
+    (`unfinished_syncs`), and a copy already running still closes its own. No copy accepted, no
+    wait."""
+    with _COND:
+        pending = _PENDING_BY_OWNER.get(id(engine), 0)
+    if not pending:
+        return True
+    timeout = FINAL_DRAIN_S if timeout is None else timeout
+    _LOG.info("waiting up to %.0fs for %d artifact copy-out(s) before the run is released",
+              timeout, pending)
+    done = wait_for_inflight(timeout, engine=engine)
+    if not done:
+        _LOG.warning("artifact sync: copy-outs still pending after %.0fs; the run is released and "
+                     "a queued copy will not start (its artifact_sync_started row stays open)",
+                     timeout)
+    return done
 
 
 def _run(engine, node_id, generation, argv, workdir, run_dir, timeout, env=None,
-         sync_id=None, cwd=None) -> None:
+         sync_id=None, cwd=None, accepted_stamp=None) -> None:
     from looplab.runtime.sandbox import _run_argv
     _engine_redact = getattr(engine, "_redact", None) or (lambda text: text)
 
@@ -277,36 +400,62 @@ def _run(engine, node_id, generation, argv, workdir, run_dir, timeout, env=None,
         # The passthrough values first (`mask_tool_text`), then the engine's own funnel.
         return _engine_redact(mask_tool_text(text, env))
 
+    # A COPY WHOSE ENGINE IS GONE IS NOT STARTED (critic c3 item 1). The non-daemon workers outlive
+    # `Engine.run`, and a copy still queued then would run — and append its receipt — after the lock
+    # was released, when a resumed engine or a Replay may own the run directory. Its start row stays
+    # open: `unfinished_syncs` reports it, and the operator re-runs the copy.
+    if not engine_owns_run(engine):
+        _LOG.warning("artifact sync of node %s (lifecycle %s) not started: the engine that accepted "
+                     "it has ended; its artifact_sync_started row (sync_id %s) stays open — run the "
+                     "copy again", node_id, generation, sync_id)
+        return
     started = time.monotonic()
     before = workdir_stamp(workdir)
-    out = ""
-    try:
-        rc, out, err, timed = _run_argv(argv, cwd or str(workdir), timeout,
-                                        env=dict(env or {}))
-    except (OSError, ValueError) as exc:          # no such tool, an unusable cwd
-        rc, err, timed = -1, f"{type(exc).__name__}: {exc}", False
-    try:
-        append_tool_log(run_dir / "artifact_sync.log", argv, out, err, env)
-    except OSError:
-        _LOG.warning("artifact sync of node %s: could not write artifact_sync.log", node_id,
-                     exc_info=True)
+    # THE LIFECYCLE THE COPY WAS ACCEPTED FOR IS NO LONGER THERE (critic c3 item 1, driven): a reset
+    # while the copy waited in the queue re-materialized the workdir for the NEXT lifecycle, and the
+    # argv's `{generation}` and this receipt both name the old one. Never run it: the receipt says it
+    # was refused, and why. (A stamp that was unreadable at acceptance cannot be compared, and the
+    # copy runs as it always did.)
+    refused = accepted_stamp is not None and before != accepted_stamp
+    out, err, rc, timed = "", "", None, False
+    if not refused:
+        try:
+            rc, out, err, timed = _run_argv(argv, cwd or str(workdir), timeout,
+                                            env=dict(env or {}))
+        except (OSError, ValueError) as exc:          # no such tool, an unusable cwd
+            rc, err, timed = -1, f"{type(exc).__name__}: {exc}", False
+        try:
+            append_tool_log(run_dir / "artifact_sync.log", argv, out, err, env)
+        except OSError:
+            _LOG.warning("artifact sync of node %s: could not write artifact_sync.log", node_id,
+                         exc_info=True)
     seconds = round(time.monotonic() - started, 3)
     # A reset of this node re-materializes the workdir while the copy reads it; the receipt says so
     # instead of vouching for a tree that may mix two lifecycles (critic 2026-10-08).
-    changed = before is not None and workdir_stamp(workdir) != before
-    if rc != 0 or timed:
+    changed = refused or (before is not None and workdir_stamp(workdir) != before)
+    if refused:
+        _LOG.warning("artifact sync of node %s (lifecycle %s) not run: the workdir was rebuilt "
+                     "while the copy was queued", node_id, generation)
+    elif rc != 0 or timed:
         _LOG.warning("artifact sync of node %s failed (exit %s%s); the node is unaffected — see "
                      "artifact_sync.log", node_id, rc, ", timed out" if timed else "")
+    # A copy that was already RUNNING when its engine ended still closes its own start row: the
+    # receipt is what says the bytes left the box, and leaving it open would send the operator to
+    # upload a finished checkpoint again. The append is safe without `engine.lock` — the store
+    # derives the seq from the file's tail under its own interprocess lock, and the Replay and
+    # deletion write fences refuse a late writer (`events/eventstore.py::EventStore._locked_append`)
+    # — which is why only STARTING a copy is gated on ownership above.
     try:
         engine.store.append(EV_ARTIFACT_SYNCED, {
             "node_id": node_id, "generation": generation,
             **({"sync_id": sync_id} if sync_id else {}),
             "command": [redact(a) for a in argv], "exit_code": rc, "timed_out": bool(timed),
             **({"workdir_changed": True} if changed else {}),
+            **({"skipped": "workdir_changed"} if refused else {}),
             "seconds": seconds,
             # Redacted WHOLE, then cut (`engine/audit.py::Engine._redact`): a cut first can leave
             # the tail of a secret that straddled it unmasked.
             "stderr_tail": redact(str(err or ""))[-_STDERR_TAIL:]})
-    except OSError:
+    except (OSError, RuntimeError):     # a full disk; a Replay / deletion fence refusing the writer
         _LOG.warning("artifact sync of node %s: could not record its receipt", node_id,
                      exc_info=True)

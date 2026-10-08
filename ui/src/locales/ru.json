@@ -1,7 +1,7 @@
 {
   "schema": 1,
   "language": "ru",
-  "count": 7639,
+  "count": 7641,
   "messages": {
     "# LoopLab run report — {0}": "# Отчёт запуска LoopLab — {0}",
     "## Agent narrative (advisory)": "## Пояснения агента (рекомендации)",
@@ -5136,7 +5136,7 @@
     "Inherit resolves from task-file, saved, environment, profile, or default settings. Validate for free to see the effective value.": "Наследование решает из файла задач, сохраненной, среды, профиля или настройки по умолчанию. Для проверки нужно получить возможность увидеть эффективную ценность.",
     "Inline task JSON": "Встроенная задача JSPON",
     "Inside “{0}”.": "Внутри,{0}”.",
-    "Inspect experiment": "Эксперимент по проверке",
+    "Inspect experiment": "Открыть эксперимент",
     "Inspect failures": "Неисправность инспекций",
     "Inspect it beside this tree": "Проверьте его рядом с этим деревом.",
     "Inspect run": "Проверки",
@@ -7666,7 +7666,9 @@
     "fix from a repair": "исправление после ремонта",
     "{0} of {1} queued operations waiting": "Ожидают выполнения: {0} из {1} операций",
     "The engine drafts proposals itself: fixes from repairs first, then the champion's capabilities. {0} drafts so far": "Движок сам пишет предложения: сначала исправления после ремонтов, затем возможности чемпиона. Черновиков: {0}",
-    "Maintainer proposal → between turns, without a pause, the engine runs the measured checks and advances the starting base. Experiments whose evaluation already started stay on their base. Interrupted checks require operator recovery.": "Предложение Maintainer → движок между ходами, без паузы, выполняет измеренные проверки и обновляет исходную базу. Эксперименты, чья оценка уже началась, остаются на своей базе. Прерванные проверки восстанавливает оператор."
+    "Maintainer proposal → between turns, without a pause, the engine runs the measured checks and advances the starting base. Experiments whose evaluation already started stay on their base. Interrupted checks require operator recovery.": "Предложение Maintainer → движок между ходами, без паузы, выполняет измеренные проверки и обновляет исходную базу. Эксперименты, чья оценка уже началась, остаются на своей базе. Прерванные проверки восстанавливает оператор.",
+    "Artifact copy-out did not finish": "Выгрузка артефакта не завершилась",
+    "A copy-out of this experiment started and has no receipt: the engine stopped first. Run the eval.artifact_sync command for it again.": "Выгрузка артефакта этого эксперимента началась, но квитанции о ней нет: движок остановился раньше. Запустите для неё команду eval.artifact_sync ещё раз."
   },
   "plurals": {
     "({0} paraphrases folded)": {

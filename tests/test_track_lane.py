@@ -128,3 +128,55 @@ def test_a_gpu_track_leases_from_the_runs_pool_and_gives_the_devices_back(tmp_pa
     _serve_until_done(eng)
     assert fold(eng.store.read_all()).nodes[0].extra_metrics == {"dev": 8.0}, "fenced to its lease"
     assert calls == [("take", 1), ("give", [1])]
+
+
+def test_a_node_reset_after_the_request_was_accepted_is_refused_not_measured(tmp_path, monkeypatch):
+    """The copy-out's rule (`engine/artifact_sync.py`): the workdir stamp is read when the request is
+    ACCEPTED and again when the node's turn comes. A reset while the job waited for its GPU used to
+    measure the next lifecycle's files and record them under the lifecycle the request named."""
+    eng = _engine(tmp_path, tracks={"g": {"command": [sys.executable, "-c", _TRACK, "{workdir}"],
+                                          "keys": ["FUR@200"], "gpus": 1}})
+    manifest = tmp_path / "run" / "nodes" / "node_0" / ".looplab-manifest"
+
+    def take(n, mem=None):
+        manifest.write_text("1" * 64)           # the reset lands while the job waits for its lease
+        return [0]
+
+    monkeypatch.setattr(eng, "_gpu_ids", [0], raising=False)
+    monkeypatch.setattr(eng, "_acquire_gpus", take)
+    monkeypatch.setattr(eng, "_release_gpus", lambda ids: None)
+    monkeypatch.setattr(eng, "_physical_gpu_ids", lambda ids: [str(i) for i in ids])
+    monkeypatch.setattr(eng, "_gpu_pool_epoch", lambda: 0)
+    eng.store.append("track_requested", {"track": "g", "node_ids": [0, 1]})
+    _serve_until_done(eng)
+    done = [e.data for e in eng.store.read_all() if e.type == "track_done"][-1]
+    assert done["recorded"] == 1 and done["refused"] == {"0": track_lane._REBUILT_BEFORE}
+    assert fold(eng.store.read_all()).nodes[0].extra_metrics in (None, {})
+
+
+def test_a_workdir_rebuilt_while_its_command_ran_is_refused(tmp_path):
+    rewrite = ("import json, pathlib, sys; w = pathlib.Path(sys.argv[1]); "
+               "(w / '.looplab-manifest').write_text('2' * 64); print(json.dumps({'v': 1.0}))")
+    eng = _engine(tmp_path, tracks={"r": {"command": [sys.executable, "-c", rewrite, "{workdir}"]}})
+    eng.store.append("track_requested", {"track": "r", "node_ids": [0]})
+    _serve_until_done(eng)
+    done = [e.data for e in eng.store.read_all() if e.type == "track_done"][-1]
+    assert done["recorded"] == 0 and done["refused"] == {"0": track_lane._REBUILT_DURING}
+
+
+def test_the_track_log_and_failure_detail_are_masked_in_every_spelling(tmp_path, monkeypatch):
+    from urllib.parse import quote
+    secret = "zq8Vn3kPw7Lr2Xt9/+x"
+    monkeypatch.setenv("MC_HOST_minio", secret)
+    leak = ("import os, sys, urllib.parse as u; s = os.environ['MC_HOST_minio']; "
+            "print('GET https://h/?k=' + u.quote(s, safe='')); sys.stderr.write('bad ' + s); "
+            "sys.exit(3)")
+    eng = _engine(tmp_path, tracks={"m": {"command": [sys.executable, "-c", leak],
+                                          "env_passthrough": ["MC_HOST_minio"]}})
+    eng.store.append("track_requested", {"track": "m", "node_ids": [0]})
+    _serve_until_done(eng)
+    log = (tmp_path / "run" / "track_m.log").read_text()
+    done = [e.data for e in eng.store.read_all() if e.type == "track_done"][-1]
+    for text in (log, str(done["failed"])):
+        assert secret not in text and quote(secret, safe="") not in text, text
+    assert "***REDACTED_ENV***" in log

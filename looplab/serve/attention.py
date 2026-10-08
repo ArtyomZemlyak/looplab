@@ -23,9 +23,10 @@ from looplab.core.models import BENIGN_TERMINAL_REASONS
 from looplab.engine.finalize import incomplete_finalize_scope
 from looplab.engine.train_monitor import OVERRUN_BEYOND_BAR_KEYS
 from looplab.events.parked_requests import open_parked_requests
-from looplab.events.replay import fold
+from looplab.events.replay import fold, unfinished_syncs
 from looplab.events.types import (
     EV_APPROVAL_REQUESTED,
+    EV_ARTIFACT_SYNC_STARTED,
     EV_ASHA_RANK,
     EV_FINALIZATION_FINISHED,
     EV_NODE_FAILED,
@@ -80,6 +81,20 @@ ATTENTION_NEEDS_ACTION_KINDS = frozenset({
     "request_parked",
     "external_checkpoint",
 })
+
+
+# The kind of an unfinished copy-out's item (`eval.artifact_sync`). NOT in
+# `ATTENTION_NEEDS_ACTION_KINDS`: re-running a copy is the operator's choice, and the run itself is
+# not waiting on it.
+ARTIFACT_SYNC_UNFINISHED_KIND = "artifact_sync_unfinished"
+
+
+def _open_sync_rows(rows) -> list:
+    """The `artifact_sync_started` rows no `artifact_synced` row closed, as events (their seq anchors
+    the item), in log order — `events/replay.py::unfinished_syncs`'s pairing on `sync_id`."""
+    open_ids = {d.get("sync_id") for d in unfinished_syncs(rows)}
+    return [e for e in rows if e.type == EV_ARTIFACT_SYNC_STARTED and isinstance(e.data, dict)
+            and e.data.get("sync_id") in open_ids]
 
 
 def _integer(value) -> int | None:
@@ -306,6 +321,27 @@ def project_event_attention(run_id: str, events: Iterable[Event]) -> dict:
             title="Experiment failures need attention",
             detail=f"{state.current_failure_count} current experiment failures; inspect the failure panel.",
             browser=True, active=True, node_id=nid, node_generation=attempt,
+        )
+        if item:
+            items.append(item)
+
+    # COPY-OUTS THAT STARTED AND NEVER CLOSED (`eval.artifact_sync`; critic c3 item 7). While the
+    # engine runs, an open start row is a copy queued or uploading; once it is gone, it is a copy an
+    # engine death interrupted or one its engine ended before starting, and nothing retries it — the
+    # operator's command is not known to be idempotent. Shown only when no engine runs
+    # (`visible_event_attention`), one item per open copy, anchored on its start row.
+    for started in _open_sync_rows(rows):
+        nid = _integer((started.data or {}).get("node_id"))
+        gen = _integer((started.data or {}).get("generation"))
+        if nid is None or gen is None:
+            continue
+        item = _item(
+            run_id, generation, started, ARTIFACT_SYNC_UNFINISHED_KIND, severity="warning",
+            title="Artifact copy-out did not finish",
+            detail=(f"The copy-out of experiment #{nid} (lifecycle {gen}) started and has no "
+                    "receipt: the engine stopped first. Run the eval.artifact_sync command for it "
+                    "again."),
+            browser=False, node_id=nid, node_generation=gen,
         )
         if item:
             items.append(item)
@@ -716,8 +752,9 @@ def project_event_attention(run_id: str, events: Iterable[Event]) -> dict:
 
 
 def visible_event_attention(projection: dict, *, engine_running: bool | None) -> list[dict]:
-    """A terminal-success marker is visible only after the driver releases its engine lock."""
-    terminal = {"finished", "budget_exhausted", "stopped"}
+    """A terminal-success marker is visible only after the driver releases its engine lock — and so
+    is an unfinished copy-out, which on a live engine is merely queued or uploading."""
+    terminal = {"finished", "budget_exhausted", "stopped", ARTIFACT_SYNC_UNFINISHED_KIND}
     return [item for item in projection.get("items", [])
             if item.get("kind") not in terminal or engine_running is False]
 

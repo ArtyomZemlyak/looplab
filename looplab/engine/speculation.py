@@ -34,6 +34,7 @@ from looplab.core.models import (
     durable_idea_payload, is_developer_error, is_developer_stuck)
 from looplab.core.llm_broker import in_llm_lane
 from looplab.events.eventstore import EventStoreConcurrencyError, retry_tail_cas
+from looplab.engine.artifact_fence import uses_waiting
 # Through the ENGINE's fold seam, not `replay.fold` directly — see `shared.py::engine_fold`.
 from looplab.engine.shared import engine_fold as fold
 from looplab.engine.node_build import developer_crash_records
@@ -741,6 +742,12 @@ class SpeculationMixin:
             and not self._developer_sentinel(node)
             and node.id not in state.aborted_nodes
             and not needs_outer_rebuild(node)
+            # BESIDE THE ARTIFACT PIN (doc 73 §1.4): a consumer pinned to a lifecycle its producer is
+            # still producing waits for it, here exactly as the non-Card selection defers it
+            # (`engine/artifact_fence.py::defer_waiting_consumers`). Admitted anyway, its ADMIT would
+            # return with no terminal and this lane would admit it again on the next wake-up, a
+            # spin that stamps the eval-start boundary of a lifecycle that never starts.
+            and not (getattr(node, "uses_attempts", None) and uses_waiting(state, node))
             # A speculative node is not consumer-owned until the matching durable done-link
             # exists. If its append raced, crash recovery keeps retrying the request head first.
             and (

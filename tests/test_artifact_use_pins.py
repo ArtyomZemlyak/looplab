@@ -237,7 +237,7 @@ def test_copies_run_on_a_bounded_pool(tmp_path, monkeypatch):
     active, peak, lock = [0], [0], threading.Lock()
 
     def slow_run(engine_, node_id, generation, argv, workdir, run_dir, timeout, env=None,
-                 sync_id=None, cwd=None):
+                 sync_id=None, cwd=None, accepted_stamp=None):
         with lock:
             active[0] += 1
             peak[0] = max(peak[0], active[0])
@@ -265,7 +265,7 @@ def test_an_interrupted_copy_is_visible_as_started_never_finished(tmp_path, monk
     release = threading.Event()
 
     def blocked_run(engine_, node_id, generation, argv, workdir, run_dir, timeout, env=None,
-                    sync_id=None, cwd=None):
+                    sync_id=None, cwd=None, accepted_stamp=None):
         release.wait(30)              # the engine "dies" here: no `artifact_synced` row
 
     monkeypatch.setattr(artifact_sync, "_run", blocked_run)

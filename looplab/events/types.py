@@ -952,6 +952,9 @@ EV_ARTIFACT_SYNCED = "artifact_synced"
 # engine that dies mid-copy leaves `started, never finished` on the log rather than nothing. The pair
 # is keyed by (node_id, generation, sync_id); nothing re-runs a copy off a started row (no automatic
 # retry: the operator's command is not known to be idempotent). DIAGNOSTIC for the same reasons.
+# A copy whose workdir was rebuilt while it waited in the queue is closed WITHOUT running, its
+# `artifact_synced` saying `skipped: "workdir_changed"` and `exit_code: null` (critic c3 item 1); one
+# whose engine ended first is never started and its start row stays open.
 EV_ARTIFACT_SYNC_STARTED = "artifact_sync_started"
 # AN OPERATOR IMPORT OF METRICS MEASURED AFTER THE RUN (`maintenance/import_metrics.py`, `looplab
 # import-metrics`; incident 2026-10-06: nodes scored at @20 were re-scored at @200 by a service, and
@@ -1789,7 +1792,7 @@ EVENT_PAYLOAD_KEYS: dict[str, PayloadContract] = {
         "The operator's eval.artifact_sync command ran over a node's workdir after its terminal.",
         required=("command", "exit_code", "generation", "node_id", "seconds", "stderr_tail",
                   "timed_out"),
-        optional=("sync_id", "workdir_changed"),
+        optional=("skipped", "sync_id", "workdir_changed"),
     ),
     "artifact_sync_started": PayloadContract(
         "The operator's eval.artifact_sync command is about to run over a node's workdir; its "

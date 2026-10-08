@@ -209,6 +209,47 @@ def rebuilt_use_pins(node, state) -> dict:
     return out
 
 
+def _declares_uses(event) -> bool:
+    """A `node_created` row that names artifacts it reads: a written `uses`, or an idea's `uses`."""
+    d = event.data if event.type == EV_NODE_CREATED else None
+    if not isinstance(d, dict):
+        return False
+    idea = d.get("idea")
+    return "uses" in d or bool(isinstance(idea, dict) and idea.get("uses"))
+
+
+def inherited_use_pins(state, parent_ids) -> dict:
+    """`{str(artifact_id): generation}` for the `node_created` of a child that INHERITS its `uses`
+    from consumer parents (an improve / merge / ablation of one; critic c3 item 4) — written by the
+    WRITER so the fold stays a plain read (`events/replay.py::_use_pins`).
+
+    Each inherited use (the fold's own rule, `events/replay.py::inherited_uses`) is pinned to its
+    producer's CURRENT lifecycle when that one is PRODUCED — evaluated, not deleted — so a child
+    built after the artifact was re-produced reads it as it is, instead of paying a build to end
+    `artifact_unavailable` on the lifecycle its parent once read. Otherwise the parent's pin is
+    inherited (first parent first), and the consumer then waits for it while it is still being
+    produced (`engine/artifact_fence.py::uses_waiting`) or is refused once it never can be. A use no
+    parent pinned (a log from before the pins) stays unpinned: the historical rule. `{}` when the
+    child inherits nothing."""
+    from looplab.events.replay import inherited_uses
+    nodes = getattr(state, "nodes", None) or {}
+    aborted = getattr(state, "aborted_nodes", None) or ()
+    out: dict = {}
+    for used in inherited_uses(state, [p for p in parent_ids or [] if type(p) is int]):
+        key = str(used)
+        parent_pin = next((pins[key] for pins in
+                           ((getattr(nodes.get(pid), "uses_attempts", None) or {})
+                            for pid in parent_ids or [])
+                           if type(pins.get(key)) is int), None)
+        if parent_pin is None:
+            continue
+        producer = nodes.get(used)
+        produced = (producer is not None and not producer.tombstoned and used not in aborted
+                    and producer.status is NodeStatus.evaluated)
+        out[key] = producer.attempt if produced else parent_pin
+    return out
+
+
 class _RerunCardCommit(NamedTuple):
     """What a node-reset re-proposal's main-task Card commit decided (`Engine._commit_rerun_card`).
 
@@ -769,6 +810,18 @@ class NodeBuildMixin:
                      ("uses_attempts", uses_attempts)):
             if v is not _OMIT:
                 data[k] = v
+        # A CHILD OF A CONSUMER carries its pins EXPLICITLY (critic c3 item 4): `uses` itself stays
+        # implicit — the fold derives it from the parents, as it always has — but the lifecycle each
+        # one is read in is decided here, at build time, against the artifact as it is now. Only when
+        # the log holds a consumer row at all — a written `uses`, or a Researcher-proposed
+        # `Idea.uses` (`events/replay.py::_idea_uses`) — so every run without artifacts pays one scan
+        # and no fold.
+        if uses is _OMIT and uses_attempts is _OMIT and parent_ids:
+            events = self.store.read_all()
+            if any(_declares_uses(e) for e in events):
+                pins = inherited_use_pins(fold(events), parent_ids)
+                if pins:
+                    data["uses_attempts"] = pins
         # doc 73 §2.5: the base this node's overlay was AUTHORED on, while this engine serves the
         # upstream lane live, so `upstream_workspace.py::materialization_plan` merges from it rather
         # than from the base active when the row landed. Handed in EXPLICITLY by the site that knows

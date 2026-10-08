@@ -786,17 +786,25 @@ own path. The canary (`eval_canary`) runs for an artifact under the artifact's o
 exit on the slice passes, and a number it prints is ignored (`eval_canary.py::canary_passed`).
 
 A consumer reads its artifact in the LIFECYCLE it was accepted against. The command stamps each
-used artifact's lifecycle (`uses_attempts`, server-derived and refused from a caller), `node_created`
-carries it, and a node built from the consumer inherits it with `uses`. Before every launch the
-consumer's eval checks each pinned artifact through the same rule `LOOPLAB_PARENT_WORKDIRS` uses
+used artifact's lifecycle (`uses_attempts`, server-derived and refused from a caller) and
+`node_created` carries it. A node built FROM a consumer (an improve, a merge, an ablation) carries
+its own pins on its `node_created` too, written when it is built: each used artifact's current
+lifecycle when that one is evaluated, else the parent's pin (`node_build.py::inherited_use_pins`),
+so a child built after the artifact was re-produced reads it as it now is; a child row from before
+this rule inherits the parent's pin in the fold. Before every launch the consumer's eval checks each
+pinned artifact through the same rule `LOOPLAB_PARENT_WORKDIRS` uses
 (`eval_dispatch.py::produced_workdir`): evaluated in exactly that lifecycle, not deleted, and its
 workdir's `.looplab-manifest` stamp intact. If one is not — the artifact was reset, rebuilt, deleted
 or its directory re-materialized after the inject was queued — the consumer ends
-`artifact_unavailable` without running, the error naming the artifact, its lifecycle and why. That
-is an engine terminal, not an evaluation failure: no triage or repair is bought for a candidate
-that is not at fault, and the owner alert shows it. A lifecycle never comes back, so the remedy is
-the operator's: rebuild the consumer (`node_reset` from implement re-pins it to each artifact as it
-is now) or inject a new one. A log written before the pin keeps the old existence-only rule.
+`artifact_unavailable` without running, the error naming the artifact, its lifecycle and why,
+including when the artifact moves between that check and the launch (`_run_eval` launches nothing
+and the attempt ends on that verdict, its invocation settled `artifact_refused`, never as the
+candidate's crash). That is an engine terminal, not an evaluation failure: no triage or repair is
+bought for a candidate that is not at fault, and the owner alert shows it (it is not one of
+`core/models.py::BENIGN_TERMINAL_REASONS`, so it counts as a failed node like any other). A
+lifecycle never comes back, so the remedy is the operator's: rebuild the consumer (`node_reset` from
+implement re-pins it to each artifact as it is now) or inject a new one. A log written before the
+pin keeps the old existence-only rule.
 
 **The Researcher may propose them too**, under `Settings.researcher_artifacts` (off by default;
 `agents/artifact_ideas.py`). On, its emit schema shows `node_kind` and `uses` and its user turn
@@ -808,8 +816,10 @@ lifecycle when the node was created.
 
 Two things sit beside the pin (`engine/artifact_fence.py`). A consumer pinned to a lifecycle its
 producer is STILL producing (a Researcher proposed the preparation and its consumer back to back)
-WAITS — it is not dispatched until the producer settles — instead of being refused for a lifecycle
-that can still be produced. And a consumer's `node_evaluated.metric_provenance.uses` records, per
+WAITS — the turn's selection and a Card session's admission both leave it out until the producer
+settles, and an ADMIT that meets one anyway returns with no terminal — instead of being refused for
+a lifecycle that can still be produced. The producer itself is always selectable (every pending node
+is), so the wait cannot hold the slot it waits for. And a consumer's `node_evaluated.metric_provenance.uses` records, per
 producer, the `generation` and `code` it was measured on; when the champion's receipt no longer
 matches its producer's current lifecycle (re-produced, failed or deleted SINCE), the run carries
 the champion caveat `stale_artifact`.

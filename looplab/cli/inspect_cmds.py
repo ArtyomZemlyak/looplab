@@ -36,7 +36,7 @@ from looplab.events.eventstore import EventStore
 from looplab.events.readmodel import (
     STATUS_CURRENT, coverage_watermark, publish_readmodel, read_watermark, readmodel_status,
     superseded_schema_version)
-from looplab.events.replay import fold
+from looplab.events.replay import fold, unfinished_sync_lines
 from looplab.events.types import EV_BUDGET
 from looplab.engine.comparability import record_of as comparability_record_of
 from looplab.trust.scan_receipt import trust_scan_summary
@@ -519,9 +519,9 @@ def inspect(run_dir: Path = typer.Argument(...)):
                        f"{len(_carrying)} of {len(_carrying) + len(_unranked)} evaluated node(s) "
                        "carry it on the declared channel"
                        + (f"; UNRANKED: {_shown}" if _unranked else ""))
-        # THE UPSTREAM BOARD (doc 73 §2.3); [] for a run that never used the upstream lane.
+        # THE UPSTREAM BOARD (doc 73 §2.3), then copy-outs left open (critic c3 item 7); [] if none.
         from looplab.core.upstream_board import board_lines
-        for _line in board_lines(state):
+        for _line in [*board_lines(state), *unfinished_sync_lines(all_events)]:
             typer.echo(_line)
         _best = state.best()
         _record = comparability_record_of(_best) if _best is not None else None

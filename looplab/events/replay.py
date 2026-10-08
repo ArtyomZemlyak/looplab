@@ -93,6 +93,7 @@ from looplab.events.replay_requests import (  # noqa: F401 — re-export
 from looplab.events.types import (
     EV_METRIC_RETARGET,
     EV_ABLATE, EV_AGENT_VALIDATED, EV_APPROVAL_GRANTED,
+    EV_ARTIFACT_SYNC_STARTED, EV_ARTIFACT_SYNCED,   # read by `unfinished_syncs` only, never folded
     EV_APPROVAL_REQUESTED,
     EV_CONFIRM_EVAL,
     EV_EVAL_NOISE_FLOOR, EV_EVAL_NOISE_SEED,
@@ -383,14 +384,35 @@ def _simplification_receipt(d: dict, parent_ids: list, st: RunState) -> Optional
             "ablation_id": ablation_id[:64]}
 
 
-def _inherited_uses(st: RunState, parent_ids: list) -> list:
+def unfinished_syncs(events) -> list[dict]:
+    """The `artifact_sync_started` rows no `artifact_synced` row closed (same `sync_id`), in log
+    order: copies an engine death interrupted, or its end never started — or, on a live engine,
+    copies still queued or running. Pure, and NOT part of the fold (both rows are diagnostic); here
+    beside it because `looplab inspect`, the attention feed and `engine/artifact_sync.py` (which
+    re-exports it) all read the one pairing rule."""
+    closed = {e.data.get("sync_id") for e in events
+              if e.type == EV_ARTIFACT_SYNCED and isinstance(e.data, dict) and e.data.get("sync_id")}
+    return [dict(e.data) for e in events
+            if e.type == EV_ARTIFACT_SYNC_STARTED and isinstance(e.data, dict)
+            and e.data.get("sync_id") not in closed]
+
+
+def unfinished_sync_lines(events) -> list[str]:
+    """`looplab inspect`'s `copy-out unfinished:` lines (critic c3 item 7), one per open copy."""
+    return [f"copy-out unfinished: node {r.get('node_id')} lifecycle {r.get('generation')} "
+            f"(sync_id {r.get('sync_id')}) — started, no receipt; if no engine is running, run "
+            "eval.artifact_sync for it again" for r in unfinished_syncs(events)]
+
+
+def inherited_uses(st: RunState, parent_ids: list) -> list:
     """The artifacts a node built FROM consumers reads (doc 73 §1.4; critic 2026-10-08): the union
     of its parents' `uses`, in parent order, bounded, artifact nodes only. An improve / merge /
     ablation of a consumer copies code that reads `LOOPLAB_USES_WORKDIRS`, and every creation path
     but the inject and the rebuild wrote no `uses` — the child got no variable and died of a
     KeyError, buying a triage and a repair. Derived HERE, from rows already folded, so every
     creation path is covered and no payload changes; a log written before `uses` existed has none
-    to inherit, so it folds as before."""
+    to inherit, so it folds as before. Public because the WRITER applies the same rule
+    (`engine/node_build.py::inherited_use_pins`, critic c3 item 4) to stamp a child's pins."""
     out: list = []
     for pid in parent_ids:
         parent = st.nodes.get(pid)
@@ -418,24 +440,33 @@ def _idea_uses(st: RunState, declared) -> list:
 def _use_pins(st: RunState, d: dict, parent_ids: list, uses: list, idea_uses=()) -> dict:
     """`{str(artifact_id): generation}` — the producer lifecycle each of `uses` is pinned to (doc 73
     §1.4, round 3). The row's own `uses_attempts` when it wrote `uses` (an inject, a rebuild), cut to
-    the ids it uses; otherwise the pins of the parents the `uses` were inherited from, first parent
-    first, so an improve / merge of a consumer reads the SAME lifecycle the consumer did. A row with
-    `uses` and no pins (every log before the key) folds to `{}`: the historical existence-only rule."""
+    the ids it uses. A child's row that INHERITED its `uses` carries its pins too since critic c3 item
+    4 — the writer pins each use to its producer's current PRODUCED lifecycle
+    (`engine/node_build.py::inherited_use_pins`), so a child of a consumer reads the artifact as it is
+    when the child is built, not the lifecycle its parent once read — and those are read the same
+    way. Only a row with neither (every child written before that) falls back to the parents' pins,
+    first parent first: the reader-side default, unchanged for old logs. A row with `uses` and no
+    pins (every log before the key) folds to `{}`: the historical existence-only rule."""
     wanted = {str(u) for u in uses}
     if not wanted:
         return {}
+    raw = d.get("uses_attempts")
     if isinstance(d.get("uses"), list):
-        raw = d.get("uses_attempts")
         if not isinstance(raw, dict):
             return {}
         return {str(k): v for k, v in raw.items()
                 if str(k) in wanted and type(v) is int and v >= 0}
     out: dict = {}
-    for pid in parent_ids:
-        parent = st.nodes.get(pid)
-        for k, v in (getattr(parent, "uses_attempts", None) or {}).items():
-            if k in wanted and k not in out:
-                out[k] = v
+    if isinstance(raw, dict):
+        # The writer's pins for the INHERITED uses (`engine/node_build.py::inherited_use_pins`).
+        out = {str(k): v for k, v in raw.items()
+               if str(k) in wanted and type(v) is int and v >= 0}
+    else:
+        for pid in parent_ids:
+            parent = st.nodes.get(pid)
+            for k, v in (getattr(parent, "uses_attempts", None) or {}).items():
+                if k in wanted and k not in out:
+                    out[k] = v
     # A RESEARCHER-proposed `Idea.uses` (doc 73 §1.4, stage 3) is pinned to the producer lifecycle
     # current when the node was CREATED — the one its Developer could read — so the pin's refusal
     # covers it; `engine/artifact_fence.py::uses_waiting` holds it back while that lifecycle is still
@@ -524,7 +555,7 @@ def _on_node_created(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
         declared = [] if isinstance(d.get("uses"), list) else _idea_uses(st, idea.uses)
         uses = ([x for x in d["uses"][:32] if type(x) is int and x >= 0]
                 if isinstance(d.get("uses"), list)
-                else (declared or _inherited_uses(st, parent_ids)))
+                else (declared or inherited_uses(st, parent_ids)))
         n = Node(
             id=nid,
             parent_ids=parent_ids,

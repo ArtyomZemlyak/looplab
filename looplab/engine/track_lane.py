@@ -23,7 +23,12 @@ that has a pool, so a CPU scorer cannot land on a device an evaluation holds.
 
 WHAT A TRACK MEASURES, and the refusal that keeps it honest (`track_refusal`): the node must be
 evaluated in its CURRENT lifecycle and its workdir's manifest stamp must be that lifecycle's code —
-a reset or rebuilt workdir is refused, never measured.
+a reset or rebuilt workdir is refused, never measured. The stamp is read when the request is
+ACCEPTED (`_start`, the main task's fold) and compared again when the node's turn comes and after its
+command ran, the copy-out's rule (`engine/artifact_sync.py`): a node reset while the job waited for
+GPUs or for earlier nodes, or during its own command, is refused rather than recorded under the
+lifecycle it no longer is. The tool log and every failure detail are masked of the passthrough
+values in every spelling and at the capture cut (`artifact_sync.py::mask_tool_text`).
 """
 from __future__ import annotations
 
@@ -40,6 +45,9 @@ _LOG = logging.getLogger(__name__)
 
 _FAILED_DETAIL = 200
 _RECEIPT_ROWS = 64
+# The two refusals of a workdir that moved after the request was accepted (`_run_job`).
+_REBUILT_BEFORE = "its workdir was rebuilt after the request was accepted"
+_REBUILT_DURING = "its workdir was rebuilt while the track command ran"
 
 
 def parse_track_output(stdout: str, *, keys=None, prefix: str = "") -> dict[str, float]:
@@ -140,9 +148,10 @@ class TrackLane:
 
 def _run_job(engine, job: TrackJob, spec: dict, targets: list) -> None:
     """The worker: run the operator's argv for each target node; RETURNS values on `job`, appends
-    nothing. `targets` is `[(node_id, generation, refusal)]`, decided on the main task's fold."""
+    nothing. `targets` is `[(node_id, generation, refusal, accepted stamp)]`, decided on the main
+    task's fold."""
     from looplab.engine.artifact_sync import (append_tool_log, mask_tool_text, passthrough_env,
-                                              render_argv, sync_cwd)
+                                              render_argv, sync_cwd, workdir_stamp)
     from looplab.runtime.sandbox import run_argv
     run_dir = Path(engine.run_dir)
     try:
@@ -170,13 +179,16 @@ def _run_job(engine, job: TrackJob, spec: dict, targets: list) -> None:
             base_env = {**base_env,
                         "CUDA_VISIBLE_DEVICES": ",".join(engine._physical_gpu_ids(held)) if held else ""}
         timeout = float(spec.get("timeout") or 3600.0)
-        for node_id, generation, refusal in targets:
+        for node_id, generation, refusal, accepted_stamp in targets:
             if job.cancel.is_set():
                 return
             if refusal:
                 job.refused[node_id] = refusal
                 continue
             workdir = run_dir / "nodes" / f"node_{node_id}"
+            if workdir_stamp(workdir) != accepted_stamp:
+                job.refused[node_id] = _REBUILT_BEFORE
+                continue
             argv = render_argv(spec["command"], {
                 "workdir": str(workdir), "run_dir": str(run_dir), "run_id": run_dir.name,
                 "node_id": node_id, "generation": generation})
@@ -191,10 +203,13 @@ def _run_job(engine, job: TrackJob, spec: dict, targets: list) -> None:
                 job.failed[node_id] = mask_tool_text(
                     f"could not run: {type(exc).__name__}: {exc}", declared)[:_FAILED_DETAIL]
                 continue
+            if workdir_stamp(workdir) != accepted_stamp:
+                job.refused[node_id] = _REBUILT_DURING
+                continue
             values = parse_track_output(out, keys=spec.get("keys"),
                                         prefix=str(spec.get("key_prefix") or ""))
             if rc != 0 or timed or not values:
-                tail = mask_tool_text((err or "").strip(), declared).splitlines()[-1:] or [""]
+                tail = mask_tool_text(err or "", declared).strip().splitlines()[-1:] or [""]
                 job.failed[node_id] = (f"exit {rc}{', timed out' if timed else ''}, "
                                        f"{len(values)} value(s): {tail[0]}")[:_FAILED_DETAIL]
                 continue
@@ -213,11 +228,14 @@ def _start(engine, state, idx: int) -> TrackJob:
         job.thread = threading.Thread(target=lambda: None, daemon=True)
         job.thread.start()
         return job
+    from looplab.engine.artifact_sync import workdir_stamp
     targets = []
     for nid in requested_node_ids(state, req.get("node_ids")):
         node = state.nodes.get(nid)
         why = "no such node" if node is None else track_refusal(engine.run_dir, node)
-        targets.append((nid, getattr(node, "attempt", 0), why))
+        # The stamp the refusal just vouched for, kept for the worker's two re-reads (`_run_job`).
+        stamp = None if why else workdir_stamp(Path(engine.run_dir) / "nodes" / f"node_{nid}")
+        targets.append((nid, getattr(node, "attempt", 0), why, stamp))
     job.thread = threading.Thread(target=_run_job, args=(engine, job, spec, targets),
                                   name=f"looplab-track:{job.track}", daemon=True)
     job.thread.start()
