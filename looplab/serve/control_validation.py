@@ -60,6 +60,7 @@ from looplab.events.types import (
     EV_COMMENT_CREATED, EV_COMMENT_EDITED, EV_COMMENT_RESOLUTION_CHANGED, EV_CONCEPT_TAG_EDITED,
     EV_FORCE_ABLATE, EV_FORCE_CONFIRM, EV_FORK, EV_HINT, EV_HYPOTHESIS_ADDED,
     EV_HYPOTHESIS_UPDATED, EV_INJECT_NODE, EV_METRIC_RETARGET, EV_NODE_ABORT, EV_NODE_RESET,
+    EV_TRACK_REQUESTED,
     EV_PAUSE, EV_PROMOTE, EV_RESTART, EV_RESUME, EV_RUN_ABORT, EV_RUN_CONCEPTS, EV_RUN_REOPENED,
     EV_SET_STRATEGY, EV_SPEC_APPROVED, EV_RESEARCH_COMPLETED, EV_REPORT_GENERATED)
 from looplab.serve.engine_proc import _resolve_task_file
@@ -731,6 +732,47 @@ def _normalize_set_strategy(ctx: _ControlIntake) -> dict:
                  "or a canonical concurrency allocation")
     data["strategy"] = clean_strategy
     return data
+
+
+# ------------------------------------------------------------------ track_requested
+
+def _declared_tracks(rd: Path) -> list[str]:
+    """The `eval.tracks` names the run's task snapshot declares, [] when none can be read."""
+    from looplab.adapters.task_schema import normalize_task
+    try:
+        data = json.loads((rd / "task.snapshot.json").read_text(encoding="utf-8"))
+        spec = normalize_task(data).get("eval") if isinstance(data, dict) else None
+    except (OSError, ValueError, TypeError):
+        return []
+    tracks = spec.get("tracks") if isinstance(spec, dict) else None
+    return sorted(tracks) if isinstance(tracks, dict) else []
+
+
+def _normalize_track_requested(ctx: _ControlIntake) -> dict:
+    """`track_requested` (doc 73 §1.4): run a DECLARED `eval.tracks.<track>` over settled nodes of
+    a live run (`engine/track_lane.py`). Refused here for what the engine could only refuse later:
+    a track the task does not declare, and node ids the run does not have. `node_ids` is `"all"` —
+    every node evaluated when the request is served — or a list of up to 256 ids."""
+    data = ctx.data
+    track = ctx.text("track", limit=80)
+    declared = _declared_tracks(ctx.rd)
+    if track not in declared:
+        raise HTTPException(409, {
+            "code": "track_not_declared",
+            "message": f"the task declares no eval.tracks.{track} (declared: "
+                       f"{', '.join(declared) or 'none'})",
+        })
+    raw = data.get("node_ids", "all")
+    if raw == "all":
+        node_ids = "all"
+    else:
+        if not isinstance(raw, list) or not raw or len(raw) > 256:
+            raise HTTPException(400, "node_ids must be \"all\" or a non-empty list of up to 256 node ids")
+        node_ids = sorted({ctx.strict_integer(x, "node_ids entries") for x in raw})
+        missing = [n for n in node_ids if n not in ctx.state().nodes]
+        if missing:
+            raise HTTPException(404, f"no node(s) {missing[:8]} in this run")
+    return {"track": track, "node_ids": node_ids}
 
 
 # ------------------------------------------------------------------ metric_retarget
@@ -1935,6 +1977,7 @@ _CONTROL_NORMALIZERS: dict[str, Optional[Callable]] = {
     EV_HINT: _normalize_hint,
     EV_SET_STRATEGY: _normalize_set_strategy,
     EV_METRIC_RETARGET: _normalize_metric_retarget,
+    EV_TRACK_REQUESTED: _normalize_track_requested,
     EV_FORCE_CONFIRM: _normalize_node_target,
     EV_FORCE_ABLATE: _normalize_node_target,
     EV_FORK: _normalize_fork,
@@ -1978,6 +2021,7 @@ _CONTROL_PRECONDITIONS: dict[str, Optional[Callable]] = {
     EV_HINT: None,
     EV_SET_STRATEGY: None,
     EV_METRIC_RETARGET: None,
+    EV_TRACK_REQUESTED: None,
     EV_FORCE_CONFIRM: None,
     EV_FORCE_ABLATE: None,
     EV_FORK: None,
@@ -2022,6 +2066,7 @@ _CONTROL_DECISIONS: dict[str, Optional[Callable]] = {
     EV_HINT: None,
     EV_SET_STRATEGY: None,
     EV_METRIC_RETARGET: None,
+    EV_TRACK_REQUESTED: None,
     EV_FORCE_CONFIRM: None,
     EV_FORCE_ABLATE: None,
     EV_FORK: None,
@@ -2083,6 +2128,9 @@ _CONTROL_POLICIES: dict[str, tuple[EnginePolicy, str]] = {
     # A folded intent, like a hint: the fold re-ranks every node the moment it lands, a live engine
     # reads it at its next fold, and a stopped run needs no engine to be re-ranked (doc 68 68.2).
     EV_METRIC_RETARGET: (EnginePolicy.NO_SPAWN, "folded_intent"),
+    # A folded queue entry the LIVE engine serves (doc 73 §1.4, `engine/track_lane.py`); a stopped
+    # run keeps it queued for its next engine (`looplab evaluate-track` answers on a stopped run).
+    EV_TRACK_REQUESTED: (EnginePolicy.NO_SPAWN, "folded_intent"),
     EV_FORCE_CONFIRM: (EnginePolicy.ENSURE_RUNNING, "engine_ack"),
     EV_FORCE_ABLATE: (EnginePolicy.ENSURE_RUNNING, "engine_ack"),
     EV_FORK: (EnginePolicy.ENSURE_RUNNING, "engine_ack"),

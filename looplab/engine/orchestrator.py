@@ -44,6 +44,7 @@ from looplab.events.types import (BACKGROUND_APPENDABLE, DIAGNOSTIC_EVENTS,
     EV_RUNG_PROMOTED,
     EV_SPEC_APPROVAL_REQUESTED,
     EV_SPEC_APPROVED, EV_SPEC_PROPOSED, PAUSE_REASON_EXTERNAL_OBLIGATIONS)
+from looplab.engine.track_lane import drain_track_requests, serve_track_requests
 from looplab.engine.ablation import AblationMixin
 from looplab.engine.metric_salvage import settle_mode as settle_metric_salvage_mode
 from looplab.engine.widths import LLM_WIDTH_MAX
@@ -1194,6 +1195,10 @@ class Engine(ConfirmPhaseMixin, NoiseFloorMixin, AblationMixin, NoveltyGateMixin
         self._simplify_refused: set = set()
         self._simplify_races: dict = {}
         self._stamp_simplify()
+        # doc 73 §1.4: the operator's evaluation TRACKS served by this live engine
+        # (`engine/track_lane.py`) — one worker at a time, results appended by the main task.
+        from looplab.engine.track_lane import TrackLane
+        self._track_lane = TrackLane()
         # Fail loudly: a repo task with no trusted eval AND no onboarder would silently
         # evaluate every node via the empty solution.py path. Require one or the other.
         if self._repo_spec and not self._eval_spec and onboarder is None:
@@ -1586,6 +1591,9 @@ class Engine(ConfirmPhaseMixin, NoiseFloorMixin, AblationMixin, NoveltyGateMixin
                     # exception case and let a genuine multi-failure group through as itself.
                     raise _sole_task_group_error(group) from None
         finally:
+            # A track worker never outlives the engine that started it: its subprocess is
+            # tree-killed and its request stays queued for the next engine (`engine/track_lane.py`).
+            self._track_lane.cancel()
             # The raising exits' half of the run-loop exit receipt (see `_record_run_loop_exit`):
             # a no-op when the fall-through already recorded it or the loop was never entered. It runs
             # BEFORE the exporter is retired, so the receipt still reaches an open trace.
@@ -2033,6 +2041,10 @@ class Engine(ConfirmPhaseMixin, NoiseFloorMixin, AblationMixin, NoveltyGateMixin
 
             if await self._serve_forced_requests(state):
                 continue
+            # The operator's queued evaluation TRACKS (doc 73 §1.4): started in a worker, harvested
+            # by this task once done; True only on the turn that appended, which re-folds.
+            if await serve_track_requests(self, state):
+                continue
 
             if self.external_harness:
                 # The external agent owns every think/plan/propose turn. Only READY-MADE injected
@@ -2284,6 +2296,13 @@ class Engine(ConfirmPhaseMixin, NoiseFloorMixin, AblationMixin, NoveltyGateMixin
         # clean finish: before this, the child's raise cancelled the drain and the run ended on the
         # ceiling, and it still does — after the siblings have landed, before `finalize_run`.
         await self._raise_deferred_eval_budget_stop()
+        # The operator's queued evaluation TRACKS are answered before a FINISHING run closes (doc 73
+        # §1.4) — a question asked of a running search is not dropped because the search ended
+        # first. A PAUSE only cancels the one in flight: its request stays queued for the resume.
+        if fold(self.store.read_all()).paused:
+            self._track_lane.cancel()
+        else:
+            await drain_track_requests(self, fold)
         # WHY THE LOOP STOPPED, exactly once — the receipt rule, the `finished` skip and the
         # exactly-once latch all live on `_record_run_loop_exit`. This fall-through covers every
         # `break` above; `Engine.run`'s outer `finally` calls the same helper so the RAISING

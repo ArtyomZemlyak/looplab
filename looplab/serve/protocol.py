@@ -62,7 +62,8 @@ from looplab.events.types import (
     EV_FORCE_ABLATE, EV_FORCE_CONFIRM, EV_FORK, EV_HINT, EV_HYPOTHESIS_ADDED,
     EV_HYPOTHESIS_UPDATED, EV_INJECT_NODE, EV_METRIC_RETARGET, EV_NODE_ABORT, EV_NODE_RESET,
     EV_PAUSE, EV_PROMOTE, EV_RESTART, EV_RESUME, EV_RUN_ABORT, EV_RUN_CONCEPTS, EV_RUN_FINISHED,
-    EV_RUN_REOPENED, EV_SET_STRATEGY, EV_SPEC_APPROVED, EV_RESEARCH_COMPLETED, EV_REPORT_GENERATED)
+    EV_RUN_REOPENED, EV_SET_STRATEGY, EV_SPEC_APPROVED, EV_RESEARCH_COMPLETED, EV_REPORT_GENERATED,
+    EV_TRACK_REQUESTED)
 
 # ---- run-generation command precondition ---------------------------------------------------------
 # The read model exposes the generation currently occupying a reusable run id. A brand-new durable
@@ -336,6 +337,7 @@ CONTROL_EVENTS = frozenset({
     EV_APPROVAL_GRANTED, EV_SPEC_APPROVED, EV_INJECT_NODE, EV_RUN_REOPENED,
     EV_SET_STRATEGY,   # A7: operator pins/overrides the Strategist's choice (HITL parity)
     EV_METRIC_RETARGET,  # doc 68 68.2: operator makes a DECLARED extra metric the objective
+    EV_TRACK_REQUESTED,  # doc 73 §1.4: run a declared eval.tracks evaluation on a LIVE run
     EV_DEEP_RESEARCH,  # P2: operator asks the engine to run the Deep-Research stage now
     # The same projections as the built-in research/report writers. The command intake binds
     # provenance and sanitizes content; an external agent never appends an event directly.
@@ -374,6 +376,7 @@ CONTROL_DATA_FIELDS: dict[str, frozenset[str]] = {
     EV_HINT: frozenset({"text", "replace"}),
     EV_SET_STRATEGY: frozenset({"strategy"}),
     EV_METRIC_RETARGET: frozenset({"key", "direction", "goal"}),
+    EV_TRACK_REQUESTED: frozenset({"track", "node_ids"}),
     EV_FORCE_CONFIRM: frozenset({"node_id", "generation"}),
     EV_FORCE_ABLATE: frozenset({"node_id", "generation"}),
     EV_FORK: frozenset({"from_node_id", "generation"}),

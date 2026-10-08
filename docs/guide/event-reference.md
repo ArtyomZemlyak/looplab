@@ -23,7 +23,7 @@ The event type itself is the contract's identity and is never renamed or reused;
 
 <!-- generated: event types -->
 
-175 event types — 123 folded into `RunState`, 52 diagnostic; 1161 declared payload keys; 30 types whose whole payload is stored by the fold.
+177 event types — 125 folded into `RunState`, 52 diagnostic; 1168 declared payload keys; 30 types whose whole payload is stored by the fold.
 
 | type | fold | records | required keys | optional keys |
 |---|---|---|---|---|
@@ -189,6 +189,8 @@ The event type itself is the contract's identity and is never renamed or reused;
 | `strategy_decision` | folded | The Strategist's consult: the strategy it returned and the context it was given. | `at_node`, `ctx`, `strategy` | `developer_application`, `width_unfilled` |
 | `task_changed` | diagnostic | A re-entry read a task whose identity (defaults left out) differs from the last recorded: the start's, or a row's `now`. | `now`, `was` | — |
 | `trace_export_health` | diagnostic | The span exporter is unhealthy — one row per distinct state, never on a healthy run. | — | `accepted_spans`, `buffered_bytes`, `dropped_queue_bytes`, `dropped_queue_full`, `dropped_serialization_error`, `dropped_shutdown`, `dropped_shutdown_timeout`, `dropped_spans`, `dropped_worker_start`, `export_failures`, `exported_spans`, `last_export_error`, `loss_receipt_failures`, `loss_receipts`, `queued_spans`, `shutdown`, `stopped_abandoned`, `stopped_crashed`, `stopped_idle`, `stopped_receipt_failed`, `stopped_retired`, `stopped_shutdown`, `worker_alive`, `worker_stop_detail`, `worker_stop_reason` |
+| `track_done` | folded | The engine finished a queued track request; its measurements are extra_metrics_imported rows. | `idx`, `track` | `failed`, `recorded`, `refused` |
+| `track_requested` | folded | An operator queued a declared eval.tracks evaluation over settled nodes of a live run. | `node_ids`, `track` | — |
 | `train_monitor_alert` | diagnostic | The live training-log judge's verdict about one running stage, and the log role it judged. | `confidence`, `generation`, `log_role`, `node_id`, `reason`, `status` | `checkpoint_id`, `citation_resolved`, `confidence_valid`, `evidence_locator`, `evidence_source`, `fault`, `kill`, `kill_role_withheld`, `kill_superseded_by`, `overrun_alert_floor_s`, `overrun_beyond_noise_s`, `projected_overrun_s`, `repair_decided`, `source`, `stage`, `stage_grace_s`, `stage_wall_s`, `stop_decided`, `trajectory`, `trajectory_veto` |
 | `trust_gate_changed` | folded | The run's trust gate was changed, by a named source (last write wins). | `source`, `trust_gate` | — |
 | `trust_scan` | diagnostic | Which trust detectors ran over one node's code, how many findings they made, over what digest. | — | `code_digest`, `detectors`, `evidence_version`, `findings`, `generation`, `node_id` |

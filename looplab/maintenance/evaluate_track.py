@@ -22,7 +22,6 @@ A dry run (the default) runs nothing; `--apply` runs the tracks while holding th
 from __future__ import annotations
 
 import json
-import math
 import time
 from pathlib import Path
 from typing import Optional
@@ -52,55 +51,9 @@ def read_track(run_dir: Path, track: str) -> dict:
     return entry
 
 
-def parse_track_output(stdout: str, *, keys=None, prefix: str = "") -> dict[str, float]:
-    """The finite numbers of the LAST JSON object stdout printed (one per line), filtered to `keys`
-    when declared, each named `prefix + key`. `{}` when no line parses."""
-    found: Optional[dict] = None
-    for line in reversed((stdout or "").splitlines()):
-        line = line.strip()
-        if not (line.startswith("{") and line.endswith("}")):
-            continue
-        try:
-            obj = json.loads(line)
-        except ValueError:
-            continue
-        if isinstance(obj, dict):
-            found = obj
-            break
-    if found is None:
-        return {}
-    wanted = set(keys) if keys else None
-    out: dict[str, float] = {}
-    for key, value in found.items():
-        if wanted is not None and key not in wanted:
-            continue
-        if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value):
-            continue
-        out[f"{prefix}{key}"] = float(value)
-    return out
-
-
-def track_refusal(run_dir: Path, node) -> Optional[str]:
-    """Why this node's workdir may NOT be measured, or None."""
-    from looplab.engine.evaluate import workdir_manifest_digest
-    if getattr(node.status, "value", node.status) != "evaluated" or node.task_metric is None:
-        return "not evaluated in its current lifecycle"
-    workdir = Path(run_dir) / "nodes" / f"node_{node.id}"
-    from looplab.engine.artifact_sync import workdir_stamp
-    try:
-        if workdir.is_symlink() or not workdir.is_dir():
-            return "its workdir is gone"
-    except OSError:
-        return "its workdir is gone"
-    # THE ONE READER OF A FILE THE CANDIDATE CAN WRITE (critic 2026-10-08): the stamp is written
-    # before the candidate's eval runs in that same workdir, and a FIFO there made a plain
-    # `read_text` block forever — with `--apply` holding `engine.lock` the whole time.
-    raw = workdir_stamp(workdir)
-    if raw is None:
-        return "its workdir carries no readable manifest stamp"
-    if raw.decode("ascii", errors="replace").strip() != workdir_manifest_digest(node):
-        return "its workdir holds another lifecycle's or code's files (manifest stamp differs)"
-    return None
+# The track's two rules are the LIVE engine's (`engine/track_lane.py`), re-exported here under the
+# names this module always had: one reading of a track's output and one refusal, offline or live.
+from looplab.engine.track_lane import parse_track_output, track_refusal  # noqa: E402,F401
 
 
 def evaluate_track(run_dir: Path, track: str, nodes: str, *, apply: bool) -> str:
@@ -169,3 +122,33 @@ def evaluate_track(run_dir: Path, track: str, nodes: str, *, apply: bool) -> str
     head = (f"{run_dir}: track {track!r} — recorded on {recorded} node(s)" if apply
             else f"{run_dir}: track {track!r} — dry run, nothing executed (--apply runs it)")
     return "\n".join([head, *lines])
+
+
+def request_live_track(run_dir: Path, track: str, nodes: str) -> str:
+    """Queue `track` over `nodes` for the run's LIVE engine (`engine/track_lane.py`): one
+    `track_requested` control intent, validated as the server's intake validates it (the track is
+    declared, the ids exist). Holds no lock: a control intent is the one thing a CLI may append
+    beside a running engine (invariant #1)."""
+    from looplab.events.types import EV_TRACK_REQUESTED
+    run_dir = Path(run_dir)
+    read_track(run_dir, track)
+    store = EventStore(str(run_dir / "events.jsonl"))
+    state = fold(store.read_all())
+    if nodes.strip().lower() == "all":
+        node_ids = "all"
+    else:
+        try:
+            node_ids = sorted({int(x) for x in nodes.split(",") if x.strip()})
+        except ValueError:
+            raise MetricsInputRefusal(
+                f"--nodes must be 'all' or a comma list of ids, not {nodes!r}") from None
+        missing = [n for n in node_ids if n not in state.nodes]
+        if missing or not node_ids:
+            raise MetricsInputRefusal(f"no node(s) {missing or nodes!r} in this run")
+    store.append(EV_TRACK_REQUESTED, {"track": track, "node_ids": node_ids})
+    position = len(state.track_requests) - state.tracks_done
+    return (f"{run_dir}: track {track!r} queued for the live engine"
+            + (f" behind {position} earlier request(s)" if position else "")
+            + " — its numbers land as `extra_metrics_imported` rows (source: track "
+            + f"{track}); a stopped run serves it on its next resume")
+

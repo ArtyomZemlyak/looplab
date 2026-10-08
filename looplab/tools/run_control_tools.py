@@ -128,11 +128,15 @@ class RunControlTools:
                  mutation_journal_path=None, mutation_recovery: bool = False,
                  lifecycle: "Optional[RunLifecycleFns]" = None,
                  trace_rewrite: "Optional[TraceRewriteFns]" = None,
-                 allow_inject: bool = False):
+                 allow_inject: bool = False, allow_tracks: bool = False):
         self.run_root = Path(run_root)
         # `inject_experiment` (doc 73 §1.4): OFF at this constructor, as a tool the model may call
         # is a prompt; the Assistant wires `Settings.assistant_inject_tool`.
         self.allow_inject = bool(allow_inject)
+        # `evaluate_track` (doc 73 §1.4): queues a declared `eval.tracks` evaluation for the LIVE
+        # engine (`engine/track_lane.py`). OFF here for the same reason; the Assistant wires
+        # `Settings.assistant_track_tool`.
+        self.allow_tracks = bool(allow_tracks)
         self.alive_fn = alive_fn
         self.mode = mode
         self.approver = approver
@@ -275,7 +279,17 @@ class RunControlTools:
                  "uses": {"type": "array", "items": {"type": "integer"}},
                  "parent_id": {"type": "integer",
                                "description": "optional: the node this one builds on"}},
-                ["run_id", "rationale"])] if self.allow_inject else [])
+                ["run_id", "rationale"])] if self.allow_inject else []) + ([fn_spec("evaluate_track",
+                "Run one of the task's DECLARED evaluation tracks (eval.tracks: e.g. @200 where the search "
+                "scores @20, a drift week) over settled nodes of a run, served by its live engine on the "
+                "run's own GPUs. The numbers land beside each node's metrics, marked as measured after "
+                "the run, and can become the objective (metric_retarget). A stopped run keeps the "
+                "request queued until it resumes.",
+                {"run_id": {"type": "string"},
+                 "track": {"type": "string", "description": "a name under the task's eval.tracks"},
+                 "node_ids": {"type": "array", "items": {"type": "integer"},
+                              "description": "the nodes to measure; omit for every evaluated node"}},
+                ["run_id", "track"])] if self.allow_tracks else [])
 
     # ------------------------------------------------------------------ helpers
     def _rd(self, run_id) -> Optional[Path]:
@@ -398,6 +412,8 @@ class RunControlTools:
                 return getattr(self, f"_tool_{name}")(name, rid, rd, args)
             if name == "inject_experiment" and self.allow_inject:
                 return self._tool_inject_experiment(name, rid, rd, args)
+            if name == "evaluate_track" and self.allow_tracks:
+                return self._tool_evaluate_track(name, rid, rd, args)
             if name == "delete_node":
                 return self._delete_node(rid, rd, args)
             if name == "delete_run":
@@ -480,6 +496,40 @@ class RunControlTools:
                 expected_generation=generation)
         return _render_command_result(
             record, name=name, run_id=rid, completed=f"budget extended for {rid}: {data}")
+
+    def _tool_evaluate_track(self, name: str, rid: str, rd: Path, args: dict) -> str:
+        """Submit the same `track_requested` the CLI's `evaluate-track --live` and the UI write
+        (doc 73 §1.4). The server's intake is the authority
+        (`serve/control_validation.py::_normalize_track_requested`: a declared track, ids the run
+        has)."""
+        from looplab.events.types import EV_TRACK_REQUESTED
+
+        track = str(args.get("track") or "").strip()[:80]
+        if not track:
+            return "(evaluate_track needs `track`: a name under the task's eval.tracks)"
+        raw = args.get("node_ids")
+        if raw in (None, [], "all"):
+            node_ids = "all"
+        elif isinstance(raw, list) and all(type(x) is int and x >= 0 for x in raw):
+            node_ids = sorted(set(raw))[:256]
+        else:
+            return "(node_ids must be a list of node ids, or omitted for every evaluated node)"
+        data = {"track": track, "node_ids": node_ids}
+        blocked, formed_generation = self._gate(
+            name, rid, rd, f"run track {track} on {rid}",
+            scope={"run_id": rid, **data},
+            preview=f"{name}({rid})\ntrack: {track}\nnodes: {node_ids}")
+        if blocked:
+            return blocked
+        with self._mutation_intent(
+                name, rid, rd, {"event_type": EV_TRACK_REQUESTED, "data": data},
+                command_backed=True,
+                expected_generation=formed_generation) as (key, generation):
+            record = self._commands.submit(
+                rd, EV_TRACK_REQUESTED, data, idempotency_key=key, expected_generation=generation)
+        return _render_command_result(
+            record, name=name, run_id=rid,
+            completed=f"track {track} queued on {rid} for the live engine")
 
     def _tool_inject_experiment(self, name: str, rid: str, rd: Path, args: dict) -> str:
         """Submit the same `inject_node` the UI and an external agent write (doc 73 §1.4): an

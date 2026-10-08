@@ -74,6 +74,8 @@ def evaluate_track_cmd(
     nodes: str = typer.Option("all", "--nodes", help="'all' evaluated nodes, or ids: 3,5,7."),
     apply: bool = typer.Option(False, "--apply",
                                help="Actually run and record. Without it this is a DRY RUN."),
+    live: bool = typer.Option(False, "--live",
+                              help="Queue it for the run's LIVE engine instead (no stop needed)."),
 ):
     """Run a declared evaluation TRACK over settled nodes' preserved workdirs (doc 73 §1.4).
 
@@ -82,13 +84,16 @@ def evaluate_track_cmd(
     Each node must be evaluated in its current lifecycle with its workdir's manifest stamp matching
     its code — otherwise it is refused, never measured. Results are recorded beside the live
     metrics (`extra_metrics_imported`, `source: track <name>`), never over them; `--apply` holds
-    `engine.lock`. A recorded key can then be the objective (`metric_retarget`).
+    `engine.lock`. A recorded key can then be the objective (`metric_retarget`). `--live` queues a
+    `track_requested` intent instead, which the RUNNING engine serves on its own GPU pool
+    (`engine/track_lane.py`); a stopped run keeps it queued for its next engine.
     """
     from looplab.core.errors import ConfigRefusal
-    from looplab.maintenance.evaluate_track import evaluate_track
+    from looplab.maintenance.evaluate_track import evaluate_track, request_live_track
     from looplab.maintenance.import_metrics import MetricsInputRefusal
     try:
-        typer.echo(evaluate_track(run_dir, track, nodes, apply=apply))
+        typer.echo(request_live_track(run_dir, track, nodes) if live
+                   else evaluate_track(run_dir, track, nodes, apply=apply))
     except MetricsInputRefusal as exc:
         raise ConfigRefusal(f"evaluate-track: {exc}") from None
 

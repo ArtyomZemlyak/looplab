@@ -179,3 +179,14 @@ def test_an_import_stays_inside_the_map_bound_and_every_added_key_is_marked():
     assert len(node.extra_metrics) == 256
     added = set(node.extra_metrics) - set(live)
     assert len(added) == 6 and all(extra_metric_key_is_backfilled(node, k) for k in added)
+
+
+def test_live_queues_a_request_for_the_running_engine(tmp_path):
+    """`--live` appends the control intent the live engine serves (`engine/track_lane.py`)."""
+    rd, store = _run(tmp_path)
+    out = _cli(rd, "--live", "--nodes", "0")
+    assert out.exit_code == 0 and "queued for the live engine" in out.output, out.output
+    st = fold(store.read_all())
+    assert st.track_requests == [{"track": "at200", "node_ids": [0]}] and st.tracks_done == 0
+    assert _cli(rd, "--live", "--nodes", "9").exit_code == 2
+    assert CliRunner().invoke(app, ["evaluate-track", str(rd), "w07", "--live"]).exit_code == 2

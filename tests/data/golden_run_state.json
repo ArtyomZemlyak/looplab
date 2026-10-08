@@ -999,6 +999,8 @@
   "strategy_history": [],
   "task_id": "toy_quadratic",
   "total_eval_seconds": 0.273,
+  "track_requests": [],
+  "tracks_done": 0,
   "trust_gate": "audit",
   "upstream_base": null,
   "upstream_enabled": false,

@@ -1,7 +1,7 @@
 {
   "schema": 1,
   "language": "ru",
-  "count": 7695,
+  "count": 7699,
   "messages": {
     "# LoopLab run report — {0}": "# Отчёт запуска LoopLab — {0}",
     "## Agent narrative (advisory)": "## Пояснения агента (рекомендации)",
@@ -7697,6 +7697,10 @@
     "It was recovered from the preserved score log, imported by the operator, or measured afterwards by an evaluation track; the record does not say which.": "Значение восстановлено из сохранённого журнала оценивания, импортировано оператором или измерено позже треком оценки; из записи не видно, каким из этих способов.",
     "Its precision may be coarser than the objective's, so two nodes equal here are not known to be equal.": "Его точность может быть грубее, чем у цели, поэтому равенство двух узлов здесь не означает, что они действительно равны.",
     "Experiment #{0}": "Эксперимент №{0}",
-    "metric {0}": "метрика {0}"
+    "metric {0}": "метрика {0}",
+    "Assistant can run evaluation tracks": "Ассистент может запускать треки оценки",
+    "Gives the Assistant an evaluate_track tool: it can queue one of the task's declared evaluation tracks (an @200 re-score, a drift week) over a run's settled nodes, behind a confirm card. The live engine runs it on the run's own GPUs and records the numbers beside each node's metrics. Off removes the tool from the Assistant.": "Даёт Ассистенту инструмент evaluate_track: он может поставить в очередь один из объявленных в задаче треков оценки (переоценку @200, неделю дрейфа) по завершённым узлам запуска — через карточку подтверждения. Живой движок выполняет его на GPU самого запуска и записывает числа рядом с метриками каждого узла. Выключено — инструмент у Ассистента убирается.",
+    "Assistant runs tracks": "Ассистент запускает треки",
+    "Lets the Assistant queue a declared evaluation track on a live run, behind a confirm card.": "Позволяет Ассистенту ставить объявленный трек оценки в очередь живого запуска через карточку подтверждения."
   }
 }

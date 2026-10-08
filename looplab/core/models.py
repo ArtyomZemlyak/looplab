@@ -2875,6 +2875,10 @@ class RunState(BaseModel):
     # that the policy then evaluates like any other — so a human can steer the search directly.
     inject_requests: list[dict] = Field(default_factory=list)
     injects_done: int = 0      # cursor into `inject_requests`; same rule as `forks_done` above
+    # Queued `track_requested` intents (doc 73 §1.4, `engine/track_lane.py`): `{track, node_ids}`
+    # each, served in order by a live engine; `tracks_done` is the cursor `track_done` advances.
+    track_requests: list[dict] = Field(default_factory=list)
+    tracks_done: int = 0
     annotations: dict[int, list[str]] = Field(default_factory=dict)  # legacy `annotation`: node notes
     # Modern collaboration is read only through authenticated, bounded projections.  Excluding it
     # here prevents free-form comment text from entering the tokenless /state + SSE payload.

@@ -2609,6 +2609,11 @@ class Settings(BaseSettings):
     # same `inject_node` command the UI writes, behind a confirm card. A tool is part of the model's
     # prompt, so `RunControlTools` defaults it OFF; this server-level switch turns it on. Not run-pinned.
     assistant_inject_tool: bool = True
+    # The Assistant's `evaluate_track` tool (doc 73 §1.4): queue one of the task's DECLARED
+    # `eval.tracks` over a run's settled nodes for its LIVE engine (`engine/track_lane.py`), behind a
+    # confirm card. A tool is part of the model's prompt, so `RunControlTools` defaults it OFF; this
+    # server-level switch turns it on. One reader: `serve/assistant.py::assistant_track_enabled`.
+    assistant_track_tool: bool = True
     # === LLM / transport ==================================================================
     llm_base_url: str = "http://localhost:11434/v1"  # Ollama OpenAI-compatible endpoint
     llm_temperature: float = 0.6

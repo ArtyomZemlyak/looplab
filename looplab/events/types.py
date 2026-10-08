@@ -956,6 +956,15 @@ EV_ARTIFACT_SYNCED = "artifact_synced"
 # carries is a LIVE record and is never overwritten. Written by a CLI holding `engine.lock`, so never
 # beside an engine (invariant #1).
 EV_EXTRA_METRICS_IMPORTED = "extra_metrics_imported"
+# …and the same row written by a LIVE engine: `track_requested` (a CONTROL intent — UI, API, the
+# Assistant, `looplab evaluate-track --live`) queues one declared `eval.tracks.<name>` over named
+# settled nodes; the engine runs it in a background worker on the run's own GPU pool
+# (`engine/track_lane.py`) and its MAIN task appends one `extra_metrics_imported` per measured node,
+# then `track_done {idx}` — the positional receipt (`_advance_request_cursor`) that serves the queue
+# head exactly once. A request with no receipt is re-run on the next resume; the fold ignores a key a
+# node already carries, so a re-run records nothing twice (invariant #3).
+EV_TRACK_REQUESTED = "track_requested"
+EV_TRACK_DONE = "track_done"
 # A PAUSE (or a stop) WITHHELD THIS LIFECYCLE'S EVALUATION WORK, and what it had already spent
 # (doc 69 69.12a). A withheld attempt returns with NO terminal — the node stays pending, and the
 # re-dispatch after the pause lifts continues the chain — so the seconds it had consumed (a passed
@@ -1750,6 +1759,16 @@ EVENT_PAYLOAD_KEYS: dict[str, PayloadContract] = {
         required=("command", "exit_code", "generation", "node_id", "seconds", "stderr_tail",
                   "timed_out"),
         optional=("workdir_changed",),
+    ),
+    "track_requested": PayloadContract(
+        "An operator queued a declared eval.tracks evaluation over settled nodes of a live run.",
+        required=("node_ids", "track"),
+        optional=(),
+    ),
+    "track_done": PayloadContract(
+        "The engine finished a queued track request; its measurements are extra_metrics_imported rows.",
+        required=("idx", "track"),
+        optional=("failed", "recorded", "refused"),
     ),
     "extra_metrics_imported": PayloadContract(
         "An operator imported metrics measured after the run for one node, beside its live ones.",

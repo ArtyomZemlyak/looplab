@@ -1300,6 +1300,9 @@ class TrackSpec(BaseModel):
     key_prefix: str = ""
     # As `ArtifactSyncSpec.env_passthrough`: a scoring service's API key by NAME.
     env_passthrough: list[str] = Field(default_factory=list)
+    # Devices a LIVE engine leases for it from the run's own pool (`engine/track_lane.py`), waiting
+    # while evaluations hold them; 0 runs it with no device visible. The offline command ignores it.
+    gpus: int = Field(default=0, ge=0, le=64)
 
     @field_validator("env_passthrough")
     @classmethod

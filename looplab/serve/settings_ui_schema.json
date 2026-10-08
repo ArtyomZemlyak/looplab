@@ -1030,6 +1030,15 @@
           "shortHelp": "Lets the Assistant add experiment or data-preparation nodes, each behind a confirm card."
         },
         {
+          "key": "assistant_track_tool",
+          "label": "Assistant can run evaluation tracks",
+          "type": "bool",
+          "default": true,
+          "help": "Gives the Assistant an evaluate_track tool: it can queue one of the task's declared evaluation tracks (an @200 re-score, a drift week) over a run's settled nodes, behind a confirm card. The live engine runs it on the run's own GPUs and records the numbers beside each node's metrics. Off removes the tool from the Assistant.",
+          "shortLabel": "Assistant runs tracks",
+          "shortHelp": "Lets the Assistant queue a declared evaluation track on a live run, behind a confirm card."
+        },
+        {
           "key": "backend",
           "label": "Role backend",
           "type": "enum",

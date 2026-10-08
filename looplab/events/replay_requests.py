@@ -30,7 +30,7 @@ from looplab.events.types import (
     EV_ANNOTATION, EV_BUDGET_EXTEND, EV_COMMENT_CREATED, EV_COMMENT_EDITED,
     EV_COMMENT_RESOLUTION_CHANGED, EV_CONFIRM_DONE, EV_DEEP_RESEARCH, EV_FORCE_ABLATE,
     EV_FORCE_CONFIRM, EV_FORK, EV_FORK_DONE, EV_HINT, EV_INJECT_DONE, EV_INJECT_NODE, EV_PROMOTE,
-    EV_SET_STRATEGY, standing_hint_dedup_key,
+    EV_SET_STRATEGY, EV_TRACK_DONE, EV_TRACK_REQUESTED, standing_hint_dedup_key,
 )
 
 
@@ -249,6 +249,28 @@ def _on_inject_done(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
     st.injects_done = _advance_request_cursor(
         st.injects_done, len(st.inject_requests), d.get("idx"))
 
+def _on_track_requested(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
+    # A COPY, normalized at the fold (the intake validated it; a hand-edited row must not crash):
+    # `node_ids` is a bounded list of non-negative ints or the literal "all".
+    track = d.get("track")
+    raw = d.get("node_ids")
+    if not isinstance(track, str) or not track:
+        return
+    if raw == "all":
+        node_ids = "all"
+    elif isinstance(raw, list):
+        node_ids = [x for x in raw[:256] if type(x) is int and x >= 0]
+    else:
+        return
+    st.track_requests.append({"track": track[:80], "node_ids": node_ids})
+
+
+def _on_track_done(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
+    # The queue's positional receipt — `_advance_request_cursor`, the one rule every served queue
+    # shares, so a duplicate receipt cannot consume the next request.
+    st.tracks_done = _advance_request_cursor(st.tracks_done, len(st.track_requests), d.get("idx"))
+
+
 def _on_deep_research(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
     st.research_requests.append(d)       # manual "go think hard" request (control event)
 
@@ -315,4 +337,6 @@ HANDLERS = {
     EV_COMMENT_EDITED: _on_comment,
     EV_COMMENT_RESOLUTION_CHANGED: _on_comment,
     EV_PROMOTE: _on_promote,
+    EV_TRACK_REQUESTED: _on_track_requested,
+    EV_TRACK_DONE: _on_track_done,
 }

@@ -2078,6 +2078,11 @@ A node is measured only when it is evaluated in its current lifecycle AND its wo
 Results land beside the live metrics through the same row `import-metrics` writes
 (`extra_metrics_imported`, `source: track <name>`, reconstructed key by key); a recorded key can be the
 objective (`metric_retarget`). `--apply` holds `engine.lock`; output goes to `<run>/track_<name>.log`.
+`--live` queues the same track for the run's RUNNING engine instead (a `track_requested` intent; no
+stop, no `engine.lock`): it runs in a background worker on the run's own GPU pool — a track declaring
+`gpus: N` leases N devices from it — and the main task records its numbers; a stopped run keeps the
+request queued until it resumes (`engine/track_lane.py`). The Assistant's `evaluate_track` tool and
+the command API write the same intent.
 The command runs from the node's workdir (`score_service.py` above is a file there); a track
 declaring `env_passthrough` (credential NAMES read from the engine's environment) runs from the run
 directory instead, so it names the node's files through `{workdir}`.

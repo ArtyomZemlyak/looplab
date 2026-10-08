@@ -72,6 +72,10 @@ the diff that justified it:
   artifacts a node reads). The diff was 16 insertions and 0 deletions — one `"kind": null` and one
   `"uses": []` per node, what a `node_created` row with neither key folds to — and no shared leaf
   changed.
+* 2026-10-08 — `RunState.track_requests` + `RunState.tracks_done` (`core/models.py`, doc 73 §1.4:
+  the live evaluation-track queue and its cursor). The diff was 2 insertions and 0 deletions —
+  `"track_requests": []` and `"tracks_done": 0`, what a log with no track request folds to — and no
+  shared leaf changed.
 """
 from __future__ import annotations
 
