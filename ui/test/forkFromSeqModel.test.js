@@ -120,6 +120,19 @@ test('the payload fences on the generation the operator SAW, not the live one', 
   assert.equal(payload.idea.params.x, 0.5)
 })
 
+test('a branch of an artifact node is an artifact node too', () => {
+  // Critic 2026-10-08: the branch dropped `node_kind`, so forking a preparation step built a ranked
+  // experiment from it. The kind is the inject's top-level key; the idea never carried it.
+  const node = snapshotNode({ kind: 'artifact' })
+  const base = forkIdeaFromSnapshot(node)
+  const payload = buildForkPayload({ node, viewSeq: 5, base, draft: { ...base, params: { x: 2 } } })
+  assert.equal(payload.node_kind, 'artifact')
+  const plain = snapshotNode()
+  const ordinary = buildForkPayload({ node: plain, viewSeq: 5, base: forkIdeaFromSnapshot(plain),
+    draft: { ...forkIdeaFromSnapshot(plain), params: { x: 2 } } })
+  assert.equal('node_kind' in ordinary, false, 'an ordinary branch keeps its historical payload')
+})
+
 test('"the run moved under you" is a distinct outcome from "refused"', () => {
   const moved = classifyForkFailure({
     status: 409, message: 'stale parent #3: current generation is 2',

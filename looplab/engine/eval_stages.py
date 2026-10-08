@@ -331,7 +331,7 @@ class EvalStagesMixin:
         return clean if err is None else None
 
     def _resolve_stages(self, workdir, es, params=None, score_cmd=None, score_timeout=None,
-                        operator_stages=_ASK):
+                        operator_stages=_ASK, artifact: bool = False):
         """Resolve the ordered eval pipeline, with the operator's `cmd` (es) AUTHORITATIVE and
         non-overridable (redesign: the agent can't rewrite how it's scored):
 
@@ -350,7 +350,15 @@ class EvalStagesMixin:
 
         `operator_stages` is `_operator_stages(es)` when the caller already asked it — `_eval_pipeline`
         does, to record the protocol off the same branch — so the list is validated ONCE per
-        resolution (critic 2026-09-26: twice, and `validate_stages` warned twice per bad key)."""
+        resolution (critic 2026-09-26: twice, and `validate_stages` warned twice per bad key).
+
+        `artifact`: the node is an ARTIFACT (doc 73 §1.4) — a preparation step that produces files
+        and is never scored. It gets NO host scorer stage and no `needs` derived from the metric's
+        subject: both are about scoring a CANDIDATE's predictions, which an artifact never writes,
+        so with either one it could never end on the clean no-metric pipeline its success rule asks
+        for (`engine/evaluate.py`, critic 2026-10-08: every artifact on a host-scored task failed).
+        Its pipeline is otherwise the experiment's — the operator's stages, or the Developer's
+        manifest before the task's own command."""
         import json
         from looplab.runtime import command_eval
 
@@ -366,7 +374,13 @@ class EvalStagesMixin:
         # is recorded as `self_metric` — and the eval is ALWAYS staged, because the single-command
         # path has no place for a second program. `needs` under `require` derives onto whichever
         # stage is last, which is this one whenever it exists.
-        host = self._host_scorer_stage(es, params)
+        host = None if artifact else self._host_scorer_stage(es, params)
+        if artifact:
+            # Nothing to derive `needs` FROM: the subject is a candidate's scored output.
+            def _final(_es, stage):
+                return stage
+        else:
+            _final = self._with_final_needs
         task_stages = es.get("stages")
         if isinstance(task_stages, list) and task_stages:
             # cmd declares stages → canonical, dev file ignored. EvalSpec validated these at submit
@@ -538,7 +552,7 @@ class EvalStagesMixin:
                     {str(s.get("name") or "") for s in preceding})
                 candidate = [final] if final.get("command") else []
                 return _expand(preceding) + candidate + [self._with_final_needs(es, host)]
-            return _expand(preceding) + [self._with_final_needs(es, final)]
+            return _expand(preceding) + [_final(es, final)]
         if host:
             return self._candidate_then_host(es, params, score_cmd, score_timeout, host)
         return None
@@ -737,7 +751,9 @@ class EvalStagesMixin:
         operator = self._operator_stages(es)
         stages = self._resolve_stages(str(Path(workdir).resolve()), es, params,  # cmd-authoritative pipeline (+ %params% per stage)
                                       score_cmd=cmd, score_timeout=timeout,      # profile/timeout survive pipeline mode
-                                      operator_stages=operator)
+                                      operator_stages=operator,
+                                      # an artifact is never scored: no host scorer, no subject needs
+                                      artifact=getattr(node, "kind", None) == "artifact")
         # …and the DEVELOPER's declared leashes, which the spec rewrite cannot reach: a
         # `looplab_stages.json` `train` declared AT the old budget was bounded by it and moves with it
         # (`command_eval.leashed_timeout`). Applied to the RESOLVED chain here — after `_resolve_stages`

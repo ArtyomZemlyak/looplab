@@ -35,6 +35,7 @@ from looplab.core.concepts import (
     normalized_concept_materialization_receipt,
 )
 from looplab.core.fitness import counts_toward_best, is_usable_metric, one_se_better
+from looplab.core.cards import CARD_IDEA_ARTIFACT_FIELDS
 from looplab.core.jsonutil import valid_digest_ref
 from looplab.core.models import (CARD_ACTION_DIGEST_V1_FIELDS, CARD_ACTION_DIGEST_V2_FIELDS,
                      CARD_CHILD_LIMIT, CARD_CONCEPT_TAG_LIMIT, CARD_LINEAGE_MAX_DEPTH,
@@ -251,7 +252,7 @@ def _bounded_card_action(value: dict, *, record_unknown_fields: bool = False) ->
     if record_unknown_fields:
         known_fields = {
             "operator", "params", "space", "eval_profile", "eval_timeout",
-            "concept_tags", *CARD_IDEA_CONCEPT_FIELDS,
+            "concept_tags", *CARD_IDEA_CONCEPT_FIELDS, *CARD_IDEA_ARTIFACT_FIELDS,
             "parent_id", "parent_ids",
         }
         if any(field not in known_fields for field in value):
@@ -1073,6 +1074,9 @@ _CARD_ADDED_ACTION_FIELDS = frozenset({
     # a subset here is the bug this constant exists to make impossible: `concepts` alone admitted a
     # FULL membership and left every `delta` proposal's Card reading as a lossy future schema.
     *CARD_IDEA_CONCEPT_FIELDS,
+    # …and what the claimed node IS (doc 73 §1.4), by the same rule: read by the claim off the mint
+    # row, never digested, never a Card field (`core/cards.py::CARD_IDEA_ARTIFACT_FIELDS`).
+    *CARD_IDEA_ARTIFACT_FIELDS,
     "parent_id", "parent_ids", "_concept_tags_overflow", "_concept_tags_invalid",
 })
 

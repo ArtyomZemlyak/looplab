@@ -438,6 +438,29 @@ def _idea_uses(st: RunState, declared) -> list:
     return out[:32]
 
 
+def node_uses(st: RunState, nid, parent_ids: list, *, written=None, declared=()) -> list:
+    """The artifacts a node created at this point of the fold reads (doc 73 §1.4) — the ONE rule,
+    read by the fold (`_on_node_created`) and by the build that hands the Developer the same list
+    (`engine/node_build.py::NodeBuildMixin._artifact_idea`).
+
+    A row that WROTE `uses` (an inject, a rebuild) reads exactly that. Otherwise it is the ORDERED
+    UNION of what its consumer parents read (`inherited_uses`, first) and what its own idea declares
+    (`_idea_uses`, then), de-duplicated: a Researcher who names one more artifact on a child of a
+    consumer ADDS a read, it does not take away the parent's — the copied code still reads the
+    parent's artifacts by position in `LOOPLAB_USES_WORKDIRS` (critic 2026-10-08: the declared list
+    used to REPLACE the inherited one). A row with neither declared nor inherited uses folds as
+    before, so every log that declared nothing folds byte for byte. A node's own id is DROPPED
+    wherever it appears: a node cannot read what it is producing, and a self pin would wait on its
+    own pending lifecycle forever (`engine/artifact_fence.py::uses_waiting`)."""
+    if isinstance(written, list):
+        return [x for x in written[:32] if type(x) is int and x >= 0 and x != nid]
+    out: list = []
+    for used in (*inherited_uses(st, parent_ids), *_idea_uses(st, declared)):
+        if used != nid and used not in out:
+            out.append(used)
+    return out[:32]
+
+
 def _use_pins(st: RunState, d: dict, parent_ids: list, uses: list, idea_uses=()) -> dict:
     """`{str(artifact_id): generation}` — the producer lifecycle each of `uses` is pinned to (doc 73
     §1.4, round 3). The row's own `uses_attempts` when it wrote `uses` (an inject, a rebuild), cut to
@@ -553,10 +576,9 @@ def _on_node_created(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
     try:
         receipt = _simplification_receipt(d, parent_ids, st)
         idea = Idea(**d["idea"])
-        declared = [] if isinstance(d.get("uses"), list) else _idea_uses(st, idea.uses)
-        uses = ([x for x in d["uses"][:32] if type(x) is int and x >= 0]
-                if isinstance(d.get("uses"), list)
-                else (declared or inherited_uses(st, parent_ids)))
+        declared = ([] if isinstance(d.get("uses"), list)
+                    else [u for u in _idea_uses(st, idea.uses) if u != nid])
+        uses = node_uses(st, nid, parent_ids, written=d.get("uses"), declared=declared)
         n = Node(
             id=nid,
             parent_ids=parent_ids,
@@ -1919,8 +1941,12 @@ def _on_confirm_eval(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
     # replay/resume of the run — the fold loop has no per-event try/except. The earlier `!= "aborted"`
     # comparisons are safe; this one needs the same shape guard as the rest of this handler's reads.
     _reason = d.get("reason")
+    # `artifact_unavailable` (doc 73 §1.4): `_run_eval` launched nothing because a pinned artifact
+    # moved — no seed ran, so none is memoized and the seed retries once it is produced again.
+    # Additive: the engine wrote no such reason on a `confirm_eval` before it (critic 2026-10-08).
     retryable_infrastructure = (isinstance(_reason, str)
-                                and _reason in {"gpu_unavailable", "gpu_unpinnable"})
+                                and _reason in {"gpu_unavailable", "gpu_unpinnable",
+                                                "artifact_unavailable"})
     # …and only a seed measured on the CURRENT objective is a memo entry (doc 68 68.2): after a
     # retarget the confirm phase measures again, on the new key.
     if (keyed and not retryable_infrastructure

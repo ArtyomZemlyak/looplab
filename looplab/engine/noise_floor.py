@@ -247,7 +247,7 @@ class NoiseFloorMixin:
         if not self._confirmation_node_current(nd.id, generation):
             return None
         with self.tracer.span("eval_noise_seed", new_trace=True, node_id=nd.id,
-                              generation=generation, seed=s):
+                              generation=generation, seed=s) as _span:
             # The pin is read ONCE, not per tick. `_confirm_phase` re-folds on every tick because a
             # Card re-pinned GPU->CPU must be able to progress during an unbounded wait; this wait is
             # bounded to a minute, and 120 whole-log folds to notice a re-pin inside it is a worse
@@ -283,6 +283,13 @@ class NoiseFloorMixin:
                     lambda: self._run_eval(nd, str(workdir), env, profile, None))
             finally:
                 self._release_gpus(reservation.get("gpu_ids"))
+            from looplab.engine.eval_dispatch import artifact_refusal
+            if artifact_refusal(res):
+                # NOTHING LAUNCHED: a pinned artifact moved (doc 73 §1.4). Not a repeat that failed
+                # — recording one would put a None into `n` for a measurement nobody made (critic
+                # 2026-10-08). The instrument ABSTAINS for this seed, as for a resource it never got.
+                _span.set("artifact_refused", True)
+                return None
             current = self._confirmation_node_current(nd.id, generation)
             valid = bool(current and res.metric is not None
                          and res.exit_code == 0 and not res.timed_out)

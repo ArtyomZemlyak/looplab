@@ -78,36 +78,82 @@ export function suggestedInjectQuestion(state, parentId) {
   return question && injectQuestions(state).some(q => q.id === question) ? question : null
 }
 
+// A message the panel shows is a CATALOGUE KEY plus its values, never an English sentence with the
+// value already spliced in: `uiMessage(key, values)` finds the Russian entry only for the key, and an
+// interpolated string matched nothing (critic 2026-10-08). `error` keeps the English rendering for
+// the callers and tests that read it.
+const message = (key, values = []) => ({
+  key, values, text: key.replace(/\{(\d+)\}/g, (_, i) => String(values[Number(i)] ?? '')),
+})
+
 /**
  * Parse the optional parameters box: empty is "no params" (absent), else a JSON OBJECT of numbers —
  * `Idea.params` is `dict[str, float]`, so a string value would be refused by the server after the
- * operator had been told the form was fine.
+ * operator had been told the form was fine. A refusal carries `message` ({key, values}) beside its
+ * English `error`.
  */
 export function parseInjectParams(text) {
   if (!String(text ?? '').trim()) return { ok: true, value: undefined }
+  const refuse = (key, values) => {
+    const m = message(key, values)
+    return { ok: false, error: m.text, message: m }
+  }
   let parsed
   try { parsed = JSON.parse(text) } catch (error) {
-    return { ok: false, error: `Parameters must be valid JSON: ${error.message}` }
+    return refuse('Parameters must be valid JSON: {0}', [error.message])
   }
   if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
-    return { ok: false, error: 'Parameters must be a JSON object, for example {"lr": 0.001}.' }
+    return refuse('Parameters must be a JSON object, for example {"lr": 0.001}.')
   }
   const bad = Object.entries(parsed).find(([, v]) => typeof v !== 'number' || !Number.isFinite(v))
-  if (bad) return { ok: false, error: `Parameter "${bad[0]}" must be a number.` }
+  if (bad) return refuse('Parameter "{0}" must be a number.', [bad[0]])
   return { ok: true, value: parsed }
 }
 
+// Each refusal's catalogue KEY; `injectBlockedMessage` supplies the values the two numeric ones name.
 export const INJECT_BLOCKED_REASONS = Object.freeze({
   no_rationale: 'Describe the experiment: the Developer builds it from this text.',
-  too_long: `The description is longer than ${INJECT_RATIONALE_MAX.toLocaleString('en-US')} characters.`,
+  too_long: 'The description is longer than {0} characters.',
   bad_kind: 'Choose an experiment or an artifact node.',
   unknown_parent: 'That parent is no longer an evaluated experiment of this run.',
   unknown_artifact: 'One of the artifacts it uses is no longer produced.',
   unknown_question: 'That research question is no longer on the board.',
-  too_many_uses: `An experiment may use at most ${INJECT_USES_MAX} artifacts.`,
+  too_many_uses: 'An experiment may use at most {0} artifacts.',
   bad_params: 'Fix the parameters first.',
   submitting: 'Already submitting.',
 })
+
+/**
+ * The refusal `code` as `{key, values, text}` for `uiMessage(key, values)`. `bad_params` is the
+ * parser's own message when the draft carries one. `locale` formats the description cap
+ * (20,000 / 20 000); null for an unknown code.
+ */
+export function injectBlockedMessage(code, { params, locale = 'en-US' } = {}) {
+  if (code === 'bad_params' && params?.message) return params.message
+  const key = INJECT_BLOCKED_REASONS[code]
+  if (!key) return null
+  if (code === 'too_long') return message(key, [INJECT_RATIONALE_MAX.toLocaleString(locale)])
+  if (code === 'too_many_uses') return message(key, [INJECT_USES_MAX])
+  return message(key)
+}
+
+/**
+ * What the draft still NAMES that the run no longer offers — the ticked artifacts that stopped being
+ * produced (reset, failed, deleted) and a parent that is no longer an evaluated experiment. The panel
+ * shows each one, still selected, with the control that clears it: the form used to keep refusing
+ * `unknown_artifact` over a box that had disappeared from the list, with no way to untick it
+ * (critic 2026-10-08). Nothing is cleared FOR the operator — what they chose stays visible until they
+ * change it.
+ */
+export function staleInjectSelections(state, draft) {
+  const { parents, artifacts } = injectCandidates(state)
+  const uses = Array.isArray(draft?.uses) ? draft.uses : []
+  const parentId = draft?.parentId
+  return {
+    uses: uses.filter(id => !artifacts.some(a => a.id === id)),
+    parentId: parentId != null && !parents.some(p => p.id === parentId) ? parentId : null,
+  }
+}
 
 /**
  * Whether the draft may be sent, and if not the FIRST reason's `code`. `draft` is

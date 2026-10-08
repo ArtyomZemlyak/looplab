@@ -224,13 +224,16 @@ def inherited_use_pins(state, parent_ids) -> dict:
     WRITER so the fold stays a plain read (`events/replay.py::_use_pins`).
 
     Each inherited use (the fold's own rule, `events/replay.py::inherited_uses`) is pinned to its
-    producer's CURRENT lifecycle when that one is PRODUCED — evaluated, not deleted — so a child
-    built after the artifact was re-produced reads it as it is, instead of paying a build to end
-    `artifact_unavailable` on the lifecycle its parent once read. Otherwise the parent's pin is
-    inherited (first parent first), and the consumer then waits for it while it is still being
-    produced (`engine/artifact_fence.py::uses_waiting`) or is refused once it never can be. A use no
-    parent pinned (a log from before the pins) stays unpinned: the historical rule. `{}` when the
-    child inherits nothing."""
+    producer's CURRENT lifecycle when that one is LIVE — evaluated, or pending in a lifecycle still
+    being produced; not deleted, not aborted — so a child built after the artifact was re-produced
+    reads it as it is, and one built while it is being re-produced WAITS for it
+    (`engine/artifact_fence.py::uses_waiting`), instead of paying a build to end
+    `artifact_unavailable` on the lifecycle its parent once read (critic 2026-10-08: a pending
+    producer used to hand the child its parent's superseded pin). Only a producer that can never be
+    produced again — deleted, aborted, or FAILED in its current lifecycle — leaves the parent's pin
+    inherited (first parent first); such a child is refused before it is bred at all
+    (`engine/artifact_fence.py::refuse_unrunnable_builds`). A use no parent pinned (a log from before
+    the pins) stays unpinned: the historical rule. `{}` when the child inherits nothing."""
     from looplab.events.replay import inherited_uses
     nodes = getattr(state, "nodes", None) or {}
     aborted = getattr(state, "aborted_nodes", None) or ()
@@ -244,9 +247,9 @@ def inherited_use_pins(state, parent_ids) -> dict:
         if parent_pin is None:
             continue
         producer = nodes.get(used)
-        produced = (producer is not None and not producer.tombstoned and used not in aborted
-                    and producer.status is NodeStatus.evaluated)
-        out[key] = producer.attempt if produced else parent_pin
+        live = (producer is not None and not producer.tombstoned and used not in aborted
+                and producer.status in (NodeStatus.evaluated, NodeStatus.pending))
+        out[key] = producer.attempt if live else parent_pin
     return out
 
 
@@ -497,8 +500,53 @@ class NodeBuildMixin:
         to the plain `implement(idea)` for developers that don't take a parent (draft, offline)."""
         return self._implement_result(idea, parent, developer=developer, state=state).code
 
+    @staticmethod
+    def _rebuild_identity(node, state) -> dict:
+        """What an IMPLEMENT rebuild of `node` writes on its `node_created` about what the node IS
+        (doc 73 §1.4): `node_kind`, `uses` and the re-pinned `uses_attempts` — each key OMITTED when
+        the node has none, as on its first creation. The fold builds a fresh Node from that row, so
+        a key left out would silently make a rebuilt artifact a ranked experiment. Only a consumer
+        that was pinned is re-pinned (`rebuilt_use_pins`): an unpinned one (a log from before the
+        key) keeps the historical rule."""
+        return {**({"node_kind": "artifact"} if getattr(node, "kind", None) == "artifact" else {}),
+                **({"uses": list(node.uses)} if getattr(node, "uses", None) else {}),
+                **({"uses_attempts": rebuilt_use_pins(node, state)}
+                   if getattr(node, "uses_attempts", None) else {})}
+
+    def _artifact_idea(self, idea, state, *, parent_ids=(), node_kind=_OMIT, uses=_OMIT):
+        """The idea HANDED TO THE DEVELOPER, told what the node it builds IS when it is an artifact
+        or reads artifacts (doc 73 §1.4; critic 2026-10-08: no Developer prompt said either, so an
+        artifact's Developer was asked for an experiment, and a consumer's had no way to learn that
+        `LOOPLAB_USES_WORKDIRS` exists). A COPY with `engine/artifact_fence.py::artifact_build_note`
+        appended to `rationale` — the field every Developer backend renders, the route
+        `_directed_idea` takes for the same reason — and the recorded idea is untouched.
+
+        `node_kind` / `uses` default to what the node's `node_created` will fold to: the idea's own
+        kind, and `events/replay.py::node_uses` over the parents and the idea's declared uses. A
+        caller that writes them on the row (an inject, an implement rebuild) passes them. A node
+        that is neither — every node of every run without artifacts — gets the idea back unchanged
+        (identity), so no other prompt moves a byte. No `Settings` flag, by the `_gpu_footprint_note`
+        rule (`adapters/repo_developer.py`): a note to the Developer makes no provider call and moves
+        no selection, and it exists only on nodes an operator or a flag-gated Researcher made."""
+        from looplab.engine.artifact_fence import artifact_build_note
+        if state is None:
+            return idea
+        kind = getattr(idea, "node_kind", None) if node_kind is _OMIT else node_kind
+        if uses is _OMIT:
+            from looplab.events.replay import node_uses
+            used = node_uses(state, None, [p for p in parent_ids if type(p) is int],
+                             declared=list(getattr(idea, "uses", None) or []))
+        else:
+            used = [u for u in (uses or []) if type(u) is int]
+        note = artifact_build_note(kind, used)
+        if not note:
+            return idea
+        directed = idea.model_copy(deep=True)
+        directed.rationale = ((directed.rationale or "") + "\n" + note).strip()
+        return directed
+
     def _implement_result(self, idea, parent=None, *, developer=None, state=None,
-                          co_parents=()) -> DeveloperResult:
+                          co_parents=(), node_kind=_OMIT, uses=_OMIT) -> DeveloperResult:
         """`_implement`, returning the whole `DeveloperResult` envelope (doc 52 row 12).
 
         The `str`-returning `_implement` above is kept for its callers and the suite; every site
@@ -511,7 +559,14 @@ class NodeBuildMixin:
         seeded with `parent`'s files as its working set and, when its `implement_from` accepts the
         keyword, is shown the co-parents' code and traces too — a recombination that sees one
         lineage is an improve with a longer rationale. A Developer without the keyword is called
-        exactly as before."""
+        exactly as before.
+
+        `node_kind` / `uses`: what the node IS, for `_artifact_idea` — derived from the idea and the
+        parents when the caller does not write them on the row itself."""
+        idea = self._artifact_idea(
+            idea, state, node_kind=node_kind, uses=uses,
+            parent_ids=([parent.id] if parent is not None else [])
+            + [getattr(c, "id", None) for c in co_parents or ()])
         developer = developer or self.developer
         impl_from = getattr(developer, "implement_from", None)
         if parent is not None and callable(impl_from):
@@ -760,6 +815,9 @@ class NodeBuildMixin:
                        developer=None) -> DeveloperResult:
         """`_repair`, returning the whole `DeveloperResult` envelope — see `_implement_result`."""
         idea = self._directed_idea(node.idea, state) if state is not None else node.idea
+        # …told what the node IS, off the folded node itself: a repair reaches only this path.
+        idea = self._artifact_idea(idea, state, node_kind=getattr(node, "kind", None),
+                                   uses=list(getattr(node, "uses", None) or []))
         developer = developer or self.developer
         rf = getattr(developer, "repair_from", None)
         # A repair edits a workdir seeded from the lifecycle's OWN base: the Developer reads that
@@ -2151,6 +2209,8 @@ class NodeBuildMixin:
         with self.tracer.span(
                 "create_node", new_trace=True, node_id=node.id, generation=generation,
                 operator=node.operator):
+            # What the node IS, written again only by an IMPLEMENT rebuild (`_rebuild_identity`).
+            rebuild_identity: dict = {}
             if replacement_card:
                 # Re-proposal changes immutable work-item meaning. Finish the Idea first, then replace
                 # the old Card with one exact native receipt while keeping the operator-requested node id.
@@ -2223,6 +2283,7 @@ class NodeBuildMixin:
                 # An implement reset keeps immutable Idea/Card identity and only re-runs Developer.
                 idea = node.idea.model_copy(deep=True)
                 active_card_id = idea.card_id
+                rebuild_identity = self._rebuild_identity(node, state)
                 building_payload = {
                     "node_id": node.id, "generation": node.attempt,
                     "operator": node.operator, "parent_ids": parents,
@@ -2232,9 +2293,14 @@ class NodeBuildMixin:
                 self.store.append(EV_NODE_BUILDING, building_payload)
             with self.tracer.span("implement"):
                 # §1: a reset RE-BUILDS the node from scratch, so standing operator directives must
-                # steer its code too — same as the four _create_node build sites.
+                # steer its code too — same as the four _create_node build sites. An implement
+                # rebuild is told what the node it rebuilds IS (`_artifact_idea`); a re-proposal is
+                # told what its new idea and parents make it, as any first build is.
                 built = self._implement_result(
-                    self._directed_idea(idea.model_copy(deep=True), state), parent, state=state)
+                    self._directed_idea(idea.model_copy(deep=True), state), parent, state=state,
+                    **({} if replacement_card else {
+                        "node_kind": rebuild_identity.get("node_kind"),
+                        "uses": rebuild_identity.get("uses", [])}))
             code = built.code
             idea, footprint_finalized = self._finalize_developer_footprint(
                 idea, self.developer, code, footprint=built.last_footprint)
@@ -2257,19 +2323,14 @@ class NodeBuildMixin:
                     # The original work item survives a rerun; only a re-proposal that MINTED a
                     # replacement card may close the one it superseded (`replacement_card`).
                     drop_card=replacement_card,
-                    # …and so does what the node IS (doc 73 §1.4): a rebuilt artifact is still an
-                    # artifact, a rebuilt consumer still reads its producers. The fold builds a fresh
-                    # Node from this row, so a key left out here would silently make it a ranked
-                    # experiment. Absent on every other node, as on its first creation.
-                    **({"node_kind": "artifact"} if getattr(node, "kind", None) == "artifact"
-                       else {}),
-                    **({"uses": list(node.uses)} if getattr(node, "uses", None) else {}),
-                    # …RE-PINNED to each producer's CURRENT lifecycle (round 3): a rebuild writes new
-                    # code against the artifacts as they are now, and is the operator's way to point a
-                    # consumer at a rebuilt artifact. Only a consumer that was pinned is re-pinned: an
-                    # unpinned one (a log from before the key) keeps the historical rule.
-                    **({"uses_attempts": rebuilt_use_pins(node, state)}
-                       if getattr(node, "uses_attempts", None) else {}),
+                    # …and so does what the node IS (doc 73 §1.4) — on an IMPLEMENT rebuild, which
+                    # keeps the idea: a rebuilt artifact is still an artifact, a rebuilt consumer
+                    # still reads its producers, RE-PINNED to each producer's CURRENT lifecycle
+                    # (round 3). A RE-PROPOSAL is a new idea under the same id and carries none of
+                    # the old node's (critic 2026-10-08): the fold derives them from the new idea
+                    # and the parents, exactly as for a first creation (`events/replay.py::
+                    # node_uses`). See `_rebuild_identity`.
+                    **rebuild_identity,
             ):
                 return
             if is_developer_stuck(code):
@@ -2515,7 +2576,15 @@ class NodeBuildMixin:
                         # base) — hand the parent's solution to a parent-aware developer. Preserve the
                         # receipt-bound Idea by handing the plugin a deep working copy.
                         _pnode = state.nodes.get(parents[0]) if parents else None
-                        _inj = self._implement_result(idea.model_copy(deep=True), _pnode, state=state)
+                        # …told what the inject IS: its kind and uses ride the REQUEST, not the idea,
+                        # and are written on its row exactly when present (below); absent, the fold
+                        # derives them from the parent, and so does `_artifact_idea`.
+                        _inj = self._implement_result(
+                            idea.model_copy(deep=True), _pnode, state=state,
+                            **({"node_kind": "artifact"} if req.get("node_kind") == "artifact"
+                               else {}),
+                            **({"uses": [x for x in req["uses"] if type(x) is int]}
+                               if isinstance(req.get("uses"), list) and req["uses"] else {}))
                         code = _inj.code
                 except Exception:
                     self._fail_reserved_build(

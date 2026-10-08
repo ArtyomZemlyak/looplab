@@ -227,6 +227,10 @@ export function buildForkPayload({ node, viewSeq, base, draft, submitting = fals
     parent_id: node.id,
     parent_generations: { [node.id]: generation },
     forked_from: { node_id: node.id, generation, observed_seq: viewSeq },
+    // A branch of an ARTIFACT node is another preparation step, not a ranked experiment (doc 73
+    // §1.4): the kind rides the inject's own top-level key, which the idea does not carry. Left out
+    // for every other node, so an ordinary branch keeps its historical payload.
+    ...(node.kind === 'artifact' ? { node_kind: 'artifact' } : {}),
   }
 }
 

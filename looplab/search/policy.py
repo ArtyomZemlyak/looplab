@@ -798,18 +798,26 @@ def _mcts_reward(value: float, direction: str) -> float:
     return (2.0 - 1.0 / (1.0 + value)) if value >= 0 else (1.0 / (1.0 - value))
 
 
+def _is_artifact(node) -> bool:
+    """An ARTIFACT node (doc 73 §1.4): evaluated and feasible, but a preparation step with no
+    metric — never a trial of the search, so it is neither a visit nor an expense of a subtree."""
+    return getattr(node, "kind", None) == "artifact"
+
+
 def subtree_eval_cost(state: RunState, node_ids) -> float:
     """Mean measured eval seconds over the subtree's own countable nodes, or 0.0 when none is.
 
     The same lifecycle filter the value and the visit count use, for the same reason: a tombstoned,
     aborted or gate-flagged descendant contributes nothing to the reward, so letting it decide the
     EXPENSE would make deleting a node change where the search goes — the exact coupling every
-    other filter in this policy closes.
+    other filter in this policy closes. An ARTIFACT is left out too (critic 2026-10-08): it is no
+    trial, and one long preparation step made every subtree look expensive against the run mean.
     """
     seconds = [state.nodes[i].eval_seconds for i in node_ids
                if i in state.nodes and state.nodes[i].status is NodeStatus.evaluated
                and state.nodes[i].feasible and not state.nodes[i].tombstoned
                and i not in state.aborted_nodes and i not in state.breed_excluded
+               and not _is_artifact(state.nodes[i])
                and isinstance(state.nodes[i].eval_seconds, (int, float))
                and state.nodes[i].eval_seconds > 0]
     return (sum(seconds) / len(seconds)) if seconds else 0.0
@@ -981,10 +989,12 @@ class MCTSPolicy:
             # DENOMINATOR with descendants that contribute nothing to `value` — and by this
             # policy's own §6.3 argument above, deleting or flagging a node would then change UCB1
             # for its ancestor, i.e. change where the search goes.
+            # An ARTIFACT descendant (evaluated, feasible, no metric) is no trial either.
             visits = sum(1 for i in tree if state.nodes[i].status is NodeStatus.evaluated
                          and state.nodes[i].feasible and not state.nodes[i].tombstoned
                          and i not in state.aborted_nodes
-                         and i not in state.breed_excluded) or 1
+                         and i not in state.breed_excluded
+                         and not _is_artifact(state.nodes[i])) or 1
             # THE LLM VALUE ESTIMATE (docs/BACKLOG.md §0.1 row 17): the value term, adjusted by what
             # a model said this branch still has left and decayed by the visits already standing
             # under it — so a branch nobody has expanded stops scoring identically to one that is
