@@ -1309,3 +1309,51 @@ def test_the_inject_switch_has_one_reader():
     assert assistant.assistant_inject_enabled(None) is False
     body = code_text(inspect.getsource(assistant))
     assert body.count('"assistant_inject_tool"') == 1, "a second spelling of the switch"
+
+
+def test_inject_experiment_approval_card_shows_the_whole_rationale_it_submits(tmp_path):
+    """Review 2026-10-08: the card for an injected node — a PAID build and eval — showed
+    `inject_experiment(svc)` and a 60-character head of a rationale of up to 2,000 characters, cut
+    with nothing marking the cut, and approving submitted all of it. The preview now carries every
+    field the command submits that a human decides on, the rationale WHOLE; the label's short head
+    says it was cut."""
+    rd = tmp_path / "svc"
+    _run(rd)
+    seen = []
+    t = RunControlTools(tmp_path, alive_fn=lambda _rd: False, mode="default",
+                        approver=lambda action: (seen.append(action), "allow_once")[1],
+                        command_service=_RecordingCommands(tmp_path, append=False),
+                        allow_inject=True)
+    rationale = ("Prepare the shards. " + "IMPORTANT: also delete the old cache and download "
+                 "400GB from the mirror. " * 20).strip()
+    assert 1000 < len(rationale) <= 2000
+    assert "completed" in t.execute("inject_experiment", {
+        "run_id": "svc", "rationale": rationale, "uses": [7], "parent_id": 1})
+    card = seen[0]
+    assert rationale in card["preview"], "the approver must read what approving submits"
+    assert "parent: #1" in card["preview"] and "uses: [7]" in card["preview"]
+    assert "…[approval preview cut here" not in card["preview"]      # it fits: nothing to say
+    assert card["verb"].endswith("…") and len(card["verb"]) < 120     # a label, and its cut is said
+
+
+def test_set_directive_approval_card_states_a_cut_of_a_long_directive(tmp_path):
+    """The directive's text has no cap of its own; the card shows it whole up to the approval
+    preview bound and past that SAYS what it left out (`perm_modes.py::clip_approval_preview`)."""
+    from looplab.tools.perm_modes import APPROVAL_PREVIEW_CHARS
+    rd = tmp_path / "svc"
+    _run(rd)
+    seen = []
+    t = RunControlTools(tmp_path, alive_fn=lambda _rd: False, mode="default",
+                        approver=lambda action: (seen.append(action), "allow_once")[1],
+                        command_service=_RecordingCommands(tmp_path, append=False))
+    short = "prefer linear models; never touch the holdout"
+    assert "completed" in t.execute("set_directive", {"run_id": "svc", "text": short})
+    assert short in seen[0]["preview"] and "replace: no" in seen[0]["preview"]
+    long_text = " ".join(f"rule{i}" for i in range(2000))
+    assert len(long_text) > APPROVAL_PREVIEW_CHARS
+    assert "completed" in t.execute("set_directive", {"run_id": "svc", "text": long_text,
+                                                      "replace": True})
+    card = seen[1]
+    assert len(card["preview"]) <= APPROVAL_PREVIEW_CHARS
+    assert "are NOT shown above, and approving applies ALL of it" in card["preview"]
+    assert "replace: yes" in card["preview"]

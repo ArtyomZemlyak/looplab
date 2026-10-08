@@ -1268,7 +1268,7 @@ These server flags are not experiment Settings and are not pinned to a run snaps
 |---|---|---|
 | `LOOPLAB_UI_REQUIRE_AUTH` | `false` | Opt into owner login and mint/reuse a token when `LOOPLAB_UI_TOKEN` is absent. A supplied token always enables login. |
 | `LOOPLAB_UI_CHECK_ORIGIN` | `false` | Opt into Host and mutation Origin checks; configure proxy names/origins with `LOOPLAB_UI_HOSTS` / `LOOPLAB_UI_CORS`. |
-| `LOOPLAB_UI_AUTO_RESUME` | `false` | On server start, resume every run a dead engine left IN PROGRESS (started, not finished, not paused, no resume owed, `engine.lock` provably free): a durable `resume_requested{mode: resume, auto_resume: true}` is appended and the ordinary pending-resume path spawns it. A paused run — an operator's pause, or the engine's own `infra_unavailable` / `engine_error` pause over a box the operator must fix — is never touched. |
+| `LOOPLAB_UI_AUTO_RESUME` | `false` | On server start, resume every run a dead engine left IN PROGRESS (started, not finished, not paused, no resume owed, `engine.lock` provably free): a durable `resume_requested{mode: resume, auto_resume: true}` is appended and the ordinary pending-resume path spawns it. A paused run — an operator's pause, or the engine's own `infra_unavailable` / `engine_error` pause over a box the operator must fix — is never touched, nor is a run under an unresolved reset/deletion fence or one whose resume would be refused (no request is written for it). One run's failure is logged and never stops the server or the other runs' recovery. |
 
 Quick start requires neither. See [Deployment](deployment.md#what-an-unset-looplab_ui_token-means)
 for open/protected mode, harness credentials and shared deployment boundaries.
