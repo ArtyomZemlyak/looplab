@@ -4148,6 +4148,13 @@ LEGACY_CONFIG_SNAPSHOT_DEFAULTS: dict[str, object] = {
     # at every commit before this one; `tests/test_concept_tag_hygiene.py` holds that `false` is the
     # historical prompt, byte for byte.
     "concept_tag_hygiene": False,
+    # THE OUTPUT LANGUAGE, added 2026-10-05 defaulting `auto` (no directive). (a) holds. (b) is the
+    # DIFFERENT-PROMPT ground: `en`/`ru` appends the language directive to every role's system
+    # prompt (`core/output_language.py::language_client`). Without this row a pre-field snapshot
+    # took the field from the ambient `LOOPLAB_OUTPUT_LANGUAGE`, so a resumed run's Researcher,
+    # Developer and judges were told something new mid-log (review 2026-10-08). (c) is `auto`,
+    # the byte-identical historical prompt.
+    "output_language": "auto",
     # THE NODE BUDGET CUE, added 2026-09-23 defaulting ON (Q-3, the Researcher's context audit).
     # (a) holds. (b) is the rows above's DIFFERENT-PROMPT ground: ON, every proposal prompt gains a
     # line stating the run's remaining node budget and its plan phase, so a resumed run would change

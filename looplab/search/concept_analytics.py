@@ -150,7 +150,8 @@ def _median(xs: list[float]) -> Optional[float]:
 
 
 def concept_metrics(state: RunState, graph: ConceptGraph,
-                    tags: Optional[dict[int, frozenset[str]]] = None) -> dict:
+                    tags: Optional[dict[int, frozenset[str]]] = None, *,
+                    effect_state: Optional[RunState] = None) -> dict:
     """Per-concept OUTCOME rollup — the metric/Δ view the concept table (View 1) needs, alongside the
     touch-only `concept_coverage`. PURE and deterministic over `(state, graph, tags)`: no I/O, no LLM,
     so it recomputes byte-identically on replay and ships to the UI via /state-derived reads.
@@ -252,13 +253,20 @@ def concept_metrics(state: RunState, graph: ConceptGraph,
     # two populations under one concept id. Every effect is then `unavailable`, with the reason
     # said, rather than published beside a row it does not describe. Compared per experiment node,
     # as sets: a node absent from either side is the empty set on that side.
-    recorded = concept_projection.current_concept_projection(state).memberships
+    #
+    # `effect_state` is the COMPLETE fold when `state` is a lifecycle-filtered copy
+    # (`serve/concept_frame.py::build_core` drops deleted/aborted nodes from `nodes` for the metric
+    # columns). The projection applies lifecycle itself, and over the filtered copy every
+    # membership of a dropped node read as `invalid_experiment_reference`: ONE aborted tagged node
+    # blanked every effect in the table.
+    effect_state = state if effect_state is None else effect_state
+    recorded = concept_projection.current_concept_projection(effect_state).memberships
     tags_are_recorded = all(
         frozenset(str(c) for c in (tags.get(node.id) or ()))
         == frozenset(recorded.get(node.id) or ()) for node in nodes)
     for bucket, subtree in ((rows, False), (rollup, True)):
         if tags_are_recorded:
-            effects = concept_effects.concept_effects(state, bucket, subtree=subtree)
+            effects = concept_effects.concept_effects(effect_state, bucket, subtree=subtree)
         else:
             effects = {cid: concept_effects.empty_effect("membership_not_recorded",
                                                          status="unavailable")

@@ -74,7 +74,14 @@ class LanguageClient:
         object.__setattr__(self, "_language", language)
 
     def __getattr__(self, key):
-        return getattr(self._client, key)
+        # Through `object.__getattribute__`: `copy.copy`/unpickling probe `__setstate__` on an
+        # object whose `_client` is not set yet, and `self._client` would re-enter this method
+        # until RecursionError.
+        try:
+            client = object.__getattribute__(self, "_client")
+        except AttributeError:
+            raise AttributeError(key) from None
+        return getattr(client, key)
 
     def __setattr__(self, key, value):
         setattr(self._client, key, value)

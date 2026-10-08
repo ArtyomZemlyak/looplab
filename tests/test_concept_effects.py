@@ -209,3 +209,22 @@ def test_capsule_store_keeps_a_capsule_whose_old_effect_is_one_ulp_outside(tmp_p
     store = ConceptCapsuleStore(tmp_path / "concept_capsules.jsonl")
     assert store.add(cap) is True
     assert [c["run_id"] for c in store.all()] == ["r"]
+
+
+def test_one_aborted_tagged_node_does_not_blank_every_effect_in_the_concept_frame():
+    """`build_core` hands the metric columns a lifecycle-filtered copy; the effect estimator must
+    read the complete fold, or the dropped node's membership poisons the projection run-wide."""
+    from looplab.search.concept_lens import default_lenses
+    from looplab.serve import concept_frame
+    rows = [(["base"], 0.1, []), (["base", "loss/a"], 0.5, [0]), (["base"], 0.2, []),
+            (["base", "loss/b"], 0.6, [2]), (["base", "x"], 0.3, [])]
+    effects = {}
+    for aborted in ([], [4]):
+        st = run(rows)
+        st.aborted_nodes = aborted
+        core = concept_frame.build_core(
+            st, run_id="r", lens_pack=default_lenses(), generation="g", requested_seq=None,
+            captured_seq=1, max_seq=1, source_divergence=None)
+        effects[bool(aborted)] = core["metrics"]["rollup"]["loss/a"]["effect"]
+    assert effects[True]["status"] == "matched", effects[True]
+    assert effects[True]["estimate"] == effects[False]["estimate"]
