@@ -835,9 +835,12 @@ def _auto_resume_bound(name: str, default: float, *, integer: bool = False) -> f
         return default
     try:
         value = int(raw) if integer else float(raw)
+        # `math.isfinite` floats its argument: a 309-digit whole number raised OverflowError here,
+        # OUTSIDE this try, and the startup scan failed after all (critic 2026-10-08, round 3).
+        finite = math.isfinite(value)
     except (ValueError, OverflowError):
-        value = None
-    if value is None or not math.isfinite(value) or value <= 0:
+        value, finite = None, False
+    if value is None or not finite or value <= 0:
         _log.warning("%s=%r is not a %s above zero; using the default %s", name, raw[:40],
                      "whole number" if integer else "finite number", default)
         return default

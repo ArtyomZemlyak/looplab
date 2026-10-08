@@ -128,3 +128,9 @@ def test_an_honest_long_stage_log_still_counts(tmp_path):
     last = events[-1].ts
     _future_log(rd, last + 20 * 3600)
     assert ep._last_alive_ts(rd, events, fold(events), now=last + 21 * 3600) == pytest.approx(last + 20 * 3600)
+
+
+def test_a_whole_number_too_large_for_a_float_is_the_default_not_a_crash(monkeypatch):
+    from looplab.serve.engine_proc import AUTO_RESUME_MAX_RUNS_ENV, _auto_resume_bound
+    monkeypatch.setenv(AUTO_RESUME_MAX_RUNS_ENV, "1" + "0" * 400)
+    assert _auto_resume_bound(AUTO_RESUME_MAX_RUNS_ENV, 4, integer=True) == 4

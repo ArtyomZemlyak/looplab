@@ -371,7 +371,8 @@ class MachineRunsTools(ForeignRunReader):
             start = 0
             if goal_offset is not None:
                 try:
-                    start = int(goal_offset) if float(goal_offset) == int(float(goal_offset)) else -1
+                    whole = float(goal_offset)          # "3200", "3200.0" and 3200.0 alike
+                    start = int(whole) if whole == int(whole) else -1
                 except (TypeError, ValueError, OverflowError):
                     start = -1
                 if start < 0 or (start >= len(goal) and start != 0):
