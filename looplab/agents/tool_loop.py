@@ -1461,7 +1461,7 @@ def drive_tool_loop(client, tools, messages: list, emit_spec: dict, *,
             if _note and _note != _last_budget_note[0]:
                 _last_budget_note[0] = _note
                 messages.append({"role": "user", "content": "Reminder — " + _note.strip()})
-        # AN ENGINE NOTICE FOR A SESSION ALREADY AT WORK (doc 73 §4.3, `engine/upstream_hints.py`):
+        # AN ENGINE NOTICE FOR A SESSION ALREADY AT WORK (doc 73 §4.2, `engine/upstream_hints.py`):
         # under an `interjection_scope` each pending notice is one `user` turn, here at the turn
         # boundary and never inside a tool result. No scope → nothing read, nothing appended.
         _interject = _interjection_ctx.get()
@@ -2012,7 +2012,7 @@ def phase_cancel_scope(cancelled):
         _phase_cancel_ctx.reset(tok)
 
 
-# AN ENGINE NOTICE SOURCE for the loops run in this context (doc 73 §4.3): a zero-argument callable
+# AN ENGINE NOTICE SOURCE for the loops run in this context (doc 73 §4.2): a zero-argument callable
 # returning the `user` turns to append at the next turn boundary (`engine/upstream_hints.py` drains
 # its board through it). None outside a scope — every existing caller is byte-identical.
 _interjection_ctx: contextvars.ContextVar = contextvars.ContextVar(
