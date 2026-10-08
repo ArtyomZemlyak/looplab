@@ -3586,5 +3586,10 @@ body.asst-side-open .app-shell-main { margin-right: var(--asst-side-w, 440px); }
 .pc-memory-group { margin-bottom: 10px; }
 .pc-memory-group .pc-detail-runs li { display: block; margin-bottom: 6px; line-height: 1.4; }
 
-.research-inferred { display: flex; flex-direction: column; gap: 2px; }
-.research-inferred-chip { align-self: flex-start; }
+/* One experiment in the Research view: where it is filed (and, for the operator, the control that
+   puts that on the record) above the shared card body. */
+.research-experiment { display: flex; flex-direction: column; gap: 2px; }
+.research-filing { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; font-size: 12px; }
+.research-filing:empty { display: none; }
+.research-inferred-chip, .research-operator-chip { align-self: flex-start; }
+.research-filing-select select { max-width: min(42ch, 100%); }

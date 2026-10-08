@@ -424,6 +424,12 @@ export function unfiledExperiments(cards, { order } = {}) {
 // DISPLAY ONLY, and marked. The card gains `question_inferred: {shared}` beside the edge so the
 // view can say "filed by concepts" — the run's record is untouched, and `latticeRollups` keeps
 // reading the AUTHORED cards, so no question's "best" is claimed by an experiment nobody filed.
+//
+// THE OPERATOR'S WORD IS FINAL (2026-10-08). A card the operator filed carries its edge like an
+// authored one; a card the operator UN-filed (`card_filed` with `parent_card_id: null` →
+// `filed_by: 'operator'` and no edge) said "under no question" on purpose, and re-inferring it would
+// put it straight back where the operator took it from. The suggestion is what the view offers to
+// make permanent — `ResearchView`'s "Keep here" records exactly this guess as a `card_filed`.
 export function inferQuestionFiling(cards) {
   const rows = Array.isArray(cards) ? cards : []
   const questions = rows.filter(card => isRecord(card) && card.id && cardIsDirection(card))
@@ -431,7 +437,8 @@ export function inferQuestionFiling(cards) {
     .filter(q => q.tags.length > 0)
   if (!questions.length) return rows
   return rows.map(card => {
-    if (!isRecord(card) || !card.id || cardIsDirection(card) || cardParentId(card)) return card
+    if (!isRecord(card) || !card.id || cardIsDirection(card) || cardParentId(card)
+      || card.filed_by) return card
     const own = new Set((Array.isArray(card.concept_tags) ? card.concept_tags : [])
       .filter(tag => typeof tag === 'string' && tag.trim()).map(tag => tag.trim()))
     if (!own.size) return card
@@ -448,4 +455,22 @@ export function inferQuestionFiling(cards) {
     if (!best || tied) return card
     return { ...card, parent_card_id: best.id, question_inferred: { shared: best.shared } }
   })
+}
+
+// THE QUESTIONS AN EXPERIMENT CAN BE FILED UNDER, for the Research view's "File under" control. Every
+// question on the page — the operator decides, so no ranking is imposed on the list — labelled by its
+// statement (clipped) and ordered by that label so the menu does not reorder itself as the board
+// polls. The card's own question stays in the list: re-selecting it is how a concept suggestion is
+// confirmed by hand.
+export const FILING_LABEL_MAX = 90
+export function questionFilingOptions(cards) {
+  const rows = Array.isArray(cards) ? cards : []
+  return rows.filter(card => isRecord(card) && card.id && cardIsDirection(card))
+    .map(card => {
+      const text = typeof card.statement === 'string' && card.statement.trim()
+        ? card.statement.trim().replace(/\s+/g, ' ') : String(card.id)
+      return { id: String(card.id),
+        label: text.length > FILING_LABEL_MAX ? `${text.slice(0, FILING_LABEL_MAX - 1)}…` : text }
+    })
+    .sort((a, b) => a.label.localeCompare(b.label) || a.id.localeCompare(b.id))
 }

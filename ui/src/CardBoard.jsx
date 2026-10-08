@@ -61,7 +61,7 @@ const _CARD_ICON = {
 const _cardRefs = value => Array.isArray(value)
   ? value.filter(item => typeof item === 'string' && item).slice(0, 32) : []
 
-const _CARD_CONTROL_KINDS = ['edit', 'priority', 'resources', 'drop', 'reopen', 'abandon']
+const _CARD_CONTROL_KINDS = ['edit', 'priority', 'resources', 'drop', 'reopen', 'abandon', 'file']
 
 function _cardResourceValues(value) {
   if (!isRecord(value)) return null
@@ -99,6 +99,11 @@ function cardControlReflected(card, kind, patch, baseline, expectedEventSeq) {
   // optimistically pending until a poll timed it out.
   if (kind === 'reopen') return card.status !== 'dropped'
   if (kind === 'abandon') return card.verdict === 'abandoned'
+  // A filing is reflected when the fold says the OPERATOR put the card exactly there — `null` being
+  // "under no question". The edge alone is not enough: an authored edge to the same question would
+  // read as reflected before the operator's own row folded.
+  if (kind === 'file') return card.filed_by === 'operator'
+    && (card.parent_card_id ?? null) === (patch.parent_card_id ?? null)
   return false
 }
 
@@ -1024,6 +1029,7 @@ function _CardKanban({
       drop: { saving: 'Dropping Card…', success: 'Card dropped', failure: 'Could not drop Card' },
       abandon: { saving: 'Abandoning this Card…', success: 'Card abandoned', failure: 'Could not abandon Card' },
       reopen: { saving: 'Reopening Card…', success: 'Card reopened', failure: 'Could not reopen Card' },
+      file: { saving: 'Filing the experiment…', success: 'Experiment filed', failure: 'Could not file the experiment' },
     }[kind]
     // A kind with no row here is REFUSED by the guard below, and it refuses with the concurrency
     // message — so a control that reaches the dispatch ladder but not this table reads to the operator
@@ -1064,7 +1070,9 @@ function _CardKanban({
               ? await CONTROL.abandonHypothesis(runId, card.id)
               : kind === 'reopen'
                 ? await CONTROL.reopenCard(runId, card.id, data.reason)
-                : await CONTROL.dropCard(runId, card.id, data.reason)
+                : kind === 'file'
+                  ? await CONTROL.fileCard(runId, card.id, data.parent_card_id)
+                  : await CONTROL.dropCard(runId, card.id, data.reason)
       if (!activeRef.current) return { kind: 'stale', message: 'Card board scope changed' }
       const feedback = commandFeedback(record, {
         success: labels.success, noop: `${labels.success} (already current)`,
@@ -1262,7 +1270,15 @@ function _CardKanban({
   // The question ladder. `visibleCards` and `renderCard` are the SAME inputs the other two views
   // draw from, so a filter or a control applied on one board reaches this one too rather than the
   // view growing its own quietly-different population.
+  // Filing is the one card control the ladder itself offers: the question an experiment answers is
+  // decided where the questions are. The patch is the fold's own answer (`parent_card_id` +
+  // `filed_by`), so the card moves at once and the reconcile effect clears it when the row folds.
+  const fileCard = control && !readOnly
+    ? (card, parentCardId) => control(card, 'file', { parent_card_id: parentCardId ?? null },
+      { parent_card_id: parentCardId ?? null, filed_by: 'operator' })
+    : null
   const researchBoard = <ResearchView cards={visibleCards} state={state} renderCard={renderCard}
+    onFile={fileCard} filingLocked={globalPending}
     onShowLanes={() => setGrouping('lanes')}
     onDiscuss={() => window.dispatchEvent(new CustomEvent('ll:focus-assistant', {
       detail: { text: 'Help me frame the first research question for this run. Review the existing experiment Cards and propose a question that organizes the evidence.' },

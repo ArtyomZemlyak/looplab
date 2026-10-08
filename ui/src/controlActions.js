@@ -158,6 +158,11 @@ export const CONTROL = {
   // command path, same generation fence — a reopen is as much a selection decision as the drop was.
   reopenCard: (rid, id, reason = 'operator reopened') => runCommand(
     rid, 'card_reopened', { id, reason }),
+  // File one experiment under a research question (`parentCardId`), or un-file it (`null`). The
+  // research-lineage correction `core/cards.py::Card.parent_card_id` had no path for: every
+  // operator-injected card arrives naming no question.
+  fileCard: (rid, id, parentCardId) => runCommand(
+    rid, 'card_filed', { id, parent_card_id: parentCardId ?? null }),
   // Workstream A: force a high-quality regeneration of the agent-authored run report now. Dedicated
   // endpoint (not /control) — appends a `report_generated` event. Runs as a background job, so we
   // jobAwait the response (a slow/large regen can't 504 behind a proxy; a fast one returns inline).
