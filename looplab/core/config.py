@@ -3146,6 +3146,10 @@ class Settings(BaseSettings):
     # ordinary proposal that the lane checks and advances only on its measured gate. Inert wherever
     # `auto` resolves `off` (no upstream block, not `trusted_local`); at most 6 drafts per run. A
     # pre-field snapshot resumes OFF. One reader: `engine/upstream_author.py::upstream_author_setting`.
+    # ON BY DEFAULT ON PURPOSE, against the house rule that a paid call defaults off: the operator's
+    # decision (doc 73 §4, 2026-10-05, confirmed 2026-10-08) was the automation by default, bounded —
+    # `upstream_author_usd` caps its money, the 6-draft count its calls, the live switch stops it. The
+    # reader still answers OFF for any settings object that lacks the field.
     upstream_author: bool = True
     # THE AUTHOR'S MONEY FOR THE WHOLE RUN (doc 73 §4.2 G4), in USD: the two calls of every draft are
     # read off the worker's own thread (`core/llm_budget.py::thread_committed_usd_exact`) onto its

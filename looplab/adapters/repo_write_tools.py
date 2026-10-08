@@ -21,6 +21,7 @@ from typing import Optional
 from looplab.tools.edit_match import apply_search_replace
 from looplab.tools.patch import SurfacePolicy
 from looplab.tools._base import capabilities_for_specs
+from looplab.core.jsonutil import bounded_json_loads
 
 # Absolute paths to INPUT data files referenced in a stage command. Only clear INPUT-data extensions
 # (a checkpoint .ckpt/.pt an earlier stage WRITES is deliberately excluded, and relative paths resolve
@@ -174,7 +175,7 @@ def declared_output_paths(manifest_text: str) -> list[tuple]:
     type test rather than a wider `except`, so a real bug here still raises.
     """
     try:
-        obj = json.loads(manifest_text or "")
+        obj = bounded_json_loads(manifest_text or "")
     except (ValueError, TypeError, RecursionError):   # a manifest nested past ~1,000 levels
         return []
     stages = obj.get("stages") if isinstance(obj, dict) else obj

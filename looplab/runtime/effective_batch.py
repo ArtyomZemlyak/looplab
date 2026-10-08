@@ -58,6 +58,7 @@ from typing import Optional
 
 from looplab.core.node_evidence import read_bounded_regular_file
 from looplab.runtime.metric_subject import bind_one
+from looplab.core.jsonutil import bounded_json_loads
 
 # The artifact, its field, and what that library means by the field. A REGISTRY of one: the string is
 # the trainer's, not ours, and a reader that guessed a second spelling would report a number from a
@@ -112,7 +113,7 @@ def _read_state(path) -> Optional[dict]:
     if raw is None or len(raw) > MAX_STATE_BYTES:
         return None
     try:
-        obj = json.loads(raw.decode("utf-8", "replace"))
+        obj = bounded_json_loads(raw.decode("utf-8", "replace"))
     except (ValueError, UnicodeError, RecursionError):
         return None
     return obj if isinstance(obj, dict) else None

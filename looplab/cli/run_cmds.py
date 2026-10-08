@@ -2178,6 +2178,35 @@ def approve(run_dir: Path = typer.Argument(..., help="Run dir awaiting approval.
     typer.echo(f"approved node {nid} for run {run_dir.name}")
 
 
+@app.command(name="upstream-auto")
+def upstream_auto(run_dir: Path = typer.Argument(..., help="Run whose upstream automation to switch."),
+                  enabled: bool = typer.Option(..., "--on/--off",
+                                               help="--off holds every AUTOMATIC upstream step"),
+                  reason: str = typer.Option("", "--reason", help="why, kept on the record (<=300 chars)")):
+    """The upstream automation's KILL SWITCH (doc 73 §4.2 G2), the CLI half of the `upstream_auto_set`
+    control the UI, the API and MCP send through `/commands`. `--off` stops the automated author (fix
+    rollout, champion integrator) and the engine's own checks and advances on its next turn; an
+    operation the operator queued is still served. `--on` lets them resume. Appended as the control
+    intent itself — the engine reads it, the fold keeps the last one (`RunState.upstream_auto_paused`)
+    — so it works on a live or a stopped run alike."""
+    from looplab.events.types import EV_UPSTREAM_AUTO_SET
+    if len(reason) > 300:
+        raise typer.BadParameter("--reason is at most 300 characters")
+    store = _require_run_dir(run_dir, healthy=True)
+    events = store.read_all()
+    if fold(events).upstream_auto_paused == (not enabled):
+        typer.echo(f"run {run_dir.name}: upstream automation already {'on' if enabled else 'off'}")
+        return
+    try:
+        store.append(EV_UPSTREAM_AUTO_SET, {"enabled": enabled, **({"reason": reason} if reason else {})},
+                     expected_last_seq=events[-1].seq if events else -1)
+    except EventStoreConcurrencyError:
+        typer.echo(f"run {run_dir.name} changed while the switch was being set; retry")
+        raise typer.Exit(2)
+    typer.echo(f"run {run_dir.name}: upstream automation {'on' if enabled else 'OFF'}"
+               + (f" ({reason})" if reason else ""))
+
+
 @app.command(name="repair-log")
 def repair_log_cmd(run_dir: Path = typer.Argument(..., help="Run dir whose events.jsonl to repair.")):
     """Repair a MID-FILE corrupted event log (the FUSE/NFS/S3 case `run`/`resume` fail closed on).
