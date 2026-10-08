@@ -782,9 +782,21 @@ a failed artifact is never metric-salvaged, and a rebuild (`node_reset` from imp
 Assistant creates either through its `inject_experiment` tool (`Settings.assistant_inject_tool`).
 A node built FROM a consumer (an improve, a merge, an ablation) inherits its parents' `uses`, so
 the copied code still finds its data. On a Docker tier each used workdir is bound read-only at its
-own path. The canary (`eval_canary`) is skipped for an artifact: it passes only on a metric.
-The producer's workdir is read as it stands when the consumer runs — resetting an artifact while
-consumers wait is not fenced yet (doc 73, status table).
+own path. The canary (`eval_canary`) runs for an artifact under the artifact's own rule: a clean
+exit on the slice passes, and a number it prints is ignored (`eval_canary.py::canary_passed`).
+
+A consumer reads its artifact in the LIFECYCLE it was accepted against. The command stamps each
+used artifact's lifecycle (`uses_attempts`, server-derived and refused from a caller), `node_created`
+carries it, and a node built from the consumer inherits it with `uses`. Before every launch the
+consumer's eval checks each pinned artifact through the same rule `LOOPLAB_PARENT_WORKDIRS` uses
+(`eval_dispatch.py::produced_workdir`): evaluated in exactly that lifecycle, not deleted, and its
+workdir's `.looplab-manifest` stamp intact. If one is not — the artifact was reset, rebuilt, deleted
+or its directory re-materialized after the inject was queued — the consumer ends
+`artifact_unavailable` without running, the error naming the artifact, its lifecycle and why. That
+is an engine terminal, not an evaluation failure: no triage or repair is bought for a candidate
+that is not at fault, and the owner alert shows it. A lifecycle never comes back, so the remedy is
+the operator's: rebuild the consumer (`node_reset` from implement re-pins it to each artifact as it
+is now) or inject a new one. A log written before the pin keeps the old existence-only rule.
 
 ### Branching from a snapshot (fork-to-branch)
 

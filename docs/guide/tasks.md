@@ -429,15 +429,23 @@ runs YOUR argv (no shell) after each node's terminal, from the node's workdir, w
 environment minus secret-shaped variables: a tool's config file (`~/.aws/credentials`,
 `~/.mc/config.json`) works as it is, and a credential held in an environment variable is passed by
 NAME — `"env_passthrough": ["AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY"]` — its value read from
-the engine's environment at copy time and never written anywhere. A command handed credentials runs
-from the RUN directory instead (the workdir is the candidate's, and a tool started there would import
+the engine's environment at copy time and never written anywhere. A command whose declaration lists
+`env_passthrough` runs from the RUN directory instead — on every host, whether or not that host holds
+the named variables (the workdir is the candidate's, and a tool started there would import
 what it left beside the key), so name the files through `{workdir}`. A receipt whose workdir was
 re-materialized during the copy (a reset of that node) carries `workdir_changed`. Placeholders: `{workdir}`, `{run_dir}`, `{run_id}`,
-`{node_id}`, `{generation}`; any other brace stays literal. It runs in a background thread, so the
-eval slot (and its GPU lease) is free during the upload; the interpreter waits for an in-flight copy
-at exit, up to its `timeout`. Its receipt is the diagnostic `artifact_synced` row, its output
-`<run>/artifact_sync.log`; a failed copy is reported there and never fails, pauses or re-runs the
-node. Absent, nothing runs and the snapshot's `eval` dump is unchanged.
+`{node_id}`, `{generation}`; any other brace stays literal. It runs on a background pool of at most
+two concurrent copies (`artifact_sync.py::MAX_CONCURRENT_SYNCS`; the rest queue in terminal order), so
+the eval slot (and its GPU lease) is free during the upload; the interpreter waits for queued and
+in-flight copies at exit, each up to its `timeout`. Each copy opens with a diagnostic
+`artifact_sync_started` row and closes with its `artifact_synced` receipt (same `sync_id`): a started
+row with no receipt is a copy an engine death interrupted (`artifact_sync.py::unfinished_syncs`), and
+it is not retried on resume — your command is not known to be idempotent, so run it again yourself.
+Its output goes to `<run>/artifact_sync.log`, written once the command exits and MASKED — the
+`env_passthrough` values and every known secret shape — so a tool that echoes its environment or a
+keyed URL leaves no credential in a file a later eval can read; a failed copy is reported there and
+never fails, pauses or re-runs the node. Absent, nothing runs and the snapshot's `eval` dump is
+unchanged.
 
 A host launch also sizes the BLAS/OpenMP pools: `OMP_NUM_THREADS`, `OPENBLAS_NUM_THREADS`,
 `MKL_NUM_THREADS` and `VECLIB_MAXIMUM_THREADS` default to the CPUs the engine's process may actually

@@ -157,3 +157,40 @@ def test_a_workdir_relative_track_script_runs(tmp_path):
             "import json,sys; print(json.dumps({'FUR@200': float(open(sys.argv[2]).read())}))")
     out = _cli(rd, "--apply")
     assert "recorded on 2 node(s)" in out.output, out.output
+
+
+def test_a_track_runs_where_its_declaration_says_whatever_this_host_holds(tmp_path, monkeypatch):
+    """Round 3 (driven): the cwd followed which declared credential names THIS host's environment
+    held. Declared `env_passthrough` means the run directory, on a box without the key too."""
+    monkeypatch.delenv("AWS_SECRET_ACCESS_KEY", raising=False)
+    rd, store = _run(tmp_path)
+    snap = json.loads((rd / "task.snapshot.json").read_text())
+    snap["eval"]["tracks"]["at200"] = {
+        "command": [sys.executable, "-c",
+                    "import json, os, sys; sys.exit(5) if os.path.basename(os.getcwd()) != 'run' "
+                    "else print(json.dumps({'FUR@200': 0.5}))"],
+        "keys": ["FUR@200"], "env_passthrough": ["AWS_SECRET_ACCESS_KEY"]}
+    (rd / "task.snapshot.json").write_text(json.dumps(snap))
+    out = _cli(rd, "--apply", "--nodes", "0")
+    assert out.exit_code == 0, out.output
+    assert fold(store.read_all()).nodes[0].extra_metrics.get("FUR@200") == 0.5, out.output
+
+
+def test_a_track_that_echoes_its_passthrough_secret_writes_it_nowhere(tmp_path, monkeypatch):
+    """Round 3 (driven): the raw tool output went to `track_<name>.log` and the CLI printed the last
+    stderr line as is. Both are masked by the passthrough VALUES now."""
+    secret = "https://minioadmin:Zq8vR2kLp0sWx7Tn@minio.local:9000"
+    monkeypatch.setenv("MC_HOST_minio", secret)
+    rd, _store = _run(tmp_path)
+    snap = json.loads((rd / "task.snapshot.json").read_text())
+    snap["eval"]["tracks"]["at200"] = {
+        "command": [sys.executable, "-c",
+                    "import os, sys; v = os.environ['MC_HOST_minio']; print(v); "
+                    "sys.stderr.write('cannot reach ' + v + '\\n'); sys.exit(1)"],
+        "env_passthrough": ["MC_HOST_minio"]}
+    (rd / "task.snapshot.json").write_text(json.dumps(snap))
+    out = _cli(rd, "--apply", "--nodes", "0")
+    assert "failed (exit 1" in out.output and "cannot reach ***REDACTED_ENV***" in out.output, out.output
+    assert "Zq8vR2kLp0sWx7Tn" not in out.output
+    log = (rd / "track_at200.log").read_text()
+    assert "***REDACTED_ENV***" in log and "Zq8vR2kLp0sWx7Tn" not in log

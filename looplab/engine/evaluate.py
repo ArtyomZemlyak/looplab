@@ -4449,6 +4449,38 @@ class EvaluateMixin:
         a.rolled_to = _durable_rollbacks(a.events_at_start, a.node_id, a.generation)
         a.rollback_refusal = ""
 
+    async def _refuse_unusable_artifacts(self, a: "EvalAttempt") -> bool:
+        """Terminalize this lifecycle as `artifact_unavailable` when a use pinned to a producer
+        lifecycle is not readable in it (`eval_dispatch.py::produced_workdir`); True when it did.
+
+        WHY A TERMINAL, AND NOT A WAIT. A lifecycle generation only ever grows: once the producer was
+        reset, deleted, or its workdir re-materialized, the lifecycle this node was pinned to can
+        never be produced again, so waiting (the infra pause's answer) would wait forever, and running
+        without it is a number measured on other data — or on nothing, read as a success. Nothing of
+        the candidate runs here, so it is no `FAILURE_REASONS` word: triage and repair, which would
+        pay to "fix" code that is not at fault, never see it. The operator's remedy is a rebuild of
+        the consumer (`node_reset` from implement re-pins it) or a fresh inject.
+
+        WHAT WAS READ, on a launch that goes ahead, is the pins on `node_created` — the eval cannot
+        run on anything else — and on this attempt's span as `uses_read`."""
+        pins = getattr(a.node, "uses_attempts", None) or {}
+        if not pins:
+            return False
+        from looplab.engine.eval_dispatch import artifact_unavailable_text
+        _paths, refused = await anyio.to_thread.run_sync(
+            self._resolve_uses, a.node, fold(self.store.read_all()))
+        if not refused:
+            a.sp.set("uses_read", dict(pins))
+            return False
+        a.sp.set("artifact_unavailable", [r["node_id"] for r in refused])
+        async with self._write_lock:
+            self.store.append(EV_NODE_FAILED, {
+                "node_id": a.node_id, "generation": a.generation,
+                "error": artifact_unavailable_text(refused), "reason": "artifact_unavailable",
+                "eval_seconds": a.charged_eval_seconds()})
+            self._maybe_crash()
+        return True
+
     async def _eval_run_attempt(self, a: "EvalAttempt") -> str:
         """RUN_ATTEMPT — one sandboxed evaluation under the intervention watcher and both live-log
         watchdogs. Binds `a.res`, the watcher's verdict and the per-attempt signals; `PHASE_RETURN`
@@ -4493,6 +4525,10 @@ class EvaluateMixin:
             # `deps_installed` row. The row closes the busy interval (doc 69 69.12a).
             await self._record_eval_withheld(
                 a, "before_launch", 0.0, reason="infra_unavailable" if infra_paused else "paused")
+            return PHASE_RETURN
+        # A PINNED ARTIFACT THIS NODE USES IS GONE (doc 73 §1.4, round 3): asked before EVERY launch,
+        # because a producer reset during a repair is as real as one before the first.
+        if await self._refuse_unusable_artifacts(a):
             return PHASE_RETURN
         a.launches += 1
         a._t0 = time.time()

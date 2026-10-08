@@ -1243,10 +1243,10 @@ def _env_passthrough_names(value, where: str) -> list[str]:
 class ArtifactSyncSpec(BaseModel):
     """`eval.artifact_sync`: the operator's own command that copies a finished node's workdir to
     durable storage (incident 2026-10-06: a 10-hour training's checkpoint lived only on a mount that
-    went away). An argv, no shell, run by the ENGINE after the node's terminal in a background thread,
-    from the node's workdir, with the host environment minus secret-shaped variables — config files
+    went away). An argv, no shell, run by the ENGINE after the node's terminal on a bounded worker pool
+    (`engine/artifact_sync.py::MAX_CONCURRENT_SYNCS`), from the node's workdir, with the host environment minus secret-shaped variables — config files
     (`~/.aws/credentials`, `~/.mc/config.json`) work as they are, and an env-held credential is passed
-    by NAME in `env_passthrough` (the command then runs from the RUN directory). Each
+    by NAME in `env_passthrough` (a spec DECLARING one runs from the RUN directory). Each
     argument may name `{workdir}`, `{run_dir}`, `{run_id}`, `{node_id}` and `{generation}`. Its
     receipt is the diagnostic `artifact_synced` row; a failed copy never fails the node."""
 

@@ -1609,6 +1609,12 @@ ENGINE_TERMINAL_REASONS: tuple[str, ...] = (
     # of needing a fourth list to keep in sync. Not BENIGN either: it is evidence about the BOX, the
     # run is paused beside it, and the owner alert must show it.
     "engine_error",
+    # A USED ARTIFACT IS NOT THERE IN THE LIFECYCLE THE NODE WAS PINNED TO (doc 73 §1.4, round 3;
+    # `engine/evaluate.py::EvaluateMixin._refuse_unusable_artifacts`): reset, deleted, failed or
+    # its workdir re-materialized. Nothing of the candidate ran, so it is not a `FAILURE_REASONS`
+    # word — a triage would pay to "fix" code that is not at fault. Not BENIGN: the operator must
+    # re-inject the consumer against the artifact as it now is, and the owner alert says so.
+    "artifact_unavailable",
 )
 
 # The subset that is BENIGN — a node that ended for a reason saying nothing about the experiment.
@@ -1989,6 +1995,14 @@ class Node(BaseModel):
     # nodes this node reads (`LOOPLAB_USES_WORKDIRS`). Both folded from `node_created`.
     kind: Optional[str] = None
     uses: list[int] = Field(default_factory=list)
+    # THE PRODUCER LIFECYCLE each use is pinned to, `{str(artifact_id): generation}` (doc 73 §1.4,
+    # round 3): the lifecycle the operator saw produced when the inject was accepted, stamped by
+    # `serve/control_validation.py::_normalize_artifact_fields` and carried onto `node_created`;
+    # inherited with `uses` by a child built from a consumer. The eval reads an artifact only while it
+    # is evaluated in THIS lifecycle with its workdir stamp intact (`engine/eval_dispatch.py::
+    # produced_workdir`); a use with no pin — every log before this key — keeps the historical
+    # existence-only rule. Fold-internal, like `parent_generations`: the durable record is the row.
+    uses_attempts: dict[str, int] = Field(default_factory=dict, exclude=True)
     # Deep-research provenance: set when this node was proposed right after a deep-research memo (its
     # directions were the active steering). {"at_node","trigger"} of the memo. None otherwise. Audit/UI
     # only (a 💡 chip) — shows where research landed in the tree; never affects search/selection.
