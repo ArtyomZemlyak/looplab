@@ -1,7 +1,7 @@
 {
   "schema": 1,
   "language": "ru",
-  "count": 7690,
+  "count": 7702,
   "messages": {
     "# LoopLab run report — {0}": "# Отчёт запуска LoopLab — {0}",
     "## Agent narrative (advisory)": "## Пояснения агента (рекомендации)",
@@ -7692,7 +7692,19 @@
     "Automation stopped by the operator: the engine drafts, checks and promotes nothing on its own; queued operations still run": "Автоматика полосы остановлена оператором: движок сам ничего не пишет, не проверяет и не продвигает; операции из очереди выполняются",
     "Author spend so far: ${0}": "Расход автора: ${0}",
     "advance held at the hourly cap": "продвижение ждёт: лимит в час",
-    "author stopped at its budget": "автор остановлен: бюджет исчерпан"
+    "author stopped at its budget": "автор остановлен: бюджет исчерпан",
+    "Upstream author budget (USD per run)": "Бюджет автора upstream (USD на запуск)",
+    "Only when the engine drafts upstream proposals itself (upstream mode auto). The total the author's paid calls (the Maintainer's draft and its critic) may spend over the whole run; each draft's cost is recorded, and once the sum reaches this the author stops. 0 = no money cap (at most 6 drafts still apply).": "Только когда движок сам составляет предложения upstream (режим upstream auto). Сколько всего могут потратить платные вызовы автора (черновик Maintainer и его критик) за весь запуск; стоимость каждого черновика записывается, и когда сумма достигает этого значения, автор останавливается. 0 — без денежного лимита (ограничение в 6 черновиков остаётся).",
+    "Author budget": "Бюджет автора",
+    "USD per run for the engine's automatic upstream drafts; 0 = no money cap.": "USD на запуск для автоматических черновиков upstream; 0 — без денежного лимита.",
+    "Automatic base advances per hour": "Автоматических обновлений базы в час",
+    "How many times a live engine may advance the base on its own in any rolling hour. A passed check beyond the cap waits and is recorded as held. Advances an operator asks for are never held. 0 = no cap.": "Сколько раз живой движок может сам обновить базу за любой скользящий час. Пройденная проверка сверх лимита ждёт и записывается как отложенная. Обновления, запрошенные оператором, никогда не откладываются. 0 — без лимита.",
+    "Advances per hour": "Обновлений в час",
+    "Cap on automatic base advances per rolling hour; 0 = none.": "Лимит автоматических обновлений базы за скользящий час; 0 — без лимита.",
+    "Upstream check profile": "Профиль проверки upstream",
+    "How an upstream check measures that the new base reproduces the source experiment. canary: one old/new pair under the task's declared eval canary (cheap on a GPU task; a task without a canary still gets full repeats). full: the declared number of paired full evaluations and the source's own score reproduced.": "Как проверка upstream измеряет, что новая база воспроизводит исходный эксперимент. canary: одна пара старая/новая на объявленной в задаче канарейке оценки (дёшево на GPU-задаче; задача без канарейки всё равно получает полные повторы). full: объявленное число парных полных оценок и воспроизведение собственного результата источника.",
+    "Check profile": "Профиль проверки",
+    "canary (one pair on the declared canary) or full (paired full repeats).": "canary (одна пара на объявленной канарейке) или full (парные полные повторы)."
   },
   "plurals": {
     "({0} paraphrases folded)": {
