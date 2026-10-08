@@ -406,8 +406,17 @@ class EvalDispatchMixin:
             for rec in e.data.get("dropped_requirements") or []:
                 if isinstance(rec, dict) and isinstance(rec.get("name"), str):
                     dropped.add(rec["name"])
-        absent = deps.absent_distributions([n for n in decl.pins if n not in dropped],
-                                           python=getattr(self.sandbox, "python", None))
+        wanted = [n for n in decl.pins if n not in dropped]
+        # Each line's environment MARKER rides along and is evaluated IN the eval interpreter: a
+        # requirement its marker excludes on this box (`pywin32; sys_platform == "win32"`) was
+        # never installed, and reading it as lost re-ran the install on every resume (review
+        # 2026-10-08).
+        # Passed only when a line carries one, like `reverified_missing` below: a stand-in for the
+        # probe written before the keyword existed keeps answering every marker-free declaration.
+        markers = {n: m for n in wanted if (m := deps.requirement_marker(decl.pins[n]))}
+        absent = deps.absent_distributions(
+            wanted, python=getattr(self.sandbox, "python", None),
+            **({"markers": markers} if markers else {}))
         return absent or []
 
     def _raise_latched_run_setup_refusal(self) -> None:

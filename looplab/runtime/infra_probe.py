@@ -216,6 +216,31 @@ def probe(targets: Iterable[tuple[str, str]], *,
     return faults
 
 
+# The faults a CANDIDATE can cause by itself on a healthy box: its workdir lives under the run
+# directory, so a candidate that writes checkpoints until the disk (or the user's quota) is full makes
+# the engine's own `run_dir` probe answer exactly these. Nothing else in the probe table writes, so no
+# other role can see them from a candidate's writes.
+CANDIDATE_FILLABLE_ERRNOS: frozenset[str] = frozenset({"ENOSPC", "EDQUOT"})
+
+
+def candidate_may_have_caused(faults: Iterable[InfraFault]) -> bool:
+    """True when EVERY fault is the run directory being full (`CANDIDATE_FILLABLE_ERRNOS`) — the one
+    probe answer a candidate's own writes can produce — and there is at least one.
+
+    WHY (review 2026-10-08, driven). A candidate that filled the disk with checkpoints died ENOSPC;
+    the probe AFTER that failure found the run directory full, paused the run and withheld the
+    attempt; the resume's fresh workdir freed the space; the same code filled it again — a pause loop
+    with the node pending forever and the Developer never told. So a failed attempt whose probe sees
+    ONLY this is not withheld as the box's fault: it takes the ordinary failure path with the probe's
+    sentence as evidence. Any other fault beside it (a dead mount, an `EIO`, a vanished interpreter)
+    keeps the whole answer the box's — "a dead mount never blames the candidate" is untouched. The
+    probe BEFORE a launch does not ask this: nothing of the attempt has run yet, so a full disk then
+    is not this attempt's doing."""
+    faults = list(faults)
+    return bool(faults) and all(f.role == "run_dir" and f.cause in CANDIDATE_FILLABLE_ERRNOS
+                                for f in faults)
+
+
 def describe(faults: Iterable[InfraFault]) -> str:
     """One line naming every fault, for a pause row's `detail` and the log."""
     return "; ".join(f.sentence() for f in faults)

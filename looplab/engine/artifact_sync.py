@@ -33,6 +33,7 @@ import time
 from pathlib import Path
 from typing import Optional
 
+from looplab.core.node_evidence import node_workdir
 from looplab.events.types import EV_ARTIFACT_SYNCED
 
 _LOG = logging.getLogger(__name__)
@@ -70,11 +71,15 @@ def start_artifact_sync(engine, node_id: int, generation: int) -> Optional[threa
     if spec is None:
         return None
     run_dir = Path(engine.run_dir)
-    workdir = run_dir / "nodes" / f"node_{node_id}"
+    # A REAL directory at both components, never a link (review 2026-10-08): `is_dir()` followed a
+    # linked `nodes/node_N`, and the operator's command — run with the host's credentials — would
+    # have uploaded whatever the link names. `node_workdir` is the refusal the log readers and
+    # `_parent_workdirs_env` already apply; a missing workdir is None too. Never raises.
     try:
-        if not workdir.is_dir():
-            return None
-    except OSError:
+        workdir = node_workdir(run_dir, node_id)
+    except (OSError, TypeError, ValueError):
+        return None
+    if workdir is None:
         return None
     values = {"workdir": str(workdir), "run_dir": str(run_dir), "run_id": run_dir.name,
               "node_id": node_id, "generation": generation}

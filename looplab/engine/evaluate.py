@@ -1677,6 +1677,11 @@ class EvalAttempt:
     # (`_durable_orphan_settle_seconds`, crit_v57 M1/L1). A canary skipped as passed by digest, or one
     # that failed, leaves it False.
     canary_ran: bool = False
+    # The engine's own probe sentence when the box check after THIS attempt's failure found ONLY the
+    # run directory full (`infra_probe.candidate_may_have_caused`): bound by DECIDE_REPAIR through
+    # `_eval_infra_pause`, reset by RUN_ATTEMPT, and appended to the triage's engine facts and the
+    # repair's error context. "" on every other attempt, so no prompt gains a byte.
+    infra_note: str = ""
 
     def charged_eval_seconds(self, extra: float = 0.0) -> float:
         """What this lifecycle's TERMINAL charges the run's eval budget: the attempts a DEAD process
@@ -3553,7 +3558,7 @@ class EvaluateMixin:
         canary itself and the crash triage that reads its evidence (`_eval_decide_repair`)."""
         return self.run_dir / "canary" / f"node_{node_id}"
 
-    def _pause_withholds_attempt(self, a: "EvalAttempt") -> bool:
+    def _pause_withholds_attempt(self, a: "EvalAttempt", *, box_fault: bool = False) -> bool:
         """Does a PAUSE withhold the evaluation work this attempt is about to START (doc 69 69.12)?
 
         Asked where an attempt begins heavy work with no phase in front of it that re-read the run:
@@ -3591,8 +3596,17 @@ class EvaluateMixin:
         writes (`_record_eval_withheld`), which the lifecycle's next terminal charges (doc 69
         69.12a) — or, when a reset abandons it first, the engine's next entry
         (`abandoned_lifecycle_charges`). A pause still never kills a RUNNING eval; it only refuses
-        to START one."""
-        if a.next_start is not _UNSET and a.next_start is not None:
+        to START one.
+
+        `box_fault` — the run was paused THIS moment by the engine's own probe of the box before
+        the launch (`_eval_infra_pause(failed=False)`) — waives the second clause (review
+        2026-10-08): a later-stage reuse point is worth nothing to an attempt launched onto a dead
+        mount, which only holds its devices until the stage's own timeout (hours, on a hung NFS
+        `stat`) and then fails into the same pause. The re-dispatch after the operator fixes the box
+        re-runs the pipeline from its first stage; that is the cost, and it is the one the operator
+        sees. The other two clauses stand: a stop still drains, an intervention still owns its
+        terminal."""
+        if (not box_fault and a.next_start is not _UNSET and a.next_start is not None):
             # TOTAL (`[]` on a resolution hiccup): an unreadable manifest names no first stage, so the
             # reuse point stands and the attempt runs on.
             stages = self._resolved_stages(a.node, a.workdir)
@@ -3661,12 +3675,28 @@ class EvaluateMixin:
         the attempt and the node stays pending, so the resume re-runs it on a healthy box. A failure
         whose probe finds nothing proceeds to the ordinary repair path, unchanged."""
         from looplab.engine.speculation import auto_pause_is_redundant
-        from looplab.runtime.infra_probe import describe, probe
+        from looplab.runtime.infra_probe import candidate_may_have_caused, describe, probe
         targets = self._infra_probe_targets()
         if not targets:
             return False
         faults = await anyio.to_thread.run_sync(functools.partial(probe, targets))
         if not faults:
+            return False
+        if failed and candidate_may_have_caused(faults):
+            # THE CANDIDATE MAY HAVE FILLED THE DISK ITSELF (review 2026-10-08, driven): its workdir
+            # is under the run directory, so checkpoints written until ENOSPC/EDQUOT make this probe
+            # answer exactly that. Withheld as the box's fault, the resume freed the space with a
+            # fresh workdir and the same code filled it again — a pause loop, the node pending
+            # forever and the Developer never told. So this failure takes the ordinary path, and the
+            # probe's sentence rides to the triage and the repair as an ENGINE-observed fact. Only
+            # when that is the ONLY fault (`infra_probe.candidate_may_have_caused`): a dead mount
+            # beside it is still the box's. The probe before a launch never takes this branch.
+            a.infra_note = self._redact(
+                "Engine check after this failure: the run directory (where this node's workdir "
+                f"lives) is full — {describe(faults)}. The evaluation's own writes may have filled "
+                "it.")[:400]
+            _LOG.warning("node %s: the run directory is full after its eval failed (%s); treated "
+                         "as the candidate's failure, not a box fault", a.node_id, describe(faults))
             return False
         what = "failed" if failed else "was about to launch"
         detail = self._redact(f"evaluation of node {a.node_id} {what} and the box did not answer: "
@@ -3806,7 +3836,8 @@ class EvaluateMixin:
             raise
         except Exception as exc:  # noqa: BLE001 — fail-open preflight: the full eval owns this fault
             fault = f"{type(exc).__name__}: {exc}"[:300]
-        passed = fault is None and canary_passed(res, expired=expired)
+        passed = fault is None and canary_passed(
+            res, expired=expired, artifact=getattr(a.node, "kind", None) == "artifact")
         interrupted = cancel.is_set() and not expired
         # A stage killed at its OWN declared timeout (at or under the canary's cap) is not the
         # canary's clock: a longer cap runs into the same second, so it takes the ordinary failure
@@ -4392,6 +4423,7 @@ class EvaluateMixin:
         a.res = None
         a.canary_failed = False
         a.canary_ran = False
+        a.infra_note = ""
         # THE BOX BEFORE THE LAUNCH (`runtime/infra_probe.py`, incident 2026-10-06). A launch on a dead
         # data mount or a vanished interpreter is hours of GPU spent to learn what a `stat` answers in
         # milliseconds — and, on a resume after a container restart, it is the FIRST thing the run does.
@@ -4407,7 +4439,11 @@ class EvaluateMixin:
         # devices it took go back when the lane settles (`_settle_eval_resource_reservation`).
         # The FIRST launch is asked too when the probe just paused the run: ADMIT asked before it, on a
         # run that was not paused yet.
-        if (((a.launches or infra_paused) and self._pause_withholds_attempt(a))
+        # `box_fault=` only when the probe paused: a one-argument stand-in for the rule (tests
+        # replace it per instance) keeps answering every other launch.
+        if (((a.launches or infra_paused)
+             and (self._pause_withholds_attempt(a, box_fault=True) if infra_paused
+                  else self._pause_withholds_attempt(a)))
                 or (await self._reclaim_devices_for_attempt(a)
                     and self._pause_withholds_attempt(a))):
             a.sp.set("eval_withheld", "paused_before_launch")
@@ -5259,7 +5295,8 @@ class EvaluateMixin:
             attempts_left=_repair_attempts_left(a.attempt, a._repair_cap),
             log_tools=_repair_tools,
             engine_facts=engine_observed_facts(a.res) + fence_refusal_note(
-                a.res, landlock=self._landlock, syscall_fence=self._syscall_fence),
+                a.res, landlock=self._landlock, syscall_fence=self._syscall_fence)
+            + (f"{a.infra_note}\n" if a.infra_note else ""),
             monitor_verdicts=a._monitor_verdicts))
         action = a.triage.get("action", DEFAULT_TRIAGE_ACTION)
         # WHAT THE FAILURE WAS, RE-READ BY THE JUDGE THAT JUST READ IT. Applied HERE, on the
@@ -5634,8 +5671,9 @@ class EvaluateMixin:
                         a.reason, _err_in, state=a.state, node=a.node,
                         headline=failure_headline(
                             getattr(a.res, "stderr", "") or "", self._redact),
-                        fence_note=fence_refusal_note(
+                        fence_note="\n".join(filter(None, (fence_refusal_note(
                             a.res, landlock=self._landlock, syscall_fence=self._syscall_fence),
+                            a.infra_note))),
                         reason_source=a._reason_source)
                     + developer_stuck_contract(DEVELOPER_STUCK_PREFIX)
                     + (developer_repair_history(a.repair_log[-_JUDGE_HISTORY_ROWS:])

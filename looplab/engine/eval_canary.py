@@ -175,12 +175,30 @@ class CanaryClock:
         self._thread.join(timeout=5)
 
 
-def canary_passed(res, *, expired: bool = False) -> bool:
+def canary_passed(res, *, expired: bool = False, artifact: bool = False) -> bool:
     """THE PASS RULE, and it is the full eval's own success rule (`_eval_settle_outcome`): the chain
     exited 0, was not killed by a clock, and the operator's reader found a number. The number itself
-    is then discarded — it measured a slice."""
+    is then discarded — it measured a slice.
+
+    `artifact` — the node is an ARTIFACT node (doc 73 §1.4), whose full eval succeeds on a CLEAN
+    pipeline with no metric (`_eval_settle_outcome`: the metric is dropped and the attempt is ok
+    exactly when `triage._failure_reason` answers `no_metric`). The canary takes that same rule
+    (review 2026-10-08, driven): asked for a number, every artifact canary failed, bought a paid
+    triage and a repair, and ended the node `unclassified` — an artifact node could never pass with
+    the canary on. Kept rather than skipped because the canary's purpose holds for a preparation
+    pipeline as well: a crash, a broken stage contract or a missing declared output is caught on the
+    slice, cheaply, before the full run. A number the pipeline prints anyway is ignored, as there."""
     if res is None or expired:
         return False
+    if artifact:
+        import copy
+        from looplab.engine.triage import _failure_reason
+        unranked = copy.copy(res)
+        try:
+            unranked.metric = None
+        except (AttributeError, TypeError):   # a frozen double: read it as it is
+            unranked = res
+        return _failure_reason(unranked) == "no_metric"
     return (getattr(res, "metric", None) is not None and not getattr(res, "timed_out", False)
             and getattr(res, "exit_code", 1) == 0)
 
