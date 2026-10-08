@@ -1,4 +1,4 @@
-import { uiText, uiMessage } from './uiLanguage.js'
+import { uiText, uiMessage, uiPlural } from './uiLanguage.js'
 // Run-report analysis: derive the human-readable conclusions ("what worked / what didn't"), the
 // key-improvement waterfall, and per-operator/per-theme effectiveness purely from the folded node
 // set. Mirrors the engine's selection rule — only FEASIBLE evaluated nodes move the frontier — so
@@ -217,7 +217,7 @@ export function nodeChip(node, nodes, state = null) {
       return (vs.length > 1 && vs.every(v => typeof v === 'number'))
         ? `${k}∈[${fmt(Math.min(...vs))}…${fmt(Math.max(...vs))}]` : k
     }
-    return uiText('swept ') + (keys.length <= 2 ? keys.map(tok).join(', ') : uiMessage('{0} params', [keys.length]))
+    return uiText('swept ') + (keys.length <= 2 ? keys.map(tok).join(', ') : uiPlural(keys.length, '{0} params', '{0} params'))
   }
   const parent = parents[0]
   if (!parent) {                                           // draft / root — nothing to diff against
@@ -310,15 +310,15 @@ export function trustCaveats(state, best) {
   if (best && hacks.some(h => h.node_id === best.id))
     out.push({ kind: 'reward-hack', severity: 'alarm', text: 'champion flagged as a possible reward-hack', panel: 'trust' })
   else if (hacks.length)
-    out.push({ kind: 'reward-hack', severity: 'warn', text: `${rewardHackNodeCount(hacks)} node(s) flagged as possible reward-hacks`, panel: 'trust' })
+    out.push({ kind: 'reward-hack', severity: 'warn', text: uiPlural(rewardHackNodeCount(hacks), '{0} node(s) flagged as possible reward-hacks', '{0} node(s) flagged as possible reward-hacks'), panel: 'trust' })
   if (state.leakage?.leak)
     out.push({ kind: 'leakage', severity: 'alarm', text: 'data-leakage scan flagged this run', panel: 'data' })
   if ((state.drifts || []).length)
-    out.push({ kind: 'drift', severity: 'warn', text: `${state.drifts.length} metric-drift divergence(s) caught`, panel: 'trust' })
+    out.push({ kind: 'drift', severity: 'warn', text: uiPlural(state.drifts.length, '{0} metric-drift divergence(s) caught', '{0} metric-drift divergence(s) caught'), panel: 'trust' })
   const infeasible = Object.values(activeNodeMap(state.nodes || {}, state))
     .filter(n => isEvaluated(n) && n.feasible === false)
   if (infeasible.length)
-    out.push({ kind: 'infeasible', severity: 'warn', text: `${infeasible.length} evaluated node(s) violated a constraint`, panel: 'trust' })
+    out.push({ kind: 'infeasible', severity: 'warn', text: uiPlural(infeasible.length, '{0} evaluated node(s) violated a constraint', '{0} evaluated node(s) violated a constraint'), panel: 'trust' })
   if (best && !(Number.isFinite(best.confirmed_mean)
       && Number.isSafeInteger(best.confirmed_seeds) && best.confirmed_seeds >= 2))
     out.push({ kind: 'single-seed', severity: 'warn', text: 'multiple successful repeat checks are not established', panel: 'trust' })
@@ -484,7 +484,7 @@ export function toMarkdown(state, _best, context = {}) {
   if (champion) L.push(uiMessage("- **Best:** node #{0} · metric {1}{2} · params {3}", [champion.id, fmt(champion.confirmed_mean ?? champion.metric), champion.confirmed_mean != null ? ` ±${fmt(champion.confirmed_std)} (${champion.confirmed_seeds}×)` : '', JSON.stringify(champion.idea?.params)]))
   // The exported Markdown is what gets pasted into a report or a ticket, so it is the LAST place a
   // `$0` may stand in for "nobody priced this run" — spell the pricing evidence out in full here.
-  if (state.llm_cost) L.push(uiMessage('- **LLM:** {0} tokens · {1} ({2})', [state.llm_cost.total_tokens,
+  if (state.llm_cost) L.push(uiPlural(state.llm_cost.total_tokens, '- **LLM:** {0} tokens · {1} ({2})', '- **LLM:** {0} tokens · {1} ({2})', [state.llm_cost.total_tokens,
     uiText(costPricing(state.llm_cost).text), uiText(costPricing(state.llm_cost).title)]))
   if (ctx.generation) L.push(uiMessage("- **Run generation:** {0}", [ctx.generation]))
   if (ctx.snapshotSeq != null) L.push(uiMessage("- **Snapshot event:** #{0}", [ctx.snapshotSeq]))
@@ -518,14 +518,14 @@ export function toMarkdown(state, _best, context = {}) {
     L.push(uiText('| step | node | operator | recorded value | measurement | numeric change | what changed |'))
     L.push('|---|---|---|---|---|---|---|')
     a.steps.forEach((s, i) => L.push(`| ${i + 1} | #${s.id} | ${s.operator}${s.theme ? ` (${s.theme})` : ''} | ${fmt(s.to)} | ${uiText(s.measurement)} | ${s.delta == null ? uiText('first eligible') : fmt(s.delta)} | ${paramDiffLabel(s.diff)} |`))
-    if (a.steps.length > 1) L.push(uiMessage("\nRecorded frontier change: **{0}** across {1} steps (first eligible {2} → numeric frontier {3}).", [fmt(a.totalGain), a.steps.length, fmt(a.firstBest), fmt(a.finalBest)]))
+    if (a.steps.length > 1) L.push(uiPlural(a.steps.length, '\nRecorded frontier change: **{0}** across {1} steps (first eligible {2} → numeric frontier {3}).', '\nRecorded frontier change: **{0}** across {1} steps (first eligible {2} → numeric frontier {3}).', [fmt(a.totalGain), a.steps.length, fmt(a.firstBest), fmt(a.finalBest)]))
   } else L.push(uiText('\n_No improving steps recorded yet._'))
   L.push('')
   L.push(uiText('## What didn\'t work'))
   const fr = Object.entries(a.failures)
   if (fr.length) { L.push(uiMessage("\n**Failures by reason:** {0}", [fr.map(([r, ns]) => `${r} (${ns.length})`).join(', ')])) }
   if (a.regressions.length) { L.push(uiMessage("\n**Worse evaluation scores:** {0} under matching recorded parent conditions.", [a.regressions.length])) }
-  if (a.infeasible.length) { L.push(uiMessage("\n**Infeasible:** {0} node(s) violated a constraint and were excluded.", [a.infeasible.length])) }
+  if (a.infeasible.length) { L.push('\n' + uiPlural(a.infeasible.length, '**Infeasible:** {0} node(s) violated a constraint and were excluded.', '**Infeasible:** {0} node(s) violated a constraint and were excluded.')) }
   const deadThemes = a.themes.filter(t => t.improved === 0)
   if (deadThemes.length) L.push(uiMessage("\n**Primary concept axes without a comparable score improvement:** {0}. Absence of an improvement is not evidence that an axis failed.", [deadThemes.map(t => t.key).join(', ')]))
   if (!fr.length && !a.regressions.length && !a.infeasible.length) L.push(uiText('\n_No recorded failures or comparable regressions._'))

@@ -1,4 +1,5 @@
 import { apiPrefix } from './api.js'
+import { uiPlural, uiText } from './uiLanguage.js'
 import {
   attentionIds, loadAttentionState, notificationsDisabledState,
   recordAttentionIds, saveAttentionState,
@@ -140,9 +141,9 @@ export async function deliverAttentionNotifications(items, {
     broadcast?.({ type: 'invalidate', v: 1 })
     let notification
     try {
-      notification = new NotificationApi('LoopLab needs attention', {
-        body: fresh.length === 1 ? 'One new item is ready to review.'
-          : `${fresh.length} new items are ready to review.`,
+      notification = new NotificationApi(uiText('LoopLab needs attention'), {
+        body: fresh.length === 1 ? uiText('One new item is ready to review.')
+          : uiPlural(fresh.length, '{0} new items are ready to review.', '{0} new items are ready to review.'),
         tag: `looplab-attention-${fresh[0].id}`,
       })
     } catch {

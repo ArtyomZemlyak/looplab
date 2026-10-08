@@ -948,6 +948,11 @@ EV_EVAL_CANARY_FINISHED = "eval_canary_finished"
 # thread; this row is its receipt. DIAGNOSTIC: appended from that thread, after the terminal, and read
 # by nothing that decides — a copy that failed is reported, never a reason to fail the node.
 EV_ARTIFACT_SYNCED = "artifact_synced"
+# …AND ITS START (round 3): written by the copy's worker BEFORE the operator's command runs, so an
+# engine that dies mid-copy leaves `started, never finished` on the log rather than nothing. The pair
+# is keyed by (node_id, generation, sync_id); nothing re-runs a copy off a started row (no automatic
+# retry: the operator's command is not known to be idempotent). DIAGNOSTIC for the same reasons.
+EV_ARTIFACT_SYNC_STARTED = "artifact_sync_started"
 # AN OPERATOR IMPORT OF METRICS MEASURED AFTER THE RUN (`maintenance/import_metrics.py`, `looplab
 # import-metrics`; incident 2026-10-06: nodes scored at @20 were re-scored at @200 by a service, and
 # `metric_retarget` to @200 would have unranked every one of them). FOLDED
@@ -1281,7 +1286,7 @@ DIAGNOSTIC_EVENTS: frozenset[str] = frozenset({
     EV_PRIOR_INJECTED, EV_MEMORY_READ,
     EV_EVAL_INVOCATION_CLAIMED, EV_EVAL_INVOCATION_SETTLED, EV_EVAL_INVOCATION_RECOVERED,
     EV_EVAL_CANARY_STARTED, EV_EVAL_CANARY_FINISHED, EV_EVAL_ATTEMPT_WITHHELD,
-    EV_TASK_CHANGED, EV_ARTIFACT_SYNCED,
+    EV_TASK_CHANGED, EV_ARTIFACT_SYNCED, EV_ARTIFACT_SYNC_STARTED,
 })
 
 # ROWS THAT CANNOT MOVE A DECISION FENCE — one named predicate, because each fence spelling its own
@@ -1762,13 +1767,22 @@ EVENT_PAYLOAD_KEYS: dict[str, PayloadContract] = {
     "eval_attempt_withheld": PayloadContract(
         "A pause, a stop or an infra_unavailable pause withheld a lifecycle's evaluation; its seconds, for its next terminal.",
         required=("at", "attempt", "eval_seconds", "generation", "node_id", "reason"),
-        optional=(),
+        # `fault` + `occupant`: the box fault that withheld it, when it was a FULL run directory
+        # (`runtime/infra_probe.py::RUN_DIR_FULL`) — read back as "this lifecycle already met one"
+        # (`engine/evaluate.py::run_dir_full_met`) — and the largest node workdir measured then.
+        optional=("fault", "occupant"),
     ),
     "artifact_synced": PayloadContract(
         "The operator's eval.artifact_sync command ran over a node's workdir after its terminal.",
         required=("command", "exit_code", "generation", "node_id", "seconds", "stderr_tail",
                   "timed_out"),
-        optional=("workdir_changed",),
+        optional=("sync_id", "workdir_changed"),
+    ),
+    "artifact_sync_started": PayloadContract(
+        "The operator's eval.artifact_sync command is about to run over a node's workdir; its "
+        "artifact_synced row closes it.",
+        required=("generation", "node_id", "sync_id"),
+        optional=(),
     ),
     "track_requested": PayloadContract(
         "An operator queued a declared eval.tracks evaluation over settled nodes of a live run.",
@@ -1975,7 +1989,7 @@ EVENT_PAYLOAD_KEYS: dict[str, PayloadContract] = {
         # (review 2026-09-22, EVT-05).
         optional=(
             "code", "deleted", "files", "forked_from", "idea", "node_kind", "origin",
-            "parent_generations", "parent_id", "parent_ids", "uses"
+            "parent_generations", "parent_id", "parent_ids", "uses", "uses_attempts"
         ),
         stored_whole=True,
     ),
@@ -2088,7 +2102,7 @@ EVENT_PAYLOAD_KEYS: dict[str, PayloadContract] = {
             "attempt", "base_selector", "card_build_generation", "deleted", "eval_start_boundary",
             "footprint_finalized", "forked_from", "generation", "materialize_aborted_intent",
             "model_arm", "node_kind", "origin", "parent_generations", "research_origin", "seed",
-            "simplified", "speculative", "uses"
+            "simplified", "speculative", "uses", "uses_attempts"
         ),
     ),
     "node_eval_started": PayloadContract(
@@ -2184,8 +2198,11 @@ EVENT_PAYLOAD_KEYS: dict[str, PayloadContract] = {
         # `terminal_reason` + `due`: an external harness's finish held back by its unmet obligations
         # (`orchestrator.py`, reason `external_finish_obligations_due`) — the finish that was asked
         # for and what is still owed.
-        optional=("attempt", "detail", "drain_builds", "drain_only", "due", "generation", "node_id",
-                  "reason", "terminal_reason"),
+        # `fault` + `occupant`: an `infra_unavailable` pause over a FULL run directory and the
+        # largest node workdir then (`engine/evaluate.py::_infra_pause_row`) — what the attention
+        # item names; the fold reads neither.
+        optional=("attempt", "detail", "drain_builds", "drain_only", "due", "fault", "generation",
+                  "node_id", "occupant", "reason", "terminal_reason"),
     ),
     "phase_progress": PayloadContract(
         "One build/eval phase started or finished — the live activity feed's row.",

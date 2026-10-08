@@ -7,7 +7,8 @@ from __future__ import annotations
 
 import hashlib
 
-from looplab.engine.seed_archive import seed_archive_digest, verified_seed_archive
+from looplab.core.seed_receipt import RECEIPT_UNUSABLE, bind_seed_receipt, node_base_receipt
+from looplab.engine.seed_archive import verified_seed_archive
 from looplab.events.replay import event_generation_binds
 
 TEXT_LIMIT = 256 * 1024
@@ -18,22 +19,19 @@ class SeedFilesUnavailable(ValueError):
 
 
 def seed_files(run_dir, node, events, *, offset=0, limit=100, path=None):
-    receipt = (node.metric_provenance or {}).get("base_revision") if node else None
-    digest = seed_archive_digest(receipt)
-    if (node is None or node.tombstoned or node.status.value != "evaluated" or digest is None
-            or any(type(receipt.get(key)) is not int or receipt[key] < 0
-                   for key in ("node_id", "generation", "seed_event_seq"))
-            or receipt["node_id"] != node.id or receipt["generation"] != node.attempt):
+    # The receipt -> seed-event binding is `core/seed_receipt.py::bind_seed_receipt`, the rule the
+    # upstream lane and `looplab export-git` share; the two refusals keep their two sentences.
+    if node is None or node.tombstoned or node.status.value != "evaluated":
         raise SeedFilesUnavailable("This completed attempt has no usable recorded base archive.")
-    seed = next((event for event in events if event.seq == receipt["seed_event_seq"]), None)
-    seeded = seed.data.get("base_revision") if seed and isinstance(seed.data, dict) else None
-    if (seed is None or seed.type != "workspace_seeded" or type(node.terminal_event_seq) is not int
-            or seed.seq >= node.terminal_event_seq or type(seed.data.get("node_id")) is not int
-            or seed.data["node_id"] != node.id
-            or not event_generation_binds(seed.data, node.attempt)
-            or seed_archive_digest(seeded) != digest
-            or any(seeded[key] != receipt[key] for key in ("file_count", "bytes"))):
+    bound = bind_seed_receipt(node_base_receipt(node), {event.seq: event for event in events},
+                              node_id=node.id, generation=node.attempt,
+                              terminal_event_seq=node.terminal_event_seq,
+                              generation_binds=event_generation_binds)
+    if bound.reason == RECEIPT_UNUSABLE:
+        raise SeedFilesUnavailable("This completed attempt has no usable recorded base archive.")
+    if bound.digest is None:
         raise SeedFilesUnavailable("The base archive is not bound to this attempt's measured evidence.")
+    receipt, digest = bound.receipt, bound.digest
     rows, selected = [], None
 
     def capture(name, data, executable):

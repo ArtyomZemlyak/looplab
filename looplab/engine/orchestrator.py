@@ -2198,8 +2198,8 @@ class Engine(ConfirmPhaseMixin, NoiseFloorMixin, AblationMixin, NoveltyGateMixin
                 state = fold(self.store.read_all())
             actions = self._select_actions(state)
             actions = self._plan_gate(state, actions)
-            # THE ARTIFACT CONSUMER FENCE (doc 73 §1.4): a node whose producer is being produced
-            # again waits for it (`engine/artifact_fence.py`). When that leaves nothing to do, the
+            # BESIDE THE ARTIFACT PIN (doc 73 §1.4): a node pinned to a lifecycle its producer is still
+            # producing waits for it (`engine/artifact_fence.py`). When that leaves nothing to do, the
             # turn sleeps instead of reading as "no actions", which would walk the finish ladder over
             # a run whose producer is still evaluating.
             actions, _deferred = defer_waiting_consumers(state, actions)

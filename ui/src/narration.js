@@ -1,4 +1,4 @@
-import { uiText, uiMessage } from './uiLanguage.js'
+import { uiText, uiMessage, uiPlural } from './uiLanguage.js'
 import { durationLabel, fmt, fmtCost, NODE_ACTIVITY, nodeActivityStatus,
   recordedNodeActivity } from './util.js'
 import { stripMd } from './markdown.jsx'
@@ -116,7 +116,7 @@ export const NARR = {
       const ties = rows.reduce(
         (n, v) => n + (Number.isFinite(v?.ties) && v.ties > 0 ? v.ties : 0), 0);
       if (d.leak) return uiText('leakage scan: LEAK DETECTED');
-      return (ties > 0 ? uiMessage("leakage scan: clean ({0} train row{1} the first test timestamp)", [ties, ties === 1 ? ' shares' : 's share']) : uiText('leakage scan: clean'));
+      return (ties > 0 ? uiPlural(ties, 'leakage scan: clean ({0} train row shares the first test timestamp)', 'leakage scan: clean ({0} train rows share the first test timestamp)') : uiText('leakage scan: clean'));
     },
   },
   approval_requested: {
@@ -137,10 +137,10 @@ export const NARR = {
   budget_extend: {
     render: (d) => {
       const bits = []
-      if (d.add_nodes) bits.push(`+${d.add_nodes} experiment node${d.add_nodes === 1 ? '' : 's'}`)
-      if (d.max_seconds != null) bits.push(`wall-clock ${d.max_seconds}s`)
-      if (d.max_eval_seconds != null) bits.push(`per-eval ${d.max_eval_seconds}s`)
-      return uiMessage("run budget extended — {0}", [bits.join(', ') || 'no change'])
+      if (d.add_nodes) bits.push(uiPlural(d.add_nodes, '+{0} experiment node', '+{0} experiment nodes'))
+      if (d.max_seconds != null) bits.push(uiMessage('wall-clock {0}s', [d.max_seconds]))
+      if (d.max_eval_seconds != null) bits.push(uiMessage('per-eval {0}s', [d.max_eval_seconds]))
+      return uiMessage("run budget extended — {0}", [bits.join(', ') || uiText('no change')])
     },
   },
   hint: { validate: d => ownValue(d, 'text'), render: (d) => `hint: ${d.text}` },
@@ -150,7 +150,7 @@ export const NARR = {
   },
   policy_decision: {
     validate: d => ownValue(d, 'chosen') && objectValue(d, 'scores'),
-    render: (d) => `chose #${d.chosen}${d.reason ? ' (' + d.reason + ')' : ''} over ${Object.keys(d.scores || {}).length} candidate(s)`,
+    render: (d) => { const n = Object.keys(d.scores || {}).length; return uiPlural(n, 'chose #{1}{2} over {0} candidate(s)', 'chose #{1}{2} over {0} candidate(s)', [n, d.chosen, d.reason ? ' (' + d.reason + ')' : '']) },
   },
   strategy_decision: {
     validate: d => nestedValue(d, 'strategy', 'policy'),
@@ -173,11 +173,11 @@ export const NARR = {
   deep_research: { render: () => uiText('deep research requested') },
   research_completed: { render: (d) => uiMessage("deep research ({0}){1}", [d.trigger || 'auto', note(d.memo?.summary)]) },
   report_generated: { render: (d) => uiMessage("run report updated{0}", [note(d.content?.headline, 90)]) },
-  reflection_note: { render: (d) => `memory: ${d.n_lessons || 0} lesson${(d.n_lessons || 0) === 1 ? '' : 's'}${d.n_skills ? `, ${d.n_skills} skill${d.n_skills === 1 ? '' : 's'}` : ''}${note(d.note)}` },
+  reflection_note: { render: (d) => uiMessage('memory: {0}{1}{2}', [uiPlural(d.n_lessons || 0, '{0} lesson', '{0} lessons'), d.n_skills ? ', ' + uiPlural(d.n_skills, '{0} skill', '{0} skills') : '', note(d.note)]) },
   // The MID-RUN half of the same memory write (skills_promoted): a card that settled early is
   // promoted while the run is still going, so the feed says so at the node it happened at
   // rather than only in the run-end note.
-  skills_promoted: { render: (d) => uiMessage("memory: {0} settled skill{1} promoted", [d.count || 0, (d.count || 0) === 1 ? '' : 's']) },
+  skills_promoted: { render: (d) => uiPlural(d.count || 0, 'memory: {0} settled skill promoted', 'memory: {0} settled skills promoted') },
   proxy_scored: {
     validate: d => ownValue(d, 'node_id') && ownValue(d, 'score'),
     render: (d) => uiMessage("proxy scored #{0}: {1}{2}", [d.node_id, fmt(d.score), d.skipped ? ' (skipped full eval)' : '']),
@@ -193,7 +193,7 @@ export const NARR = {
   },
   hypothesis_ranked: {
     validate: d => ownValue(d, 'n') || Array.isArray(d?.order),
-    render: (d) => uiMessage("ranked {0} hypotheses by payoff{1}{2}", [d.n || (d.order || []).length, d.confidence != null ? ` (${Math.round(d.confidence * 100)}% conf)` : '', note(d.reason, 70)]),
+    render: (d) => uiPlural(d.n || (d.order || []).length, 'ranked {0} hypotheses by payoff{1}{2}', 'ranked {0} hypotheses by payoff{1}{2}', [d.n || (d.order || []).length, d.confidence != null ? uiMessage(' ({0}% conf)', [Math.round(d.confidence * 100)]) : '', note(d.reason, 70)]),
   },
   foresight_selected: {
     validate: d => ownValue(d, 'kind') && ownValue(d, 'chosen')
@@ -205,7 +205,7 @@ export const NARR = {
   },
   llm_cost: {
     validate: d => ownValue(d, 'total_tokens') && ownValue(d, 'cost'),
-    render: (d) => `LLM: ${d.total_tokens} tokens, ${fmtCost(d)}`,
+    render: (d) => uiPlural(d.total_tokens, 'LLM: {0} tokens, {1}', 'LLM: {0} tokens, {1}', [d.total_tokens, fmtCost(d)]),
   },
   // --- operator/boss control INTENTS + their engine confirmations. Every event the agentic boss can
   // produce gets a plain-English line here, so an action never shows in the feed as a raw-JSON blob. ---
@@ -291,23 +291,23 @@ export const NARR = {
         .join(', ')
       const ev = (d.evidence && typeof d.evidence === 'object') ? d.evidence : {}
       const from = ev.widest_declared_gpus != null && ev.gpu_pool != null
-        ? ` (${ev.open_proposals ?? '?'} open proposal(s) wanting up to ${ev.widest_declared_gpus} GPU(s) of ${ev.gpu_pool})`
+        ? ' ' + uiMessage('({0} open proposal(s) wanting up to {1} GPU(s) of {2})', [ev.open_proposals ?? '?', ev.widest_declared_gpus, ev.gpu_pool])
         : ''
       return uiMessage("width re-pinned from the proposals — {0}{1}", [axes, from])
     },
   },
   hypothesis_merged: {
     validate: d => ownValue(d, 'statement'),
-    render: (d) => uiMessage("hypotheses merged — {0}{1}", [String(d.statement || '').slice(0, 80), (d.aliases || []).length ? ` (${(d.aliases || []).length} paraphrase${(d.aliases || []).length === 1 ? '' : 's'} folded)` : '']),
+    render: (d) => uiMessage("hypotheses merged — {0}{1}", [String(d.statement || '').slice(0, 80), (d.aliases || []).length ? ' ' + uiPlural((d.aliases || []).length, '({0} paraphrase folded)', '({0} paraphrases folded)') : '']),
   },
   lessons_distilled: {
     validate: d => ownValue(d, 'count'),
-    render: (d) => `distilled ${d.count || 0} lesson${d.count === 1 ? '' : 's'}${d.trigger ? ' (' + d.trigger + ')' : ''}`,
+    render: (d) => uiPlural(d.count || 0, 'distilled {0} lesson{1}', 'distilled {0} lessons{1}', [d.count || 0, d.trigger ? ' (' + d.trigger + ')' : '']),
   },
   lessons_refreshed: { render: (d) => (d.skipped ? uiText('cross-run lessons refresh skipped') : uiText('cross-run lessons refreshed')) },
   coverage_snapshot: {
     validate: d => ownValue(d, 'themes') && ownValue(d, 'niches'),
-    render: (d) => `coverage — ${d.themes || 0} theme${d.themes === 1 ? '' : 's'} · ${d.niches || 0} niche${d.niches === 1 ? '' : 's'}${d.dominant_theme_frac != null ? ` · dominant ${Math.round(d.dominant_theme_frac * 100)}%` : ''}`,
+    render: (d) => uiMessage('coverage — {0} · {1}{2}', [uiPlural(d.themes || 0, '{0} theme', '{0} themes'), uiPlural(d.niches || 0, '{0} niche', '{0} niches'), d.dominant_theme_frac != null ? ' · ' + uiMessage('dominant {0}%', [Math.round(d.dominant_theme_frac * 100)]) : '']),
   },
   deps_installed: { render: (d) => uiMessage("dependencies installed{0}", [d.packages ? ': ' + (Array.isArray(d.packages) ? d.packages.slice(0, 6).join(', ') : String(d.packages).slice(0, 80)) : '']) },
   fork_done: { render: () => uiText('fork fulfilled — branch added') },
@@ -324,7 +324,7 @@ export const NARR = {
     validate: d => nestedValue(d, 'chosen', 'kind') && Array.isArray(d?.legal),
     // One key per English number form: a glued `s` placeholder rendered as a stray Latin letter
     // inside the Russian sentence.
-    render: (d) => uiMessage((d.legal || []).length === 1 ? "agent chose {0}{1} (of {2} legal move){3}" : "agent chose {0}{1} (of {2} legal moves){3}", [d.chosen?.kind || '?', d.chosen?.node_id != null ? ' → #' + d.chosen.node_id : '', (d.legal || []).length, note(d.rationale, 70)]),
+    render: (d) => uiPlural((d.legal || []).length, 'agent chose {0}{1} (of {2} legal move){3}', 'agent chose {0}{1} (of {2} legal moves){3}', [d.chosen?.kind || '?', d.chosen?.node_id != null ? ' → #' + d.chosen.node_id : '', (d.legal || []).length, note(d.rationale, 70)]),
   },
   agent_validated: {
     validate: d => ownValue(d, 'node_id'),
@@ -341,11 +341,11 @@ export const NARR = {
   data_profiled: {
     validate: d => ownValue(d, 'columns') && d.columns !== null
       && typeof d.columns === 'object',
-    render: (d) => { const c = d.columns; const n = Array.isArray(c) ? c.length : Object.keys(c || {}).length; return uiMessage("dataset profiled ({0} column{1})", [n, n === 1 ? '' : 's']) },
+    render: (d) => { const c = d.columns; const n = Array.isArray(c) ? c.length : Object.keys(c || {}).length; return uiPlural(n, 'dataset profiled ({0} column)', 'dataset profiled ({0} columns)') },
   },
   data_provenance: {
     validate: d => objectValue(d, 'assets'),
-    render: (d) => { const n = Object.keys(d.assets || {}).length; return uiMessage("dataset provenance pinned ({0} asset{1})", [n, n === 1 ? '' : 's']) },
+    render: (d) => { const n = Object.keys(d.assets || {}).length; return uiPlural(n, 'dataset provenance pinned ({0} asset)', 'dataset provenance pinned ({0} assets)') },
   },
   // Setup phase (task + data), made watchable: these appear live between run start and the first node.
   setup_started: { render: (d) => uiMessage("setting up task & data{0}…", [d.repo ? ' (repo)' : '']) },
@@ -371,7 +371,7 @@ export const NARR = {
   workspace_changed: { render: () => uiText('workspace changed since the last run — re-grounding') },
   budget: {
     validate: d => ownValue(d, 'nodes') && ownValue(d, 'elapsed_s'),
-    render: (d) => uiMessage(d.nodes === 1 ? "checkpoint — {0} node, {1}s elapsed" : "checkpoint — {0} nodes, {1}s elapsed", [d.nodes, fmt(d.elapsed_s, 3)]),
+    render: (d) => uiPlural(d.nodes, 'checkpoint — {0} node, {1}s elapsed', 'checkpoint — {0} nodes, {1}s elapsed', [d.nodes, fmt(d.elapsed_s, 3)]),
   },
   // Meaningful events that previously LEAKED as raw JSON (no narration + not hidden). Narrated here so
   // they read cleanly. The high-volume / internal read-model events (node_concepts and the rest of the
@@ -386,7 +386,7 @@ export const NARR = {
   },
   node_tombstoned: {
     validate: d => (Array.isArray(d?.node_ids) && d.node_ids.length > 0) || ownValue(d, 'node_id'),
-    render: (d) => { const ids = Array.isArray(d.node_ids) ? d.node_ids : (d.node_id != null ? [d.node_id] : []); return (ids.length ? uiMessage("deleted node{0} {1}", [ids.length === 1 ? '' : 's', ids.map(n => '#' + n).join(', ')]) : uiText('deleted a node subtree')) },
+    render: (d) => { const ids = Array.isArray(d.node_ids) ? d.node_ids : (d.node_id != null ? [d.node_id] : []); return (ids.length ? uiPlural(ids.length, 'deleted node {1}', 'deleted nodes {1}', [ids.length, ids.map(n => '#' + n).join(', ')]) : uiText('deleted a node subtree')) },
   },
   holdout_evaluated: {
     validate: d => ownValue(d, 'node_id') && ownValue(d, 'metric'),
@@ -435,7 +435,7 @@ export const NARR = {
   card_resource_pinned: {
     validate: d => typeof d?.id === 'string' && d.id.length > 0
       && ownValue(d, 'gpus'),
-    render: (d) => uiMessage("Card {0} resource override: {1} GPU{2}{3}", [d.id.slice(0, 80), d.gpus, d.gpus === 1 ? '' : 's', d.gpu_mem_mib != null ? ` · ${d.gpu_mem_mib} MiB/GPU` : '']),
+    render: (d) => uiPlural(d.gpus, 'Card {1} resource override: {0} GPU{2}', 'Card {1} resource override: {0} GPUs{2}', [d.gpus, d.id.slice(0, 80), d.gpu_mem_mib != null ? ` · ${d.gpu_mem_mib} MiB/GPU` : '']),
   },
   card_dropped: {
     validate: d => typeof d?.id === 'string' && d.id.length > 0,
@@ -460,7 +460,9 @@ export const NARR = {
   // Failure/audit + progress events whose SUCCESS or sibling twins are already narrated — hiding only the
   // failure/correction case was the wrong asymmetry, so surface them here too (found by the coverage audit).
   report_refresh_failed: { render: (d) => uiMessage("report refresh failed{0}", [note(d.reason || d.error || d.message)]) },
-  log_repaired: { render: (d) => uiMessage("event log repaired{0}", [d.dropped_lines != null ? ` — dropped ${d.dropped_lines} corrupt line${d.dropped_lines === 1 ? '' : 's'}, kept ${d.good_records ?? '?'}` : ' at divergence']) },
+  log_repaired: { render: (d) => (d.dropped_lines != null
+    ? uiPlural(d.dropped_lines, 'event log repaired — dropped {0} corrupt line, kept {1}', 'event log repaired — dropped {0} corrupt lines, kept {1}', [d.dropped_lines, d.good_records ?? '?'])
+    : uiText('event log repaired at divergence')) },
   stage_finished: {
     validate: d => ownAny(d, ['name', 'stage']),
     render: (d) => `stage ${d.name || d.stage || '?'} ${d.status === 'ok' || d.status === 'passed' || d.ok === true ? '✓' : (d.status || 'finished')}${d.node_id != null ? ` (#${d.node_id})` : ''}`,
@@ -562,7 +564,7 @@ export const isCuratedType = (type) => Object.hasOwn(NARR, type)
 export function eventNarration(event) {
   const omittedBytes = event?._log_page?.truncated ? Number(event._log_page.raw_bytes || 0) : 0
   if (event?._log_page?.truncated === true) {
-    return uiMessage("{0} — details omitted ({1} source bytes exceed page limit)", [event.type || 'event', omittedBytes.toLocaleString()])
+    return uiPlural(omittedBytes, '{0} — details omitted ({1} source bytes exceed page limit)', '{0} — details omitted ({1} source bytes exceed page limit)', [event.type || 'event', omittedBytes.toLocaleString()])
   }
   try {
     // Own-property read so an event type equal to an Object.prototype key ("toString", "constructor")

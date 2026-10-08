@@ -12,7 +12,7 @@ from collections.abc import Callable
 from contextlib import ExitStack, nullcontext
 from pathlib import Path
 from typing import TypeVar
-from looplab.core.jsonutil import valid_digest_ref
+from looplab.core.jsonutil import strict_json_loads, valid_digest_ref
 from looplab.engine.memory_stores import (
     curation_ledger_scopes, governance_ledger_files, governed_source_names)
 
@@ -58,20 +58,6 @@ class GovernanceLedgerUnavailable(RuntimeError):
         }
 
 
-def _reject_json_constant(_value: str):
-    raise ValueError("non-standard JSON constant")
-
-
-def _strict_json_object(pairs):
-    """Build an object only when every member name is unique, including nested objects."""
-    out = {}
-    for key, value in pairs:
-        if key in out:
-            raise ValueError("duplicate JSON object member")
-        out[key] = value
-    return out
-
-
 def read_governance_rows(
         path: Path, *, ledger: str,
         validate: Callable[[dict], str | None]) -> list[dict]:
@@ -102,11 +88,10 @@ def read_governance_rows(
             raise GovernanceLedgerUnavailable(ledger, "blank_row", line=line_number)
         try:
             text = payload.decode("utf-8", errors="strict")
-            row = json.loads(
-                text, parse_constant=_reject_json_constant,
-                object_pairs_hook=_strict_json_object,
-            )
-        except (UnicodeDecodeError, json.JSONDecodeError, ValueError, RecursionError) as exc:
+            # Unique member names at every depth, no non-finite constants, and a too-deep row a
+            # `ValueError` like the rest: `core/jsonutil.py::strict_json_loads`.
+            row = strict_json_loads(text)
+        except (UnicodeDecodeError, ValueError) as exc:
             raise GovernanceLedgerUnavailable(ledger, "malformed_json", line=line_number) from exc
         if not isinstance(row, dict):
             raise GovernanceLedgerUnavailable(ledger, "non_object", line=line_number)

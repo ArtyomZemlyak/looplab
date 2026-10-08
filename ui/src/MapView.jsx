@@ -1,4 +1,4 @@
-import { uiText, uiMessage, useUILanguage } from './uiLanguage.js'
+import { uiText, uiMessage, uiPlural, useUILanguage } from './uiLanguage.js'
 import React, { useEffect, useMemo, useRef } from 'react'
 import {
   ReactFlow, Background, Controls, Handle, MiniMap, Panel, Position, useReactFlow,
@@ -94,7 +94,7 @@ function ProjSuper({ data }) {
         <b className="grp-name"><OpIcon name="folder" className="t-ic" /> {data.name}</b>
         <span className="spacer" style={{ flex: 1 }} /><span className="grp-n">{data.count}</span>
       </div>
-      <div className="muted" style={{ marginTop: 3 }}>{data.runs}{uiText(" run")}{data.runs !== 1 ? 's' : ''}{uiText(" · expand to inspect")}</div>
+      <div className="muted" style={{ marginTop: 3 }}>{uiPlural(data.runs, '{0} run · expand to inspect', '{0} runs · expand to inspect')}</div>
     </SuperShell>
   )
 }
@@ -242,8 +242,8 @@ export default function MapView({ onOpen, runs = [], projects = [], collapsed = 
         <Controls showInteractive={false} />
         <MiniMap pannable zoomable className="run-minimap" nodeColor={node => node.type === 'run' ? 'var(--accent)' : 'var(--line-2)'} />
         <Panel position="top-left" className="map-summary">
-          <b>{runs.length}{uiText(" runs")}</b><span>{scopeLabel}</span>
-          <span>{runNodeCount}{uiText(" visible · ")}{collapsedIds.length}{uiText(" collapsed cluster")}{collapsedIds.length === 1 ? '' : 's'}</span>
+          <b>{uiPlural(runs.length, '{0} runs', '{0} runs')}</b><span>{scopeLabel}</span>
+          <span>{uiPlural(runNodeCount, '{0} visible · ', '{0} visible · ')}{uiPlural(collapsedIds.length, '{0} collapsed cluster', '{0} collapsed clusters')}</span>
           {collapsedIds.length > 0 && <button className="btn sm" onClick={() => collapsedIds.forEach(onToggle)}>{uiText("Expand clusters")}</button>}
         </Panel>
       </ReactFlow>

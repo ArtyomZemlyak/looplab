@@ -141,7 +141,8 @@ class TrackLane:
 def _run_job(engine, job: TrackJob, spec: dict, targets: list) -> None:
     """The worker: run the operator's argv for each target node; RETURNS values on `job`, appends
     nothing. `targets` is `[(node_id, generation, refusal)]`, decided on the main task's fold."""
-    from looplab.engine.artifact_sync import passthrough_env, render_argv, sync_cwd
+    from looplab.engine.artifact_sync import (append_tool_log, mask_tool_text, passthrough_env,
+                                              render_argv, sync_cwd)
     from looplab.runtime.sandbox import run_argv
     run_dir = Path(engine.run_dir)
     try:
@@ -160,7 +161,8 @@ def _run_job(engine, job: TrackJob, spec: dict, targets: list) -> None:
                 engine._wait_for_gpu_change(epoch)
         if job.cancel.is_set():
             return
-        base_env = passthrough_env(spec)
+        declared = passthrough_env(spec)
+        base_env = dict(declared)
         pool = list(getattr(engine, "_gpu_ids", None) or [])
         if held or pool:
             # Fenced to the devices this job holds — none at all for a `gpus: 0` track on a run with
@@ -179,16 +181,20 @@ def _run_job(engine, job: TrackJob, spec: dict, targets: list) -> None:
                 "workdir": str(workdir), "run_dir": str(run_dir), "run_id": run_dir.name,
                 "node_id": node_id, "generation": generation})
             try:
-                rc, out, err, timed = run_argv(argv, sync_cwd(workdir, run_dir, base_env), timeout,
-                                               env=dict(base_env), cancel=job.cancel,
-                                               log_path=str(run_dir / f"track_{job.track}.log"))
+                # The working directory the DECLARATION implies and the log written once, MASKED of
+                # the passthrough values and every known secret — the offline command's rules
+                # (`artifact_sync.py::sync_cwd`, `append_tool_log`).
+                rc, out, err, timed = run_argv(argv, sync_cwd(workdir, run_dir, spec), timeout,
+                                               env=dict(base_env), cancel=job.cancel)
+                append_tool_log(run_dir / f"track_{job.track}.log", argv, out, err, declared)
             except (OSError, ValueError) as exc:
-                job.failed[node_id] = f"could not run: {type(exc).__name__}: {exc}"[:_FAILED_DETAIL]
+                job.failed[node_id] = mask_tool_text(
+                    f"could not run: {type(exc).__name__}: {exc}", declared)[:_FAILED_DETAIL]
                 continue
             values = parse_track_output(out, keys=spec.get("keys"),
                                         prefix=str(spec.get("key_prefix") or ""))
             if rc != 0 or timed or not values:
-                tail = (err or "").strip().splitlines()[-1:] or [""]
+                tail = mask_tool_text((err or "").strip(), declared).splitlines()[-1:] or [""]
                 job.failed[node_id] = (f"exit {rc}{', timed out' if timed else ''}, "
                                        f"{len(values)} value(s): {tail[0]}")[:_FAILED_DETAIL]
                 continue

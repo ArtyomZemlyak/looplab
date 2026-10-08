@@ -27,6 +27,8 @@
 // treated as `declared`: on every preserved row where we can check, the truth was `auto`. Readers
 // group it WITH auto for trust and label it distinctly, so an operator can tell "the candidate
 // printed this" from "nobody wrote down where this came from".
+import { uiMessage, uiPlural, uiText } from './uiLanguage.js'
+
 export const EXTRA_METRIC_DECLARED = 'declared'
 export const EXTRA_METRIC_AUTO = 'auto'
 export const EXTRA_METRIC_ENGINE = 'engine'
@@ -113,12 +115,16 @@ export function unverifiedExtraMetricKeys(nodes, keys) {
 // backfill only, and an imported or tracked value was never in that log at all.
 export const EXTRA_METRIC_RECONSTRUCTED_LABEL = 'reconstructed'
 // One literal per SENTENCE, so each is a whole entry in the Russian catalogue rather than a fragment
-// cut at a line break.
-export const EXTRA_METRIC_RECONSTRUCTED_HELP = [
+// cut at a line break, and the help is translated sentence by sentence and joined AFTER
+// translation: `uiText` matches whole catalogue keys only, so the joined English never matched one
+// and a Russian reader got the whole tooltip in English.
+const RECONSTRUCTED_SENTENCES = [
   'Added to the record after the run, not recorded while the run was evaluating.',
   'It was recovered from the preserved score log, imported by the operator, or measured afterwards by an evaluation track; the record does not say which.',
   'Its precision may be coarser than the objective\'s, so two nodes equal here are not known to be equal.',
-].join(' ')
+]
+export const EXTRA_METRIC_RECONSTRUCTED_HELP = RECONSTRUCTED_SENTENCES.join(' ')
+const COARSER_PRECISION = RECONSTRUCTED_SENTENCES[2]
 
 // Absent means MEASURED, and that is the safe direction here — the opposite of the channel map's.
 // An absent channel means "nobody wrote down where this came from" and must not read as the
@@ -171,16 +177,20 @@ export function extraMetricImportSource(node, key) {
   return typeof found === 'string' && found ? found : null
 }
 
+// Returned in the UI language, each sentence translated on its own (see RECONSTRUCTED_SENTENCES).
+// A named import source replaces only the "how it was added" sentences: an imported value's
+// precision is no better known than a recovered one's, so the coarser-precision caveat stays.
 export function extraMetricSourceHelp(node, key) {
   const channel = extraMetricChannel(node, key)
-  if (!extraMetricKeyIsBackfilled(node, key)) return EXTRA_METRIC_CHANNEL_HELP[channel]
+  if (!extraMetricKeyIsBackfilled(node, key)) return uiText(EXTRA_METRIC_CHANNEL_HELP[channel])
   const decimals = extraMetricPrecision(node, key)
-  const precision = decimals == null ? '' : ` Printed to ${decimals} decimal place(s).`
   const source = extraMetricImportSource(node, key)
   const how = source
-    ? `Imported after the run (source: ${source}), not recorded while it was happening.`
-    : EXTRA_METRIC_RECONSTRUCTED_HELP
-  return `${EXTRA_METRIC_CHANNEL_HELP[channel]} ${how}${precision}`
+    ? [uiMessage('Imported after the run (source: {0}), not recorded while it was happening.', [source]),
+      uiText(COARSER_PRECISION)]
+    : RECONSTRUCTED_SENTENCES.map(sentence => uiText(sentence))
+  return [uiText(EXTRA_METRIC_CHANNEL_HELP[channel]), ...how,
+    ...(decimals == null ? [] : [uiPlural(decimals, 'Printed to {0} decimal place(s).', 'Printed to {0} decimal place(s).')])].join(' ')
 }
 
 // Does any of these nodes show a RECONSTRUCTED value under any of these keys? What a table's

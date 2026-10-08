@@ -17,6 +17,10 @@ export function decodeCatalogue(page) {
     || typeof data !== 'object' || page.count !== Object.keys(data).length
     || typeof data.Runs !== 'string' || typeof data.Settings !== 'string'
     || !Object.values(data).every(value => typeof value === 'string')) throw new Error('Invalid language catalogue')
+  // `plurals` (optional): English `other` text -> the CLDR forms `uiPlural` picks among.
+  const plurals = page.plurals ?? {}
+  if (!plurals || typeof plurals !== 'object' || Array.isArray(plurals)
+    || !Object.values(plurals).every(validPluralForms)) throw new Error('Invalid language catalogue')
   const patterns = Object.keys(data).filter(key => /\{\d+\}/.test(key)).map(key => {
     const pieces = key.split(/(\{\d+\})/), indices = []
     const literals = pieces.filter(piece => !/^\{\d+\}$/.test(piece))
@@ -29,7 +33,7 @@ export function decodeCatalogue(page) {
       && (literal.match(/\p{L}/gu) || []).length >= MIN_ANCHOR_LETTERS
     return { key, indices, literals, anchored, regex: new RegExp('^' + regex + '$') }
   })
-  return value => {
+  const translate = value => {
     const key = value.replace(/\s+/g, ' ').trim()
     let translated = Object.hasOwn(data, key) ? data[key] : undefined
     if (translated === undefined && !/[Ѐ-ӿ]/.test(key)) for (const pattern of patterns) {
@@ -49,4 +53,18 @@ export function decodeCatalogue(page) {
     }
     return translated === undefined ? value : value.replace(/\S[\s\S]*\S|\S/, () => translated)
   }
+  translate.plural = other => Object.hasOwn(plurals, other) ? plurals[other] : undefined
+  return translate
+}
+// The integer categories are required; `other` (fractions) is optional and `uiPlural` reads `few`.
+// `exact1` (optional) is ICU's `=1`: the text for exactly one, which `uiPlural` prefers over
+// `one`. CLDR `one` also covers 21, 31, 101…, so a `one` form must read right for 21 — the count
+// printed, no singular pronoun pointing back at the counted noun ("21 запись; итоги могут её
+// учитывать" is wrong). A sentence whose natural singular needs that pronoun, or that never prints
+// the count ("удалён узел #3"), says it in `exact1` and keeps `one` right for 21.
+export const PLURAL_FORMS = ['exact1', 'one', 'few', 'many', 'other']
+export function validPluralForms(forms) {
+  return !!forms && typeof forms === 'object' && !Array.isArray(forms)
+    && ['one', 'few', 'many'].every(name => typeof forms[name] === 'string' && forms[name].trim())
+    && Object.entries(forms).every(([name, form]) => PLURAL_FORMS.includes(name) && typeof form === 'string' && form.trim())
 }

@@ -1,4 +1,4 @@
-import { uiText, uiMessage, useUILanguage } from './uiLanguage.js'
+import { uiText, uiMessage, uiPlural, useUILanguage } from './uiLanguage.js'
 import React, { useId, useMemo, useState } from 'react'
 import Markdown, { stripMd } from './markdown.jsx'
 import { OpIcon } from './icons.jsx'
@@ -6,7 +6,6 @@ import { memoLead, memoLeadIsPartial, normalizeResearchMemo } from './researchMe
 import { safeExternalHref } from './urlSafety.js'
 import './research-memo.css'
 
-const plural = (count, one, many = `${one}s`) => `${count} ${count === 1 ? one : many}`
 
 function triggerLabel(trigger) {
   if (trigger === 'cadence') return 'scheduled'
@@ -122,13 +121,13 @@ function EvidenceDisclosure({ value, trust, onSelectNode, onSelectEvidence }) {
       <OpIcon name="chevron-down" size={12} className="research-disclosure-chevron" />
       <span className="research-disclosure-title"><OpIcon name="check" size={14} />{uiText(" Evidence & Verification")}</span>
       <span className="research-disclosure-meta">
-        {plural(rows.length, 'claim')} {(omitted > 0 ? uiMessage("· {0} omitted", [omitted]) : '')}
+        {uiPlural(rows.length, '{0} claim', '{0} claims')} {(omitted > 0 ? uiMessage("· {0} omitted", [omitted]) : '')}
       </span>
     </summary>
     {omitted > 0 && <p className="research-warning" role="note">
       {value.verification?.omittedVerdicts > 0
-        ? <>{uiText("Verification incomplete: showing ")}{verdicts.length}{uiText(" of ")}{value.verification.totalVerdicts}{uiText(" verifier verdicts.")}</>
-        : <>{uiText("Verification incomplete: ")}{omitted}{uiText(" claim row")}{((omitted === 1 ? uiText(' is') : uiText('s are')))}{uiText(" not shown.")}</>}
+        ? <>{uiPlural(value.verification.totalVerdicts, 'Verification incomplete: showing {0} of {1} verifier verdicts.', 'Verification incomplete: showing {0} of {1} verifier verdicts.', [verdicts.length, value.verification.totalVerdicts])}</>
+        : <>{uiPlural(omitted, 'Verification incomplete: {0} claim row is not shown.', 'Verification incomplete: {0} claim rows are not shown.')}</>}
     </p>}
     {value.claimsComplete === false && !value.claimsOmitted && <p className="research-warning" role="note">{uiText("Claim completeness could not be verified.")}</p>}
     {value.verification?.alignment?.complete === false && <p className="research-warning" role="note">{uiText("Claim-to-verifier alignment is incomplete. Supported labels are not treated as a complete check.")}</p>}
@@ -179,7 +178,7 @@ function SourceDisclosure({ sources }) {
     <summary>
       <OpIcon name="chevron-down" size={12} className="research-disclosure-chevron" />
       <span className="research-disclosure-title"><OpIcon name="gear" size={14} />{uiText(" Research activity & sources")}</span>
-      <span className="research-disclosure-meta">{plural(sources.length, 'step')}</span>
+      <span className="research-disclosure-meta">{uiPlural(sources.length, '{0} step', '{0} steps')}</span>
     </summary>
     <ol className="research-source-list">
       {sources.map((source, index) => {
@@ -216,13 +215,13 @@ export function ResearchMemoBody({ memo, onSteer, steeringDirection = '', onSele
       <div className="research-takeaway"><Markdown text={value.summary || uiText('No conclusion was recorded.')} externalOnly /></div>
     </section>}
     {value.findings.length > 0 && <section className="research-memo-block findings">
-      <SectionHeading icon="bulb" meta={plural(value.findings.length, 'finding')}>{uiText("Key findings")}</SectionHeading>
+      <SectionHeading icon="bulb" meta={uiPlural(value.findings.length, '{0} finding', '{0} findings')}>{uiText("Key findings")}</SectionHeading>
       <ul>{value.findings.map((finding, index) => <li key={index}><Markdown text={finding} externalOnly /></li>)}</ul>
     </section>}
     <EvidenceDisclosure value={value} trust={trust} onSelectNode={onSelectNode}
       onSelectEvidence={onSelectEvidence} />
     {value.recommended_directions.length > 0 && <section className="research-memo-block actions">
-      <SectionHeading icon="compass" meta={plural(value.recommended_directions.length, 'action')}>{uiText("Next actions")}</SectionHeading>
+      <SectionHeading icon="compass" meta={uiPlural(value.recommended_directions.length, '{0} action', '{0} actions')}>{uiText("Next actions")}</SectionHeading>
       {(steeringNote || onSteer) && <p className="research-action-note">{((steeringNote || uiText('Using a direction queues a hint for the next proposal. It does not start an experiment.')))}</p>}
       <ol className="research-direction-list">{value.recommended_directions.map((direction, index) => {
         const busy = steeringDirection === direction
@@ -285,7 +284,7 @@ export default function ResearchMemoCard({ memo, memoNumber = 1, open, onToggle,
             <OpIcon name="search" size={13} />{uiText(" Research memo #")}{memoNumber}
             {latest && <span className="pill">{uiText("latest")}</span>}
             {value.trigger && <span>{uiText(triggerLabel(value.trigger))}</span>}
-            {value.at_node != null && <span>{uiMessage(value.at_node === 1 ? "After {0} experiment" : "After {0} experiments", [value.at_node])}</span>}
+            {value.at_node != null && <span>{uiPlural(value.at_node, 'After {0} experiment', 'After {0} experiments')}</span>}
           </span>
           {/* Accordion headers show a lead; the static reading header goes straight to the research takeaway. */}
           {!staticOpen && <span className="research-memo-summary" title={value.summary || undefined}>
@@ -297,8 +296,8 @@ export default function ResearchMemoCard({ memo, memoNumber = 1, open, onToggle,
         <span className="research-memo-overview">
           <TrustBadge trust={trust} />
           {(value.claimsTotal || value.verification?.totalVerdicts) > 0
-            && <span>{plural(value.claimsTotal || value.verification?.totalVerdicts, 'claim')}</span>}
-          {value.sources.length > 0 && <span>{plural(value.sources.length, 'research step')}</span>}
+            && <span>{uiPlural(value.claimsTotal || value.verification?.totalVerdicts, '{0} claim', '{0} claims')}</span>}
+          {value.sources.length > 0 && <span>{uiPlural(value.sources.length, '{0} research step', '{0} research steps')}</span>}
         </span>
       </HeaderTag>
     </h3>

@@ -1,4 +1,4 @@
-import { uiText, uiMessage, useUILanguage } from './uiLanguage.js'
+import { uiText, uiMessage, uiPlural, useUILanguage } from './uiLanguage.js'
 import React, { useEffect, useId, useRef } from 'react'
 import Markdown from './markdown.jsx'
 import { fmt } from './util.js'
@@ -88,7 +88,7 @@ function ToolActivity({ items, live = false }) {
         {steps.map(step => step.label).join(' · ')}</span>
     </div>
   }
-  const summary = `${total} tool steps · ${steps[steps.length - 1].label}`
+  const summary = uiPlural(total, '{0} tool steps · {1}', '{0} tool steps · {1}', [total, steps[steps.length - 1].label])
   return <details className="asst-tool-disclosure">
     <summary className="asst-tool-toggle">
       <OpIcon name="gear" size={12} className="asst-tool-icon" />
@@ -96,7 +96,7 @@ function ToolActivity({ items, live = false }) {
       <OpIcon name="chevron-down" size={13} className="asst-tool-chevron" />
     </summary>
     <div className="asst-tool-body">
-      {limited && <p className="asst-tool-limit">{uiText("Showing the latest ")}{steps.length}{uiText(" of ")}{total}{uiText(" steps.")}</p>}
+      {limited && <p className="asst-tool-limit">{uiPlural(total, 'Showing the latest {0} of {1} steps.', 'Showing the latest {0} of {1} steps.', [steps.length, total])}</p>}
       {/* An explicit `value` per item, never a computed `start`: an unlabelled payload inside the
           window is skipped but still counted in `total`, so `total - shown + 1` was the right first
           ordinal only when every windowed item happened to carry a label. */}

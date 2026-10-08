@@ -899,6 +899,12 @@ def _normalize_artifact_fields(ctx: _ControlIntake) -> None:
             raise HTTPException(409, {"code": "inject_uses_not_produced",
                                       "message": f"uses: artifact #{nid} has not been produced yet; "
                                                  "inject its consumers once it is"})
+    # THE LIFECYCLE THAT WAS PRODUCED, SERVER-STAMPED (round 3). An inject is queued while stopped
+    # and built later; by then the artifact may have been reset, rebuilt or deleted, and the consumer
+    # used to read whatever bytes were there. The engine carries this onto `node_created` and the
+    # eval reads the artifact only in THIS lifecycle (`engine/eval_dispatch.py::produced_workdir`).
+    # Never caller-supplied: not in the request allow-list, so a client sending it is refused above.
+    data["uses_attempts"] = {str(nid): state.nodes[nid].attempt for nid in uses}
 
 
 def _import_cross_run_source(ctx: _ControlIntake) -> None:

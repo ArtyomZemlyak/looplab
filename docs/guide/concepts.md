@@ -782,25 +782,37 @@ a failed artifact is never metric-salvaged, and a rebuild (`node_reset` from imp
 Assistant creates either through its `inject_experiment` tool (`Settings.assistant_inject_tool`).
 A node built FROM a consumer (an improve, a merge, an ablation) inherits its parents' `uses`, so
 the copied code still finds its data. On a Docker tier each used workdir is bound read-only at its
-own path. The canary (`eval_canary`) is skipped for an artifact: it passes only on a metric.
+own path. The canary (`eval_canary`) runs for an artifact under the artifact's own rule: a clean
+exit on the slice passes, and a number it prints is ignored (`eval_canary.py::canary_passed`).
+
+A consumer reads its artifact in the LIFECYCLE it was accepted against. The command stamps each
+used artifact's lifecycle (`uses_attempts`, server-derived and refused from a caller), `node_created`
+carries it, and a node built from the consumer inherits it with `uses`. Before every launch the
+consumer's eval checks each pinned artifact through the same rule `LOOPLAB_PARENT_WORKDIRS` uses
+(`eval_dispatch.py::produced_workdir`): evaluated in exactly that lifecycle, not deleted, and its
+workdir's `.looplab-manifest` stamp intact. If one is not — the artifact was reset, rebuilt, deleted
+or its directory re-materialized after the inject was queued — the consumer ends
+`artifact_unavailable` without running, the error naming the artifact, its lifecycle and why. That
+is an engine terminal, not an evaluation failure: no triage or repair is bought for a candidate
+that is not at fault, and the owner alert shows it. A lifecycle never comes back, so the remedy is
+the operator's: rebuild the consumer (`node_reset` from implement re-pins it to each artifact as it
+is now) or inject a new one. A log written before the pin keeps the old existence-only rule.
 
 **The Researcher may propose them too**, under `Settings.researcher_artifacts` (off by default;
 `agents/artifact_ideas.py`). On, its emit schema shows `node_kind` and `uses` and its user turn
 lists the run's PRODUCED ARTIFACTS, so it can have an expensive preparation step done once and have
 later experiments read it. The two fields ride the idea (`Idea.node_kind`/`Idea.uses`, hidden from
 every other run's schema and omitted from every dump when empty); the fold makes such a node an
-artifact and keeps only `uses` ids that name artifact nodes.
+artifact and keeps only `uses` ids that name artifact nodes, each pinned to the producer's
+lifecycle when the node was created.
 
-**The consumer fence** (`engine/artifact_fence.py`). A consumer reads exactly the artifact it was
-admitted with, or does not run. While a producer is being produced again (an operator `node_reset`
-put it back to pending) its consumers WAIT — their evaluation is not dispatched until it settles. A
-producer that is gone, deleted, aborted or failed in its current lifecycle closes each pending
-consumer at zero cost with the benign engine terminal `artifact_unavailable`, before anything runs:
-the candidate would crash on a missing input and buy a repair no code edit can make.
-`LOOPLAB_USES_WORKDIRS` names only a producer evaluated in its current lifecycle whose workdir's
-manifest stamp is that lifecycle's code. A consumer's `node_evaluated.metric_provenance.uses` records,
-per producer, the `generation` and `code` it was measured on; when the champion's receipt no longer
-matches its producer's current lifecycle, the run carries the champion caveat `stale_artifact`.
+Two things sit beside the pin (`engine/artifact_fence.py`). A consumer pinned to a lifecycle its
+producer is STILL producing (a Researcher proposed the preparation and its consumer back to back)
+WAITS — it is not dispatched until the producer settles — instead of being refused for a lifecycle
+that can still be produced. And a consumer's `node_evaluated.metric_provenance.uses` records, per
+producer, the `generation` and `code` it was measured on; when the champion's receipt no longer
+matches its producer's current lifecycle (re-produced, failed or deleted SINCE), the run carries
+the champion caveat `stale_artifact`.
 
 ### Branching from a snapshot (fork-to-branch)
 

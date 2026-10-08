@@ -1,4 +1,4 @@
-import { uiText, uiMessage, useUILanguage } from './uiLanguage.js'
+import { uiText, uiMessage, uiPlural, useUILanguage } from './uiLanguage.js'
 import React from 'react'
 
 // Shared chrome for the "group" visual language used by BOTH the in-run canvas (Dag.jsx) and the
@@ -34,11 +34,11 @@ export function GroupRegion({
     ? `${matchedCount}/${count}${splitAcrossBands ? ' · split' : ''}`
     : splitAcrossBands ? `${count}/${totalCount} · split` : String(count)
   const bandDescription = splitAcrossBands
-    ? `${count} experiments in this topology band, ${totalCount} in this group across the graph`
-    : `${count} experiments`
+    ? uiPlural(count, '{0} experiments in this topology band, {1} in this group across the graph', '{0} experiments in this topology band, {1} in this group across the graph', [count, totalCount])
+    : uiPlural(count, '{0} experiments', '{0} experiments')
   const countDescription = filterActive
-    ? `${matchedCount} of ${count} experiments in this topology band match ${filterDescription}`
-      + (splitAcrossBands ? `; ${totalCount} experiments in this group across the graph` : '')
+    ? uiPlural(count, '{0} of {1} experiments in this topology band match {2}', '{0} of {1} experiments in this topology band match {2}', [matchedCount, count, filterDescription])
+      + (splitAcrossBands ? uiPlural(totalCount, '; {0} experiments in this group across the graph', '; {0} experiments in this group across the graph') : '')
     : bandDescription
   return (
     <div className={'grp-band' + (filterActive && matchedCount === 0 ? ' dim' : '')}

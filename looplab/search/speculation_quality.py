@@ -42,7 +42,6 @@ from __future__ import annotations
 
 import ast
 import hashlib
-import json
 import math
 import os
 import platform
@@ -53,7 +52,7 @@ from pathlib import Path
 from types import MappingProxyType
 from typing import Any
 
-from looplab.core.jsonutil import canonical_json, valid_digest_ref
+from looplab.core.jsonutil import canonical_json, strict_json_loads, valid_digest_ref
 from looplab.core.atomicio import strict_atomic_write_text
 from looplab.core.config import RUN_START_PINNED_FIELDS
 from looplab.core.fitness import VERIFIER_SELECTION_CONTRACT, finite_metric
@@ -434,35 +433,17 @@ _RECEIPT_FIELDS = frozenset({
 })
 
 
-class _DuplicateKey(ValueError):
-    pass
-
-
-def _object_without_duplicates(items: list[tuple[str, Any]]) -> dict[str, Any]:
-    out: dict[str, Any] = {}
-    for key, value in items:
-        if key in out:
-            raise _DuplicateKey(f"duplicate JSON key: {key}")
-        out[key] = value
-    return out
-
-
-def _reject_json_constant(value: str) -> None:
-    raise ValueError(f"non-finite JSON number: {value}")
-
-
 def _json_loads(data: bytes) -> Any:
     try:
         text = data.decode("utf-8")
     except UnicodeDecodeError as exc:
         raise ValueError("file is not UTF-8") from exc
+    # `core/jsonutil.py::strict_json_loads` words its refusals exactly as this module's private
+    # hook did ("duplicate JSON key: …", "non-finite JSON number: …", the RecursionError's own
+    # text), so an error string a receipt records is byte-identical.
     try:
-        return json.loads(
-            text,
-            object_pairs_hook=_object_without_duplicates,
-            parse_constant=_reject_json_constant,
-        )
-    except (json.JSONDecodeError, _DuplicateKey, ValueError, RecursionError) as exc:
+        return strict_json_loads(text)
+    except ValueError as exc:
         raise ValueError(f"invalid strict JSON: {exc}") from exc
 
 

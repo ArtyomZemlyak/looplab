@@ -1,4 +1,4 @@
-import { uiText, uiMessage, useUILanguage } from './uiLanguage.js'
+import { uiText, uiMessage, uiPlural, useUILanguage } from './uiLanguage.js'
 import React from 'react'
 import './baseRevision.css'
 import { nodeBase, capabilityOrigin } from './baseRevision.js'
@@ -20,7 +20,7 @@ export default function BaseRevision({ node, state, compact = false }) {
       {base.rebase?.status === 'rebased' && <p className="muted">{uiText("Overlay migrated from ")}{base.rebase.from_digest?.slice(0, 12)}{uiText(". Score was measured after migration.")}</p>}
       {base.rebase?.status !== 'conflict' && base.rebase?.absorbed_paths?.length > 0 && <p className="muted">{uiText("Shared implementation replaced exact inherited copies: ")}{base.rebase.absorbed_paths.join(', ')}{uiText(". Scientific recipe remains separate.")}</p>}
       <details><summary>{uiText("Recorded archive identity")}</summary><code className="base-digest">{base.digest}</code>
-        <p>{base.file_count}{uiText(" files · ")}{base.bytes}{uiText(" bytes · scorer boundary ")}{((base.scorer_boundary?.complete ? uiText('recorded') : uiText('unknown')))}</p></details>
+        <p>{uiPlural(base.file_count, '{0} files', '{0} files')}{' · '}{uiPlural(base.bytes, '{0} bytes', '{0} bytes')}{uiText(" · scorer boundary ")}{((base.scorer_boundary?.complete ? uiText('recorded') : uiText('unknown')))}</p></details>
     </>}
   </div>
 }

@@ -415,6 +415,39 @@ def _idea_uses(st: RunState, declared) -> list:
     return out[:32]
 
 
+def _use_pins(st: RunState, d: dict, parent_ids: list, uses: list, idea_uses=()) -> dict:
+    """`{str(artifact_id): generation}` — the producer lifecycle each of `uses` is pinned to (doc 73
+    §1.4, round 3). The row's own `uses_attempts` when it wrote `uses` (an inject, a rebuild), cut to
+    the ids it uses; otherwise the pins of the parents the `uses` were inherited from, first parent
+    first, so an improve / merge of a consumer reads the SAME lifecycle the consumer did. A row with
+    `uses` and no pins (every log before the key) folds to `{}`: the historical existence-only rule."""
+    wanted = {str(u) for u in uses}
+    if not wanted:
+        return {}
+    if isinstance(d.get("uses"), list):
+        raw = d.get("uses_attempts")
+        if not isinstance(raw, dict):
+            return {}
+        return {str(k): v for k, v in raw.items()
+                if str(k) in wanted and type(v) is int and v >= 0}
+    out: dict = {}
+    for pid in parent_ids:
+        parent = st.nodes.get(pid)
+        for k, v in (getattr(parent, "uses_attempts", None) or {}).items():
+            if k in wanted and k not in out:
+                out[k] = v
+    # A RESEARCHER-proposed `Idea.uses` (doc 73 §1.4, stage 3) is pinned to the producer lifecycle
+    # current when the node was CREATED — the one its Developer could read — so the pin's refusal
+    # covers it; `engine/artifact_fence.py::uses_waiting` holds it back while that lifecycle is still
+    # being produced. Only ids no parent pinned, and only on a row whose `uses` came from its idea.
+    for used in idea_uses:
+        k = str(used)
+        producer = st.nodes.get(used)
+        if k in wanted and k not in out and producer is not None:
+            out[k] = producer.attempt
+    return out
+
+
 def _on_node_created(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
     # Don't let a duplicate node_created RESURRECT a settled node (invariant #2 "first terminal
     # wins"): if the id already exists AND is in a TERMINAL state (evaluated/failed), skip the event.
@@ -488,6 +521,10 @@ def _on_node_created(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
     try:
         receipt = _simplification_receipt(d, parent_ids, st)
         idea = Idea(**d["idea"])
+        declared = [] if isinstance(d.get("uses"), list) else _idea_uses(st, idea.uses)
+        uses = ([x for x in d["uses"][:32] if type(x) is int and x >= 0]
+                if isinstance(d.get("uses"), list)
+                else (declared or _inherited_uses(st, parent_ids)))
         n = Node(
             id=nid,
             parent_ids=parent_ids,
@@ -514,9 +551,8 @@ def _on_node_created(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
             # on its idea (doc 73 §1.4, stage 3) — absent on every other idea, so nothing changes.
             kind=("artifact" if d.get("node_kind") == "artifact" or idea.node_kind == "artifact"
                   else None),
-            uses=([x for x in d["uses"][:32] if type(x) is int and x >= 0]
-                  if isinstance(d.get("uses"), list)
-                  else (_idea_uses(st, idea.uses) or _inherited_uses(st, parent_ids))),
+            uses=uses,
+            uses_attempts=_use_pins(st, d, parent_ids, uses, declared),
             research_origin=d.get("research_origin"),   # 💡 proposed just after a deep-research memo
             model_arm=str(d.get("model_arm") or "")[:64],  # doc 52 row 19: the routed model arm
             # doc 67 67.5: the node's parent with one block commented out, or None — and the cut it

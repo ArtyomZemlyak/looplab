@@ -131,5 +131,45 @@ def test_without_credentials_the_copy_runs_from_the_workdir(tmp_path):
     """critic 2026-10-08, second round (driven): always-run-dir broke every workdir-relative command
     (`rsync -a ./ dest` copied the whole run dir, events.jsonl included)."""
     from looplab.engine.artifact_sync import sync_cwd
-    assert sync_cwd("/r/nodes/node_1", "/r", {}) == "/r/nodes/node_1"
-    assert sync_cwd("/r/nodes/node_1", "/r", {"AWS_SECRET_ACCESS_KEY": "x"}) == "/r"
+    assert sync_cwd("/r/nodes/node_1", "/r", {"command": ["x"]}) == "/r/nodes/node_1"
+    assert sync_cwd("/r/nodes/node_1", "/r", {"command": ["x"], "env_passthrough": []}) == (
+        "/r/nodes/node_1")
+    assert sync_cwd("/r/nodes/node_1", "/r", {"env_passthrough": ["AWS_SECRET_ACCESS_KEY"]}) == "/r"
+
+
+def test_the_cwd_follows_the_declaration_not_the_host_environment(tmp_path, monkeypatch):
+    """Round 3 (driven): the cwd was keyed on which declared names THIS host's environment held, so
+    one task ran from the run dir on a box with the key and from the workdir on one without — and a
+    relative argv broke on one of them. A declared passthrough runs from the run dir everywhere."""
+    monkeypatch.delenv("AWS_SECRET_ACCESS_KEY", raising=False)
+    engine = make_engine(tmp_path / "run")
+    (tmp_path / "run" / "nodes" / "node_0").mkdir(parents=True)
+    where = "import os, sys; sys.exit(0 if os.path.basename(os.getcwd()) == 'run' else 5)"
+    engine._eval_spec = {"artifact_sync": {"command": [sys.executable, "-c", where],
+                                           "env_passthrough": ["AWS_SECRET_ACCESS_KEY"]}}
+    artifact_sync.start_artifact_sync(engine, 0, 0)
+    assert artifact_sync.wait_for_inflight(30)
+    rows = [e.data for e in engine.store.read_all() if e.type == "artifact_synced"]
+    assert rows[-1]["exit_code"] == 0, "the key is absent here, and the copy still runs from the run dir"
+
+
+_ECHO = ("import os, sys; v = os.environ.get('MC_HOST_minio', ''); print('host ' + v); "
+         "sys.stderr.write('error: ' + v + '\\n'); sys.exit(1)")
+
+
+def test_a_tool_that_echoes_a_passthrough_secret_leaves_it_in_no_file(tmp_path, monkeypatch):
+    """Round 3 (driven): `run_argv(log_path=…)` mirrored the tool's raw bytes into
+    `artifact_sync.log`, which later evals may read, and a name that is not secret-SHAPED
+    (`MC_HOST_minio`) escaped the receipt's env screen too. Masked by identity at the write."""
+    secret = "https://minioadmin:Zq8vR2kLp0sWx7Tn@minio.local:9000"
+    monkeypatch.setenv("MC_HOST_minio", secret)
+    engine = make_engine(tmp_path / "run")
+    (tmp_path / "run" / "nodes" / "node_0").mkdir(parents=True)
+    engine._eval_spec = {"artifact_sync": {"command": [sys.executable, "-c", _ECHO],
+                                           "env_passthrough": ["MC_HOST_minio"]}}
+    artifact_sync.start_artifact_sync(engine, 0, 0)
+    assert artifact_sync.wait_for_inflight(30)
+    log = (tmp_path / "run" / "artifact_sync.log").read_text()
+    assert "host ***REDACTED_ENV***" in log and "error: ***REDACTED_ENV***" in log, log
+    assert "Zq8vR2kLp0sWx7Tn" not in log
+    assert "Zq8vR2kLp0sWx7Tn" not in (tmp_path / "run" / "events.jsonl").read_text()

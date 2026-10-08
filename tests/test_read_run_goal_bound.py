@@ -59,7 +59,7 @@ def test_an_offset_that_names_no_page_is_refused_not_answered_with_page_zero(tmp
     tools = MachineRunsTools(tmp_path)
     second = tools.execute("read_run", {"run_id": "demo", "full_goal": True, "goal_offset": 3200})
     # A provider sending the number as a string or a float reads the SAME page.
-    for spelled in ("3200", 3200.0):
+    for spelled in ("3200", 3200.0, "3200.0"):
         assert tools.execute("read_run", {"run_id": "demo", "full_goal": True,
                                           "goal_offset": spelled}) == second
     for bad in (-5, len(goal), 10**9, "x", 3200.5):

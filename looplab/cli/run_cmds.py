@@ -156,6 +156,50 @@ def _run_engine_guarded(eng: Engine, *, mlflow_uri: str = ""):
             _retire()
 
 
+# The `pause` reason an operator's Ctrl-C records (`_record_interrupt_pause`). Free text, like
+# `looplab stop`'s: `RunState.pause_reason` carries it and nothing decides on it.
+INTERRUPT_PAUSE_REASON = "operator interrupt (Ctrl-C in `looplab run`/`looplab resume`)"
+
+
+def _record_interrupt_pause(eng) -> bool:
+    """Record an operator's Ctrl-C as the durable pause `looplab stop` writes. True when appended.
+
+    WHY. A run whose engine died is resumed by `LOOPLAB_UI_AUTO_RESUME=1` on the next server start
+    (`serve/engine_proc.py::_request_auto_resume`), and before this a Ctrl-C in `looplab run` /
+    `looplab resume` left a log indistinguishable from a crash: the run the operator stopped was
+    restarted — and spent — by the next server start. Auto-resume already leaves every HALTED run
+    alone, so the interrupt now says what it was in the one vocabulary every reader shares: the same
+    `pause` control intent `looplab stop` appends (invariant 1: the CLI appends control intents), with
+    its own `reason`. `looplab resume` lifts it exactly as it lifts a stop.
+
+    SIGINT ONLY, by construction: this runs on `KeyboardInterrupt`, and no LoopLab process installs a
+    SIGTERM handler, so the SIGTERM a container restart (or the server's engine reaper) sends kills
+    the process with no Python frame run — and that is the crash auto-resume exists for. Called AFTER
+    `anyio.run` has returned, i.e. once the engine loop has stopped. BEST EFFORT: the CAS is on the
+    rows the halted check read, so a run that is already paused, finished or finalizing gets nothing
+    and two calls never write two rows; any failure answers False and the caller re-raises the
+    interrupt unchanged — a run left unpaused is only the behaviour before this existed."""
+    store = getattr(eng, "store", None)
+    if store is None:
+        return False
+    try:
+        for _attempt in range(4):
+            events = store.read_all()
+            if not events or fold(events).halted:
+                return False
+            try:
+                store.append(EV_PAUSE, {"reason": INTERRUPT_PAUSE_REASON},
+                             expected_last_seq=events[-1].seq)
+            except EventStoreConcurrencyError:
+                continue        # a row landed since the read: re-decide on the new tail
+            typer.echo(f"interrupted: {getattr(eng, 'run_dir', 'the run')} is paused (not finalized) "
+                       "— `looplab resume` to continue, `looplab finalize` to wrap it up", err=True)
+            return True
+    except Exception:  # noqa: BLE001 — best effort: the Ctrl-C surfaces unchanged; unpaused is the pre-fix state
+        return False
+    return False
+
+
 def _drive_engine_to_terminal(eng: Engine):
     """The guarded drive itself. Split out only so `_run_engine_guarded` can wrap it in the
     trace-lifetime `finally` above without re-indenting the terminal-recovery body."""
@@ -163,6 +207,12 @@ def _drive_engine_to_terminal(eng: Engine):
     started = time.time()
     try:
         return anyio.run(eng.run)
+    except KeyboardInterrupt:
+        # An operator's Ctrl-C is a STOP, not a crash: recorded as the durable pause so
+        # `LOOPLAB_UI_AUTO_RESUME` does not restart it (`_record_interrupt_pause`). The engine loop
+        # has stopped by now (`anyio.run` returned); the interrupt itself is re-raised untouched.
+        _record_interrupt_pause(eng)
+        raise
     except RunStartPinError:
         # A refused re-entry (stale speculation evidence, or a resume spelling a width other than the
         # one run_started pinned) deliberately leaves the untrusted/stale run prefix untouched.  The

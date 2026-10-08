@@ -933,7 +933,8 @@ def test_a_truncated_log_says_so_on_every_commit(tmp_path):
 def _seeded_recipe(store, nid, digest, *, generation=0, parents=()):
     _node(store, nid, list(parents), files={"recipe.env": "MOMENTUM=0.3\n"}, generation=generation)
     base = {"version": 1, "scope": "seeded_editables_before_mounts_and_overlay", "complete": True,
-            "digest": digest, "file_count": 3, "bytes": 120}
+            "digest": digest, "file_count": 3, "bytes": 120,
+            "archive": {"version": 1, "status": "stored", "path": f"base_snapshots/{digest}"}}
     seed = store.append("workspace_seeded", {"node_id": nid, "generation": generation, "base_revision": base})
     return {**base, "node_id": nid, "generation": generation, "seed_event_seq": seed.seq}
 
@@ -1101,6 +1102,63 @@ def test_unbound_base_receipts_are_unavailable_in_the_git_projection(tmp_path, d
     stream = git_export.fast_import_stream(events, fold(events)).stream
     assert b"Looplab-Base-Reference: unavailable\n" in stream
     assert b"content-not-exported" not in stream
+
+
+@pytest.mark.parametrize("defect", [None, "archive_unavailable", "archive_path", "no_archive",
+                                    "seed_archive_unavailable", "seed_generation", "bytes_past_json_safe"])
+def test_git_projection_names_a_base_exactly_when_the_seed_files_route_and_upstream_lane_bind_it(
+        tmp_path, defect):
+    """ONE binder (`core/seed_receipt.py::bind_seed_receipt`): the git trailer used to re-check the
+    receipt by hand and skipped the archive's `stored` status and canonical path, so it printed
+    `sha256=…` for a receipt the `/seed-files` route and the upstream lane both refuse."""
+    from looplab.core.errors import UpstreamRefusal
+    from looplab.engine.upstream_state import _source_receipt
+    from looplab.events.replay import fold
+    from looplab.serve.seed_files import SeedFilesUnavailable, seed_files
+    rd, store = _store(tmp_path)
+    _started(store)
+    _node(store, 0, [], files={"recipe.env": "MOMENTUM=0.3\n"})
+    digest = "a" * 64
+    base = {"version": 1, "scope": "seeded_editables_before_mounts_and_overlay", "complete": True,
+            "digest": digest, "file_count": 3, "bytes": 120,
+            "archive": {"version": 1, "status": "stored", "path": f"base_snapshots/{digest}"}}
+    seeded = json.loads(json.dumps(base))
+    if defect == "seed_archive_unavailable":
+        seeded["archive"]["status"] = "unavailable"
+    elif defect == "bytes_past_json_safe":
+        # Both sides agree, so only the receipt half's JSON-safe bound (`node_comparison`'s) refuses.
+        base["bytes"] = seeded["bytes"] = 2 ** 53
+    seed = store.append("workspace_seeded", {"node_id": 0, "generation": 1 if defect == "seed_generation" else 0,
+                                             "base_revision": seeded})
+    receipt = {**json.loads(json.dumps(base)), "node_id": 0, "generation": 0, "seed_event_seq": seed.seq}
+    if defect == "archive_unavailable":
+        receipt["archive"]["status"] = "unavailable"
+    elif defect == "archive_path":
+        receipt["archive"]["path"] = "base_snapshots/" + "b" * 64
+    elif defect == "no_archive":
+        receipt.pop("archive")
+    _evaluated(store, 0, 0.5, task_metric=0.5, metric_provenance={"base_revision": receipt})
+    events = store.read_all()
+    state = fold(events)
+    stream = git_export.fast_import_stream(events, state).stream
+    node = state.nodes[0]
+    try:
+        _source_receipt(node, {e.seq: e for e in events})
+        upstream_bound = True
+    except UpstreamRefusal:
+        upstream_bound = False
+    try:
+        seed_files(rd, node, events)
+        route_bound = True
+    except SeedFilesUnavailable as exc:
+        # Only the archive's bytes are absent in this log-only fixture: a receipt the route BINDS
+        # gets past both binding refusals to the on-disk verification, which is not this question.
+        route_bound = "missing, changed or unreadable" in str(exc)
+    named = b"content-not-exported" in stream
+    assert named is route_bound is upstream_bound is (defect is None), (defect, named, route_bound,
+                                                                         upstream_bound)
+    if defect is None:
+        assert f"Looplab-Base-Reference: sha256={digest}; seed-event={seed.seq}".encode() in stream
 
 
 def test_reset_and_damaged_prefix_do_not_borrow_current_base_evidence(tmp_path):

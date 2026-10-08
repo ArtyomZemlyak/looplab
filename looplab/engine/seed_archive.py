@@ -10,15 +10,16 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
-import re
 import stat
 import tempfile
 
 from looplab.core.atomicio import (durable_no_replace_rename, rmtree_readonly_aware,
                                   strict_atomic_write_bytes, strict_fsync, strict_fsync_parent)
 from looplab.core.pathsafe import contained_member, is_reparse, resolve_settled
-
-ARCHIVE_DIR = "base_snapshots"
+# The receipt's IDENTITY rule is pure and moved to `core/seed_receipt.py` so `events/git_export.py`
+# can bind a receipt by the same rule the route and the upstream lane use; re-exported here as the
+# SAME objects, so `from looplab.engine.seed_archive import seed_archive_digest` keeps working.
+from looplab.core.seed_receipt import ARCHIVE_DIR, seed_archive_digest  # noqa: F401
 
 
 def _destination_exists(exc):
@@ -33,24 +34,6 @@ def _matches(path, receipt, *, on_file=None):
     observed = seeded_base_revision(path, on_file=on_file)
     return observed["complete"] and all(observed[k] == receipt.get(k)
                                         for k in ("version", "scope", "digest", "file_count", "bytes"))
-
-
-def seed_archive_digest(receipt) -> str | None:
-    """The recorded archive's canonical identity, or None for an unusable reference."""
-    if not isinstance(receipt, dict) or receipt.get("complete") is not True:
-        return None
-    if (type(receipt.get("version")) is not int or receipt["version"] != 1
-            or receipt.get("scope") != "seeded_editables_before_mounts_and_overlay"
-            or any(type(receipt.get(k)) is not int or receipt[k] < 0 for k in ("file_count", "bytes"))):
-        return None
-    digest, archive = receipt.get("digest"), receipt.get("archive")
-    if (not isinstance(digest, str) or re.fullmatch(r"[0-9a-f]{64}", digest) is None
-            or not isinstance(archive, dict) or type(archive.get("version")) is not int
-            or archive["version"] != 1
-            or archive.get("status") != "stored"
-            or archive.get("path") != f"{ARCHIVE_DIR}/{digest}"):
-        return None
-    return digest
 
 
 def verified_seed_archive(run_dir, receipt, *, on_file=None) -> Path | None:

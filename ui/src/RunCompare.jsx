@@ -1,4 +1,4 @@
-import { uiText, uiMessage, useUILanguage } from './uiLanguage.js'
+import { uiText, uiMessage, uiPlural, useUILanguage } from './uiLanguage.js'
 import React, { useEffect, useLayoutEffect, useRef, useState } from 'react'
 import { distinctMetricFormatter, get, fmt, fmtAgo, fmtCost, fmtElapsedSeconds, normalizeRunGeneration, runApiPath } from './util.js'
 import { effectiveRunStatus, metricIncomparabilityText } from './runIndex.js'
@@ -244,9 +244,12 @@ export default function RunCompare({
             : `Comparison captured ${snapshotTime}.`
   const rankingReceipt = ranking.status === 'ranked'
     ? ranking.bestRunIds.length > 1
-      ? ` ${ranking.bestRunIds.length} runs tied for best ${ranking.phase === 'confirmed'
-        ? 'confirmed mean' : 'raw metric'} in this capture: ${formatMetric(ranking.bestValue)}.`
-      : ` Best ${ranking.phase === 'confirmed' ? 'confirmed mean' : 'raw metric'} in this capture: ${formatMetric(ranking.bestValue)}.`
+      ? (ranking.phase === 'confirmed'
+        ? uiPlural(ranking.bestRunIds.length, ' {0} runs tied for best confirmed mean in this capture: {1}.', ' {0} runs tied for best confirmed mean in this capture: {1}.', [ranking.bestRunIds.length, formatMetric(ranking.bestValue)])
+        : uiPlural(ranking.bestRunIds.length, ' {0} runs tied for best raw metric in this capture: {1}.', ' {0} runs tied for best raw metric in this capture: {1}.', [ranking.bestRunIds.length, formatMetric(ranking.bestValue)]))
+      : (ranking.phase === 'confirmed'
+        ? uiMessage(' Best confirmed mean in this capture: {0}.', [formatMetric(ranking.bestValue)])
+        : uiMessage(' Best raw metric in this capture: {0}.', [formatMetric(ranking.bestValue)]))
     : ''
   const rankingWarning = ranking.status === 'incompatible'
     ? `Metrics are shown but not ranked; ${metricIncomparabilityText(ranking.reason)
@@ -293,7 +296,7 @@ export default function RunCompare({
     <div className="compare-head">
       <div>
         <h2 ref={headingRef} id="run-compare-title" tabIndex={-1}>{uiText("Run comparison")}</h2>
-        <p>{runs.length}{uiText(" runs · The Run column stays pinned; choose the evidence columns you need.")}</p>
+        <p>{uiPlural(runs.length, '{0} runs · The Run column stays pinned; choose the evidence columns you need.', '{0} runs · The Run column stays pinned; choose the evidence columns you need.')}</p>
       </div>
       <details ref={columnsDetailsRef} className="compare-columns" onKeyDown={event => {
         if (event.key !== 'Escape' || !event.currentTarget.open) return
@@ -377,7 +380,7 @@ export default function RunCompare({
               <tbody>{config.rows.map(row => <tr key={row.key}><th scope="row">{row.key}</th>
                 {row.values.map((value, index) => <td key={snapshotRuns[index].run_id}>{value}</td>)}</tr>)}</tbody>
             </table>
-            {config.total > config.rows.length && <p className="muted">{uiText("Showing the first ")}{config.rows.length}{uiText(" of ")}{config.total}{uiText(" differing settings.")}</p>}
+            {config.total > config.rows.length && <p className="muted">{uiPlural(config.total, 'Showing the first {0} of {1} differing settings.', 'Showing the first {0} of {1} differing settings.', [config.rows.length, config.total])}</p>}
           </div>
         : <p className="muted">{((snapshotStatus === 'loading' ? uiText('Loading configuration capture…') : uiText('No verified configuration differences are available for this capture.')))}</p>}
     </details>

@@ -1,4 +1,4 @@
-import { uiText, uiMessage } from './uiLanguage.js'
+import { uiText, uiMessage, uiPlural } from './uiLanguage.js'
 // Pure projection: splice EVERY in-flight build (`node_building` marker) into `state.nodes` as a
 // synthetic `status:'building'` node, so the DAG / list / panels render each the INSTANT work starts on
 // it — before its node_created folds. Kept out of the real event-sourced node set on the backend (id
@@ -255,7 +255,7 @@ export function evalStageShortLabel(record) {
 // reviewable in one place and a phase the engine adds without a label here renders as null (the
 // caller's existing text) instead of as "undefined".
 const PHASE_TEXT = {
-  'build|propose': (r) => ((r.count && r.count > 1 ? uiMessage("Proposing {0} experiments…", [r.count]) : uiMessage("Proposing experiment{0}…", [r.nodeId != null ? ` #${r.nodeId}` : '']))),
+  'build|propose': (r) => ((r.count && r.count > 1 ? uiPlural(r.count, 'Proposing {0} experiments…', 'Proposing {0} experiments…') : uiMessage("Proposing experiment{0}…", [r.nodeId != null ? ` #${r.nodeId}` : '']))),
   'build|novelty': (r) => uiMessage("Checking experiment{0} is not a repeat…", [r.nodeId != null ? ` #${r.nodeId}` : '']),
   'build|reserve': (r) => uiMessage("Reserving experiment{0}…", [r.nodeId != null ? ` #${r.nodeId}` : '']),
   'build|implement': (r) => uiMessage("Writing code for experiment{0}…", [r.nodeId != null ? ` #${r.nodeId}` : '']),

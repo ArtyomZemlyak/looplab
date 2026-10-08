@@ -1,4 +1,4 @@
-import { uiText, uiMessage, useUILanguage } from './uiLanguage.js'
+import { uiText, uiMessage, uiPlural, useUILanguage } from './uiLanguage.js'
 import React, { useCallback, useEffect, useId, useLayoutEffect, useMemo, useRef, useState } from 'react'
 
 import { attentionHref } from './attentionModel.js'
@@ -60,11 +60,13 @@ function snapshotAge(value, now = Date.now()) {
   return `${Math.floor(elapsed / 86_400_000)}d ago`
 }
 
-const itemWord = count => count === 1 ? 'item' : 'items'
-
+// Every counted phrase here is built in the UI language (`uiPlural`: Russian has three integer
+// forms) and every sentence that embeds one is a `uiMessage`, because once a fragment is Russian
+// the catalogue's pattern half can no longer translate the English sentence around it.
 function actionCountCopy(count, still = false) {
-  if (count === 1) return `1 item${still ? ' still' : ''} needs action`
-  return `${count} items${still ? ' still' : ''} need action`
+  return still
+    ? uiPlural(count, '{0} item still needs action', '{0} items still need action')
+    : uiPlural(count, '{0} item needs action', '{0} items need action')
 }
 
 function visualCount(count, incomplete = false) {
@@ -280,9 +282,9 @@ export default function AttentionCenter() {
   const actionCountExact = feedAuthoritative && runActionCountKnown
   const actionPhrase = actionCountCopy(activeActionCount)
   const stillActionPhrase = actionCountCopy(activeActionCount, true)
-  const uncertainActionPhrase = activeActionCount === 1
-    ? '1 loaded or previously verified item may need action'
-    : `${activeActionCount} loaded or previously verified items may need action`
+  const uncertainActionPhrase = uiPlural(activeActionCount,
+    '{0} loaded or previously verified item may need action',
+    '{0} loaded or previously verified items may need action')
   const unreadComplete = feedAuthoritative && !truncated
   const unreadPaginationIncomplete = feedAuthoritative && truncated
 
@@ -310,7 +312,7 @@ export default function AttentionCenter() {
         }
       }
     }
-    if (fresh.length) setLiveMessage(`${fresh.length} new attention ${fresh.length === 1 ? 'item' : 'items'}.`)
+    if (fresh.length) setLiveMessage(uiPlural(fresh.length, '{0} new attention item.', '{0} new attention items.'))
   }, [initialized, currentItems, dismissedIds, runStale, permissionsStale, partial, setLiveMessage])
 
   const broadcastInvalidation = useCallback(value => {
@@ -389,14 +391,16 @@ export default function AttentionCenter() {
 
   const markAllRead = useCallback(async () => {
     if (!unreadCount) return
-    const loaded = unreadComplete ? '' : 'loaded '
     const unresolved = activeActionCount > 0
       ? actionCountExact
         ? ` ${stillActionPhrase}.`
-        : ` ${uncertainActionPhrase}. Current action total is unavailable.`
+        : ' ' + uiMessage('{0}. Current action total is unavailable.', [uncertainActionPhrase])
       : ''
     await persistIds('acknowledged', unreadItems.map(item => item.id),
-      `${unreadCount} ${loaded}${itemWord(unreadCount)} marked as read.${unresolved}`)
+      (unreadComplete
+        ? uiPlural(unreadCount, '{0} item marked as read.', '{0} items marked as read.')
+        : uiPlural(unreadCount, '{0} loaded item marked as read.', '{0} loaded items marked as read.'))
+      + unresolved)
   }, [activeActionCount, actionCountExact, persistIds, stillActionPhrase,
     uncertainActionPhrase, unreadComplete, unreadCount, unreadItems])
 
@@ -528,27 +532,28 @@ export default function AttentionCenter() {
   const notificationsEnabled = preferences.valid && preferences.state.enabled
   const enableBlocked = notificationBusy || !preferences.available
     || capability === 'unsupported' || capability === 'denied' || capability === 'locks-unavailable'
-  const unreadPhrase = unreadCount === 1 ? '1 unread item' : `${unreadCount} unread items`
+  const unreadPhrase = uiPlural(unreadCount, '{0} unread item', '{0} unread items')
   const loadedUnreadPhrase = unreadCount > 0
-    ? `${unreadCount} unread loaded ${itemWord(unreadCount)}` : 'unread count incomplete'
+    ? uiPlural(unreadCount, '{0} unread loaded item', '{0} unread loaded items') : 'unread count incomplete'
+  const uncertainActionAria = uiMessage('{0}; current action total is unavailable', [uncertainActionPhrase])
   const actionAria = actionCountExact
     ? (activeActionCount > 0 ? actionPhrase : 'no items need action')
     : activeActionCount > 0
-      ? `${uncertainActionPhrase}; current action total is unavailable`
+      ? uncertainActionAria
       : 'current action total is unavailable; no action cards are loaded'
   const unreadAria = unreadComplete
     ? (unreadCount > 0 ? unreadPhrase : 'no unread items')
     : unreadCount > 0
-      ? `at least ${unreadCount} loaded ${itemWord(unreadCount)} ${unreadCount === 1 ? 'is' : 'are'} unread`
+      ? uiPlural(unreadCount, 'at least {0} loaded item is unread', 'at least {0} loaded items are unread')
       : 'no unread items are loaded; unread count is incomplete'
   const countAria = `${uiText(actionAria)}; ${uiText(unreadAria)}`
   const triggerLabel = !initialized
     ? 'Open attention center. Checking for updates.'
     : feedVerified
-      ? `Open attention center, ${countAria}.`
+      ? uiMessage('Open attention center, {0}.', [countAria])
       : verified
-        ? `Open attention center. Current status unavailable. ${countAria}.`
-        : `Open attention center. Current status unavailable. No complete verified snapshot. ${countAria}.`
+        ? uiMessage('Open attention center. Current status unavailable. {0}.', [countAria])
+        : uiMessage('Open attention center. Current status unavailable. No complete verified snapshot. {0}.', [countAria])
   const badgeShowsActions = activeActionCount > 0
   const showBadge = badgeShowsActions || unreadCount > 0 || unreadPaginationIncomplete
   const badge = badgeShowsActions
@@ -570,10 +575,10 @@ export default function AttentionCenter() {
       ? 'Current status unavailable'
       : activeActionCount > 0
         ? unreadCount > 0
-          ? `${actionPhrase} · ${unreadComplete ? unreadPhrase : loadedUnreadPhrase}`
+          ? `${actionPhrase} · ${uiText(unreadComplete ? unreadPhrase : loadedUnreadPhrase)}`
           : unreadComplete
             ? stillActionPhrase
-            : `${stillActionPhrase} · unread count incomplete`
+            : uiMessage('{0} · unread count incomplete', [stillActionPhrase])
         : unreadCount > 0
           ? (unreadComplete ? unreadPhrase : loadedUnreadPhrase)
           : unreadComplete
@@ -583,10 +588,10 @@ export default function AttentionCenter() {
     ? 'Checking for items that need action…'
     : feedVerified
       ? activeActionCount > 0
-        ? `No action cards are shown yet, but ${actionPhrase} in total. Load older items to review them.`
+        ? uiMessage('No action cards are shown yet, but {0} in total. Load older items to review them.', [actionPhrase])
         : 'Nothing needs your action right now.'
       : activeActionCount > 0
-        ? `No action cards are shown; ${uncertainActionPhrase}. Retry to verify the current list.`
+        ? uiMessage('No action cards are shown; {0}. Retry to verify the current list.', [uncertainActionPhrase])
         : verified
           ? 'No action cards are shown. Current action status is unavailable; both sources were verified previously.'
           : `No action cards are shown. Current action status is unavailable. ${NO_COMPLETE_ATTENTION_SNAPSHOT}`
@@ -626,7 +631,9 @@ export default function AttentionCenter() {
             <p id={descriptionId}>{uiText(headerStatus)}</p>
           </div>
           {unreadCount > 0 && <button type="button" className="attention-header-action"
-            aria-label={uiMessage("{0} {1} {2} {3} as read{4}", [unreadComplete ? 'Mark all' : 'Mark', unreadCount, unreadComplete ? 'unread' : 'loaded unread', itemWord(unreadCount), activeActionCount > 0 ? `; ${actionCountExact ? stillActionPhrase : `${uncertainActionPhrase}; current action total is unavailable`}` : ''])}
+            aria-label={(unreadComplete
+              ? uiPlural(unreadCount, 'Mark all {0} unread item as read{1}', 'Mark all {0} unread items as read{1}', [unreadCount, activeActionCount > 0 ? `; ${actionCountExact ? stillActionPhrase : uncertainActionAria}` : ''])
+              : uiPlural(unreadCount, 'Mark {0} loaded unread item as read{1}', 'Mark {0} loaded unread items as read{1}', [unreadCount, activeActionCount > 0 ? `; ${actionCountExact ? stillActionPhrase : uncertainActionAria}` : '']))}
             onClick={markAllRead}>{((unreadComplete ? uiText('Mark all read') : uiText('Mark loaded read')))}</button>}
           <button type="button" className="attention-close" aria-label={uiText("Close attention center")}
             data-dialog-initial-focus onClick={close}><OpIcon name="cross" size={20} /></button>
@@ -702,7 +709,7 @@ export default function AttentionCenter() {
               <h3 ref={recentHeadingRef} id={`${titleId}-recent`} tabIndex={-1}>{uiText("Recent")}</h3>
               <span className="attention-section-count">
                 <span aria-hidden="true">{recentItems.length}{uiText(" loaded")}</span>
-                <span className="sr-only">{recentItems.length}{uiText(" recent ")}{itemWord(recentItems.length)}{uiText(" loaded")}</span>
+                <span className="sr-only">{uiPlural(recentItems.length, '{0} recent item loaded', '{0} recent items loaded')}</span>
               </span>
             </div>
             {recentItems.length

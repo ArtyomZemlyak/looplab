@@ -1,4 +1,4 @@
-import { uiText, uiMessage, useUILanguage } from './uiLanguage.js'
+import { uiText, uiMessage, uiPlural, useUILanguage } from './uiLanguage.js'
 import LanguageControl from './LanguageControl.jsx'
 import React, { useCallback, useEffect, useId, useRef, useState } from 'react'
 import { deadlineSharedAssistant, fmtDate } from './util.js'
@@ -181,8 +181,8 @@ export default function SharedAssistant({ sid }) {
     : refreshing
       ? 'Refreshing shared chat. Showing the last loaded transcript.'
       : resource.status === 'ready'
-        ? `Shared chat loaded. ${messageCount} ${messageCount === 1 ? 'message' : 'messages'}.${truncated
-          ? ' Some messages or details are not included because this transcript reached its safety limit.' : ''}`
+        ? uiPlural(messageCount, 'Shared chat loaded. {0} message.', 'Shared chat loaded. {0} messages.')
+          + (truncated ? ' ' + uiText('Some messages or details are not included because this transcript reached its safety limit.') : '')
         : ''
   return <main ref={mainRef} className="asst-view asst-shared" data-route-main tabIndex={-1}
     aria-labelledby={titleId} aria-describedby={statusId}>

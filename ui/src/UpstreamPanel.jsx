@@ -1,4 +1,4 @@
-import { uiText, uiMessage, useUILanguage } from './uiLanguage.js'
+import { uiText, uiMessage, uiPlural, useUILanguage } from './uiLanguage.js'
 import React from 'react'
 import './baseRevision.css'
 import { baseChoices } from './baseRevision.js'
@@ -42,7 +42,7 @@ export default function UpstreamPanel({ state, onClose }) {
     <p className="muted">{((ru ? 'Кнопка подготовит сообщение. Проверьте его и нажмите «Отправить» для обращения к модели; возможна оплата провайдеру.' : uiText('The button prepares a message. Review it and press Send to contact the model; provider charges may apply.')))}</p>
     {state.upstream_base && <p>{((ru ? 'Новая исходная база' : uiText('Updated starting base')))} <code title={state.upstream_base.selector?.digest}>{state.upstream_base.selector?.digest?.slice(0, 12)}</code> · {((ru ? 'из эксперимента' : uiText('from experiment')))} #{state.upstream_base.source_node_id}</p>}
     <p className="muted">{((ru ? 'Уже измеренные результаты сохраняют свой код. Новая база влияет на будущие эксперименты; для сравнения оценок нужны сопоставимые условия.' : uiText('Measured results keep their original code. A new base affects future experiments; comparing scores requires comparable conditions.')))}</p>
-    <div className="upstream-bases">{bases.map(row => <span className="pill" key={row.digest} title={row.digest}>{((row.digest === 'unknown' ? (ru ? 'База неизвестна' : uiText('Base unknown')) : row.digest.slice(0, 12)))} · {(ru ? `Экспериментов: ${row.count}` : uiMessage("{0} experiment{1}", [row.count, row.count === 1 ? '' : 's']))}</span>)}</div>
+    <div className="upstream-bases">{bases.map(row => <span className="pill" key={row.digest} title={row.digest}>{((row.digest === 'unknown' ? (ru ? 'База неизвестна' : uiText('Base unknown')) : row.digest.slice(0, 12)))} · {(ru ? `Экспериментов: ${row.count}` : uiPlural(row.count, '{0} experiment', '{0} experiments'))}</span>)}</div>
     {check && <p>{check.status === 'unfinished' ? (((ru ? 'Проверка не завершена — прочитайте прогресс; прерванную проверку нужно восстановить явно.' : uiText('Unfinished check — read progress; recover interrupted checks explicitly.'))))
       : check.status === 'abandoned' ? (((ru ? 'Проверка отменена — поздние результаты не разрешают обновить базу.' : uiText('Abandoned check — late results cannot authorize advancement.'))))
       : check.status === 'unknown' ? (((ru ? 'Доказательства проверки недоступны — прочитайте полную историю переноса.' : uiText('Check evidence unavailable — read complete upstream history.'))))

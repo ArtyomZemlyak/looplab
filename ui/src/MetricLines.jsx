@@ -1,4 +1,4 @@
-import { uiMessage } from './uiLanguage.js'
+import { uiMessage, uiPlural } from './uiLanguage.js'
 import { uiText, useUILanguage } from './uiLanguage.js'
 import React from 'react'
 import { fmt } from './util.js'
@@ -42,7 +42,7 @@ function MetricGroup({ name, tags, series, cols }) {
       <button type="button" className="metric-group-toggle" aria-expanded={open}
         aria-controls={groupId} onClick={() => setOpen(o => !o)}>
         <span style={{ opacity: 0.6, fontSize: 10, width: 10, display: 'inline-block' }}>{open ? '▾' : '▸'}</span>
-        {name} <span className="muted" style={{ fontWeight: 400 }}>· {tags.length}{uiText(" metric")}{tags.length === 1 ? '' : 's'}</span>
+        {name} <span className="muted" style={{ fontWeight: 400 }}>· {uiPlural(tags.length, '{0} metric', '{0} metrics')}</span>
       </button>
       {open && <div id={groupId} className="metric-group-grid"
         style={{ display: 'grid', gridTemplateColumns: `repeat(${cols}, minmax(0,1fr))`, gap: 10 }}>
@@ -80,8 +80,8 @@ export function MiniLine({ label, pts, width = 340, height = 130 }) {
   return (
     <div style={{ border: `1px solid ${GRID}`, borderRadius: 6, padding: 6, background: 'var(--bg-1)' }}>
       <ChartFrame title={uiText(label)}
-        description={uiMessage("{0} · {1} points{2}", [hp ? `Step ${hp.step}: ${fmt(hp.value)}` : `Latest ${fmt(last)}`, pts.length, plotted.length < pts.length
-          ? ` · plot: ${plotted.length} of ${pts.length} points, bucket extrema; exact data in table/CSV` : ''])}
+        description={uiPlural(pts.length, '{0} · {1} points{2}', '{0} · {1} points{2}', [hp ? uiMessage('Step {0}: {1}', [hp.step, fmt(hp.value)]) : uiMessage('Latest {0}', [fmt(last)]), pts.length, plotted.length < pts.length
+          ? uiPlural(pts.length, ' · plot: {0} of {1} points, bucket extrema; exact data in table/CSV', ' · plot: {0} of {1} points, bucket extrema; exact data in table/CSV', [plotted.length, pts.length]) : ''])}
         columns={columns} rows={pts} pageSize={100} csvName={csvName} className="metric-mini-chart">
       {({ labelledBy }) => <svg width="100%" viewBox={`0 0 ${w} ${h}`}
            role="img" aria-labelledby={labelledBy}

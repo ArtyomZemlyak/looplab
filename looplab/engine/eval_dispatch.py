@@ -53,6 +53,47 @@ _DECLARED_PINS_CAP = 400
 _MAX_NODE_DEP_SYNCS = 8
 
 
+def produced_workdir(state, run_dir, node_id: int, generation=None) -> tuple:
+    """`(abs workdir, "")` when node `node_id` is EVALUATED in lifecycle `generation` (its current
+    one when None) and its workdir still holds that lifecycle's files, else `(None, why)`.
+
+    THE ONE RULE for a node another node's eval reads from: a parent under `LOOPLAB_PARENT_WORKDIRS`
+    (critic 2026-10-08) and a pinned artifact under `LOOPLAB_USES_WORKDIRS` (round 3). "Holds that
+    lifecycle's files" is the workdir's `.looplab-manifest` stamp equal to the node's own
+    `workdir_manifest_digest`, which names the lifecycle — so a reset that re-materializes the
+    directory, or a failed lifecycle's half-written checkpoint, never reads as produced. `why` is one
+    of `missing` / `rebuilt` (the node is in another lifecycle) / `not_evaluated` / `workdir_missing`
+    / `workdir_changed`; a node's `tombstoned` flag is the CALLER's question (a parent's deletion
+    never changed what a child continues from)."""
+    from looplab.core.node_evidence import node_workdir
+    from looplab.engine.artifact_sync import workdir_stamp
+    from looplab.engine.evaluate import workdir_manifest_digest
+    node = state.nodes.get(node_id)
+    if node is None:
+        return None, "missing"
+    if generation is not None and node.attempt != generation:
+        return None, "rebuilt"
+    if node.status is not NodeStatus.evaluated:
+        return None, "not_evaluated"
+    try:
+        wd = node_workdir(run_dir, node_id)
+    except (OSError, TypeError, ValueError):
+        wd = None
+    if wd is None:
+        return None, "workdir_missing"
+    stamp = workdir_stamp(wd)
+    if stamp is None or stamp.decode("ascii", "replace").strip() != workdir_manifest_digest(node):
+        return None, "workdir_changed"
+    return str(wd.resolve()), ""
+
+
+def artifact_unavailable_text(refused) -> str:
+    """The `artifact_unavailable` terminal's `error`: each refused use, its pinned lifecycle and why."""
+    return "; ".join(
+        f"used artifact #{r['node_id']} is not available in lifecycle {r['generation']} "
+        f"({r['why']})" for r in refused)[:400]
+
+
 class _DeferredBudgetStop:
     """A task-group facade that DEFERS a background task's `BudgetExceeded` instead of letting it
     cancel that group's siblings -- used by `_dispatch_evals` for exactly one caller,
@@ -934,61 +975,64 @@ class EvalDispatchMixin:
         run_dir = getattr(self, "run_dir", None)
         if run_dir is None:
             return {}
-        from looplab.engine.artifact_sync import workdir_stamp
-        from looplab.engine.evaluate import workdir_manifest_digest
         # ONLY A PARENT EVALUATED IN ITS CURRENT LIFECYCLE whose workdir still holds that lifecycle's
         # files (critic 2026-10-08): a failed parent's half-written checkpoint, or a workdir being
         # re-materialized by a reset, is not what the child was built to continue from. One fold, and
-        # only for a task that asked for this variable.
+        # only for a task that asked for this variable. The rule is `produced_workdir`'s, which the
+        # used artifacts below share.
         state = fold(self.store.read_all())
         paths = []
         for pid in getattr(node, "parent_ids", None) or []:
             if isinstance(pid, bool) or not isinstance(pid, int):
                 continue
-            parent = state.nodes.get(pid)
-            if parent is None or parent.status is not NodeStatus.evaluated:
-                continue
-            wd = Path(run_dir) / "nodes" / f"node_{pid}"
-            if not wd.is_dir() or wd.is_symlink():
-                continue
-            stamp = workdir_stamp(wd)
-            if stamp is None or stamp.decode("ascii", "replace").strip() != workdir_manifest_digest(parent):
-                continue
-            paths.append(str(wd.resolve()))
+            wd, _why = produced_workdir(state, run_dir, pid)
+            if wd is not None:
+                paths.append(wd)
         return {self.PARENT_WORKDIRS_ENV: os.pathsep.join(paths)} if paths else {}
 
     USES_WORKDIRS_ENV = "LOOPLAB_USES_WORKDIRS"
 
-    def _uses_workdirs_env(self, node) -> dict:
-        """`{LOOPLAB_USES_WORKDIRS: <abs workdirs>}` for the artifact nodes `node.uses` names,
-        `os.pathsep`-joined in declaration order; `{}` for every other node.
+    def _resolve_uses(self, node, state=None) -> tuple[list, list]:
+        """`(paths, refused)` for the artifact nodes `node.uses` names, in declaration order.
 
-        THE CONSUMER FENCE's file half (`engine/artifact_fence.py`): only a producer evaluated in its
-        current lifecycle whose workdir's manifest stamp is that lifecycle's code — the rule
-        `_parent_workdirs_env` applies to a parent. A producer being re-materialized by a reset is
-        never handed to a candidate half-written; ADMIT already refused to start a consumer whose
-        producer is not READY on the fold, so a path missing here means the directory moved under
-        the fold, and the variable says so by omission rather than by a stale path."""
+        A use PINNED to a producer lifecycle (`Node.uses_attempts`, round 3) counts only through
+        `produced_workdir` — evaluated in exactly that lifecycle, not deleted, its workdir stamp
+        intact — and one that does not is REFUSED: `{"node_id", "generation", "why"}`, which the
+        caller turns into the consumer's `artifact_unavailable` terminal rather than an eval that
+        reads nothing, a half-rebuilt directory or another lifecycle's bytes. A use with NO pin
+        (every log before the key) keeps the historical rule: its workdir exists, else it is left
+        out. `state` is folded here only when some use is pinned, so an unpinned node pays nothing."""
         run_dir = getattr(self, "run_dir", None)
         uses = getattr(node, "uses", None) or []
         if run_dir is None or not uses:
-            return {}
-        from looplab.engine.artifact_fence import READY, uses_verdicts
-        from looplab.engine.artifact_sync import workdir_stamp
-        from looplab.engine.evaluate import workdir_manifest_digest
-        state = fold(self.store.read_all())
-        paths = []
-        for nid, verdict, _why in uses_verdicts(state, node):
-            if verdict != READY:
+            return [], []
+        pins = getattr(node, "uses_attempts", None) or {}
+        if pins and state is None:
+            state = fold(self.store.read_all())
+        paths, refused = [], []
+        for nid in uses:
+            if type(nid) is not int:
+                continue
+            pin = pins.get(str(nid))
+            if type(pin) is int:
+                producer = state.nodes.get(nid)
+                wd, why = (produced_workdir(state, run_dir, nid, generation=pin)
+                           if producer is not None and not producer.tombstoned
+                           else (None, "deleted"))
+                if wd is None:
+                    refused.append({"node_id": nid, "generation": pin, "why": why})
+                else:
+                    paths.append(wd)
                 continue
             wd = Path(run_dir) / "nodes" / f"node_{nid}"
-            if not wd.is_dir() or wd.is_symlink():
-                continue
-            stamp = workdir_stamp(wd)
-            if (stamp is None or stamp.decode("ascii", "replace").strip()
-                    != workdir_manifest_digest(state.nodes[nid])):
-                continue
-            paths.append(str(wd.resolve()))
+            if wd.is_dir() and not wd.is_symlink():
+                paths.append(str(wd.resolve()))
+        return paths, refused
+
+    def _uses_workdirs_env(self, node) -> dict:
+        """`{LOOPLAB_USES_WORKDIRS: <abs workdirs>}` for the artifact nodes `node.uses` names that
+        `_resolve_uses` admits, `os.pathsep`-joined in declaration order; `{}` for every other node."""
+        paths, _refused = self._resolve_uses(node)
         return {self.USES_WORKDIRS_ENV: os.pathsep.join(paths)} if paths else {}
 
     def _run_eval(self, node, workdir, env=None, profile=None, cancel=None, start_stage=_UNSET,
@@ -1035,7 +1079,16 @@ class EvalDispatchMixin:
         # …and the ARTIFACT nodes this node uses (doc 73 §1.4), unconditionally: `uses` exists only
         # on a node an operator injected naming them and on the nodes built from it, which inherit
         # it in the fold (`events/replay.py::_inherited_uses`), so nothing else carries it.
-        used = self._uses_workdirs_env(node)
+        _used_paths, _used_refused = self._resolve_uses(node)
+        if _used_refused:
+            # A pinned artifact moved between RUN_ATTEMPT's check
+            # (`EvaluateMixin._refuse_unusable_artifacts`) and here. Never launch without it:
+            # a plain failed result, nothing executed, like the protected-script preflight below.
+            from looplab.runtime import command_eval
+            return command_eval.RunResult(
+                exit_code=2, stdout="", metric=None, timed_out=False,
+                stderr=artifact_unavailable_text(_used_refused))
+        used = ({self.USES_WORKDIRS_ENV: os.pathsep.join(_used_paths)} if _used_paths else {})
         if used:
             env = {**(env or {}), **used}
         if canary is not None:
@@ -1412,20 +1465,11 @@ class EvalDispatchMixin:
         node_aborted = node_id in cur.aborted_nodes
         card_dropped = bool(
             n is not None and self._operator_card_dropped_for_node(cur, n))
-        # …and an ARTIFACT this node `uses` that can never be read (doc 73 §1.4,
-        # `engine/artifact_fence.py`): closed here, before anything runs, on every lane that asks
-        # this stop — the candidate would crash on a missing input and buy a repair for it.
-        unavailable = None
-        if n is not None and getattr(n, "uses", None) and not (node_aborted or card_dropped):
-            from looplab.engine.artifact_fence import uses_unavailable
-            unavailable = uses_unavailable(cur, n)
-        if node_aborted or card_dropped or unavailable:
+        if node_aborted or card_dropped:
             if n is not None and n.status is NodeStatus.pending:
                 from looplab.engine.evaluate import _durable_prior_seconds
-                reason = ("aborted" if node_aborted else "card_dropped" if card_dropped
-                          else "artifact_unavailable")
-                error = ("aborted by operator" if node_aborted else "Card dropped by operator"
-                         if card_dropped else f"an artifact this node uses is unavailable: {unavailable}")
+                reason = "aborted" if node_aborted else "card_dropped"
+                error = "aborted by operator" if node_aborted else "Card dropped by operator"
                 self.store.append(EV_NODE_FAILED, {
                     "node_id": node_id, "generation": n.attempt,
                     "error": error, "reason": reason,

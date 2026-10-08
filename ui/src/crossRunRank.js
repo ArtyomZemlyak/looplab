@@ -1,4 +1,4 @@
-import { uiMessage } from './uiLanguage.js'
+import { uiMessage, uiPlural, uiText } from './uiLanguage.js'
 // Pure model for the CROSS-RUN metric overlay — the `Same-task run observations` panel's decisions.
 // No React, no I/O; unit-tested with `node --test` (`ui/test/crossRunRank.test.js`).
 //
@@ -484,40 +484,48 @@ function buildGroup(bucket, limit, { refusal = '' } = {}) {
 export function groupClaim(group) {
   if (!group) return null
   const objective = group.direction === 'min' ? 'lowest' : 'highest'
-  const scope = `${group.size} run${group.size === 1 ? '' : 's'} of task ${group.taskId}`
+  const scope = uiPlural(group.size, '{0} run of task {1}', '{0} runs of task {1}', [group.size, group.taskId])
   // A REFUSED group is worded from its own refusal: the sentence it replaced blamed "a split by
   // source tree or protocol" on a group nothing of the kind had split — its runs refused by keys,
   // or by task ids a trim made one (critic 2026-09-26).
   const claim = group.outcome === 'refused'
     ? `None of these ${group.size} runs of ${group.taskId} holds a rank: ${refusalClause(group)}. `
       + 'Each value is shown and is true of its own measurement; no ordering between them is.'
+    // Every other claim is said in the UI language, one key per count-dependent sentence
+    // (`uiPlural`) and one per objective word, so no English fragment is glued into Russian copy.
     : group.outcome === 'none'
-    ? `No run of ${group.taskId} can hold a rank: every one of these ${group.size} has an incomplete `
-      + 'event log, so each value describes a readable prefix.'
+    ? uiPlural(group.size, 'No run of {1} can hold a rank: every one of these {0} has an incomplete event log, so each value describes a readable prefix.',
+      'No run of {1} can hold a rank: every one of these {0} has an incomplete event log, so each value describes a readable prefix.',
+      [group.size, group.taskId])
     : group.outcome === 'single'
-      ? `One ranked run of ${group.taskId}. A single observation is not a comparison — there is `
-        + 'nothing here that another run of this objective lost to.'
+      ? uiMessage('One ranked run of {0}. A single observation is not a comparison — there is nothing here that another run of this objective lost to.', [group.taskId])
       : group.outcome === 'tied'
-        ? `All ${group.ranked} ranked runs of ${group.taskId} recorded exactly the same value `
-          + `(${group.bestValue}). This group has no winner: it is a ${group.ranked}-way tie, not an `
-          + 'ordering.'
+        ? uiPlural(group.ranked, 'All {0} ranked runs of {1} recorded exactly the same value ({2}). This group has no winner: it is a {0}-way tie, not an ordering.',
+          'All {0} ranked runs of {1} recorded exactly the same value ({2}). This group has no winner: it is a {0}-way tie, not an ordering.',
+          [group.ranked, group.taskId, group.bestValue])
         : group.leaders.length > 1
-          ? `${group.leaders.length} of ${group.ranked} ranked runs share the ${objective} recorded `
-            + `value (${group.bestValue}) for ${group.taskId}. They tie for first; none of them beat `
-            + 'the others.'
-          : `Of ${group.ranked} ranked runs of ${group.taskId}, ${group.leaders[0]} recorded the `
-            + `${objective} value (${group.bestValue}).`
+          ? (objective === 'lowest'
+            ? uiPlural(group.ranked, '{1} of {0} ranked runs share the lowest recorded value ({2}) for {3}. They tie for first; none of them beat the others.',
+              '{1} of {0} ranked runs share the lowest recorded value ({2}) for {3}. They tie for first; none of them beat the others.',
+              [group.ranked, group.leaders.length, group.bestValue, group.taskId])
+            : uiPlural(group.ranked, '{1} of {0} ranked runs share the highest recorded value ({2}) for {3}. They tie for first; none of them beat the others.',
+              '{1} of {0} ranked runs share the highest recorded value ({2}) for {3}. They tie for first; none of them beat the others.',
+              [group.ranked, group.leaders.length, group.bestValue, group.taskId]))
+          : (objective === 'lowest'
+            ? uiPlural(group.ranked, 'Of {0} ranked runs of {1}, {2} recorded the lowest value ({3}).',
+              'Of {0} ranked runs of {1}, {2} recorded the lowest value ({3}).',
+              [group.ranked, group.taskId, group.leaders[0], group.bestValue])
+            : uiPlural(group.ranked, 'Of {0} ranked runs of {1}, {2} recorded the highest value ({3}).',
+              'Of {0} ranked runs of {1}, {2} recorded the highest value ({3}).',
+              [group.ranked, group.taskId, group.leaders[0], group.bestValue]))
   const refusals = [
-    'This orders the values these runs RECORDED. `/api/runs` carries no metric name, unit, dataset or '
-    + 'evaluation protocol, so a shared task ID does not prove the runs measured the same thing.',
+    uiText('This orders the values these runs RECORDED. `/api/runs` carries no metric name, unit, dataset or evaluation protocol, so a shared task ID does not prove the runs measured the same thing.'),
     // NARROWED 2026-08-15, by exactly the width of what the row now carries. `best_metric_caveats`
     // records whether the champion's number was SALVAGED or TRUST-FLAGGED; it still records nothing
     // about the metric SUBJECT — which artifact the number is a claim about — and that is the half
     // docs 31/35 measured, so the refusal keeps its example and loses only the sentence that is no
     // longer true.
-    'It is not a claim that each number is about the artifact its own run produced — the metric '
-    + 'SUBJECT is not recorded on this row (docs 31/35: two nodes here recorded 0.224975 for a '
-    + 'checkpoint neither of them trained).',
+    uiText('It is not a claim that each number is about the artifact its own run produced — the metric SUBJECT is not recorded on this row (docs 31/35: two nodes here recorded 0.224975 for a checkpoint neither of them trained).'),
   ]
   // THE COMPARABILITY STATE OF THE PARTITION, added 2026-08-20. It is stated for BOTH answers and
   // never omitted, because the whole defect this closes is that silence read as agreement: an
@@ -530,37 +538,34 @@ export function groupClaim(group) {
   // there is a GROUPING and not an agreement, and "unknown whether they were measured against the
   // same test set" is false of runs the refusal has just shown differ.
   refusals.push(group.outcome === 'refused' ? refusedPartitionLine(group) : group.partition
-    ? `These ${group.size} run(s) share a recorded comparability key (${group.partition}), so their `
-      + 'numbers were measured against the same declared evaluation inputs. Runs of this same task '
-      + 'that recorded a DIFFERENT key, or none at all, are in their own group above or below — they '
-      + 'are deliberately not ranked against these.'
-    : 'No run in this group records a comparability key, so it is UNKNOWN whether they were measured '
-      + 'against the same test set, the same corpus or the same protocol — and unknown is not the '
-      + 'same as yes. On this box a `repo_task` group has held recall@100 values measured on more '
-      + 'than one test set. Declare `eval.inputs` on the task to make this decidable.')
+    ? uiPlural(group.size, 'These {0} run(s) share a recorded comparability key ({1}), so their numbers were measured against the same declared evaluation inputs. Runs of this same task that recorded a DIFFERENT key, or none at all, are in their own group above or below — they are deliberately not ranked against these.',
+      'These {0} run(s) share a recorded comparability key ({1}), so their numbers were measured against the same declared evaluation inputs. Runs of this same task that recorded a DIFFERENT key, or none at all, are in their own group above or below — they are deliberately not ranked against these.',
+      [group.size, group.partition])
+    : uiText('No run in this group records a comparability key, so it is UNKNOWN whether they were measured against the same test set, the same corpus or the same protocol — and unknown is not the same as yes. On this box a `repo_task` group has held recall@100 values measured on more than one test set. Declare `eval.inputs` on the task to make this decidable.'))
   // WHY this group is a part of its partition and not the whole of it (`splitRefusedBucket`).
   refusals.push(...splitClaims(group))
   if (group.caveatedCount > 0) {
     // The COUNT and the LEADERSHIP are two different facts and the sentence says both: a caveated
     // also-ran is a footnote, a caveated leader is the answer to "which configuration should I
     // reuse". Neither is unranked — see the `caveats` comment in `buildGroup`.
-    refusals.push(`${group.caveatedCount} run(s) in this group publish a best metric their own run `
-      + 'recorded a caveat about (salvaged, or from a trust-flagged node) and selected on anyway. '
-      + (group.caveatedLeader
-        ? 'One of them leads this group. Open it before reusing its configuration.'
-        : 'None of them leads this group.'))
+    refusals.push(uiPlural(group.caveatedCount, '{0} run(s) in this group publish a best metric their own run recorded a caveat about (salvaged, or from a trust-flagged node) and selected on anyway.',
+      '{0} run(s) in this group publish a best metric their own run recorded a caveat about (salvaged, or from a trust-flagged node) and selected on anyway.')
+      + ' ' + (group.caveatedLeader
+        ? uiText('One of them leads this group. Open it before reusing its configuration.')
+        : uiText('None of them leads this group.')))
   }
   if (group.integrityExcluded > 0) {
-    refusals.push(`${group.integrityExcluded} run(s) in this group hold no rank: their event log `
-      + 'stops being readable, so the value shown is the best of a PREFIX, not of the run.')
+    refusals.push(uiPlural(group.integrityExcluded, '{0} run(s) in this group hold no rank: their event log stops being readable, so the value shown is the best of a PREFIX, not of the run.',
+      '{0} run(s) in this group hold no rank: their event log stops being readable, so the value shown is the best of a PREFIX, not of the run.'))
   }
   if (group.provisionalCount > 0) {
-    refusals.push(`${group.provisionalCount} of these runs have not finished. Their best is a `
-      + 'best-so-far and can still improve.')
+    refusals.push(uiPlural(group.provisionalCount, '{0} of these runs have not finished. Their best is a best-so-far and can still improve.',
+      '{0} of these runs have not finished. Their best is a best-so-far and can still improve.'))
   }
   if (group.confirmedCount > 0 && group.confirmedCount < group.size) {
-    refusals.push(`${group.confirmedCount} of ${group.size} values are confirmed means and the rest `
-      + 'are single best observations — repeated and unrepeated measurements in one column.')
+    refusals.push(uiPlural(group.size, '{0} of {1} values are confirmed means and the rest are single best observations — repeated and unrepeated measurements in one column.',
+      '{0} of {1} values are confirmed means and the rest are single best observations — repeated and unrepeated measurements in one column.',
+      [group.confirmedCount, group.size]))
   }
   return { scope, claim, refusals }
 }
@@ -586,31 +591,29 @@ export function splitClaims(group) {
   if (!isRecord(group) || !isRecord(group.split)) return []
   const list = value => (Array.isArray(value)
     ? value.filter(name => Object.hasOwn(group.split, name)) : [])
-  const names = picked => picked.map(name => SPLIT_NAMES[name] || name).join(' or ')
-  const these = group.size === 1 ? 'this run' : 'these runs'
+  // The facet names are said in the UI language: each one is substituted into a translated sentence.
+  const names = picked => picked.map(name => uiText(SPLIT_NAMES[name] || name)).join(uiText(' or '))
   const proven = list(group.splitProven)
   const unrecorded = list(group.splitUnrecorded)
   const apart = list(group.splitApart)
   const out = []
   if (proven.length) {
-    out.push(`Runs of this task with the same comparability key that recorded a different `
-      + `${names(proven)} provably differ from ${these} (${splitLabel(Object.fromEntries(
-        proven.map(name => [name, group.split[name]])))}), so each part is ranked on its own and `
-      + 'never against the other.')
+    const label = splitLabel(Object.fromEntries(proven.map(name => [name, group.split[name]])))
+    out.push(uiPlural(group.size, 'Runs of this task with the same comparability key that recorded a different {1} provably differ from this run ({2}), so each part is ranked on its own and never against the other.',
+      'Runs of this task with the same comparability key that recorded a different {1} provably differ from these runs ({2}), so each part is ranked on its own and never against the other.',
+      [group.size, names(proven), label]))
   }
   // Scoped to the FACET, not the run: a part can be set apart on one facet by absence and provably
   // differ on another, and "nothing proves a difference" said of the whole run would be false.
   if (unrecorded.length) {
-    out.push(`${these[0].toUpperCase()}${these.slice(1)} recorded no ${names(unrecorded)}, while `
-      + 'other runs of this task with the same comparability key recorded conflicting ones — not '
-      + 'recorded, so not comparable with either side. '
-      + `${group.size === 1 ? 'It is' : 'They are'} ranked apart from those runs, though a missing `
-      + `${names(unrecorded)} proves no difference.`)
+    out.push(uiPlural(group.size, 'This run recorded no {1}, while other runs of this task with the same comparability key recorded conflicting ones — not recorded, so not comparable with either side. It is ranked apart from those runs, though a missing {1} proves no difference.',
+      'These runs recorded no {1}, while other runs of this task with the same comparability key recorded conflicting ones — not recorded, so not comparable with either side. They are ranked apart from those runs, though a missing {1} proves no difference.',
+      [group.size, names(unrecorded)]))
   }
   if (apart.length) {
-    out.push(`Runs of this task with the same comparability key that recorded no ${names(apart)} `
-      + `are ranked apart from ${these} as well, though a missing ${names(apart)} proves no `
-      + 'difference.')
+    out.push(uiPlural(group.size, 'Runs of this task with the same comparability key that recorded no {1} are ranked apart from this run as well, though a missing {1} proves no difference.',
+      'Runs of this task with the same comparability key that recorded no {1} are ranked apart from these runs as well, though a missing {1} proves no difference.',
+      [group.size, names(apart)]))
   }
   return out
 }
@@ -630,13 +633,11 @@ function refusalClause(group, subject = 'two of them') {
 // The sentence a refused group prints where every other group states its comparability key.
 function refusedPartitionLine(group) {
   return group.partition
-    ? `These ${group.size} runs are grouped by a shared comparability key (${group.partition}), `
-      + 'but a pair of them is refused all the same (above), so sharing that key does not make '
-      + 'them one evaluation. Runs of this same task that recorded a DIFFERENT key, or none at '
-      + 'all, are in their own group above or below.'
-    : `These ${group.size} runs record no comparability key they could be grouped by, and a pair `
-      + 'of them is refused all the same (above): what their records do carry is enough to show '
-      + 'they differ.'
+    ? uiPlural(group.size, 'These {0} runs are grouped by a shared comparability key ({1}), but a pair of them is refused all the same (above), so sharing that key does not make them one evaluation. Runs of this same task that recorded a DIFFERENT key, or none at all, are in their own group above or below.',
+      'These {0} runs are grouped by a shared comparability key ({1}), but a pair of them is refused all the same (above), so sharing that key does not make them one evaluation. Runs of this same task that recorded a DIFFERENT key, or none at all, are in their own group above or below.',
+      [group.size, group.partition])
+    : uiPlural(group.size, 'These {0} runs record no comparability key they could be grouped by, and a pair of them is refused all the same (above): what their records do carry is enough to show they differ.',
+      'These {0} runs record no comparability key they could be grouped by, and a pair of them is refused all the same (above): what their records do carry is enough to show they differ.')
 }
 
 // The title of a row with NO RANK — or, with no row, of the "not ranked" mark in a refused group's
@@ -737,16 +738,16 @@ export function trajectoryTitle(group) {
 // the group has.
 export function trajectoryClaim(group, overlay) {
   const size = Number.isSafeInteger(group?.size) ? group.size : 0
-  const plural = (n, one, many) => (n === 1 ? one : many)
+  // Each clause is built in the UI language (`uiPlural`: Russian has three integer forms).
   const left = []
-  if (overlay.noSeries) left.push(`${overlay.noSeries} ${plural(overlay.noSeries, 'carries', 'carry')} no series (no feasible measured node, or a row served before the series existed)`)
-  if (overlay.prefix) left.push(`${overlay.prefix} prefix-folded ${plural(overlay.prefix, 'run is', 'runs are')} not drawn, for the reason ${plural(overlay.prefix, 'it holds', 'they hold')} no rank`)
-  if (overlay.refused) left.push(`${overlay.refused} ${plural(overlay.refused, 'run is', 'runs are')} not drawn, for the reason ${plural(overlay.refused, 'it holds', 'they hold')} no rank: a pair of this group's runs provably disagrees on its evaluation, and one axis would order them all the same`)
-  if (overlay.beyondLimit) left.push(`${overlay.beyondLimit} beyond the ${overlay.limit} lines the chart can tell apart, in rank order`)
-  if (overlay.capped) left.push(`${overlay.capped} drawn coarser: more improvements than the row carries`)
+  if (overlay.noSeries) left.push(uiPlural(overlay.noSeries, '{0} carries no series (no feasible measured node, or a row served before the series existed)', '{0} carry no series (no feasible measured node, or a row served before the series existed)'))
+  if (overlay.prefix) left.push(uiPlural(overlay.prefix, '{0} prefix-folded run is not drawn, for the reason it holds no rank', '{0} prefix-folded runs are not drawn, for the reason they hold no rank'))
+  if (overlay.refused) left.push(uiPlural(overlay.refused, "{0} run is not drawn, for the reason it holds no rank: a pair of this group's runs provably disagrees on its evaluation, and one axis would order them all the same", "{0} runs are not drawn, for the reason they hold no rank: a pair of this group's runs provably disagrees on its evaluation, and one axis would order them all the same"))
+  if (overlay.beyondLimit) left.push(uiPlural(overlay.limit, '{0} beyond the {1} lines the chart can tell apart, in rank order', '{0} beyond the {1} lines the chart can tell apart, in rank order', [overlay.beyondLimit, overlay.limit]))
+  if (overlay.capped) left.push(uiMessage('{0} drawn coarser: more improvements than the row carries', [overlay.capped]))
   const tail = left.length ? ` ${left.join('; ')}.` : ''
   if (!overlay.drawn) return uiMessage("No trajectory to draw for this group.{0}", [tail])
-  return `Running best per evaluated experiment for ${overlay.drawn} of ${size} ${plural(size, 'run', 'runs')}, `
-    + "on this group's own axis — one task, one direction, one evaluation, nothing rescaled; "
-    + `a line holds its value until the experiment that beat it.${tail}`
+  return uiPlural(size, "Running best per evaluated experiment for {1} of {0} run, on this group's own axis — one task, one direction, one evaluation, nothing rescaled; a line holds its value until the experiment that beat it.{2}",
+    "Running best per evaluated experiment for {1} of {0} runs, on this group's own axis — one task, one direction, one evaluation, nothing rescaled; a line holds its value until the experiment that beat it.{2}",
+    [size, overlay.drawn, tail])
 }

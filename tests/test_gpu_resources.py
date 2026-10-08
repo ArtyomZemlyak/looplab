@@ -449,7 +449,7 @@ class _EvalResetHost(_Pool):
     # phase this double has to carry — borrowed real, for the same reason as the invariant above.
     _eval_admit = EvaluateMixin._eval_admit
 
-    async def _contain_eval_crash(self, node_id, generation, exc):
+    async def _contain_eval_crash(self, node_id, generation, exc, a=None):
         """OPT OUT of the crash containment, because this double's exception is a PROBE.
 
         Production `_evaluate` now closes its own node on any unexpected exception rather than

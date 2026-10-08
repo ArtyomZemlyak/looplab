@@ -51,7 +51,8 @@ from pathlib import Path
 
 from looplab.core.containment import refuse_budget_stop
 from looplab.core.errors import BudgetExceeded
-from looplab.core.jsonutil import valid_digest_ref
+from looplab.core.jsonutil import (DuplicateJSONKey, JSONTooDeep, NonFiniteJSONConstant,
+                                    strict_json_loads, valid_digest_ref)
 from looplab.core.models import RunState
 
 
@@ -265,28 +266,22 @@ class CurationProtocolMixin:
         """Read an existing v2 paid claim without borrowing identity from the retrying run."""
         from looplab.engine.governance_health import CURATION_ID_MAX_CHARS
 
-        def _unique_object(pairs):
-            obj = {}
-            for key, value in pairs:
-                if key in obj:
-                    raise ValueError("duplicate curation claim field")
-                obj[key] = value
-            return obj
-
-        def _reject_constant(_value):
-            raise ValueError("non-finite curation claim value")
-
         with path.open("rb") as handle:
             raw = handle.read(_CURATION_CLAIM_MAX_BYTES + 1)
         if not raw or len(raw) > _CURATION_CLAIM_MAX_BYTES:
             raise ValueError("invalid curation claim size")
         if raw.count(b"\n") != 1 or not raw.endswith(b"\n"):
             raise ValueError("curation claim must be one complete record")
+        # The ONE strict loader (`core/jsonutil.py::strict_json_loads`); each refusal keeps the
+        # sentence this reader always gave. A too-deep claim used to escape as a bare
+        # `RecursionError`; it is now the encoding refusal it is.
         try:
-            claim = json.loads(
-                raw.decode("utf-8"), object_pairs_hook=_unique_object,
-                parse_constant=_reject_constant)
-        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+            claim = strict_json_loads(raw.decode("utf-8"))
+        except DuplicateJSONKey as exc:
+            raise ValueError("duplicate curation claim field") from exc
+        except NonFiniteJSONConstant as exc:
+            raise ValueError("non-finite curation claim value") from exc
+        except (UnicodeDecodeError, json.JSONDecodeError, JSONTooDeep) as exc:
             raise ValueError("invalid curation claim encoding") from exc
         expected_fields = {
             "v", "action", "kind", "log", "curation_key", "source_key", "run_id",

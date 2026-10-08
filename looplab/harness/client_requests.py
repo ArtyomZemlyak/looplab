@@ -15,6 +15,7 @@ from pathlib import Path
 from urllib.parse import quote, urlsplit
 
 from looplab.core.atomicio import strict_atomic_write_bytes
+from looplab.core.jsonutil import DuplicateJSONKey, JSONTooDeep, canonical_json, strict_json_loads
 from looplab.core.redact import secret_env_values
 from looplab.core.node_evidence import read_bounded_regular_file
 from looplab.events.eventstore import interprocess_lock
@@ -38,9 +39,11 @@ ACTION_ROUTES = frozenset({
 })
 
 
-def _bytes(value):
-    return json.dumps(value, sort_keys=True, separators=(",", ":"),
-                      ensure_ascii=False, allow_nan=False).encode()
+# The persisted identity bytes (directory names, `request_sha256`, `act_` ids) ARE
+# `core/jsonutil.py::canonical_json`: same four options, UTF-8. Only the refusal changed shape —
+# an unencodable value is a `ValueError` (it could be a raw `TypeError` / `RecursionError`), which
+# every caller already contains as not_sent / a damaged record.
+_bytes = canonical_json
 
 
 def _hash(value):
@@ -80,15 +83,6 @@ def _bounded_id(value, what):
                                    "nothing was saved and no HTTP request was made.")
 
 
-def _unique(pairs):
-    value = {}
-    for key, item in pairs:
-        if key in value:
-            raise ValueError("duplicate client request field")
-        value[key] = item
-    return value
-
-
 class ClientRequests:
     identity_field = "command_id"
     identity_pattern = r"cmd_[0-9a-f]{32}"
@@ -124,7 +118,10 @@ class ClientRequests:
         if raw is None:
             raise ValueError("client request source unavailable")
         try:
-            row = json.loads(raw, object_pairs_hook=_unique)
+            # `core/jsonutil.py::strict_json_loads`: bytes as before (its encoding detection kept),
+            # member names unique at every depth, and now no bare NaN/Infinity either — `_bytes`
+            # never writes one, so a record carrying one is damage.
+            row = strict_json_loads(raw)
             expected = {"version", "server", "run_id", "generation", self.identity_field,
                         "request_sha256", "request"}
             request = row.get("request") if isinstance(row, dict) else None
@@ -146,7 +143,9 @@ class ClientRequests:
             # A SAVED record failing the authoring rules is damage, not the caller's request:
             # never let it read as "your request has no valid action_id".
             raise ValueError("client request identity/content invalid") from exc
-        except (TypeError, RecursionError) as exc:
+        except DuplicateJSONKey as exc:
+            raise ValueError("duplicate client request field") from exc
+        except (TypeError, RecursionError, JSONTooDeep) as exc:
             raise ValueError("client request structure invalid") from exc
 
     @staticmethod

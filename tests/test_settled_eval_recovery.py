@@ -27,6 +27,7 @@ from looplab.events.types import (DIAGNOSTIC_EVENTS, EV_EVAL_INVOCATION_CLAIMED,
                                   EV_WORKSPACE_SEEDED)
 from looplab.runtime.sandbox import RunResult
 from tests.factories import make_engine
+from _posix_gates import POSIX_ONLY_OS_CALLS
 
 _TERMINALS = ("node_evaluated", "node_failed")
 
@@ -318,3 +319,30 @@ def test_a_recovered_terminal_starts_the_operators_copy_out(tmp_path, monkeypatc
     assert calls == [], "the settled evaluation is finalized, never re-run"
     assert [e.type for e in _terminals(resumed)] == ["node_evaluated"]
     assert started == [(0, 0)]
+
+
+@POSIX_ONLY_OS_CALLS
+def test_a_fifo_planted_as_the_manifest_stamp_never_blocks_the_recovery(tmp_path):
+    """Review 2026-10-08, round 3: `EvalAttempt.workdir_matches` read the candidate-writable
+    `.looplab-manifest` with `read_text`, so a FIFO planted in its place blocked the worker thread
+    of settled recovery forever. Through `read_bounded_regular_file` it answers "no match" at once —
+    and a real stamp still matches."""
+    import threading
+    from looplab.engine.evaluate import EvalAttempt
+    engine = _engine(tmp_path / "run")
+    _seed(engine)
+    node = fold(engine.store.read_all()).nodes[0]
+    a = EvalAttempt(node_id=0)
+    a._manifest_stamp = tmp_path / ".looplab-manifest"
+    a._manifest_stamp.write_text(_workdir_manifest_digest(node), encoding="ascii")
+    assert a.workdir_matches(node) is True
+    a._manifest_stamp.unlink()
+    os.mkfifo(a._manifest_stamp)
+    answer: list = []
+    worker = threading.Thread(target=lambda: answer.append(a.workdir_matches(node)), daemon=True)
+    worker.start()
+    worker.join(5)
+    if worker.is_alive():                  # release the blocked open so the thread can exit
+        fd = os.open(a._manifest_stamp, os.O_WRONLY | os.O_NONBLOCK)
+        os.close(fd)
+    assert answer == [False], "a FIFO manifest stamp blocked the settled-recovery worker"

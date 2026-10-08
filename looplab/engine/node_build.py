@@ -180,6 +180,34 @@ def inject_needs_developer(req) -> bool:
     return not (req.get("code") or req.get("files") or req.get("deleted"))
 
 
+def inject_use_pins(req) -> dict:
+    """`{"uses_attempts": {str(id): generation}}` for the `node_created` an inject writes: the pins
+    `serve/control_validation.py::_normalize_artifact_fields` stamped at intake, cut to the ids the
+    row uses (doc 73 §1.4, round 3). `{}` — the key omitted — for a request that carries none."""
+    if not isinstance(req, Mapping) or not isinstance(req.get("uses"), list):
+        return {}
+    raw = req.get("uses_attempts")
+    if not isinstance(raw, Mapping):
+        return {}
+    wanted = {str(x) for x in req["uses"] if type(x) is int}
+    pins = {str(k): v for k, v in raw.items()
+            if str(k) in wanted and type(v) is int and v >= 0}
+    return {"uses_attempts": pins} if pins else {}
+
+
+def rebuilt_use_pins(node, state) -> dict:
+    """The pins a REBUILT consumer carries: each used producer's lifecycle in `state` — the fold the
+    rebuild was decided on — or the old pin when the producer is gone from it."""
+    old = dict(getattr(node, "uses_attempts", None) or {})
+    out = {}
+    for nid in getattr(node, "uses", None) or []:
+        producer = state.nodes.get(nid) if state is not None else None
+        pin = producer.attempt if producer is not None else old.get(str(nid))
+        if type(pin) is int and pin >= 0:
+            out[str(nid)] = pin
+    return out
+
+
 class _RerunCardCommit(NamedTuple):
     """What a node-reset re-proposal's main-task Card commit decided (`Engine._commit_rerun_card`).
 
@@ -693,7 +721,7 @@ class NodeBuildMixin:
                            card_build_generation=_OMIT, eval_start_boundary=_OMIT,
                            materialize_aborted_intent=_OMIT, model_arm=_OMIT,
                            simplified=_OMIT, node_kind=_OMIT, uses=_OMIT,
-                           expected_last_seq=_OMIT) -> None:
+                           uses_attempts=_OMIT, expected_last_seq=_OMIT) -> None:
         """The single `node_created` emitter for every creation site (`_create_node`,
         `_create_injected_node`, `_ablate`, `_ablate_code`, and doc 67 67.5's `_simplify` and
         `_rebuild_simplification` — the two that pass `simplified`). Optional keys default to the
@@ -721,7 +749,9 @@ class NodeBuildMixin:
                      # doc 67 67.5: `AblationMixin._simplify`'s receipt, and nobody else's.
                      ("simplified", simplified),
                      # doc 73 §1.4: an operator inject's artifact kind and the artifacts it reads.
-                     ("node_kind", node_kind), ("uses", uses)):
+                     ("node_kind", node_kind), ("uses", uses),
+                     # round 3: the producer lifecycle each use is pinned to.
+                     ("uses_attempts", uses_attempts)):
             if v is not _OMIT:
                 data[k] = v
         # doc 73 §2.5: the base this node's overlay was AUTHORED on, while this engine serves the
@@ -2159,6 +2189,12 @@ class NodeBuildMixin:
                     **({"node_kind": "artifact"} if getattr(node, "kind", None) == "artifact"
                        else {}),
                     **({"uses": list(node.uses)} if getattr(node, "uses", None) else {}),
+                    # …RE-PINNED to each producer's CURRENT lifecycle (round 3): a rebuild writes new
+                    # code against the artifacts as they are now, and is the operator's way to point a
+                    # consumer at a rebuilt artifact. Only a consumer that was pinned is re-pinned: an
+                    # unpinned one (a log from before the key) keeps the historical rule.
+                    **({"uses_attempts": rebuilt_use_pins(node, state)}
+                       if getattr(node, "uses_attempts", None) else {}),
             ):
                 return
             if is_developer_stuck(code):
@@ -2451,6 +2487,10 @@ class NodeBuildMixin:
                     **({"node_kind": "artifact"} if req.get("node_kind") == "artifact" else {}),
                     **({"uses": [x for x in req["uses"] if type(x) is int]}
                        if isinstance(req.get("uses"), list) and req["uses"] else {}),
+                    # …and the producer LIFECYCLE each use was accepted against, server-stamped at
+                    # intake (round 3); OMITTED for a request that carries none (queued before the
+                    # key), which keeps the historical existence-only rule for it.
+                    **inject_use_pins(req),
             ):
                 return
             # Mirror _create_node / _rerun_node: a Developer session that CRASHED returns the

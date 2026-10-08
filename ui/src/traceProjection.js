@@ -1,3 +1,4 @@
+import { uiPlural } from './uiLanguage.js'
 const count = value => Number.isSafeInteger(value) && value >= 0 ? value : 0
 
 export const traceUnavailable = p => p?.unavailable === true
@@ -66,8 +67,7 @@ export const traceWindow = (projection, { canPage = false } = {}) => {
 export const traceWindowNotice = spanWindow =>
   (spanWindow.omitted == null || spanWindow.total <= 0 || spanWindow.visible <= 0
     ? TRACE_PARTIAL_NOTICE
-    : `Showing ${spanWindow.visible} of ${spanWindow.total} spans; `
-      + `${spanWindow.omitted} more are not displayed.`)
+    : uiPlural(spanWindow.total, 'Showing {0} of {1} spans; {2} more are not displayed.', 'Showing {0} of {1} spans; {2} more are not displayed.', [spanWindow.visible, spanWindow.total, spanWindow.omitted]))
 
 const stated = value => (Number.isSafeInteger(value) && value >= 0 ? value : null)
 
@@ -124,8 +124,9 @@ export const conversationWindow = (projection, { canPage = false } = {}) => {
 export const conversationWindowNotice = conversationView =>
   (conversationView.visibleTurns <= 0 || conversationView.totalTurns <= 0
     ? TRACE_PARTIAL_NOTICE
-    : `Showing the most recent ${conversationView.visibleTurns} of `
-      + `${conversationView.totalsArePartial ? 'at least ' : ''}${conversationView.totalTurns} steps.`)
+    : conversationView.totalsArePartial
+      ? uiPlural(conversationView.totalTurns, 'Showing the most recent {0} of at least {1} steps.', 'Showing the most recent {0} of at least {1} steps.', [conversationView.visibleTurns, conversationView.totalTurns])
+      : uiPlural(conversationView.totalTurns, 'Showing the most recent {0} of {1} steps.', 'Showing the most recent {0} of {1} steps.', [conversationView.visibleTurns, conversationView.totalTurns]))
 
 const record = value => value && typeof value === 'object' && !Array.isArray(value) ? value : {}
 
@@ -225,9 +226,8 @@ export function stageLogAttribution(stages = []) {
       label, ordinal, total,
       // Says what the text IS, not what it is not: a band that only denied being this attempt's log
       // would leave the operator with no idea what they are reading.
-      note: `This run wrote all ${total} ${label} attempts into one ${label}.log, and the engine`
-        + ' keeps no durable record of where one attempt ends. The text below is that whole file’s'
-        + ` tail — the same bytes on all ${total} bands, not this attempt’s (#${ordinal}) alone.`,
+      note: uiPlural(total, 'This run wrote all {0} {1} attempts into one {1}.log, and the engine keeps no durable record of where one attempt ends. The text below is that whole file’s tail — the same bytes on all {0} bands, not this attempt’s (#{2}) alone.',
+        'This run wrote all {0} {1} attempts into one {1}.log, and the engine keeps no durable record of where one attempt ends. The text below is that whole file’s tail — the same bytes on all {0} bands, not this attempt’s (#{2}) alone.', [total, label, ordinal]),
     }
   })
 }

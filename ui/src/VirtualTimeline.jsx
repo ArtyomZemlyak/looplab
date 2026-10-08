@@ -1,4 +1,4 @@
-import { uiText, uiMessage, useUILanguage } from './uiLanguage.js'
+import { uiText, uiMessage, uiPlural, useUILanguage } from './uiLanguage.js'
 import React, { useCallback, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import {
   anchoredScrollTop, buildVirtualLayout, DEFAULT_TIMELINE_OVERSCAN, DEFAULT_TIMELINE_ROW_HEIGHT,
@@ -329,7 +329,7 @@ export default function VirtualTimeline({
     {!followingTail && (unreadUnknown || unread > 0) && <div className="timeline-unread-status" role="status"
       aria-live="polite" aria-atomic="true">
       <button type="button" className="timeline-unread" onClick={onJumpToLive}
-        aria-label={((unreadUnknown ? uiText('New activity; jump to live') : uiMessage("{0} new event{1}; jump to live", [unread, unread === 1 ? '' : 's'])))}>
+        aria-label={((unreadUnknown ? uiText('New activity; jump to live') : uiPlural(unread, '{0} new event; jump to live', '{0} new events; jump to live')))}>
         {((unreadUnknown ? uiText('new activity · jump to live') : uiMessage("{0} new · jump to live", [unread])))}
       </button>
     </div>}

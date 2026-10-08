@@ -1,4 +1,4 @@
-import { uiText, uiMessage, useUILanguage } from './uiLanguage.js'
+import { uiText, uiMessage, uiPlural, useUILanguage } from './uiLanguage.js'
 import React, { useEffect, useId, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import UpstreamPanel from './UpstreamPanel.jsx'
 import { deadlineGet, get, post, fmt, fmtInt, fmtBytes, fmtElapsedSeconds, CONTROL,
@@ -479,7 +479,7 @@ export function OverviewPanel({ state, maxEval, phase, runState, onClose, onOpen
         <div className="ov-run-facts">
           <div><span className="ov-label">{uiText("Run state")}</span><strong>{((runState || (state.paused ? uiText('paused') : (state.finished ? uiText('finished') : '—'))))}</strong></div>
           <div><span className="ov-label">{uiText("Phase")}</span><strong>{phase || state.phase || '—'}</strong></div>
-          <div><span className="ov-label">{uiText("Experiments")}</span><strong>{evaluated}{uiText(" evaluated ")}<span className="ov-fact-muted">/ {nodes.length}{uiText(" nodes")}</span></strong></div>
+          <div><span className="ov-label">{uiText("Experiments")}</span><strong>{uiPlural(evaluated, '{0} evaluated ', '{0} evaluated ')}<span className="ov-fact-muted">/ {uiPlural(nodes.length, '{0} nodes', '{0} nodes')}</span></strong></div>
           <div><span className="ov-label">{uiText("Failures")}</span><strong>{failed}</strong></div>
         </div>
       </div>
@@ -496,21 +496,21 @@ export function OverviewPanel({ state, maxEval, phase, runState, onClose, onOpen
           aria-valuetext={`${fmtElapsedSeconds(evalSec)} of ${fmtElapsedSeconds(evalLimit)} used`}>
           <span style={{ width: `${evalPercent}%` }} /></div>}
         <div className="ov-budget-note">{((evalLimit == null ? uiText('Evaluation-time limit unavailable') : (evalSec == null ? uiText('Remaining time unavailable') : evalSec > evalLimit ? uiMessage("Over limit by {0}", [fmtElapsedSeconds(evalSec - evalLimit)]) : uiMessage("{0} remaining", [fmtElapsedSeconds(Math.max(0, evalLimit - evalSec))]))))}
-          {cost?.total_tokens != null && <span> · {fmtInt(cost.total_tokens)}{uiText(" tokens")}</span>}</div>
+          {cost?.total_tokens != null && <span> · {uiPlural(cost.total_tokens, '{0} tokens', '{0} tokens', [fmtInt(cost.total_tokens)])}</span>}</div>
       </section>
       {(rewardFlags > 0 || duplicates > 0) && <section className="ov-section ov-signals" aria-label={uiText("Review signals")}>
         <h3>{uiText("Review signals")}</h3>
         <div className="ov-signal-list">
           {rewardFlags > 0 && <button type="button" className="ov-signal ov-signal-alert" onClick={() => onOpenPanel?.('trust')}>
-            <OpIcon name="alert" size={15} /> {rewardFlags}{uiText(" suspicious ")}{((rewardFlags === 1 ? uiText('result') : uiText('results')))} <span>{uiText("Open Trust →")}</span></button>}
-          {duplicates > 0 && <div className="ov-signal"><OpIcon name="replay" size={15} /> {duplicates}{uiText(" near-duplicate ")}{((duplicates === 1 ? uiText('proposal') : uiText('proposals')))}</div>}
+            <OpIcon name="alert" size={15} /> {uiPlural(rewardFlags, '{0} suspicious result', '{0} suspicious results')} <span>{uiText("Open Trust →")}</span></button>}
+          {duplicates > 0 && <div className="ov-signal"><OpIcon name="replay" size={15} /> {uiPlural(duplicates, '{0} near-duplicate proposal', '{0} near-duplicate proposals')}</div>}
         </div>
       </section>}
       {hints.length > 0 && <section className="ov-section ov-directions" aria-label={uiText("Saved hints")}>
         <div className="ov-section-head"><h3><OpIcon name="bulb" size={15} />{uiText(" Saved hints")}</h3><span className="ov-count">{hints.length}</span></div>
         <div className="ov-latest"><span className="ov-label">{uiText("Latest hint")}</span>
           <p>{((latestHintLead || uiText('No text available')))}</p></div>
-        {hints.length > 1 && <details className="ov-details"><summary>{uiText("Show all ")}{hints.length}{uiText(" hints")}</summary>
+        {hints.length > 1 && <details className="ov-details"><summary>{uiPlural(hints.length, 'Show all {0} hints', 'Show all {0} hints')}</summary>
           <ol className="ov-hints">{hints.map((hint, i) => <li key={i}>{((stripMd(hintText(hint)) || uiText('No text available')))}</li>)}</ol>
         </details>}
         {hints.length === 1 && latestHintLead !== latestHintPlain && <details className="ov-details"><summary>{uiText("Read full hint")}</summary>
@@ -573,7 +573,7 @@ export function ResearchPanel({ state, runId, onToast, onClose, onSelect, onSele
   const latestSelected = selectedMemo?.sourceIndex === newestMemoIndex
   const finished = state.phase === 'finished'
   return (
-    <Panel title={uiText("Deep research")} sub={memos.length ? `${memos.length} memo${memos.length === 1 ? '' : 's'}` : 'none yet'} onClose={onClose}
+    <Panel title={uiText("Deep research")} sub={memos.length ? uiPlural(memos.length, '{0} memo', '{0} memos') : 'none yet'} onClose={onClose}
       size={memos.length ? 'board' : undefined} className={`research-panel${memos.length ? '' : ' empty'}`}>
       <p className="research-purpose" role="note">{uiText('Hypothesis search and experiment planning. Research claims are suggestions to verify, not measured conclusions about what worked.')}</p>
       {!memos.length && <div className="research-empty-state" role="status">
@@ -583,7 +583,7 @@ export function ResearchPanel({ state, runId, onToast, onClose, onSelect, onSele
           <p>{uiText("The run may not have created its first experiment, the LLM backend may be unavailable, or ")}<code>{"deep_research_every"}</code>{uiText(" may be set to ")}<code>-1</code>.</p>
         </details>
       </div>}
-      {memoProjection.omitted > 0 && <div className="muted">{uiText("Showing ")}{memos.length}{uiText(" of ")}{memoProjection.total}{uiText(" newest valid memos; older, malformed, or over-budget entries are omitted.")}</div>}
+      {memoProjection.omitted > 0 && <div className="muted">{uiPlural(memoProjection.total, 'Showing {0} of {1} newest valid memos; older, malformed, or over-budget entries are omitted.', 'Showing {0} of {1} newest valid memos; older, malformed, or over-budget entries are omitted.', [memos.length, memoProjection.total])}</div>}
       {selectedMemo && <div className={`research-workspace${memos.length === 1 ? ' single' : ''}`}>
         {memos.length > 1 && <nav className="research-history" aria-label={uiText("Research memos")}>
           <div className="research-history-title">{uiText("Memo history ")}<span>{memos.length}</span></div>
@@ -594,7 +594,7 @@ export function ResearchPanel({ state, runId, onToast, onClose, onSelect, onSele
               aria-current={memo.sourceIndex === selectedMemo.sourceIndex ? 'true' : undefined}
               onClick={() => selectMemo(memo.sourceIndex)}>
               <span className="research-history-meta">#{memo.sourceIndex + 1}{((index === 0 ? uiText(' · latest') : ''))}
-                {(memo.at_node != null ? uiMessage(" · after {0} experiments", [memo.at_node]) : '')}</span>
+                {(memo.at_node != null ? uiPlural(memo.at_node, ' · after {0} experiments', ' · after {0} experiments') : '')}</span>
               <span className="research-history-lead">{((memoLead(memo.summary) || uiText('No conclusion was recorded.')))}</span>
               <span className={`research-history-trust tone-${trust.tone}`}>{uiText(trust.label)}</span>
             </button>
@@ -694,11 +694,11 @@ export function TrustPanel({ state, runId, onClose, onSelect, onToast, readOnly 
       <div className="trust-overview">
         <TrustState value={trustSummary} action={flaggedCount > 0
           ? <button type="button" className="btn sm"
-              onClick={() => rewardSignalsRef.current?.scrollIntoView({ block: 'start' })}>{uiText("Review ")}{flaggedCount}{uiText(" flagged ")}{((flaggedCount === 1 ? uiText('node') : uiText('nodes')))}
+              onClick={() => rewardSignalsRef.current?.scrollIntoView({ block: 'start' })}>{uiPlural(flaggedCount, 'Review {0} flagged node', 'Review {0} flagged nodes')}
             </button> : null} />
       </div>
       {state.host_grading
-        ? <TrustState value={{ tone: 'ok', label: 'Host-side grading recorded', detail: `The candidate writes predictions only; ${state.host_grading.scorer || 'the host scorer'} evaluates ${state.host_grading.n_labels ?? 'held-out'} labels outside the candidate process.` }} />
+        ? <TrustState value={{ tone: 'ok', label: 'Host-side grading recorded', detail: uiMessage('The candidate writes predictions only; {0} evaluates {1} labels outside the candidate process.', [state.host_grading.scorer || uiText('the host scorer'), state.host_grading.n_labels ?? uiText('held-out')]) }} />
         : <TrustState value={{ tone: 'warn', label: 'Metric is not host-graded', detail: 'This run does not record an out-of-process grader, so the displayed metric may be self-reported by the candidate process.' }} />}
       <details className="trust-config-details">
         <summary>{uiText("Detector configuration")}</summary>
@@ -718,7 +718,9 @@ export function TrustPanel({ state, runId, onClose, onSelect, onToast, readOnly 
             // job is to say whether seed luck was ruled out. A count of 0 beside a `confirmed_mean`
             // is a contradiction the operator needs to see, not one to smooth over. Print any real
             // number; reserve the word for an absent count. (Same fix in Inspector.jsx's Robustness.)
-            ? { tone: 'ok', label: 'Winner is multi-seed confirmed', detail: `${typeof robust.confirmed_seeds === 'number' ? robust.confirmed_seeds : 'Multiple'} successful seeds produced ${fmt(robust.confirmed_mean)} ±${fmt(robust.confirmed_std)}.` }
+            ? { tone: 'ok', label: 'Winner is multi-seed confirmed', detail: (typeof robust.confirmed_seeds === 'number'
+              ? uiPlural(robust.confirmed_seeds, '{0} successful seeds produced {1} ±{2}.', '{0} successful seeds produced {1} ±{2}.', [robust.confirmed_seeds, fmt(robust.confirmed_mean), fmt(robust.confirmed_std)])
+              : uiMessage('Multiple successful seeds produced {0} ±{1}.', [fmt(robust.confirmed_mean), fmt(robust.confirmed_std)])) }
             : { tone: 'warn', label: 'Winner is single-evaluation', detail: 'Seed luck has not been ruled out; the selected winner is not a robust result yet.' }} />
           <div className="kv">
             <div className="k">{uiText("single-eval leader")}</div><div className="v">#{naive.id} · {fmt(naive.metric)}</div>
@@ -985,7 +987,7 @@ export function ParetoPanel({ state, onClose, onSelect }) {
           : []
         const displaced = measuredFront.filter(m => !front.some(f => f.id === m.id))
         return <>
-          <div className="section-h">{uiText("Pareto-optimal set (I5) ")}{keys.length ? <span className="pill">{keys.length + 1}{uiText(" objectives")}</span> : <span className="pill">{uiText("metric only")}</span>}</div>
+          <div className="section-h">{uiText("Pareto-optimal set (I5) ")}{keys.length ? <span className="pill">{uiPlural(keys.length + 1, '{0} objectives', '{0} objectives')}</span> : <span className="pill">{uiText("metric only")}</span>}</div>
           {sortedFront.length
             ? <DataTable caption={uiText("Pareto-optimal node metrics")} card={false}><table className="tbl"><thead><tr><th>{uiText("node")}</th><th>{uiText("metric")}</th>
                 {/* A column heading carries the caveat, because a whole objective axis is either
@@ -1016,9 +1018,9 @@ export function ParetoPanel({ state, onClose, onSelect }) {
               ⚠ #{n.id}{uiText("’s objective is ")}<b>{OBJECTIVE_SOURCE_LABEL[sources.get(n.id).channel]}</b>.{' '}
               {objectiveSourceHelp(sources.get(n.id))}
             </div>)}
-            <div>{uiText("It is ranked here because the run ranks it — this front shows the selection the engine is actually making, not a corrected one.")}{displaced.length > 0 && <>{uiText(" Set ")}{((caveated.length === 1 ? uiText('it') : uiText('those')))}{uiText(" aside and")}{' '}
+            <div>{uiText("It is ranked here because the run ranks it — this front shows the selection the engine is actually making, not a corrected one.")}{displaced.length > 0 && <>{uiPlural(caveated.length, ' Set it aside and', ' Set those aside and')}{' '}
                 {displaced.map(n => `#${n.id} (${fmt(n.confirmed_mean ?? n.metric)})`).join(', ')}{' '}
-                {((displaced.length === 1 ? uiText('is') : uiText('are')))}{uiText(" non-dominated on measured objectives alone.")}</>}
+                {uiPlural(displaced.length, 'is non-dominated on measured objectives alone.', 'are non-dominated on measured objectives alone.')}</>}
             </div>
           </div>}
           {/* THE FRONT MAY BE OVER INCOMPARABLE POINTS, which no caveat above can express: every
@@ -1030,14 +1032,14 @@ export function ParetoPanel({ state, onClose, onSelect }) {
               and a banner over silence would show on every run and mean nothing. */}
           {splitBy && <div className="warn" style={{ marginTop: 8 }}>{uiText("⚠ This run’s nodes were ")}<b>{uiText("not all measured against the same evaluation")}</b>{uiText(" — two of them ")}{((COMPARABILITY_REFUSAL_TEXT[splitBy] || uiText('were measured under provably different evaluations')))}{uiText(". Dominance between two such nodes is not a fact, so this front orders points that do not share an axis. Each value is still true of its own measurement; the front is not.")}</div>}
           {sortedFront.length > 0 && unverified.size > 0 && <div className="muted" style={{ marginTop: 8 }}>
-            ⚠ {[...unverified].join(', ')} {((unverified.size === 1 ? uiText('is') : uiText('are')))}{uiText(" not a declared measurement: the value was taken from the experiment's own stdout, or the run predates the record that would say. The front below is computed over it anyway — read it as a trade-off the experiments ")}<i>{uiText("reported")}</i>{uiText(", not one the engine verified.")}</div>}
+            ⚠ {[...unverified].join(', ')} {uiPlural(unverified.size, "is not a declared measurement: the value was taken from the experiment's own stdout, or the run predates the record that would say. The front below is computed over it anyway — read it as a trade-off the experiments ", "are not a declared measurement: the value was taken from the experiment's own stdout, or the run predates the record that would say. The front below is computed over it anyway — read it as a trade-off the experiments ")}<i>{uiText("reported")}</i>{uiText(", not one the engine verified.")}</div>}
           {sortedFront.length > 0 && <div className="muted" style={{ marginTop: 8 }}>{uiText("Confirmed mean is used when available; otherwise the recorded metric is used.")}{!keys.length && <>{uiText(" With one objective, every feasible node tied at the best displayed metric is Pareto-optimal. Add extra_metrics (e.g. latency, size) to show trade-offs.")}</>}
           </div>}
         </>
       })()}
       <div className="section-h">{uiText("Pareto (metric vs constraint)")}</div>
       {scatter || <div className="muted">{uiText("No constraints/aux metrics in this task.")}</div>}
-      <div className="section-h">{uiText("Diversity archive ")}{archive && <span className="pill">{archive.niches}{uiText(" niches")}</span>}</div>
+      <div className="section-h">{uiText("Diversity archive ")}{archive && <span className="pill">{uiPlural(archive.niches, '{0} niches', '{0} niches')}</span>}</div>
       {archive?.elites?.length
         ? <DataTable caption={uiText("Diversity archive elite nodes")} card={false}><table className="tbl"><thead><tr><th>{uiText("node")}</th><th>{uiText("metric")}</th><th>{uiText("params")}</th></tr></thead><tbody>
           {/* The elites are the other "reuse this configuration" table on this panel, so they read
@@ -1066,7 +1068,7 @@ export function DataQualityPanel({ state, onClose }) {
   if (!prof) return <Panel title={uiText("Data quality")} onClose={onClose}><div className="muted">{uiText("No data profile (task exposes no dataset).")}</div></Panel>
   const cols = Object.entries(prof)
   return (
-    <Panel title={uiText("Data quality")} sub={`${cols.length} columns`} onClose={onClose} wide>
+    <Panel title={uiText("Data quality")} sub={uiPlural(cols.length, '{0} columns', '{0} columns')} onClose={onClose} wide>
       <DataTable caption={uiText("Dataset column quality profile")} card={false}><table className="tbl"><thead><tr><th>{uiText("column")}</th><th>{uiText("dtype")}</th><th>{uiText("missing%")}</th><th>{uiText("unique")}</th><th>{uiText("min")}</th><th>{uiText("max")}</th><th>{uiText("mean")}</th><th>{uiText("flags")}</th></tr></thead><tbody>
         {cols.map(([c, s]) => <tr key={c}>
           {/* `(s.missing_frac || 0) * 100` invented a measurement. Not every profiler records
@@ -1366,14 +1368,14 @@ export function AuthoringPanel({
     || uncertainSaveCount > 0 || damagedRecoveryCount > 0
   const authoringNavigationSummary = [
     dirtyCount > 0
-      ? `${dirtyCount} unsaved Authoring draft${dirtyCount === 1 ? '' : 's'} will be discarded.` : '',
-    mutationBusy ? 'A save is in progress; its outcome may not remain visible.' : '',
+      ? uiPlural(dirtyCount, '{0} unsaved Authoring draft will be discarded.', '{0} unsaved Authoring drafts will be discarded.') : '',
+    mutationBusy ? uiText('A save is in progress; its outcome may not remain visible.') : '',
     uncertainSaveCount > 0
-      ? `${uncertainSaveCount} save outcome${uncertainSaveCount === 1 ? '' : 's'} may be unknown; review retained recovery before retrying.` : '',
+      ? uiPlural(uncertainSaveCount, '{0} save outcome may be unknown; review retained recovery before retrying.', '{0} save outcomes may be unknown; review retained recovery before retrying.') : '',
     damagedRecoveryCount > 0
-      ? `${damagedRecoveryCount} damaged recovery record${damagedRecoveryCount === 1 ? ' remains' : 's remain'} quarantined in this tab.` : '',
+      ? uiPlural(damagedRecoveryCount, '{0} damaged recovery record remains quarantined in this tab.', '{0} damaged recovery records remain quarantined in this tab.') : '',
   ].filter(Boolean).join(' ')
-  const authoringCloseMessage = `${authoringNavigationSummary} Close Authoring anyway?`
+  const authoringCloseMessage = `${authoringNavigationSummary} ${uiText('Close Authoring anyway?')}`
   const navigationUnsafeRef = useRef(navigationUnsafe)
   navigationUnsafeRef.current = navigationUnsafe
   useLayoutEffect(() => {
@@ -1399,12 +1401,12 @@ export function AuthoringPanel({
       allowRef: allowNavigationRef,
       guardedHash: location.hash,
       message: () => uncertainSaveCount > 0
-        ? `${uncertainSaveCount} save outcome${uncertainSaveCount === 1 ? '' : 's'} may be unknown. Leave Authoring?`
+        ? uiPlural(uncertainSaveCount, '{0} save outcome may be unknown. Leave Authoring?', '{0} save outcomes may be unknown. Leave Authoring?')
         : damagedRecoveryCount > 0
-          ? `${damagedRecoveryCount} damaged recovery record${damagedRecoveryCount === 1 ? '' : 's'} remain quarantined. Leave Authoring?`
+          ? uiPlural(damagedRecoveryCount, '{0} damaged recovery record remain quarantined. Leave Authoring?', '{0} damaged recovery records remain quarantined. Leave Authoring?')
         : mutationBusy
-          ? 'A save is in progress. Leave Authoring?'
-          : `${dirtyCount} unsaved draft${dirtyCount === 1 ? '' : 's'} will be lost. Leave?`,
+          ? uiText('A save is in progress. Leave Authoring?')
+          : uiPlural(dirtyCount, '{0} unsaved draft will be lost. Leave?', '{0} unsaved drafts will be lost. Leave?'),
       onAllow: () => draftStore.clear(AUTHORING_PANEL_DRAFT_SCOPE),
     })
   }, [navigationGuardOwner, draftStore, navigationUnsafe, mutationBusy, uncertainSaveCount,
@@ -1963,11 +1965,11 @@ export function AuthoringPanel({
       return
     }
     const warning = uncertainSaveCount > 0
-      ? `${uncertainSaveCount} save outcome${uncertainSaveCount === 1 ? '' : 's'} may be unknown; exact draft${uncertainSaveCount === 1 ? '' : 's'} retained here.`
+      ? uiPlural(uncertainSaveCount, '{0} save outcome may be unknown; exact draft retained here.', '{0} save outcomes may be unknown; exact drafts retained here.')
       : damagedRecoveryCount > 0
-        ? `${damagedRecoveryCount} damaged recovery record${damagedRecoveryCount === 1 ? ' remains' : 's remain'} quarantined here.`
-      : mutationBusy ? 'A save is in progress.'
-        : `${dirtyCount} unsaved draft${dirtyCount === 1 ? '' : 's'} will be lost.`
+        ? uiPlural(damagedRecoveryCount, '{0} damaged recovery record remains quarantined here.', '{0} damaged recovery records remain quarantined here.')
+      : mutationBusy ? uiText('A save is in progress.')
+        : uiPlural(dirtyCount, '{0} unsaved draft will be lost.', '{0} unsaved drafts will be lost.')
     if (!window.confirm(uiMessage("{0} Close Authoring?", [warning]))) return
     allowNavigationRef.current = true
     draftStore.clear(AUTHORING_PANEL_DRAFT_SCOPE)
@@ -2019,7 +2021,7 @@ export function AuthoringPanel({
       </div>
       <PanelResourceNotice resource={source} label={uiMessage("{0} files", [kind])} onRetry={retry} />
       {dirtyCount > 0 && <div className="notice" role="status" style={{ marginBottom: 10 }}>
-        {dirtyCount}{uiText(" draft")}{dirtyCount === 1 ? '' : 's'}{uiText(" retained. Switching is safe; closing loses them.")}</div>}
+        {uiPlural(dirtyCount, '{0} draft retained. Switching is safe; closing loses them.', '{0} drafts retained. Switching is safe; closing loses them.')}</div>}
       {selected && !selectedSourceReconciled && <div className="notice" role="status"
         style={{ marginBottom: 10 }}>{uiText("Save and server-copy stay disabled until current ")}{kind}{uiText(" reconciles with this draft.")}</div>}
       {!storageAvailable && <div className="report-inline-state error" role="alert" style={{ marginBottom: 10 }}>
@@ -2035,7 +2037,7 @@ export function AuthoringPanel({
             ...current, [recovery.scope]: { ...current[recovery.scope], inspected: true },
           }))}>{uiText("Inspect recovery")}</button>
           : <>
-            <span className="muted">{uiText("Stored record ")}{recovery.raw.length}{uiText(" bytes; ")}{((recovery.reason ? uiText('integrity check failed.') : uiText('operation identity unverified.')))}</span>
+            <span className="muted">{uiPlural(recovery.raw.length, 'Stored record {0} bytes; ', 'Stored record {0} bytes; ')}{((recovery.reason ? uiText('integrity check failed.') : uiText('operation identity unverified.')))}</span>
             <button className="btn sm danger" onClick={() => releaseDamagedRecovery(recovery)}>{uiText("Release exact record")}</button>
           </>}
       </div>)}
@@ -2210,10 +2212,10 @@ function ConceptShelfBar({ tierLabel, receipt, concepts, selected, onSelect, mod
       {summary && <div className="muted" style={{ fontSize: 11, marginTop: 6, lineHeight: 1.5 }}>
         {/* The non-negotiable disclosure. Sorting or filtering by an axis that only covers part of the
             data is legitimate; doing it without saying how much it covers is not. */}
-        <b>{summary.tagged === null ? '—' : summary.tagged}{uiText(" of ")}{summary.total}</b> {tierLabel.toLowerCase()}{uiText(" carry concepts")}{summary.untagged > 0 && <> · <b>{summary.untagged}{uiText(" untagged")}</b>{((mode === 'tree' ? uiText(' (shown under Untagged)') : uiText(' (hidden by any concept filter)')))}</>}
+        <b>{summary.tagged === null ? '—' : summary.tagged}{uiText(" of ")}{summary.total}</b> {(tierLabel === 'Lessons' ? uiText('lessons carry concepts') : tierLabel === 'Cases' ? uiText('cases carry concepts') : uiText('meta-notes carry concepts'))}{summary.untagged > 0 && <> · <b>{summary.untagged}{uiText(" untagged")}</b>{((mode === 'tree' ? uiText(' (shown under Untagged)') : uiText(' (hidden by any concept filter)')))}</>}
         {summary.coarse && <>{uiText(" · all attribution is run-level, so it is only as precise as a whole run")}</>}
         {runsIndexed > 0 && summary.untagged > 0
-          && <> · {runsTagged}{uiText(" of ")}{runsIndexed}{uiText(" runs are concept-tagged")}</>}
+          && <> · {uiPlural(runsIndexed, '{0} of {1} runs are concept-tagged', '{0} of {1} runs are concept-tagged', [runsTagged, runsIndexed])}</>}
       </div>}
     </div>
   )
@@ -2273,14 +2275,15 @@ export function MemoryPanel({ onClose }) {
   const selectedReceiptIncomplete = memoryTierIncomplete(selectedReceipt)
   const selectedTierLabel = tab === 'lessons' ? 'Lessons' : tab === 'cases' ? 'Cases' : 'Meta-notes'
   const selectedReceiptIssues = []
-  if (selectedReceipt?.unavailable) selectedReceiptIssues.push('This tier could not be read.')
+  if (selectedReceipt?.unavailable) selectedReceiptIssues.push(uiText('This tier could not be read.'))
   if (selectedReceipt?.sourceWindowTruncated) {
     selectedReceiptIssues.push(selectedReceipt.returned > 0
-      ? `Showing the newest ${selectedReceipt.returned} ${selectedReceipt.returned === 1 ? 'item' : 'items'} from a bounded window; older entries were omitted.`
-      : 'Only a bounded recent source window was checked; older entries were omitted.')
+      ? uiPlural(selectedReceipt.returned, 'Showing the newest {0} item from a bounded window; older entries were omitted.',
+        'Showing the newest {0} items from a bounded window; older entries were omitted.')
+      : uiText('Only a bounded recent source window was checked; older entries were omitted.'))
   }
   if (selectedReceipt?.skipped > 0) {
-    selectedReceiptIssues.push(`${selectedReceipt.skipped} source ${selectedReceipt.skipped === 1 ? 'row was' : 'rows were'} not shown.`)
+    selectedReceiptIssues.push(uiPlural(selectedReceipt.skipped, '{0} source row was not shown.', '{0} source rows were not shown.'))
   }
   const memoryEmptyCopy = (receipt, noun, completeCopy) => {
     if (mem.dir == null) return 'No cross-run memory directory is configured.'
@@ -2305,9 +2308,10 @@ export function MemoryPanel({ onClose }) {
   // In tree mode a filter still applies (drill into a subtree, then read it grouped), and the Untagged
   // group is always rendered so nothing the axis cannot classify goes missing from the view.
   const conceptGroups = rows => groupByConceptTree(applyConcept(rows).shown)
-  const filterNotice = (result, noun) => result.hidden > 0 && <div className="muted"
-    style={{ fontSize: 11, marginBottom: 8 }} role="status">{uiText("Concept filter ")}<b>{((concept === UNTAGGED ? uiText('Untagged') : concept))}</b>{uiText(" hid ")}{result.hidden} {noun}
-    {result.hiddenUntagged > 0 && <> — {result.hiddenUntagged}{uiText(" of them because they carry no concept at all")}</>}.
+  // `hidden` is the phrase with its count, already in the UI language (`uiPlural` at the call).
+  const conceptFilterBanner = (result, hidden) => result.hidden > 0 && <div className="muted"
+    style={{ fontSize: 11, marginBottom: 8 }} role="status">{uiText("Concept filter ")}<b>{((concept === UNTAGGED ? uiText('Untagged') : concept))}</b>{uiText(" hid ")}{hidden}
+    {result.hiddenUntagged > 0 && <> — {uiPlural(result.hiddenUntagged, '{0} of them because they carry no concept at all', '{0} of them because they carry no concept at all')}</>}.
     {' '}<button type="button" className="btn xs" onClick={() => setConcept('')}>{uiText("Clear concept")}</button>
   </div>
   return (
@@ -2329,8 +2333,8 @@ export function MemoryPanel({ onClose }) {
       {tab === 'knowledge' && knowledge.status === 'ready' && knowledgeIncomplete
         && <MemoryCompletenessNotice resource={knowledge} onRetry={retryKnowledge}>
           <b>{uiText("Knowledge notes are incomplete.")}</b>{' '}
-          {(kb.truncatedFiles > 0 && uiMessage("{0} Markdown {1} not returned. ", [kb.truncatedFiles, kb.truncatedFiles === 1 ? 'entry was' : 'entries were']))}
-          {(truncatedKnowledgePreviews > 0 && uiMessage("{0} loaded {1} only a prefix.", [truncatedKnowledgePreviews, truncatedKnowledgePreviews === 1 ? 'preview contains' : 'previews contain']))}
+          {(kb.truncatedFiles > 0 && uiPlural(kb.truncatedFiles, '{0} Markdown entry was not returned. ', '{0} Markdown entries were not returned. '))}
+          {(truncatedKnowledgePreviews > 0 && uiPlural(truncatedKnowledgePreviews, '{0} loaded preview contains only a prefix.', '{0} loaded previews contain only a prefix.'))}
         </MemoryCompletenessNotice>}
       {/* Orientation shown on every tab. The three durable-knowledge surfaces are easy to mistake for
           each other, so each one says what the OTHER two are: this panel is what the RUNS wrote,
@@ -2347,8 +2351,8 @@ export function MemoryPanel({ onClose }) {
       </div>
       {tab !== 'knowledge' && selectedReceipt?.windowDigest && <div className="muted"
         style={{ fontSize: 11, marginBottom: 10 }}>{uiText("Snapshot ")}<code>{selectedReceipt.windowDigest.slice(0, 16)}</code>
-        {selectedReceipt.sourceRows != null && <> · {selectedReceipt.sourceRows}{uiText(" source rows")}</>}
-        {selectedReceipt.sourceSize != null && <> · {selectedReceipt.sourceSize}{uiText(" bytes total")}</>}
+        {selectedReceipt.sourceRows != null && <> · {uiPlural(selectedReceipt.sourceRows, '{0} source rows', '{0} source rows')}</>}
+        {selectedReceipt.sourceSize != null && <> · {uiPlural(selectedReceipt.sourceSize, '{0} bytes total', '{0} bytes total')}</>}
       </div>}
       {tab === 'lessons' && <div className="muted" style={{ fontSize: 11, marginBottom: 10, lineHeight: 1.5 }}>{uiText("Split by role (§role-split): the ")}<b>{uiText("Researcher")}</b>{uiText(" gets R&D / “what technique to try” lessons; the ")}<b>{uiText("Developer")}</b>{uiText(" gets only its own “what code change fixed a crash” lessons (untagged/legacy lessons are shared). Cases, notes and the knowledge base are not split.")}</div>}
       {tab === 'lessons' && <div className="conv-toggle memory-role-tabs" style={{ marginBottom: 8 }}>
@@ -2380,7 +2384,7 @@ export function MemoryPanel({ onClose }) {
           </div>
         </div>
         return <>
-          {((conceptOn && uiText(filterNotice(result, result.hidden === 1 ? 'lesson' : 'lessons'))))}
+          {((conceptOn && conceptFilterBanner(result, uiPlural(result.hidden, '{0} lesson', '{0} lessons'))))}
           {conceptOn && conceptMode === 'tree' && result.shown.length
             ? conceptGroups(byRole).map(group => <ConceptGroup key={group.id} group={group}>
                 {group.rows.map((l, i) => card(l, i))}
@@ -2408,7 +2412,7 @@ export function MemoryPanel({ onClose }) {
           <thead><tr><th>{uiText("task / objective")}</th><th>{uiText("goal / rationale")}</th><th>{uiText("metric")}</th><th>{uiText("params")}</th><th>{uiText("run")}</th><th>{uiText("concepts")}</th></tr></thead>
           <tbody>{rows(list)}</tbody></table></DataTable>
         return <>
-          {((conceptOn && uiText(filterNotice(result, result.hidden === 1 ? 'case' : 'cases'))))}
+          {((conceptOn && conceptFilterBanner(result, uiPlural(result.hidden, '{0} case', '{0} cases'))))}
           {conceptOn && conceptMode === 'tree' && result.shown.length
             ? conceptGroups(mem.cases || []).map(group => <ConceptGroup key={group.id} group={group}>
                 {table(group.rows)}</ConceptGroup>)
@@ -2429,7 +2433,7 @@ export function MemoryPanel({ onClose }) {
             <ConceptChips row={n} selected={concept} onSelect={setConcept} /></div>
         </div>
         return <>
-          {((conceptOn && uiText(filterNotice(result, result.hidden === 1 ? 'meta-note' : 'meta-notes'))))}
+          {((conceptOn && conceptFilterBanner(result, uiPlural(result.hidden, '{0} meta-note', '{0} meta-notes'))))}
           {conceptOn && conceptMode === 'tree' && result.shown.length
             ? conceptGroups(mem.notes || []).map(group => <ConceptGroup key={group.id} group={group}>
                 {group.rows.map((n, i) => card(n, i))}</ConceptGroup>)
@@ -2637,7 +2641,7 @@ export function CrossRunPanel({ state, onClose }) {
   // An unranked row names what holds it unranked — for a refused group, the refusal itself.
   const rankCell = (row, group) => (row.rank == null
     ? <span className="muted" title={unrankedRowTitle(group, row)}>—</span>
-    : <span title={((row.tied ? uiMessage("tied with {0} other run(s) at this value", [row.tied]) : uiText('rank within this comparable group')))}>
+    : <span title={((row.tied ? uiPlural(row.tied, 'tied with {0} other run(s) at this value', 'tied with {0} other run(s) at this value') : uiText('rank within this comparable group')))}>
         #{row.rank}{((row.tied ? uiText(' (tie)') : ''))}</span>)
   // The caveat rides in the OBJECTIVE cell, beside the number it qualifies, and not in the status
   // column: this table's whole job is to say which recorded value led, and a qualifier one column
@@ -2651,12 +2655,12 @@ export function CrossRunPanel({ state, onClose }) {
   </>
   return (
     <Panel title={uiText("Same-task run comparison")}
-      sub={resource.data ? `${observations} metric observation${observations === 1 ? '' : 's'}` : ''}
+      sub={resource.data ? uiPlural(observations, '{0} metric observation', '{0} metric observations') : ''}
       onClose={onClose} wide>
       <PanelResourceNotice resource={resource} label={uiText("Cross-run results")} onRetry={retry} />
       {resource.data && <div className="panel-resource-toolbar">
         <span className="muted">{uiText("task ID:")}</span><code>{((task || 'not recorded'))}</code>
-        <span className="muted">{tally.groups}{uiText(" group")}{tally.groups === 1 ? '' : 's'}{uiText(" of this task, ")}{tally.comparableGroups}{uiText(" comparable · ranked within a group only · ")}{GROUP_DEFINITION}</span>
+        <span className="muted">{uiPlural(tally.groups, '{0} group of this task, ', '{0} groups of this task, ')}{tally.comparableGroups}{uiText(" comparable · ranked within a group only · ")}{GROUP_DEFINITION}</span>
       </div>}
       {resource.data && !task && <div className="notice resource-warning" role="status">
         <b>{uiText("Same-task observations unavailable.")}</b>
@@ -2673,7 +2677,7 @@ export function CrossRunPanel({ state, onClose }) {
               (`splitClaims`, `unrankedRowTitle`): a fixed title said "provably differ" of a part
               set apart only because it recorded nothing, and a refused group's mark named no
               cause. */}
-          <b>{group.taskId} · {((group.direction === 'min' ? uiText('minimize') : uiText('maximize')))} · {group.size}{uiText(" run")}{group.size === 1 ? '' : 's'}
+          <b>{group.taskId} · {((group.direction === 'min' ? uiText('minimize') : uiText('maximize')))} · {uiPlural(group.size, '{0} run', '{0} runs')}
             {' · '}{group.partition
               ? <span title={((group.outcome === 'refused' ? uiText('these runs recorded the same comparability key, and a pair of them is refused all the same: the key groups them, it does not make them one evaluation') : uiText('these runs recorded the same comparability key, so their numbers were measured against the same declared evaluation inputs')))}>{uiText("evaluation ")}{group.partition}</span>
               : <span className="warn" title={uiText("no run in this group records what its number was measured against; unknown is not the same as comparable")}>{uiText("evaluation unrecorded")}</span>}
@@ -2722,11 +2726,11 @@ export function CrossRunPanel({ state, onClose }) {
         </div>
       })}
       {omitted > 0 && <div className="muted" style={{ marginTop: 8 }}>
-        {omitted}{uiText(" additional observation")}{omitted === 1 ? '' : 's'}{uiText(" omitted by the client render limit.")}</div>}
+        {uiPlural(omitted, '{0} additional observation omitted by the client render limit.', '{0} additional observations omitted by the client render limit.')}</div>}
       {/* Coverage, in the spirit of `conceptForest.js::forestCoverage`: what this screen ranked, and
           the far larger population it says nothing about. */}
-      {coverage && <div className="muted" style={{ marginTop: 8, fontSize: 11 }}>{uiText("This server holds ")}{coverage.runs}{uiText(" run")}{coverage.runs === 1 ? '' : 's'}; {coverage.comparableRuns}{uiText(" of them sit in ")}{coverage.comparableGroups}{uiText(" comparable group")}{coverage.comparableGroups === 1 ? '' : 's'}.
-        {' '}{coverage.noMetric}{uiText(" recorded no metric and ")}{coverage.singletonTasks}{uiText(" task/direction/evaluation")}{' '}{uiText("combination")}{((coverage.singletonTasks === 1 ? uiText(' is') : uiText('s are')))}{uiText(" the only run of their kind, so nothing on this box ranks them. ")}{/* EVALUATION is the third term since 2026-08-20: a group is
+      {coverage && <div className="muted" style={{ marginTop: 8, fontSize: 11 }}>{uiPlural(coverage.runs, 'This server holds {0} run', 'This server holds {0} runs')}; {uiPlural(coverage.comparableGroups, '{1} in {0} comparable group', '{1} in {0} comparable groups', [coverage.comparableGroups, uiPlural(coverage.comparableRuns, '{0} of them sit', '{0} of them sit')])}.
+        {' '}{uiPlural(coverage.singletonTasks, '{1} recorded no metric and {0} task/direction/evaluation combination is the only run of their kind, so nothing on this box ranks them. ', '{1} recorded no metric and {0} task/direction/evaluation combinations are the only run of their kind, so nothing on this box ranks them. ', [coverage.singletonTasks, coverage.noMetric])}{/* EVALUATION is the third term since 2026-08-20: a group is
           partitioned by comparability key as well, so a task with several runs can hold several
           singletons — which is the finding, not a rounding error in this sentence. */}
         {/* UNIDENTIFIED is counted too (critic 2026-09-26): without it a box of 3 runs whose one
@@ -2740,10 +2744,10 @@ export function CrossRunPanel({ state, onClose }) {
             is said to be set apart, and the refused runs are counted on their own, split or not —
             "N of them still disagree after that split" was printed over a group no split
             touched. */}
-        {(coverage.splitProvenRuns > 0 && uiMessage(" {0} run{1} share a task and comparability key with others but provably differ from some of them in source tree or evaluation protocol, so {2} grouped by that as well.", [coverage.splitProvenRuns, coverage.splitProvenRuns === 1 ? '' : 's', coverage.splitProvenRuns === 1 ? 'it is' : 'they are']))}
-        {(coverage.splitUnrecordedRuns > 0 && uiMessage(" {0} run{1} recorded none of the source tree or protocol facets that split {2} task and key — not recorded, so not comparable with either side — and {3} grouped apart without a proven difference.", [coverage.splitUnrecordedRuns, coverage.splitUnrecordedRuns === 1 ? '' : 's', coverage.splitUnrecordedRuns === 1 ? 'its' : 'their', coverage.splitUnrecordedRuns === 1 ? 'is' : 'are']))}
-        {(coverage.refusedRuns > 0 && uiMessage(" {0} run{1} shown without a rank: a pair in {2} group provably disagrees on its evaluation, and no split by source tree or protocol separates them.", [coverage.refusedRuns, coverage.refusedRuns === 1 ? ' is' : 's are', coverage.refusedRuns === 1 ? 'its' : 'their']))}
-        {(elsewhere > 0 && uiMessage(" {0} comparable group(s) belong to other task IDs and are deliberately not shown here — their objectives are unrelated to this run.", [elsewhere]))}
+        {(coverage.splitProvenRuns > 0 && uiPlural(coverage.splitProvenRuns, ' {0} run share a task and comparability key with others but provably differ from some of them in source tree or evaluation protocol, so it is grouped by that as well.', ' {0} runs share a task and comparability key with others but provably differ from some of them in source tree or evaluation protocol, so they are grouped by that as well.'))}
+        {(coverage.splitUnrecordedRuns > 0 && uiPlural(coverage.splitUnrecordedRuns, ' {0} run recorded none of the source tree or protocol facets that split its task and key — not recorded, so not comparable with either side — and is grouped apart without a proven difference.', ' {0} runs recorded none of the source tree or protocol facets that split their task and key — not recorded, so not comparable with either side — and are grouped apart without a proven difference.'))}
+        {(coverage.refusedRuns > 0 && uiPlural(coverage.refusedRuns, ' {0} run is shown without a rank: a pair in its group provably disagrees on its evaluation, and no split by source tree or protocol separates them.', ' {0} runs are shown without a rank: a pair in their group provably disagrees on its evaluation, and no split by source tree or protocol separates them.'))}
+        {(elsewhere > 0 && uiPlural(elsewhere, ' {0} comparable group(s) belong to other task IDs and are deliberately not shown here — their objectives are unrelated to this run.', ' {0} comparable group(s) belong to other task IDs and are deliberately not shown here — their objectives are unrelated to this run.'))}
       </div>}
     </Panel>
   )
@@ -3039,7 +3043,7 @@ const explorerEvent = event => {
   const omitted = event?._log_page?.truncated === true
   const bytes = omitted ? Number(event._log_page.raw_bytes || 0) : 0
   if (omitted) {
-    const preview = `details omitted · ${bytes.toLocaleString()} source bytes exceed page limit`
+    const preview = uiPlural(bytes, 'details omitted · {0} source bytes exceed page limit', 'details omitted · {0} source bytes exceed page limit', [bytes.toLocaleString()])
     return {
       event, preview, searchType: String(event.type || '').toLowerCase(),
       searchData: preview.toLowerCase(), omitted: true, serialized: null,
@@ -3158,8 +3162,8 @@ export function EventExplorer({ runId, timeline, historyActive = false, onReturn
     }
   }
   const totalLabel = timeline.totalEvents == null
-    ? `${timeline.rows.length} loaded events`
-    : `${timeline.rows.length} loaded of ${timeline.totalEvents} events`
+    ? uiPlural(timeline.rows.length, '{0} loaded events', '{0} loaded events')
+    : uiPlural(timeline.totalEvents, '{0} loaded of {1} events', '{0} loaded of {1} events', [timeline.rows.length, timeline.totalEvents])
   return (
     <Panel title={uiText("Raw event explorer")} sub={totalLabel} onClose={onClose} wide>
       <div className="event-explorer-tools">
@@ -3218,7 +3222,7 @@ export function EventExplorer({ runId, timeline, historyActive = false, onReturn
                   <span className="event-explorer-data">{uiText(highlightedExplorerText(preview, query))}</span>
                   {open && <div id={detailsId} className="event-explorer-detail">
                     <div className="event-explorer-detail-tools">
-                      <span>{uiText("Full payload · ")}{item.serialized.length.toLocaleString()}{uiText(" characters")}</span>
+                      <span>{uiPlural(item.serialized.length, 'Full payload · {0} characters', 'Full payload · {0} characters', [item.serialized.length.toLocaleString()])}</span>
                       <div className="event-explorer-detail-actions">
                         <button type="button" className="btn sm ghost" onClick={() => selectPayload(item)}>{uiText("Select payload")}</button>
                         <button type="button" className="btn sm ghost" disabled={status === 'copying'}
@@ -3384,7 +3388,7 @@ export function ArtifactsPanel({ runId, expectedGeneration, onToast, onClose }) 
             <input className="text art-filter" aria-label={uiText("Filter loaded files")} placeholder={uiText("filter loaded files…")} value={filter}
                    onChange={e => setFilter(e.target.value)} />
             {ql && <div className="muted art-filter-status" role="status" aria-live="polite" aria-atomic="true">
-              {((totalMatches === 0 ? uiText('No matches in the loaded file inventory.') : uiMessage("{0} {1} in the loaded file inventory.", [totalMatches, totalMatches === 1 ? 'match' : 'matches'])))}
+              {((totalMatches === 0 ? uiText('No matches in the loaded file inventory.') : uiPlural(totalMatches, '{0} match in the loaded file inventory.', '{0} matches in the loaded file inventory.')))}
               {((cappedSearch && uiText(' Some roots reached the listing limit, so other matches may exist.')))}
             </div>}
             {roots.length === 0 && <div className="muted">{uiText("No files found.")}</div>}
@@ -3399,7 +3403,7 @@ export function ArtifactsPanel({ runId, expectedGeneration, onToast, onClose }) 
                     <span className="art-chev">{isOpen ? '▾' : '▸'}</span>
                     <b>{uiText(r.label)}</b>
                     <span className="muted art-root-n">
-                      {(ql ? uiMessage("{0} {1} · {2} loaded", [matches.length, matches.length === 1 ? 'match' : 'matches', r.n_files]) : `${r.n_files}${r.truncated ? ' loaded · cap reached' : ''}`)}</span>
+                      {(ql ? uiPlural(matches.length, '{0} match · {1} loaded', '{0} matches · {1} loaded', [matches.length, r.n_files]) : `${r.n_files}${r.truncated ? ' loaded · cap reached' : ''}`)}</span>
                   </button>
                   {isOpen && <div className="art-files">
                     {files.length === 0 ? <div className="muted art-empty">{((ql ? (r.truncated ? uiText('no match in loaded subset') : uiText('no match in this root')) : uiText('empty')))}</div>
@@ -3412,7 +3416,7 @@ export function ArtifactsPanel({ runId, expectedGeneration, onToast, onClose }) 
                           <span className="art-name">{f.path}</span>
                           <span className="art-size">{fmtBytes(f.size)}</span>
                         </button>))}
-                    {r.truncated && <div className="muted art-empty">{(ql ? uiMessage("Filter checked {0} loaded files; this root may contain more matches.", [r.n_files]) : uiMessage("Listing stopped at {0} files; this root may contain more.", [r.n_files]))}</div>}
+                    {r.truncated && <div className="muted art-empty">{(ql ? uiPlural(r.n_files, 'Filter checked {0} loaded files; this root may contain more matches.', 'Filter checked {0} loaded files; this root may contain more matches.') : uiPlural(r.n_files, 'Listing stopped at {0} files; this root may contain more.', 'Listing stopped at {0} files; this root may contain more.'))}</div>}
                   </div>}
                 </div>
               )

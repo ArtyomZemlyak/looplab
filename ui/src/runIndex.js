@@ -1,4 +1,4 @@
-import { uiText, uiMessage } from './uiLanguage.js'
+import { uiText, uiMessage, uiPlural } from './uiLanguage.js'
 import { activeNodeMap } from './nodeProjection.js'
 
 export const ALL_RUNS = '__all__'
@@ -49,12 +49,16 @@ export function sourceIntegrityNotice(run = {}) {
   // good + the BOUNDARY row + dropped, mirroring `eventstore.py::integrity_sentence`: the boundary
   // line is a complete record on disk, so this total is the one the timeline pager also counts.
   const total = good != null && dropped != null ? good + dropped + 1 : null
-  const where = line != null ? ` at line ${line}` : ''
-  const scope = total != null ? `You are seeing ${good} of ${total} records; ${dropped} durable `
-    + 'record(s) behind that boundary are NOT shown.' : 'Part of the log is not shown.'
-  return `Incomplete record: this run’s event log stops being readable${where}. ${scope} `
-    + 'Every number here describes the readable prefix only — it is not evidence that the rest did '
-    + 'not happen.'
+  // Said in the UI language sentence by sentence: the composite was never a catalogue key.
+  const head = line != null
+    ? uiMessage('Incomplete record: this run’s event log stops being readable at line {0}.', [line])
+    : uiText('Incomplete record: this run’s event log stops being readable.')
+  const scope = total != null
+    ? uiPlural(total, 'You are seeing {0} of {1} records; {2} durable record(s) behind that boundary are NOT shown.',
+      'You are seeing {0} of {1} records; {2} durable record(s) behind that boundary are NOT shown.', [good, total, dropped])
+    : uiText('Part of the log is not shown.')
+  return `${head} ${scope} `
+    + uiText('Every number here describes the readable prefix only — it is not evidence that the rest did not happen.')
 }
 
 // --- What kind of number `best_metric` IS ---------------------------------------------------------
@@ -733,11 +737,12 @@ export function appliedParamsConflictNotice(record) {
   const rows = appliedParamsConflicts(record)
   if (!rows.length) return ''
   const checked = appliedParamsChecked(record)
-  const scope = checked == null ? '' : ` of ${checked} checked`
-  return `${rows.length} declared coordinate${rows.length === 1 ? '' : 's'}${scope} `
-    + `${rows.length === 1 ? 'is' : 'are'} read differently by two of this node's own configuration `
-    + 'files, and nothing in the record can order them. The experiment ran and its number still '
-    + 'counts — but the run cannot say which value it was measured at.'
+  return checked == null
+    ? uiPlural(rows.length, "{0} declared coordinate is read differently by two of this node's own configuration files, and nothing in the record can order them. The experiment ran and its number still counts — but the run cannot say which value it was measured at.",
+      "{0} declared coordinates are read differently by two of this node's own configuration files, and nothing in the record can order them. The experiment ran and its number still counts — but the run cannot say which value it was measured at.")
+    : uiPlural(rows.length, "{0} declared coordinate of {1} checked is read differently by two of this node's own configuration files, and nothing in the record can order them. The experiment ran and its number still counts — but the run cannot say which value it was measured at.",
+      "{0} declared coordinates of {1} checked are read differently by two of this node's own configuration files, and nothing in the record can order them. The experiment ran and its number still counts — but the run cannot say which value it was measured at.",
+      [rows.length, checked])
 }
 
 // The one sentence the browser prints about diverged coordinates, mirroring the vocabulary of
@@ -748,10 +753,12 @@ export function appliedParamsNotice(record) {
   const rows = appliedParamsDivergences(record)
   if (!rows.length) return ''
   const checked = appliedParamsChecked(record)
-  const scope = checked == null ? '' : ` of ${checked} checked`
-  return `${rows.length} declared coordinate${rows.length === 1 ? '' : 's'}${scope} `
-    + `${rows.length === 1 ? 'was' : 'were'} not what ran. The experiment still ran and its number `
-    + 'still counts — but it is filed under parameters the configuration did not use.'
+  return checked == null
+    ? uiPlural(rows.length, '{0} declared coordinate was not what ran. The experiment still ran and its number still counts — but it is filed under parameters the configuration did not use.',
+      '{0} declared coordinates were not what ran. The experiment still ran and its number still counts — but it is filed under parameters the configuration did not use.')
+    : uiPlural(rows.length, '{0} declared coordinate of {1} checked was not what ran. The experiment still ran and its number still counts — but it is filed under parameters the configuration did not use.',
+      '{0} declared coordinates of {1} checked were not what ran. The experiment still ran and its number still counts — but it is filed under parameters the configuration did not use.',
+      [rows.length, checked])
 }
 
 // Does any PAIR in `records` disagree at a shared authority? The one loop both refusals are written

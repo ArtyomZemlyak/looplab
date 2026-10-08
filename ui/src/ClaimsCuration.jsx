@@ -1,4 +1,4 @@
-import { uiText, uiMessage, useUILanguage } from './uiLanguage.js'
+import { uiText, uiMessage, uiPlural, useUILanguage } from './uiLanguage.js'
 import React, { useEffect, useLayoutEffect, useRef, useState } from 'react'
 import {
   getCrossRunAtlas, getCrossRunClaims, getCrossRunCurationLog, getCrossRunClaimCurationLog,
@@ -24,7 +24,6 @@ const SOURCES = [
 ]
 const SOURCE_TIMEOUT_MS = 15_000
 
-const countLabel = (count, singular, plural = `${singular}s`) => uiText(`${count} ${count === 1 ? singular : plural}`)
 const EPISTEMIC_COPY = {
   supported: 'support-only evidence',
   refuted: 'opposition-only evidence',
@@ -162,7 +161,7 @@ export function ClaimCard({ claim, compact = false }) {
       {groups.map(([kind, , total], index) => (index < 2 || total > 0)
         && <span key={kind}>{kind}{((kind === 'contradiction' ? 's' : uiText(' refs')))} <b>{total}</b></span>)}
       {claim.scopes.length > 0 && <span title={claim.scopes.join(', ')}>
-        {uiText(countLabel(claim.scopes.length, 'claim grouping'))}
+        {uiPlural(claim.scopes.length, '{0} claim grouping', '{0} claim groupings')}
       </span>}
     </div>
     {context.length > 0 && <div className="ledger-claim-context" aria-label={uiText("Claim groups and runs")}>
@@ -177,7 +176,7 @@ export function ClaimCard({ claim, compact = false }) {
           {kind} · {value}
         </code>)}
         {hiddenEvidence > 0 && <span className="ledger-evidence-boundary">
-          {uiText(countLabel(hiddenEvidence, 'additional reference'))}{uiText(" not shown (claim limit).")}</span>}
+          {uiPlural(hiddenEvidence, '{0} additional reference not shown (claim limit).', '{0} additional references not shown (claim limit).')}</span>}
       </div>
     </details>}
     {!compact && (claim.sources.length > 0 || claim.verification.length > 0) && <details>
@@ -422,12 +421,12 @@ export default function ClaimsCuration({ onBack }) {
           {resource.errors.length > 0 && <div className="notice resource-warning ledger-degraded" role="status">
             <b>{((hasRetainedStale ? uiMessage("Refresh incomplete; showing stale last-good data{0}.", [hasMissing
                 ? '; some sources unavailable' : '']) : uiText('Some sources unavailable.')))}</b>
-            <span>{uiText(countLabel(resource.errors.length, 'source refresh', 'source refreshes'))}{uiText(" failed.")}</span>
+            <span>{uiPlural(resource.errors.length, '{0} source refresh failed.', '{0} source refreshes failed.')}</span>
           </div>}
 
           {view.invalidRows.total > 0 && <div className="notice resource-warning ledger-degraded" role="alert">
             <b>{uiText("Some portfolio records were ignored.")}</b>
-            <span>{uiText(countLabel(view.invalidRows.total, 'record'))}{uiText("; totals may include them.")}</span>
+            <span>{uiPlural(view.invalidRows.total, '{0} record; totals may include them.', '{0} records; totals may include them.')}</span>
           </div>}
 
           <EvidenceSourceNotice claims={view.claimSource} />
@@ -461,7 +460,7 @@ export default function ClaimsCuration({ onBack }) {
                     <ClaimCard key={`${claim.uid || claim.statement}-${index}`} claim={claim} compact />)}</div>
                 : <p className="ledger-section-empty">{uiText("None returned.")}</p>)}
               {mixedLoaded && view.hiddenContradictions > 0 && <p className="ledger-boundary-note">
-                {uiText(countLabel(view.hiddenContradictions, 'additional mixed-evidence record'))}{uiText(" not shown (bounded projection).")}</p>}
+                {uiPlural(view.hiddenContradictions, '{0} additional mixed-evidence record not shown (bounded projection).', '{0} additional mixed-evidence records not shown (bounded projection).')}</p>}
               {/* This watermark carries the atlas slice's retry now. It used to opt OUT of one,
                   because the concepts panel above it owned the single retry for that same source;
                   that panel is gone, so without this the operator could not retry a failed
@@ -483,7 +482,7 @@ export default function ClaimsCuration({ onBack }) {
                     <ClaimCard key={`${claim.uid || claim.statement}-${index}`} claim={claim} />)}</div>
                 : <p className="ledger-section-empty">{uiText("No claims returned.")}</p>)}
               {claimsLoaded && view.hiddenClaims > 0 && <p className="ledger-boundary-note">
-                {uiText(countLabel(view.hiddenClaims, 'additional claim'))}{uiText(" not shown (render limit).")}</p>}
+                {uiPlural(view.hiddenClaims, '{0} additional claim not shown (render limit).', '{0} additional claims not shown (render limit).')}</p>}
               <SourceWatermark sourceKey="claims" label={uiText("Claim records")}
                 source={sourceStates.claims} retry={retry} busy={busy}
                 pending={resource.pending.includes('claims')}
@@ -498,12 +497,12 @@ export default function ClaimsCuration({ onBack }) {
               {view.curation.length > 0
                 ? <ol className="ledger-curation-list">{view.curation.map((entry, index) =>
                     <li key={`${entry.kind}-${index}`}>
-                      <b>{entry.kind}{uiText(" steward")}</b> · {uiText(countLabel(entry.proposals, 'proposal'))} ·
+                      <b>{entry.kind}{uiText(" steward")}</b> · {uiPlural(entry.proposals, '{0} proposal', '{0} proposals')} ·
                       {' '}{(entry.applied ? uiMessage("{0} applied", [entry.applied]) : entry.outcome.replaceAll('-', ' '))}
                     </li>)}</ol>
                 : <p className="ledger-section-empty">{((curationCurrent ? uiText('No steward records returned.') : uiText('No records shown; merge incomplete.')))}</p>}
               {view.hiddenCuration > 0 && <p className="ledger-boundary-note">
-                {uiText(countLabel(view.hiddenCuration, 'older entry', 'older entries'))}{uiText(" not shown (render limit).")}</p>}
+                {uiPlural(view.hiddenCuration, '{0} older entry not shown (render limit).', '{0} older entries not shown (render limit).')}</p>}
               {[['conceptCuration', 'Concept'], ['claimCuration', 'Claim']].map(([sourceKey, kind]) =>
                 <SourceWatermark key={sourceKey} sourceKey={sourceKey}
                   label={uiMessage("{0} steward log", [kind])} source={sourceStates[sourceKey]} retry={retry}

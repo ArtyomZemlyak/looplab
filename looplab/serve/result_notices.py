@@ -74,7 +74,12 @@ def _measurement(node):
         "error", "error_reason", "tombstoned"})
 
 
-def _receipts(srv, rd: Path, expected_generation: str) -> tuple[str, list[dict]]:
+def _receipts(srv, rd: Path, expected_generation: str, source: dict | None = None) -> tuple[str, list[dict]]:
+    """The fenced receipts of one generation. `source`, when a dict, receives the `events` and the
+    folded `state` the receipts were derived from, so the background worker reads its goal, node and
+    history off the SAME fold instead of re-reading and re-folding the log two more times per tick
+    (`result_commentary.py::ResultCommentaryService.process_run`). Positional on purpose: a spy that
+    forwards `*args` keeps forwarding it."""
     from looplab.harness.obligations import evidence_revision
 
     rd, observed_generation = srv.commands.generation_fence(rd)
@@ -88,6 +93,8 @@ def _receipts(srv, rd: Path, expected_generation: str) -> tuple[str, list[dict]]
             or read_bounded_regular_file(rd / "events.jsonl", 1, tail=True) != b"\n"):
         raise HTTPException(503, "result event source incomplete")
     state = fold(events)
+    if source is not None:
+        source["events"], source["state"] = events, state
     flagged = set(flagged_node_ids(state))
     trust_signals = current_trust_signals(state)
     advisory = set(trust_signals) - flagged

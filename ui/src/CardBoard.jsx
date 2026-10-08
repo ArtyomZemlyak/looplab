@@ -1,4 +1,4 @@
-import { uiText, uiMessage, useUILanguage } from './uiLanguage.js'
+import { uiText, uiMessage, uiPlural, useUILanguage } from './uiLanguage.js'
 // The Card board — the authoritative kanban plus the legacy hypothesis fallback it degrades to —
 // lifted out of panels.jsx (doc 25 UI-04). It carries a whole optimistic-control mini-framework
 // (cardControlReflected / _cardWithOptimisticControls / the sentEditRef pruning) and the hypothesis
@@ -118,7 +118,7 @@ function _cardResourceSummary(value, { unavailable = 'unspecified' } = {}) {
   const memory = footprint.gpu_mem_mib
   return [
     gpus == null ? 'GPU count unspecified'
-      : gpus === 0 ? 'CPU only' : `${gpus} GPU${gpus === 1 ? '' : 's'}`,
+      : gpus === 0 ? 'CPU only' : uiPlural(gpus, '{0} GPU', '{0} GPUs'),
     memory == null ? null : `${fmtInt(memory)} MiB/GPU`,
   ].filter(Boolean).join(' · ')
 }
@@ -339,9 +339,12 @@ function _CardKanbanCard({
           {priority != null && <span className="chip xs" title={uiText("derived priority; 1 is highest")}>#{priority + 1}</span>}
           {card.pinned === true && <span className="chip xs warn"><OpIcon name="flag" size={10} />{uiText(" pinned")}</span>}
           {roll && <span className={'chip xs' + (roll.total === 0 ? ' warn' : '')}
-            title={((roll.total === 0 ? uiText('no experiment has run for this work item yet') : `${roll.total} experiment${roll.total === 1 ? '' : 's'} ${roll.substituted ? 'ran under' : 'tested'} this work item`
-                + (roll.substituted ? ` · ${roll.substituted} built something else — not a test of it` : '')
-                + (roll.missing ? ` · ${roll.missing} not in this snapshot` : '')))}>
+            title={((roll.total === 0 ? uiText('no experiment has run for this work item yet') : (roll.substituted
+                ? uiPlural(roll.total, '{0} experiment ran under this work item', '{0} experiments ran under this work item')
+                  + ' · ' + uiPlural(roll.substituted, '{0} built something else — not a test of it',
+                    '{0} built something else — not a test of it')
+                : uiPlural(roll.total, '{0} experiment tested this work item', '{0} experiments tested this work item'))
+                + (roll.missing ? ' · ' + uiPlural(roll.missing, '{0} not in this snapshot', '{0} not in this snapshot') : '')))}>
             {(attemptCoverage?.label ?? roll.total)}{uiText(" exp")}</span>}
           {/* NOT a status, and no longer painted like one. `selection_ready === false` says the Card
               queue will not pick this card up next, which for `work_terminal` / `work_in_flight` is
@@ -356,7 +359,7 @@ function _CardKanbanCard({
               title={uiText(block.title)}>{uiText(block.label)}</span>
           })()}
           {receipt && receipt.complete !== true && <span className="chip xs warn"
-            title={uiMessage("{0} public field omission{1}", [omissionCount, omissionCount === 1 ? '' : 's'])}>{uiText("partial")}</span>}
+            title={uiPlural(omissionCount, '{0} public field omission', '{0} public field omissions')}>{uiText("partial")}</span>}
         </span>
         {concepts.length > 0 && <span className="card-kanban-tags">
           {concepts.slice(0, 3).map(concept => <span key={concept} className="chip xs">{concept}</span>)}
@@ -404,7 +407,7 @@ function _CardKanbanCard({
           })()
           : <span className="chip xs" title={uiText("selection readiness was not present in the public projection")}>{uiText("readiness unknown")}</span>}
       {receipt && receipt.complete !== true && <span className="chip xs warn"
-        title={uiMessage("{0} public field omission{1}", [omissionCount, omissionCount === 1 ? '' : 's'])}>{uiText("partial details")}{omissionCount ? ` · ${omissionCount}` : ''}</span>}
+        title={uiPlural(omissionCount, '{0} public field omission', '{0} public field omissions')}>{uiText("partial details")}{omissionCount ? ` · ${omissionCount}` : ''}</span>}
     </div>
     {/* The two counts are compared, not truth-tested. `a || b || n` YIELDS `n` when a and b are
         falsy, so with no operator, no profile, no params and no space this guard evaluated to the
@@ -420,7 +423,7 @@ function _CardKanbanCard({
         {key}={fmt(moved.has(key) ? moved.get(key) : value)}
         {moved.has(key) && <span className="muted">{uiText(" (proposed ")}{fmt(value)})</span>}
       </span>)}
-      {spaceCount > 0 && <span>{spaceCount}{uiText(" search variable")}{spaceCount === 1 ? '' : 's'}</span>}
+      {spaceCount > 0 && <span>{uiPlural(spaceCount, '{0} search variable', '{0} search variables')}</span>}
     </div>}
     {/* WHAT ACTUALLY RAN, and until 2026-08-25 this pane showed the PROPOSAL alone. `card.params`
         is receipt-bound and cannot be corrected; `applied_params` rides beside it on the wire and
@@ -432,7 +435,7 @@ function _CardKanbanCard({
     {drift && <div className="card-kanban-fact card-drift">
       <span className="card-kanban-k">{uiText("Ran at")}</span>
       <span>
-        <span className="chip xs warn">{drift.moved}{uiText(" of ")}{drift.compared}{uiText(" knobs moved")}</span>
+        <span className="chip xs warn">{uiPlural(drift.compared, '{0} of {1} knobs moved', '{0} of {1} knobs moved', [drift.moved, drift.compared])}</span>
         {typeof card.applied_params_node === 'number'
           ? <span className="muted">{uiText("on experiment #")}{card.applied_params_node}</span> : null}
       </span>
@@ -472,7 +475,7 @@ function _CardKanbanCard({
       <span className="card-kanban-k">{uiText("Direction")}</span>
       <span>
         <span className="chip xs chip-direction">{uiText("not runnable by design")}</span>
-        <span className="muted">{((childCount > 0 ? uiMessage("{0} experiment{1} filed under it", [childCount, childCount === 1 ? '' : 's']) : uiText('no experiment filed under it yet')))}</span>
+        <span className="muted">{((childCount > 0 ? uiPlural(childCount, '{0} experiment filed under it', '{0} experiments filed under it') : uiText('no experiment filed under it yet')))}</span>
       </span>
     </div>}
     {!blockersKnown && <div className="muted card-kanban-unknown">{uiText("Selection blockers unavailable")}</div>}
@@ -503,7 +506,7 @@ function _CardKanbanCard({
           {rollupChips(lineage.rollup).map(chip => (
             <span key={chip.key} className="chip xs">{uiText(chip.label)}</span>
           ))}
-          {(rollupChips(lineage.rollup).length === 0 ? uiMessage("{0} experiment{1}", [lineage.children.length, lineage.children.length === 1 ? '' : 's']) : null)}
+          {(rollupChips(lineage.rollup).length === 0 ? uiPlural(lineage.children.length, '{0} experiment', '{0} experiments') : null)}
         </> : null}
         {/* An unanswered direction says so rather than rendering an empty row. */}
         {((lineage.kind === CARD_KIND_DIRECTION && lineage.children.length === 0 ? uiText(' — no experiment proposed against this yet') : null))}
@@ -560,7 +563,7 @@ function _CardKanbanCard({
       {/* Referenced but not distilled in THIS run's log — an earlier run's lesson carried in as a
           prior. Reported, because a card claiming fewer lessons than it cites is quietly wrong. */}
       {lessons.unresolved.length > 0 && <span className="muted">
-        {lessons.unresolved.length}{uiText(" referenced ")}{((lessons.unresolved.length === 1 ? uiText('lesson was') : uiText('lessons were')))}{uiText(" distilled outside this run and cannot be resolved to their text here.")}</span>}
+        {uiPlural(lessons.unresolved.length, '{0} referenced lesson was distilled outside this run and cannot be resolved to their text here.', '{0} referenced lessons were distilled outside this run and cannot be resolved to their text here.')}</span>}
     </div>}
     {claimRefs.length > 0 && <div className="card-kanban-fact">
       <span className="card-kanban-k">{uiText("Research claims")}</span>
@@ -692,11 +695,15 @@ function _CardAttempts({ attempts, selectedNodeId, onOpenNode, coverage = null, 
     <details className="card-attempts-explain" open={roll.total === 0}>
       <summary>{uiText("How Cards and experiments relate")}</summary>
       <p className="muted card-attempts-note">
-      {((roll.total === 0 ? uiText('No experiment has run for this work item yet. A Card can also close with none — a proposal the engine minted and rejected before building anything.') : `This work item is not itself an experiment: it is the question ${roll.total === 1
-          ? 'one experiment' : `these ${roll.total} experiments`} ${roll.substituted ? 'ran under' : 'tested'}.`
+      {((roll.total === 0 ? uiText('No experiment has run for this work item yet. A Card can also close with none — a proposal the engine minted and rejected before building anything.') : (roll.substituted
+          ? (roll.total === 1 ? uiText('This work item is not itself an experiment: it is the question one experiment ran under.')
+            : uiPlural(roll.total, 'This work item is not itself an experiment: it is the question these {0} experiments ran under.', 'This work item is not itself an experiment: it is the question these {0} experiments ran under.'))
+          : (roll.total === 1 ? uiText('This work item is not itself an experiment: it is the question one experiment tested.')
+            : uiPlural(roll.total, 'This work item is not itself an experiment: it is the question these {0} experiments tested.', 'This work item is not itself an experiment: it is the question these {0} experiments tested.')))
           // A substituted build ran under the card and did not test it; "tested" was false for it.
-          + (roll.substituted ? ` ${roll.substituted === 1 ? 'One of them' : `${roll.substituted} of them`}`
-            + ' built something else instead of its idea and is not a test of it.' : '')))}
+          + (roll.substituted ? ' ' + (roll.substituted === 1
+            ? uiText('One of them built something else instead of its idea and is not a test of it.')
+            : uiPlural(roll.substituted, '{0} of them built something else instead of its idea and is not a test of it.', '{0} of them built something else instead of its idea and is not a test of it.')) : '')))}
       </p>
     </details>
     {attempts.length > 0 && <ul className="card-attempt-list">
@@ -852,7 +859,7 @@ function _CardTrace({ card, runId, expectedGeneration, onOpenNode, attempts = []
               {open === section.key ? '▾' : '▸'}{uiText(" Developer · build and evaluation")}</button>
             <button type="button" className="btn xs ghost"
               onClick={() => onOpenNode?.(Number(section.node.node_id))}>{uiText("open experiment ›")}</button>
-            <span className="muted">{fmtInt(section.node.spans)}{uiText(" spans · ")}{fmtInt(section.node.generations)}{uiText(" gen · ")}{fmtInt(section.node.tools)}{uiText(" tools · ")}{fmtInt(section.node.tokens?.total)}{uiText(" tok")}{(section.node.errors ? uiMessage(" · {0} error", [fmtInt(section.node.errors)]) : '')}</span>
+            <span className="muted">{uiPlural(section.node.spans, '{0} spans', '{0} spans', [fmtInt(section.node.spans)])}{' · '}{fmtInt(section.node.generations)}{uiText(" gen · ")}{uiPlural(section.node.tools, '{0} tools', '{0} tools', [fmtInt(section.node.tools)])}{' · '}{fmtInt(section.node.tokens?.total)}{uiText(" tok")}{(section.node.errors ? uiMessage(" · {0} error", [fmtInt(section.node.errors)]) : '')}</span>
           </div>
           {open === section.key && <div className="card-trace-body">
             <React.Suspense fallback={fallback}>
@@ -1177,7 +1184,7 @@ function _CardKanban({
   const lanes = _cardLanes(visibleCards)
   const total = _cardInt(projection?.total)
   const sub = total != null && total !== cards.length
-    ? `${visibleCards.length} of ${total} public work items` : `${visibleCards.length} work item${visibleCards.length === 1 ? '' : 's'}`
+    ? uiPlural(total, '{0} of {1} public work items', '{0} of {1} public work items', [visibleCards.length, total]) : uiPlural(visibleCards.length, '{0} work item', '{0} work items')
   // A card is born as a hypothesis (peer review): keep the "+ Add" belief affordance on the
   // authoritative Card board, not only the empty-Card fallback — otherwise the operator loses the
   // documented control the moment the first card exists. Wired to the same addHypothesis control.
@@ -1286,7 +1293,7 @@ function _CardKanban({
   // board's own total needs the reconciliation on the surface that shrank.
   const questionNotice = laneQuestions.length > 0 && grouping === 'lanes'
     ? <div className="muted card-question-notice" role="status">
-        {laneQuestions.length}{uiText(" research question")}{laneQuestions.length === 1 ? '' : 's'}{uiText(" not shown here — a question owns no experiment, so it has no lane.")}{' '}
+        {uiPlural(laneQuestions.length, '{0} research question not shown here — a question owns no experiment, so it has no lane.', '{0} research questions not shown here — a question owns no experiment, so it has no lane.')}{' '}
         <button type="button" className="btn sm ghost" onClick={() => setGrouping('research')}>{uiText("open the Research ladder")}</button>
       </div>
     : null
@@ -1348,8 +1355,7 @@ function _CardKanban({
         <div className="card-lanes-head">
           <span className="muted">{uiText(sub)}</span>
           <_CardProjectionNotice projection={projection} cards={visibleCards} />
-          {missingCardId && <div className="notice resource-warning card-selection-missing" role="status">{uiText("Card ")}<code>{missingCardId}</code>{uiText(" is not in the loaded board.")}{(((_cardInt(projection?.omitted) ?? 0) > 0 ? ` ${projection.omitted} work item${projection.omitted === 1 ? '' : 's'} `
-                + `${projection.omitted === 1 ? 'was' : 'were'} omitted from this snapshot.` : uiText(' This link may be stale.')))}
+          {missingCardId && <div className="notice resource-warning card-selection-missing" role="status">{uiText("Card ")}<code>{missingCardId}</code>{uiText(" is not in the loaded board.")}{(((_cardInt(projection?.omitted) ?? 0) > 0 ? ' ' + uiPlural(projection.omitted, '{0} work item was omitted from this snapshot.', '{0} work items were omitted from this snapshot.') : uiText(' This link may be stale.')))}
             <button type="button" className="btn sm ghost" onClick={closeDetails}>{uiText("Clear selection")}</button>
           </div>}
           {groupingBar}
@@ -2058,7 +2064,7 @@ function _HypothesisFallback({ state, runId, runGeneration, onSelect, onClose, o
     onRecoveryReleased?.()
   }
   return (
-    <Panel title={uiText("Hypotheses")} sub={`${hyps.length} tracked — what the run is trying to learn`} onClose={onClose} wide>
+    <Panel title={uiText("Hypotheses")} sub={uiPlural(hyps.length, '{0} tracked — what the run is trying to learn', '{0} tracked — what the run is trying to learn')} onClose={onClose} wide>
       <div className="toolbar" style={{ marginBottom: 10, gap: 6 }}>
         <input className="text" style={{ flex: 1 }} aria-label={uiText("New hypothesis")}
           placeholder={uiText("Pose a hypothesis to test (e.g. “target is right-skewed; a log transform helps”)")}
@@ -2091,7 +2097,7 @@ function _HypothesisFallback({ state, runId, runGeneration, onSelect, onClose, o
         {!damagedInspected
           ? <button className="btn sm" onClick={() => setDamagedInspected(true)}>{uiText("Inspect recovery")}</button>
           : <>
-            <span className="muted">{uiText("Run ")}{runId}{uiText("; generation ")}{String(runGeneration).slice(0, 12)}{uiText("…; stored record ")}{damagedRecovery.raw.length}{uiText(" bytes. Its command identity cannot be verified.")}</span>
+            <span className="muted">{uiText("Run ")}{runId}{uiText("; generation ")}{String(runGeneration).slice(0, 12)}{uiText("…; stored record ")}{uiPlural(damagedRecovery.raw.length, '{0} bytes. Its command identity cannot be verified.', '{0} bytes. Its command identity cannot be verified.')}</span>
             <button className="btn sm danger" onClick={releaseDamagedRecovery}>{uiText("Release exact record")}</button>
           </>}
       </div>}

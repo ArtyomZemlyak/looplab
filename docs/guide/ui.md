@@ -48,7 +48,11 @@ call runs in the browser. For UI changes, wrap authored captions with `uiText` o
 add their Russian text to `ui/src/locales/ru.json`, and run `npm run check:locale` in `ui/`.
 Substitution values remain verbatim; translate an owned caption explicitly before passing it
 as a substitution, and never translate user prose, code or identifiers. The build and UI tests
-check catalogue coverage, version/count and placeholder multiplicity.
+check catalogue coverage, version/count and placeholder multiplicity. A counted phrase uses
+`uiPlural(count, one, other)`: its Russian one/few/many forms live in `ru.json`'s `plurals`,
+keyed by the English `other` text, and `check:locale` refuses a missing, unused or ill-formed entry.
+CLDR `one` also covers 21 and 101, so a `one` form must read right for 21; a sentence that is
+only right for exactly one (a singular pronoun, or no printed count) goes in the optional `exact1`.
 Switching language does not send a message or call a model. Retrying an interrupted
 message keeps that message's original language. Earlier results and the detailed selected-result
 comparison are expandable. These reads do not call a model or start work.

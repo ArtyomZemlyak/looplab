@@ -1,4 +1,4 @@
-import { uiText, uiMessage, useUILanguage } from './uiLanguage.js'
+import { uiText, uiMessage, uiPlural, useUILanguage } from './uiLanguage.js'
 import React, { useEffect, useRef, useState } from 'react'
 import {
   abandonScopeReportAction, createIdempotencyKey, getScopeReport, genScopeReport,
@@ -508,8 +508,8 @@ export default function ScopeReport({ scope, onOpen, onClose }) {
         {data?.exists && c && <div className="sr-body">
           <div className="sr-meta">
             {evidenceRuns != null && sourceRuns != null
-              ? <span>{uiText("· evidence ")}{evidenceRuns}/{sourceRuns}{uiText(" runs")}{((c.coverage.incomplete === true ? uiText(' (incomplete)') : ''))}</span>
-              : <span>{uiText("· snapshot: ")}{Array.isArray(data.run_ids) ? data.run_ids.length : '?'}{uiText(" runs")}</span>}
+              ? <span>{uiPlural(sourceRuns, '· evidence {0}/{1} runs', '· evidence {0}/{1} runs', [evidenceRuns, sourceRuns])}{((c.coverage.incomplete === true ? uiText(' (incomplete)') : ''))}</span>
+              : <span>{(Array.isArray(data.run_ids) ? uiPlural(data.run_ids.length, '· snapshot: {0} runs', '· snapshot: {0} runs') : uiText('· snapshot: ? runs'))}</span>}
             {data.stale === true && <span className="sr-stale"> · {((formatUpgrade ? uiText('report format upgraded — regenerate once') : uiText('stale snapshot — regenerate')))}</span>}
             {authority.freshness === 'unknown' && <span className="sr-stale">{uiText(" · snapshot freshness unknown")}</span>}
           </div>

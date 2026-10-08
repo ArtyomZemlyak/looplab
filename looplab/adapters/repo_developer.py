@@ -2541,10 +2541,16 @@ class LLMRepoDeveloper:
     def _upstream_base_note(self) -> str:
         """What the upstream lane promoted into this run's base (`core/upstream_board.py`), or ""
         — when `upstream_board_brief` is off, when no state is bound, and on every run that never
-        promoted anything, so all of those render the historical bytes."""
+        promoted anything, so all of those render the historical bytes.
+
+        The promotion summaries are model-written text reaching the build/repair prompts outside a
+        tool result, so the evidence envelope fences them (`core/evidence.py`) — only while this
+        Developer's `evidence_envelope` is on; off, the call below is the historical one."""
         if not getattr(self, "_upstream_board", False):
             return ""
         from looplab.core.upstream_board import developer_base_note
+        if getattr(self, "_evidence_envelope", False):
+            return developer_base_note(getattr(self, "_memory_state", None), label=EVIDENCE_LABEL)
         return developer_base_note(getattr(self, "_memory_state", None))
 
     def _time_budget_note(self) -> str:

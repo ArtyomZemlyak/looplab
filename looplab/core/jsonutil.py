@@ -42,6 +42,68 @@ def canonical_json(value: object) -> bytes:
         raise ValueError(f"value is not canonical JSON: {exc}") from exc
 
 
+class StrictJSONError(ValueError):
+    """A document `strict_json_loads` refuses for a reason `json.loads` itself would not."""
+
+
+class DuplicateJSONKey(StrictJSONError):
+    """An object names one member twice, at any depth. `key` is the repeated name."""
+
+    def __init__(self, key: str):
+        super().__init__(f"duplicate JSON key: {key}")
+        self.key = key
+
+
+class NonFiniteJSONConstant(StrictJSONError):
+    """A bare `NaN` / `Infinity` / `-Infinity`, which no strict JSON reader accepts."""
+
+    def __init__(self, constant: str):
+        super().__init__(f"non-finite JSON number: {constant}")
+        self.constant = constant
+
+
+class JSONTooDeep(StrictJSONError):
+    """The decoder ran out of stack: a `RecursionError`, reported as the input defect it is."""
+
+
+def _unique_members(pairs):
+    out = {}
+    for key, value in pairs:
+        if key in out:
+            raise DuplicateJSONKey(key)
+        out[key] = value
+    return out
+
+
+def _refuse_constant(constant: str):
+    raise NonFiniteJSONConstant(constant)
+
+
+def strict_json_loads(document: "str | bytes | bytearray") -> object:
+    """`json.loads` for a document whose readers must agree on what it SAYS (the reading side of
+    `canonical_json`).
+
+    Plain `json.loads` keeps the LAST of two members with one name, so a ledger row, a paid claim
+    or a request record carrying `{"action": "a", "action": "b"}` means whatever the reader that
+    happened to parse it retained — and a reader that kept the first disagrees silently. Four
+    modules each declared a private `object_pairs_hook` for exactly this refusal
+    (`engine/curation_protocol.py`, `engine/governance_health.py`, `search/speculation_quality.py`,
+    `harness/client_requests.py`); this is that hook, once. It also refuses the non-finite constants
+    `json.loads` accepts by default, and turns a `RecursionError` from a deeply nested document into
+    `JSONTooDeep` — a `ValueError`, so every caller's existing `except ValueError` contains it
+    instead of a bounded record taking the reader down.
+
+    Everything refused is a `ValueError` (`json.JSONDecodeError` for malformed text, a
+    `StrictJSONError` subclass for the rest). The input is passed to `json.loads` as given, so
+    bytes keep its encoding detection; a caller that requires UTF-8 decodes first.
+    """
+    try:
+        return json.loads(document, object_pairs_hook=_unique_members,
+                          parse_constant=_refuse_constant)
+    except RecursionError as exc:
+        raise JSONTooDeep(str(exc)) from exc
+
+
 DIGEST_TEXT_CAP = 131_072
 """Preimage byte budget shared by the two BOUNDED identity minters (doc 25 CO-08).
 

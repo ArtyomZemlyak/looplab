@@ -1,4 +1,4 @@
-import { uiText, uiMessage, useUILanguage } from './uiLanguage.js'
+import { uiText, uiMessage, uiPlural, useUILanguage } from './uiLanguage.js'
 import React, { useEffect, useId, useMemo, useRef, useState } from 'react'
 
 import {
@@ -176,7 +176,7 @@ function DraftCounter({ draft }) {
   const invalid = draft.tooLarge || draft.invalidUnicode
   return <span className={'comment-byte-count' + (invalid ? ' over' : '')}
     aria-live={invalid ? 'polite' : 'off'}>
-    {((draft.invalidUnicode ? uiText('Unsupported Unicode sequence') : uiMessage("{0} / {1} bytes", [draft.bytes.toLocaleString(), COMMENT_MAX_BYTES.toLocaleString()])))}
+    {((draft.invalidUnicode ? uiText('Unsupported Unicode sequence') : uiPlural(COMMENT_MAX_BYTES, '{0} / {1} bytes', '{0} / {1} bytes', [draft.bytes.toLocaleString(), COMMENT_MAX_BYTES.toLocaleString()])))}
   </span>
 }
 

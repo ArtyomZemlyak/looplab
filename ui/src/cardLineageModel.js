@@ -21,6 +21,7 @@
 // a lane is a statement about ONE piece of work. A direction gets COUNTS instead, which is also the
 // only form that stays readable as the family grows.
 
+import { uiPlural } from './uiLanguage.js'
 import { isRecord } from './panelPrimitives.js'
 
 export const CARD_KIND_DIRECTION = 'direction'
@@ -198,7 +199,7 @@ export function rollupChips(rollup) {
   if (!isRecord(rollup)) return []
   const total = rollup.children
   if (!Number.isSafeInteger(total) || total <= 0) return []
-  const chips = [{ key: 'children', label: `${total} experiment${total === 1 ? '' : 's'}` }]
+  const chips = [{ key: 'children', label: uiPlural(total, '{0} experiment', '{0} experiments') }]
   for (const [key, label] of ROLLUP_CHIPS) {
     const count = rollup[key]
     if (Number.isSafeInteger(count) && count > 0) chips.push({ key, label: `${count} ${label}` })

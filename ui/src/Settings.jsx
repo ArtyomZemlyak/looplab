@@ -1,4 +1,4 @@
-import { uiText, uiMessage, useUILanguage } from './uiLanguage.js'
+import { uiText, uiMessage, uiPlural, useUILanguage } from './uiLanguage.js'
 import { setUILanguage } from './uiLanguage.js'
 import React, { useEffect, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react'
 import { createIdempotencyKey, deadlineGet, saveSettings, saveSecret } from './util.js'
@@ -31,7 +31,6 @@ import { useToast } from './useToast.js'
 import { LlmHealth, readHealthRecovery, unknownTransport } from './LlmHealth.jsx'
 export { LlmHealth, LLM_HEALTH_TIMEOUT_MS } from './LlmHealth.jsx'
 
-const countLabel = (count, singular, plural = `${singular}s`) => uiText(`${count} ${count === 1 ? singular : plural}`)
 const CREDENTIAL_SOURCE_LABELS = {
   stored: 'Stored secret',
   environment: 'Process environment',
@@ -121,7 +120,7 @@ const launchGuardState = ({
   if (invalidCount > 0) return {
     blocked: true,
     status: 'invalid',
-    reason: `${countLabel(invalidCount, 'invalid setting')} must be fixed before starting a run.`,
+    reason: uiPlural(invalidCount, '{0} invalid setting must be fixed before starting a run.', '{0} invalid settings must be fixed before starting a run.'),
   }
   if (unsaved) return {
     blocked: true,
@@ -469,10 +468,10 @@ export default function Settings({ onBack, initialSection = '' }) {
   const hiddenUnsaved = hiddenUnsavedKeys.length
   const searching = !!query.trim()
   const catalogueSummary = searching
-    ? `${countLabel(visibleStats.fields, 'match', 'matches')} across all settings`
+    ? uiPlural(visibleStats.fields, '{0} match across all settings', '{0} matches across all settings')
     : mode === 'essential'
-      ? countLabel(visibleStats.fields, 'essential setting')
-      : `${countLabel(visibleStats.fields, 'setting')} in ${countLabel(visibleStats.groups, 'section')}`
+      ? uiPlural(visibleStats.fields, '{0} essential setting', '{0} essential settings')
+      : `${uiPlural(visibleStats.fields, '{0} setting', '{0} settings')} ${uiPlural(visibleStats.groups, 'in {0} section', 'in {0} sections')}`
 
   const onChange = (key, value) => {
     if (mutationRef.current?.kind === 'reloading settings') return
@@ -587,7 +586,7 @@ export default function Settings({ onBack, initialSection = '' }) {
       return
     }
     if (invalidCount) {
-      show(uiMessage("Fix {0} before saving", [countLabel(invalidCount, 'invalid setting')]))
+      show(uiPlural(invalidCount, 'Fix {0} invalid setting before saving', 'Fix {0} invalid settings before saving'))
       focusFirstInvalid()
       return
     }
@@ -894,10 +893,10 @@ export default function Settings({ onBack, initialSection = '' }) {
           <div className="settings-summary" role="status" aria-live="polite">
             <span>{uiText(catalogueSummary)}</span>
             <span className="settings-summary-divider" aria-hidden="true">·</span>
-            <span className={unsaved ? 'is-unsaved' : ''}>{((unsaved ? uiText(countLabel(unsavedKeys.size, 'unsaved change')) : uiText('No unsaved changes')))}</span>
+            <span className={unsaved ? 'is-unsaved' : ''}>{((unsaved ? uiPlural(unsavedKeys.size, '{0} unsaved change', '{0} unsaved changes') : uiText('No unsaved changes')))}</span>
             <span className="settings-summary-divider" aria-hidden="true">·</span>
-            <span>{uiText(countLabel(dirty.size, 'customized value'))}</span>
-            {hiddenUnsaved > 0 && <button type="button" className="settings-summary-link" onClick={revealChanges}>{uiText("Review ")}{uiText(countLabel(hiddenUnsaved, 'hidden change'))}
+            <span>{uiPlural(dirty.size, '{0} customized value', '{0} customized values')}</span>
+            {hiddenUnsaved > 0 && <button type="button" className="settings-summary-link" onClick={revealChanges}>{uiPlural(hiddenUnsaved, 'Review {0} hidden change', 'Review {0} hidden changes')}
             </button>}
           </div>
         </section>
@@ -968,10 +967,10 @@ export default function Settings({ onBack, initialSection = '' }) {
       <span className="spacer" style={{ flex: 1 }} />
       {invalidCount
         ? <button type="button" className="settings-summary-link settings-save-state is-invalid"
-            ref={saveStateRef} onClick={focusFirstInvalid}>{uiText(countLabel(invalidCount, 'invalid setting'))}{uiText(" — review")}</button>
+            ref={saveStateRef} onClick={focusFirstInvalid}>{uiPlural(invalidCount, '{0} invalid setting — review', '{0} invalid settings — review')}</button>
         : <span className={'settings-save-state' + (unsaved ? ' is-unsaved' : '')}
             ref={saveStateRef} role="status" aria-live="polite" tabIndex={-1}>
-          {((unsaved ? uiText(countLabel(unsavedKeys.size, 'unsaved change')) : uiText('All changes saved')))}
+          {((unsaved ? uiPlural(unsavedKeys.size, '{0} unsaved change', '{0} unsaved changes') : uiText('All changes saved')))}
         </span>}
       <button className="btn sm ghost" disabled={!!mutationBusy || !canResetDefaults
         || settingsActionRecoveryBlocked}

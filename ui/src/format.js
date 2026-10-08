@@ -1,5 +1,5 @@
 
-import { effectiveUILanguage } from './uiLanguage.js'
+import { effectiveUILanguage, uiPlural } from './uiLanguage.js'
 // Pure value formatters: metric numbers, byte sizes, epoch-seconds timestamps, and the caption
 // font-size fitter. Split out of util.js (mega-refactor P5.2 — bodies verbatim); util.js re-exports
 // everything, so importers are unchanged.
@@ -158,23 +158,23 @@ export function costPricing(c) {
   // unknown rather than asserting either "unpriced" or "all priced".
   if (priced === null) {
     return { text: `$${fmt(cost)}`, priced: true, partial: false,
-             title: `This roll-up does not record how many of its ${calls.toLocaleString()} calls the`
-               + ' provider priced, so the figure may be a floor. Open the run to see the split.' }
+             title: uiPlural(calls, 'This roll-up does not record how many of its {0} calls the provider priced, so the figure may be a floor. Open the run to see the split.',
+               'This roll-up does not record how many of its {0} calls the provider priced, so the figure may be a floor. Open the run to see the split.', [calls.toLocaleString()]) }
   }
   if (priced <= 0) {
     return { text: 'unpriced', priced: false, partial: false,
-             title: `This run's provider reported no price for any of its ${calls.toLocaleString()}`
-               + ' calls. Spend is unknown, not zero — read the token counts instead.' }
+             title: uiPlural(calls, "This run's provider reported no price for any of its {0} calls. Spend is unknown, not zero — read the token counts instead.",
+               "This run's provider reported no price for any of its {0} calls. Spend is unknown, not zero — read the token counts instead.", [calls.toLocaleString()]) }
   }
   const label = `$${fmt(cost)}`
   if (priced < calls) {
     return { text: `${label}+`, priced: true, partial: true,
-             title: `Only ${priced.toLocaleString()} of ${calls.toLocaleString()} calls were priced`
-               + ` by the provider, so ${label} is a floor — the other`
-               + ` ${(calls - priced).toLocaleString()} cost an unknown amount.` }
+             title: uiPlural(calls, 'Only {0} of {1} calls were priced by the provider, so {2} is a floor — the other {3} cost an unknown amount.',
+               'Only {0} of {1} calls were priced by the provider, so {2} is a floor — the other {3} cost an unknown amount.',
+               [priced.toLocaleString(), calls.toLocaleString(), label, (calls - priced).toLocaleString()]) }
   }
   return { text: label, priced: true, partial: false,
-           title: `All ${calls.toLocaleString()} calls were priced by the provider.` }
+           title: uiPlural(calls, 'All {0} calls were priced by the provider.', 'All {0} calls were priced by the provider.', [calls.toLocaleString()]) }
 }
 
 // Convenience wrapper for the one-line "N tokens · $X" summaries.

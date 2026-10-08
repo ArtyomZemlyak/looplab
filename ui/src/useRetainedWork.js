@@ -3,6 +3,7 @@ import { useEffect, useMemo, useRef } from 'react'
 import { inspectAuthoringRecoveryStorage } from './authoringRecoveryStorage.js'
 import { listCommentOperationRecoveries } from './commentRecoveryStorage.js'
 import { installNavigationLossGuard } from './navigationLossGuard.js'
+import { useUILanguage } from './uiLanguage.js'
 import {
   AUTHORING_SCOPE, authoringRetention, commentDraftEntryUnsafe, commentRetention,
   configDraftScope, panelRetention, retainedNavigationShouldBlock, retainedNavigationTarget,
@@ -26,6 +27,10 @@ export function useRetainedWork({
   activePanelNavigationGuard, panelNavigationGuardRef, setPanelNavigationGuard,
   commentRecoveryRevision, inspectorDraftRevision, onBack,
 }) {
+  // `commentRetention` returns its leave message already in the UI language (`uiPlural`), so the
+  // memo is keyed on the language revision too: keyed on the stores alone, a language switch kept
+  // the old language's sentence until some draft changed.
+  const [, , languageRevision] = useUILanguage()
   const comments = useMemo(() => {
     // A review capability has no composer, no recovery storage and no way to retain anything, so it
     // reads as EMPTY rather than as "unknown" — otherwise a reviewer would be refused navigation by
@@ -38,7 +43,7 @@ export function useRetainedWork({
       : listCommentOperationRecoveries(String(runId))
     return commentRetention({ runId, generation, entries, recovery })
   }, [reviewMode, runId, generation, inspectorDraftRevision, commentRecoveryRevision,
-      inspectorDraftStore])
+      inspectorDraftStore, languageRevision])
 
   // The panel reads are keyed on the OPEN panel: a closed panel retains nothing that this component
   // can act on, and reading its scope anyway would make an unsafe draft in a panel nobody has open

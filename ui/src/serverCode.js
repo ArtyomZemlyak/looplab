@@ -16,7 +16,7 @@
 // A NOTICE, NEVER A REFUSAL. A stale server still serves, and its numbers are still that server's
 // honest fold — they are simply older than the tree. Hiding rows or blanking values would replace a
 // legible smaller truth with no truth at all.
-import { uiMessage } from './uiLanguage.js'
+import { uiMessage, uiPlural } from './uiLanguage.js'
 import { isRecord } from './panelPrimitives.js'
 
 export function serverCodeNotice(state) {
@@ -29,7 +29,7 @@ export function serverCodeNotice(state) {
     ? report.changed.filter(p => typeof p === 'string' && p.trim()) : []
   const more = report.changed_truncated === true || sample.length < count
   return {
-    text: uiMessage(count === 1 ? 'server code {0} file behind' : 'server code {0} files behind', [count]),
+    text: uiPlural(count, 'server code {0} file behind', 'server code {0} files behind'),
     detail: 'this server process loaded its code at startup and the tree has moved since — every'
       + ' fix merged after it started is absent from what you are looking at. Restart the UI server.'
       + (sample.length ? ` Changed: ${sample.join(', ')}${more ? ', …' : ''}` : ''),

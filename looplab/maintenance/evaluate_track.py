@@ -58,7 +58,8 @@ from looplab.engine.track_lane import parse_track_output, track_refusal  # noqa:
 
 def evaluate_track(run_dir: Path, track: str, nodes: str, *, apply: bool) -> str:
     """Plan (and with `apply`, run and record) `track` over `nodes` (`"all"` or `"3,5"`)."""
-    from looplab.engine.artifact_sync import passthrough_env, render_argv, sync_cwd
+    from looplab.engine.artifact_sync import (append_tool_log, mask_tool_text, passthrough_env,
+                                              render_argv, sync_cwd)
     from looplab.events.types import EV_EXTRA_METRICS_IMPORTED
     from looplab.maintenance.backfill_applied_params import offline_run
     from looplab.runtime.sandbox import run_argv
@@ -96,16 +97,19 @@ def evaluate_track(run_dir: Path, track: str, nodes: str, *, apply: bool) -> str
                 # The declared credentials by NAME, and the working directory they imply, as the
                 # copy-out (`engine/artifact_sync.py::sync_cwd`).
                 env = passthrough_env(spec)
-                rc, out, err, timed = run_argv(argv, sync_cwd(workdir, run_dir, env),
-                                               float(spec.get("timeout") or 3600.0), env=env,
-                                               log_path=str(run_dir / f"track_{track}.log"))
+                rc, out, err, timed = run_argv(argv, sync_cwd(workdir, run_dir, spec),
+                                               float(spec.get("timeout") or 3600.0), env=env)
+                # MASKED at the write boundary (round 3): the passthrough values and every known
+                # secret, never the tool's raw bytes (`artifact_sync.py::append_tool_log`).
+                append_tool_log(run_dir / f"track_{track}.log", argv, out, err, env)
             except (OSError, ValueError) as exc:
-                lines.append(f"  node {nid}: could not run — {type(exc).__name__}: {exc}")
+                lines.append(f"  node {nid}: could not run — {type(exc).__name__}: "
+                             f"{mask_tool_text(str(exc), env)}")
                 continue
             seconds = round(time.monotonic() - started, 1)
             values = parse_track_output(out, keys=spec.get("keys"), prefix=str(spec.get("key_prefix") or ""))
             if rc != 0 or timed or not values:
-                tail = (err or "").strip().splitlines()[-1:] or [""]
+                tail = mask_tool_text((err or "").strip(), env).splitlines()[-1:] or [""]
                 lines.append(f"  node {nid}: failed (exit {rc}{', timed out' if timed else ''}, "
                              f"{len(values)} value(s), {seconds}s) {tail[0][:200]}")
                 continue

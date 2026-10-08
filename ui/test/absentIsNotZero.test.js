@@ -39,8 +39,10 @@ test('epoch-second guards test for a NUMBER, so 1970 renders the element and not
 
 test('a RECORDED seed count is printed, including zero — only an absent one becomes prose', () => {
   for (const [file, needle] of [
-    ['Inspector.jsx', "typeof n.confirmed_seeds === 'number' ? n.confirmed_seeds : 'Multiple'"],
-    ['panels.jsx', "typeof robust.confirmed_seeds === 'number' ? robust.confirmed_seeds : 'Multiple'"],
+    // Each count is a `uiPlural` phrase since 2026-10-08 (Russian number forms); the guard is the
+    // same — a NUMBER prints, and only a non-number reaches the "Multiple" sentence.
+    ['Inspector.jsx', "typeof n.confirmed_seeds === 'number' ? uiPlural(n.confirmed_seeds,"],
+    ['panels.jsx', "typeof robust.confirmed_seeds === 'number'\n              ? uiPlural(robust.confirmed_seeds,"],
   ]) {
     const src = sourceOf(file)
     assert.ok(src.includes(needle), `${file}: a recorded 0 must print as 0, not as "Multiple"`)

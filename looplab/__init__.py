@@ -512,6 +512,7 @@ _LAYOUT = {
     "workspace": "engine",
     "workspace_seed": "engine",  # shared eval/Developer candidate filesystem primitives
     "seed_archive": "engine",  # run-owned verified copied-base bytes
+    "seed_receipt": "core",  # the ONE copied-base receipt -> seed-event binder (route, upstream, git)
     "comparability_rule": "core",  # the pure comparison RULE `engine/comparability.py` re-exports
     "concept_effects": "search",  # matched with/without concept contrasts (observational)
     "output_language": "core",  # the one prose-language directive for every model role

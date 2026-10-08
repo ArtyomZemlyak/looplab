@@ -164,6 +164,25 @@ BOX_FAULT_PAUSE_REASONS: dict[str, tuple[str, str]] = {
 }
 
 
+def _full_run_dir_detail(data) -> str | None:
+    """The fixed sentence for an `infra_unavailable` pause over a FULL run directory, naming the
+    largest node workdir off the row's `occupant` (`engine/evaluate.py::_infra_pause_row`, round 3)
+    — the one thing the operator has to act on. Built from two validated integers only, never from
+    the row's text; None when the row carries no such attribution."""
+    if not isinstance(data, dict) or data.get("fault") != "run_dir_full":
+        return None
+    occupant = data.get("occupant")
+    node_id = _integer(occupant.get("node_id")) if isinstance(occupant, dict) else None
+    size = occupant.get("bytes") if isinstance(occupant, dict) else None
+    if node_id is None or node_id < 0 or type(size) is not int or size <= 0:
+        return ("The run directory is full. Free space on it and resume; the withheld experiment "
+                "re-runs, charged to nobody.")
+    from looplab.runtime.infra_probe import human_bytes   # serve -> runtime stays deferred
+    return (f"The run directory is full; experiment #{node_id}'s workdir holds {human_bytes(size)}, "
+            "the most of any experiment. Free space (or abort that experiment) and resume; the "
+            "withheld experiment re-runs, charged to nobody.")
+
+
 def _item(run_id: str, generation: str, event: Event, kind: str, *, severity: str,
           title: str, detail: str, browser: bool, active: bool = False,
           node_id: int | None = None, node_generation: int | None = None,
@@ -623,8 +642,11 @@ def project_event_attention(run_id: str, events: Iterable[Event]) -> dict:
         box = BOX_FAULT_PAUSE_REASONS.get(str(state.pause_reason or ""))
         pause = accepted_event(state.pause_event_seq, EV_PAUSE) if box else None
         if pause is not None:
+            full = (_full_run_dir_detail(pause.data)
+                    if str(state.pause_reason or "") == "infra_unavailable" else None)
             item = _item(run_id, generation, pause, "run_failed", severity="danger",
-                         title=box[0], detail=box[1], browser=True, active=True)
+                         title="Run paused: the run directory is full" if full else box[0],
+                         detail=full or box[1], browser=True, active=True)
             if item:
                 items.append(item)
 

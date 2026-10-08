@@ -1,4 +1,4 @@
-import { uiText, uiMessage, useUILanguage } from './uiLanguage.js'
+import { uiText, uiMessage, uiPlural, useUILanguage } from './uiLanguage.js'
 import React, { useCallback, useContext, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import { ReactFlow, Background, Controls, MiniMap, Handle, Position, Panel,
   useNodesInitialized, useReactFlow, useViewport } from '@xyflow/react'
@@ -401,7 +401,7 @@ function ExpNode({ data }) {
           title={uiMessage("Reads the workdirs of artifact nodes {0} (LOOPLAB_USES_WORKDIRS)", [node.uses.map(id => '#' + id).join(', ')])}>⇠</span>}
         {branch && <span className="origin-chip fork compact" role="img"
           aria-label={uiText(branch.label)} title={uiText(branch.title)}><OpIcon name={branch.icon} size={11} /></span>}
-        {sweep && <span className="badge sweep" title={uiMessage("intra-node sweep · {0} trials — open the node's Trials tab", [sw.count])}>⊞ {sw.count}</span>}
+        {sweep && <span className="badge sweep" title={uiPlural(sw.count, "intra-node sweep · {0} trials — open the node's Trials tab", "intra-node sweep · {0} trials — open the node's Trials tab")}>⊞ {sw.count}</span>}
         {agentBadge(node.agent_report)}
       </div>
       <div className="metric">
@@ -409,7 +409,7 @@ function ExpNode({ data }) {
         {/* delta only where it's meaningful — a merge has several parents, so a single ▲/▼ vs parent[0] would lie */}
         {!isMerge && d && <span className={'delta ' + (d.improved ? 'up' : 'down')}>{d.improved ? '▲' : '▼'}{fmt(Math.abs(d.d), 2)}</span>}
         {/* confirmed = a compact tick, not a restated 'robust …' line; the full ±std lives in the Inspector */}
-        {confirmed && <span className="conf-chip" title={uiMessage("robust {0} ±{1} over {2} seeds", [fmt(node.confirmed_mean, 3), fmt(node.confirmed_std, 2), node.confirmed_seeds])}>✓{node.confirmed_seeds}×</span>}
+        {confirmed && <span className="conf-chip" title={uiPlural(node.confirmed_seeds, 'robust {0} ±{1} over {2} seeds', 'robust {0} ±{1} over {2} seeds', [fmt(node.confirmed_mean, 3), fmt(node.confirmed_std, 2), node.confirmed_seeds])}>✓{node.confirmed_seeds}×</span>}
       </div>
       {/* A fixed-height graph node gets exactly one context row. Failure/constraint truth wins over
           sweep detail, then merge/change copy. Provenance stays independently reachable in the header. */}
@@ -423,7 +423,7 @@ function ExpNode({ data }) {
           : sweep ? <div className="sub sweep-foot">
             <Spark series={sw.series} width={104} height={16} />
             <span className="spacer" style={{ flex: 1 }} />
-            {sw.failed ? <span className="dot fail" title={uiMessage("{0} failed trials", [sw.failed])}>●{sw.failed}</span> : null}
+            {sw.failed ? <span className="dot fail" title={uiPlural(sw.failed, '{0} failed trials', '{0} failed trials')}>●{sw.failed}</span> : null}
           </div>
           : isMerge
             ? (() => { const ml = '⊕ ' + mergeThemes.join(' + ')
@@ -434,7 +434,7 @@ function ExpNode({ data }) {
     {(conceptStatus === 'partial' || conceptTags.length > 0) && (conceptTags.length > 2
       ? <details className="node-concepts expandable nodrag nopan"
           onClick={event => event.stopPropagation()}>
-        <summary aria-label={uiMessage("Show all {0} concepts for experiment {1}", [conceptTags.length, node.id])}>
+        <summary aria-label={uiPlural(conceptTags.length, 'Show all {0} concepts for experiment {1}', 'Show all {0} concepts for experiment {1}', [conceptTags.length, node.id])}>
           {conceptPreview}<span className="nc-tag more">+{conceptTags.length - 2}</span>
         </summary>
         <div className="node-concepts-all">{conceptTags.join(' · ')}</div>
@@ -476,8 +476,8 @@ function GroupSuper({ data }) {
   const zeroMatch = filterActive && count === 0
   const countText = filterActive ? `${count}/${totalCount}` : String(count)
   const matchText = filterActive
-    ? `${count} of ${totalCount} experiments match ${filterDescription}`
-    : `${count} experiments`
+    ? uiPlural(totalCount, '{0} of {1} experiments match {2}', '{0} of {1} experiments match {2}', [count, totalCount, filterDescription])
+    : uiPlural(count, '{0} experiments', '{0} experiments')
   const metricText = zeroMatch ? 'no matching experiments' : `best ${fmt(best)}`
   return (
     <SuperShell tint={tint} selected={selected} dimmed={zeroMatch} selectKey={label}
