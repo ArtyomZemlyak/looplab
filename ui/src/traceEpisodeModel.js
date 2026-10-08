@@ -25,6 +25,7 @@
 
 // The ONE tiered duration rendering (`format.js` imports nothing, so a pure model may reach it).
 import { durationLabel } from './format.js'
+import { uiPlural, uiText } from './uiLanguage.js'
 
 // The kinds a node's own trace records, in the words the operator uses. Only a RENAME lives here: a
 // label with no row keeps its recorded spelling verbatim, because inventing a friendly name for a
@@ -294,7 +295,7 @@ export const episodeSummary = (episode, index) => {
   const duration = episodeDurationLabel(episode)
   if (duration) parts.push(duration)
   const spans = episode?.spans
-  if (Number.isSafeInteger(spans) && spans > 0) parts.push(`${spans} spans`)
+  if (Number.isSafeInteger(spans) && spans > 0) parts.push(uiPlural(spans, '{0} spans', '{0} spans'))
   const generations = episode?.generations
   if (Number.isSafeInteger(generations) && generations > 0) {
     parts.push(`${generations} gen`)
@@ -322,13 +323,14 @@ export const episodeMapNotice = map => {
   // `dropped` is named separately wherever it is non-zero: an omitted episode can be reached by
   // asking the server for more, one this fold refused for a missing anchor cannot be reached at all,
   // and rolling them into one number would promise a remedy for half of them.
-  const unreachable = dropped ? ` ${dropped} cannot be jumped to.` : ''
+  // Returned in the UI language, one whole sentence per number form (`uiPlural`).
+  const unreachable = dropped ? ' ' + uiPlural(dropped, '{0} cannot be jumped to.', '{0} cannot be jumped to.') : ''
   if (!total) {
     return known === 1
-      ? 'This experiment has 1 earlier step and it cannot be jumped to.'
-      : `This experiment has ${known} earlier steps and none of them can be jumped to.`
+      ? uiText('This experiment has 1 earlier step and it cannot be jumped to.')
+      : uiPlural(known, 'This experiment has {0} earlier steps and none of them can be jumped to.', 'This experiment has {0} earlier steps and none of them can be jumped to.')
   }
-  return `Showing the most recent ${total} of ${known} steps.${unreachable}`
+  return uiPlural(known, 'Showing the most recent {0} of {1} steps.', 'Showing the most recent {0} of {1} steps.', [total, known]) + unreachable
 }
 
 // What the control says when the map could not be read. A failed map is not an absent history, and

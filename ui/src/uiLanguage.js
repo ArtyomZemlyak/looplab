@@ -76,11 +76,14 @@ export function uiMessage(key, values = []) {
 // Russian needs three integer forms (1 узел, 2 узла, 5 узлов; 21 узел, 11 узлов), which no suffix
 // placeholder can carry, so the Russian forms live in the catalogue's `plurals` section keyed by
 // the English `other` text: { one, few, many, other? } with CLDR's categories (`other` is the
-// fractional form and defaults to `few`, "1,5 запуска"). `{N}` substitutes `values[N]` as in
-// `uiMessage`; `values` defaults to `[count]`. A key with no Russian forms falls back to the
+// fractional form and defaults to `few`, "1,5 запуска"; the optional `exact1` is the text for
+// exactly one, since CLDR `one` is also 21 and 101 — `localeCatalogue.js::PLURAL_FORMS`). `{N}`
+// substitutes `values[N]` as in `uiMessage`; `values` defaults to `[count]`. A key with no Russian forms falls back to the
 // English choice through `uiText`, so a missing entry reads English, never a glued fragment.
 // `scripts/localize-copy.mjs --check` collects every `uiPlural(count, '<one>', '<other>', …)`
-// call (both forms must be string literals) and refuses a missing, unused or ill-formed entry.
+// call (both forms string literals carrying the same placeholders, the function called by its own
+// imported name — an alias, `L.uiPlural` or a call the collector never reaches is refused) and
+// refuses a missing, unused or ill-formed entry.
 export function russianPluralCategory(count) {
   const n = Math.abs(Number(count))
   if (!Number.isInteger(n)) return 'other'
@@ -89,12 +92,18 @@ export function russianPluralCategory(count) {
   if (last >= 2 && last <= 4 && (lastTwo < 12 || lastTwo > 14)) return 'few'
   return 'many'
 }
+// The Russian form for `count`: `exact1` for exactly one when the entry has it, else the CLDR
+// category's form (`other`, the fractional form, falls back to `few`).
+export function russianPluralForm(forms, count) {
+  if (Number(count) === 1 && forms.exact1) return forms.exact1
+  return forms[russianPluralCategory(count)] ?? forms.few
+}
 export function uiPlural(count, one, other, values = [count]) {
   // Keyed like `uiText`: whitespace-normalized and trimmed, with the source's own edges kept.
   const key = typeof other === 'string' ? other.replace(/\s+/g, ' ').trim() : other
   const forms = effectiveUILanguage() === 'ru' && dictionary?.plural ? dictionary.plural(key) : undefined
   const template = forms
-    ? other.match(/^\s*/)[0] + (forms[russianPluralCategory(count)] ?? forms.few) + other.match(/\s*$/)[0]
+    ? other.match(/^\s*/)[0] + russianPluralForm(forms, count) + other.match(/\s*$/)[0]
     : uiText(Number(count) === 1 ? one : other)
   return template.replace(/\{(\d+)\}/g, (_, index) => String(values[Number(index)] ?? ''))
 }

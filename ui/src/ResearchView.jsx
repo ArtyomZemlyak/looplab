@@ -197,7 +197,7 @@ export default function ResearchView({ cards, state, renderCard, onShowLanes, on
     </div>
     {bar}
     {filtering && <p className="research-filter-result" role="status">
-      {matchCount}{uiText(" matching ")}{((matchCount === 1 ? uiText('question') : uiText('questions')))}{uiText(" · matching branches are open")}</p>}
+      {uiPlural(matchCount, '{0} matching question · matching branches are open', '{0} matching questions · matching branches are open')}</p>}
     <ol className="research-lattice">
       {shown.map((row) => {
         const roll = rollups.get(row.rowKey) || {}
@@ -240,8 +240,8 @@ export default function ResearchView({ cards, state, renderCard, onShowLanes, on
             {/* A row that appears in two places says so where it appears. Without this the operator
                 reads one question as two, and the duplication is deliberate. */}
             {closure && <span className={'chip' + (closure.supported ? ' muted' : ' warn')}
-              title={(closure.supported ? `closed (${closure.by}) with ${closure.sharper} sharper question(s) and `
-                  + `${closure.measured} measured experiment(s) behind it` : uiMessage("closed with NOTHING narrower behind it — no sharper question was asked and no experiment of its own produced evidence", []))}>
+              title={(closure.supported ? uiPlural(closure.sharper, 'closed ({1}) with {0} sharper question(s) and ', 'closed ({1}) with {0} sharper question(s) and ', [closure.sharper, closure.by])
+                  + uiPlural(closure.measured, '{0} measured experiment(s) behind it', '{0} measured experiment(s) behind it') : uiMessage("closed with NOTHING narrower behind it — no sharper question was asked and no experiment of its own produced evidence", []))}>
               {closure.by}{((closure.supported ? '' : uiText(' · nothing narrower')))}
             </span>}
             {row.duplicated && <span className="chip muted"
@@ -291,7 +291,7 @@ export default function ResearchView({ cards, state, renderCard, onShowLanes, on
       aria-labelledby="research-unfiled-h">
       <h3 id="research-unfiled-h" className="research-unfiled-h">{uiText("Not filed under any question ")}<span className="muted">{unfiled.length}</span>
       </h3>
-      <div className="muted card-empty">{uiText("no question claims ")}{((unfiled.length === 1 ? uiText('this experiment') : uiText('these experiments')))}{uiText(" — the Researcher proposed ")}{((unfiled.length === 1 ? uiText('it') : uiText('them')))}{uiText(" without naming a direction")}</div>
+      <div className="muted card-empty">{uiPlural(unfiled.length, 'no question claims this experiment — the Researcher proposed it without naming a direction', 'no question claims these experiments — the Researcher proposed them without naming a direction')}</div>
       <div className="research-experiments">{unfiled.map(card => renderCard(card))}</div>
     </section>}
     {/* Same rule as the unfiled block: the parent this card names is off the page. */}
@@ -300,7 +300,7 @@ export default function ResearchView({ cards, state, renderCard, onShowLanes, on
       <h3 id="research-offpage-h" className="research-unfiled-h">{uiText("Filed under a question not on this page ")}<span className="muted">{offPage.length}</span>
       </h3>
       <div className="muted card-empty">
-        {((offPage.length === 1 ? uiText('this experiment names') : uiText('these experiments name')))}{uiText(" a parent the board did not send — the run has a question for ")}{((offPage.length === 1 ? uiText('it') : uiText('them')))}{uiText(", beyond the row cap this view receives")}</div>
+        {uiPlural(offPage.length, 'this experiment names a parent the board did not send — the run has a question for it, beyond the row cap this view receives', 'these experiments name a parent the board did not send — the run has a question for them, beyond the row cap this view receives')}</div>
       <div className="research-experiments">{offPage.map(card => renderCard(card))}</div>
     </section>}
   </div>

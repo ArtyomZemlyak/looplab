@@ -242,8 +242,8 @@ export default function MapView({ onOpen, runs = [], projects = [], collapsed = 
         <Controls showInteractive={false} />
         <MiniMap pannable zoomable className="run-minimap" nodeColor={node => node.type === 'run' ? 'var(--accent)' : 'var(--line-2)'} />
         <Panel position="top-left" className="map-summary">
-          <b>{runs.length}{uiText(" runs")}</b><span>{scopeLabel}</span>
-          <span>{runNodeCount}{uiText(" visible · ")}{uiPlural(collapsedIds.length, '{0} collapsed cluster', '{0} collapsed clusters')}</span>
+          <b>{uiPlural(runs.length, '{0} runs', '{0} runs')}</b><span>{scopeLabel}</span>
+          <span>{uiPlural(runNodeCount, '{0} visible · ', '{0} visible · ')}{uiPlural(collapsedIds.length, '{0} collapsed cluster', '{0} collapsed clusters')}</span>
           {collapsedIds.length > 0 && <button className="btn sm" onClick={() => collapsedIds.forEach(onToggle)}>{uiText("Expand clusters")}</button>}
         </Panel>
       </ReactFlow>

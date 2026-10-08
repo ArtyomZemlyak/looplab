@@ -171,12 +171,12 @@ test('bounded omissions and loaded-window search limitations are explicit on bot
     source('Dock.jsx'), source('panels.jsx'), source('narration.js')])
   // The omission notice is written by the narration model (doc 25 UI-08); the row that shows the same
   // receipt inline still lives in Dock. `dockNarration.test.js` drives the narrated wording for real.
-  assert.match(narration, /details omitted \(\$\{omittedBytes\.toLocaleString\(\)\} source bytes exceed page limit\)/)
-  assert.match(dock, /\{omittedBytes\.toLocaleString\(\)\} source bytes exceed the bounded page response/)
+  assert.match(narration, /uiPlural\(omittedBytes, '\{0\} — details omitted \(\{1\} source bytes exceed page limit\)'[^\]]*\[event\.type \|\| 'event', omittedBytes\.toLocaleString\(\)\]\)/)
+  assert.match(dock, /uiPlural\(omittedBytes, '\{0\} source bytes exceed the bounded page response\.'[^)]*\[omittedBytes\.toLocaleString\(\)\]\)/)
   assert.match(dock, /Filters search loaded events only/)
   assert.match(dock, /rawPreview = JSON\.stringify\(event\.data \?\? \{\}\)\.slice\(0, 500\)/)
   assert.match(dock, /`\$\{event\.type \|\| ''\} \$\{narration\} \$\{rawPreview\}`\.toLowerCase\(\)/)
-  assert.match(panels, /details omitted · \$\{bytes\.toLocaleString\(\)\} source bytes exceed page limit/)
+  assert.match(panels, /uiPlural\(bytes, 'details omitted · \{0\} source bytes exceed page limit'[^\]]*\[bytes\.toLocaleString\(\)\]\)/)
   assert.match(panels, /Search covers the loaded window only/)
   assert.doesNotMatch(panels.slice(panels.indexOf('export function EventExplorer')), /title=\{JSON\.stringify/)
 })

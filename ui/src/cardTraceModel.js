@@ -1,3 +1,4 @@
+import { uiPlural } from './uiLanguage.js'
 // A CARD's whole story, as the operator reads it — the pure half of the card Trace section.
 //
 // A Card is one hypothesis: the Researcher proposes it, the Developer builds one or more experiments
@@ -34,7 +35,7 @@ export function cardTraceSections(payload) {
     sections.push({
       kind: 'research',
       key: 'research',
-      title: research.length === 1 ? 'Research' : `Research · ${research.length} proposals`,
+      title: research.length === 1 ? 'Research' : uiPlural(research.length, 'Research · {0} proposals', 'Research · {0} proposals'),
       rows: research.map(row => ({
         ...row,
         label: researchLinkLabel(row.link),

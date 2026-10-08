@@ -57,7 +57,12 @@ export function decodeCatalogue(page) {
   return translate
 }
 // The integer categories are required; `other` (fractions) is optional and `uiPlural` reads `few`.
-export const PLURAL_FORMS = ['one', 'few', 'many', 'other']
+// `exact1` (optional) is ICU's `=1`: the text for exactly one, which `uiPlural` prefers over
+// `one`. CLDR `one` also covers 21, 31, 101…, so a `one` form must read right for 21 — the count
+// printed, no singular pronoun pointing back at the counted noun ("21 запись; итоги могут её
+// учитывать" is wrong). A sentence whose natural singular needs that pronoun, or that never prints
+// the count ("удалён узел #3"), says it in `exact1` and keeps `one` right for 21.
+export const PLURAL_FORMS = ['exact1', 'one', 'few', 'many', 'other']
 export function validPluralForms(forms) {
   return !!forms && typeof forms === 'object' && !Array.isArray(forms)
     && ['one', 'few', 'many'].every(name => typeof forms[name] === 'string' && forms[name].trim())

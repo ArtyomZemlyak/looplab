@@ -1454,7 +1454,7 @@ export default function ConceptView({ runId, generation, sequence: displayedSequ
         const edgeProjection = Array.isArray(node?.cross_parents)
         const conceptLabel = edgeProjection ? id : conceptLeaf(id)
         const crossParentSummary = crossParents.length
-          ? `Additional display ${crossParents.length === 1 ? 'parent' : 'parents'} via projected ${linkKind} ${crossParents.length === 1 ? 'link' : 'links'}: ${crossParents.join(', ')}`
+          ? uiPlural(crossParents.length, 'Additional display parent via projected {1} link: {2}', 'Additional display parents via projected {1} links: {2}', [crossParents.length, linkKind, crossParents.join(', ')])
           : ''
         return <Fragment key={id}><tr className={'cv-crow' + (node?.tagged ? ' tagged' : ' ghost') + (conceptHit ? ' hit' : '')}>
           <td className="cv-name" style={{ paddingLeft: 12 + depth * 18 }}>
@@ -1464,7 +1464,7 @@ export default function ConceptView({ runId, generation, sequence: displayedSequ
             <span className="cv-cid" title={id}><Marked text={conceptLabel} query={searching ? query : ''} /></span>
             {!!crossParents.length && <details className="cv-crosslinks">
               <summary className="cv-badge" title={uiText(crossParentSummary)}
-                aria-label={uiText(crossParentSummary)}>+{crossParents.length} {((crossParents.length === 1 ? uiText('link') : uiText('links')))}</summary>
+                aria-label={uiText(crossParentSummary)}>{uiPlural(crossParents.length, '+{0} link', '+{0} links')}</summary>
               <span className="cv-crosslinks-detail">{uiText(crossParentSummary)}</span>
             </details>}
             {!!experiments.length && <button type="button" className="cv-badge btn xs"
@@ -1473,7 +1473,7 @@ export default function ConceptView({ runId, generation, sequence: displayedSequ
               aria-label={(evidenceOpen
                 ? uiPlural(experiments.length, 'Hide {0} tagged experiment for {1}', 'Hide {0} tagged experiments for {1}', [experiments.length, id])
                 : uiPlural(experiments.length, 'Show {0} tagged experiment for {1}', 'Show {0} tagged experiments for {1}', [experiments.length, id]))}>
-              {experiments.length}{uiText(" refs")}</button>}
+              {uiPlural(experiments.length, '{0} refs', '{0} refs')}</button>}
           </td>{cols.map(column => {
             const value = metricRows[id]?.[column.key]
             const tone = column.delta && column.key !== 'effect_delta' ? deltaTone(value) : ''

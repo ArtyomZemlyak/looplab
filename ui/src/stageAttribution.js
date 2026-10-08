@@ -1,4 +1,4 @@
-import { uiMessage } from './uiLanguage.js'
+import { uiMessage, uiPlural } from './uiLanguage.js'
 // The eval pipeline's stage strip, ATTRIBUTED — the pure half of `Inspector.jsx::StagePipeline`.
 //
 // THE DEFECT THIS EXISTS FOR. `stage_finished` is appended once per stage per ATTEMPT of the
@@ -124,23 +124,23 @@ export const stageSupersessionNotice = (views, { repairs = null, status = null }
   const stale = (views || []).filter(v => v?.superseded)
   if (!stale.length) return null
   const failed = stale.filter(v => v.failed).length
-  const subject = stale.length === 1 ? 'result is' : 'results are'
   const settled = status === 'evaluated' || status === 'failed'
+  // Both sentences are returned in the UI language, one whole key per number form (`uiPlural`):
+  // the count-dependent words used to be glued into one English template no catalogue key matched.
   return {
     superseded: stale.length,
     failed,
     repairs,
-    text: `${stale.length} of ${views.length} stage ${subject} from an earlier attempt`
-      + ` — repair ${repairs} was applied after ${stale.length === 1 ? 'it' : 'them'} and `
-      + (settled
-        ? 'this experiment was settled by a later attempt these rows do not describe.'
-        : 'this experiment has not been scored since.'),
+    text: settled
+      ? uiPlural(stale.length, '{0} of {1} stage result is from an earlier attempt — repair {2} was applied after it and this experiment was settled by a later attempt these rows do not describe.',
+        '{0} of {1} stage results are from an earlier attempt — repair {2} was applied after them and this experiment was settled by a later attempt these rows do not describe.', [stale.length, views.length, repairs])
+      : uiPlural(stale.length, '{0} of {1} stage result is from an earlier attempt — repair {2} was applied after it and this experiment has not been scored since.',
+        '{0} of {1} stage results are from an earlier attempt — repair {2} was applied after them and this experiment has not been scored since.', [stale.length, views.length, repairs]),
     // Said separately because it is the operator's actual complaint and the sentence above is
     // about staleness in general: N of the stale rows are the RED ones.
     failureText: failed
-      ? (failed === 1
-        ? '1 of them is a failure that a later attempt has not repeated.'
-        : `${failed} of them are failures that a later attempt has not repeated.`)
+      ? uiPlural(failed, '{0} of them is a failure that a later attempt has not repeated.',
+        '{0} of them are failures that a later attempt has not repeated.')
       : null,
   }
 }

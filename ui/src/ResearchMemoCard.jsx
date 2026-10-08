@@ -126,8 +126,8 @@ function EvidenceDisclosure({ value, trust, onSelectNode, onSelectEvidence }) {
     </summary>
     {omitted > 0 && <p className="research-warning" role="note">
       {value.verification?.omittedVerdicts > 0
-        ? <>{uiText("Verification incomplete: showing ")}{verdicts.length}{uiText(" of ")}{value.verification.totalVerdicts}{uiText(" verifier verdicts.")}</>
-        : <>{uiText("Verification incomplete: ")}{omitted}{uiText(" claim row")}{((omitted === 1 ? uiText(' is') : uiText('s are')))}{uiText(" not shown.")}</>}
+        ? <>{uiPlural(value.verification.totalVerdicts, 'Verification incomplete: showing {0} of {1} verifier verdicts.', 'Verification incomplete: showing {0} of {1} verifier verdicts.', [verdicts.length, value.verification.totalVerdicts])}</>
+        : <>{uiPlural(omitted, 'Verification incomplete: {0} claim row is not shown.', 'Verification incomplete: {0} claim rows are not shown.')}</>}
     </p>}
     {value.claimsComplete === false && !value.claimsOmitted && <p className="research-warning" role="note">{uiText("Claim completeness could not be verified.")}</p>}
     {value.verification?.alignment?.complete === false && <p className="research-warning" role="note">{uiText("Claim-to-verifier alignment is incomplete. Supported labels are not treated as a complete check.")}</p>}
@@ -284,7 +284,7 @@ export default function ResearchMemoCard({ memo, memoNumber = 1, open, onToggle,
             <OpIcon name="search" size={13} />{uiText(" Research memo #")}{memoNumber}
             {latest && <span className="pill">{uiText("latest")}</span>}
             {value.trigger && <span>{uiText(triggerLabel(value.trigger))}</span>}
-            {value.at_node != null && <span>{uiMessage(value.at_node === 1 ? "After {0} experiment" : "After {0} experiments", [value.at_node])}</span>}
+            {value.at_node != null && <span>{uiPlural(value.at_node, 'After {0} experiment', 'After {0} experiments')}</span>}
           </span>
           {/* Accordion headers show a lead; the static reading header goes straight to the research takeaway. */}
           {!staticOpen && <span className="research-memo-summary" title={value.summary || undefined}>

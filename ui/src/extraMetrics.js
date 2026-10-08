@@ -115,8 +115,7 @@ export function unverifiedExtraMetricKeys(nodes, keys) {
 // backfill only, and an imported or tracked value was never in that log at all.
 export const EXTRA_METRIC_RECONSTRUCTED_LABEL = 'reconstructed'
 // One literal per SENTENCE, so each is a whole entry in the Russian catalogue rather than a fragment
-// cut at a line break.
-// One literal per SENTENCE, and the help is translated sentence by sentence and joined AFTER
+// cut at a line break, and the help is translated sentence by sentence and joined AFTER
 // translation: `uiText` matches whole catalogue keys only, so the joined English never matched one
 // and a Russian reader got the whole tooltip in English.
 const RECONSTRUCTED_SENTENCES = [

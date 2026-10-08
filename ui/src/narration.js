@@ -193,7 +193,7 @@ export const NARR = {
   },
   hypothesis_ranked: {
     validate: d => ownValue(d, 'n') || Array.isArray(d?.order),
-    render: (d) => uiMessage("ranked {0} hypotheses by payoff{1}{2}", [d.n || (d.order || []).length, d.confidence != null ? ` (${Math.round(d.confidence * 100)}% conf)` : '', note(d.reason, 70)]),
+    render: (d) => uiPlural(d.n || (d.order || []).length, 'ranked {0} hypotheses by payoff{1}{2}', 'ranked {0} hypotheses by payoff{1}{2}', [d.n || (d.order || []).length, d.confidence != null ? uiMessage(' ({0}% conf)', [Math.round(d.confidence * 100)]) : '', note(d.reason, 70)]),
   },
   foresight_selected: {
     validate: d => ownValue(d, 'kind') && ownValue(d, 'chosen')
@@ -205,7 +205,7 @@ export const NARR = {
   },
   llm_cost: {
     validate: d => ownValue(d, 'total_tokens') && ownValue(d, 'cost'),
-    render: (d) => `LLM: ${d.total_tokens} tokens, ${fmtCost(d)}`,
+    render: (d) => uiPlural(d.total_tokens, 'LLM: {0} tokens, {1}', 'LLM: {0} tokens, {1}', [d.total_tokens, fmtCost(d)]),
   },
   // --- operator/boss control INTENTS + their engine confirmations. Every event the agentic boss can
   // produce gets a plain-English line here, so an action never shows in the feed as a raw-JSON blob. ---
@@ -564,7 +564,7 @@ export const isCuratedType = (type) => Object.hasOwn(NARR, type)
 export function eventNarration(event) {
   const omittedBytes = event?._log_page?.truncated ? Number(event._log_page.raw_bytes || 0) : 0
   if (event?._log_page?.truncated === true) {
-    return uiMessage("{0} — details omitted ({1} source bytes exceed page limit)", [event.type || 'event', omittedBytes.toLocaleString()])
+    return uiPlural(omittedBytes, '{0} — details omitted ({1} source bytes exceed page limit)', '{0} — details omitted ({1} source bytes exceed page limit)', [event.type || 'event', omittedBytes.toLocaleString()])
   }
   try {
     // Own-property read so an event type equal to an Object.prototype key ("toString", "constructor")

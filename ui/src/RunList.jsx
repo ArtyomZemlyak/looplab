@@ -1,4 +1,4 @@
-import { uiText, uiMessage, useUILanguage } from './uiLanguage.js'
+import { uiText, uiMessage, uiPlural, useUILanguage } from './uiLanguage.js'
 import React, { lazy, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import { get, fmt, fmtDate, fmtAgo, listProjects, createProject, patchProject, deleteProject, assignRun, renameRun,
   createIdempotencyKey, submitRunDeletion, getRunMemoryAttribution, purgeRunMemory,
@@ -38,6 +38,7 @@ import {
 } from './memoryCascadeModel.js'
 import {
   bulkDeletionPlan, bulkDeletionSummary, bulkOutcomeNotice, bulkProgressLabel,
+  deletionNoticeText, languageFollowingNotice,
 } from './bulkDeleteModel.js'
 
 const MapView = lazy(() => import('./MapView.jsx'))
@@ -2135,7 +2136,7 @@ export default function RunList({ onOpen, onGlobalNavigate,
     // When a cascade ran, its outcome IS the deletion's outcome as far as the operator is concerned
     // — and a partly-failed purge has to say so here, because the run's card is already gone and
     // this notice is the last surface that can carry the retry.
-    const cascade = cascadeOutcome(receipt.memory, intent.runId)
+    const cascade = languageFollowingNotice(() => cascadeOutcome(receipt.memory, intent.runId))
     if (!quiet) setDeletionNotice(cleared
       ? (cascade || { kind: 'status', text: `Run “${intent.runId}” was permanently deleted.` })
       : { kind: 'error', text:
@@ -2367,7 +2368,11 @@ export default function RunList({ onOpen, onGlobalNavigate,
     state.running = false
     state.current = ''
     setBulkDeleteState({ ...state })
-    setDeletionNotice(bulkOutcomeNotice(state))
+    // Stored with its producer over a frozen copy of the tally, so the sentence follows the UI
+    // language (`deletionNoticeText`) and a later batch's `state` cannot rewrite it.
+    const outcome = { ...state, done: [...(state.done || [])], blocked: [...(state.blocked || [])],
+      memoryFailures: [...(state.memoryFailures || [])] }
+    setDeletionNotice(languageFollowingNotice(() => bulkOutcomeNotice(outcome)))
     // …and the batch drops the plan it has now spent, so a second press re-reads the CURRENT list
     // instead of walking runs it already deleted (which reported "Nothing was deleted" about a
     // batch that deleted eight).
@@ -2403,7 +2408,7 @@ export default function RunList({ onOpen, onGlobalNavigate,
       const memory = await request.promise
       // Reuse the one outcome vocabulary. A second phrasing here would let the retry report success
       // in words the first attempt never used, for the same result.
-      setDeletionNotice(cascadeOutcome(memory, runId)
+      setDeletionNotice(languageFollowingNotice(() => cascadeOutcome(memory, runId))
         || { kind: 'status', text: 'The memory purge finished.' })
     } catch {
       // Carry the identity forward: the run is gone, so this notice is the ONLY place it still
@@ -2509,7 +2514,7 @@ export default function RunList({ onOpen, onGlobalNavigate,
       </div>)}
       {deletionNotice && <div className={`notice run-deletion-notice ${deletionNotice.kind}`}
         role={deletionNotice.kind === 'error' ? 'alert' : 'status'}>
-        <span>{uiText(deletionNotice.text)}</span>
+        <span>{uiText(deletionNoticeText(deletionNotice))}</span>
         {deletionNotice.retryRunId && <button type="button" className="btn sm"
           disabled={memoryRetryBusy}
           onClick={() => retryMemoryPurge(deletionNotice.retryRunId, deletionNotice.retryIdentity)}>
@@ -2907,7 +2912,7 @@ export default function RunList({ onOpen, onGlobalNavigate,
                   <div className="pill warn" role="status" key={slug}
                     title={uiText(bestMetricCaveatNotice({ best_metric_caveats: [slug] }))}>
                     {uiText(bestMetricCaveatLabel(slug))}</div>))}
-                <div className="muted">{r.nodes}{uiText(" nodes · ")}{r.direction}</div>
+                <div className="muted">{uiPlural(r.nodes, '{0} nodes', '{0} nodes')}{' · '}{r.direction}</div>
                 {/* A NUMBER guard, not a truth test: `mtime` is epoch seconds, so the falsy value is
                     a real timestamp (1970-01-01T00:00:00Z) and `0 && <div/>` renders a bare `0` into
                     the run card instead of rendering nothing. Unreachable from a healthy run today,

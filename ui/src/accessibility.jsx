@@ -1,4 +1,4 @@
-import { uiText, uiMessage, useUILanguage } from './uiLanguage.js'
+import { uiText, uiMessage, uiPlural, useUILanguage } from './uiLanguage.js'
 import React, { useEffect, useId, useRef, useState } from 'react'
 
 const textValue = value => {
@@ -143,7 +143,7 @@ export function ChartFrame({ title, description, columns = [], rows = [], csvNam
             aria-label={uiMessage("{0} {1} data page", [uiText(name), title])} aria-controls={`chart-data-${generated}`}
             disabled={target === currentPage || target < 0 || target >= pages}
             onClick={() => setPage(target)}>{uiText(name)}</button>)}
-        <span role="status">{start + 1}–{Math.min(start + pageSize, rows.length)}{uiText(" of ")}{rows.length}{uiText(" rows")}</span>
+        <span role="status">{start + 1}–{uiPlural(rows.length, '{1} of {0} rows', '{1} of {0} rows', [rows.length, Math.min(start + pageSize, rows.length)])}</span>
       </div>}
       <DataTable caption={uiMessage("{0} data", [title])} columns={columns}
         rows={pageSize > 0 ? rows.slice(start, start + pageSize) : rows} card csvName={null} />

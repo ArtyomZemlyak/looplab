@@ -1,4 +1,4 @@
-import { uiText, uiMessage, useUILanguage } from './uiLanguage.js'
+import { uiText, uiMessage, uiPlural, useUILanguage } from './uiLanguage.js'
 import React from 'react'
 import { fmt, operatorMeta } from './util.js'
 import { ChartFrame } from './accessibility.jsx'
@@ -224,7 +224,9 @@ export function Trajectory({
         className={'btn xs ghost' + (!detailY ? ' primary' : '')} onClick={() => setDetailY(v => !v)}>
         {((detailY ? uiText('Full range') : uiText('Focus on results')))}</button>}
     </div>
-    {clipped > 0 && <div className="chart-scale-note" role="note">{uiText("Detail ")}{fmt(shownMin)}–{fmt(shownMax)} · {clipped}{uiText(" worse ")}{((clipped === 1 ? uiText('result') : uiText('results')))}{uiText(" shown as triangles at the ")}{((direction === 'min' ? uiText('top') : uiText('bottom')))}{uiText(" edge (worst ")}{fmt(direction === 'min' ? maxY : minY)}).
+    {clipped > 0 && <div className="chart-scale-note" role="note">{uiText("Detail ")}{fmt(shownMin)}–{fmt(shownMax)} · {(direction === 'min'
+      ? uiPlural(clipped, '{0} worse result shown as triangles at the top edge (worst {1}).', '{0} worse results shown as triangles at the top edge (worst {1}).', [clipped, fmt(maxY)])
+      : uiPlural(clipped, '{0} worse result shown as triangles at the bottom edge (worst {1}).', '{0} worse results shown as triangles at the bottom edge (worst {1}).', [clipped, fmt(minY)]))}
     </div>}
     <svg width="100%" viewBox={`0 0 ${w} ${h}`} className={pick ? 'pickable' : ''}
          role="img" aria-labelledby={labelledBy}
@@ -353,7 +355,7 @@ export function ImprovementWaterfall({ steps, direction, width = 760 }) {
         onClick={() => setShowLater(value => !value)}>{((focused ? uiText('All steps') : uiText('Later changes')))}</button></div>}
       {focused && <div className="waterfall-context" role="note">{uiText("First eligible #")}{steps[0].id} {fmt(steps[0].to)}{uiText(" → next frontier #")}{steps[1].id} {fmt(steps[1].to)}{uiText(" (numeric change ")}{fmt(firstChange)}{uiText("). Bars below use the later metric range.")}</div>}
       {shown.length < candidates.length && <div className="muted" role="note">
-        {(focused ? uiMessage("Showing latest 100 of {0} later steps", [candidates.length]) : uiMessage("Showing the baseline and latest 99 of {0} steps", [steps.length]))}{uiText("; View data and CSV include all ")}{steps.length}.
+        {(focused ? uiPlural(candidates.length, 'Showing latest 100 of {0} later steps', 'Showing latest 100 of {0} later steps') : uiPlural(steps.length, 'Showing the baseline and latest 99 of {0} steps', 'Showing the baseline and latest 99 of {0} steps'))}{uiText("; View data and CSV include all ")}{steps.length}.
       </div>}
       <svg width={plotW} viewBox={`0 0 ${plotW} ${h}`} role="img" aria-labelledby={labelledBy}>
       {[0, .5, 1].map((t, i) => <g key={i}>
@@ -591,7 +593,7 @@ export function Spark({ series, width = 120, height = 22, label = null }) {
   const W = width, H = height
   const pts = series.map((v, i) => `${(i / (series.length - 1) * W).toFixed(1)},${(H - (v - lo) / span * H).toFixed(1)}`).join(' ')
   return <svg className="grp-spark" width={W} height={H} role="img"
-    aria-label={(label || uiMessage("Trend across {0} values, from {1} to {2}", [series.length, fmt(series[0]), fmt(series[series.length - 1])]))}>
+    aria-label={(label || uiPlural(series.length, 'Trend across {0} values, from {1} to {2}', 'Trend across {0} values, from {1} to {2}', [series.length, fmt(series[0]), fmt(series[series.length - 1])]))}>
     <polyline points={pts} fill="none" stroke="var(--accent)" strokeWidth="1.5" />
   </svg>
 }

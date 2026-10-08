@@ -10,6 +10,7 @@
 // everything under `loss/contrastive/...` — one definition of what "about this concept" means,
 // shared by both surfaces, because two would drift.
 import { rowMatchesConcept, rowConcepts } from './conceptShelf.js'
+import { uiPlural } from './uiLanguage.js'
 
 // The tiers, in the order an operator reads them: what was concluded, what solved a task, what a run
 // noted. `knowledge` is deliberately absent — it is human-authored and carries no run concepts, so a
@@ -49,13 +50,13 @@ export function conceptMemoryNotice(result) {
   if (!result || !result.total) return 'Cross-run memory is empty, so nothing can be linked yet.'
   if (!result.matched) {
     return result.untagged >= result.total
-      ? `Nothing links to this concept — none of the ${result.total} memory rows carries a concept `
-        + 'at all, so no concept could select any of them.'
-      : `Nothing links to this concept. ${result.untagged} of ${result.total} memory rows carry no `
-        + 'concept, so they could not be selected by any concept either.'
+      ? uiPlural(result.total, 'Nothing links to this concept — none of the {0} memory rows carries a concept at all, so no concept could select any of them.',
+        'Nothing links to this concept — none of the {0} memory rows carries a concept at all, so no concept could select any of them.')
+      : uiPlural(result.total, 'Nothing links to this concept. {0} of {1} memory rows carry no concept, so they could not be selected by any concept either.',
+        'Nothing links to this concept. {0} of {1} memory rows carry no concept, so they could not be selected by any concept either.', [result.untagged, result.total])
   }
   return result.untagged
-    ? `${result.untagged} of ${result.total} memory rows carry no concept and cannot be reached from `
-      + 'any concept.'
+    ? uiPlural(result.total, '{0} of {1} memory rows carry no concept and cannot be reached from any concept.',
+      '{0} of {1} memory rows carry no concept and cannot be reached from any concept.', [result.untagged, result.total])
     : ''
 }

@@ -922,10 +922,11 @@ function CardLink({ link, onOpenCard }) {
           verdict" because it leaves out a substituted node even while `card.evidence` still names it. */}
       {(() => {
         const parts = [
-          summary.evidence > 0 && `${summary.evidence} counted in its verdict`,
-          summary.ownedOnly > 0 && `${summary.ownedOnly} reserved but not evidence yet`,
-          summary.substituted > 0 && `${summary.substituted} built something else (not a test of it)`,
-          summary.missing > 0 && `${summary.missing} not in this snapshot`,
+          // Each clause in the UI language: it is joined below and never reaches `uiText` whole.
+          summary.evidence > 0 && uiPlural(summary.evidence, '{0} counted in its verdict', '{0} counted in its verdict'),
+          summary.ownedOnly > 0 && uiPlural(summary.ownedOnly, '{0} reserved but not evidence yet', '{0} reserved but not evidence yet'),
+          summary.substituted > 0 && uiPlural(summary.substituted, '{0} built something else (not a test of it)', '{0} built something else (not a test of it)'),
+          summary.missing > 0 && uiPlural(summary.missing, '{0} not in this snapshot', '{0} not in this snapshot'),
         ].filter(Boolean)
         return parts.length ? ` ${parts.join(', ')}.` : ''
       })()}
@@ -993,7 +994,7 @@ function DerivedMemory({ n, state, runId }) {
           {/* The visible fingerprint of a merge: more agreeing observations than traceable ids. */}
           {row.evidenceCount != null && row.evidenceCount > row.alsoFrom.length + 1
             && <span className="chip xs" title={uiText("Consolidation keeps only a count when it merges rows from other runs; their own evidence is not retained.")}>
-              {row.evidenceCount}{uiText(" agreeing observations, ")}{row.alsoFrom.length + 1}{uiText(" still traceable")}</span>}
+              {uiPlural(row.evidenceCount, '{0} agreeing observations, {1} still traceable', '{0} agreeing observations, {1} still traceable', [row.evidenceCount, row.alsoFrom.length + 1])}</span>}
           {row.concepts.map(id => <span key={id} className="nc-tag">{id}</span>)}
         </div>
         {row.alsoFrom.length > 0 && <div className="muted">{uiText("Also credits ")}{row.alsoFrom.map(id => `#${id}`).join(', ')}.</div>}
@@ -1392,7 +1393,7 @@ function SpanRow({ row, t0, total, runId, expectedGeneration, open, io,
       <span className={stage ? 'stage-caret' : 'span-tw'}>
         {detail ? (open ? '▾' : '▸') : '·'}</span>
       {stage ? <><span className="stage-ic"><OpIcon name={icon} /></span><b>{role}</b>
-        {roll.calls > 0 && <span className="stage-roll" title={uiMessage("{0} billed tokens", [roll.tok])}>
+        {roll.calls > 0 && <span className="stage-roll" title={uiPlural(roll.tok, '{0} billed tokens', '{0} billed tokens')}>
           {uiPlural(roll.calls, '{0} call', '{0} calls')}
           {(roll.ctx ? uiMessage(" · {0} ctx", [ktok(roll.ctx)]) : '')}{(roll.out ? uiMessage(" · {0} out", [ktok(roll.out)]) : '')}</span>}
         <span className="spacer" /></>
@@ -1500,7 +1501,7 @@ function VirtualSpanTree({ roots, t0, total, runId, expectedGeneration, identity
         thinkOpen={state.think} onThink={think => updateSpan(row.key, { think })} />
     }} identity={identity} className="span-tree-virtual" estimateSize={32} overscan={10}
       activeIndex={activeIndex} viewportProps={{ role: 'tree',
-        'aria-label': `Span tree with ${rows.length} observations`,
+        'aria-label': uiPlural(rows.length, 'Span tree with {0} observations', 'Span tree with {0} observations'),
         'aria-activedescendant': activeId || undefined, onKeyDown: onTreeKey }}
       getItemProps={(row, index) => ({ id: `${treeId}-item-${index}`,
         role: 'treeitem',
@@ -1740,7 +1741,7 @@ function ConvStage({ st, defaultOpen = true, log = '', logShare = null, live = f
         t.type === 'request' ? <ConvRequest key={j} t={t} />
           : t.type === 'tool' ? <ConvTool key={j} t={t} /> : <ConvGen key={j} t={t} />)}
       {!allTurns && (st.turns || []).length > CONVERSATION_TURN_CAP && <button className="span-more"
-        onClick={() => setAllTurns(true)}>{uiText("… show ")}{(st.turns || []).length - CONVERSATION_TURN_CAP}{uiText(" more turns")}</button>}
+        onClick={() => setAllTurns(true)}>{uiPlural((st.turns || []).length - CONVERSATION_TURN_CAP, '… show {0} more turns', '… show {0} more turns')}</button>}
       {log && logShare ? <div className="muted trace-small stage-log-share" role="note">
         {logShare.note}</div> : null}
       {log ? <StageLog text={log} live={live} /> : null}
@@ -2281,7 +2282,7 @@ export function ResearchTraces({ rows, runId, expectedGeneration = null }) {
             <span className="muted">· {uiText(researchLinkLabel(row.link))}</span>
           </button>
           {(row.generations || row.tools) ? <span className="muted research-trace-roll">
-            {fmtInt(row.generations)}{uiText(" gen · ")}{fmtInt(row.tools)}{uiText(" tools · ")}{fmtInt(row.tokens?.total)}{uiText(" tok")}</span> : null}
+            {fmtInt(row.generations)}{uiText(" gen · ")}{uiPlural(row.tools, '{0} tools', '{0} tools', [fmtInt(row.tools)])}{' · '}{fmtInt(row.tokens?.total)}{uiText(" tok")}</span> : null}
         </h4>
         {/* The trace gets the whole width, below its heading. It used to be a flex SIBLING of that
             label, which squeezed a span tree — search bar, timeline bars and all — into whatever
@@ -3066,7 +3067,7 @@ function Trust({ n, drifts = [] }) {
       // "Multiple" is the one rendering that hides it. Print the count whenever it is a number —
       // including 0 — and reserve the word for a genuinely absent count.
       // (A `{/* … */}` here is a syntax error: inside a ternary we are in JS, not in JSX children.)
-      ? <><State tone="ok" label={uiText("Multi-seed confirmed")} detail={`${typeof n.confirmed_seeds === 'number' ? n.confirmed_seeds : 'Multiple'} successful seeds are recorded for this node.`} /><div className="kv">
+      ? <><State tone="ok" label={uiText("Multi-seed confirmed")} detail={(typeof n.confirmed_seeds === 'number' ? uiPlural(n.confirmed_seeds, '{0} successful seeds are recorded for this node.', '{0} successful seeds are recorded for this node.') : uiText('Multiple successful seeds are recorded for this node.'))} /><div className="kv">
         <KV k="single" v={fmt(n.metric)} />
         <KV k="robust mean" v={fmt(n.confirmed_mean)} />
         <KV k="std" v={fmt(n.confirmed_std)} />

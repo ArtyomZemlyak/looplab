@@ -171,3 +171,19 @@ export function bulkOutcomeNotice(state) {
       'The remaining {0} runs were not touched.') : '')
     + tail + memoryTail }
 }
+
+// A deletion notice whose sentence a helper composes in the UI language (`bulkOutcomeNotice` and
+// `memoryCascadeModel.js::cascadeOutcome` both count through `uiPlural`) is stored with its
+// PRODUCER, and `deletionNoticeText` composes the sentence again at render. Stored as text, a
+// language switch kept the old language's sentence on screen until the next deletion replaced it.
+// The producer closes over the INPUTS it was handed, so the facts it states cannot change — only
+// the language they are said in. `kind` and the retry handle are language-free and stay as stored.
+export function languageFollowingNotice(produce) {
+  const notice = produce()
+  return notice ? { ...notice, produce } : notice
+}
+export function deletionNoticeText(notice) {
+  if (!notice) return ''
+  const now = typeof notice.produce === 'function' ? notice.produce() : null
+  return now?.text ?? notice.text
+}

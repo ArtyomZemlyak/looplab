@@ -1,5 +1,5 @@
 import React, { useId } from 'react'
-import { uiText, uiMessage, useUILanguage } from './uiLanguage.js'
+import { uiText, uiMessage, uiPlural, useUILanguage } from './uiLanguage.js'
 import { fmt } from './format.js'
 import { conceptEffectValue, validConceptEffect } from './conceptEffect.js'
 
@@ -44,7 +44,7 @@ export default function ConceptEffect({ effect }) {
         {uiMessage('With #{0} (attempt {1}) / without #{2} (attempt {3}): {4}',
           [pair.with_node, pair.with_attempt, pair.without_node, pair.without_attempt, fmt(pair.delta)])}
       </li>)}</ul>
-      {effect.pairs_omitted > 0 && <p>{uiMessage('{0} additional pairs included in the estimate.', [effect.pairs_omitted])}</p>}
+      {effect.pairs_omitted > 0 && <p>{uiPlural(effect.pairs_omitted, '{0} additional pairs included in the estimate.', '{0} additional pairs included in the estimate.')}</p>}
       <button type="button" className="btn sm" popovertarget={panelId} popovertargetaction="hide">{uiText('Close')}</button>
     </div>
   </>

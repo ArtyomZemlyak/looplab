@@ -323,7 +323,8 @@ test('Assistant run links hand off modal routes without breaking native modified
 test('DAG concept overflow is a keyboard and touch disclosure with the complete canonical set', async () => {
   const [dag, css] = await Promise.all([source('Dag.jsx'), source('styles.css')])
   assert.match(dag, /<details className="node-concepts expandable nodrag nopan"/)
-  assert.match(dag, /<summary aria-label=\{`Show all \$\{conceptTags\.length\} concepts for experiment \$\{node\.id\}`\}/)
+  // A counted phrase since 2026-10-08 (`uiPlural`: Russian number forms); the same complete label.
+  assert.match(dag, /<summary aria-label=\{uiPlural\(conceptTags\.length, 'Show all \{0\} concepts for experiment \{1\}', 'Show all \{0\} concepts for experiment \{1\}', \[conceptTags\.length, node\.id\]\)\}/)
   assert.match(dag, /<div className="node-concepts-all">\{conceptTags\.join\(' · '\)\}<\/div>/)
   assert.match(css, /\.node-concepts summary:focus-visible \{ outline: 2px solid var\(--accent\);/)
 })

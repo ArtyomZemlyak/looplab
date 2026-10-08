@@ -80,7 +80,7 @@ export function rewardHackStatus(hacks, config, evaluatedCount = 0) {
   return result(
     'unknown',
     'No current suspicious signals recorded',
-    `Detection is enabled now; ${evaluatedCount} evaluations have no current-attempt signal. This does not prove each attempt was inspected.`,
+    uiPlural(evaluatedCount, 'Detection is enabled now; {0} evaluations have no current-attempt signal. This does not prove each attempt was inspected.', 'Detection is enabled now; {0} evaluations have no current-attempt signal. This does not prove each attempt was inspected.'),
   )
 }
 
@@ -116,8 +116,24 @@ export const salvagedProvenance = node =>
 // `ambiguous` gets its own clause because it is the one slug whose fix is neither "declare one" nor
 // "produce the file": the declaration matched SEVERAL artifacts and the engine refused to pick, which
 // is the property that keeps a declared pattern from manufacturing a referent nobody chose.
-const unboundBecause = (why) =>
-  (why === 'not_declared' ? uiText(', because the task declares no eval.metric.subject') : (why === 'ambiguous' ? uiMessage(": the declared eval.metric.subject_glob matched more than one artifact, so the engine refused to pick one", []) : (why ? uiMessage(": the declared subject is {0}", [why]) : '')))
+//
+// Each is a WHOLE sentence, one catalogue key per (lead, reason), returned in the UI language: the
+// clause used to be translated alone and glued between two English halves, so a Russian reader got
+// one Russian clause inside an English sentence (and the whole sentence was no key `uiText` knew).
+const unboundSubjectFeasibility = why => (why === 'not_declared'
+  ? uiText('Nothing records which artifact this number is about, because the task declares no eval.metric.subject, so the claim cannot be checked and the node is excluded from winner selection.')
+  : why === 'ambiguous'
+    ? uiText('Nothing records which artifact this number is about: the declared eval.metric.subject_glob matched more than one artifact, so the engine refused to pick one, so the claim cannot be checked and the node is excluded from winner selection.')
+    : why
+      ? uiMessage('Nothing records which artifact this number is about: the declared subject is {0}, so the claim cannot be checked and the node is excluded from winner selection.', [why])
+      : uiText('Nothing records which artifact this number is about, so the claim cannot be checked and the node is excluded from winner selection.'))
+const unboundSubjectHelp = why => (why === 'not_declared'
+  ? uiText('This number was measured by the protected scoring path, but nothing records which artifact it is about, because the task declares no eval.metric.subject, so the claim cannot be checked and the node is excluded from winner selection.')
+  : why === 'ambiguous'
+    ? uiText('This number was measured by the protected scoring path, but nothing records which artifact it is about: the declared eval.metric.subject_glob matched more than one artifact, so the engine refused to pick one, so the claim cannot be checked and the node is excluded from winner selection.')
+    : why
+      ? uiMessage('This number was measured by the protected scoring path, but nothing records which artifact it is about: the declared subject is {0}, so the claim cannot be checked and the node is excluded from winner selection.', [why])
+      : uiText('This number was measured by the protected scoring path, but nothing records which artifact it is about, so the claim cannot be checked and the node is excluded from winner selection.'))
 
 export function nodeFeasibilityStatus(node) {
   const violations = node?.violations || []
@@ -135,8 +151,7 @@ export function nodeFeasibilityStatus(node) {
     return result(
       'warn',
       'Metric bound to no subject',
-      'Nothing records which artifact this number is about' + unboundBecause(why)
-        + ', so the claim cannot be checked and the node is excluded from winner selection.',
+      unboundSubjectFeasibility(why),
     )
   }
   if (violations.length && violations.every(isSalvagedMetricViolation)) {
@@ -329,22 +344,20 @@ export function objectiveSourceHelp(source) {
     // `salvageRow` is what tells the two apart, and it is the only thing that can: a salvage-proper
     // row is the salvage rung's own exclusion receipt, and its absence beside a live `provenance`
     // means the rung already let this node through.
-    return base
-      + `${source.stage ? ` after stage “${source.stage}” failed its contract` : ''}`
-      + (source.admitted
-        ? '. metric_salvage is set to “select”, so it competes for champion like a measured result.'
-        : source.salvageRow
-          ? '. It is excluded from winner selection until metric_salvage is set to “select”.'
-          : '. metric_salvage already admits it — this node is excluded from winner selection for a'
-            + ' DIFFERENT recorded violation, which the Trust tab names.')
+    // Returned in the UI language, sentence by sentence (the `extraMetricSourceHelp` rule): the
+    // composite was never a catalogue key, so a Russian reader got the whole help in English.
+    const recovered = source.stage
+      ? uiMessage('NOT measured: the experiment produced this number and the run recovered it with its own declared reader after stage “{0}” failed its contract.', [source.stage])
+      : uiText('NOT measured: the experiment produced this number and the run recovered it with its own declared reader.')
+    return recovered + ' ' + (source.admitted
+      ? uiText('metric_salvage is set to “select”, so it competes for champion like a measured result.')
+      : source.salvageRow
+        ? uiText('It is excluded from winner selection until metric_salvage is set to “select”.')
+        : uiText('metric_salvage already admits it — this node is excluded from winner selection for a DIFFERENT recorded violation, which the Trust tab names.'))
   }
-  if (source?.channel === OBJECTIVE_SUBJECT_UNBOUND) {
-    return base + unboundBecause(source.unboundReason)
-      + ', so the claim cannot be checked and the node is excluded from winner selection.'
-  }
-  return base + (source?.declarationRepaired
-    ? ' Its declaration was repaired after the fact and the artifact contract was then re-checked'
-      + " and passed, so this node's recorded code is not byte-for-byte what produced this number."
+  if (source?.channel === OBJECTIVE_SUBJECT_UNBOUND) return unboundSubjectHelp(source.unboundReason)
+  return uiText(base) + (source?.declarationRepaired
+    ? ' ' + uiText("Its declaration was repaired after the fact and the artifact contract was then re-checked and passed, so this node's recorded code is not byte-for-byte what produced this number.")
     : '')
 }
 

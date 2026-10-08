@@ -1,4 +1,4 @@
-import { uiText, uiMessage, useUILanguage } from './uiLanguage.js'
+import { uiText, uiMessage, uiPlural, useUILanguage } from './uiLanguage.js'
 import React, { useEffect, useMemo, useRef, useState } from 'react'
 import BaseRevision from './BaseRevision.jsx'
 import UpstreamPanel from './UpstreamPanel.jsx'
@@ -183,7 +183,7 @@ function ChampionCard({ best, state }) {
         <div className="k">{uiText("repeat evidence")}</div><div className="v">{uiText(measurement.reliability)}</div>
         <div className="k">{uiText("params")}</div><div className="v">{params.length
           ? <details className="champion-params">
-              <summary>{params.length}{uiText(" parameters · ")}<span className="champion-params-show">{uiText("show values")}</span><span className="champion-params-hide">{uiText("hide values")}</span></summary>
+              <summary>{uiPlural(params.length, '{0} parameters', '{0} parameters')}{' · '}<span className="champion-params-show">{uiText("show values")}</span><span className="champion-params-hide">{uiText("hide values")}</span></summary>
               <dl className="champion-params-list">{params.map(([key, value]) => <React.Fragment key={key}>
                 <dt>{key}</dt><dd>{fmt(value)}</dd>
               </React.Fragment>)}</dl>
@@ -525,7 +525,7 @@ export default function ReportView({ state, runId, onOpenPanel, canOpenPanel, on
     <div className="report-view" aria-busy={refreshing || undefined}>
       <h2 id="report-section-summary" tabIndex={-1} className="report-title">{state.label || state.run_id || state.task_id}</h2>
       <div className="report-sub muted">{state.label && state.label !== state.run_id ? `${state.run_id} · ` : ''}{state.direction} · {uiText(state.phase || (state.finished ? 'finished' : 'running'))}{state.stop_reason ? ` (${state.stop_reason})` : ''}
-        {' · '}{nodeCount}{uiText(" nodes (")}{a.nEval}{uiText(" evaluated, ")}{failed.length}{uiText(" failed)")}{(state.llm_cost && uiMessage(" · {0} tokens · {1}", [fmtInt(state.llm_cost.total_tokens), fmtCost(state.llm_cost)]))}</div>
+        {' · '}{uiPlural(nodeCount, '{0} nodes ({1} evaluated, {2} failed)', '{0} nodes ({1} evaluated, {2} failed)', [nodeCount, a.nEval, failed.length])}{(state.llm_cost && uiPlural(state.llm_cost.total_tokens, ' · {0} tokens · {1}', ' · {0} tokens · {1}', [fmtInt(state.llm_cost.total_tokens), fmtCost(state.llm_cost)]))}</div>
 
       <VerdictBanner v={v} onOpenPanel={onOpenPanel} canOpenPanel={canOpenPanel} />
 
@@ -602,11 +602,11 @@ export default function ReportView({ state, runId, onOpenPanel, canOpenPanel, on
             <td className="report-delta">{((s.delta == null ? uiText('first eligible') : fmt(s.delta)))}</td>
             <td><BaseRevision node={state.nodes[s.id]} state={state} compact /></td>
             <td className="muted">{s.diff.length > 2
-              ? <details className="report-step-changes"><summary>{s.diff.length}{uiText(" parameter changes")}</summary>
+              ? <details className="report-step-changes"><summary>{uiPlural(s.diff.length, '{0} parameter changes', '{0} parameter changes')}</summary>
                   <span>{uiText(paramDiffLabel(s.diff))}</span></details>
               : uiText(paramDiffLabel(s.diff))}</td></tr>)}
         </tbody></table></DataTable>
-        {a.steps.length > 1 && <div className="muted">{uiText("Recorded frontier change ")}<b>{fmt(a.totalGain)}</b>{uiText(" over ")}{a.steps.length}{uiText(" steps (first eligible ")}{fmt(a.firstBest)}{uiText(" → numeric frontier ")}{fmt(a.finalBest)}).</div>}
+        {a.steps.length > 1 && <div className="muted">{uiText("Recorded frontier change ")}<b>{fmt(a.totalGain)}</b>{uiPlural(a.steps.length, ' over {0} steps (first eligible {1} → numeric frontier {2}).', ' over {0} steps (first eligible {1} → numeric frontier {2}).', [a.steps.length, fmt(a.firstBest), fmt(a.finalBest)])}</div>}
       </>}
 
       {imp.length > 0 ? <>

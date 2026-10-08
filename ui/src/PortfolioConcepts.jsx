@@ -49,10 +49,10 @@ function BestMetric({ best }) {
   if (!best) return null
   const value = Number.isInteger(best.value) ? String(best.value) : best.value.toFixed(4)
   return <span className="pc-metric"
-    title={`best ${best.direction === 'min' ? 'lowest' : 'highest'} robust metric across `
-      + `${best.runs} run(s) of task ${best.taskId}`
-      + (best.objective ? ` — ranked by ${best.objective}, an operator retarget, not the task's `
-        + 'own metric' : '')}>
+    title={(best.direction === 'min'
+      ? uiPlural(best.runs, 'best lowest robust metric across {0} run(s) of task {1}', 'best lowest robust metric across {0} run(s) of task {1}', [best.runs, best.taskId])
+      : uiPlural(best.runs, 'best highest robust metric across {0} run(s) of task {1}', 'best highest robust metric across {0} run(s) of task {1}', [best.runs, best.taskId]))
+      + (best.objective ? uiMessage(" — ranked by {0}, an operator retarget, not the task's own metric", [best.objective]) : '')}>
     {best.direction === 'min' ? '↓' : '↑'} {value}{best.objective ? ` (${best.objective})` : ''}
   </span>
 }
@@ -109,7 +109,7 @@ function Partners({ cooccurrence, node }) {
     {/* A pruned node's pairs were never counted. Saying "no partners" for it would turn a bound into
         a finding, which is the same rule the tree's truncation notice follows. */}
     {node.tagged && cooccurrence.pairsOutsideProjectionUnknown
-      && <p className="muted">{uiText("Pairs touching ")}{cooccurrence.pairSourceNodesPruned}{uiText(" less-used concept(s) were not computed, so this list may be incomplete.")}</p>}
+      && <p className="muted">{uiPlural(cooccurrence.pairSourceNodesPruned, 'Pairs touching {0} less-used concept(s) were not computed, so this list may be incomplete.', 'Pairs touching {0} less-used concept(s) were not computed, so this list may be incomplete.')}</p>}
   </>
 }
 
@@ -177,10 +177,8 @@ export function ConceptDetail({ forest, cooccurrence, id, runsById, onOpenRun, o
       <summary>{uiText("How these counts are defined")}</summary>
       <p>{uiText("Runs count distinct runs tagged with this concept or anything below it.")}</p>
       <p>{((node.tagged ? uiText('Experiments count only this exact tag. A subtree total would count experiments with several tags more than once.') : uiText('No run tagged this id itself; a deeper id spells it as an ancestor.')))}</p>
-      {node.best && <p>{`Best robust metric below this concept, over ${node.best.runs} run(s) of `
-        + `${node.best.taskId} (${node.best.direction})`
-        + (node.best.objective ? ` — ranked by ${node.best.objective}, an operator retarget, `
-          + 'not the task’s own metric.' : '.')}</p>}
+      {node.best && <p>{uiPlural(node.best.runs, 'Best robust metric below this concept, over {0} run(s) of {1} ({2})', 'Best robust metric below this concept, over {0} run(s) of {1} ({2})', [node.best.runs, node.best.taskId, node.best.direction])
+        + (node.best.objective ? uiMessage(' — ranked by {0}, an operator retarget, not the task’s own metric.', [node.best.objective]) : '.')}</p>}
     </details>
     <h4>{uiText("Evidence")}</h4>
     <ul className="pc-detail-runs">
@@ -195,7 +193,7 @@ export function ConceptDetail({ forest, cooccurrence, id, runsById, onOpenRun, o
       })}
     </ul>
     {node.runIds.length > shown.length
-      && <p className="muted">+{node.runIds.length - shown.length}{uiText(" more runs not listed.")}</p>}
+      && <p className="muted">{uiPlural(node.runIds.length - shown.length, '+{0} more runs not listed.', '+{0} more runs not listed.')}</p>}
     <_ConceptMemory memory={memory} id={id} onRetry={onMemoryRetry} />
     <Partners cooccurrence={cooccurrence} node={node} />
   </aside>
@@ -359,7 +357,7 @@ export default function PortfolioConcepts({
         <button type="button" className="btn sm" onClick={collapseAll}>{uiText("Collapse all")}</button>
       </div>
       {search && <p className="pc-search-result" role="status">
-        {matches.size}{((matches.size === 1 ? uiText(" matching concept") : uiText(" matching concepts")))}{uiText(" highlighted in the tree.")}{((matches.size > 0 && uiText(' Matching paths stay open until search is cleared. Press Enter to focus the first match.')))}
+        {uiPlural(matches.size, '{0} matching concept highlighted in the tree.', '{0} matching concepts highlighted in the tree.')}{((matches.size > 0 && uiText(' Matching paths stay open until search is cleared. Press Enter to focus the first match.')))}
       </p>}
     </div>
 
@@ -369,27 +367,26 @@ export default function PortfolioConcepts({
         to prevent for memory rows. */}
     {coverage && <div className={'pc-coverage' + (coverage.complete ? ' pc-complete' : '')}
       role="status">
-      <b>{coverage.tagged}{uiText(" of ")}{coverage.runs}{uiText(" runs")}</b>{uiText(" carry concept tags")}{coverage.untagged > 0 && <> · <b>{coverage.untagged}{uiText(" untagged")}</b></>}
+      <b>{uiPlural(coverage.runs, '{0} of {1} runs', '{0} of {1} runs', [coverage.tagged, coverage.runs])}</b>{uiText(" carry concept tags")}{coverage.untagged > 0 && <> · <b>{uiPlural(coverage.untagged, '{0} untagged', '{0} untagged')}</b></>}
       {' · '}{uiPlural(coverage.concepts, '{0} concept', '{0} concepts')} {uiPlural(coverage.roots, 'across {0} root', 'across {0} roots')}
       {coverage.complete && <>{uiText(" · every run in scope is tagged")}</>}
-      {coverage.malformedRuns > 0 && <> · <b>{coverage.droppedIds}{uiText(" unreadable tag(s)")}</b>{uiText(" in ")}{coverage.malformedRuns}{uiText(" run(s)")}</>}
+      {coverage.malformedRuns > 0 && <> · <b>{uiPlural(coverage.droppedIds, '{0} unreadable tag(s)', '{0} unreadable tag(s)')}</b>{uiPlural(coverage.malformedRuns, ' in {0} run(s)', ' in {0} run(s)')}</>}
     </div>}
 
     {/* Checked in List, then filtered out of it. The tree already excludes them — the disagreement
         was only ever in the words, and silently dropping them is how "the runs I picked" and "the
         runs this tree describes" become two different sets nobody mentions. */}
     {selectedOutOfScope > 0 && <p className="muted pc-scope-note" role="status">
-      {selectedOutOfScope}{uiText(" checked run(s) are outside the current list scope and are not in this tree. Clear the list filters to include them.")}</p>}
+      {uiPlural(selectedOutOfScope, '{0} checked run(s) are outside the current list scope and are not in this tree. Clear the list filters to include them.', '{0} checked run(s) are outside the current list scope and are not in this tree. Clear the list filters to include them.')}</p>}
 
     {policyState.status !== 'ready' && <div className="notice resource-warning" role="status">{uiText("Concept governance is ")}{((policyState.status === 'loading' ? uiText('loading') : uiText('unavailable')))}{uiText("; this tree is temporarily showing raw run-authored ids, so governed merges and purges may be unapplied.")}</div>}
     {policyState.status === 'ready' && !governance.complete
-      && <div className="notice resource-warning" role="status">{uiText("Concept governance is partially applied.")}{governance.unappliedSplits > 0 && <> {governance.unappliedSplits}{uiText(" split-dependent tag(s) remain raw.")}</>}
-        {governance.invalidTargets > 0 && <> {governance.invalidTargets}{uiText(" invalid policy/tag target(s) were omitted.")}</>}
+      && <div className="notice resource-warning" role="status">{uiText("Concept governance is partially applied.")}{governance.unappliedSplits > 0 && <> {uiPlural(governance.unappliedSplits, '{0} split-dependent tag(s) remain raw.', '{0} split-dependent tag(s) remain raw.')}</>}
+        {governance.invalidTargets > 0 && <> {uiPlural(governance.invalidTargets, '{0} invalid policy/tag target(s) were omitted.', '{0} invalid policy/tag target(s) were omitted.')}</>}
       </div>}
     {policyState.status === 'ready' && governance.capsuleCoverageKnown
       && (governance.unrepresentedRuns > 0 || governance.capsuleIdsOmitted > 0)
-      && <div className="notice resource-warning" role="status">{uiText("Durable cross-run concept memory does not cover this whole list: ")}{governance.unrepresentedRuns}
-        {' '}{uiText("visible run(s) have no retained capsule")}{governance.capsuleIdsOmitted > 0 && <>; {governance.capsuleIdsOmitted}{uiText(" capsule id(s) were omitted from the policy receipt")}</>}{uiText(". The tree still shows their run-authored tags, but the agent priors may use a smaller population.")}</div>}
+      && <div className="notice resource-warning" role="status">{uiText("Durable cross-run concept memory does not cover this whole list: ")}{uiPlural(governance.unrepresentedRuns, '{0} visible run(s) have no retained capsule', '{0} visible run(s) have no retained capsule')}{governance.capsuleIdsOmitted > 0 && <>; {uiPlural(governance.capsuleIdsOmitted, '{0} capsule id(s) were omitted from the policy receipt', '{0} capsule id(s) were omitted from the policy receipt')}</>}{uiText(". The tree still shows their run-authored tags, but the agent priors may use a smaller population.")}</div>}
 
     {forest.truncated && <div className="notice resource-warning" role="status">{uiText("This scope carries more concepts than the tree renders. Narrow the scope to see the rest.")}</div>}
 
@@ -413,7 +410,7 @@ export default function PortfolioConcepts({
     <div className={'pc-body' + (selected ? ' pc-has-selection' : '')}>
       <div className="pc-tree-shell">
         {coverage?.empty
-          ? <div className="notice resource-empty">{uiText("No run in this scope carries a concept tag.")}{coverage.runs > 0 && <>{uiText(" All ")}{coverage.runs}{uiText(" of them ran; none was tagged, which is a fact about tagging and not about what was learned.")}</>}
+          ? <div className="notice resource-empty">{uiText("No run in this scope carries a concept tag.")}{coverage.runs > 0 && <>{uiPlural(coverage.runs, ' All {0} of them ran; none was tagged, which is a fact about tagging and not about what was learned.', ' All {0} of them ran; none was tagged, which is a fact about tagging and not about what was learned.')}</>}
             </div>
           : <ul ref={treeRef} tabIndex={-1} className="pc-tree" aria-label={uiText("Concept tree")}>
               {rows.map(row => <ConceptRow key={row.id} row={row}
@@ -466,9 +463,8 @@ export default function PortfolioConcepts({
           </div>
           {cooccurrence.pairs.length === 0
             ? <p className="muted">
-                {((cooccurrence.pairCandidates === 0 ? uiText('No run in this scope was tagged with two concepts, so there is nothing to pair.') : uiText(`No pair of concepts appeared together in ${cooccurrence.minRuns} or more runs. `
-                    + `${cooccurrence.pairCandidates} pairing(s) were seen in a single run — a tagger `
-                    + 'emitting two labels once, which is not yet evidence of a pattern.')))}
+                {((cooccurrence.pairCandidates === 0 ? uiText('No run in this scope was tagged with two concepts, so there is nothing to pair.') : uiPlural(cooccurrence.minRuns, 'No pair of concepts appeared together in {0} or more runs. ', 'No pair of concepts appeared together in {0} or more runs. ')
+                    + uiPlural(cooccurrence.pairCandidates, '{0} pairing(s) were seen in a single run — a tagger emitting two labels once, which is not yet evidence of a pattern.', '{0} pairing(s) were seen in a single run — a tagger emitting two labels once, which is not yet evidence of a pattern.')))}
               </p>
             : <>
                 <ol className="pc-pair-list">
@@ -484,7 +480,7 @@ export default function PortfolioConcepts({
                   </li>)}
                 </ol>
                 {cooccurrence.pairs.length > MAX_PAIR_ROWS
-                  && <p className="muted">+{cooccurrence.pairs.length - MAX_PAIR_ROWS}{uiText(" more pair(s) above the threshold, not listed.")}</p>}
+                  && <p className="muted">{uiPlural(cooccurrence.pairs.length - MAX_PAIR_ROWS, '+{0} more pair(s) above the threshold, not listed.', '+{0} more pair(s) above the threshold, not listed.')}</p>}
               </>}
           {/* The RANKING cap, which is a different absence from both of the two below and was the
               only one with no words. `pairsOmitted` is pairs that reached the floor, were counted,
@@ -496,11 +492,11 @@ export default function PortfolioConcepts({
               `partnersOf` then returns a SHORT list for the concepts that fell off while the detail
               pane says "no concept appeared with this one". */}
           {cooccurrence.pairsOmitted > 0 && <p className="muted">
-            {cooccurrence.pairsOmitted}{uiText(" further pair(s) reached this threshold and were counted, but fall outside the ranked set this view keeps. They are missing from the list above and from the partners of any concept they touch.")}</p>}
+            {uiPlural(cooccurrence.pairsOmitted, '{0} further pair(s) reached this threshold and were counted, but fall outside the ranked set this view keeps. They are missing from the list above and from the partners of any concept they touch.', '{0} further pair(s) reached this threshold and were counted, but fall outside the ranked set this view keeps. They are missing from the list above and from the partners of any concept they touch.')}</p>}
           {/* Two different absences, never merged. The cap above is exact — we counted them and showed
               fewer. A pruned node's pairs were never materialized, so their count is UNKNOWN, and
               printing it as zero would present a bound as a finding. */}
-          {cooccurrence.pairsOutsideProjectionUnknown && <p className="muted">{uiText("Only the ")}{cooccurrence.pairSourceNodesIncluded}{uiText(" most-used concepts were paired; pairs touching the other ")}{cooccurrence.pairSourceNodesPruned}{uiText(" are unknown, not absent.")}</p>}
+          {cooccurrence.pairsOutsideProjectionUnknown && <p className="muted">{uiPlural(cooccurrence.pairSourceNodesIncluded, 'Only the {0} most-used concepts were paired; pairs touching the other {1} are unknown, not absent.', 'Only the {0} most-used concepts were paired; pairs touching the other {1} are unknown, not absent.', [cooccurrence.pairSourceNodesIncluded, cooccurrence.pairSourceNodesPruned])}</p>}
         </section>}
       </div>
     </div>

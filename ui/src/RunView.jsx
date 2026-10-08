@@ -1889,15 +1889,15 @@ export default function RunView({ runId, onBack, reviewMode = false, reviewMeta 
         </p>}
         {retainedAuthoringDraftUnsafe && <p className="notice" role="status">
           {retainedAuthoringDraftCount > 0 && <>
-            <b>{retainedAuthoringDraftCount}{uiText(" unsaved in-memory Authoring draft")}{((retainedAuthoringDraftCount === 1 ? uiText(' is') : uiText('s are')))}{uiText(" retained in this tab.")}</b>
+            <b>{uiPlural(retainedAuthoringDraftCount, '{0} unsaved in-memory Authoring draft is retained in this tab.', '{0} unsaved in-memory Authoring drafts are retained in this tab.')}</b>
             {' '}{uiText("Nothing was saved automatically.")}{' '}
           </>}
           {retainedAuthoringDurableRecoveryCount > 0 && <>
-            <b>{retainedAuthoringDurableRecoveryCount}{uiText(" durable Authoring recovery record")}{((retainedAuthoringDurableRecoveryCount === 1 ? uiText(' remains') : uiText('s remain')))}{uiText(" protected in browser storage.")}</b>
+            <b>{uiPlural(retainedAuthoringDurableRecoveryCount, '{0} durable Authoring recovery record remains protected in browser storage.', '{0} durable Authoring recovery records remain protected in browser storage.')}</b>
             {' '}{uiText("It will be reconciled without automatic replay.")}{' '}
           </>}
           {retainedAuthoringMemoryOnlyRecoveryCount > 0 && <>
-            <b>{retainedAuthoringMemoryOnlyRecoveryCount}{uiText(" exact recovery snapshot")}{((retainedAuthoringMemoryOnlyRecoveryCount === 1 ? uiText(' exists') : uiText('s exist')))}{uiText(" only in this tab.")}</b>
+            <b>{uiPlural(retainedAuthoringMemoryOnlyRecoveryCount, '{0} exact recovery snapshot exists only in this tab.', '{0} exact recovery snapshots exist only in this tab.')}</b>
             {' '}{uiText("Opening the current generation preserves it; leaving this run discards it.")}{' '}
           </>}{uiText("Open the current generation to refresh the Authoring source and review the retained text.")}</p>}
         {retainedCommentWorkUnsafe && <div className="notice"
@@ -1905,7 +1905,7 @@ export default function RunView({ runId, onBack, reviewMode = false, reviewMeta 
             ? 'alert' : 'status'}>
           <b>{uiText("Comments work is retained in this tab.")}</b>{' '}
           {(retainedCommentDrafts.length > 0 ? uiPlural(retainedCommentDrafts.length, '{0} unsaved draft remain in memory. ', '{0} unsaved drafts remain in memory. ') : '')}
-          {(retainedCommentRecovery.valid.length > 0 ? uiMessage(retainedCommentRecovery.valid.length === 1 ? "{0} exact command recovery is protected in browser storage. " : "{0} exact command recoveries are protected in browser storage. ", [retainedCommentRecovery.valid.length]) : '')}
+          {(retainedCommentRecovery.valid.length > 0 ? uiPlural(retainedCommentRecovery.valid.length, '{0} exact command recovery is protected in browser storage. ', '{0} exact command recoveries are protected in browser storage. ') : '')}
           {(retainedCommentRecovery.damaged.length > 0 ? uiPlural(retainedCommentRecovery.damaged.length, '{0} damaged recovery record needs review. ', '{0} damaged recovery records need review. ') : '')}
           {((retainedCommentRecoveryUnavailable ? uiText('Recovery storage cannot be inspected, so Start over remains blocked until it is available again. ') : ''))}{uiText("Nothing will be replayed automatically or rebound to the replacement generation.")}{(retainedCommentDrafts.length > 0 || retainedCommentRecovery.valid.length > 0) && <details>
             <summary>{uiText("View retained Comments work")}</summary>

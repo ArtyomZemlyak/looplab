@@ -1,4 +1,4 @@
-import { uiText, uiMessage, useUILanguage } from './uiLanguage.js'
+import { uiText, uiMessage, uiPlural, useUILanguage } from './uiLanguage.js'
 import React, { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import { get, fmt, workingId, getRunCommand, retryRunCommand, runCommand,
   commandFeedback, commandErrorMessage, commandFailureRecord, commandCanRetry, createIdempotencyKey,
@@ -279,7 +279,7 @@ export function agentStatus(live, log, evalStages = null, externalMode = false) 
     buildLabel = buildMarkers.length > 1
       ? `${stepLabel} (${buildMarkers.length} in parallel)` : stepLabel
   } else if (buildMarkers.length > 1) {
-    buildLabel = `Writing ${buildMarkers.length} experiments in parallel…`
+    buildLabel = uiPlural(buildMarkers.length, 'Writing {0} experiments in parallel…', 'Writing {0} experiments in parallel…')
   } else if (buildMarkers.length === 1) {
     const op = buildMarkers[0].operator || ''
     const id = buildMarkers[0].node_id
@@ -627,7 +627,7 @@ export function EventRow({ e, onFocusEvent, focusLabel, nodeCreatedAttempt, auto
           </button>
         </div>
         {open && expandable && <div className="ev-detail-wrap" id={detailsId}>
-          {hasOmittedDetail && <div className="notice" role="note">{uiText("Event details were not transferred: ")}{omittedBytes.toLocaleString()}{uiText(" source bytes exceed the bounded page response.")}</div>}
+          {hasOmittedDetail && <div className="notice" role="note">{uiText("Event details were not transferred: ")}{uiPlural(omittedBytes, '{0} source bytes exceed the bounded page response.', '{0} source bytes exceed the bounded page response.', [omittedBytes.toLocaleString()])}</div>}
           {hasReason && reasoningDetail(e, nodeTrace)}
           {hasGeneric && <GenericDetail e={e} />}
           {hasTrace && nodeTrace == null && !nodeTraceError && <div className="muted" role="status">{uiText("loading node trace…")}</div>}

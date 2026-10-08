@@ -8,7 +8,7 @@ import assert from 'node:assert/strict'
 import React from 'react'
 import { readFileSync, readdirSync } from 'node:fs'
 import { decodeCatalogue, validPluralForms } from '../src/localeCatalogue.js'
-import { russianPluralCategory, uiPlural } from '../src/uiLanguage.js'
+import { russianPluralCategory, russianPluralForm, uiPlural } from '../src/uiLanguage.js'
 import { localizeSource } from '../scripts/localize-copy.mjs'
 import { fetchStub, jsonResponse, mountLive, settle } from './_mount.js'
 
@@ -77,7 +77,9 @@ test('every shipped plural entry is well formed and named by exactly one live ui
   for (const glued of ['{0} run{1} of task {2}', 'deleted node{0} {1}', '{0} {1}{2} marked as read.{3}',
     'Shared chat loaded. {0} {1}.{2}', '{0} permanently deleted: {1}.{2}{3}', '{0} experiment{1}',
     '{0} pending Assistant approval{1}', 'memory: {0} settled skill{1} promoted', '{0} span{1}',
-    '{0} new event{1}; jump to live', '+{0} experiment node{1}', '{0} {1} {2} {3} as read{4}']) {
+    '{0} new event{1}; jump to live', '+{0} experiment node{1}', '{0} {1} {2} {3} as read{4}',
+    // The suffix fragments the later conversions retired (2026-10-08).
+    's are', 's remain', 's exist', 'is']) {
     assert.ok(!Object.hasOwn(page.messages, glued), glued)
   }
 })
@@ -92,6 +94,93 @@ export const c = (n, w) => uiPlural(n, w, w + 's')\n`
   assert.ok(!result.messages.includes('{0} lesson') && !result.messages.includes('{0} lessons'))
   assert.equal(result.pluralDefects.length, 1)
   assert.equal(result.changed, false)
+})
+
+// CLDR `one` is not "exactly one": it is also 21, 31, 101… The first catalogue wrote several `one`
+// forms as exactly-one sentences — a singular pronoun pointing back at the counted noun ("21 запись;
+// итоги могут её учитывать", "21 рабочая задача уже существует. Она…") or no printed count at all
+// ("удалён узел #1, …, #21"). `exact1` (ICU's `=1`) now carries such a sentence, and `one` must
+// read right for 21.
+const SINGULAR_REFERENCE = /(?<!\p{L})(он|она|оно|его|её|ее|него|неё|нее|ему|ей|ней|нему|нём|им|ним|этот|эта|это|этого|этой|этому|этим|этом|эту|тот|та|то|того|той|тому|том|ту)(?!\p{L})/giu
+const references = text => new Set([...text.matchAll(SINGULAR_REFERENCE)].map(m => m[0].toLowerCase()))
+function sourcePluralSlots() {
+  const slots = {}
+  for (const file of readdirSync(new URL('../src/', import.meta.url))) {
+    if (!/\.(jsx|js)$/.test(file) || /^(uiLanguage|useAssistantLanguage|locale)/.test(file)) continue
+    const result = localizeSource(readFileSync(new URL(`../src/${file}`, import.meta.url), 'utf8'), file)
+    for (const [key, list] of Object.entries(result.pluralSlots)) (slots[key] ??= []).push(...list)
+  }
+  return slots
+}
+const render = (form, slot, n) => form.replace(/\{(\d+)\}/g, (_, i) => Number(i) === slot ? String(n) : `‹${i}›`)
+
+test('exact1 is the form for exactly one; one/few/many stay CLDR for every other count', () => {
+  const forms = { exact1: 'удалён узел {1}', one: 'удалены узлы {1}', few: 'удалены узлы {1}', many: 'удалены узлы {1}' }
+  assert.ok(validPluralForms(forms))
+  assert.equal(russianPluralForm(forms, 1), forms.exact1)
+  assert.equal(russianPluralForm(forms, '1'), forms.exact1, 'a numeric string is read as its number')
+  for (const n of [21, 31, 101, -1, -21]) assert.equal(russianPluralForm(forms, n), forms.one, String(n))
+  assert.equal(russianPluralForm(forms, 2), forms.few)
+  assert.equal(russianPluralForm(forms, 1.5), forms.few, 'a fraction still reads `few`')
+  const { exact1, ...plain } = forms
+  assert.equal(russianPluralForm(plain, 1), plain.one, 'with no exact1, one is the form for 1 too')
+  assert.ok(!validPluralForms({ ...forms, exact1: ' ' }), 'an empty exact1 is ill-formed')
+  assert.ok(!validPluralForms({ ...forms, exact2: 'x' }), 'no other explicit-count form exists')
+  const base = { schema: 1, language: 'ru', count: 2, messages: { Runs: 'Запуски', Settings: 'Настройки' } }
+  assert.deepEqual(decodeCatalogue({ ...base, plurals: { 'deleted nodes {1}': forms } }).plural('deleted nodes {1}'), forms)
+})
+
+test('every shipped `one` form reads right at 21 and 101: count printed, no singular back-reference', () => {
+  const slots = sourcePluralSlots()
+  const defects = []
+  for (const [key, forms] of Object.entries(page.plurals)) {
+    const keySlots = [...new Set(slots[key] || [])]
+    assert.equal(keySlots.length, 1, `${key}: every call prints its count at one values index`)
+    const [slot] = keySlots
+    assert.notEqual(slot, null, `${key}: values must be an array literal`)
+    const printed = slot >= 0 && key.includes(`{${slot}}`)
+    for (const n of [21, 101]) {
+      const said = render(russianPluralForm(forms, n), slot, n)
+      const plural = render(forms.few, slot, n)
+      // A count the sentence never prints cannot be read as 21's agreement: it reads singular.
+      if (printed ? !said.includes(String(n)) : said !== plural) defects.push(`${key} @${n}: ${said}`)
+      // A pronoun the plural form does not also say points back at the counted noun.
+      const extra = [...references(said)].filter(word => !references(plural).has(word))
+      if (extra.length) defects.push(`${key} @${n} (${extra.join(', ')}): ${said}`)
+    }
+  }
+  assert.deepEqual(defects, [])
+  // The sentences the review found, rendered as the dock / run list / Authoring now say them.
+  const P = page.plurals, at = (key, n, values = [n]) => russianPluralForm(P[key], n)
+    .replace(/\{(\d+)\}/g, (_, i) => String(values[Number(i)] ?? ''))
+  assert.equal(at('deleted nodes {1}', 21, [21, '#1, …, #21']), 'удалены узлы #1, …, #21')
+  assert.equal(at('deleted nodes {1}', 1, [1, '#3']), 'удалён узел #3')
+  assert.equal(at('{0} records; totals may include them.', 21), '21 запись; итоги могут их учитывать.')
+  assert.equal(at('{0} records; totals may include them.', 1), '1 запись; итоги могут её учитывать.')
+  assert.equal(at('{0} drafts retained. Switching is safe; closing loses them.', 21),
+    'Сохранён 21 черновик. Переключаться безопасно; при закрытии черновики будут потеряны.')
+  assert.equal(at('The remaining {0} runs were not touched.', 21), 'Остальные 21 запуск не затронуты.')
+  assert.equal(at('The remaining {0} runs were not touched.', 1), 'Оставшийся 1 запуск не затронут.')
+  assert.equal(at('Mark all {0} unread items as read{1}', 21, [21, '']),
+    'Отметить все 21 непрочитанный элемент как прочитанные')
+  assert.match(at('{0} save outcomes may be unknown. Leave Authoring?', 21), /^Результаты 21 сохранения могут быть неизвестны/)
+  assert.match(at('{0} save outcomes may be unknown. Leave Authoring?', 1), /^Результат 1 сохранения может быть неизвестен/)
+})
+
+test('the collector refuses a uiPlural it cannot see and English forms that disagree on placeholders', () => {
+  const defects = source => localizeSource(source, 'x.js').pluralDefects
+  assert.match(defects(`import { uiPlural as p } from './uiLanguage.js'\nexport const a = n => p(n, '{0} dog', '{0} dogs')\n`).join(),
+    /imported under its own name/)
+  assert.match(defects(`import * as L from './uiLanguage.js'\nexport const a = n => L.uiPlural(n, '{0} cat', '{0} cats')\n`).join(),
+    /called by its bare name/)
+  assert.match(defects(`import { uiPlural } from './uiLanguage.js'\nconst say = uiPlural\nexport const a = n => say(n, '{0} hen', '{0} hens')\n`).join(),
+    /not passed as a value/)
+  assert.match(defects(`import { uiPlural } from './uiLanguage.js'\nexport const a = n => uiPlural(n, '{1} ram', '{0} rams')\n`).join(),
+    /different placeholders/)
+  assert.deepEqual(defects(`import { uiPlural } from './uiLanguage.js'\nexport const a = n => uiPlural(n, '{0} ram', '{0} rams')\n`), [])
+  const slots = source => localizeSource(source, 'x.js').pluralSlots
+  assert.deepEqual(slots(`import { uiPlural } from './uiLanguage.js'\nexport const a = (n, x) => [uiPlural(n, '{0} a', '{0} as'), uiPlural(n.length, 'b {1}', 'bs {1}', [n.length, x]), uiPlural(n, '{1} c {0}', '{1} cs {0}', [x, n])]\n`),
+    { '{0} as': [0], 'bs {1}': [0], '{1} cs {0}': [1] })
 })
 
 test('converted call sites render correct Russian number forms', async () => {
@@ -124,10 +213,24 @@ test('converted call sites render correct Russian number forms', async () => {
     assert.equal(cascade.cascadeLabel({ deletable: 21, kept: 0 }),
       'Также удалить собственную межзапусковую память этого запуска (21 строка)')
 
+    // A count agrees with its own noun or verb, never with a neighbour's count (review of 1fd23d9):
+    // the CrossRunPanel coverage line nests the runs' verb inside the groups' noun phrase.
+    const coverage = (groups, runs) => locale.uiPlural(groups, '{1} in {0} comparable group', '{1} in {0} comparable groups',
+      [groups, locale.uiPlural(runs, '{0} of them sit', '{0} of them sit')])
+    assert.equal(coverage(3, 1), '1 из них входит в 3 сопоставимые группы')
+    assert.equal(coverage(1, 5), '5 из них входят в 1 сопоставимую группу')
+    assert.equal(coverage(21, 21), '21 из них входит в 21 сопоставимую группу')
+    const built = n => locale.uiPlural(n, '{0} built something else — not a test of it', '{0} built something else — not a test of it')
+    assert.equal(built(1), '1 собрал что-то другое — это не проверка задачи')
+    assert.equal(built(3), '3 собрали что-то другое — это не проверка задачи')
+
     // Dock narration: no English suffix fragment left in the event line.
     const line = (type, data) => narration.eventNarration({ type, data })
     assert.equal(line('node_tombstoned', { node_ids: [3] }), 'удалён узел #3')
     assert.equal(line('node_tombstoned', { node_ids: [3, 4] }), 'удалены узлы #3, #4')
+    const ids21 = Array.from({ length: 21 }, (_, i) => i + 1)
+    assert.equal(line('node_tombstoned', { node_ids: ids21 }), 'удалены узлы ' + ids21.map(i => '#' + i).join(', '),
+      'CLDR `one` is also 21: the count is not printed, so 21 nodes read plural')
     assert.equal(line('skills_promoted', { count: 3 }), 'память: повышено 3 устоявшихся навыка')
     assert.equal(line('reflection_note', { n_lessons: 5, n_skills: 1 }), 'память: 5 уроков, 1 навык')
     assert.equal(line('budget_extend', { add_nodes: 11 }), 'бюджет запуска расширен — +11 узлов эксперимента')
@@ -147,4 +250,108 @@ test('converted call sites render correct Russian number forms', async () => {
     assert.match(view.container.textContent, /train · 2 метрики/)
     assert.doesNotMatch(view.container.textContent, /metric/)
   } finally { await harness.close() }
+})
+
+// Text a helper composes in the UI language and a component then KEEPS — a memo keyed on the
+// stores, a notice in state — kept the old language after a switch. The retained-work leave
+// message is memoized on the language revision too; the run list's deletion notice is stored with
+// its producer and composed at render. Driven RU -> EN -> RU through the real language store.
+test('kept plural text follows a language switch RU -> EN -> RU', async () => {
+  const harness = await mountLive(); localStorage.clear()
+  const backend = fetchStub()
+  globalThis.fetch = (...args) => String(args[0]).endsWith('/locales/ru.json')
+    ? Promise.resolve(jsonResponse(page)) : backend(...args)
+  try {
+    const locale = await harness.load('/src/uiLanguage.js')
+    const bulk = await harness.load('/src/bulkDeleteModel.js')
+    const cascade = await harness.load('/src/memoryCascadeModel.js')
+    const { useRetainedWork } = await harness.load('/src/useRetainedWork.js')
+    const switchTo = language => React.act(async () => { locale.setUILanguage(language); await locale.loadUILanguage() })
+    await switchTo('ru')
+
+    // The run list's deletion notice: stored once, read at every render.
+    const batch = bulk.languageFollowingNotice(() => bulk.bulkOutcomeNotice({ done: ['a', 'b'], total: 2 }))
+    const purge = bulk.languageFollowingNotice(() => cascade.cascadeOutcome({ ok: true, deleted: 21 }, 'r'))
+    const said = () => [bulk.deletionNoticeText(batch), bulk.deletionNoticeText(purge)]
+    const russian = ['2 запуска удалены безвозвратно: “a”, “b”.',
+      'Запуск удалён вместе с 21 строкой межзапусковой памяти, принадлежавшей только ему.']
+    assert.deepEqual(said(), russian)
+    assert.equal(batch.kind, 'status'); assert.equal(purge.retryRunId, '')
+    await switchTo('en')
+    assert.deepEqual(said(), ['2 runs permanently deleted: “a”, “b”.',
+      'The run was deleted, along with 21 cross-run memory rows only it owned.'])
+    await switchTo('ru')
+    assert.deepEqual(said(), russian)
+    assert.equal(bulk.languageFollowingNotice(() => null), null, 'no outcome, no notice')
+    assert.equal(bulk.deletionNoticeText({ kind: 'error', text: 'plain' }), 'plain', 'a plain notice is its text')
+
+    // The retained-work leave message: memoized, so only a memo keyed on the language follows it.
+    const run = 'demo', scope = `comment-composer:${run}@gen-a:3:1`
+    const store = { entries: () => [[scope, { text: 'draft' }]], readField: () => null, clear() {} }
+    const Probe = () => React.createElement('p', null, useRetainedWork({
+      runId: run, generation: 'gen-a', reviewMode: false, panel: null, routeFenceActive: false,
+      inspectorDraftStore: store, activePanelNavigationGuard: null,
+      panelNavigationGuardRef: { current: null }, setPanelNavigationGuard() {},
+      commentRecoveryRevision: 0, inspectorDraftRevision: 0, onBack() {},
+    }).retainedRunLeaveMessage)
+    const view = await harness.mount(Probe)
+    await settle()
+    const ruLeave = view.container.textContent
+    assert.match(ruLeave, /1 несохранённый черновик комментария покинет/)
+    await switchTo('en'); await settle()
+    assert.match(view.container.textContent, /1 unsaved comment draft will leave/)
+    assert.doesNotMatch(view.container.textContent, /[А-Яа-яЁё]/)
+    await switchTo('ru'); await settle()
+    assert.equal(view.container.textContent, ruLeave)
+  } finally { await harness.close() }
+
+  // The run list stores the producer at all three sites that store a composed outcome.
+  const runList = readFileSync(new URL('../src/RunList.jsx', import.meta.url), 'utf8')
+  for (const stored of ['setDeletionNotice(bulkOutcomeNotice(', 'setDeletionNotice(cascadeOutcome(',
+    'const cascade = cascadeOutcome(', '{uiText(deletionNotice.text)}'])
+    assert.ok(!runList.includes(stored), stored)
+})
+
+// The glue shape itself, refused at the source: a conditional on a count being 1 that picks between
+// two English WORD forms (`n === 1 ? 'item' : 'items'`, `n === 1 ? uiText(' is') : uiText('s are')`)
+// is how a Russian sentence ended up with an English suffix or a fixed number form. A whole-sentence
+// branch on exactly one (`n === 1 ? uiText('This is the only attempt…') : uiPlural(…)`) is allowed —
+// it is a different sentence, not a glued word.
+test('no source file picks an English word form by comparing a count with 1', async () => {
+  const { parse } = await import('@babel/parser')
+  const PAIRS = [['is', 'are'], ['was', 'were'], ['it', 'them'], ['it', 'those'], ['this', 'these'],
+    ['has', 'have'], ['does', 'do'], ['one', 'all']]
+  const literal = node => node?.type === 'StringLiteral' ? node.value
+    : node?.type === 'CallExpression' && ['uiText', 'uiMessage'].includes(node.callee?.name)
+      && node.arguments[0]?.type === 'StringLiteral' ? node.arguments[0].value : null
+  const words = text => text.trim().toLowerCase().split(/\s+/)
+  const glued = (a, b) => {
+    if (a == null || b == null) return false
+    if (/^(s|es)(\s|$)/.test(b.trim())) return true  // a bare suffix glued onto the count's noun
+    const [x, y] = [words(a), words(b)]
+    if (x.length !== y.length || x.length > 3) return false
+    return x.some((w, i) => w !== y[i] && (y[i] === w + 's' || y[i] === w + 'es'
+      || y[i] === w.replace(/y$/, 'ies') || PAIRS.some(([p, q]) => w === p && y[i] === q)))
+  }
+  const oneTest = t => t?.type === 'BinaryExpression' && ['===', '!==', '==', '!=', '>'].includes(t.operator)
+    && [t.left, t.right].some(x => x.type === 'NumericLiteral' && x.value === 1)
+  const found = []
+  for (const file of readdirSync(new URL('../src/', import.meta.url))) {
+    if (!/\.(jsx|js)$/.test(file)) continue
+    const source = readFileSync(new URL(`../src/${file}`, import.meta.url), 'utf8')
+    const visit = node => {
+      if (!node || typeof node !== 'object') return
+      if (Array.isArray(node)) return node.forEach(visit)
+      if (node.type === 'ConditionalExpression' && oneTest(node.test)) {
+        const [a, b] = [literal(node.consequent), literal(node.alternate)]
+        if (glued(a, b) || glued(b, a)) found.push(`${file}:${source.slice(0, node.start).split('\n').length} ${a} / ${b}`)
+      }
+      for (const [key, value] of Object.entries(node)) if (!['loc', 'extra', 'leadingComments', 'trailingComments', 'innerComments'].includes(key)) visit(value)
+    }
+    visit(parse(source, { sourceType: 'module', plugins: ['jsx'] }).program)
+  }
+  assert.deepEqual(found, [])
+  // The detector sees the shapes it was written for.
+  assert.ok(glued('item', 'items') && glued(' is', 's are') && glued('this experiment', 'these experiments')
+    && glued('entry was', 'entries were') && !glued('created', 'edited') && !glued('single', 'ranked'))
 })

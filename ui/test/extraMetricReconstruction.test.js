@@ -135,3 +135,22 @@ test('an imported key names what measured it when the record says (2026-10-08)',
   const unsourced = { ...node, extra_metrics_backfill: { backfilled: true, keys: ['FUR@200'] } }
   assert.match(extraMetricSourceHelp(unsourced, 'FUR@200'), /does not say which/)
 })
+
+// The whole English sentence an imported key's help says, pinned since 2026-10-08: a named source
+// replaces the two "how it entered the record" sentences, and the coarser-precision caveat STAYS —
+// the import marker cannot say what precision the importer's source printed, any more than the
+// generic reconstruction can. (It was added when the help began translating per sentence.)
+test('an imported key keeps the coarser-precision caveat beside its named source', () => {
+  const node = {
+    extra_metrics: { 'FUR@200': 0.3 },
+    extra_metrics_provenance: { 'FUR@200': 'declared' },
+    extra_metrics_backfill: { backfilled: true, keys: ['FUR@200'], sources: { 'FUR@200': 'scoring service v2' } },
+  }
+  const declared = "Read by the operator's own metric reader spec — the same guarded channel as the objective."
+  const imported = 'Imported after the run (source: scoring service v2), not recorded while it was happening.'
+  const coarser = "Its precision may be coarser than the objective's, so two nodes equal here are not known to be equal."
+  assert.equal(extraMetricSourceHelp(node, 'FUR@200'), `${declared} ${imported} ${coarser}`)
+  const printed = { ...node, extra_metrics_backfill: { ...node.extra_metrics_backfill, precision_decimals: { 'FUR@200': 3 } } }
+  assert.equal(extraMetricSourceHelp(printed, 'FUR@200'),
+    `${declared} ${imported} ${coarser} Printed to 3 decimal place(s).`)
+})

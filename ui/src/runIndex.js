@@ -49,12 +49,16 @@ export function sourceIntegrityNotice(run = {}) {
   // good + the BOUNDARY row + dropped, mirroring `eventstore.py::integrity_sentence`: the boundary
   // line is a complete record on disk, so this total is the one the timeline pager also counts.
   const total = good != null && dropped != null ? good + dropped + 1 : null
-  const where = line != null ? ` at line ${line}` : ''
-  const scope = total != null ? `You are seeing ${good} of ${total} records; ${dropped} durable `
-    + 'record(s) behind that boundary are NOT shown.' : 'Part of the log is not shown.'
-  return `Incomplete record: this run’s event log stops being readable${where}. ${scope} `
-    + 'Every number here describes the readable prefix only — it is not evidence that the rest did '
-    + 'not happen.'
+  // Said in the UI language sentence by sentence: the composite was never a catalogue key.
+  const head = line != null
+    ? uiMessage('Incomplete record: this run’s event log stops being readable at line {0}.', [line])
+    : uiText('Incomplete record: this run’s event log stops being readable.')
+  const scope = total != null
+    ? uiPlural(total, 'You are seeing {0} of {1} records; {2} durable record(s) behind that boundary are NOT shown.',
+      'You are seeing {0} of {1} records; {2} durable record(s) behind that boundary are NOT shown.', [good, total, dropped])
+    : uiText('Part of the log is not shown.')
+  return `${head} ${scope} `
+    + uiText('Every number here describes the readable prefix only — it is not evidence that the rest did not happen.')
 }
 
 // --- What kind of number `best_metric` IS ---------------------------------------------------------

@@ -217,7 +217,7 @@ export function nodeChip(node, nodes, state = null) {
       return (vs.length > 1 && vs.every(v => typeof v === 'number'))
         ? `${k}∈[${fmt(Math.min(...vs))}…${fmt(Math.max(...vs))}]` : k
     }
-    return uiText('swept ') + (keys.length <= 2 ? keys.map(tok).join(', ') : uiMessage('{0} params', [keys.length]))
+    return uiText('swept ') + (keys.length <= 2 ? keys.map(tok).join(', ') : uiPlural(keys.length, '{0} params', '{0} params'))
   }
   const parent = parents[0]
   if (!parent) {                                           // draft / root — nothing to diff against
@@ -484,7 +484,7 @@ export function toMarkdown(state, _best, context = {}) {
   if (champion) L.push(uiMessage("- **Best:** node #{0} · metric {1}{2} · params {3}", [champion.id, fmt(champion.confirmed_mean ?? champion.metric), champion.confirmed_mean != null ? ` ±${fmt(champion.confirmed_std)} (${champion.confirmed_seeds}×)` : '', JSON.stringify(champion.idea?.params)]))
   // The exported Markdown is what gets pasted into a report or a ticket, so it is the LAST place a
   // `$0` may stand in for "nobody priced this run" — spell the pricing evidence out in full here.
-  if (state.llm_cost) L.push(uiMessage('- **LLM:** {0} tokens · {1} ({2})', [state.llm_cost.total_tokens,
+  if (state.llm_cost) L.push(uiPlural(state.llm_cost.total_tokens, '- **LLM:** {0} tokens · {1} ({2})', '- **LLM:** {0} tokens · {1} ({2})', [state.llm_cost.total_tokens,
     uiText(costPricing(state.llm_cost).text), uiText(costPricing(state.llm_cost).title)]))
   if (ctx.generation) L.push(uiMessage("- **Run generation:** {0}", [ctx.generation]))
   if (ctx.snapshotSeq != null) L.push(uiMessage("- **Snapshot event:** #{0}", [ctx.snapshotSeq]))
@@ -518,7 +518,7 @@ export function toMarkdown(state, _best, context = {}) {
     L.push(uiText('| step | node | operator | recorded value | measurement | numeric change | what changed |'))
     L.push('|---|---|---|---|---|---|---|')
     a.steps.forEach((s, i) => L.push(`| ${i + 1} | #${s.id} | ${s.operator}${s.theme ? ` (${s.theme})` : ''} | ${fmt(s.to)} | ${uiText(s.measurement)} | ${s.delta == null ? uiText('first eligible') : fmt(s.delta)} | ${paramDiffLabel(s.diff)} |`))
-    if (a.steps.length > 1) L.push(uiMessage("\nRecorded frontier change: **{0}** across {1} steps (first eligible {2} → numeric frontier {3}).", [fmt(a.totalGain), a.steps.length, fmt(a.firstBest), fmt(a.finalBest)]))
+    if (a.steps.length > 1) L.push(uiPlural(a.steps.length, '\nRecorded frontier change: **{0}** across {1} steps (first eligible {2} → numeric frontier {3}).', '\nRecorded frontier change: **{0}** across {1} steps (first eligible {2} → numeric frontier {3}).', [fmt(a.totalGain), a.steps.length, fmt(a.firstBest), fmt(a.finalBest)]))
   } else L.push(uiText('\n_No improving steps recorded yet._'))
   L.push('')
   L.push(uiText('## What didn\'t work'))

@@ -27,6 +27,8 @@ const human = (s) =>
 // A shell command is copied and pasted, never translated: the Russian catalogue once rendered
 // `looplab finalize <runs>/{0}` as `Завершить процесс <unes>/{0}`. Paths are opaque the same way.
 const command = (s) => /^(looplab |git |python |npm )/.test(s);
+const placeholderSet = (text) =>
+  [...new Set(text.match(/\{\d+\}/g) || [])].sort().join();
 const hasJSX = (n) =>
   n &&
   typeof n === "object" &&
@@ -146,6 +148,8 @@ export function localizeSource(source, filename = "fixture.jsx") {
     components = new Set(),
     ownedVariables = new Set(),
     plurals = new Set(),
+    pluralSlots = {},
+    reachedPluralCalls = new Set(),
     pluralDefects = [];
   const add = (s) => {
       if (human(s)) messages.add(norm(s));
@@ -338,12 +342,34 @@ export function localizeSource(source, filename = "fixture.jsx") {
     // (the `other` text) in the catalogue's `plurals` section, never two `messages` keys. Both
     // forms must be literals, or no check could say which Russian forms the call needs. The count
     // and the values are walked as ordinary code, so copy inside them is still collected.
+    // The two English forms must also carry the SAME placeholders: a form that drops or renames
+    // one (`uiPlural(n, '{1} ram', '{0} rams')`) prints the wrong value, or none, for one count.
+    // `pluralSlots` records which `values` index prints the count (-1: the count is never printed,
+    // as in `deleted node {1}`; null: `values` is not an array literal), so a check can say
+    // whether a Russian `one` form — also the form for 21 — states the number it agrees with.
     if (n.type === "CallExpression" && n.callee?.name === "uiPlural") {
-      const [count, one, other, ...rest] = n.arguments;
-      if (one?.type === "StringLiteral" && other?.type === "StringLiteral")
-        plurals.add(norm(other.value));
-      else pluralDefects.push(`${filename}:${n.start} uiPlural forms must be string literals`);
-      for (const x of [count, ...rest]) walk(x, [...parents, n]);
+      reachedPluralCalls.add(n);
+      const [count, one, other, values, ...rest] = n.arguments;
+      if (one?.type === "StringLiteral" && other?.type === "StringLiteral") {
+        const key = norm(other.value);
+        plurals.add(key);
+        if (placeholderSet(one.value) !== placeholderSet(other.value))
+          pluralDefects.push(
+            `${filename}:${n.start} uiPlural one/other forms carry different placeholders`,
+          );
+        // The count's own slot, or the slot that FORMATS it (`[fmtInt(n)]`, `[n.toLocaleString()]`).
+        const elements = values?.type === "ArrayExpression" ? values.elements : [],
+          exact = elements.findIndex((x) => x && count && raw(x) === raw(count)),
+          slot = !values
+            ? 0
+            : values.type !== "ArrayExpression"
+              ? null
+              : exact >= 0
+                ? exact
+                : elements.findIndex((x) => x && count && raw(x).includes(raw(count)));
+        (pluralSlots[key] ??= []).push(slot);
+      } else pluralDefects.push(`${filename}:${n.start} uiPlural forms must be string literals`);
+      for (const x of [count, values, ...rest]) walk(x, [...parents, n]);
       return;
     }
     // Translate only human prose returned by presentation helpers. Operational
@@ -515,6 +541,33 @@ export function localizeSource(source, filename = "fixture.jsx") {
     }
   }
   walk(tree);
+  // A `uiPlural` call the walk above never reached, or one spelled any other way (an aliased
+  // import, `L.uiPlural(…)`, the function passed as a value), is a counted phrase no check can
+  // see: its key would never be required in the catalogue and the Russian copy would silently
+  // read English. Refuse each such spelling here, by name, so the collector's view is the source's.
+  (function audit(n, parent) {
+    if (!n?.type) return;
+    if (n.type === "CallExpression" && n.callee?.type === "Identifier"
+      && n.callee.name === "uiPlural" && !reachedPluralCalls.has(n))
+      pluralDefects.push(`${filename}:${n.start} uiPlural call the collector does not reach`);
+    if (n.type === "ImportSpecifier" && (n.imported?.name ?? n.imported?.value) === "uiPlural"
+      && n.local.name !== "uiPlural")
+      pluralDefects.push(`${filename}:${n.start} uiPlural must be imported under its own name`);
+    if (n.type === "MemberExpression"
+      && (n.computed ? n.property?.value : n.property?.name) === "uiPlural")
+      pluralDefects.push(`${filename}:${n.start} uiPlural must be called by its bare name`);
+    if (n.type === "Identifier" && n.name === "uiPlural" && parent
+      && !(parent.type === "CallExpression" && parent.callee === n)
+      && !(parent.type === "ImportSpecifier")
+      && !(parent.type === "MemberExpression" && parent.property === n && !parent.computed))
+      pluralDefects.push(`${filename}:${n.start} uiPlural must be called directly, not passed as a value`);
+    for (const [k, v] of Object.entries(n)) {
+      if (["loc", "start", "end", "extra", "comments", "leadingComments", "trailingComments",
+        "innerComments"].includes(k)) continue;
+      if (Array.isArray(v)) for (const c of v) audit(c, n);
+      else if (v?.type) audit(v, n);
+    }
+  })(tree, null);
   if (changed) {
     for (const fn of components) {
       if (fn.body.type === "BlockStatement") {
@@ -577,6 +630,7 @@ export function localizeSource(source, filename = "fixture.jsx") {
     source: result,
     messages: [...messages],
     plurals: [...plurals],
+    pluralSlots,
     pluralDefects,
     changed,
   };

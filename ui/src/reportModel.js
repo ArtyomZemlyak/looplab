@@ -1,3 +1,4 @@
+import { uiPlural } from './uiLanguage.js'
 // Pure boundary for agent-authored report narratives. Deterministic report analysis still reads the
 // folded run state; only this optional, untrusted narrative is projected into a bounded render shape.
 
@@ -123,12 +124,11 @@ export function reportCoverageText(coverage) {
   if (!coverage || coverage.status === 'absent') return 'No agent narrative is published.'
   if (coverage.status === 'stale') {
     // One sentence per English number form: a glued `s` capture leaks into the Russian copy.
-    return coverage.staleBy === 1
-      ? `Covers ${coverage.atNode} of ${coverage.currentNodeCount} nodes · stale by 1 node.`
-      : `Covers ${coverage.atNode} of ${coverage.currentNodeCount} nodes · stale by ${coverage.staleBy} nodes.`
+    return uiPlural(coverage.staleBy, 'Covers {0} of {1} nodes · stale by {2} node.',
+      'Covers {0} of {1} nodes · stale by {2} nodes.', [coverage.atNode, coverage.currentNodeCount, coverage.staleBy])
   }
   if (coverage.status === 'inconsistent') {
-    return `Claims ${coverage.atNode} nodes, but this view has ${coverage.currentNodeCount} · inconsistent provenance.`
+    return uiPlural(coverage.atNode, 'Claims {0} nodes, but this view has {1} · inconsistent provenance.', 'Claims {0} nodes, but this view has {1} · inconsistent provenance.', [coverage.atNode, coverage.currentNodeCount])
   }
   if (coverage.status === 'node_count_matched') {
     return `Covers ${coverage.atNode} of ${coverage.currentNodeCount} nodes · node coverage complete, not full state freshness.`

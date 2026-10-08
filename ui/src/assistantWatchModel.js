@@ -74,7 +74,8 @@ export function budgetText(watch) {
   const done = Number(watch?.wakeups || 0)
   const max = Number(watch?.max_wakeups || 0)
   if (!Number.isFinite(max) || max <= 0) return ''
-  return watch?.trigger?.kind === 'work' ? `${done}/${max} cycles` : `${done}/${max} wake-ups`
+  return watch?.trigger?.kind === 'work' ? uiPlural(max, '{0}/{1} cycles', '{0}/{1} cycles', [done, max])
+    : uiPlural(max, '{0}/{1} wake-ups', '{0}/{1} wake-ups', [done, max])
 }
 
 // One row's full description. `waitingFor` is the server's own sentence and is never re-derived
