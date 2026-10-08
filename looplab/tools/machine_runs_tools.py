@@ -34,6 +34,11 @@ from looplab.tools._base import RESULT_CAP, fn_spec
 _TRACE_CHARS = RESULT_CAP - 400
 # How much of a run's goal `read_run` prints by default (`_read_run`).
 READ_RUN_GOAL_CHARS = 600
+# One PAGE of the goal when it is asked for whole (critic 2026-10-08): `full_goal` used to print the
+# goal AND the listing in one result, which the tool loop cut at RESULT_CAP (4000) with no way to
+# continue — a 5,500-character goal could not be read whole at all. A page is the goal alone, well
+# under the cap, and names the offset that continues it.
+READ_RUN_GOAL_PAGE_CHARS = 3200
 
 
 # How many episodes a map prints at EACH END before the middle is elided. Both ends on purpose (the
@@ -210,8 +215,11 @@ class MachineRunsTools(ForeignRunReader):
                  "sort": {"type": "string", "enum": ["best", "worst", "recent"]},
                  "limit": {"type": "integer"},
                  "full_goal": {"type": "boolean",
-                               "description": "print the whole goal instead of its first "
-                                              f"{READ_RUN_GOAL_CHARS} characters"}},
+                               "description": "print the goal alone, page by page, instead of its "
+                                              f"first {READ_RUN_GOAL_CHARS} characters"},
+                 "goal_offset": {"type": "integer",
+                                 "description": "with full_goal: the character offset the page "
+                                                "starts at (the previous page names it)"}},
                 ["run_id"]),
             fn_spec("read_run_experiment",
                 "Read one experiment of a run in full detail (params, metric, robustness, rationale, "
@@ -265,7 +273,8 @@ class MachineRunsTools(ForeignRunReader):
                 return self._list_runs(bool(args.get("only_live")))
             if name == "read_run":
                 return self._read_run(args.get("run_id"), args.get("sort"), args.get("limit"),
-                                      full_goal=args.get("full_goal") is True)
+                                      full_goal=args.get("full_goal") is True,
+                                      goal_offset=args.get("goal_offset"))
             if name == "read_run_experiment":
                 return self._read_experiment(args.get("run_id"), int(args.get("node_id")),
                                              args.get("trials"))
@@ -343,7 +352,7 @@ class MachineRunsTools(ForeignRunReader):
                          + self._partial_suffix(r["run_id"]))
         return f"{len(lines)} run(s):\n" + "\n".join(lines)
 
-    def _read_run(self, run_id, sort, limit, *, full_goal: bool = False) -> str:
+    def _read_run(self, run_id, sort, limit, *, full_goal: bool = False, goal_offset=None) -> str:
         st = self._state(run_id)
         if st is None:
             return f"(no such run: {run_id!r})"
@@ -355,9 +364,16 @@ class MachineRunsTools(ForeignRunReader):
         # experiment listing, so every read returned the goal and a cut-off list, and the model
         # spent its turn re-reading. The rest is one call away and that call is named.
         goal = str(st.goal or st.task_id or "")
-        if not full_goal and len(goal) > READ_RUN_GOAL_CHARS:
+        if full_goal:
+            start = goal_offset if type(goal_offset) is int and 0 <= goal_offset < len(goal) else 0
+            end = min(len(goal), start + READ_RUN_GOAL_PAGE_CHARS)
+            more = (f"\n[goal continues: read_run(run_id, full_goal=true, goal_offset={end})]"
+                    if end < len(goal) else "\n[end of goal]")
+            return (f"run {run_id} · goal chars {start}-{end} of {len(goal)}:\n"
+                    + goal[start:end] + more)
+        if len(goal) > READ_RUN_GOAL_CHARS:
             goal = (goal[:READ_RUN_GOAL_CHARS].rstrip() + f" … [goal: first {READ_RUN_GOAL_CHARS} "
-                    f"of {len(goal)} chars; read_run(run_id, full_goal=true) prints it whole]")
+                    f"of {len(goal)} chars; read_run(run_id, full_goal=true) prints it page by page]")
         head = (f"run {run_id} · goal: {goal} · direction={st.direction} · "
                 f"phase={'finished' if st.finished else ('live' if live else 'idle')} · "
                 f"{len(st.nodes)} nodes · best={digest.fmt_num(digest.node_metric(best)) if best else '—'}"

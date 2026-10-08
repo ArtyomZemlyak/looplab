@@ -164,7 +164,7 @@ function Turn({
           restarted, the stream dropped — is re-run with its exact identity when the chat reopens,
           and without this line the operator watched the same activity appear again and could not
           send ("Так ну и че?" went nowhere). */}
-      {m.role === 'assistant' && m.streaming && m.recoveryNeeded &&
+      {m.role === 'assistant' && m.streaming && m.replaying &&
         <div className="asst-status recovering" role="status">
           {uiText("Re-running the interrupted turn: its reply was never saved (the server restarted or the connection dropped). A new message can be sent when it finishes.")}</div>}
       {m.role === 'assistant' && m.streaming && !m.content && !(m.activity && m.activity.length) &&

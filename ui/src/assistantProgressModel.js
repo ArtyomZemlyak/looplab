@@ -1,3 +1,5 @@
+import { shouldSurfaceProgress } from './assistantTurnModel.js'
+
 // What a POLLED turn progress (`GET /api/assistant/progress`) means for the live assistant message.
 //
 // A pure model beside `AssistantBar.jsx`, which applies it at three sites — the send path's
@@ -50,6 +52,25 @@ export function progressHasNews(progress) {
   if (!progress) return false
   return !!(progress.text || (Array.isArray(progress.steps) && progress.steps.length)
     || (Array.isArray(progress.activity) && progress.activity.length))
+}
+
+/** May the fallback poll apply this frame to the live message? (critic 2026-10-08)
+ *
+ *  The historical rule (`assistantTurnModel.js::shouldSurfaceProgress`) surfaces a frame only when
+ *  its `text` is longer than what the stream produced. Since `text` became the ANSWER alone, a turn
+ *  behind a buffering proxy has `text === ''` for its whole tool phase, so nothing surfaced: no
+ *  steps, no "last activity" line — the opaque-liveness incident on the very path this fallback is
+ *  for. So a frame also applies when it carries news and either no SSE event has arrived yet
+ *  (`streamLive` false: the stream is buffered) or the poll already owns the activity (`ownsActivity`:
+ *  once a frame wrote the server's whole list, the batched SSE events must not append it again). */
+export function progressFrameApplies(streamed, progress, { streamLive = false, ownsActivity = false } = {}) {
+  if (!progress || progress.active !== true) return false
+  if (shouldSurfaceProgress(streamed, progress)) return true
+  // ACTIVITY news only — a frame whose answer is not longer than the stream's has nothing for the
+  // answer bubble, and the caller keeps the streamed text (`AssistantBar.jsx::runLLM`'s onProgress).
+  const activity = (Array.isArray(progress.activity) && progress.activity.length > 0)
+    || (Array.isArray(progress.steps) && progress.steps.length > 0)
+  return (!streamLive || ownsActivity) && activity
 }
 
 /** "HH:MM:SS" of a ms timestamp in the viewer's clock, or '' for none. The live line prints the

@@ -1108,6 +1108,10 @@ export default function AssistantBar({ runId, hidden = false, onReady }) {
         setMsgs(m => (m[m.length - 1] && m[m.length - 1].role === 'assistant' && m[m.length - 1].streaming)
           ? m : [...m, { role: 'assistant', content: '', streaming: true, activity: act,
             recoveryNeeded: !!dangling, lastEventAt: progressPatch(prog).lastEventAt }])
+        // "Re-running the interrupted turn" is said only when that is TRUE (critic 2026-10-08): the
+        // exact replay below was actually posted. A reload or a chat switch while the original worker
+        // is still running reattaches to it — nothing is being re-run, and the line used to claim the
+        // reply "was never saved" in exactly that, most common, case.
         let polling = true
         let exactFailure = null
         let recoveryCtrl = null
@@ -1146,6 +1150,7 @@ export default function AssistantBar({ runId, hidden = false, onReady }) {
           }
           const acknowledgedLiveShareIds = assistantLiveShareIds(latest.meta)
           exactState = 'posted'
+          patchLast(prev => prev && prev.role === 'assistant' && prev.streaming ? { replaying: true } : prev)
           recoveryCtrl = new AbortController(); abortRef.current = recoveryCtrl
           // Re-read above before POST: if the old worker persisted its reply after our first GET, this
           // path observes it instead of accidentally appending a fresh duplicate turn.
@@ -2428,6 +2433,12 @@ export default function AssistantBar({ runId, hidden = false, onReady }) {
     setTurnStarting(false); setBusy(true); runningRef.current = true
     const ctrl = new AbortController(); abortRef.current = ctrl
     let acc = ''
+    // WHO OWNS THE ACTIVITY (critic 2026-10-08). Behind a buffering proxy no SSE event arrives until
+    // the end, so the poll writes the server's whole ordered activity; the batched SSE `text`/`step`
+    // events that then flush must not append it a second time. `sseLive`: any SSE event has
+    // arrived. `pollActivity`: a poll frame has written the activity — from then on it alone does.
+    let sseLive = false
+    let pollActivity = false
     let streamedFailure = ''
     // The two concurrent fallback polls beside the stream — permissions and the buffered-proxy
     // progress mirror — are `assistantTurnPolls.js` now (doc 25 UI-05). They share this turn's
@@ -2439,11 +2450,17 @@ export default function AssistantBar({ runId, hidden = false, onReady }) {
       onPermissions: pending => setPending(pending),
       readProgress: () => assistantProgress(id),
       streamedText: () => acc,
+      streamLive: () => sseLive,
+      ownsActivity: () => pollActivity,
       onProgress: pp => patchLast(prev => {
         if (!(prev && prev.role === 'assistant' && prev.streaming)) return prev
+        if (Array.isArray(pp.activity) && pp.activity.length) pollActivity = true
         const patch = progressPatch(pp, prev)
+        // The mirrored answer only when it is AHEAD of the stream: a frame applied for its activity
+        // must never overwrite longer streamed tokens with a shorter mirror.
+        const ahead = patch.content && patch.content.length > acc.length ? patch.content : null
         return { ...patch,
-          content: assistantErrorInfo(pp.text) ? normalizedFailureText(pp.text) : (patch.content || prev.content) }
+          content: assistantErrorInfo(pp.text) ? normalizedFailureText(pp.text) : (ahead || prev.content) }
       }),
       sleep,
     })
@@ -2452,18 +2469,20 @@ export default function AssistantBar({ runId, hidden = false, onReady }) {
       if (!replyAttemptCurrent(localAttempt, id)) return
       const res = await assistantMessageStream(id, fullInstruction, effectiveMode, {
         onToken: safeAttempt((tok) => {
+          sseLive = true
           acc += tokText(tok)
           patchLast({ content: assistantErrorInfo(acc) ? normalizedFailureText(acc) : acc,
             lastEventAt: Date.now() })
         }),
-        onText: safeAttempt((txt) => patchLast(prev => ({ activity: [...(prev.activity || []), { type: 'text', content: txt }],
-          lastEventAt: Date.now() }))),
-        onStep: safeAttempt((s) => patchLast(prev => {
+        onText: safeAttempt((txt) => { sseLive = true; patchLast(prev => (pollActivity ? { lastEventAt: Date.now() }
+          : { activity: [...(prev.activity || []), { type: 'text', content: txt }], lastEventAt: Date.now() })) }),
+        onStep: safeAttempt((s) => { sseLive = true; patchLast(prev => {
+          if (pollActivity) return { lastEventAt: Date.now() }
           const a = prev.activity || []; const last = a[a.length - 1]
           return last && last.type === 'tools'
             ? { activity: [...a.slice(0, -1), { ...last, labels: [...last.labels, s] }], lastEventAt: Date.now() }
             : { activity: [...a, { type: 'tools', labels: [s] }], lastEventAt: Date.now() }
-        })),
+        }) }),
         onTodos: safeAttempt((items) => patchLast({ todos: items })),
         onError: safeAttempt((e) => {
           streamedFailure = normalizedFailureText(e)

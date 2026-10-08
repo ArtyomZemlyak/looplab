@@ -926,7 +926,7 @@ class EvalDispatchMixin:
         run_dir = getattr(self, "run_dir", None)
         if run_dir is None:
             return {}
-        from looplab.core.node_evidence import read_bounded_regular_file
+        from looplab.engine.artifact_sync import workdir_stamp
         from looplab.engine.evaluate import workdir_manifest_digest
         # ONLY A PARENT EVALUATED IN ITS CURRENT LIFECYCLE whose workdir still holds that lifecycle's
         # files (critic 2026-10-08): a failed parent's half-written checkpoint, or a workdir being
@@ -943,7 +943,7 @@ class EvalDispatchMixin:
             wd = Path(run_dir) / "nodes" / f"node_{pid}"
             if not wd.is_dir() or wd.is_symlink():
                 continue
-            stamp = read_bounded_regular_file(wd / ".looplab-manifest", 256)
+            stamp = workdir_stamp(wd)
             if stamp is None or stamp.decode("ascii", "replace").strip() != workdir_manifest_digest(parent):
                 continue
             paths.append(str(wd.resolve()))

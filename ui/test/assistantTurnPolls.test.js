@@ -115,3 +115,23 @@ test('the progress mirror stays behind the stream it is filling in for', async (
   assert.deepEqual(painted, ['mirror'],
     'once the stream is longer than the mirror, the authoritative tokens are never overwritten')
 })
+
+test('behind a buffering proxy the tool phase surfaces before any answer text (critic 2026-10-08)', async () => {
+  const seen = []
+  let reads = 0
+  const polls = startTurnFallbackPolls({
+    isCurrent: () => true,
+    readPermissions: async () => ({ ok: true, pending: [] }),
+    onPermissions: () => {},
+    readProgress: async () => {
+      reads += 1
+      if (reads >= 3) polls.stop()
+      return { active: true, text: '', activity: [{ type: 'tools', labels: ['read_run'] }], last_event: reads }
+    },
+    streamedText: () => '',
+    onProgress: value => seen.push(value.last_event),
+    sleep: tick,
+  })
+  await polls.settled()
+  assert.ok(seen.length >= 2, `the steps and the "last activity" line reached the bubble: ${seen}`)
+})

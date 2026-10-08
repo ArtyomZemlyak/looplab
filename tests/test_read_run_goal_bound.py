@@ -32,8 +32,19 @@ def test_a_long_goal_is_bounded_and_the_listing_survives(tmp_path):
         f"first {READ_RUN_GOAL_CHARS} of {len(goal)} chars" in out
     assert "full_goal=true" in out, "the bound names the call that continues past it"
     assert "#2" in out, "the experiment listing is no longer crowded out"
-    whole = tools.execute("read_run", {"run_id": "demo", "full_goal": True})
-    assert whole.count("constraint") == 2000
+    # critic 2026-10-08: the whole goal is read PAGE by page, each page under the tool loop's cap,
+    # each naming the offset that continues it — asserted on what the model actually receives.
+    from looplab.agents.tool_loop import _cap_tool_result
+    pages, offset = [], 0
+    for _ in range(20):
+        args = {"run_id": "demo", "full_goal": True, **({"goal_offset": offset} if offset else {})}
+        page = tools.execute("read_run", args)
+        assert _cap_tool_result(page) == page, "a page fits the cap whole"
+        pages.append(page.split(":\n", 1)[1].rsplit("\n[", 1)[0])
+        if "[end of goal]" in page:
+            break
+        offset = int(page.rsplit("goal_offset=", 1)[1].split(")", 1)[0])
+    assert "".join(pages) == goal
 
 
 def test_a_short_goal_prints_as_before(tmp_path):

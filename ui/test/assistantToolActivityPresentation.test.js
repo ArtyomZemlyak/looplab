@@ -30,6 +30,15 @@ test('AssistantChat presents bounded, semantic tool activity without raw payload
       return { dom, document: dom.window.document, markup }
     }
 
+    await t.test('the replay line shows only for an actually re-posted turn (critic 2026-10-08)', () => {
+      const reattached = renderTurn({ role: 'assistant', content: '', streaming: true, recoveryNeeded: true })
+      assert.doesNotMatch(reattached.markup, /Re-running the interrupted turn/,
+        'a reload while the original worker runs reattaches; nothing is being re-run')
+      const replayed = renderTurn({ role: 'assistant', content: '', streaming: true, recoveryNeeded: true,
+        replaying: true })
+      assert.match(replayed.markup, /Re-running the interrupted turn/)
+    })
+
     await t.test('live groups and persisted legacy steps share the native disclosure', () => {
       const labels = ['Inspect task', 'Read files', 'Search tests', 'Compare evidence', 'Run checks']
       const live = renderTurn({

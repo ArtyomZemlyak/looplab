@@ -1,4 +1,4 @@
-import { shouldSurfaceProgress } from './assistantTurnModel.js'
+import { progressFrameApplies } from './assistantProgressModel.js'
 
 // The two concurrent fallback polls that run BESIDE one Assistant turn's SSE stream (doc 25 UI-05
 // names them as the reason `runLLM` is hard to read). They are here, together, because they share
@@ -11,8 +11,9 @@ import { shouldSurfaceProgress } from './assistantTurnModel.js'
 //   * PROGRESS — the SSE fallback. Behind a buffering proxy (jupyter-server-proxy / nginx) the
 //     token/text/step events arrive batched only at the END, leaving a dead "thinking" bubble the
 //     whole time. So the server's mirrored answer-so-far is polled and surfaced while the stream has
-//     produced less than it (`assistantTurnModel.js::shouldSurfaceProgress`); once tokens flow, the
-//     authoritative SSE content wins. It fills the buffered gap; it never fights a working stream.
+//     produced less than it — or, before any SSE event arrived, whenever it carries activity
+//     (`assistantProgressModel.js::progressFrameApplies`); once tokens flow, the authoritative SSE
+//     content wins. It fills the buffered gap; it never fights a working stream.
 //
 // Two properties are what this module exists to make checkable, and both are about a LATE result:
 // every await is followed by `isCurrent()` before anything is published, so a poll that resolves
@@ -23,7 +24,8 @@ import { shouldSurfaceProgress } from './assistantTurnModel.js'
 // It is deliberately not a hook: it owns no React state, and `runLLM` already owns the lifetime.
 export function startTurnFallbackPolls({
   isCurrent, readPermissions, onPermissions, readProgress, onProgress,
-  streamedText = () => '', sleep, permissionIntervalMs = 800, progressIntervalMs = 1000,
+  streamedText = () => '', streamLive = () => false, ownsActivity = () => false,
+  sleep, permissionIntervalMs = 800, progressIntervalMs = 1000,
 }) {
   let polling = true
   const live = () => polling && isCurrent()
@@ -47,7 +49,8 @@ export function startTurnFallbackPolls({
       try {
         const seen = await readProgress()
         if (!live()) break
-        if (!shouldSurfaceProgress(streamedText(), seen)) continue
+        if (!progressFrameApplies(streamedText(), seen,
+          { streamLive: streamLive(), ownsActivity: ownsActivity() })) continue
         onProgress(seen)
       } catch { /* transient */ }
     }

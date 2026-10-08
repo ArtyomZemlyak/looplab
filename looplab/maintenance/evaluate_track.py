@@ -86,8 +86,7 @@ def track_refusal(run_dir: Path, node) -> Optional[str]:
     if getattr(node.status, "value", node.status) != "evaluated" or node.task_metric is None:
         return "not evaluated in its current lifecycle"
     workdir = Path(run_dir) / "nodes" / f"node_{node.id}"
-    stamp = workdir / ".looplab-manifest"
-    from looplab.core.node_evidence import read_bounded_regular_file
+    from looplab.engine.artifact_sync import workdir_stamp
     try:
         if workdir.is_symlink() or not workdir.is_dir():
             return "its workdir is gone"
@@ -96,7 +95,7 @@ def track_refusal(run_dir: Path, node) -> Optional[str]:
     # THE ONE READER OF A FILE THE CANDIDATE CAN WRITE (critic 2026-10-08): the stamp is written
     # before the candidate's eval runs in that same workdir, and a FIFO there made a plain
     # `read_text` block forever — with `--apply` holding `engine.lock` the whole time.
-    raw = read_bounded_regular_file(stamp, 256)
+    raw = workdir_stamp(workdir)
     if raw is None:
         return "its workdir carries no readable manifest stamp"
     if raw.decode("ascii", errors="replace").strip() != workdir_manifest_digest(node):

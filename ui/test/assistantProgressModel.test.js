@@ -3,7 +3,7 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import {
-  lastEventClock, progressActivity, progressHasNews, progressPatch,
+  lastEventClock, progressActivity, progressFrameApplies, progressHasNews, progressPatch,
 } from '../src/assistantProgressModel.js'
 
 test('the answer is `text` alone; the prose rides the ordered activity', () => {
@@ -43,4 +43,19 @@ test('news and the clock', () => {
   assert.equal(progressHasNews({ activity: [{ type: 'text', content: 'x' }] }), true)
   assert.equal(lastEventClock(undefined), '')
   assert.match(lastEventClock(Date.UTC(2026, 9, 7, 12, 3, 4)), /^\d\d:\d\d:\d\d$/)
+})
+
+test('a tool-phase frame behind a buffering proxy applies; a working stream is never fought', () => {
+  // critic 2026-10-08: `text` is the answer alone, so the tool phase has `text === ''` and the old
+  // text-length rule surfaced nothing at all behind a buffering proxy.
+  const toolPhase = { active: true, text: '', activity: [{ type: 'tools', labels: ['read_run'] }], last_event: 5 }
+  assert.equal(progressFrameApplies('', toolPhase), true, 'no SSE event yet: the poll is the only channel')
+  assert.equal(progressFrameApplies('', toolPhase, { streamLive: true }), false,
+    'a live stream owns its own activity')
+  assert.equal(progressFrameApplies('', toolPhase, { streamLive: true, ownsActivity: true }), true,
+    'once the poll wrote the activity it keeps it, so a batched SSE flush cannot append it twice')
+  assert.equal(progressFrameApplies('ab', { active: true, text: 'abc' }, { streamLive: true }), true,
+    'a longer answer still surfaces')
+  assert.equal(progressFrameApplies('', { active: false, text: '', activity: toolPhase.activity }), false)
+  assert.equal(progressFrameApplies('', { active: true, text: '' }), false, 'nothing to show is no news')
 })

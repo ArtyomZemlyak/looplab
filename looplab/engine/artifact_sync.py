@@ -74,9 +74,13 @@ def passthrough_env(spec) -> dict:
     return {n: os.environ[n] for n in names if isinstance(n, str) and n in os.environ}
 
 
-def _stamp(workdir: Path) -> Optional[bytes]:
+def workdir_stamp(workdir: Path) -> Optional[bytes]:
+    """The bytes of a node workdir's `.looplab-manifest` stamp, or None. Through THE reader of a file
+    a candidate can write (`core/node_evidence.py::read_bounded_regular_file`): the stamp is written
+    before the candidate's eval runs in that same directory, which may replace it with a FIFO or a
+    multi-gigabyte file. Shared with `maintenance/evaluate_track.py`."""
     from looplab.core.node_evidence import read_bounded_regular_file
-    return read_bounded_regular_file(workdir / ".looplab-manifest", 256)
+    return read_bounded_regular_file(Path(workdir) / ".looplab-manifest", 256)
 
 
 def start_artifact_sync(engine, node_id: int, generation: int) -> Optional[threading.Thread]:
@@ -123,7 +127,7 @@ def _run(engine, node_id, generation, argv, workdir, run_dir, timeout, env=None)
     from looplab.runtime.sandbox import _run_argv
     redact = getattr(engine, "_redact", None) or (lambda text: text)
     started = time.monotonic()
-    before = _stamp(workdir)
+    before = workdir_stamp(workdir)
     try:
         # FROM THE RUN DIRECTORY, not the workdir (critic 2026-10-08): the workdir is the candidate's,
         # and a `python -m <tool>` started there imports whatever module the candidate left beside
@@ -135,7 +139,7 @@ def _run(engine, node_id, generation, argv, workdir, run_dir, timeout, env=None)
     seconds = round(time.monotonic() - started, 3)
     # A reset of this node re-materializes the workdir while the copy reads it; the receipt says so
     # instead of vouching for a tree that may mix two lifecycles (critic 2026-10-08).
-    changed = before is not None and _stamp(workdir) != before
+    changed = before is not None and workdir_stamp(workdir) != before
     if rc != 0 or timed:
         _LOG.warning("artifact sync of node %s failed (exit %s%s); the node is unaffected — see "
                      "artifact_sync.log", node_id, rc, ", timed out" if timed else "")
