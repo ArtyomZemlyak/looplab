@@ -61,7 +61,7 @@ def completion_score_comparison(node, parents, state, flagged):
     This is a current-evidence read; no filesystem verification or engine action.
     """
     from looplab.core.fitness import counts_toward_best, is_usable_metric
-    from looplab.engine.seed_archive import seed_archive_digest
+    from looplab.core.seed_receipt import node_base_receipt, receipt_archive_digest
 
     count = len(node.parent_ids)
     status = "no_parent" if count == 0 else "multiple_parents" if count > 1 else "parent_unavailable"
@@ -80,17 +80,11 @@ def completion_score_comparison(node, parents, state, flagged):
             status = "ineligible"
         else:
             status = parents[0]["comparability"]
-            receipts = [(n.metric_provenance or {}).get("base_revision") for n in (node, parent)]
+            receipts = [node_base_receipt(n) for n in (node, parent)]
             if state.upstream_enabled or any(r is not None for r in receipts):
-                digests = []
-                for n, receipt in zip((node, parent), receipts):
-                    digest = seed_archive_digest(receipt)
-                    if (not digest or receipt.get("complete") is not True
-                            or any(type(receipt.get(k)) is not int or not 0 <= receipt[k] <= 2**53 - 1
-                                   for k in ("node_id", "generation", "seed_event_seq", "file_count", "bytes"))
-                            or receipt["node_id"] != n.id or receipt["generation"] != n.attempt):
-                        digest = None
-                    digests.append(digest)
+                # The receipt half of `core/seed_receipt.py`'s binder: no event log is read here.
+                digests = [receipt_archive_digest(receipt, node_id=n.id, generation=n.attempt)
+                           for n, receipt in zip((node, parent), receipts)]
                 if not all(digests):
                     status = "base_unknown"
                 elif digests[0] != digests[1]:

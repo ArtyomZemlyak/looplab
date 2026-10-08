@@ -14,6 +14,7 @@ from pathlib import Path
 
 from looplab.core.errors import UpstreamRefusal
 from looplab.core.node_evidence import read_bounded_regular_file
+from looplab.core.seed_receipt import bind_seed_receipt, node_base_receipt
 from looplab.events.eventstore import decode_event_record, event_sequence_continues
 from looplab.events.replay import event_generation_binds
 from looplab.engine.shared import engine_fold as fold
@@ -112,26 +113,16 @@ def source_node(events, node_id):
 
 def _source_receipt(node, events_by_seq):
     """Share primary-score and seed identity eligibility with nomination reads."""
-    from looplab.engine.seed_archive import seed_archive_digest
     if (node is None or node.tombstoned or node.status.value != "evaluated"
             or not node.feasible or node.violations or (node.metric_provenance or {}).get("salvaged")):
         raise UpstreamRefusal("upstream_source_not_measured", "Choose a current completed node with a primary measured score")
-    receipt = (node.metric_provenance or {}).get("base_revision")
-    message = "The source node has no complete archived seed identity"
-    if not isinstance(receipt, dict) or any(type(receipt.get(k)) is not int or receipt[k] < 0
-            for k in ("node_id", "generation", "seed_event_seq")):
-        raise UpstreamRefusal("upstream_source_unavailable", message)
-    seed = events_by_seq.get(receipt["seed_event_seq"])
-    seed_base = seed.data.get("base_revision") if seed is not None else None
-    archive_digest = seed_archive_digest(receipt)
-    if (receipt["node_id"] != node.id or receipt["generation"] != node.attempt
-            or seed is None or seed.type != "workspace_seeded"
-            or type(node.terminal_event_seq) is not int or seed.seq >= node.terminal_event_seq
-            or type(seed.data.get("node_id")) is not int or seed.data["node_id"] != node.id
-            or not event_generation_binds(seed.data, node.attempt) or archive_digest is None
-            or seed_archive_digest(seed_base) != archive_digest
-            or any(seed_base[k] != receipt[k] for k in ("file_count", "bytes"))):
-        raise UpstreamRefusal("upstream_source_unavailable", message)
+    # One binder for the route, this lane and `looplab export-git` (`core/seed_receipt.py`).
+    bound = bind_seed_receipt(node_base_receipt(node), events_by_seq, node_id=node.id,
+                              generation=node.attempt, terminal_event_seq=node.terminal_event_seq,
+                              generation_binds=event_generation_binds)
+    if bound.digest is None:
+        raise UpstreamRefusal("upstream_source_unavailable", "The source node has no complete archived seed identity")
+    receipt = bound.receipt
     # The gate repeats the declared primary evaluator. Retargeting only changes
     # node.metric for ranking; an unranked node can still have a measured source.
     score = node.task_metric

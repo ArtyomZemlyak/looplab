@@ -107,10 +107,11 @@ from typing import Iterable, Optional
 
 from looplab.core.jsonutil import surrogate_safe
 from looplab.core.models import NodeStatus, coerce_node_id
+from looplab.core.seed_receipt import bind_seed_receipt, node_base_receipt
 from looplab.events.eventstore import integrity_sentence
 from looplab.events.replay import (FoldCursor, flagged_node_ids, hard_flagged_ids,
                                    promotion_eligible_nodes)
-from looplab.events.replay_ctx import event_timestamp
+from looplab.events.replay_ctx import event_generation_binds, event_timestamp
 from looplab.events.types import (DIAGNOSTIC_EVENTS, EV_NODE_CREATED, EV_NODE_RESET, EV_WORKSPACE_SEEDED,
                                   FENCE_NEUTRAL_EVENTS)
 
@@ -634,28 +635,16 @@ def _recorded_base_reference(lc: _Lifecycle, ctx: _Context) -> str:
     node = lc.node
     if node is None or node.status is not NodeStatus.evaluated or ctx.incomplete:
         return "unavailable"
-    source = node.metric_provenance
-    receipt = source.get("base_revision") if isinstance(source, dict) else None
-    if (not isinstance(receipt, dict) or type(receipt.get("version")) is not int
-            or receipt["version"] != 1 or receipt.get("complete") is not True
-            or receipt.get("scope") != "seeded_editables_before_mounts_and_overlay"
-            or not isinstance(receipt.get("digest"), str)
-            or re.fullmatch(r"[0-9a-f]{64}", receipt["digest"]) is None
-            or any(type(receipt.get(k)) is not int or receipt[k] < 0
-                   for k in ("node_id", "generation", "seed_event_seq", "file_count", "bytes"))
-            or receipt["node_id"] != lc.node_id or receipt["generation"] != lc.generation):
+    # The SAME binder the `/seed-files` route and the upstream lane refuse by
+    # (`core/seed_receipt.py::bind_seed_receipt`). This projection used to re-check the fields by
+    # hand and skipped the archive's `stored` status and canonical path, so it printed a reference
+    # for a receipt both of those readers refuse.
+    bound = bind_seed_receipt(node_base_receipt(node), ctx.seed_events, node_id=lc.node_id,
+                              generation=lc.generation, terminal_event_seq=node.terminal_event_seq,
+                              generation_binds=event_generation_binds)
+    if bound.digest is None:
         return "unavailable"
-    seed = ctx.seed_events.get(receipt["seed_event_seq"])
-    data = seed.data if seed is not None and isinstance(seed.data, dict) else {}
-    base = data.get("base_revision")
-    if (seed is None or type(node.terminal_event_seq) is not int or seed.seq >= node.terminal_event_seq
-            or type(data.get("node_id")) is not int or data["node_id"] != lc.node_id
-            or type(data.get("generation")) is not int or data["generation"] != lc.generation
-            or not isinstance(base, dict)
-            or any(type(base.get(k)) is not type(receipt[k]) or base[k] != receipt[k]
-                   for k in ("version", "scope", "complete", "digest", "file_count", "bytes"))):
-        return "unavailable"
-    return f"sha256={receipt['digest']}; seed-event={seed.seq}; content-not-exported"
+    return f"sha256={bound.digest}; seed-event={bound.seed.seq}; content-not-exported"
 
 
 def _message(lc: _Lifecycle, ctx: _Context, skipped: Counter) -> str:

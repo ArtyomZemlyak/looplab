@@ -4,6 +4,8 @@ import hashlib
 import json
 import re
 
+from looplab.core.jsonutil import canonical_json
+
 
 def valid_page(page, generation, proposal_id, request_hash, offset, limit, content_hash):
     if not isinstance(page, dict):
@@ -18,7 +20,10 @@ def valid_page(page, generation, proposal_id, request_hash, offset, limit, conte
             or page.get("source_health") != {"events": "complete", "request": "complete"}
             or page.get("request_path") != f"upstream/requests/{proposal_id}/request.json"
             or not isinstance(action, str) or re.fullmatch(r"[A-Za-z0-9_.:-]{1,128}", action) is None
-            or proposal_id != "up_" + hashlib.sha256(json.dumps(action).encode()).hexdigest()[:24]
+            # The regex above admits printable ASCII without `"` or `\` only, so the old spelling
+            # `json.dumps(action)` (ensure_ascii=True) and the server's `ensure_ascii=False` mint
+            # (`engine/upstream.py`) were the same bytes here; this IS that canonical form.
+            or proposal_id != "up_" + hashlib.sha256(canonical_json(action)).hexdigest()[:24]
             or not sha(page.get("content_sha256")) or not sha(page.get("chunk_sha256"))
             or content_hash is not None and page["content_sha256"] != content_hash
             or page.get("encoding") != "base64" or not isinstance(page.get("chunk"), str)
@@ -45,8 +50,7 @@ def valid_page(page, generation, proposal_id, request_hash, offset, limit, conte
         # multi-page callers must assemble and verify explicitly themselves.
         try:
             body = json.loads(chunk)
-            canonical = json.dumps(body, sort_keys=True, separators=(",", ":"),
-                                   ensure_ascii=False, allow_nan=False).encode()
+            canonical = canonical_json(body)  # the same four options, UTF-8: the same bytes
             if (not isinstance(body, dict) or body.get("action_id") != action
                     or body.get("expected_generation") != page["request_generation"]
                     or hashlib.sha256(chunk).hexdigest() != page["content_sha256"]
