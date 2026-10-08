@@ -325,8 +325,13 @@ def test_roles_is_no_longer_a_god_module():
     `toy_roles.py` 127 -> 132 on 2026-10-07 (24cbec2, landed without the raise): the offline
     Researcher writes its two rationales in Russian when `output_language` is `ru` — prose only, the
     optimizer, its RNG and the evaluation are untouched. The cap moves to measured + 1.
+
+    `roles.py` 875 -> 877 on 2026-10-08 (doc 73 §1.4, `Settings.researcher_artifacts`): the plain
+    Researcher's one structured call takes its artifact half — the cue, the emit model, the drop —
+    from ONE `agents/artifact_ideas.py::artifact_turn`, and those are the import and the call; the
+    rest folded into existing lines. The cap moves to measured + 1.
     """
-    caps = {"agents/roles.py": 876, "agents/role_prompts.py": 344, "agents/state_brief.py": 646,
+    caps = {"agents/roles.py": 878, "agents/role_prompts.py": 344, "agents/state_brief.py": 646,
             "agents/role_wrappers.py": 467, "agents/toy_roles.py": 133}
     sizes = {rel: len((_PKG / rel).read_text(encoding="utf-8").splitlines()) for rel in caps}
     over = {rel: (n, caps[rel]) for rel, n in sizes.items() if n >= caps[rel]}

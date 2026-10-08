@@ -1805,6 +1805,13 @@ def assistant_inject_enabled(settings) -> bool:
     return getattr(settings, "assistant_inject_tool", False) is True
 
 
+def assistant_track_enabled(settings) -> bool:
+    """The ONE reading of `Settings.assistant_track_tool` (doc 73 §1.4): whether the run-control
+    provider carries `evaluate_track` and the system prompt names it — one function for both, for
+    `assistant_inject_enabled`'s reason. No settings, or no field, is no tool."""
+    return getattr(settings, "assistant_track_tool", False) is True
+
+
 # --------------------------------------------------------------------------- system prompt + toolset
 # The guard below names the CHANNEL, and since 2026-09-03 every tool result carries the label it
 # names: `drive_tool_loop`'s `tool_result_label` fences each result between `UNTRUSTED_RUN_EVIDENCE`
@@ -1822,7 +1829,8 @@ def assistant_inject_enabled(settings) -> bool:
 def system_prompt(mode: str, *, repo_root: Path = REPO_ROOT, knowledge_dir: str | None = None,
                   cross_run_tools: bool = False, taxonomy_tools: bool = False,
                   work_cycle: bool = False, standing_work: bool = False,
-                  response_language: str = "auto", inject_tool: bool = False) -> str:
+                  response_language: str = "auto", inject_tool: bool = False,
+                  track_tool: bool = False) -> str:
     from looplab.serve.assistant_language import language_directive
 
     mode = normalize_mode(mode)
@@ -1886,7 +1894,11 @@ def system_prompt(mode: str, *, repo_root: Path = REPO_ROOT, knowledge_dir: str 
            + ("You can also ADD a node with inject_experiment: an experiment, an ARTIFACT node "
               "(kind='artifact': prepares data the next experiments read; succeeds without a metric and "
               "is never ranked), or a node that uses=[artifact ids] once those are evaluated.\n"
-              if inject_tool else ""))
+              if inject_tool else "")
+           + ("You can RUN one of the task's declared evaluation tracks (eval.tracks — e.g. @200, a "
+              "drift week) over a run's settled nodes with evaluate_track; the live engine runs it "
+              "on the run's own GPUs and the numbers land beside each node's metrics.\n"
+              if track_tool else ""))
         + "When the user wants to START a new autonomous-ML run, call `propose_run` with a run name + an "
         "inline COMPOSABLE `task` (goal + direction + the fields you have: repo / dataset / cmd / "
         "kaggle — there is NO `kind` field, the engine infers the task from what you describe) or a "
@@ -2041,7 +2053,8 @@ def build_tools(run_root, alive_fn: Optional[Callable] = None, mode: str = DEFAU
                 mutation_journal_path=mutation_journal_path,
                 mutation_recovery=True,
                 trace_rewrite=trace_rewrite_fns(),
-                allow_inject=assistant_inject_enabled(settings)))
+                allow_inject=assistant_inject_enabled(settings),
+                allow_tracks=assistant_track_enabled(settings)))
         providers.append(TodoTools(on_todos=on_todos))
         return CompositeTools(providers)
 
@@ -2085,7 +2098,8 @@ def build_tools(run_root, alive_fn: Optional[Callable] = None, mode: str = DEFAU
                                       mutation_journal_path=mutation_journal_path,
                                       mutation_recovery=mutation_recovery,
                                       trace_rewrite=trace_rewrite_fns(),
-                                      allow_inject=assistant_inject_enabled(settings))]
+                                      allow_inject=assistant_inject_enabled(settings),
+                                      allow_tracks=assistant_track_enabled(settings))]
     providers.append(TodoTools(on_todos=on_todos))
     if work_cycle:
         providers.append(WorkCheckpointTools())
@@ -2388,7 +2402,8 @@ def run_turn(client, run_root, messages: list, instruction: str, mode: str = DEF
         work_cycle=work_cycle, standing_work=watches is not None,
         response_language=response_language,
         # The same switch that adds the tool, and only outside `plan` (the provider is mutating).
-        inject_tool=(mode != "plan" and assistant_inject_enabled(settings)))}]
+        inject_tool=(mode != "plan" and assistant_inject_enabled(settings)),
+        track_tool=(mode != "plan" and assistant_track_enabled(settings)))}]
     for m in messages:
         role = m.get("role")
         # A user turn may carry `raw` — the full model-facing instruction (attached-file contents,

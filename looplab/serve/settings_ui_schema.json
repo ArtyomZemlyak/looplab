@@ -1030,6 +1030,15 @@
           "shortHelp": "Lets the Assistant add experiment or data-preparation nodes, each behind a confirm card."
         },
         {
+          "key": "assistant_track_tool",
+          "label": "Assistant can run evaluation tracks",
+          "type": "bool",
+          "default": true,
+          "help": "Gives the Assistant an evaluate_track tool: it can queue one of the task's declared evaluation tracks (an @200 re-score, a drift week) over a run's settled nodes, behind a confirm card. The live engine runs it on the run's own GPUs and records the numbers beside each node's metrics. Off removes the tool from the Assistant.",
+          "shortLabel": "Assistant runs tracks",
+          "shortHelp": "Lets the Assistant queue a declared evaluation track on a live run, behind a confirm card."
+        },
+        {
           "key": "backend",
           "label": "Role backend",
           "type": "enum",
@@ -1471,6 +1480,20 @@
           "help": "When the upstream lane has promoted a champion's general capability into the run's base (behind a named flag whose default keeps the old behaviour), every Developer build turn lists those promotions — flag, default and enabled value, source experiment, summary — so the role that writes the code switches a flag on instead of re-implementing it, and does not repair around a failure a promoted fix already cured. A run that never promoted anything is unchanged. Off = the pre-2026-10-07 prompt, byte for byte."
         },
         {
+          "key": "upstream_mode",
+          "label": "Upstream lane on a live run",
+          "type": "enum",
+          "options": [
+            "off",
+            "propose",
+            "auto"
+          ],
+          "default": "auto",
+          "help": "Only for a task that declares an upstream block. off: proposing, checking and promoting a capability into the base needs a paused run. propose: those steps are queued and the live engine performs them between turns. auto: the engine also checks every proposal and promotes every one whose measured gate passed.",
+          "shortLabel": "Upstream mode",
+          "shortHelp": "off, propose (queued on a live run) or auto (checked and promoted automatically)."
+        },
+        {
           "key": "established_context",
           "label": "Carry earlier phases' reads into each new phase",
           "type": "bool",
@@ -1785,6 +1808,15 @@
           "type": "bool",
           "default": true,
           "help": "On (default): the agentic Researcher, Deep Research, agentic Strategist, and unified pilot can read the run's own experiments (list/read/find-analogous/themes/code) and task data (schema/profile) mid-loop. Off: the Researcher uses its legacy single-shot proposal path (the richer default digest is still added), while the other shared-provider roles likewise lose these pull tools."
+        },
+        {
+          "key": "researcher_artifacts",
+          "label": "Researcher can propose artifact nodes",
+          "type": "bool",
+          "default": false,
+          "help": "Lets the Researcher propose a preparation node (an artifact: it produces files such as a prepared dataset, succeeds without a metric and is never ranked) and have later experiments read it. Off keeps the Researcher's historical prompt.",
+          "shortLabel": "Researcher artifacts",
+          "shortHelp": "Lets the Researcher propose preparation nodes that later experiments read."
         },
         {
           "key": "researcher_repo_view_follows_node",

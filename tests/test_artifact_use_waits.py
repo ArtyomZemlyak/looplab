@@ -1,22 +1,25 @@
-"""Artifact pins, round 3c (critic c3): a consumer WAITS for an artifact still being produced, a child
-of a consumer is pinned at build time, a race refusal is an engine outcome, and the copy-out's queue
+"""Artifact pins, round 3c (critic c3), on the consumer fence's design (`engine/artifact_fence.py`
+is the authority for WAITING): a child of a consumer is pinned at build time, a race refusal is an
+engine outcome, the Card lane never admits a consumer that must wait, and the copy-out's queue
 re-checks what it is about to upload.
 
 Each test drives the defect the critic found on f943dbc:
 
   * item 2 — a consumer pinned to a producer lifecycle that is still pending/running was evaluated
-    first and ended `artifact_unavailable` forever; it is now HELD (at the dispatcher's admission, or
-    at ADMIT on a lane that admits without asking) and only a lifecycle that can never be produced
-    is refused;
+    first and ended `artifact_unavailable` forever; the fence's selection defer and ADMIT return
+    (`tests/test_artifact_fence.py`) hold it, and here: a consumer handed to the dispatcher BEFORE its
+    producer ends with no terminal and runs once the producer settled, and a Card session's
+    admission leaves it out instead of re-admitting it every wake-up;
   * item 4 — a child built from a consumer after the artifact was re-produced inherited the OLD pin
     and paid a build to fail; the writer now pins it to the producer's current produced lifecycle;
   * item 6 — `_run_eval`'s last-instant refusal returned an exit-2 result that read as the
-    candidate's crash; it is now settled on the same verdict, and `artifact_unavailable` is benign
-    for the search's failure statistics (its own attention item says what to do);
+    candidate's crash; it is now the engine terminal `artifact_unavailable` — which stays NOT benign
+    (dd57462): the failure statistics count it and the owner alert shows it;
   * items 1 / 5 / 7 — `eval.artifact_sync`: a queued copy of a node reset meanwhile is refused, a
-    copy of an ended engine is not started, a secret cut at the 64 KB capture boundary or printed
-    percent-encoded is masked, a worker that cannot start never drains the queue inline, and an
-    unfinished copy is surfaced by `looplab inspect` and the attention feed.
+    copy of an ended engine is not started, an ending engine first waits for its own copies, a
+    secret cut at the 64 KB capture boundary or printed percent-encoded is masked, a worker that
+    cannot start never drains the queue inline, and an unfinished copy is surfaced by
+    `looplab inspect` and the attention feed.
 """
 from __future__ import annotations
 
@@ -30,7 +33,6 @@ import pytest
 
 from factories import make_engine
 from looplab.engine import artifact_sync
-from looplab.engine import evaluate as evaluate_mod
 from looplab.events.eventstore import Event
 from looplab.events.replay import fold
 from looplab.runtime.command_eval import RunResult
@@ -70,48 +72,23 @@ def _status(engine, nid):
 
 # ------------------------------------------------------------------ item 2: wait, never a terminal
 
-def test_the_admission_rule_holds_a_consumer_while_its_producer_is_producing(tmp_path):
-    from looplab.engine.eval_dispatch import _eval_admission_current, awaited_producers
-    engine = _engine(tmp_path)
-    _created(engine, 0, node_kind="artifact")
-    _created(engine, 1, uses=[0], uses_attempts={"0": 0})
-    st = fold(engine.store.read_all())
-    assert awaited_producers(st, st.nodes[1]) == [(0, 0)]
-    assert not _eval_admission_current(st, st.nodes[1], 0, None), "held while #0 is pending"
-    assert _eval_admission_current(st, st.nodes[0], 0, None), "the producer itself is admitted"
-    engine.store.append("node_evaluated", {"node_id": 0, "generation": 0, "metric": None,
-                                           "violations": []})
-    st = fold(engine.store.read_all())
-    assert awaited_producers(st, st.nodes[1]) == []
-    assert _eval_admission_current(st, st.nodes[1], 0, None), "released once it is produced"
-
-
-def test_a_consumer_queued_before_its_producer_waits_and_then_reads_it(tmp_path, monkeypatch):
+def test_a_consumer_queued_before_its_producer_waits_and_then_reads_it(tmp_path):
     """DRIVEN through the serial dispatcher, consumer FIRST in the batch: on f943dbc it was evaluated
-    before its producer and ended `artifact_unavailable (not_evaluated)` for good. Held at ADMISSION:
-    its evaluation is never even entered while the producer is pending."""
-    monkeypatch.setattr(evaluate_mod, "USE_HOLD_GRACE_S", 0.0)
-    monkeypatch.setattr(evaluate_mod, "USE_HOLD_POLL_S", 0.01)
+    before its producer and ended `artifact_unavailable (not_evaluated)` for good. Now its ADMIT
+    returns with no terminal (`artifact_fence.py::uses_waiting`), the producer runs, and the next
+    dispatch evaluates the consumer on the produced lifecycle."""
     engine = _engine(tmp_path)
     _created(engine, 0, node_kind="artifact")
     _created(engine, 1, uses=[0], uses_attempts={"0": 0})
-    calls, entered = [], []
+    calls = []
     _scripted_run_eval(engine, calls)
-    real_evaluate = engine._evaluate
-
-    async def recording_evaluate(nid, *args, **kwargs):
-        entered.append(nid)
-        return await real_evaluate(nid, *args, **kwargs)
-
-    engine._evaluate = recording_evaluate
     st = fold(engine.store.read_all())
     anyio.run(lambda: engine._dispatch_evals(
         [{"kind": "evaluate", "node_id": 1}, {"kind": "evaluate", "node_id": 0}], st, None,
         research=False))
-    assert entered == [0], "the consumer was held at admission, the producer ran"
-    assert [c[0] for c in calls] == [0]
+    assert [c[0] for c in calls] == [0], "nothing of the consumer ran"
     assert _status(engine, 0) == ("evaluated", None)
-    assert _status(engine, 1) == ("pending", None), "held: no terminal, still owed"
+    assert _status(engine, 1) == ("pending", None), "no terminal: still owed"
     st = fold(engine.store.read_all())
     anyio.run(lambda: engine._dispatch_evals([{"kind": "evaluate", "node_id": 1}], st, None,
                                              research=False))
@@ -120,68 +97,22 @@ def test_a_consumer_queued_before_its_producer_waits_and_then_reads_it(tmp_path,
     assert _status(engine, 1) == ("evaluated", None)
 
 
-def test_a_lane_that_admits_without_asking_waits_for_a_running_producer(tmp_path, monkeypatch):
-    """A Card lane admits by its own rule; ADMIT holds the consumer while the producer it waits for
-    is RUNNING here, then evaluates it against the produced lifecycle."""
-    monkeypatch.setattr(evaluate_mod, "USE_HOLD_POLL_S", 0.02)
+def test_a_card_session_never_admits_a_consumer_that_must_wait(tmp_path):
+    """The Card lane admits by its own rule (`_session_admissible`), not the turn's selection. Without
+    the fence there, it admitted the consumer, stamped its eval-start boundary, ADMIT returned with no
+    terminal, and the next wake-up admitted it again — a spin over a lifecycle that never starts."""
+    from types import SimpleNamespace
     engine = _engine(tmp_path)
     _created(engine, 0, node_kind="artifact")
     _created(engine, 1, uses=[0], uses_attempts={"0": 0})
-    calls = []
-    _scripted_run_eval(engine, calls)
-    engine._eval_inflight = {(0, 0)}          # the producer's lane, as a Card session records it
-
-    async def scenario():
-        async with anyio.create_task_group() as tg:
-            tg.start_soon(engine._evaluate, 1, anyio.CapacityLimiter(1), None)
-            await anyio.sleep(0.3)
-            assert calls == [], "the consumer is waiting, nothing of it ran"
-            assert _status(engine, 1) == ("pending", None)
-            await engine._evaluate(0, anyio.CapacityLimiter(1), None)
-            engine._eval_inflight.clear()
-
-    anyio.run(scenario)
-    assert [c[0] for c in calls] == [0, 1]
-    assert _status(engine, 1) == ("evaluated", None)
-
-
-def test_a_producer_running_nowhere_sends_the_consumer_back_to_the_queue(tmp_path, monkeypatch):
-    """Not running here: holding the lane could starve the very producer it waits for (width 1),
-    so after the grace the attempt goes back to the queue — no terminal, nothing launched."""
-    monkeypatch.setattr(evaluate_mod, "USE_HOLD_POLL_S", 0.01)
-    monkeypatch.setattr(evaluate_mod, "USE_HOLD_GRACE_S", 0.0)
-    engine = _engine(tmp_path)
-    _created(engine, 0, node_kind="artifact")
-    _created(engine, 1, uses=[0], uses_attempts={"0": 0})
-    engine.store.append("node_eval_started", {"node_id": 1, "generation": 0})   # a Card boundary
-    calls = []
-    _scripted_run_eval(engine, calls)
-    anyio.run(engine._evaluate, 1, anyio.CapacityLimiter(1), None)
-    assert calls == []
-    assert _status(engine, 1) == ("pending", None)
-    events = engine.store.read_all()
-    withheld = [e.data for e in events if e.type == "eval_attempt_withheld"]
-    assert withheld and withheld[-1]["reason"] == "artifact_pending" and withheld[-1]["at"] == "admit"
-    assert not any(e.type == "node_failed" for e in events)
-
-
-def test_a_launch_that_meets_a_producing_artifact_is_withheld_not_failed(tmp_path):
-    """RUN_ATTEMPT's own check, past ADMIT's hold (here: a hold that ended for a reason of the
-    node's own): still producing is a WAIT — back to the queue — never `artifact_unavailable`."""
-    engine = _engine(tmp_path)
-    _created(engine, 0, node_kind="artifact")
-    _created(engine, 1, uses=[0], uses_attempts={"0": 0})
-    calls = []
-    _scripted_run_eval(engine, calls)
-
-    async def no_hold(a):
-        return False
-
-    engine._hold_for_pinned_producers = no_hold
-    anyio.run(engine._evaluate, 1, anyio.CapacityLimiter(1), None)
-    assert calls == [] and _status(engine, 1) == ("pending", None)
-    withheld = [e.data for e in engine.store.read_all() if e.type == "eval_attempt_withheld"]
-    assert [(w["at"], w["reason"]) for w in withheld] == [("before_launch", "artifact_pending")]
+    session = SimpleNamespace(eval_inflight=set())
+    st = fold(engine.store.read_all())
+    assert engine._session_admissible(st.nodes[0], st, session), "the producer is admitted"
+    assert not engine._session_admissible(st.nodes[1], st, session), "the consumer waits"
+    engine.store.append("node_evaluated", {"node_id": 0, "generation": 0, "metric": None,
+                                           "violations": []})
+    st = fold(engine.store.read_all())
+    assert engine._session_admissible(st.nodes[1], st, session), "released once it is produced"
 
 
 def test_a_failed_producer_lifecycle_is_refused_not_waited_for(tmp_path):
@@ -195,7 +126,7 @@ def test_a_failed_producer_lifecycle_is_refused_not_waited_for(tmp_path):
     anyio.run(engine._evaluate, 1, anyio.CapacityLimiter(1), None)
     assert calls == []
     node = fold(engine.store.read_all()).nodes[1]
-    assert node.error_reason == "artifact_unavailable" and "(failed)" in node.error
+    assert node.error_reason == "artifact_unavailable" and "(not_evaluated)" in node.error
 
 
 # ------------------------------------------------------------------ item 4: the writer pins children
@@ -245,6 +176,28 @@ def test_the_child_row_carries_its_pins_and_the_fold_reads_them(tmp_path):
                               idea={"operator": "improve"}, code="x", files={})
     row = [e.data for e in engine.store.read_all() if e.type == "node_created"][-1]
     assert row["uses_attempts"] == {"0": 1} and "uses" not in row, "uses stays implicit"
+    child = fold(engine.store.read_all()).nodes[2]
+    assert child.uses == [0] and child.uses_attempts == {"0": 1}
+
+
+def test_a_child_of_a_researcher_proposed_consumer_is_pinned_too(tmp_path):
+    """The writer's gate sees an `Idea.uses` consumer (doc 73 §1.4, stage 3) as well as a written
+    `uses` row, and the fold keeps both the writer's inherited pins and the idea's own."""
+    engine = _engine(tmp_path)
+    _created(engine, 0, node_kind="artifact")
+    engine.store.append("node_evaluated", {"node_id": 0, "generation": 0, "metric": None,
+                                           "violations": []})
+    engine.store.append("node_created", {
+        "node_id": 1, "parent_ids": [], "operator": "draft",
+        "idea": {"operator": "draft", "params": {}, "rationale": "r", "uses": [0]},
+        "code": "x"})
+    assert fold(engine.store.read_all()).nodes[1].uses_attempts == {"0": 0}
+    engine.store.append("node_reset", {"node_id": 0, "from_stage": "eval"})
+    engine.store.append("node_evaluated", {"node_id": 0, "generation": 1, "metric": None,
+                                           "violations": []})
+    engine._emit_node_created(node_id=2, parent_ids=[1], operator="improve",
+                              idea={"operator": "improve"}, code="x", files={})
+    assert engine.store.read_all()[-1].data["uses_attempts"] == {"0": 1}
     child = fold(engine.store.read_all()).nodes[2]
     assert child.uses == [0] and child.uses_attempts == {"0": 1}
 
@@ -304,17 +257,22 @@ def test_run_eval_tags_the_result_it_never_launched(tmp_path):
     from looplab.engine.eval_dispatch import artifact_refusal
     engine = _engine(tmp_path)
     _created(engine, 0, node_kind="artifact")
+    engine.store.append("node_tombstoned", {"node_ids": [0]})
     _created(engine, 1, uses=[0], uses_attempts={"0": 0})
     node = fold(engine.store.read_all()).nodes[1]
     res = type(engine)._run_eval(engine, node, str(tmp_path / "run" / "nodes" / "node_1"))
-    assert [r["why"] for r in artifact_refusal(res)] == ["producing"]
-    assert "still being produced in lifecycle 0" in res.stderr
+    assert [r["why"] for r in artifact_refusal(res)] == ["deleted"]
+    assert res.exit_code == 2 and "not available in lifecycle 0 (deleted)" in res.stderr
     assert artifact_refusal(_SCORED) == []
 
 
-def test_artifact_unavailable_is_no_search_failure_but_still_alerts(tmp_path):
-    from looplab.core.models import search_outcome
+def test_artifact_unavailable_stays_a_counted_failure_with_its_owner_alert(tmp_path):
+    """ONE answer on benign-ness, master's (dd57462): `artifact_unavailable` is an engine terminal
+    — no triage, no repair — but NOT benign, so the search's failure statistics count it and the
+    owner alert (the failure spike) shows it; the attention feed has no second item for it."""
+    from looplab.core.models import BENIGN_TERMINAL_REASONS
     from looplab.serve.attention import project_run_attention
+    assert "artifact_unavailable" not in BENIGN_TERMINAL_REASONS
     engine = _engine(tmp_path)
     _created(engine, 0, node_kind="artifact")
     engine.store.append("node_tombstoned", {"node_ids": [0]})
@@ -324,13 +282,11 @@ def test_artifact_unavailable_is_no_search_failure_but_still_alerts(tmp_path):
                                             "reason": "artifact_unavailable"})
     events = engine.store.read_all()
     st = fold(events)
-    assert search_outcome(st, st.nodes[1]) is None
-    assert st.current_failure_count == 0, "three artifact refusals are no failure spike"
+    assert st.current_failure_count == 3, "counted like any failed node"
     items = project_run_attention("r" * 8, events, engine_running=True)
-    alerts = [i for i in items if i["kind"] == "run_failed" and i.get("node_id") in (1, 2, 3)]
-    assert sorted(i["node_id"] for i in alerts) == [1, 2, 3]
-    assert all("artifact" in i["title"] for i in alerts)
-    assert not [i for i in items if i["kind"] == "failure_spike"]
+    assert [i for i in items if i["kind"] == "failure_spike"], "the owner alert shows it"
+    assert not [i for i in items if "artifact" in str(i.get("title", "")).lower()], (
+        "no second, artifact-specific alert beside the spike")
 
 
 # ------------------------------------------------------------------ item 1: the copy-out queue
@@ -383,7 +339,9 @@ def test_a_copy_queued_past_its_engine_s_end_is_never_started(tmp_path):
         artifact_sync.start_artifact_sync(engine, n, 0)
     time.sleep(0.3)
     assert artifact_sync.engine_owns_run(engine)
-    engine.retire_tracer()                    # `Engine.run`'s last act before the lock is released
+    # The exporter's shutdown is what `engine_owns_run` reads; `retire_tracer` itself would first
+    # wait for these copies (`test_an_ending_engine_waits_for_its_copies_before_release`).
+    engine.tracer.shutdown(timeout_millis=1000)
     assert not artifact_sync.engine_owns_run(engine)
     gate.write_text("go")
     assert artifact_sync.wait_for_inflight(30)
@@ -393,6 +351,43 @@ def test_a_copy_queued_past_its_engine_s_end_is_never_started(tmp_path):
         "a copy already running closes its own row: its bytes did leave the box")
     assert [r["node_id"] for r in artifact_sync.unfinished_syncs(events)] == [3], (
         "the one never started stays open — the operator's list of copies to run again")
+
+
+def test_an_ending_engine_waits_for_its_copies_before_release(tmp_path):
+    """`Engine.retire_tracer` — the barrier after which a queued copy is never started — first waits
+    for the copies this engine accepted (`artifact_sync.py::drain_before_release`): without it the
+    run's LAST copies, queued behind the pool when the search ended, were exactly the ones skipped."""
+    engine = _sync_run(tmp_path)
+    gate, ran = tmp_path / "release", tmp_path / "ran"
+    _gated_copy(engine, gate, ran)
+    for n in (1, 2, 3):
+        artifact_sync.start_artifact_sync(engine, n, 0)
+    threading.Timer(0.3, lambda: gate.write_text("go")).start()
+    engine.retire_tracer()
+    assert not artifact_sync.engine_owns_run(engine)
+    assert sorted(p.name for p in ran.iterdir()) == ["1", "2", "3"], "node 3's copy started too"
+    assert artifact_sync.unfinished_syncs(engine.store.read_all()) == []
+
+
+def test_the_release_wait_is_bounded_and_per_engine(tmp_path, monkeypatch):
+    engine = _sync_run(tmp_path)
+    other = _sync_run(tmp_path / "other", nodes=(9,))
+    gate, ran = tmp_path / "release", tmp_path / "ran"
+    _gated_copy(engine, gate, ran)
+    for n in (1, 2, 3):
+        artifact_sync.start_artifact_sync(engine, n, 0)
+    try:
+        assert artifact_sync.drain_before_release(other, timeout=5), "another engine's copies"
+        monkeypatch.setattr(artifact_sync, "FINAL_DRAIN_S", 0.2)
+        started = time.monotonic()
+        engine.retire_tracer()
+        assert time.monotonic() - started < 5, "bounded"
+    finally:
+        gate.write_text("go")
+        assert artifact_sync.wait_for_inflight(30)
+    events = engine.store.read_all()
+    assert [r["node_id"] for r in artifact_sync.unfinished_syncs(events)] == [3], (
+        "past the bound the queued copy is not started, and its open row says so")
 
 
 def test_no_worker_thread_never_drains_the_queue_on_the_caller(tmp_path, monkeypatch):
@@ -422,6 +417,7 @@ def test_no_worker_thread_never_drains_the_queue_on_the_caller(tmp_path, monkeyp
             for job in left:
                 artifact_sync._QUEUE.remove(job)
             artifact_sync._PENDING -= len(left)
+            artifact_sync._PENDING_BY_OWNER.pop(id(engine), None)
 
 
 # ------------------------------------------------------------------ item 5: masking at the cut

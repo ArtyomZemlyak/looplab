@@ -198,9 +198,16 @@ CHAMPION_CAVEAT_MERGED_COORDINATES = "merged_coordinates"
 # comparing two (critic 2026-09-27, driven: a retargeted run ranked first in a cross-run group with
 # no caveat).
 CHAMPION_CAVEAT_RETARGETED_OBJECTIVE = "retargeted_objective"
+# THE SEVENTH, `stale_artifact` (doc 73 §1.4): the champion read an ARTIFACT node (`uses`) whose
+# current lifecycle is not the one its number was measured on — the operator re-produced, failed or
+# deleted the dataset since (`engine/artifact_fence.py::stale_uses`, against the receipt its
+# `node_evaluated` carries). The measurement stands; the data it was measured OF is no longer the
+# data the run holds.
+CHAMPION_CAVEAT_STALE_ARTIFACT = "stale_artifact"
 CHAMPION_CAVEATS = (CHAMPION_CAVEAT_SALVAGED, CHAMPION_CAVEAT_TRUST_FLAGGED,
                     CHAMPION_CAVEAT_PARAMS_OVERRIDDEN, CHAMPION_CAVEAT_MIXED_COMPARABILITY,
-                    CHAMPION_CAVEAT_MERGED_COORDINATES, CHAMPION_CAVEAT_RETARGETED_OBJECTIVE)
+                    CHAMPION_CAVEAT_MERGED_COORDINATES, CHAMPION_CAVEAT_RETARGETED_OBJECTIVE,
+                    CHAMPION_CAVEAT_STALE_ARTIFACT)
 
 
 def champion_metric_caveats(state) -> list[str]:
@@ -309,6 +316,11 @@ def champion_metric_caveats(state) -> list[str]:
     # operator's `metric_retarget`), so every replay answers the same.
     if isinstance(getattr(state, "objective_key", None), str) and state.objective_key:
         out.append(CHAMPION_CAVEAT_RETARGETED_OBJECTIVE)
+
+    # THE DATA. The champion's own receipt against the producers' CURRENT lifecycles, both folded.
+    from looplab.engine.artifact_fence import stale_uses
+    if stale_uses(state, best):
+        out.append(CHAMPION_CAVEAT_STALE_ARTIFACT)
     return out
 
 

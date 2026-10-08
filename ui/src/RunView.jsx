@@ -116,6 +116,7 @@ const CollabPanel = lazy(() => import('./CollabPanel.jsx'))
 // Its own chunk, not `loadPanels`: it is reachable only from a historical snapshot's node menu, so
 // bundling it with the hub panels would ship a steering form to every run-list visitor.
 const ForkFromSeqPanel = lazy(() => import('./ForkFromSeqPanel.jsx'))
+const InjectNodePanel = lazy(() => import('./InjectNodePanel.jsx'))
 const OverviewPanel = lazyNamed(loadPanels, 'OverviewPanel')
 const ResearchPanel = lazyNamed(loadPanels, 'ResearchPanel')
 const ArtifactsPanel = lazyNamed(loadPanels, 'ArtifactsPanel')
@@ -157,7 +158,8 @@ const HarnessProgressPanel = lazyNamed(() => import('./HarnessProgressPanel.jsx'
 // `?panel=hypotheses` links still work — `runRouteState.js::LEGACY_PANEL_VIEWS` migrates them to
 // `?view=cards` rather than reporting an unknown panel.
 const HUBS = [
-  ['Progress', [['queue', 'Queue'], ['research', 'Research'], ['agent', 'Agent cycle'], ['failures', 'Failures']]],
+  ['Progress', [['queue', 'Queue'], ['research', 'Research'], ['agent', 'Agent cycle'], ['failures', 'Failures'],
+    ['inject', 'Add experiment']]],
   ['Trust', [['trust', 'Trust'], ['pareto', 'Pareto / diversity'], ['data', 'Data quality']]],
   ['Analysis', [['compare', 'Compare'], ['sensitivity', 'Sensitivity'], ['importance', 'Importance'], ['crossrun', 'Cross-run']]],
   ['Lab', [['artifacts', 'Files'], ['registry', 'Registry'], ['collab', 'Comments & sharing'], ['events', 'Events']]],
@@ -2714,6 +2716,8 @@ export default function RunView({ runId, onBack, reviewMode = false, reviewMeta 
           same reason: `observed_seq` records a vantage point the run really reached, and the
           requested seq is only what was asked for. `access` travels as a prop so the panel prints
           the refusal instead of rendering a form that cannot submit. */}
+      {panel === 'inject' && panelAllowed('inject') && <InjectNodePanel state={state} runId={runId}
+        readOnly={mutationReadOnlyMode} onToast={showToast} onClose={closePanel} />}
       {panel === 'fork' && panelAllowed('fork') && <ForkFromSeqPanel runId={runId}
         node={hist?.nodes?.[selectedId] ?? null} viewSeq={currentHistory?.resolvedSeq ?? null}
         expectedGeneration={generation} access={forkAccess} liveNodes={live?.nodes || null}

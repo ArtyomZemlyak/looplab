@@ -79,6 +79,17 @@ _QUEUE: collections.deque = collections.deque()
 _PENDING = 0
 _WORKERS = 0
 _COND = threading.Condition()
+# …and the same pending count PER ACCEPTING ENGINE (`id(engine)`; the queued job holds the engine, so
+# the id cannot be reused while its count is positive), so an engine ending waits for ITS copies and
+# never for another engine's in the same process (`drain_before_release`).
+_PENDING_BY_OWNER: dict[int, int] = {}
+
+# How long an ending engine waits for the copy-outs it accepted before it gives up its run
+# (`drain_before_release`). A queued copy found after the end is never started (`engine_owns_run`),
+# so without the wait the copies of a run's LAST nodes — queued behind the bound when the search
+# finished — were exactly the ones skipped. Bounded, and by the default copy `timeout`: one slow
+# upload must not hold a finished run's lock forever; what is left open is reported unfinished.
+FINAL_DRAIN_S = 1800.0
 
 
 def render_argv(argv, values: dict) -> list[str]:
@@ -205,6 +216,7 @@ def _submit(job) -> None:
     with _COND:
         _QUEUE.append(job)
         _PENDING += 1
+        _PENDING_BY_OWNER[id(job[0])] = _PENDING_BY_OWNER.get(id(job[0]), 0) + 1
         if _WORKERS >= MAX_CONCURRENT_SYNCS:
             return
         _WORKERS += 1
@@ -255,6 +267,12 @@ def _worker() -> None:
             finally:
                 with _COND:
                     _PENDING -= 1
+                    owner = id(job[0])
+                    left = _PENDING_BY_OWNER.get(owner, 1) - 1
+                    if left > 0:
+                        _PENDING_BY_OWNER[owner] = left
+                    else:
+                        _PENDING_BY_OWNER.pop(owner, None)
                     _COND.notify_all()
     finally:
         if not clean:
@@ -341,10 +359,36 @@ def append_tool_log(path, argv, out, err, env=None) -> None:
         fh.write(body)
 
 
-def wait_for_inflight(timeout: Optional[float] = None) -> bool:
-    """Wait until every copy this process accepted has finished; True when none is pending."""
+def wait_for_inflight(timeout: Optional[float] = None, engine=None) -> bool:
+    """Wait until every copy this process accepted — or, given `engine`, every copy THAT engine
+    accepted — has finished; True when none is pending."""
     with _COND:
-        return _COND.wait_for(lambda: _PENDING == 0, timeout)
+        if engine is None:
+            return _COND.wait_for(lambda: _PENDING == 0, timeout)
+        return _COND.wait_for(lambda: not _PENDING_BY_OWNER.get(id(engine)), timeout)
+
+
+def drain_before_release(engine, timeout: Optional[float] = None) -> bool:
+    """Called by an ending engine BEFORE its terminal barrier (`engine/orchestrator.py::Engine.
+    retire_tracer`), while it still owns the run: wait, bounded, for the copy-outs it accepted, so a
+    copy still queued behind `MAX_CONCURRENT_SYNCS` when the search ended starts under the owner that
+    accepted it instead of being skipped by `engine_owns_run` the moment the barrier closes. True
+    when nothing of it is pending; on the bound, what is left keeps its open start row
+    (`unfinished_syncs`), and a copy already running still closes its own. No copy accepted, no
+    wait."""
+    with _COND:
+        pending = _PENDING_BY_OWNER.get(id(engine), 0)
+    if not pending:
+        return True
+    timeout = FINAL_DRAIN_S if timeout is None else timeout
+    _LOG.info("waiting up to %.0fs for %d artifact copy-out(s) before the run is released",
+              timeout, pending)
+    done = wait_for_inflight(timeout, engine=engine)
+    if not done:
+        _LOG.warning("artifact sync: copy-outs still pending after %.0fs; the run is released and "
+                     "a queued copy will not start (its artifact_sync_started row stays open)",
+                     timeout)
+    return done
 
 
 def _run(engine, node_id, generation, argv, workdir, run_dir, timeout, env=None,

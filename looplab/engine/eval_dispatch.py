@@ -87,70 +87,19 @@ def produced_workdir(state, run_dir, node_id: int, generation=None) -> tuple:
     return str(wd.resolve()), ""
 
 
-# THE ONE WORD for a pinned use whose producer is still PRODUCING the lifecycle it is pinned to —
-# pending in exactly that attempt (critic c3 item 2). Not a refusal: the consumer WAITS for it,
-# held at admission (`_eval_admission_current`) or, on a lane that admits without asking, at its own
-# ADMIT (`evaluate.py::EvaluateMixin._hold_for_pinned_producers`). Every other `why` is a lifecycle
-# that can never be produced again — a generation only grows — and ends the consumer
-# `artifact_unavailable`.
-USE_PRODUCING = "producing"
-
-
-def awaited_producers(state, node) -> list:
-    """`[(producer id, pinned lifecycle)]` for every use of `node` pinned to a lifecycle its producer
-    is still PRODUCING: pending in exactly that attempt, not deleted, not aborted. Pure over the
-    fold — no I/O — so the admission rule can ask it at every dispatch site for free; `[]` for an
-    unpinned node (every log before the pins) and for one whose producers have all settled."""
-    pins = getattr(node, "uses_attempts", None) or {}
-    if not pins:
-        return []
-    nodes = getattr(state, "nodes", None) or {}
-    aborted = getattr(state, "aborted_nodes", None) or ()
-    out = []
-    for nid in getattr(node, "uses", None) or []:
-        pin = pins.get(str(nid))
-        if type(nid) is not int or type(pin) is not int:
-            continue
-        producer = nodes.get(nid)
-        if (producer is not None and not producer.tombstoned and nid not in aborted
-                and producer.attempt == pin and producer.status is NodeStatus.pending):
-            out.append((nid, pin))
-    return out
-
-
-def pinned_use_verdict(state, run_dir, node_id: int, generation: int) -> tuple:
-    """THE VERDICT on one pinned use (critic c3 item 2): `(abs workdir, "")` readable now,
-    `(None, USE_PRODUCING)` still being produced in that lifecycle — wait for it — or `(None, why)`
-    when it can never be produced: `missing`, `deleted`, `aborted`, `failed`, `rebuilt` (the
-    producer moved past it), `workdir_missing` / `workdir_changed` (its files are not there). Shared
-    by RUN_ATTEMPT's check, `_run_eval`'s last-instant check and the race refusal's settle, so the
-    three can never disagree about which outcome a moved artifact is."""
-    producer = state.nodes.get(node_id)
-    if producer is None:
-        return None, "missing"
-    if producer.tombstoned:
-        return None, "deleted"
-    if producer.attempt == generation and producer.status is NodeStatus.pending:
-        return (None, "aborted") if node_id in state.aborted_nodes else (None, USE_PRODUCING)
-    if producer.attempt == generation and producer.status is NodeStatus.failed:
-        return None, "failed"
-    return produced_workdir(state, run_dir, node_id, generation=generation)
-
-
 def artifact_unavailable_text(refused) -> str:
     """The `artifact_unavailable` terminal's `error`: each refused use, its pinned lifecycle and why."""
     return "; ".join(
-        (f"used artifact #{r['node_id']} is still being produced in lifecycle {r['generation']}"
-         if r.get("why") == USE_PRODUCING else
-         f"used artifact #{r['node_id']} is not available in lifecycle {r['generation']} "
-         f"({r['why']})") for r in refused)[:400]
+        f"used artifact #{r['node_id']} is not available in lifecycle {r['generation']} "
+        f"({r['why']})" for r in refused)[:400]
 
 
 # The attribute `_run_eval` sets on the `RunResult` it returns WITHOUT launching because a pinned use
 # moved after RUN_ATTEMPT's check (critic c3 item 6). An attribute rather than an exit code: no
 # number is the engine's alone, and the candidate's own process may exit 2. RUN_ATTEMPT reads it
-# through `artifact_refusal` and settles the attempt on the use verdict — `artifact_unavailable` or a
-# withheld attempt — so triage, repair and the crash statistics never see a launch that never was.
+# through `artifact_refusal` and ends the lifecycle `artifact_unavailable` on that verdict
+# (`evaluate.py::EvaluateMixin._settle_artifact_refusal`), so triage, repair and the crash
+# statistics never see a launch that never was.
 ARTIFACT_REFUSAL_ATTR = "artifact_refused"
 
 
@@ -316,13 +265,6 @@ def _eval_admission_current(state, node, generation, max_es) -> bool:
     * the run terminal gate — pause/stop/finish landed during the wait.
     * `total_eval_seconds >= max_es` — the run's eval budget was spent while we waited.
 
-    * `awaited_producers` — an artifact this node USES is still being produced in the lifecycle the
-      node is pinned to (critic c3 item 2). HELD, not refused: the candidate is skipped this turn and
-      stays pending, so the producer it waits for is dispatched first (in this batch, or the next)
-      and a waiting consumer never occupies the slot that producer needs. Nothing is written; the
-      outer loop re-selects every pending node each turn, and a run that stops first leaves both
-      pending, owed, exactly as it leaves any node a ceiling never started.
-
     Returns True only when ALL hold; callers keep their own refusal handling, which genuinely
     differs per branch (skip / drop the candidate / stop admitting entirely).
     """
@@ -334,7 +276,6 @@ def _eval_admission_current(state, node, generation, max_es) -> bool:
         and node.id not in state.aborted_nodes
         and not _run_terminal_gate(state)
         and not (max_es is not None and state.total_eval_seconds >= max_es)
-        and not awaited_producers(state, node)
     )
 
 
@@ -1070,11 +1011,10 @@ class EvalDispatchMixin:
         """`(paths, refused)` for the artifact nodes `node.uses` names, in declaration order.
 
         A use PINNED to a producer lifecycle (`Node.uses_attempts`, round 3) counts only through
-        `pinned_use_verdict` — evaluated in exactly that lifecycle, not deleted, its workdir stamp
-        intact — and one that does not is REFUSED: `{"node_id", "generation", "why"}`. A `why` of
-        `USE_PRODUCING` is a lifecycle still being produced, which the caller WAITS for (critic c3
-        item 2); every other is the consumer's `artifact_unavailable` terminal rather than an eval
-        that reads nothing, a half-rebuilt directory or another lifecycle's bytes. A use with NO pin
+        `produced_workdir` — evaluated in exactly that lifecycle, not deleted, its workdir stamp
+        intact — and one that does not is REFUSED: `{"node_id", "generation", "why"}`, which the
+        caller turns into the consumer's `artifact_unavailable` terminal rather than an eval that
+        reads nothing, a half-rebuilt directory or another lifecycle's bytes. A use with NO pin
         (every log before the key) keeps the historical rule: its workdir exists, else it is left
         out. `state` is folded here only when some use is pinned, so an unpinned node pays nothing."""
         run_dir = getattr(self, "run_dir", None)
@@ -1090,7 +1030,10 @@ class EvalDispatchMixin:
                 continue
             pin = pins.get(str(nid))
             if type(pin) is int:
-                wd, why = pinned_use_verdict(state, run_dir, nid, pin)
+                producer = state.nodes.get(nid)
+                wd, why = (produced_workdir(state, run_dir, nid, generation=pin)
+                           if producer is not None and not producer.tombstoned
+                           else (None, "deleted"))
                 if wd is None:
                     refused.append({"node_id": nid, "generation": pin, "why": why})
                 else:
@@ -1156,9 +1099,8 @@ class EvalDispatchMixin:
             # A pinned artifact moved between RUN_ATTEMPT's check
             # (`EvaluateMixin._refuse_unusable_artifacts`) and here. Never launch without it, and
             # never as a CRASH (critic c3 item 6): the result is TAGGED (`ARTIFACT_REFUSAL_ATTR`), and
-            # RUN_ATTEMPT settles it on the same use verdict its own check reads — the engine
-            # terminal `artifact_unavailable`, or a withheld attempt while the producer is still
-            # producing — so no triage, repair or failure count ever sees it. A caller that reads
+            # RUN_ATTEMPT ends the lifecycle on this verdict — the engine terminal
+            # `artifact_unavailable` — so no triage or repair ever sees it. A caller that reads
             # only the `RunResult` (confirm, the noise floor) sees nothing ran: exit 2, no metric.
             from looplab.runtime import command_eval
             refused_result = command_eval.RunResult(

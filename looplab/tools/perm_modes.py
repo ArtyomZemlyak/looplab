@@ -133,6 +133,7 @@ _ACTION_RISK = {
     ("run_control", "extend_budget"): RISK_CONSEQUENTIAL,
     ("run_control", "set_directive"): RISK_CONSEQUENTIAL,
     ("run_control", "inject_experiment"): RISK_CONSEQUENTIAL,   # adds one node; spends a build + eval
+    ("run_control", "evaluate_track"): RISK_CONSEQUENTIAL,      # runs a declared track; spends GPU time
     ("run_control", "delete_node"): RISK_HIGH,
     ("run_control", "delete_run"): RISK_HIGH,
     ("run_control", "set_trust_gate"): RISK_HIGH,
@@ -176,6 +177,7 @@ _ACTION_CONSEQUENCE = {
     ("run_control", "extend_budget"): "Increases the scoped run budget by the reviewed amounts.",
     ("run_control", "set_directive"): "Writes or replaces the reviewed directive on the scoped run.",
     ("run_control", "inject_experiment"): "Adds one reviewed node to the scoped run; its build and evaluation spend budget.",
+    ("run_control", "evaluate_track"): "Queues one declared evaluation track over the scoped run's nodes; it spends GPU time and adds measured-after-the-run metrics.",
     ("run_control", "delete_node"): "Permanently removes the reviewed node subtree from the run.",
     ("run_control", "delete_run"): "Permanently deletes the scoped run directory.",
     ("run_control", "set_trust_gate"): "Changes the scoped run's trust-enforcement policy.",

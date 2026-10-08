@@ -292,6 +292,9 @@ def test_every_control_event_has_one_explicit_engine_policy():
         "card_reopened", "research_completed", "report_generated",
         # doc 68 68.2: a retarget re-ranks every node in the FOLD; a stopped run needs no engine.
         "metric_retarget",
+        # doc 73 §1.4: a queued evaluation track — the LIVE engine serves it; a stopped run keeps
+        # it queued for its next engine (`looplab evaluate-track` answers there).
+        "track_requested",
     }
 
 

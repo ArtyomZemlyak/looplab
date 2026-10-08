@@ -1359,6 +1359,36 @@ def test_set_directive_approval_card_states_a_cut_of_a_long_directive(tmp_path):
     assert "replace: yes" in card["preview"]
 
 
+def test_evaluate_track_is_absent_by_default_and_queues_a_request_when_wired(tmp_path):
+    """doc 73 §1.4: the Assistant may queue a DECLARED evaluation track for the live engine —
+    through the same `track_requested` command `looplab evaluate-track --live` writes."""
+    rd = tmp_path / "svc"
+    _run(rd)
+    off = RunControlTools(tmp_path, alive_fn=lambda _rd: False, mode="auto")
+    assert "evaluate_track" not in {s["function"]["name"] for s in off.specs()}
+    commands = _RecordingCommands(tmp_path, append=False)
+    t = RunControlTools(tmp_path, alive_fn=lambda _rd: False, mode="auto",
+                        command_service=commands, allow_tracks=True)
+    assert "evaluate_track" in {s["function"]["name"] for s in t.specs()}
+    assert "queued" in t.execute("evaluate_track", {"run_id": "svc", "track": "at200"})
+    assert "queued" in t.execute("evaluate_track", {"run_id": "svc", "track": "at200",
+                                                    "node_ids": [2, 1, 2]})
+    assert [c[1] for c in commands.calls] == ["track_requested", "track_requested"]
+    assert commands.calls[0][2] == {"track": "at200", "node_ids": "all"}
+    assert commands.calls[1][2] == {"track": "at200", "node_ids": [1, 2]}
+    assert "needs `track`" in t.execute("evaluate_track", {"run_id": "svc"})
+
+
+def test_the_track_switch_has_one_reader():
+    from types import SimpleNamespace
+
+    from looplab.core.config import Settings
+    from looplab.serve import assistant
+    assert assistant.assistant_track_enabled(Settings()) is True
+    assert assistant.assistant_track_enabled(Settings(assistant_track_tool=False)) is False
+    assert assistant.assistant_track_enabled(SimpleNamespace()) is False
+
+
 def test_a_long_single_line_preview_shows_its_head_not_only_the_cut_receipt():
     from looplab.tools.perm_modes import APPROVAL_PREVIEW_CHARS, clip_approval_preview
     text = "set_directive(r)\nreplace: no\ntext:\n" + "word " * 2000

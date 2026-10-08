@@ -100,7 +100,7 @@ def test_packaged_settings_ui_schema_preserves_copy_and_only_known_unique_fields
     fields = [field for group in packaged["groups"] for field in group["fields"]]
     keys = [field["key"] for field in fields]
     assert len(keys) == len(set(keys))
-    assert len(keys) == SETTINGS_UI_SCHEMA_CATALOGUE_FIELD_COUNT == 256
+    assert len(keys) == SETTINGS_UI_SCHEMA_CATALOGUE_FIELD_COUNT == 259
     # 238 -> 239 on 2026-09-29: `foresight_alternatives` -- whether the foresight panel's
     # candidates 2..K continue candidate 1's research session. Verified by INTERSECTION: 238
     # keys common to the previous keyset plus exactly that one.
@@ -551,7 +551,10 @@ def test_packaged_settings_ui_schema_preserves_copy_and_only_known_unique_fields
     # output_language is a curated prose preference; it adds no experiment gate.
     # 286 -> 287 on 2026-10-05: `concept_tag_hygiene` (a curated row, so both counts move).
     # 290 -> 291 on 2026-10-07: `upstream_board_brief` (doc 73 §2.3; a curated row, so both move).
-    assert len(Settings.model_fields) == SETTINGS_UI_SCHEMA_SETTINGS_FIELD_COUNT == 291
+    # 291 -> 292: `assistant_track_tool` (doc 73 §1.4, the Assistant's evaluate_track tool; a curated row, so both move).
+    # 292 -> 293: `researcher_artifacts` (doc 73 §1.4, Researcher-proposed artifact nodes; a curated row, so both move).
+    # 293 -> 294: `upstream_mode` (doc 73 §2.5, the live upstream lane; a curated row, so both move).
+    assert len(Settings.model_fields) == SETTINGS_UI_SCHEMA_SETTINGS_FIELD_COUNT == 294
     # 199 -> 200 Settings and 168 -> 169 catalogued rows when F8 added `repair_critic_after`
     # (2026-08-13), the cadence at which the repair critic gets its veto. It is catalogued rather
     # than left uncurated because the knob directly above it, `inline_repair_attempts`, changed

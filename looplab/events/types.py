@@ -964,6 +964,15 @@ EV_ARTIFACT_SYNC_STARTED = "artifact_sync_started"
 # carries is a LIVE record and is never overwritten. Written by a CLI holding `engine.lock`, so never
 # beside an engine (invariant #1).
 EV_EXTRA_METRICS_IMPORTED = "extra_metrics_imported"
+# …and the same row written by a LIVE engine: `track_requested` (a CONTROL intent — UI, API, the
+# Assistant, `looplab evaluate-track --live`) queues one declared `eval.tracks.<name>` over named
+# settled nodes; the engine runs it in a background worker on the run's own GPU pool
+# (`engine/track_lane.py`) and its MAIN task appends one `extra_metrics_imported` per measured node,
+# then `track_done {idx}` — the positional receipt (`_advance_request_cursor`) that serves the queue
+# head exactly once. A request with no receipt is re-run on the next resume; the fold ignores a key a
+# node already carries, so a re-run records nothing twice (invariant #3).
+EV_TRACK_REQUESTED = "track_requested"
+EV_TRACK_DONE = "track_done"
 # A PAUSE (or a stop) WITHHELD THIS LIFECYCLE'S EVALUATION WORK, and what it had already spent
 # (doc 69 69.12a). A withheld attempt returns with NO terminal — the node stays pending, and the
 # re-dispatch after the pause lifts continues the chain — so the seconds it had consumed (a passed
@@ -975,17 +984,13 @@ EV_EXTRA_METRICS_IMPORTED = "extra_metrics_imported"
 # it. `at` names the withhold point (`EVAL_WITHHELD_POINTS`), `reason` whether the run was paused or
 # stopping — or `infra_unavailable`: the attempt failed and the engine's own probe of the declared
 # paths found the BOX broken (`runtime/infra_probe.py`), so the engine paused the run itself and the
-# failure was charged to nobody (`engine/evaluate.py::EvaluateMixin._eval_infra_pause`) — or
-# `artifact_pending` (round 3, critic c3 item 2): an artifact this node USES is still being produced in
-# the lifecycle it is pinned to, by no lane of this process, so the attempt goes back to the queue
-# instead of holding a slot the producer may need (`engine/evaluate.py::EvaluateMixin.
-# _hold_for_pinned_producers`); the producer's terminal decides, and nothing is charged.
+# failure was charged to nobody (`engine/evaluate.py::EvaluateMixin._eval_infra_pause`).
 #
 # DIAGNOSTIC for `eval_canary_*`'s reason: appended from the eval child, per attempt. The fold never
 # reads it; the charge reaches the run through the lifecycle's one terminal.
 EV_EVAL_ATTEMPT_WITHHELD = "eval_attempt_withheld"
 EVAL_WITHHELD_POINTS = ("admit", "before_launch", "after_canary", "decide_repair")
-EVAL_WITHHELD_REASONS = ("paused", "stopping", "infra_unavailable", "artifact_pending")
+EVAL_WITHHELD_REASONS = ("paused", "stopping", "infra_unavailable")
 EV_WORKSPACE_SEEDED = "workspace_seeded"
 # FOLDED (moved out of DIAGNOSTIC_EVENTS): the start of an arbitrary operator `run_setup` command is
 # the only evidence that its side effects may have been applied. Without folding it, a kill between
@@ -1143,6 +1148,14 @@ EV_UPSTREAM_GATE_FINISHED = "upstream_gate_finished"
 EV_UPSTREAM_GATE_ABANDONED = "upstream_gate_abandoned"
 EV_BASE_ADVANCED = "base_advanced"
 EV_NODE_OVERLAY_REBASED = "node_overlay_rebased"
+# THE LIVE LANE'S QUEUE (doc 73 §2.5, `engine/upstream_serve.py`): an upstream propose/check/advance
+# asked of a run whose engine is ALIVE and whose `upstream_mode` serves it is queued by the lane
+# (`engine/upstream.py::UpstreamLane._queue_if_live`, the same writer and lock as every upstream row)
+# and served by that engine between turns; `lane_op_done {idx}` is the positional receipt
+# (`_advance_request_cursor`). Deliberately NOT `upstream_`-prefixed: the lane's ACK and history
+# readers key on that prefix and an action id, and a queue entry is neither a claim nor a verdict.
+EV_LANE_OP_REQUESTED = "lane_op_requested"
+EV_LANE_OP_DONE = "lane_op_done"
 
 ALL_EVENT_TYPES: frozenset[str] = frozenset(
     v for k, v in globals().items() if k.startswith("EV_") and isinstance(v, str)
@@ -1364,7 +1377,9 @@ EVENT_PAYLOAD_KEYS: dict[str, PayloadContract] = {
     "upstream_execution": PayloadContract("Separate charged gate execution, never a node score.", required=('action_id', 'execution', 'proposal_id', 'request_hash'), stored_whole=True),
     "upstream_gate_finished": PayloadContract("Measured gate verdict bound to actual source and inputs.", required=('action_id', 'evidence_token', 'proposal_id', 'request_hash', 'result'), stored_whole=True),
     "upstream_gate_abandoned": PayloadContract("Operator recovery of an interrupted claim; grants no pass.", required=('action_id', 'claim_action_id', 'proposal_id', 'reason', 'request_hash'), stored_whole=True),
-    "base_advanced": PayloadContract("Explicit stopped-engine CAS: only future lifecycles adopt the verified base.", required=('action_id', 'evidence_token', 'flag', 'from_revision', 'gate_seq', 'hunk_hashes', 'proposal_id', 'request_hash', 'selector', 'source_node_id', 'summary'), stored_whole=True),
+    "base_advanced": PayloadContract("Explicit CAS — the stopped lane's, or the live engine's (`in_engine`): only future lifecycles adopt the verified base.", required=('action_id', 'evidence_token', 'flag', 'from_revision', 'gate_seq', 'hunk_hashes', 'proposal_id', 'request_hash', 'selector', 'source_node_id', 'summary'), optional=('in_engine',), stored_whole=True),
+    "lane_op_requested": PayloadContract("An upstream propose/check/advance queued for the LIVE engine that serves the lane.", required=('action_id', 'op', 'request_hash'), optional=('body', 'proposal_id', 'request_path')),
+    "lane_op_done": PayloadContract("The live engine settled a queued upstream operation; the lane's own rows carry what it did.", required=('idx', 'op', 'outcome'), optional=('action_id', 'code', 'seq')),
     "ablate": PayloadContract(
         "One ablation of the champion's code: which blocks were removed and what each removal cost the metric.",
         required=("generation", "impacts", "parent_id"),
@@ -1772,6 +1787,16 @@ EVENT_PAYLOAD_KEYS: dict[str, PayloadContract] = {
         required=("generation", "node_id", "sync_id"),
         optional=(),
     ),
+    "track_requested": PayloadContract(
+        "An operator queued a declared eval.tracks evaluation over settled nodes of a live run.",
+        required=("node_ids", "track"),
+        optional=(),
+    ),
+    "track_done": PayloadContract(
+        "The engine finished a queued track request; its measurements are extra_metrics_imported rows.",
+        required=("idx", "track"),
+        optional=("failed", "recorded", "refused"),
+    ),
     "extra_metrics_imported": PayloadContract(
         "An operator imported metrics measured after the run for one node, beside its live ones.",
         required=("extra_metrics", "generation", "imported_at", "node_id", "source"),
@@ -2077,7 +2102,7 @@ EVENT_PAYLOAD_KEYS: dict[str, PayloadContract] = {
         "A node exists: its idea, the code and files the Developer wrote, and its parents.",
         required=("code", "files", "idea", "node_id", "operator", "parent_ids"),
         optional=(
-            "attempt", "card_build_generation", "deleted", "eval_start_boundary",
+            "attempt", "base_selector", "card_build_generation", "deleted", "eval_start_boundary",
             "footprint_finalized", "forked_from", "generation", "materialize_aborted_intent",
             "model_arm", "node_kind", "origin", "parent_generations", "research_origin", "seed",
             "simplified", "speculative", "uses", "uses_attempts"

@@ -18,9 +18,18 @@ def test_engine_presence_refuses_new_work_but_exact_saved_ack_is_readable(tmp_pa
     monkeypatch.setattr(upstream, "engine_alive", lambda rd: True)
     before = store.path.read_bytes()
     assert lane.propose(proposal) == made
+    # The STOPPED lane's contract (`upstream_mode: off`, doc 72): new work on a running engine is
+    # refused. Under `propose`/`auto` it is queued for that engine instead (doc 73 §2.5,
+    # `tests/test_upstream_live_lane.py`), which is the only write here.
+    lane.settings = lane.settings.model_copy(update={"upstream_mode": "off"})
     with pytest.raises(UpstreamRefusal, match="Pause"):
         lane.check({"expected_generation": generation, "action_id": "running", "proposal_id": made["proposal_id"]})
     assert store.path.read_bytes() == before
+    lane.settings = lane.settings.model_copy(update={"upstream_mode": "auto"})
+    queued = lane.check({"expected_generation": generation, "action_id": "running", "proposal_id": made["proposal_id"]})
+    assert queued["status"] == "queued" and queued["event_type"] == "lane_op_requested"
+    assert [e.type for e in store.read_all()][-1] == "lane_op_requested"
+    assert not any(e.type == "upstream_gate_started" for e in store.read_all()), "queued, never run here"
 
 
 @pytest.mark.parametrize("fault", ["origin", "candidate", "source_seed", "seed_generation", "probe_overlay"])

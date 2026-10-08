@@ -3,6 +3,8 @@ import httpx
 from fastapi.testclient import TestClient
 import pytest
 
+from looplab.core.config import Settings
+
 from looplab.engine import upstream
 from looplab.harness.mcp_server import HarnessAPI
 from looplab.serve.server import make_app
@@ -47,9 +49,16 @@ def test_abandoned_check_recovery_reaches_each_client_without_new_work(tmp_path,
                 assistant = UpstreamTools(tmp_path, mode="auto", approver=lambda action: APPROVAL_ALLOW_ONCE)
                 reply = assistant.execute("upstream_check", {"run_id": "run", "body": request})
                 assert reply.is_error and "already abandoned" in reply.content
+                # The stopped lane's refusal is `upstream_mode: off` (doc 72); the live modes queue
+                # the action for the running engine instead (`tests/test_upstream_live_lane.py`).
+                snapshot = tmp_path / "run" / "config.snapshot.json"
+                live = snapshot.read_bytes()
+                snapshot.write_text(Settings.model_validate_json(live).model_copy(
+                    update={"upstream_mode": "off"}).model_dump_json(), encoding="utf8")
                 fresh = api.upstream_write("run", "check", {**request, "action_id": "fresh-check"})
                 assert fresh["status"] == 409
                 assert fresh["body"]["detail"]["code"] == "upstream_engine_running"
+                snapshot.write_bytes(live)
             assert store.path.read_bytes() == before
             assert not any(e.type in ("upstream_execution", "base_advanced", "resume") for e in store.read_all())
             checked = api.upstream_write("run", "check", {**request, "action_id": "fresh-check"})

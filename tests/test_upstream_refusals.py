@@ -78,10 +78,15 @@ def test_retry_of_abandoned_claim_names_recovery_without_reexecution(tmp_path, m
         assert conflict.value.code == "upstream_action_conflict"
         assert probes == []
         if running:
+            # The stopped lane (`upstream_mode: off`) refuses new work on a running engine; the live
+            # modes queue it instead (doc 73 §2.5, `tests/test_upstream_live_lane.py`).
+            live_settings = lane.settings
+            lane.settings = lane.settings.model_copy(update={"upstream_mode": "off"})
             with pytest.raises(UpstreamRefusal) as busy:
                 getattr(lane, operation)({**request, "action_id": "fresh-action"})
             assert busy.value.code == "upstream_engine_running"
             assert len(probes) == 1
+            lane.settings = live_settings
     assert store.path.read_bytes() == before
     assert not any(e.type in ("upstream_execution", "base_advanced", "resume") for e in store.read_all())
     # The explicit fresh action, after recovery and engine exit, remains usable.

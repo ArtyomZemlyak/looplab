@@ -421,7 +421,7 @@ copied into an idea. Host tiers only — a Docker tier binds no other node's wor
 directory is already readable to an eval and never writable, so the parent's files can be read,
 not changed. Off, the variable is absent and the task snapshot's `eval` dump is byte-identical.
 
-**Further evaluations on demand (`eval.tracks`, none by default).** `{"tracks": {"at200": {"command": [...], "keys": [...], "key_prefix": "", "timeout": 3600}}}` declares evaluators that never run during the search: `looplab evaluate-track RUN at200 --nodes all --apply` runs one over each settled node's preserved workdir (refusing a node whose workdir is not its evaluated code; the argv takes `env_passthrough` — and the working directory it implies — exactly as `artifact_sync` does) and records the numbers beside the live metrics — see the [CLI reference](cli-reference.md#evaluate-track).
+**Further evaluations on demand (`eval.tracks`, none by default).** `{"tracks": {"at200": {"command": [...], "keys": [...], "key_prefix": "", "timeout": 3600}}}` declares evaluators that never run during the search: `looplab evaluate-track RUN at200 --nodes all --apply` runs one over each settled node's preserved workdir (refusing a node whose workdir is not its evaluated code — on a live run that stamp is read when the request is accepted and again before and after the node's command, so a node reset meanwhile is refused, never recorded; the argv takes `env_passthrough` — and the working directory it implies — exactly as `artifact_sync` does; `--live`, the Assistant's `evaluate_track` tool or a `track_requested` command queue it for the RUNNING engine instead, which leases `gpus` devices from the run's pool) and records the numbers beside the live metrics — see the [CLI reference](cli-reference.md#evaluate-track).
 
 **Copying a finished node's workdir to durable storage (`eval.artifact_sync`, off by default).**
 `{"artifact_sync": {"command": ["mc", "cp", "-r", "{workdir}", "minio/bucket/{run_id}/node_{node_id}/"], "timeout": 1800}}`
@@ -440,9 +440,13 @@ exit code. Placeholders: `{workdir}`, `{run_dir}`, `{run_id}`,
 `{node_id}`, `{generation}`; any other brace stays literal. It runs on a background pool of at most
 two concurrent copies (`artifact_sync.py::MAX_CONCURRENT_SYNCS`; the rest queue in terminal order), so
 the eval slot (and its GPU lease) is free during the upload; the interpreter waits for in-flight
-copies at exit, each up to its `timeout`. A copy still QUEUED when its engine's run has ended is not
-started (`artifact_sync.py::engine_owns_run`: another engine may own the run directory by then); one
-already running finishes and records its receipt. Each copy opens with a diagnostic
+copies at exit, each up to its `timeout`. A copy is started only while the engine that accepted it
+still owns the run (`artifact_sync.py::engine_owns_run`: another engine may own the run directory
+after), so an ending engine first waits, up to 1800 s, for the copies it accepted
+(`artifact_sync.py::drain_before_release`, before its terminal barrier and the release of
+`engine.lock`) — the copies of the run's last nodes are not skipped for being queued when the search
+ended. One still queued past that bound is not started; one already running finishes and records its
+receipt. Each copy opens with a diagnostic
 `artifact_sync_started` row and closes with its `artifact_synced` receipt (same `sync_id`): a started
 row with no receipt is a copy an engine death interrupted or its end never started
 (`artifact_sync.py::unfinished_syncs`), listed by `looplab inspect` (`copy-out unfinished:`) and, once

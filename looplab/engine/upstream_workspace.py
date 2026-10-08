@@ -301,6 +301,28 @@ def materialization_plan(spec, node, events):
     if created is None:
         raise UpstreamRefusal("upstream_source_unavailable", "Pending overlay has no replay-applied authoring event")
     origin = active_base([e for e in events if e.seq <= created.seq], spec["seed_base"])
+    # THE BASE THE OVERLAY WAS AUTHORED ON (doc 73 §2.5, stage 2). A base the ENGINE advanced while it
+    # ran (`engine/upstream_serve.py`) does not rebind the Developers it built at launch, so a node
+    # created after that advance was still written against the launch base: `node_created` names it
+    # (`base_selector`), and the three-way merge must take it as the OLD side. Absent on every row
+    # written by a stopped-engine lane, where the two can never differ.
+    authored = created.data.get("base_selector")
+    if isinstance(authored, dict):
+        try:
+            origin = {**origin, "selector": normalize_seed_base(
+                {k: authored[k] for k in ("run_dir", "event_seq", "digest")})}
+        except (KeyError, ValueError, TypeError) as exc:
+            raise UpstreamRefusal("upstream_source_unavailable",
+                                  "The node's authored base selection is invalid") from exc
+    # A LIFECYCLE WHOSE EVALUATION STARTED IS PINNED to the base it was seeded on: once a workspace of
+    # THIS generation recorded its selection and the eval-start receipt is durable, a
+    # re-materialization (a crash re-dispatch, a resume) seeds the same base with the same overlay,
+    # whatever the run advanced to since — the attempt, its repairs and its terminal stay on one
+    # base. The stopped lane never met this case (`advance` refuses `upstream_work_pending` over such
+    # a lifecycle); an advance the ENGINE makes while it runs does. A lifecycle seeded but not yet
+    # started still migrates, as doc 72 designed, and so does every new lifecycle.
+    pinned = False
+    started = bool(getattr(current_node, "eval_activity_started", False))
     for index, e in enumerate(events):
         if e.data.get("node_id") != node.id or e.seq < created.seq:
             continue
@@ -316,10 +338,18 @@ def materialization_plan(spec, node, events):
             continue
         if e.type == "workspace_seeded" and (e.data.get("base_revision") or {}).get("selection"):
             origin["selector"] = {k: e.data["base_revision"]["selection"][k] for k in ("run_dir", "event_seq", "digest")}
+            pinned = pinned or (started and prior.attempt == node.attempt)
         elif e.type == "node_overlay_rebased":
             applied = fold(events[:index + 1]).nodes[node.id]
             if applied.files == e.data.get("files") and applied.deleted == e.data.get("deleted"):
                 origin["selector"] = e.data["selector"]
+    if pinned:
+        selected_seed_base(origin["selector"])
+        effective = {**spec, "effective_seed_base": origin["selector"],
+                     "editables": pinned_editables(spec["editables"], origin["selector"])}
+        return effective, node.model_copy(), {"status": "pinned",
+            "from_digest": origin["selector"]["digest"], "to_digest": origin["selector"]["digest"],
+            "conflicts": [], "absorbed_paths": [], "advance_seq": current["advance_seq"]}
     old, _ = selected_seed_base(origin["selector"])
     new, _ = selected_seed_base(current["selector"])
     overlay, removed = dict(node.files), list(node.deleted)

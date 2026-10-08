@@ -194,11 +194,20 @@ function NodeActionTrigger({ nodeId, expanded, onOpen }) {
     onClick={e => { e.stopPropagation(); onOpen(nodeId, e) }}>•••</button>
 }
 
+// The selection label is translated PART BY PART (critic 2026-10-08): joined first, it was one
+// English sentence no catalogue entry could ever match. A part is a static string or `[template,
+// args]` for `uiMessage`; dynamic text (a concept, a branch label) passes through unchanged.
+export function selectionLabelText(parts) {
+  if (!Array.isArray(parts)) return uiText(String(parts || ''))
+  return parts.filter(Boolean)
+    .map(part => Array.isArray(part) ? uiMessage(part[0], part[1]) : uiText(part)).join(', ')
+}
+
 function NodeSelectionTrigger({ nodeId, selected, label, onSelect }) {
   useUILanguage()
 
   return <button type="button" className="node-select-trigger"
-    data-node-select-id={nodeId} aria-label={uiText(label)}
+    data-node-select-id={nodeId} aria-label={uiText(selectionLabelText(label))}
     aria-current={selected ? 'true' : undefined} onClick={() => onSelect(nodeId)} />
 }
 
@@ -312,27 +321,27 @@ function ExpNode({ data }) {
     + (conceptTruth ? ` · ${conceptTruth}` : '')
     + (branch ? ` · ${branch.title}` : '')
   const selectionLabel = [
-    `Experiment #${node.id}`, op.label, activity.label,
-    m == null ? 'metric unavailable' : `metric ${fmt(m)}`,
+    ['Experiment #{0}', [node.id]], op.label, activity.label,
+    m == null ? 'metric unavailable' : ['metric {0}', [fmt(m)]],
     m == null ? null : dagObjectiveSourceLabel(node),
     dagFeasibilityLabel(node.feasible),
     node.id === state.best_node_id ? 'current champion' : null,
     workIds.has(Number(node.id)) ? 'currently working' : null,
-    theme ? `primary concept axis ${theme}` : null,
+    theme ? ['primary concept axis {0}', [theme]] : null,
     conceptTruth || null,
-    seed ? `seeded from run ${seed.name}, experiment ${seed.nodeId}${seedContractText(node.origin)}` : null,
+    seed ? ['seeded from run {0}, experiment {1}{2}', [seed.name, seed.nodeId, seedContractText(node.origin)]] : null,
     node.research_origin ? 'proposed from deep research directions' : null,
     // doc 73 §1.4: an ARTIFACT node prepares data for later nodes, succeeds without a metric and is
     // never ranked; a node that `uses` artifacts reads their workdirs.
     node.kind === 'artifact' ? 'artifact node, never ranked' : null,
-    node.uses?.length ? `uses artifacts ${node.uses.map(id => '#' + id).join(', ')}` : null,
+    node.uses?.length ? ['uses artifacts {0}', [node.uses.map(id => '#' + id).join(', ')]] : null,
     // An operator branch is a statement about WHO WROTE THIS IDEA, so it belongs in the selection
     // label beside the other two provenance facts rather than only in a hover title a screen reader
     // never reaches.
     branch ? branch.label : null,
-    node.status === 'failed' ? `failure reason ${node.error_reason || 'not reported'}` : null,
+    node.status === 'failed' ? ['failure reason {0}', [node.error_reason || 'not reported']] : null,
     'Select to inspect',
-  ].filter(Boolean).join(', ')
+  ].filter(Boolean)
   // Zoom LOD: below the threshold the full card is sub-pixel mush AND expensive (4 text rows + a Spark
   // SVG). Collapse to a glyph — the status-coloured body does the talking, plus the operator icon + id,
   // so the forest reads as a field of green/red blocks at overview (Blender/ELK level-of-detail pattern).

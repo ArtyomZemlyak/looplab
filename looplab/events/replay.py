@@ -423,7 +423,21 @@ def inherited_uses(st: RunState, parent_ids: list) -> list:
     return out[:32]
 
 
-def _use_pins(st: RunState, d: dict, parent_ids: list, uses: list) -> dict:
+def _idea_uses(st: RunState, declared) -> list:
+    """The artifacts a RESEARCHER-proposed idea declares it reads (doc 73 §1.4, stage 3;
+    `core/models.py::Idea.uses`), kept only where the id names an artifact node already in the fold
+    — a proposal is a model's text, so an id that names nothing, or an experiment, costs the link and
+    never a malformed node. Whether the producer is PRODUCED is the consumer fence's question at
+    evaluation time (`engine/artifact_fence.py`), not the fold's."""
+    out: list = []
+    for used in declared or []:
+        producer = st.nodes.get(used)
+        if used not in out and getattr(producer, "kind", None) == "artifact":
+            out.append(used)
+    return out[:32]
+
+
+def _use_pins(st: RunState, d: dict, parent_ids: list, uses: list, idea_uses=()) -> dict:
     """`{str(artifact_id): generation}` — the producer lifecycle each of `uses` is pinned to (doc 73
     §1.4, round 3). The row's own `uses_attempts` when it wrote `uses` (an inject, a rebuild), cut to
     the ids it uses. A child's row that INHERITED its `uses` carries its pins too since critic c3 item
@@ -442,15 +456,26 @@ def _use_pins(st: RunState, d: dict, parent_ids: list, uses: list) -> dict:
             return {}
         return {str(k): v for k, v in raw.items()
                 if str(k) in wanted and type(v) is int and v >= 0}
-    if isinstance(raw, dict):
-        return {str(k): v for k, v in raw.items()
-                if str(k) in wanted and type(v) is int and v >= 0}
     out: dict = {}
-    for pid in parent_ids:
-        parent = st.nodes.get(pid)
-        for k, v in (getattr(parent, "uses_attempts", None) or {}).items():
-            if k in wanted and k not in out:
-                out[k] = v
+    if isinstance(raw, dict):
+        # The writer's pins for the INHERITED uses (`engine/node_build.py::inherited_use_pins`).
+        out = {str(k): v for k, v in raw.items()
+               if str(k) in wanted and type(v) is int and v >= 0}
+    else:
+        for pid in parent_ids:
+            parent = st.nodes.get(pid)
+            for k, v in (getattr(parent, "uses_attempts", None) or {}).items():
+                if k in wanted and k not in out:
+                    out[k] = v
+    # A RESEARCHER-proposed `Idea.uses` (doc 73 §1.4, stage 3) is pinned to the producer lifecycle
+    # current when the node was CREATED — the one its Developer could read — so the pin's refusal
+    # covers it; `engine/artifact_fence.py::uses_waiting` holds it back while that lifecycle is still
+    # being produced. Only ids no parent pinned, and only on a row whose `uses` came from its idea.
+    for used in idea_uses:
+        k = str(used)
+        producer = st.nodes.get(used)
+        if k in wanted and k not in out and producer is not None:
+            out[k] = producer.attempt
     return out
 
 
@@ -526,8 +551,11 @@ def _on_node_created(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
     )
     try:
         receipt = _simplification_receipt(d, parent_ids, st)
+        idea = Idea(**d["idea"])
+        declared = [] if isinstance(d.get("uses"), list) else _idea_uses(st, idea.uses)
         uses = ([x for x in d["uses"][:32] if type(x) is int and x >= 0]
-                if isinstance(d.get("uses"), list) else inherited_uses(st, parent_ids))
+                if isinstance(d.get("uses"), list)
+                else (declared or inherited_uses(st, parent_ids)))
         n = Node(
             id=nid,
             parent_ids=parent_ids,
@@ -539,7 +567,7 @@ def _on_node_created(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
                 for parent_id in parent_ids
             },
             operator=d["operator"],
-            idea=Idea(**d["idea"]),
+            idea=idea,
             code=d.get("code", ""),
             files=d.get("files", {}) or {},
             deleted=d.get("deleted", []) or [],
@@ -550,9 +578,12 @@ def _on_node_created(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
             # historical snapshot) and edited its idea. Additive with a reader-side default, so old
             # logs fold byte-identically (invariant 5).
             forked_from=d.get("forked_from"),
-            kind=("artifact" if d.get("node_kind") == "artifact" else None),
+            # The operator's inject writes the top-level keys; a Researcher's proposal carries them
+            # on its idea (doc 73 §1.4, stage 3) — absent on every other idea, so nothing changes.
+            kind=("artifact" if d.get("node_kind") == "artifact" or idea.node_kind == "artifact"
+                  else None),
             uses=uses,
-            uses_attempts=_use_pins(st, d, parent_ids, uses),
+            uses_attempts=_use_pins(st, d, parent_ids, uses, declared),
             research_origin=d.get("research_origin"),   # 💡 proposed just after a deep-research memo
             model_arm=str(d.get("model_arm") or "")[:64],  # doc 52 row 19: the routed model arm
             # doc 67 67.5: the node's parent with one block commented out, or None — and the cut it
@@ -1402,7 +1433,12 @@ def _on_extra_metrics_imported(st: RunState, e: Event, d: dict, ctx: "_FoldCtx")
         return
     found = normalize_extra_metrics(d.get("extra_metrics"))
     live = dict(node.extra_metrics or {})
-    added = {k: v for k, v in found.items() if k not in live}
+    # The map stays inside the SAME 256-key bound every other writer of it is held to
+    # (`normalize_extra_metrics`), and the marker names every reconstructed key within it: an
+    # unbounded merge let a late-sorting imported key fall off the marker's capped `keys` and read
+    # as a LIVE measurement (critic 2026-10-08). Keys past the bound are dropped, in name order.
+    room = max(0, 256 - len(live))
+    added = dict(sorted((k, v) for k, v in found.items() if k not in live)[:room])
     if not added:
         return
     marker = dict(node.extra_metrics_backfill or {})

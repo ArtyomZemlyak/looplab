@@ -763,7 +763,7 @@ fact is a `request_parked` item in the UI's attention inbox. An `inject_node` co
 
 A **`copy-out unfinished:`** line names every `eval.artifact_sync` copy whose
 `artifact_sync_started` row has no `artifact_synced` receipt — node, lifecycle and `sync_id`
-(`looplab/engine/artifact_sync.py::unfinished_syncs`). While an engine runs that is a copy queued or
+(`looplab/events/replay.py::unfinished_syncs`). While an engine runs that is a copy queued or
 uploading; once none does, it was interrupted or its engine ended before starting it, and nothing
 retries it: run your copy command for it again. With no engine running the same fact is an
 `artifact_sync_unfinished` item in the attention feed.
@@ -2096,6 +2096,11 @@ Results land beside the live metrics through the same row `import-metrics` write
 objective (`metric_retarget`). `--apply` holds `engine.lock`; output goes to `<run>/track_<name>.log`,
 written once the command exits with the `env_passthrough` values and every known secret masked, as is
 the failure line printed here.
+`--live` queues the same track for the run's RUNNING engine instead (a `track_requested` intent; no
+stop, no `engine.lock`): it runs in a background worker on the run's own GPU pool — a track declaring
+`gpus: N` leases N devices from it — and the main task records its numbers; a stopped run keeps the
+request queued until it resumes (`engine/track_lane.py`). The Assistant's `evaluate_track` tool and
+the command API write the same intent.
 The command runs from the node's workdir (`score_service.py` above is a file there); a track
 declaring `env_passthrough` (credential NAMES read from the engine's environment) runs from the run
 directory instead — decided by the declaration, not by which names this host holds — so it names the

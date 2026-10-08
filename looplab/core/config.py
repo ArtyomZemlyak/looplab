@@ -2609,6 +2609,11 @@ class Settings(BaseSettings):
     # same `inject_node` command the UI writes, behind a confirm card. A tool is part of the model's
     # prompt, so `RunControlTools` defaults it OFF; this server-level switch turns it on. Not run-pinned.
     assistant_inject_tool: bool = True
+    # The Assistant's `evaluate_track` tool (doc 73 §1.4): queue one of the task's DECLARED
+    # `eval.tracks` over a run's settled nodes for its LIVE engine (`engine/track_lane.py`), behind a
+    # confirm card. A tool is part of the model's prompt, so `RunControlTools` defaults it OFF; this
+    # server-level switch turns it on. One reader: `serve/assistant.py::assistant_track_enabled`.
+    assistant_track_tool: bool = True
     # === LLM / transport ==================================================================
     llm_base_url: str = "http://localhost:11434/v1"  # Ollama OpenAI-compatible endpoint
     llm_temperature: float = 0.6
@@ -3125,6 +3130,15 @@ class Settings(BaseSettings):
     # defaults it OFF and a pre-field snapshot resumes OFF (its `LEGACY_CONFIG_SNAPSHOT_DEFAULTS`
     # row). One reader: `adapters/repo_developer.py::upstream_board_enabled`.
     upstream_board_brief: bool = True
+    # THE UPSTREAM LANE SERVED BY THE LIVE ENGINE (doc 73 §2.5; `engine/upstream_serve.py`). `off`: the
+    # stopped-engine lane exactly as doc 72 shipped it. `propose`: a propose/check/advance asked of a
+    # live run is QUEUED (`lane_op_requested`) and served between turns, without a pause. `auto`:
+    # `propose`, and the engine also checks each proposal once and advances each whose measured gate
+    # passed. Proposals are still authored by the Assistant / an agent / the operator. A task with no
+    # `upstream` block (or not `trusted_local`) resolves to `off` with the reason stated, so the default
+    # costs nothing where the operator declared nothing. One reader:
+    # `engine/upstream_serve.py::upstream_mode_setting`; `resolve_upstream_mode` adds the task's half.
+    upstream_mode: typing.Literal["off", "propose", "auto"] = "auto"
     # A5 (docs/60 §60.9): seed every chain root (Researcher propose, Developer stages/plan/step/
     # implement/repair) with a small block carrying what EARLIER phases of this run already read —
     # the reference file, the manifest, the config — verbatim under `established_context_bytes`,
@@ -3224,6 +3238,14 @@ class Settings(BaseSettings):
     # the task data (schema/profile/asset) mid-loop, instead of seeing only best+parent. Advisory —
     # never changes best-selection. Off = the legacy single-shot Researcher (richer digest still added).
     researcher_tools: bool = True
+    # A RESEARCHER THAT MAY PROPOSE ARTIFACT NODES (doc 73 §1.4, stage 3; `agents/artifact_ideas.py`).
+    # ON, the Researcher's emit schema shows `node_kind` and `uses` (`ArtifactIdeaEmission`) and its
+    # user turn lists the run's PRODUCED ARTIFACTS, so it can have an expensive preparation step done
+    # ONCE (a node that produces files and is never ranked) and have later experiments read it through
+    # `LOOPLAB_USES_WORKDIRS`. OFF (the default) is the historical schema and prompt byte for byte. It
+    # changes a paid prompt, so the Researchers default it OFF at their constructors and it is run-pinned.
+    # One reader: `agents/artifact_ideas.py::researcher_artifacts_enabled`.
+    researcher_artifacts: bool = False
     # THE RESEARCHER READS THE CODE IT IS IMPROVING (WP-TOOLS T3, 2026-09-29). The Researcher's
     # `repo_read`/`repo_grep`/`repo_list` always showed the run's STARTING code: on MiniOneRec inf13
     # the proposal improving node 15 read the 1,410-line base `service/latency_engine.py` believing
@@ -3806,6 +3828,14 @@ def unknown_snapshot_keys(data) -> list[str]:
 # Keep their historical effective behavior when newer product defaults become active: re-entry must not
 # silently add paid calls, interventions, concurrency or a different selection policy to an old run.
 LEGACY_CONFIG_SNAPSHOT_DEFAULTS: dict[str, object] = {
+    # THE LIVE UPSTREAM LANE, added 2026-10-08 defaulting `auto` (doc 73 §2.5). A resumed pre-field run
+    # keeps the stopped-engine lane it launched with: `auto` buys gate executions and advances the base
+    # on its own, which that run's operator never chose.
+    "upstream_mode": "off",
+    # A RESEARCHER THAT MAY PROPOSE ARTIFACT NODES, added 2026-10-08 defaulting OFF (doc 73 §1.4). ON
+    # it changes the Researcher's emit schema and user turn, so a resumed pre-field run keeps its
+    # historical request; `tests/test_researcher_artifacts.py` holds that `false` is byte for byte.
+    "researcher_artifacts": False,
     "assistant_result_commentary": False,
     "parallel_build": 1,
     "eval_parallel": None,

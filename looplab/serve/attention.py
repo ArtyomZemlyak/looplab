@@ -20,11 +20,10 @@ from typing import Iterable
 from looplab.core.fitness import finite_metric
 from looplab.core.models import Event, NodeStatus
 from looplab.core.models import BENIGN_TERMINAL_REASONS
-from looplab.engine.artifact_sync import unfinished_syncs
 from looplab.engine.finalize import incomplete_finalize_scope
 from looplab.engine.train_monitor import OVERRUN_BEYOND_BAR_KEYS
 from looplab.events.parked_requests import open_parked_requests
-from looplab.events.replay import fold
+from looplab.events.replay import fold, unfinished_syncs
 from looplab.events.types import (
     EV_APPROVAL_REQUESTED,
     EV_ARTIFACT_SYNC_STARTED,
@@ -84,17 +83,15 @@ ATTENTION_NEEDS_ACTION_KINDS = frozenset({
 })
 
 
-# The terminal reason the engine writes for a consumer whose pinned artifact is gone
-# (`core/models.py::ENGINE_TERMINAL_REASONS`), and the kind of an unfinished copy-out's item. The
-# kind is NOT in `ATTENTION_NEEDS_ACTION_KINDS`: re-running a copy is the operator's choice, and the
-# run itself is not waiting on it.
-ARTIFACT_UNAVAILABLE_REASON = "artifact_unavailable"
+# The kind of an unfinished copy-out's item (`eval.artifact_sync`). NOT in
+# `ATTENTION_NEEDS_ACTION_KINDS`: re-running a copy is the operator's choice, and the run itself is
+# not waiting on it.
 ARTIFACT_SYNC_UNFINISHED_KIND = "artifact_sync_unfinished"
 
 
 def _open_sync_rows(rows) -> list:
     """The `artifact_sync_started` rows no `artifact_synced` row closed, as events (their seq anchors
-    the item), in log order — `engine/artifact_sync.py::unfinished_syncs`'s pairing on `sync_id`."""
+    the item), in log order — `events/replay.py::unfinished_syncs`'s pairing on `sync_id`."""
     open_ids = {d.get("sync_id") for d in unfinished_syncs(rows)}
     return [e for e in rows if e.type == EV_ARTIFACT_SYNC_STARTED and isinstance(e.data, dict)
             and e.data.get("sync_id") in open_ids]
@@ -324,31 +321,6 @@ def project_event_attention(run_id: str, events: Iterable[Event]) -> dict:
             title="Experiment failures need attention",
             detail=f"{state.current_failure_count} current experiment failures; inspect the failure panel.",
             browser=True, active=True, node_id=nid, node_generation=attempt,
-        )
-        if item:
-            items.append(item)
-
-    # A CONSUMER WHOSE PINNED ARTIFACT CAN NEVER BE PRODUCED (doc 73 §1.4; critic c3 item 6). Benign
-    # for the failure spike above — nothing of the candidate ran, so it is no evidence about the
-    # experiment — but the operator still has the one remedy only they can apply: re-inject the
-    # consumer (or rebuild it) against the artifact as it is now. One item per CURRENT failed
-    # lifecycle, anchored on its accepted terminal; a reset, abort or deletion of the consumer drops
-    # it. The detail is a fixed sentence over the node id, never the terminal's own text.
-    for nid, current in sorted(state.nodes.items()):
-        if (current.tombstoned or nid in state.aborted_nodes
-                or current.status is not NodeStatus.failed):
-            continue
-        event = accepted_event(current.terminal_event_seq, EV_NODE_FAILED)
-        if event is None or str((event.data or {}).get("reason") or "").strip().lower() \
-                != ARTIFACT_UNAVAILABLE_REASON:
-            continue
-        item = _item(
-            run_id, generation, event, "run_failed", severity="warning",
-            title="Experiment could not read its artifact",
-            detail=(f"Experiment #{nid} was pinned to an artifact lifecycle that can no longer be "
-                    "produced (reset, failed or deleted); nothing of it ran. Re-inject it against "
-                    "the artifact as it is now."),
-            browser=True, active=True, node_id=nid, node_generation=current.attempt,
         )
         if item:
             items.append(item)

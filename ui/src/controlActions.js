@@ -94,6 +94,10 @@ export const CONTROL = {
       parent_generations: parent_id != null && parent_generation != null
         ? { [parent_id]: parent_generation } : undefined,
     }),
+  // The inject FORM's body (`InjectNodePanel.jsx`), built whole by `injectNodeModel.js::
+  // buildInjectPayload` — the one place that may add `node_kind`/`uses` (doc 73 §1.4) and the
+  // parent's generation the operator saw. Never hand-build this body.
+  injectPayload: (rid, payload, options = {}) => runCommand(rid, 'inject_node', payload, options),
   // Fork-to-branch: the operator branches from an experiment they are reading — usually in a
   // HISTORICAL snapshot — with its idea EDITED. Deliberately `inject_node` and not `fork`: `fork`
   // asks the Researcher to improve a node and carries no idea at all, while an operator-authored
