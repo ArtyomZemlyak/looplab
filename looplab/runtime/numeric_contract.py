@@ -23,6 +23,8 @@ import math
 import re
 from typing import Optional
 
+from looplab.core.jsonutil import bounded_json_loads
+
 NUMERIC_OPS: tuple[str, ...] = ("<", "<=", ">", ">=", "==", "!=")
 MAX_STAGE_NUMERIC_RELATIONS = 8
 MAX_NUMERIC_KEY_CHARS = 64
@@ -115,7 +117,7 @@ def last_json_string(text: str, key: str) -> Optional[str]:
         if not (stripped.startswith("{") and stripped.endswith("}")):
             continue
         try:
-            doc = json.loads(stripped)
+            doc = bounded_json_loads(stripped)
         except ValueError:
             continue
         if not isinstance(doc, dict):
@@ -138,7 +140,7 @@ def last_readings(text: str, keys) -> dict:
         stripped = line.strip()
         if stripped.startswith("{") and stripped.endswith("}"):
             try:
-                doc = json.loads(stripped)
+                doc = bounded_json_loads(stripped)
             except (ValueError, RecursionError):
                 # A line too deep (or with an integer too long) to parse is not a reading — and the
                 # candidate's own stdout must not raise out of the contract check (2026-09-26).

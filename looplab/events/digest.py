@@ -11,7 +11,7 @@ import json
 import math
 from typing import Optional
 
-from looplab.core.jsonutil import surrogate_safe_tree
+from looplab.core.jsonutil import bounded_json_loads, surrogate_safe_tree
 from looplab.core.models import NodeStatus, RunState, coerce_node_id
 # Both moved to `core/numeric.py` (doc 25 XP-12): neither reads an event log, and keeping them here
 # forced `runtime` to import `events` purely to reach a math function. Re-exported so the historical
@@ -420,7 +420,7 @@ def _last_json_object(text: str) -> Optional[dict]:
         if not line.startswith("{"):
             continue
         try:
-            obj = json.loads(line)
+            obj = bounded_json_loads(line)
         except (ValueError, TypeError, RecursionError):
             # RecursionError too: `json.loads` raises it past ~1,000 levels, and this reads a tail of
             # the CANDIDATE's own stdout — one deep line must render nothing, not raise.

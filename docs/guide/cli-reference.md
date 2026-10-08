@@ -10,6 +10,7 @@ looplab resume          Resume/continue a run (crash, stopped, or finished) by r
 looplab stop            Stop a run: freeze it, NO wrap-up (resumable)
 looplab finalize        Finalize a run: stop AND wrap up (report/lessons/cost)
 looplab repair-log      Repair a mid-file-corrupted event log (FUSE/NFS/S3)
+looplab upstream-auto   Switch a run's upstream automation off/on (the kill switch)
 looplab inspect         Show the raw launch snapshot + current folded best result
 looplab comparability   What each run's number may be RANKED against — refuses across evaluations
 looplab replay          Pure fold of the event log → state (read-only)
@@ -685,6 +686,21 @@ deletion path takes `engine.lock` itself before it touches anything, so a live e
 with `engine_running` whatever state its finalization is in.
 
 ---
+
+## `upstream-auto`
+
+The kill switch of a run's **automatic** upstream steps (doc 73 §4.2 G2): the automated author's
+drafts and the engine's own checks and base advances. It appends the same `upstream_auto_set` control
+the UI, the API and MCP send through `/commands`; the fold keeps the last one
+(`RunState.upstream_auto_paused`), so it works on a live run (the engine stops on its next turn) or a
+stopped one (it stays off after `resume`). An operation the operator queued is still served, and an
+automatic step already running finishes. `looplab inspect` prints the switch beside the lane's mode,
+queue, the author's drafts and spend, and any step a cap held back.
+
+```bash
+looplab upstream-auto RUN_DIR --off --reason "reviewing the last promotion"
+looplab upstream-auto RUN_DIR --on
+```
 
 ## `repair-log`
 

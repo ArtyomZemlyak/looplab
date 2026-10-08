@@ -28,6 +28,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional
 
+from looplab.core.jsonutil import bounded_json_loads
 # The replacement-only file-identity tier the stage-log cursor keys on (`_stage_log_cursor`).
 from looplab.core.atomicio import same_file_entry
 from looplab.core.node_evidence import open_untrusted_regular, read_bounded_regular_target
@@ -477,8 +478,11 @@ def _confined(workdir, rel) -> Optional[Path]:
     workdir at eval time (`ln -s b a; ln -s a b`, then a `file_json` spec naming `a`). Pre-extraction
     that escaped `read_metric` and took down the run instead of failing the node.
     """
+    # `resolve_refusing_loops`: Python 3.13's non-strict `resolve()` stopped raising on a loop, and
+    # this guard then ACCEPTED one; the helper restores the refusal on every version.
+    from looplab.core.pathsafe import resolve_refusing_loops
     try:
-        path = (Path(workdir) / rel).resolve()
+        path = resolve_refusing_loops(Path(workdir) / rel)
         return path if _is_within(path, Path(workdir).resolve()) else None
     except (OSError, ValueError, RuntimeError):
         return None
@@ -499,7 +503,7 @@ def declared_failure_reason(stdout: str) -> Optional[str]:
         if not (line.startswith("{") and line.endswith("}")):
             continue
         try:
-            row = json.loads(line)
+            row = bounded_json_loads(line)
         except (ValueError, RecursionError):
             # RecursionError too: this runs on EVERY command-eval result, outside any guard, and a
             # line nested past ~1,000 levels raised it straight out of the eval (critic 2026-09-26).
@@ -542,7 +546,7 @@ def _read_file(stdout, workdir, spec, wrap, since, env=None) -> Optional[float]:
         pat = regex_pattern(spec)
         return _regex_metric(text, pat, spec.get("group", 1)) if pat else None
     try:
-        return _to_float(_dig(json.loads(text), spec.get("key", "metric")))
+        return _to_float(_dig(bounded_json_loads(text), spec.get("key", "metric")))
     except (ValueError, RecursionError):
         # A file the CANDIDATE wrote: malformed (`JSONDecodeError` is a `ValueError`), an integer
         # literal past 4,300 digits (a plain `ValueError`) or nested past ~1,000 levels
@@ -615,8 +619,8 @@ def _read_host_score(stdout, workdir, spec, wrap, since, env=None) -> Optional[f
     if preds_text is None:
         return None
     try:
-        preds = json.loads(preds_text)
-        labels = json.loads(labels_path.read_text(encoding="utf-8-sig", errors="replace"))
+        preds = bounded_json_loads(preds_text)
+        labels = bounded_json_loads(labels_path.read_text(encoding="utf-8-sig", errors="replace"))
     except (ValueError, RecursionError, OSError):   # candidate predictions: see `_read_file`
         return None
     return _to_float(host_score(spec.get("scorer", "rmse"), preds, labels, key=spec.get("key")))

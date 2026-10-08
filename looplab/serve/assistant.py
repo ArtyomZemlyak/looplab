@@ -2060,9 +2060,12 @@ def build_tools(run_root, alive_fn: Optional[Callable] = None, mode: str = DEFAU
 
     providers.append(RunLauncherTools())
     from looplab.tools.upstream_tools import UpstreamTools
-    from looplab.engine.upstream_serve import upstream_mode_setting
-    providers.append(UpstreamTools(run_root, mode=mode, approver=approver,
-                                   live_lane=upstream_mode_setting(settings) != "off"))
+    # The LIVE descriptions, whatever this server's own `upstream_mode` says: each defers to the
+    # run's `upstream_status` (its launched mode, `engine/upstream_serve.py::resolve_upstream_mode`)
+    # and keeps the stopped-engine instruction for a run that serves no live lane — so they are true
+    # of every run under this root. Keyed on the SERVER's setting they told the Assistant to pause a
+    # run launched under `auto` whenever the server had since been set `off` (critic 2026-10-08).
+    providers.append(UpstreamTools(run_root, mode=mode, approver=approver, live_lane=True))
     if portfolio_ok:
         # PART V §22.4 (Phase 2): edit the shared cross-run concept TAXONOMY (merge/rename/purge/split)
         # via the append-only, reversible governance ledger. The provider itself gates: it contributes

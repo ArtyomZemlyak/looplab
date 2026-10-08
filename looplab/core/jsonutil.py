@@ -104,6 +104,46 @@ def strict_json_loads(document: "str | bytes | bytearray") -> object:
         raise JSONTooDeep(str(exc)) from exc
 
 
+# How deep a CANDIDATE-written JSON document may nest before its readers refuse it as unparseable.
+# No metric line, trainer state or stage manifest a real pipeline writes comes near it, and it is far
+# below the interpreter's recursion limit, so every recursive walk downstream of a reader stays safe.
+MAX_CANDIDATE_JSON_DEPTH = 200
+
+
+def _nesting_exceeds(value, limit: int) -> bool:
+    """Whether `value` nests containers deeper than `limit` — iteratively, so the check itself never
+    recurses."""
+    stack = [(value, 1)]
+    while stack:
+        current, depth = stack.pop()
+        if depth > limit:
+            return True
+        children = current.values() if isinstance(current, dict) else current
+        stack.extend((c, depth + 1) for c in children if isinstance(c, (dict, list)))
+    return False
+
+
+def bounded_json_loads(document: "str | bytes | bytearray", *,
+                       max_depth: int = MAX_CANDIDATE_JSON_DEPTH) -> object:
+    """`json.loads` for text a CANDIDATE wrote (its stdout, its trainer state, its stage manifest),
+    refusing a document nested deeper than `max_depth` with `JSONTooDeep` — a `ValueError`, which
+    every such reader already treats as "not a JSON reading".
+
+    Those readers used to rely on `json.loads` RAISING `RecursionError` past ~1,000 levels, and
+    Python 3.13 stopped doing that for a few thousand: `'[' * 5000` now parses, and the first
+    recursive walk AFTER the reader's `try` (`surrogate_safe_tree`, a canonical dump, a prompt
+    render) raised it instead, out of the reader — a candidate's own output taking the run down
+    (`tests/test_candidate_stdout_cannot_pause_the_run.py`, red on 3.13.16). Semantics are plain
+    `json.loads` otherwise: no strict-key or constant refusal, unlike `strict_json_loads`."""
+    try:
+        value = json.loads(document)
+    except RecursionError as exc:
+        raise JSONTooDeep(str(exc)) from exc
+    if isinstance(value, (dict, list)) and _nesting_exceeds(value, max_depth):
+        raise JSONTooDeep(f"JSON nested deeper than {max_depth} levels")
+    return value
+
+
 DIGEST_TEXT_CAP = 131_072
 """Preimage byte budget shared by the two BOUNDED identity minters (doc 25 CO-08).
 

@@ -315,3 +315,29 @@ def test_the_prompts_fence_candidate_text_while_the_envelope_is_on():
     assert "UNTRUSTED" not in plain[0]["content"] + plain[1]["content"]
     assert fenced[1]["content"].count("UNTRUSTED_RUN_EVIDENCE") >= 4, "the context AND the draft"
     assert "quoted evidence" in fenced[0]["content"]
+
+
+def test_the_kill_switch_from_the_cli_and_the_inspect_lines(tmp_path, monkeypatch):
+    """doc 73 §4.3: the switch had no `looplab` command and `inspect` printed neither it nor what a cap
+    held back. Both read and write the same rows the UI does."""
+    from typer.testing import CliRunner
+
+    from looplab.cli import app
+    lane, store, generation, body = fixture(tmp_path)
+    runner = CliRunner()
+    off = runner.invoke(app, ["upstream-auto", str(lane.rd), "--off", "--reason", "reviewing"])
+    assert off.exit_code == 0, off.output
+    row, = [e.data for e in store.read_all() if e.type == "upstream_auto_set"]
+    assert row == {"enabled": False, "reason": "reviewing"}
+    assert fold(store.read_all()).upstream_auto_paused is True
+    again = runner.invoke(app, ["upstream-auto", str(lane.rd), "--off"])
+    assert "already off" in again.output and len([e for e in store.read_all()
+                                                   if e.type == "upstream_auto_set"]) == 1
+    calls = []
+    _model(monkeypatch, _champion_draft(), calls=calls)
+    _serve(_live_engine(lane, store), turns=3)
+    assert calls == [], "the switch holds the author"
+    shown = runner.invoke(app, ["inspect", str(lane.rd)])
+    assert "upstream lane: auto" in shown.output and "automation OFF" in shown.output, shown.output
+    assert runner.invoke(app, ["upstream-auto", str(lane.rd), "--on"]).exit_code == 0
+    assert fold(store.read_all()).upstream_auto_paused is False

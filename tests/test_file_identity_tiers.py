@@ -318,13 +318,15 @@ def _stat_on_another_device(base: os.stat_result) -> os.stat_result:
     """
     # `st_file_attributes` rides along where the platform has it (Windows): it is not one of the ten
     # positional fields, and leaving it out made the copy differ from `base` in MORE than st_dev
-    # there (CI run 35804658308). A platform without the field ignores the key.
+    # there (CI run 35804658308). Only where the platform HAS it: Python 3.13 refuses a key the
+    # platform's `stat_result` does not define (3.12 ignored it).
     swapped = os.stat_result(
         (base.st_mode, base.st_ino, base.st_dev + 1, base.st_nlink, base.st_uid, base.st_gid,
          base.st_size, base.st_atime, base.st_mtime, base.st_ctime),
         {"st_atime_ns": base.st_atime_ns, "st_mtime_ns": base.st_mtime_ns,
          "st_ctime_ns": base.st_ctime_ns,
-         "st_file_attributes": getattr(base, "st_file_attributes", 0)})
+         **({"st_file_attributes": base.st_file_attributes}
+            if hasattr(base, "st_file_attributes") else {})})
     assert file_identity(swapped)[1:] == file_identity(base)[1:], "only st_dev may differ"
     assert file_identity(swapped) != file_identity(base)
     return swapped

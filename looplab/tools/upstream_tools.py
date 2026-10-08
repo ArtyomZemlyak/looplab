@@ -15,7 +15,8 @@ class UpstreamTools:
         self.run_root, self.mode, self.approver = Path(run_root).resolve(), mode, approver
         # doc 73 §2.5: describe the LIVE lane (`engine/upstream_serve.py`) instead of the
         # stopped-engine one. OFF here because the descriptions are part of the Assistant's prompt;
-        # `serve/assistant.py` turns it on from `upstream_mode_setting`.
+        # `serve/assistant.py` turns it on — the live texts defer to each run's `upstream_status`,
+        # so they hold for a run served by either lane.
         self.live_lane = bool(live_lane)
 
     def specs(self):

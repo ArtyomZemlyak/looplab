@@ -279,3 +279,26 @@ def resolve_settled(path) -> Path:
             break
         answer = again
     return answer
+
+
+def resolve_refusing_loops(path) -> Path:
+    """`Path(path).resolve()` that RAISES on a symlink loop on every Python, as 3.12 did.
+
+    Python 3.13 changed non-strict `resolve()`: a loop is no longer an error (`RuntimeError`) but
+    resolves to a path that still names the loop, so a containment guard written for 3.12 — "a
+    failure out of `.resolve()` is a refusal" — ACCEPTED a candidate's `ln -s b a; ln -s a b` as a
+    path inside its workdir (`runtime/command_eval.py::_confined`, measured on 3.13.16:
+    `tests/test_metric_reader_confinement.py` red). Asked strictly first, so a loop anywhere in the
+    path shows as `ELOOP` (3.13) or `RuntimeError` (3.12) and is re-raised as the `RuntimeError` the
+    callers already refuse on; a component that merely does not exist yet keeps the non-strict
+    answer every caller relied on."""
+    import errno
+    requested = Path(path)
+    try:
+        return requested.resolve(strict=True)
+    except FileNotFoundError:
+        return requested.resolve()
+    except OSError as exc:
+        if exc.errno == errno.ELOOP:
+            raise RuntimeError(f"Symlink loop from {str(requested)!r}") from exc
+        return requested.resolve()

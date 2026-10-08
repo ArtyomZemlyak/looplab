@@ -212,6 +212,18 @@ def test_the_assistant_tools_describe_the_live_lane_only_when_wired(tmp_path):
     assert "QUEUES the check" in live
 
 
+def test_the_assistant_describes_the_live_lane_whatever_the_servers_own_mode(tmp_path):
+    """Critic 2026-10-08: keyed on the SERVER's `upstream_mode`, a server set `off` told the Assistant
+    to pause a run launched under `auto`. The live texts defer to each run's `upstream_status`, so
+    they are true of every run under the root."""
+    from looplab.serve.assistant import build_tools
+    tools = build_tools(tmp_path, mode="auto", settings=Settings(upstream_mode="off"),
+                        approver=lambda *a, **k: True)
+    text = " ".join(s["function"]["description"] for s in tools.specs()
+                    if s["function"]["name"].startswith("upstream_"))
+    assert "QUEUES the check" in text and "otherwise the engine must be stopped" in text
+
+
 # ------------------------------------------------------------------------------- the Developer moves
 def test_a_developer_built_at_launch_rebinds_to_the_advanced_base(tmp_path):
     from looplab.adapters.repo_task import LLMRepoDeveloper

@@ -57,6 +57,7 @@ from typing import Literal, Optional
 
 from pydantic import BaseModel, Field
 
+from looplab.core.jsonutil import bounded_json_loads
 from looplab.core.llm import BudgetExceeded
 from looplab.core.llm_broker import in_llm_lane
 # The confidence normalizer is the training monitor's, deliberately not a second spelling: both watchdogs
@@ -290,7 +291,7 @@ def _json_objects_newest_first(log_tail: str):
         if not line.startswith("{"):
             continue
         try:
-            obj = json.loads(line)
+            obj = bounded_json_loads(line)
         except (ValueError, RecursionError):   # JSONDecodeError is a ValueError; so is the
             continue                            # 4,300-digit integer-literal limit (2026-09-26)
         if isinstance(obj, dict):

@@ -238,6 +238,39 @@ def upstream_live_view(run_dir, events, *, cursor: Optional[int] = None) -> Opti
             "held": held[-LIVE_AUTHORED_ROWS:], "author_spent_usd": round(author_spent_usd(events), 6)}
 
 
+def upstream_board_lines(run_dir, state, events) -> list[str]:
+    """`looplab inspect`'s upstream lines: the folded board (`core/upstream_board.py::board_lines`),
+    then the LIVE lane as `upstream_live_view` reads it — the mode it serves, the kill switch, the
+    queue, the author's drafts and spend, the steps a cap held back. [] when the run never touched the
+    lane."""
+    from looplab.core.upstream_board import board_lines
+    out = list(board_lines(state))
+    live = upstream_live_view(run_dir, events, cursor=getattr(state, "lane_ops_done", None))
+    if live is None:
+        return out
+    head = f"upstream lane: {live['mode']}" + (" (as configured; no engine armed it yet)"
+                                               if live["configured"] else "")
+    if live["reason"]:
+        head += f" — {live['reason']}"
+    if live["auto_paused"]:
+        head += " — automation OFF (kill switch; `looplab upstream-auto RUN --on` resumes it)"
+    out.append(head)
+    queue = live["queue"]
+    if queue["total"]:
+        out.append(f"  queue: {queue['pending']} waiting of {queue['total']}")
+    if live["author"] or live["authored_total"]:
+        counts: dict = {}
+        for row in live["authored"]:
+            counts[row["outcome"]] = counts.get(row["outcome"], 0) + 1
+        out.append(f"  author: {live['authored_total']} row(s), ${live['author_spent_usd']:.4f} spent"
+                   + (" — last: " + ", ".join(f"{k} {v}" for k, v in sorted(counts.items()))
+                      if counts else ""))
+    for row in live["held"][-3:]:
+        out.append(f"  held: {row['op']} {row.get('reason') or ''}"
+                   + (f" ({row['proposal_id']})" if row.get("proposal_id") else ""))
+    return out
+
+
 def claims_unresolved(events) -> bool:
     """A lane claim (a proposal's or a gate's) has no completion and was not abandoned — the lane
     refuses every new operation until the operator resolves it, so `auto` asks none and the author
