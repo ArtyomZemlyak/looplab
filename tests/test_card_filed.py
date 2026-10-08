@@ -219,3 +219,46 @@ def test_the_real_intake_closes_the_payload_and_null_un_files(tmp_path):
     store.append(EV_CARD_FILED, {"id": exp, "parent_card_id": qx, "source": "operator"})
     assert normalize_control(_Srv(), rd, EV_CARD_FILED, {"id": exp, "parent_card_id": None})[
         "parent_card_id"] is None
+
+
+# ------------------------------------------------------------------------- the inject paths
+
+def _run(tmp_path):
+    from looplab.events.eventstore import EventStore
+
+    rd = tmp_path / "run"
+    rd.mkdir()
+    store = EventStore(rd / "events.jsonl")
+    for ev in _log():
+        store.append(ev.type, ev.data)
+
+    class _Srv:
+        def state(self, rd):
+            return fold(EventStore(rd / "events.jsonl").read_all())
+
+    return rd, _Srv()
+
+
+def test_an_inject_may_name_the_question_it_answers_and_a_wrong_name_is_refused(tmp_path):
+    """Every inject path now offers `idea.parent_card_id`. A name the board does not hold used to be
+    accepted and then silently dropped by the lineage pass, so the operator believed the node filed."""
+    from fastapi import HTTPException
+
+    from looplab.events.types import EV_INJECT_NODE
+    from looplab.serve.control_validation import normalize_control
+
+    rd, srv = _run(tmp_path)
+    (qx, _qy), exp = _ids(srv.state(rd))
+    out = normalize_control(srv, rd, EV_INJECT_NODE, {
+        "idea": {"operator": "inject", "rationale": "try z", "parent_card_id": qx}})
+    assert out["idea"]["parent_card_id"] == qx, "the durable inject carries the filing"
+    for bad in ("no-such-question", exp):            # missing, and an experiment rather than a question
+        with pytest.raises(HTTPException) as err:
+            normalize_control(srv, rd, EV_INJECT_NODE, {
+                "idea": {"operator": "inject", "rationale": "try z", "parent_card_id": bad}})
+        assert err.value.status_code == 400
+        assert err.value.detail["code"] == "inject_question_invalid"
+    plain = normalize_control(srv, rd, EV_INJECT_NODE,
+                              {"idea": {"operator": "inject", "rationale": "try z"}})
+    assert not plain["idea"].get("parent_card_id"), "an inject naming none is unchanged"
+

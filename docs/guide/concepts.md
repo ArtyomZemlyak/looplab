@@ -1897,6 +1897,22 @@ both resolution paths and BEFORE the self-edge test, which is what lets the pare
 direction named in `card_id` is nulled and deliberately NOT re-routed into `parent_card_id`: the
 prompt already says which field to use, and inferring the filing would mint a link nobody authored.
 
+**Operator and inject filings (2026-10-08).** A Researcher proposal is not the only way work
+reaches the board. On `minionerec-backbones-v11`, 39 of 45 experiments were operator injects, and
+none of them named a question. Three inputs now let the author file one:
+- `inject_node` takes `idea.parent_card_id`. The UI inject form offers it and pre-selects the
+  question that the chosen parent's card is filed under. The Assistant's `inject_experiment` takes
+  it as `question_id`. The server refuses a name that is not an open question
+  (`inject_question_invalid`). Before this, such a name was accepted and then silently dropped by
+  the lineage pass.
+- After the fact, the `card_filed` control files an experiment under a question or un-files it.
+  It is last-write-wins per card, replaces the authored edge, and is marked `filed_by: "operator"`
+  on the card. The Research view's **File under** / **Keep here** controls write it.
+
+Only a recorded filing reaches the engine: the question's rollup, `read_questions`, and the
+open-question cap (`research_cadence.py::open_belief_populations` counts only questions with no
+experiment filed under them). The view's concept inference never does.
+
 **And since 2026-08-26 an agent can ASK for the board, not only be shown it.** `read_questions`
 (`tools/question_board.py`) returns each open research question with its concepts, the experiments
 filed under it, and what each of those measured. **It shipped BROKEN and the failure is worth

@@ -1073,6 +1073,28 @@ def _normalize_fork_receipt(ctx: _ControlIntake, parents: list, idea: Idea) -> d
     }
 
 
+def _check_inject_question(ctx: _ControlIntake, question_id: Optional[str]) -> None:
+    """An inject that names the research question it answers (`idea.parent_card_id`) must name one.
+
+    Every inject path now offers the field (the UI form, the Assistant's `inject_experiment`); before
+    any of them did, none of v11's 39 operator injects named a question. A name the board does not
+    hold was ACCEPTED and silently dropped by `card_ledger.py::_apply_card_lineage` (an edge to a
+    missing card becomes a root), so the operator believed the experiment was filed and the Research
+    view showed it unfiled. Refused here instead, while the operator is still looking.
+    """
+    if not question_id:
+        return
+    question = ctx.state().cards.get(question_id)
+    if (question is None or getattr(question, "card_kind", None) != "direction"
+            or getattr(question, "merged_into", None) is not None):
+        raise HTTPException(400, {
+            "code": "inject_question_invalid",
+            "message": f"idea.parent_card_id {question_id!r} is not an open research question "
+                       "on this board",
+            "remediation": "name one of the run's research questions, or leave it out",
+        })
+
+
 def _normalize_inject_node(ctx: _ControlIntake) -> dict:
     data = ctx.data
     # BEFORE the import, because the import MINTS this key and after it runs a server-derived
@@ -1134,6 +1156,7 @@ def _normalize_inject_node(ctx: _ControlIntake) -> dict:
                   for row in exc.errors(include_url=False)[:5]]
         raise HTTPException(400, f"idea is invalid: {'; '.join(issues)}") from exc
     data["idea"] = durable_idea_payload(normalized_idea)
+    _check_inject_question(ctx, normalized_idea.parent_card_id)
     if data.get("parent_id") is not None:
         data["parent_id"] = ctx.node("parent_id")
     if data.get("parent_ids") is not None:

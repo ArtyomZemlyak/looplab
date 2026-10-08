@@ -1396,3 +1396,27 @@ def test_a_long_single_line_preview_shows_its_head_not_only_the_cut_receipt():
     assert len(card) <= APPROVAL_PREVIEW_CHARS
     assert card.count("word") > 100, "the reviewer reads a head of the directive itself"
     assert clip_approval_preview(card) == card, "idempotent: the router re-bounds every preview"
+
+
+def test_inject_experiment_files_the_node_under_the_question_it_names(tmp_path):
+    """`question_id` rides as `idea.parent_card_id` — the filing no inject path offered before (none
+    of minionerec-backbones-v11's 39 operator injects named a question). The approval card names it;
+    the server refuses a name that is not an open question (`inject_question_invalid`)."""
+    rd = tmp_path / "svc"
+    _run(rd)
+    seen = []
+    commands = _RecordingCommands(tmp_path, append=False)
+    t = RunControlTools(tmp_path, alive_fn=lambda _rd: False, mode="default",
+                        approver=lambda action: (seen.append(action), "allow_once")[1],
+                        command_service=commands, allow_inject=True)
+    spec = next(s for s in t.specs() if s["function"]["name"] == "inject_experiment")
+    assert "question_id" in spec["function"]["parameters"]["properties"]
+    assert "completed" in t.execute("inject_experiment", {
+        "run_id": "svc", "rationale": "a wider beam", "question_id": " q-beam "})
+    assert commands.calls[0][2]["idea"] == {
+        "operator": "inject", "rationale": "a wider beam", "parent_card_id": "q-beam"}
+    assert "answers question: q-beam" in str(seen[-1])
+    assert "question_id must be" in t.execute("inject_experiment", {
+        "run_id": "svc", "rationale": "x", "question_id": 7})
+    assert "completed" in t.execute("inject_experiment", {"run_id": "svc", "rationale": "plain"})
+    assert "parent_card_id" not in commands.calls[-1][2]["idea"], "naming none sends none"

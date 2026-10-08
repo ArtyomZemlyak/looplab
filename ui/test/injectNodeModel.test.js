@@ -5,7 +5,8 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 
 import {
-  buildInjectPayload, injectCandidates, injectSubmitDecision, parseInjectParams,
+  buildInjectPayload, injectCandidates, injectQuestions, injectSubmitDecision, parseInjectParams,
+  suggestedInjectQuestion,
 } from '../src/injectNodeModel.js'
 import { RUN_ROUTE_PANELS, REVIEW_SAFE_PANEL_NAMES } from '../src/runRouteState.js'
 
@@ -66,4 +67,32 @@ test('parameters are an object of finite numbers, and an empty box sends none', 
 test('the panel is a route an owner can open and a review link cannot', () => {
   assert.ok(RUN_ROUTE_PANELS.includes('inject'))
   assert.ok(!REVIEW_SAFE_PANEL_NAMES.includes('inject'))
+})
+
+test('an inject may name the question it answers; the parent\'s question is the suggestion', () => {
+  // None of minionerec-backbones-v11's 39 operator injects named a question: no surface offered it.
+  const withBoard = {
+    nodes: {
+      1: { id: 1, status: 'evaluated', attempt: 0, idea: { rationale: 'base', card_id: 'card-1' } },
+      2: { id: 2, status: 'evaluated', attempt: 0, idea: { rationale: 'loose', card_id: 'card-2' } },
+    },
+    cards: {
+      'q-b': { card_kind: 'direction', statement: 'does beam width matter' },
+      'q-a': { card_kind: 'direction', statement: 'does a bigger backbone help' },
+      'q-old': { card_kind: 'direction', statement: 'merged away', merged_into: 'q-a' },
+      'card-1': { card_kind: 'experiment', parent_card_id: 'q-b' },
+      'card-2': { card_kind: 'experiment' },
+    },
+  }
+  assert.deepEqual(injectQuestions(withBoard).map(q => q.id), ['q-a', 'q-b'],
+    'open questions only, ordered by statement; a merged-away row is not offered')
+  assert.equal(suggestedInjectQuestion(withBoard, 1), 'q-b', 'built on #1 → #1\'s question')
+  assert.equal(suggestedInjectQuestion(withBoard, 2), null, 'an unfiled parent suggests nothing')
+  assert.equal(suggestedInjectQuestion(withBoard, null), null)
+  const filed = buildInjectPayload({ state: withBoard, draft: draft({ questionId: 'q-a' }) })
+  assert.equal(filed.idea.parent_card_id, 'q-a')
+  const none = buildInjectPayload({ state: withBoard, draft: draft({ questionId: null }) })
+  assert.ok(!('parent_card_id' in none.idea), 'naming none sends no key — the historical shape')
+  assert.equal(injectSubmitDecision({ state: withBoard, draft: draft({ questionId: 'q-old' }) }).code,
+    'unknown_question')
 })
