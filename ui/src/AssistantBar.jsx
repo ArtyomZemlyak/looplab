@@ -1146,6 +1146,11 @@ export default function AssistantBar({ runId, hidden = false, onReady }) {
           }
           const acknowledgedLiveShareIds = assistantLiveShareIds(latest.meta)
           exactState = 'posted'
+          // NOW the turn is being re-run, and only now does the placeholder say so
+          // (`assistantRecovery.js::replayingTurnNotice`): a reattach to a worker that is still
+          // answering carries `recoveryNeeded` as well, and is not a replay.
+          patchLast(prev => prev && prev.role === 'assistant' && prev.streaming
+            ? { replaying: true } : prev)
           recoveryCtrl = new AbortController(); abortRef.current = recoveryCtrl
           // Re-read above before POST: if the old worker persisted its reply after our first GET, this
           // path observes it instead of accidentally appending a fresh duplicate turn.
@@ -2428,6 +2433,9 @@ export default function AssistantBar({ runId, hidden = false, onReady }) {
     setTurnStarting(false); setBusy(true); runningRef.current = true
     const ctrl = new AbortController(); abortRef.current = ctrl
     let acc = ''
+    // Step/prose events the stream itself delivered: once it has delivered any, it owns the bubble's
+    // activity and the progress fallback stops surfacing activity-only frames over it.
+    let streamEvents = 0
     let streamedFailure = ''
     // The two concurrent fallback polls beside the stream — permissions and the buffered-proxy
     // progress mirror — are `assistantTurnPolls.js` now (doc 25 UI-05). They share this turn's
@@ -2439,6 +2447,7 @@ export default function AssistantBar({ runId, hidden = false, onReady }) {
       onPermissions: pending => setPending(pending),
       readProgress: () => assistantProgress(id),
       streamedText: () => acc,
+      streamEvents: () => streamEvents,
       onProgress: pp => patchLast(prev => {
         if (!(prev && prev.role === 'assistant' && prev.streaming)) return prev
         const patch = progressPatch(pp, prev)
@@ -2456,14 +2465,20 @@ export default function AssistantBar({ runId, hidden = false, onReady }) {
           patchLast({ content: assistantErrorInfo(acc) ? normalizedFailureText(acc) : acc,
             lastEventAt: Date.now() })
         }),
-        onText: safeAttempt((txt) => patchLast(prev => ({ activity: [...(prev.activity || []), { type: 'text', content: txt }],
-          lastEventAt: Date.now() }))),
-        onStep: safeAttempt((s) => patchLast(prev => {
-          const a = prev.activity || []; const last = a[a.length - 1]
-          return last && last.type === 'tools'
-            ? { activity: [...a.slice(0, -1), { ...last, labels: [...last.labels, s] }], lastEventAt: Date.now() }
-            : { activity: [...a, { type: 'tools', labels: [s] }], lastEventAt: Date.now() }
-        })),
+        onText: safeAttempt((txt) => {
+          streamEvents += 1
+          patchLast(prev => ({ activity: [...(prev.activity || []), { type: 'text', content: txt }],
+            lastEventAt: Date.now() }))
+        }),
+        onStep: safeAttempt((s) => {
+          streamEvents += 1
+          patchLast(prev => {
+            const a = prev.activity || []; const last = a[a.length - 1]
+            return last && last.type === 'tools'
+              ? { activity: [...a.slice(0, -1), { ...last, labels: [...last.labels, s] }], lastEventAt: Date.now() }
+              : { activity: [...a, { type: 'tools', labels: [s] }], lastEventAt: Date.now() }
+          })
+        }),
         onTodos: safeAttempt((items) => patchLast({ todos: items })),
         onError: safeAttempt((e) => {
           streamedFailure = normalizedFailureText(e)

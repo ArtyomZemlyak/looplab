@@ -99,15 +99,26 @@ export function unverifiedExtraMetricKeys(nodes, keys) {
 // "the print statement cannot tell them apart" are different claims, and a table that renders the
 // second as the first is stating something false.
 //
-// NOT PER KEY, because the writer cannot produce a partially-backfilled node: the fold declines a
-// node that already carries ANY extra metric, so a backfilled map is backfilled entirely. The
-// `node` argument is still taken per call so the two readers below have the same shape as the
-// channel ones and a caller cannot pass the wrong object silently.
+// PER KEY SINCE 2026-10-07. The score backfill alone could not produce a partially-backfilled node
+// (the fold declines a node that already carries ANY extra metric), but an operator import
+// (`looplab import-metrics`) or a declared evaluation track (`looplab evaluate-track`) — both the
+// `extra_metrics_imported` row — adds reconstructed keys BESIDE live ones, and the marker then names
+// them in `keys` (`extraMetricKeyIsBackfilled` below). So a node's map may be part measured, part
+// reconstructed, and a surface asks per key.
+//
+// THE HELP IS GENERIC ON PURPOSE. The marker does not say which writer added a key: an import onto a
+// node the score backfill already reached folds both sets into one `keys` list
+// (`looplab/events/replay.py::_on_extra_metrics_imported`). What every reconstruction shares is that
+// it entered the record after the run; "recovered from the preserved score log" is true of the
+// backfill only, and an imported or tracked value was never in that log at all.
 export const EXTRA_METRIC_RECONSTRUCTED_LABEL = 'reconstructed'
-export const EXTRA_METRIC_RECONSTRUCTED_HELP =
-  'Recovered from the preserved score log after the run, not recorded while it was happening. The '
-  + 'operator\'s own scoring program printed it — but at the precision it chose to print, which is '
-  + 'coarser than the objective, so two nodes equal here are not known to be equal.'
+// One literal per SENTENCE, so each is a whole entry in the Russian catalogue rather than a fragment
+// cut at a line break.
+export const EXTRA_METRIC_RECONSTRUCTED_HELP = [
+  'Added to the record after the run, not recorded while the run was evaluating.',
+  'It was recovered from the preserved score log, imported by the operator, or measured afterwards by an evaluation track; the record does not say which.',
+  'Its precision may be coarser than the objective\'s, so two nodes equal here are not known to be equal.',
+].join(' ')
 
 // Absent means MEASURED, and that is the safe direction here — the opposite of the channel map's.
 // An absent channel means "nobody wrote down where this came from" and must not read as the
@@ -155,6 +166,14 @@ export function extraMetricSourceHelp(node, key) {
   const decimals = extraMetricPrecision(node, key)
   const precision = decimals == null ? '' : ` Printed to ${decimals} decimal place(s).`
   return `${EXTRA_METRIC_CHANNEL_HELP[channel]} ${EXTRA_METRIC_RECONSTRUCTED_HELP}${precision}`
+}
+
+// Does any of these nodes show a RECONSTRUCTED value under any of these keys? What a table's
+// reconstruction footnote is printed on: per key, and only for a value that is actually there, so an
+// import that added one key a table does not show cannot summon a sentence about rows it does.
+export function anyReconstructedExtraMetric(nodes, keys) {
+  return (nodes || []).some(node => node && (keys || []).some(key => key != null
+    && node.extra_metrics?.[key] != null && extraMetricKeyIsBackfilled(node, key)))
 }
 
 // A value that is caveated for EITHER reason — the channel is not the guarded one, or the whole map

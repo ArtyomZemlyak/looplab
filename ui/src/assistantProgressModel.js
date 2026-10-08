@@ -52,6 +52,23 @@ export function progressHasNews(progress) {
     || (Array.isArray(progress.activity) && progress.activity.length))
 }
 
+/** Has this frame MOVED since `previous` — the frame the caller last surfaced, or null? A newer
+ *  `last_event`, or activity/steps/answer that differ from it. A frame with no news never has.
+ *  The send path's buffered-proxy fallback (`assistantTurnModel.js::shouldSurfaceProgress`) asks it
+ *  so a turn deep in tool rounds — `text` empty, the prose in `activity` — still moves its bubble,
+ *  and so an unchanged frame polled again does not re-render the live Turn once a second. */
+export function progressMovedSince(progress, previous) {
+  if (!progressHasNews(progress)) return false
+  if (!previous) return true
+  const at = frame => {
+    const moved = Number(frame && frame.last_event)
+    return Number.isFinite(moved) && moved > 0 ? moved : 0
+  }
+  if (at(progress) > at(previous)) return true
+  const shape = frame => JSON.stringify([frame.text || '', frame.steps || null, frame.activity || null])
+  return shape(progress) !== shape(previous)
+}
+
 /** "HH:MM:SS" of a ms timestamp in the viewer's clock, or '' for none. The live line prints the
  *  time the turn last MOVED rather than a ticking counter: a turn that has stalled shows a time that
  *  stops changing, with no timer re-rendering every message on screen. */

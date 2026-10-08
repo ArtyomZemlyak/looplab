@@ -219,6 +219,30 @@ test('the star row reads the key\'s own source, and the task metric sits beside 
   assert.match(rowsOf(plain).find(tr => tr.textContent.includes('★')).textContent, /measured/)
 })
 
+test('the reconstruction footnote is asked per key and does not call an import log-recovered',
+  async () => {
+    // An operator import / evaluation track (`extra_metrics_imported`) adds reconstructed keys
+    // BESIDE live ones and names them in the marker's `keys`; it was never in the score log.
+    const footnote = el => [...el.querySelectorAll('div.muted')]
+      .find(div => div.textContent.startsWith('Rows marked reconstructed'))
+    const n0 = {
+      ...node(0, { 'FUR@20': 0.13, 'FUR@200': 0.36 }, { 'FUR@20': 'declared', 'FUR@200': 'declared' }),
+      extra_metrics_backfill: { backfilled: true, keys: ['FUR@200'] },
+    }
+    const imported = footnote(await render(run([n0])))
+    assert.ok(imported, 'an imported key on screen prints the footnote')
+    assert.match(imported.textContent,
+      /added to the record after the run[\s\S]*imported by the operator, or measured afterwards by an evaluation track/)
+    assert.doesNotMatch(imported.textContent, /were recovered from the preserved score log after the run/,
+      'not every reconstruction came out of the score log')
+    // A marker naming only a key this node does not show cannot summon a sentence about its rows.
+    const elsewhere = { ...n0, extra_metrics_backfill: { backfilled: true, keys: ['absent@1'] } }
+    assert.equal(footnote(await render(run([elsewhere]))), undefined)
+    // A whole-map marker (the score backfill) still prints it, as before.
+    const whole = { ...n0, extra_metrics_backfill: { backfilled: true } }
+    assert.ok(footnote(await render(run([whole]))))
+  })
+
 test('a retargeted run ranks apart from the task-metric runs, and the pair is refused by name',
   async () => {
     const { crossRunGroups } = await import('../src/crossRunRank.js')

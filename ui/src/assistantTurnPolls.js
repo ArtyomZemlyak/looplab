@@ -12,7 +12,10 @@ import { shouldSurfaceProgress } from './assistantTurnModel.js'
 //     token/text/step events arrive batched only at the END, leaving a dead "thinking" bubble the
 //     whole time. So the server's mirrored answer-so-far is polled and surfaced while the stream has
 //     produced less than it (`assistantTurnModel.js::shouldSurfaceProgress`); once tokens flow, the
-//     authoritative SSE content wins. It fills the buffered gap; it never fights a working stream.
+//     authoritative SSE content wins. A frame with no answer text yet — the turn is in its tool
+//     rounds, the prose is `activity` — is surfaced when it MOVED since the last one surfaced, and
+//     only while the stream is silent (`streamEvents`). It fills the buffered gap; it never fights a
+//     working stream.
 //
 // Two properties are what this module exists to make checkable, and both are about a LATE result:
 // every await is followed by `isCurrent()` before anything is published, so a poll that resolves
@@ -23,7 +26,8 @@ import { shouldSurfaceProgress } from './assistantTurnModel.js'
 // It is deliberately not a hook: it owns no React state, and `runLLM` already owns the lifetime.
 export function startTurnFallbackPolls({
   isCurrent, readPermissions, onPermissions, readProgress, onProgress,
-  streamedText = () => '', sleep, permissionIntervalMs = 800, progressIntervalMs = 1000,
+  streamedText = () => '', streamEvents = () => 0, sleep, permissionIntervalMs = 800,
+  progressIntervalMs = 1000,
 }) {
   let polling = true
   const live = () => polling && isCurrent()
@@ -41,13 +45,16 @@ export function startTurnFallbackPolls({
   })()
 
   const progress = (async () => {
+    let surfaced = null                 // the frame last handed to `onProgress`
     while (live()) {
       await sleep(progressIntervalMs)
       if (!live()) break
       try {
         const seen = await readProgress()
         if (!live()) break
-        if (!shouldSurfaceProgress(streamedText(), seen)) continue
+        const gate = { streamEvents: streamEvents(), surfaced }
+        if (!shouldSurfaceProgress(streamedText(), seen, gate)) continue
+        surfaced = seen
         onProgress(seen)
       } catch { /* transient */ }
     }

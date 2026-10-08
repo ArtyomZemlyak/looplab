@@ -9,6 +9,7 @@ import { OpIcon } from './icons.jsx'
 import { toolActivityProjection } from './assistantToolActivity.js'
 import { lastEventClock } from './assistantProgressModel.js'
 import { turnPropsEqual } from './assistantTranscriptModel.js'
+import { replayingTurnNotice } from './assistantRecovery.js'
 import LazyBoundary from './LazyBoundary.jsx'
 import './assistant-tool-activity.css'
 
@@ -163,8 +164,10 @@ function Turn({
       {/* A REPLAYED turn says so (2026-10-06): a turn whose reply never landed — the server
           restarted, the stream dropped — is re-run with its exact identity when the chat reopens,
           and without this line the operator watched the same activity appear again and could not
-          send ("Так ну и че?" went nowhere). */}
-      {m.role === 'assistant' && m.streaming && m.recoveryNeeded &&
+          send ("Так ну и че?" went nowhere). Only once the replay was POSTED: a reload that merely
+          reattaches to a turn the server is still running carries `recoveryNeeded` too, and is not
+          a re-run (`assistantRecovery.js::replayingTurnNotice`). */}
+      {replayingTurnNotice(m) &&
         <div className="asst-status recovering" role="status">
           {uiText("Re-running the interrupted turn: its reply was never saved (the server restarted or the connection dropped). A new message can be sent when it finishes.")}</div>}
       {m.role === 'assistant' && m.streaming && !m.content && !(m.activity && m.activity.length) &&

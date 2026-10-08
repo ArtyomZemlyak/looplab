@@ -20,9 +20,14 @@
 //     are the two the operator must be told about rather than left to guess.
 //   * THE PROGRESS POLL ONLY FILLS A GAP. Behind a buffering proxy the SSE tokens arrive batched at
 //     the end, so the mirrored answer-so-far is surfaced while it is LONGER than what the stream has
-//     produced — and never once the stream overtakes it. That comparison is the whole rule, and
-//     inverted it would let a stale poll overwrite live tokens.
+//     produced — and never once the stream overtakes it. Inverted, that comparison would let a stale
+//     poll overwrite live tokens. Since the server keeps `text` for the ANSWER and sends the prose
+//     between tool rounds as `activity`, a turn deep in tool rounds has no text to be longer, so the
+//     gap is also filled by a frame that MOVED (new activity, a newer `last_event`) — but only while
+//     the stream is SILENT: no token and no step/prose event yet, which is exactly the buffered case.
+//     A stream that has delivered anything owns the bubble's activity, and the poll never replaces it.
 import { assistantTurnIndex, completedAssistantReply } from './assistantRecovery.js'
+import { progressMovedSince } from './assistantProgressModel.js'
 
 // ── 1. may this turn be sent ──────────────────────────────────────────────────────────────────────
 // Returns null when it may, else `{code, message, verifyShare}`. `verifyShare` asks the caller to
@@ -71,8 +76,15 @@ export function sendAbandonReason({
 
 // ── 3. the SSE fallback ───────────────────────────────────────────────────────────────────────────
 // The /progress mirror fills the gap a buffering proxy leaves; it never fights a working stream.
-export const shouldSurfaceProgress = (streamed, progress) => !!progress && progress.active === true
-  && String(streamed || '').length < String(progress.text || '').length
+// `streamEvents` counts the step/prose events the stream itself has delivered; `surfaced` is the frame
+// this turn last surfaced (null for none), so an unchanged frame polled again is not news.
+export function shouldSurfaceProgress(streamed, progress, { streamEvents = 0, surfaced = null } = {}) {
+  if (!progress || progress.active !== true) return false
+  if (String(streamed || '').length < String(progress.text || '').length) return true
+  // A silent stream has streamed nothing, so the answer above was not longer only because there is
+  // none yet: the frame's activity and liveness are the whole of what the operator can be shown.
+  return !streamed && !(streamEvents > 0) && progressMovedSince(progress, surfaced)
+}
 
 // ── 4. the terminal frame ─────────────────────────────────────────────────────────────────────────
 // A terminal SSE error is not a completed turn, and the transcript is the authority on what actually

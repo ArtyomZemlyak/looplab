@@ -3,7 +3,7 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import {
-  lastEventClock, progressActivity, progressHasNews, progressPatch,
+  lastEventClock, progressActivity, progressHasNews, progressMovedSince, progressPatch,
 } from '../src/assistantProgressModel.js'
 
 test('the answer is `text` alone; the prose rides the ordered activity', () => {
@@ -36,6 +36,17 @@ test('malformed segments are dropped, never rendered', () => {
     null, { type: 'text', content: '   ' }, { type: 'tools', labels: [3, ''] },
     { type: 'html', content: '<b>x</b>' }, { type: 'tools', labels: ['ok'] },
   ] }, []), [{ type: 'tools', labels: ['ok'] }])
+})
+
+test('a frame moved since the last one surfaced', () => {
+  const frame = { text: '', activity: [{ type: 'tools', labels: ['a'] }], last_event: 10 }
+  assert.equal(progressMovedSince(frame, null), true)
+  assert.equal(progressMovedSince(frame, frame), false)
+  assert.equal(progressMovedSince({ ...frame, last_event: 11 }, frame), true)
+  assert.equal(progressMovedSince({ ...frame, activity: [{ type: 'tools', labels: ['a', 'b'] }] }, frame),
+    true, 'a label appended to the same tool group is new activity')
+  assert.equal(progressMovedSince({ text: '', activity: [], last_event: 12 }, frame), false,
+    'no news never moved')
 })
 
 test('news and the clock', () => {

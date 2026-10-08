@@ -115,3 +115,66 @@ test('the progress mirror stays behind the stream it is filling in for', async (
   assert.deepEqual(painted, ['mirror'],
     'once the stream is longer than the mirror, the authoritative tokens are never overwritten')
 })
+
+test('a turn in its tool rounds reaches the bubble through a buffering proxy', async () => {
+  // The regression (2026-10-07): the server's `text` became the ANSWER only, with the inter-round
+  // prose in `activity`, so a buffered turn's frames carry `text: ''` for every tool round — and a
+  // gate keyed on "text longer than the stream" published none of them. The bubble sat on a dead
+  // "thinking" for the whole turn.
+  const frame = (at, prose) => ({
+    active: true, text: '', steps: ['Read run r1'],
+    activity: [{ type: 'text', content: prose }, { type: 'tools', labels: ['Read run r1'] }],
+    last_event: at,
+  })
+  const frames = [
+    frame(1_700_000_001, 'Looking at the run.'),
+    frame(1_700_000_001, 'Looking at the run.'),       // polled again, nothing moved
+    frame(1_700_000_004, 'Now the champion.'),
+    frame(1_700_000_004, 'Now the champion.'),
+  ]
+  const painted = []
+  let rounds = 0
+  const polls = startTurnFallbackPolls({
+    isCurrent: () => true,
+    readPermissions: async () => ({ ok: false }),
+    onPermissions: () => {},
+    readProgress: async () => {
+      const seen = frames[rounds]
+      rounds += 1
+      if (rounds >= frames.length) polls.stop()
+      return seen
+    },
+    streamedText: () => '',                               // the proxy holds every SSE frame back
+    onProgress: value => painted.push([value.last_event, value.activity[0].content]),
+    sleep: tick,
+  })
+  // `stop()` lands inside the last read, so its frame is never published — the turn ended.
+  await polls.settled()
+  assert.deepEqual(painted, [[1_700_000_001, 'Looking at the run.'], [1_700_000_004, 'Now the champion.']],
+    'every frame that moved is surfaced once, and an unchanged one is not re-published')
+})
+
+test('an activity-only frame never replaces what a working stream delivered', async () => {
+  const painted = []
+  let delivered = 0
+  let rounds = 0
+  const polls = startTurnFallbackPolls({
+    isCurrent: () => true,
+    readPermissions: async () => ({ ok: false }),
+    onPermissions: () => {},
+    readProgress: async () => {
+      rounds += 1
+      if (rounds === 2) delivered = 1                      // the stream delivers its first step
+      if (rounds >= 4) polls.stop()
+      return { active: true, text: '', steps: ['s'], activity: [{ type: 'tools', labels: ['s'] }],
+        last_event: 1_700_000_000 + rounds }
+    },
+    streamedText: () => '',
+    streamEvents: () => delivered,
+    onProgress: value => painted.push(value.last_event),
+    sleep: tick,
+  })
+  await polls.settled()
+  assert.deepEqual(painted, [1_700_000_001],
+    'surfaced while the stream was silent, never once it delivered a step of its own')
+})

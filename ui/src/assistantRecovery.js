@@ -11,6 +11,17 @@ export function danglingAssistantTurn(messages) {
     && trailing.turn_id.length > 0 ? trailing : null
 }
 
+// Does this live placeholder say "re-running the interrupted turn"? Only when the exact recovery was
+// actually POSTED for it (`replaying`, set by the reattach path at that moment) — never on
+// `recoveryNeeded` alone. `recoveryNeeded` means the transcript ends in a staged user turn, and it is
+// equally true after an ordinary reload while the server's ORIGINAL worker is still answering it:
+// that turn is being attached to, not re-run, and saying otherwise told the operator a reply had been
+// lost when it was still on its way.
+export function replayingTurnNotice(message) {
+  return !!message && message.role === 'assistant' && message.streaming === true
+    && message.replaying === true
+}
+
 export function assistantRecoveryPayload(turn) {
   if (!turn || turn.role !== 'user' || typeof turn.turn_id !== 'string' || !turn.turn_id) return null
   const display = typeof turn.content === 'string' ? turn.content : null
