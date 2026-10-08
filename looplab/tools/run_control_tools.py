@@ -69,6 +69,17 @@ def _node_lifecycle_unchanged(store, *, node_id: int, expected_tail: int,
             and node.attempt == generation)
 
 
+# The one-line `verb` of an approval card is a LABEL, so it keeps a short head of the free text it
+# names — but a head that was cut says so with a trailing ellipsis, and the whole text rides in the
+# card's `preview` (`RunControlTools._gate`), where any further cut is stated by
+# `perm_modes.py::clip_approval_preview`.
+_LABEL_HEAD_CHARS = 60
+
+
+def _label_head(text: str) -> str:
+    return text if len(text) <= _LABEL_HEAD_CHARS else text[:_LABEL_HEAD_CHARS - 1] + "…"
+
+
 @dataclass(frozen=True)
 class RunLifecycleFns:
     """The run-lifecycle primitives a run-MUTATING tool needs, as an explicit contract.
@@ -291,13 +302,20 @@ class RunControlTools:
     def _gate(self, name: str, rid: str, rd: Path, verb: str, *,
               scope: Optional[dict] = None,
               preview: Optional[str] = None) -> tuple[Optional[str], Optional[str]]:
-        # Returns a "declined/disabled" string to short-circuit, or None to proceed. `preview` is the
-        # card's body when the call carries text the operator must read to approve it (an inject's
-        # rationale is the whole build instruction), bounded by the ONE rule that says what it cut.
+        # Returns a "declined/disabled" string to short-circuit, or None to proceed.
+        #
+        # `preview` is what the approver READS before approving (review 2026-10-08). A tool whose
+        # submitted payload carries free text — an injected node's rationale drives a paid build and
+        # eval, a directive steers every later proposal — states that text here WHOLE, bounded only
+        # by `perm_modes.py::clip_approval_preview`, whose cut is SAID; the one-line `verb` is a
+        # label, not the review surface. Without it the card showed `name(run)` and a 60-character
+        # head of a rationale up to 2,000 characters, and "approve" submitted all of it.
         from looplab.tools.perm_modes import clip_approval_preview, decide_action, refusal_for
         action = {"tool": name, "tool_kind": "run_control", "label": f"{name} {rid}",
-                  "verb": verb, "run_id": rid,
-                  "preview": (clip_approval_preview(preview) if preview else f"{name}({rid})"),
+                  "verb": verb,
+                  "preview": (clip_approval_preview(preview) if preview is not None
+                              else f"{name}({rid})"),
+                  "run_id": rid,
                   "scope": dict(scope or {"run_id": rid})}
         denied = ("(run control is disabled in read-only plan mode — switch to "
                   "default/acceptEdits/auto.)")
@@ -500,18 +518,21 @@ class RunControlTools:
                 return f"(no node #{parent} in {rid})"
             data["parent_id"] = parent
             data["parent_generations"] = {str(parent): parent_node.attempt}
+        preview_lines = [f"{name}({rid})", f"kind: {data.get('node_kind', 'experiment')}"]
+        if parent is not None:
+            preview_lines.append(
+                f"parent: #{parent} (lifecycle {data['parent_generations'][str(parent)]})")
+        if data.get("uses"):
+            preview_lines.append(f"uses: {data['uses']}")
+        preview_lines += ["rationale:", rationale]
         blocked, formed_generation = self._gate(
             name, rid, rd, f"inject {'an artifact' if kind == 'artifact' else 'a node'} into {rid}: "
-                           f"{rationale[:60]}",
+                           f"{_label_head(rationale)}",
             scope={"run_id": rid, "node_kind": data.get("node_kind", "experiment"),
                    "uses": data.get("uses", []), "parent_id": parent,
                    "parent_generations": data.get("parent_generations", {}),
                    "rationale_digest": hashlib.sha256(rationale.encode("utf-8")).hexdigest()},
-            # The WHOLE rationale on the card (critic 2026-10-08): the verb shows 60 characters and
-            # the Developer builds from up to 2,000, so the operator approved text they never saw.
-            preview=(f"{'artifact' if kind == 'artifact' else 'experiment'}"
-                     + (f" using {data['uses']}" if data.get("uses") else "")
-                     + (f" from #{parent}" if parent is not None else "") + f"\n{rationale}"))
+            preview="\n".join(preview_lines))
         if blocked:
             return blocked
         with self._mutation_intent(
@@ -532,10 +553,15 @@ class RunControlTools:
         if not text:
             return "(set_directive needs a non-empty text)"
         blocked, formed_generation = self._gate(
-            name, rid, rd, f"directive for {rid}: {text[:60]}",
+            name, rid, rd, f"directive for {rid}: {_label_head(text)}",
             scope={"run_id": rid,
                    "text_digest": hashlib.sha256(text.encode("utf-8")).hexdigest(),
-                   "replace": bool(args.get("replace"))})
+                   "replace": bool(args.get("replace"))},
+            preview="\n".join([
+                f"{name}({rid})",
+                ("replace: yes — replaces all prior directives" if args.get("replace")
+                 else "replace: no — appended to prior directives"),
+                "text:", text]))
         if blocked:
             return blocked
         data = {"text": text, "replace": bool(args.get("replace"))}

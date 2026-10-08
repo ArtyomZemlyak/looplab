@@ -15,6 +15,7 @@ own callers still read them out of this module's globals, so a patch of either n
 from __future__ import annotations
 
 import atexit
+import logging
 import os
 import re
 import signal
@@ -47,6 +48,8 @@ from looplab.engine.run_lifecycle import (  # noqa: F401 - re-exported for the h
     sweep_stale_lifecycle_locks,
     within_resume_grace as _within_resume_grace,
 )
+
+_log = logging.getLogger(__name__)
 
 
 def _on_shared_hub() -> bool:
@@ -482,6 +485,16 @@ def _claim_and_spawn_resume(rd: Path, cli_args: list[str], *, env: Optional[dict
                 return False
             if not state.resume_pending():
                 return False
+            # AN AUTO-RESUME NEVER LIFTS A HALT THAT LANDED AFTER IT (review 2026-10-08). A pending
+            # request normally MEANS "lift the stop" — the operator asked for it — but one the
+            # server minted on its own (`_request_auto_resume`) only claimed the run was in
+            # progress when it was decided. A pause/stop/finish appended since is the operator's
+            # newer word, and the `looplab resume` this would start lifts it. Decided on THIS fold,
+            # whose last seq the claim below CASes on, so a halt landing after the check moves the
+            # tail, the claim refuses, and the retry re-folds and stops here. Any operator-pressed
+            # request (or restart) still pending is honoured exactly as before.
+            if state.halted and _pending_intent_is_auto_only(events, state):
+                return False
             waiter_args = _cli_args_for_resume_state(rd, cli_args, state)
             if _launch_claim_is_fresh(state, now):
                 # A claimant can acquire engine.lock between the caller's liveness probe and this
@@ -768,10 +781,36 @@ def auto_resume_enabled() -> bool:
     return str(os.environ.get(AUTO_RESUME_ENV, "")).strip().lower() in {"1", "true", "yes", "on"}
 
 
+def _pending_intent_is_auto_only(events, state) -> bool:
+    """True when every resume intent `state` still owes was minted by `_request_auto_resume`.
+
+    The fold keeps only the WATERMARK (`last_resume_request_seq`), not who asked, so the request rows
+    newer than the last serve are read off the same `events` the state was folded from. A launch
+    claim is transport metadata, not an intent; a `restart` and any request without
+    `auto_resume: true` are the operator's own ask. False when no auto request is pending at all."""
+    served = state.last_resume_served_seq
+    saw_auto = False
+    for event in events:
+        seq = getattr(event, "seq", None)
+        if seq is None or seq <= served:
+            continue
+        if event.type == EV_RESTART:
+            return False
+        if event.type != EV_RESUME_REQUESTED:
+            continue
+        data = event.data if isinstance(event.data, dict) else {}
+        if data.get("launch_claim"):
+            continue
+        if data.get("auto_resume") is not True:
+            return False
+        saw_auto = True
+    return saw_auto
+
+
 # THE TWO BOUNDS on an auto-resume (critic 2026-10-08). A Ctrl-C'd CLI run writes no `run_finished`
 # and no pause, so without them every such run under the root — months old included — was resumed at
-# once on each server start, a concurrent LLM spend with no cap by default. A run whose log last
-# moved more than `MAX_AGE_H` hours ago is left for a human; at most `MAX_RUNS` are resumed per scan.
+# once on each server start, a concurrent LLM spend with no cap by default. A run last seen alive
+# more than `MAX_AGE_H` hours ago is left for a human; at most `MAX_RUNS` are resumed per scan.
 AUTO_RESUME_MAX_AGE_ENV = "LOOPLAB_UI_AUTO_RESUME_MAX_AGE_H"
 AUTO_RESUME_MAX_RUNS_ENV = "LOOPLAB_UI_AUTO_RESUME_MAX_RUNS"
 _AUTO_RESUME_MAX_AGE_H = 24.0
@@ -803,31 +842,77 @@ def _last_alive_ts(rd: Path, events, state) -> Optional[float]:
     return max(stamps) if stamps else None
 
 
-def _request_auto_resume(rd: Path, store, state, *, now: Optional[float] = None) -> bool:
+def _request_auto_resume(rd: Path, store, events, state, *,
+                         launch_env: Optional[Callable[[], Any]] = None,
+                         now: Optional[float] = None) -> bool:
     """Append a durable `resume_requested{mode: resume, auto_resume: true}` for a run a dead engine
     left IN PROGRESS, so the ordinary pending-resume path below spawns it (incident 2026-10-06: a
     container restart killed every engine and each run waited for a human to press resume).
 
     In progress means: it started, it is not finished, not halted (an operator's pause, a stop, and
     every engine auto-pause — `infra_unavailable` included, which is the operator's box to fix — are
-    all left alone), owes no finalization and no resume already, and its `engine.lock` is provably
-    FREE (`_spawn_liveness` False; an inconclusive probe is never permission). The append is a
-    compare-and-swap on the tail, so a CLI that resumed it meanwhile wins. True when appended."""
-    from looplab.events.eventstore import EventStoreConcurrencyError
+    all left alone), owes no finalization and no resume already, carries no reset/deletion fence,
+    and its `engine.lock` is provably FREE (`_spawn_liveness` False; an inconclusive probe is never
+    permission). `state` MUST be `fold(events)`: the decision and the append's compare-and-swap are
+    made on the SAME rows (review 2026-10-08) — the CAS is on `events`' own last seq, so a pause, a
+    stop or a CLI resume appended after the scan read the log moves the tail and refuses the append.
+    (It used to CAS on a FRESH re-read, which accepted a pause the decision never saw.)
+
+    ADMISSION BEFORE THE DURABLE APPEND (review 2026-10-08). A request is a promise the pending
+    path keeps re-trying: once appended, `resume_pending()` stays True until an engine serves it, so
+    a queued command waits on it and the UI shows "resume pending". A resume the child or the launch
+    would refuse — `spawn_snapshot_refusal`, the exact read the child makes, and the run's launch
+    environment (`launch_env`, the context the claim path enters before Popen) — is therefore asked
+    FIRST, and a refused run gets no request; it is logged and left for the operator.
+
+    Never raises for a refusal the append itself makes: a fence that appeared after the pre-check,
+    a lock or corruption error and a lost CAS all answer False. A refused launch environment RAISES
+    (before the append), and so may anything unforeseen; the startup scan contains every failure
+    per run, so one run cannot take down the server's startup. True when appended."""
+    from looplab.core.run_deletion import (
+        RunDeletionFenceError, RunDeletionStorageError, load_run_deletion_fence)
+    from looplab.core.run_reset import (
+        RunResetFenceError, RunResetStorageError, load_run_reset_marker)
+    from looplab.events.eventstore import (
+        EventLogCorruptionError, EventStoreConcurrencyError, EventStoreLockError)
     if (not state.task_id or state.finished or state.halted or state.resume_pending()
             or state.finalization_pending()):
         return False
+    # A run mid-Replay or mid-deletion is not "in progress": its writer fence refuses this append
+    # (`EventStore.append` checks both under the append lock), and the operation that owns it decides
+    # what the run becomes. An unreadable fence fails closed, exactly as the writers treat it.
+    try:
+        if load_run_reset_marker(rd) is not None or load_run_deletion_fence(rd) is not None:
+            return False
+    except (RunResetStorageError, RunDeletionStorageError, OSError):
+        return False
+    last_alive = _last_alive_ts(rd, events, state)
+    max_age_s = _auto_resume_bound(AUTO_RESUME_MAX_AGE_ENV, _AUTO_RESUME_MAX_AGE_H) * 3600.0
+    if last_alive is None or ((time.time() if now is None else now) - last_alive) > max_age_s:
+        return False
     if _spawn_liveness(rd) is not False or not _resolve_task_file(rd):
         return False
-    events = store.read_all()
-    last_ts = _last_alive_ts(rd, events, state)
-    max_age_s = _auto_resume_bound(AUTO_RESUME_MAX_AGE_ENV, _AUTO_RESUME_MAX_AGE_H) * 3600.0
-    if last_ts is None or ((time.time() if now is None else now) - last_ts) > max_age_s:
+    refusal = spawn_snapshot_refusal(rd)
+    if refusal is not None:
+        _log.warning("auto-resume skipped for %s: the resume child would refuse it (%s)",
+                     rd.name, refusal.get("code"))
         return False
+    if launch_env is not None:
+        # Entered and left with nothing inside: the same credential/launch validation the claim
+        # path runs before Popen. A refusal RAISES out of here, before the append, and the startup
+        # scan's per-run containment logs it and moves on — no request, no permanent pending.
+        with launch_env():
+            pass
     try:
         store.append(EV_RESUME_REQUESTED, {"mode": "resume", "auto_resume": True},
                      expected_last_seq=events[-1].seq if events else -1)
-    except (EventStoreConcurrencyError, OSError):
+    except EventStoreConcurrencyError:
+        return False        # the log moved since the decision: the newer rows win, decide next start
+    except (RunResetFenceError, RunDeletionFenceError, RunResetStorageError,
+            RunDeletionStorageError, EventLogCorruptionError, EventStoreLockError,
+            OSError) as exc:
+        _log.warning("auto-resume skipped for %s: the event log refused the request (%s)",
+                     rd.name, type(exc).__name__)
         return False
     return True
 
@@ -895,36 +980,59 @@ def install_resume_reconcile_hooks(
             run_dirs = list(root.iterdir()) if root.exists() else []
         except OSError:
             return
-        auto_left = int(_auto_resume_bound(AUTO_RESUME_MAX_RUNS_ENV, _AUTO_RESUME_MAX_RUNS))
-        for rd in run_dirs:
+        auto_left = [int(_auto_resume_bound(AUTO_RESUME_MAX_RUNS_ENV, _AUTO_RESUME_MAX_RUNS))]
+
+        def _scan_run(rd: Path) -> None:
             if not (rd / "events.jsonl").is_file():
-                continue
+                return
             # The byte filter proves "no pending request" only; an opted-in auto-resume must fold
             # every run, because the runs it is FOR hold no request yet.
             if not auto and not _log_may_hold_resume_intent(rd / "events.jsonl"):
-                continue          # no event in it can raise the request seq: provably not pending
+                return          # no event in it can raise the request seq: provably not pending
             try:
                 store = EventStore(rd / "events.jsonl")
                 if store.divergence is not None:
-                    continue
-                state = fold(store.read_all())
+                    return
+                events = store.read_all()
+                state = fold(events)
             except Exception:  # noqa: BLE001 - one corrupt run cannot block server startup recovery
-                continue
-            if not state.resume_pending():
-                if not (auto and auto_left > 0 and _request_auto_resume(rd, store, state)):
-                    continue
-                auto_left -= 1
-                state = fold(store.read_all())
-            task_file = _resolve_task_file(rd)
-            if not task_file:
-                continue
-            cli_args = _cli_args_for_resume_state(
-                rd, ["resume", str(rd), "--task-file", str(task_file)], state)
+                return
             prepare_spawn = ((lambda run_dir=rd: before_spawn(run_dir))
                              if before_spawn is not None else None)
             prepare_launch = ((lambda run_dir=rd: launch_env(run_dir))
                               if launch_env is not None else None)
+            auto_requested = False
+            if not state.resume_pending():
+                # Decided AND compare-and-swapped on `events` — the rows `state` was folded from
+                # (`_request_auto_resume`'s docstring).
+                if not (auto and auto_left[0] > 0
+                        and _request_auto_resume(rd, store, events, state,
+                                                 launch_env=prepare_launch)):
+                    return
+                auto_left[0] -= 1
+                auto_requested = True
+                state = fold(store.read_all())
+            task_file = _resolve_task_file(rd)
+            if not task_file:
+                return
+            cli_args = _cli_args_for_resume_state(
+                rd, ["resume", str(rd), "--task-file", str(task_file)], state)
             startup_liveness = _spawn_liveness(rd)
+            if auto_requested and startup_liveness is False:
+                # CLAIMED NOW, stated rather than inherited (review 2026-10-08). The grace exists so
+                # a request someone ELSE just made has time for ITS spawn to take engine.lock; this
+                # server made this one a moment ago over a provably free lock, so no spawn of it is
+                # in flight — a command worker's is caught by the claim's `spawn_inflight`
+                # handshake. The grace arithmetic below happened to answer "claim now" too, but only
+                # because the scan's `now` predates the request's own timestamp (a NEGATIVE elapsed
+                # reads as outside the grace); a clock step the other way would have deferred it by
+                # the full grace, a window in which an operator's pause lands after the request.
+                # The claim's own halted check covers what window remains.
+                _claim_and_spawn_resume(
+                    rd, cli_args, now=now, cancel_event=shutdown, wait_on_alive=True,
+                    before_spawn=prepare_spawn, launch_env=prepare_launch,
+                    spawn_inflight=spawn_inflight)
+                return
             if startup_liveness is True:
                 # A server restart loses the old in-memory tail waiter; reinstall it while the
                 # engine still owns the run. The durable launch claim arbitrates multiple workers.
@@ -932,12 +1040,12 @@ def install_resume_reconcile_hooks(
                     cli_args, run_dir=rd, cancel_event=shutdown,
                     before_spawn=prepare_spawn, launch_env=prepare_launch,
                     spawn_inflight=spawn_inflight)
-                continue
+                return
             if startup_liveness is None:
                 # Do not create one 20 Hz waiter thread per malformed/reparse/unsupported run at
                 # startup. Unknown ownership remains quarantined until a later healthy observation
                 # or server restart can prove an exact state.
-                continue
+                return
             latest_ts = max(float(state.last_resume_request_ts or 0.0),
                             float(state.last_resume_launch_ts or 0.0))
             elapsed = now - latest_ts
@@ -948,13 +1056,12 @@ def install_resume_reconcile_hooks(
             grace = run_lifecycle.RESUME_RECONCILE_GRACE_S
             delay = (grace - elapsed if 0.0 <= elapsed < grace else 0.0)
             if delay <= 0:
-                try:
-                    reconcile_pending_resume(
-                        rd, now=now, cancel_event=shutdown, before_spawn=prepare_spawn,
-                        launch_env=prepare_launch, spawn_inflight=spawn_inflight)
-                except Exception:  # noqa: BLE001 - one broken run cannot abort server startup
-                    pass
-                continue
+                # No handler of its own: the per-run containment around `_scan_run` is the one that
+                # keeps a broken run from aborting server startup (it used to be spelled here too).
+                reconcile_pending_resume(
+                    rd, now=now, cancel_event=shutdown, before_spawn=prepare_spawn,
+                    launch_env=prepare_launch, spawn_inflight=spawn_inflight)
+                return
             def _reconcile_unless_shutdown(run_dir=rd):
                 if not shutdown.is_set():
                     prepare = ((lambda: before_spawn(run_dir))
@@ -968,6 +1075,18 @@ def install_resume_reconcile_hooks(
             timer.daemon = True
             timers.append(timer)
             timer.start()
+        for rd in run_dirs:
+            # PER-RUN CONTAINMENT (review 2026-10-08). This scan is a `ServerLifecycle` startup
+            # step, so anything one run raises out of it fails the whole server's startup — and no
+            # run after it in the directory listing is recovered. It did: an opted-in auto-resume
+            # appended to a run mid-Replay, `EventStore.append` raised its `RunResetFenceError`, and
+            # the UI would not start at all. Each run is now its own step: a failure is logged with
+            # the run's name and the scan moves on to the next run.
+            try:
+                _scan_run(rd)
+            except Exception as exc:  # noqa: BLE001 — one run's recovery must never fail server startup or the other runs' recovery
+                _log.warning("startup resume recovery skipped %s: %s", rd.name,
+                             type(exc).__name__)
 
     def _recover_resumes_on_startup():
         _scan_startup()
