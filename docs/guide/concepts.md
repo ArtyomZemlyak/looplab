@@ -778,20 +778,34 @@ artifact nodes that are ALREADY produced; the command refuses `inject_uses_not_p
 
 It stays what it is: a retargeted objective never ranks it (even when an import left it the key),
 a failed artifact is never metric-salvaged, and a rebuild (`node_reset` from implement) carries
-`node_kind`/`uses` forward. The run graph marks an artifact with ▣ and a consumer with ⇠; the
+`node_kind`/`uses` forward — a re-proposal (`node_reset` from propose) is a new idea and carries
+neither. On a task with a host scorer an artifact runs no host `score` stage and no `needs` derived
+from the metric's subject: both score a candidate's predictions, which a preparation step never
+writes. The Developer is told what it builds: an artifact's build prompt says it produces files under
+its own workdir and needs no metric, and a consumer's names the artifacts and that
+`LOOPLAB_USES_WORKDIRS` holds their workdirs in that order. The run graph marks an artifact with ▣ and a consumer with ⇠; the
 Assistant creates either through its `inject_experiment` tool (`Settings.assistant_inject_tool`).
 A node built FROM a consumer (an improve, a merge, an ablation) inherits its parents' `uses`, so
-the copied code still finds its data. On a Docker tier each used workdir is bound read-only at its
-own path. The canary (`eval_canary`) runs for an artifact under the artifact's own rule: a clean
+the copied code still finds its data; `uses` its own idea declares are ADDED after the inherited
+ones, never instead of them, and a node never uses itself. A Card claim builds the `node_kind` and
+`uses` its proposal carried (`core/cards.py::CARD_IDEA_ARTIFACT_FIELDS`, outside the ownership
+digest). On a Docker tier each used workdir is bound read-only at its own path; on a Windows host at
+`/looplab-uses/<i>` instead, with `LOOPLAB_USES_WORKDIRS` naming those container paths. The canary (`eval_canary`) runs for an artifact under the artifact's own rule: a clean
 exit on the slice passes, and a number it prints is ignored (`eval_canary.py::canary_passed`).
 
 A consumer reads its artifact in the LIFECYCLE it was accepted against. The command stamps each
 used artifact's lifecycle (`uses_attempts`, server-derived and refused from a caller) and
 `node_created` carries it. A node built FROM a consumer (an improve, a merge, an ablation) carries
 its own pins on its `node_created` too, written when it is built: each used artifact's current
-lifecycle when that one is evaluated, else the parent's pin (`node_build.py::inherited_use_pins`),
-so a child built after the artifact was re-produced reads it as it now is; a child row from before
-this rule inherits the parent's pin in the fold. Before every launch the consumer's eval checks each
+lifecycle when that one is evaluated or still being produced (the child then waits for it), else the
+parent's pin (`node_build.py::inherited_use_pins`), so a child built after the artifact was
+re-produced reads it as it now is; a child row from before this rule inherits the parent's pin in the
+fold. A consumer whose artifact can never be produced again — deleted, aborted, or failed in its
+current lifecycle — is not bred from at all: every turn's selected builds pass
+`artifact_fence.py::refuse_unrunnable_builds`, which drops such a build before anything is paid and,
+when that leaves the turn empty, builds the best runnable alternative instead (an improve of the
+best breedable parent whose children can run, else a draft), its `policy_decision` naming the
+artifact. Before every launch the consumer's eval checks each
 pinned artifact through the same rule `LOOPLAB_PARENT_WORKDIRS` uses
 (`eval_dispatch.py::produced_workdir`): evaluated in exactly that lifecycle, not deleted, and its
 workdir's `.looplab-manifest` stamp intact. If one is not — the artifact was reset, rebuilt, deleted
@@ -804,7 +818,10 @@ bought for a candidate that is not at fault, and the owner alert shows it (it is
 `core/models.py::BENIGN_TERMINAL_REASONS`, so it counts as a failed node like any other). A
 lifecycle never comes back, so the remedy is the operator's: rebuild the consumer (`node_reset` from
 implement re-pins it to each artifact as it is now) or inject a new one. A log written before the
-pin keeps the old existence-only rule.
+pin keeps the old existence-only rule. A confirmation or noise-floor seed whose pinned artifact moved
+launches nothing and is not a measured seed: confirm records a `confirm_eval` with reason
+`artifact_unavailable`, which the fold keeps out of the per-seed memo (the seed retries, and the
+pass auto-pauses after repeated refusals saying so), and the noise floor abstains for that seed.
 
 **The Researcher may propose them too**, under `Settings.researcher_artifacts` (off by default;
 `agents/artifact_ideas.py`). On, its emit schema shows `node_kind` and `uses` and its user turn
@@ -818,7 +835,9 @@ Two things sit beside the pin (`engine/artifact_fence.py`). A consumer pinned to
 producer is STILL producing (a Researcher proposed the preparation and its consumer back to back)
 WAITS — the turn's selection and a Card session's admission both leave it out until the producer
 settles, and an ADMIT that meets one anyway returns with no terminal — instead of being refused for
-a lifecycle that can still be produced. The producer itself is always selectable (every pending node
+a lifecycle that can still be produced. The drain-only resume, the plateau stop and the external
+harness's evaluation lane defer it the same way, so a waiting consumer never reads as a stuck
+admission. The producer itself is always selectable (every pending node
 is), so the wait cannot hold the slot it waits for. And a consumer's `node_evaluated.metric_provenance.uses` records, per
 producer, the `generation` and `code` it was measured on; when the champion's receipt no longer
 matches its producer's current lifecycle (re-produced, failed or deleted SINCE), the run carries

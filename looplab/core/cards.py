@@ -430,6 +430,19 @@ _CARD_ACTION_DIGEST_VERSIONS = frozenset({1, 2})
 # full one in. ``tests/test_card_concept_round_trip.py`` drives both the agreement and the exemption.
 CARD_IDEA_CONCEPT_FIELDS = ("concept_mode", "concepts", "concepts_added", "concepts_removed")
 
+# What the claimed node IS (doc 73 §1.4): a Researcher-proposed ARTIFACT (`node_kind`) and the produced
+# artifacts it reads (`uses`), on the ``card_added`` idea block ONLY when the proposal carried them —
+# so every Card minted without them keeps its row byte for byte. The SAME exemption as the concept
+# envelope and for the same reason: NOT digested, because the ownership digest is re-derived from the
+# Card PROJECTION (`engine/card_reservation.py::_card_claim_receipt_action`) and from the ledger's
+# snapshot, neither of which carries them — covering them would be a new digest version, and a
+# Card whose two derivations disagreed is unclaimable forever. The claim reads them off the ONE mint
+# row whose ownership receipt it has just proved (`_claim_artifact_fields`), so a Card claim builds
+# the node the proposal described (critic 2026-10-08: it built a ranked experiment that read nothing).
+# Emitted by ``engine/card_reservation.py::_authored_card_artifact``; admitted by
+# ``events/card_ledger.py`` beside the concept tuple.
+CARD_IDEA_ARTIFACT_FIELDS = ("node_kind", "uses")
+
 # One semantic boundary for every Card producer, replay path, identity digest, and public projection.
 # The UTF-8 cap is deliberately the worst-case encoding size of the character cap, so valid Unicode
 # statements are never accepted by one layer and rejected by another.

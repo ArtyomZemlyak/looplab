@@ -639,7 +639,8 @@ class CardReservationMixin:
 
     @staticmethod
     def _rebuilt_claim_idea(card_id: str, statement: str, action: dict, rationale: str,
-                            concepts: Optional[dict] = None) -> Idea:
+                            concepts: Optional[dict] = None,
+                            artifact: Optional[dict] = None) -> Idea:
         """Rebuild the Idea a claim will execute, from the immutable action its digest covers.
 
         ONE spelling, called from both ends of the same round trip: `_card_added_payload` proves the
@@ -647,6 +648,9 @@ class CardReservationMixin:
         claimed. A second hand-synced copy would let the mint prove a rebuild the claim no longer
         performs — the guard would go quietly vacuous instead of red, which is exactly the failure it
         exists to stop.
+
+        `artifact` is what the node IS (`_claim_artifact_fields` of the mint row; doc 73 §1.4) —
+        empty for every Card whose proposal named neither, which rebuilds exactly as before.
         """
         return Idea(
             operator=action["operator"],
@@ -659,7 +663,35 @@ class CardReservationMixin:
             card_id=card_id,
             footprint=normalize_researcher_footprint(action.get("footprint")),
             **(concepts or {}),
+            **(artifact or {}),
         )
+
+    @staticmethod
+    def _authored_card_artifact(idea: Idea) -> dict:
+        """The `card_added` idea block's artifact fields (`core/cards.py::CARD_IDEA_ARTIFACT_FIELDS`):
+        `node_kind` and `uses` exactly when the proposal carried them, so every Card minted without
+        them keeps its row byte for byte. Outside the ownership digest, like the concept envelope."""
+        return {**({"node_kind": "artifact"} if getattr(idea, "node_kind", None) == "artifact"
+                   else {}),
+                **({"uses": [u for u in idea.uses if type(u) is int]}
+                   if getattr(idea, "uses", None) else {})}
+
+    @staticmethod
+    def _claim_artifact_fields(recorded_idea) -> dict:
+        """The `Idea` artifact kwargs a Card claim rebuilds with, from the RECORDED mint row's idea
+        block. Untrusted durable input: anything malformed is dropped, and `Idea`'s own validators
+        bound the rest; the fold then keeps only `uses` that name artifact nodes."""
+        if not isinstance(recorded_idea, dict):
+            return {}
+        out: dict = {}
+        if recorded_idea.get("node_kind") == "artifact":
+            out["node_kind"] = "artifact"
+        uses = recorded_idea.get("uses")
+        if isinstance(uses, list):
+            kept = [u for u in uses[:32] if type(u) is int and u >= 0]
+            if kept:
+                out["uses"] = kept
+        return out
 
     @staticmethod
     def _card_action(idea: Idea, parents: list[int], parent_generations: dict[str, int],
@@ -749,9 +781,11 @@ class CardReservationMixin:
         # round trip below, exactly as `action` already is. Proving the mint against a rebuild that
         # skipped the concept envelope is what let the claim quietly execute a different Idea.
         card_concepts = cls._authored_card_concepts(idea)
+        card_artifact = cls._authored_card_artifact(idea)
         rebuilt = cls._rebuilt_claim_idea(
             card_id, statement, action, rationale,
-            concepts=cls._claim_concept_envelope(card_concepts))
+            concepts=cls._claim_concept_envelope(card_concepts),
+            artifact=cls._claim_artifact_fields(card_artifact))
         rebuilt_action = cls._card_action(
             rebuilt, list(action.get("parent_ids") or []),
             dict(action.get("parent_generations") or {}),
@@ -793,6 +827,9 @@ class CardReservationMixin:
                 "eval_profile": action["eval_profile"],
                 "eval_timeout": action["eval_timeout"],
                 **(card_concepts or {}),
+                # What the claimed node IS (`_authored_card_artifact`; doc 73 §1.4), outside the
+                # digest by the concept envelope's rule — absent for every proposal without it.
+                **card_artifact,
             },
             "parent_id": action["parent_id"],
             "parent_ids": action["parent_ids"],
@@ -2121,7 +2158,10 @@ class CardReservationMixin:
                 card.id, card.seed_statement, receipt_action,
                 self._claim_rationale(card, registrations[0].data,
                                       full_rationale=card_full_rationale(self)),
-                concepts=calibration_concepts)
+                concepts=calibration_concepts,
+                # …and what the node IS, off the same proved mint row (critic 2026-10-08: a
+                # claim used to build a Researcher-proposed artifact as a ranked experiment).
+                artifact=self._claim_artifact_fields(registrations[0].data.get("idea")))
         except Exception:  # noqa: BLE001 — hostile/future Card data cannot escape the closed Idea schema
             return None
         rebuilt_action = self._card_action(

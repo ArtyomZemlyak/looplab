@@ -2386,7 +2386,12 @@ def make_docker_wrap(mount_root: str, image: str, network: str = "none",
     root = Path(mount_root).resolve()
     gpu_args = docker_gpu_argv(env, runtime=runtime)
     extra: list[str] = []
-    for p, ro in (binds or []):
+    for bind in (binds or []):
+        # `(host_path, read_only)`, or `(host_path, read_only, container_path)` when the caller maps
+        # the source to a destination of its own — a Windows host's path is no Linux container path
+        # (`engine/eval_dispatch.py::docker_use_binds`). The pair keeps the same-path rule below.
+        p, ro = bind[0], bind[1]
+        dst = bind[2] if len(bind) > 2 else None
         raw = os.fspath(p)
         # A task may deliberately carry a POSIX-absolute source path even when the Docker
         # client runs on Windows.  WindowsPath.resolve() treats `/data/raw` as rooted on the
@@ -2405,7 +2410,7 @@ def make_docker_wrap(mount_root: str, image: str, network: str = "none",
         # target (same absolute path) so the in-/work symlink resolves in the container. Only real
         # symlinks reach here (see _data_binds), so on POSIX ap is a valid Linux container path; a
         # copied-in source (the common Windows case) rides in the /work bind and is never bound here.
-        spec = f"type=bind,src={ap},dst={ap}" + (",readonly" if ro else "")
+        spec = f"type=bind,src={ap},dst={dst or ap}" + (",readonly" if ro else "")
         extra += ["--mount", spec]
 
     def _build(env: Optional[dict]):

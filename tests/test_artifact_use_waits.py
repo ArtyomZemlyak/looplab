@@ -156,7 +156,20 @@ def test_a_child_is_pinned_to_the_artifact_as_it_is_when_it_is_built():
         ("node_evaluated", {"node_id": 0, "generation": 0, "metric": None, "violations": []}),
         _nc(1, uses=[0], uses_attempts={"0": 0}),
         ("node_reset", {"node_id": 0, "from_stage": "eval"})))   # lifecycle 1 still producing
-    assert inherited_use_pins(st2, [1]) == {"0": 0}, "not produced: the parent's pin is inherited"
+    # Critic 2026-10-08: a producer being RE-produced handed the child its parent's SUPERSEDED pin,
+    # so the child was a paid build guaranteed to end `artifact_unavailable`. It is pinned to the
+    # lifecycle being produced, and waits for it.
+    assert inherited_use_pins(st2, [1]) == {"0": 1}, "being produced: the child waits for it"
+    from looplab.engine.artifact_fence import uses_waiting
+    child = st2.nodes[1].model_copy(update={"uses_attempts": inherited_use_pins(st2, [1])})
+    assert uses_waiting(st2, child)
+    st3 = fold(_rows(
+        _nc(0, node_kind="artifact"),
+        ("node_evaluated", {"node_id": 0, "generation": 0, "metric": None, "violations": []}),
+        _nc(1, uses=[0], uses_attempts={"0": 0}),
+        ("node_reset", {"node_id": 0, "from_stage": "eval"}),
+        ("node_failed", {"node_id": 0, "generation": 1, "error": "x", "reason": "crash"})))
+    assert inherited_use_pins(st3, [1]) == {"0": 0}, "never producible: the parent's pin stays"
 
 
 def test_the_child_row_carries_its_pins_and_the_fold_reads_them(tmp_path):

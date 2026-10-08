@@ -35,6 +35,17 @@ from looplab.trust.cv import cv_summary
 
 
 _CONFIRM_RETRYABLE = object()
+# …and its sibling for a seed `_run_eval` never launched because a pinned ARTIFACT moved (doc 73
+# §1.4): retried and paced the same way, and told apart only so the auto-pause names the artifact
+# rather than a GPU (`_pace_confirm_refusal`).
+_CONFIRM_ARTIFACT_REFUSED = object()
+# The auto-pause's two sentences, one per refusal the pace counts.
+_CONFIRM_PAUSE_GPU = ("auto-paused: confirmation could not secure the pinned GPU resource after "
+                      "repeated attempts (zero-device inventory or an unenforceable durable pin). "
+                      "Repair the runtime or re-pin the Card, then resume.")
+_CONFIRM_PAUSE_ARTIFACT = ("auto-paused: confirmation could not read the artifact a confirmed node "
+                           "is pinned to after repeated attempts (its producer was reset, deleted or "
+                           "failed). Re-produce the artifact or rebuild the consumer, then resume.")
 # "Any objective": the snapshot check a caller makes when it measures nothing a retarget retires.
 _ANY_OBJECTIVE = object()
 # Each confirmation row below carries `objective_key` — the key it was measured on (doc 68 68.2) —
@@ -96,10 +107,11 @@ class ConfirmPhaseMixin:
                 return True
         return False
 
-    async def _pace_confirm_refusal(self) -> None:
+    async def _pace_confirm_refusal(self, *, artifact: bool = False) -> None:
         """Back off after one retryable confirm refusal and, past the consecutive-refusal cap, pause
         the run durably. Called only on the ``_CONFIRM_RETRYABLE`` path, so the streak counts whole
-        confirm passes that refused back-to-back; any pass that actually runs a seed resets it."""
+        confirm passes that refused back-to-back; any pass that actually runs a seed resets it.
+        `artifact`: the refusal was a moved pinned artifact, which the pause names instead."""
         streak = getattr(self, "_confirm_refusal_streak", 0) + 1
         self._confirm_refusal_streak = streak
         if streak >= _CONFIRM_REFUSAL_PAUSE_AFTER:
@@ -113,9 +125,7 @@ class ConfirmPhaseMixin:
                 if self._run_halt_intent():
                     return
                 self.store.append(EV_PAUSE, {
-                    "reason": "auto-paused: confirmation could not secure the pinned GPU resource "
-                              "after repeated attempts (zero-device inventory or an unenforceable "
-                              "durable pin). Repair the runtime or re-pin the Card, then resume."})
+                    "reason": _CONFIRM_PAUSE_ARTIFACT if artifact else _CONFIRM_PAUSE_GPU})
             return
         await anyio.sleep(min(_CONFIRM_REFUSAL_BACKOFF_CAP,
                               _CONFIRM_REFUSAL_BACKOFF_BASE * (2 ** (streak - 1))))
@@ -280,6 +290,23 @@ class ConfirmPhaseMixin:
             finally:
                 self._release_gpus(reservation.get("gpu_ids"))
 
+            # NOTHING LAUNCHED: an artifact this node is pinned to moved (`_run_eval` tagged the
+            # result, `eval_dispatch.py::artifact_refusal`; doc 73 §1.4). That is not a seed the node
+            # ran and failed — memoizing it demoted the champion on a number nobody measured (critic
+            # 2026-10-08). Audited ONCE per (node, seed) under its own reason, which the fold keeps out
+            # of `confirm_seed_results` exactly like the GPU refusals, so the seed retries once the
+            # artifact is produced again; the pass stays open and paces like them.
+            from looplab.engine.eval_dispatch import artifact_refusal, artifact_unavailable_text
+            if artifact_refusal(res):
+                if not self._confirm_refusal_recorded(nd.id, generation, s, "artifact_unavailable"):
+                    async with self._write_lock:
+                        self.store.append(EV_CONFIRM_EVAL, {
+                            "node_id": nd.id, "generation": generation, "seed": s,
+                            "eval_seconds": 0.0, "metric": None,
+                            "reason": "artifact_unavailable",
+                            "error": artifact_unavailable_text(artifact_refusal(res)),
+                            **({"objective_key": objective} if objective else {})})
+                return _CONFIRM_ARTIFACT_REFUSED
             # The eval actually executed (neither GpuPinUnenforceable fired): the pinned resource is
             # satisfiable again, so clear any accumulated consecutive-refusal streak.
             self._confirm_refusal_streak = 0
@@ -408,7 +435,7 @@ class ConfirmPhaseMixin:
                 if (not self._confirmation_snapshot_current(generations, objective)
                         or not self._confirmation_node_current(nd.id, nd.attempt)):
                     return
-                if m is _CONFIRM_RETRYABLE:
+                if m is _CONFIRM_RETRYABLE or m is _CONFIRM_ARTIFACT_REFUSED:
                     # Infrastructure refusal is neither a completed seed nor confirmation completion.
                     # Leave the phase open so the same seed can run after a re-pin/runtime repair. The
                     # audit row is deduped inside `_run_confirm_seed` so re-entry cannot grow the log
@@ -416,7 +443,8 @@ class ConfirmPhaseMixin:
                     # the run durably. Otherwise run()'s empty-actions branch re-enters _confirm_phase
                     # immediately and (required_unavailable returns without waiting) a host that can
                     # never satisfy the pin — a CPU-box resume, driver loss — would hot-spin at 100% CPU.
-                    await self._pace_confirm_refusal()
+                    await (self._pace_confirm_refusal(artifact=True) if m is _CONFIRM_ARTIFACT_REFUSED
+                           else self._pace_confirm_refusal())
                     return
                 if m is not None:
                     scores.append(m)
@@ -482,10 +510,11 @@ class ConfirmPhaseMixin:
             result = await self._run_confirm_seed(nd, s, objective)
             if not self._confirmation_node_current(nd.id, generation):
                 return
-            if result is _CONFIRM_RETRYABLE:
+            if result is _CONFIRM_RETRYABLE or result is _CONFIRM_ARTIFACT_REFUSED:
                 # `_serve_forced_requests` re-enters this unfulfilled forced confirm every loop, so an
                 # unsatisfiable pin hot-spins here exactly as in `_confirm_phase`. Back off / auto-pause.
-                await self._pace_confirm_refusal()
+                await (self._pace_confirm_refusal(artifact=True) if result is _CONFIRM_ARTIFACT_REFUSED
+                       else self._pace_confirm_refusal())
                 return
         async with self._write_lock:
             if not self._confirmation_node_current(nd.id, generation):

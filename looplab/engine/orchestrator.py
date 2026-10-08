@@ -44,7 +44,7 @@ from looplab.events.types import (BACKGROUND_APPENDABLE, DIAGNOSTIC_EVENTS,
     EV_RUNG_PROMOTED,
     EV_SPEC_APPROVAL_REQUESTED,
     EV_SPEC_APPROVED, EV_SPEC_PROPOSED, PAUSE_REASON_EXTERNAL_OBLIGATIONS)
-from looplab.engine.artifact_fence import defer_waiting_consumers
+from looplab.engine.artifact_fence import defer_waiting_consumers, refuse_unrunnable_builds
 from looplab.engine.track_lane import cancel_track_lane, drain_track_requests, serve_track_requests
 from looplab.engine.upstream_serve import serve_upstream_requests
 from looplab.engine.ablation import AblationMixin
@@ -2094,6 +2094,9 @@ class Engine(ConfirmPhaseMixin, NoiseFloorMixin, AblationMixin, NoveltyGateMixin
                     state = self._sync_card_enrichments(state)
                     self._external_enrichment_seq = decision_seq
                 evals = [a for a in self.policy.next_actions(state) if a["kind"] == "evaluate"]
+                # …less a consumer still waiting on its producer (`engine/artifact_fence.py`): its
+                # ADMIT returns with no terminal, so dispatching it would re-dispatch every turn.
+                evals, _waiting = defer_waiting_consumers(state, evals)
                 if evals:
                     await self._dispatch_evals(evals, state, max_es, research=False)
                 else:
@@ -2218,6 +2221,14 @@ class Engine(ConfirmPhaseMixin, NoiseFloorMixin, AblationMixin, NoveltyGateMixin
             if _deferred and not actions:
                 await anyio.sleep(0.5)
                 continue
+            # …and a build bred from a consumer whose artifact can never be produced again is not
+            # bought at all: its child could only end `artifact_unavailable`. The turn gets the best
+            # runnable alternative instead, recorded as its `policy_decision`
+            # (`engine/artifact_fence.py::refuse_unrunnable_builds`). A no-op without artifacts.
+            actions, _unrunnable = refuse_unrunnable_builds(state, actions)
+            if _unrunnable:
+                _LOG.warning("artifact fence: refused %d build(s) whose child could only end "
+                             "artifact_unavailable", len(_unrunnable))
             # A NODE-CREATING OPERATOR REQUEST PARKED ON THE NODE BUDGET reaches this line only
             # because other work was waiting beside it (`forced_requests.py::_park_for_node_budget`,
             # doc 68 68.8): this turn EVALUATES what already exists — node 18 on v10, which sat
@@ -2544,20 +2555,31 @@ class Engine(ConfirmPhaseMixin, NoiseFloorMixin, AblationMixin, NoveltyGateMixin
                 # — is the normal loop's own overshoot bound, and one node serialized a parallel
                 # drain under ANY time budget (critic 2026-09-26, driven: 4.3 s became 6.4 s).
                 width = max(1, int(self._eval_parallel or 1))
-                handed = dict(sorted(owed.items())[:width] if max_s is not None
-                              else sorted(owed.items()))
-                await self._dispatch_evals([{"kind": "evaluate", "node_id": node_id}
-                                            for node_id in handed],
-                                           state, max_es, research=False)
+                # A consumer pinned to a lifecycle its producer is STILL producing is not handed:
+                # its ADMIT would return with no terminal and the turn would read as stuck and pause
+                # the drain over a node that only had to wait (`engine/artifact_fence.py`). When the
+                # producer is owed too it is handed beside it and the consumer runs on a later turn;
+                # when nothing it waits on is owed, nothing can move it and the drain pauses STUCK.
+                admissible, _waiting = defer_waiting_consumers(
+                    state, [{"kind": "evaluate", "node_id": node_id}
+                            for node_id, _ in sorted(owed.items())])
+                admissible_ids = [a["node_id"] for a in admissible]
+                handed = {node_id: owed[node_id] for node_id in
+                          (admissible_ids[:width] if max_s is not None else admissible_ids)}
+                if handed:
+                    await self._dispatch_evals([{"kind": "evaluate", "node_id": node_id}
+                                                for node_id in handed],
+                                               state, max_es, research=False)
                 after = fold(self.store.read_all())
                 # Still owed, on the lifecycle it was handed on: nothing moved it. An abort or a
                 # reset landing meanwhile is a move — the next turn re-derives what is owed.
                 stuck = sorted(node_id for node_id, generation in handed.items()
                                if (node := after.nodes.get(node_id)) is not None
                                and node.attempt == generation and drain_owed(after, node))
-                if len(stuck) < len(handed):
+                if handed and len(stuck) < len(handed):
                     return "continue"
-                reason = DRAIN_ONLY_STUCK_REASON.format(ids=", ".join(map(str, stuck)))
+                reason = DRAIN_ONLY_STUCK_REASON.format(
+                    ids=", ".join(map(str, stuck or sorted(owed))))
         async with self._write_lock:
             if self._run_halt_intent():
                 return "continue"          # the loop head's own stop / pause handling decides
@@ -2594,7 +2616,16 @@ class Engine(ConfirmPhaseMixin, NoiseFloorMixin, AblationMixin, NoveltyGateMixin
             await self._raise_deferred_eval_budget_stop()
             return "continue"
         aborted = set(state.aborted_nodes)
-        owed = {node.id: node.attempt for node in state.pending_nodes() if node.id not in aborted}
+        # A consumer waiting on a producer still being produced is not handed (`engine/
+        # artifact_fence.py`): it would stay pending through its dispatch and read as an admission
+        # refusal. Its producer is pending too, so it is handed here and the consumer follows.
+        admissible, _waiting = defer_waiting_consumers(
+            state, [{"kind": "evaluate", "node_id": node.id} for node in state.pending_nodes()
+                    if node.id not in aborted])
+        owed = {a["node_id"]: state.nodes[a["node_id"]].attempt for a in admissible}
+        if _waiting and not owed:
+            await anyio.sleep(0.5)
+            return "continue"
         if owed:
             await self._dispatch_evals([{"kind": "evaluate", "node_id": node_id}
                                         for node_id in owed], state, max_es, research=False)
@@ -2778,6 +2809,11 @@ class Engine(ConfirmPhaseMixin, NoiseFloorMixin, AblationMixin, NoveltyGateMixin
             state, speculative_raw_actions(
                 state, self.policy, self.policy.max_nodes, context=context),
             sweep=getattr(self, "_endgame_sweep", True))
+        # A build whose child could only end `artifact_unavailable` is not staged here either
+        # (`engine/artifact_fence.py::refuse_unrunnable_builds`); this lane takes no replacement —
+        # the next selection turn makes the runnable choice.
+        lane = [action for action in lane
+                if not refuse_unrunnable_builds(state, [action])[1]]
         return [action for action in lane
                 if action.get("kind") in ("draft", "improve", "merge")][:free]
 

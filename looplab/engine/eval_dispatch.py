@@ -109,6 +109,26 @@ def artifact_refusal(res) -> list:
     return list(refused) if isinstance(refused, list) else []
 
 
+# Where a Windows host's used artifact workdirs are mounted inside a Linux container: a drive-letter
+# host path is no valid container destination (`docker_use_binds`).
+DOCKER_USES_ROOT = "/looplab-uses"
+
+
+def docker_use_binds(paths, *, windows: bool) -> tuple[list, Optional[str]]:
+    """`(binds, container_value)` for the artifact workdirs a node uses (doc 73 §1.4) on the Docker
+    tier. On a POSIX host each workdir is bound read-only at its OWN path, so the host value of
+    `LOOPLAB_USES_WORKDIRS` already names container paths and `container_value` is None (unchanged).
+    On a WINDOWS host (critic 2026-10-08) a drive-letter workdir is no Linux container path —
+    the bind's destination was invalid and the variable named nothing the container could open — so
+    each is bound at `DOCKER_USES_ROOT/<i>`, in `uses` order, and the variable the container is
+    handed is those destinations joined with the CONTAINER's separator (`:`)."""
+    paths = [p for p in (paths or []) if p]
+    if not windows:
+        return [(p, True) for p in paths], None
+    dsts = [f"{DOCKER_USES_ROOT}/{i}" for i in range(len(paths))]
+    return [(p, True, d) for p, d in zip(paths, dsts)], (":".join(dsts) if dsts else None)
+
+
 class _DeferredBudgetStop:
     """A task-group facade that DEFERS a background task's `BudgetExceeded` instead of letting it
     cancel that group's siblings -- used by `_dispatch_evals` for exactly one caller,
@@ -1175,15 +1195,16 @@ class EvalDispatchMixin:
             # `Settings` fields onto itself under the same names. Only the per-EVAL arguments
             # (`binds`, `env`) are spelled here, because only this tier has them.
             from looplab.runtime.sandbox import docker_tier_kwargs
+            # …and the ARTIFACT workdirs this node `uses` (doc 73 §1.4), read-only — at their own
+            # host paths on a POSIX host, so `LOOPLAB_USES_WORKDIRS` names paths the container can
+            # see (critic 2026-10-08: it named host paths that did not exist there), and under
+            # `DOCKER_USES_ROOT` on a Windows one, whose paths no Linux container can name.
+            _use_binds, _use_value = docker_use_binds(_used_paths, windows=os.name == "nt")
             wrap = (command_eval.make_docker_wrap(
                         root, **docker_tier_kwargs(self),
-                        # …and the ARTIFACT workdirs this node `uses` (doc 73 §1.4), read-only at
-                        # their own host paths, so `LOOPLAB_USES_WORKDIRS` names paths the container
-                        # can see (critic 2026-10-08: it named host paths that did not exist there).
-                        binds=((self._data_binds(workdir) or [])
-                               + [(p, True) for p in (used.get(self.USES_WORKDIRS_ENV) or "")
-                                  .split(os.pathsep) if p]) or None,
-                        env=env)   # forward LOOPLAB_EVAL_SEED etc. into the container (per-eval env)
+                        binds=((self._data_binds(workdir) or []) + _use_binds) or None,
+                        # forward LOOPLAB_EVAL_SEED etc. into the container (per-eval env)
+                        env=({**env, self.USES_WORKDIRS_ENV: _use_value} if _use_value else env))
                     if self.trust_mode in ("untrusted", "hostile") else None)
             # The operator's declared metric SUBJECT, filtered to strings HERE rather than trusted:
             # `_grandfathered` reloads a recorded `task.snapshot.json` WITHOUT re-validating it, so
@@ -1208,7 +1229,11 @@ class EvalDispatchMixin:
             # stage's stdout is the HOST's, read with the host scorer's own reader (the task's when
             # it declares none), and the task's reader is handed over as `self_metric` to read the
             # candidate's own number off the stage before it. Without one, byte-identical.
-            _host = es.get("host_scorer") if isinstance(es.get("host_scorer"), dict) else None
+            # An ARTIFACT node (doc 73 §1.4) is never scored, so it runs no host scorer
+            # (`eval_stages.py::EvalStagesMixin._resolve_stages`): its last stage's stdout is read with
+            # the task's own reader, exactly as on a task that declares none, and then discarded.
+            _host = (es.get("host_scorer") if isinstance(es.get("host_scorer"), dict)
+                     and getattr(node, "kind", None) != "artifact" else None)
             _primary = ((_host.get("metric") if isinstance(_host.get("metric"), dict) else None)
                         or es["metric"]) if _host else es["metric"]
             # The deadline callback receives only a log tail from the sandbox.
