@@ -322,7 +322,9 @@ export const NARR = {
   },
   agent_decision: {
     validate: d => nestedValue(d, 'chosen', 'kind') && Array.isArray(d?.legal),
-    render: (d) => uiMessage("agent chose {0}{1} (of {2} legal move{3}){4}", [d.chosen?.kind || '?', d.chosen?.node_id != null ? ' → #' + d.chosen.node_id : '', (d.legal || []).length, (d.legal || []).length === 1 ? '' : 's', note(d.rationale, 70)]),
+    // One key per English number form: a glued `s` placeholder rendered as a stray Latin letter
+    // inside the Russian sentence.
+    render: (d) => uiMessage((d.legal || []).length === 1 ? "agent chose {0}{1} (of {2} legal move){3}" : "agent chose {0}{1} (of {2} legal moves){3}", [d.chosen?.kind || '?', d.chosen?.node_id != null ? ' → #' + d.chosen.node_id : '', (d.legal || []).length, note(d.rationale, 70)]),
   },
   agent_validated: {
     validate: d => ownValue(d, 'node_id'),
@@ -369,7 +371,7 @@ export const NARR = {
   workspace_changed: { render: () => uiText('workspace changed since the last run — re-grounding') },
   budget: {
     validate: d => ownValue(d, 'nodes') && ownValue(d, 'elapsed_s'),
-    render: (d) => uiMessage("checkpoint — {0} node{1}, {2}s elapsed", [d.nodes, d.nodes === 1 ? '' : 's', fmt(d.elapsed_s, 3)]),
+    render: (d) => uiMessage(d.nodes === 1 ? "checkpoint — {0} node, {1}s elapsed" : "checkpoint — {0} nodes, {1}s elapsed", [d.nodes, fmt(d.elapsed_s, 3)]),
   },
   // Meaningful events that previously LEAKED as raw JSON (no narration + not hidden). Narrated here so
   // they read cleanly. The high-volume / internal read-model events (node_concepts and the rest of the

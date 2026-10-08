@@ -1905,7 +1905,7 @@ export default function RunView({ runId, onBack, reviewMode = false, reviewMeta 
             ? 'alert' : 'status'}>
           <b>{uiText("Comments work is retained in this tab.")}</b>{' '}
           {(retainedCommentDrafts.length > 0 ? uiMessage("{0} unsaved draft{1} remain in memory. ", [retainedCommentDrafts.length, retainedCommentDrafts.length === 1 ? '' : 's']) : '')}
-          {(retainedCommentRecovery.valid.length > 0 ? uiMessage("{0} exact command recover{1} protected in browser storage. ", [retainedCommentRecovery.valid.length, retainedCommentRecovery.valid.length === 1 ? 'y is' : 'ies are']) : '')}
+          {(retainedCommentRecovery.valid.length > 0 ? uiMessage(retainedCommentRecovery.valid.length === 1 ? "{0} exact command recovery is protected in browser storage. " : "{0} exact command recoveries are protected in browser storage. ", [retainedCommentRecovery.valid.length]) : '')}
           {(retainedCommentRecovery.damaged.length > 0 ? uiMessage("{0} damaged recovery record{1} review. ", [retainedCommentRecovery.damaged.length, retainedCommentRecovery.damaged.length === 1 ? ' needs' : 's need']) : '')}
           {((retainedCommentRecoveryUnavailable ? uiText('Recovery storage cannot be inspected, so Start over remains blocked until it is available again. ') : ''))}{uiText("Nothing will be replayed automatically or rebound to the replacement generation.")}{(retainedCommentDrafts.length > 0 || retainedCommentRecovery.valid.length > 0) && <details>
             <summary>{uiText("View retained Comments work")}</summary>
@@ -2500,6 +2500,7 @@ export default function RunView({ runId, onBack, reviewMode = false, reviewMeta 
               resetKey={`${runId}:${generation || 'pending'}:${historyActive ? viewSeq : 'live'}`}>
               <ConceptView runId={runId} generation={generation}
                 sequence={historyActive ? viewSeq : null} state={state}
+                observedSeq={historyActive ? history.resolvedSeq : seq}
                 selectedNodeId={selectedId} onPickNode={inspectFromConcepts}
                 onOpenLineage={() => setView('dag')} />
             </LazyBoundary>

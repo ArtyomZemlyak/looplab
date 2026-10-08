@@ -122,7 +122,10 @@ export function reportNarrativeCoverage(report, currentNodeCount) {
 export function reportCoverageText(coverage) {
   if (!coverage || coverage.status === 'absent') return 'No agent narrative is published.'
   if (coverage.status === 'stale') {
-    return `Covers ${coverage.atNode} of ${coverage.currentNodeCount} nodes · stale by ${coverage.staleBy} node${coverage.staleBy === 1 ? '' : 's'}.`
+    // One sentence per English number form: a glued `s` capture leaks into the Russian copy.
+    return coverage.staleBy === 1
+      ? `Covers ${coverage.atNode} of ${coverage.currentNodeCount} nodes · stale by 1 node.`
+      : `Covers ${coverage.atNode} of ${coverage.currentNodeCount} nodes · stale by ${coverage.staleBy} nodes.`
   }
   if (coverage.status === 'inconsistent') {
     return `Claims ${coverage.atNode} nodes, but this view has ${coverage.currentNodeCount} · inconsistent provenance.`

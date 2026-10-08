@@ -59,7 +59,7 @@ export function driftStatus(drifts, config, evaluatedCount = 0) {
 export function rewardHackStatus(hacks, config, evaluatedCount = 0) {
   if ((hacks || []).length) return result(
     'alarm',
-    `${rewardHackNodeCount(hacks)} suspicious node${rewardHackNodeCount(hacks) === 1 ? '' : 's'} flagged`,
+    rewardHackNodeCount(hacks) === 1 ? '1 suspicious node flagged' : `${rewardHackNodeCount(hacks)} suspicious nodes flagged`,
     'Review the recorded signals before trusting or promoting the result.',
   )
   if (!config) return result(

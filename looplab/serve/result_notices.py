@@ -206,6 +206,22 @@ def publish(srv, rd: Path, body) -> dict:
     return _publish(srv, rd, body, internal=False)
 
 
+# The most one journal row can take: ids and tokens (~260 bytes), keys, and a 700-character summary
+# at up to 4 UTF-8 bytes per character. `ledger_has_room` asks for this much BEFORE a paid call.
+_MAX_ROW_BYTES = 4096
+
+
+def ledger_has_room(rd: Path) -> bool:
+    """Whether one more commentary row is certain to fit under `_MAX_BYTES`. The background worker
+    asks this before it BUYS a reply: a reply bought into a full ledger can never be published
+    (`_publish` refuses 413), so it was paid for and never shown, and it stalled every later one."""
+    try:
+        size = (rd / _FILE).stat().st_size
+    except FileNotFoundError:
+        size = 0
+    return size + _MAX_ROW_BYTES + 1 <= _MAX_BYTES
+
+
 def publish_internal(srv, rd: Path, body) -> dict:
     """Server worker only. The public POST retains external-only authority."""
     return _publish(srv, rd, body, internal=True)

@@ -301,3 +301,15 @@ def test_scheduled_reset_uses_ordinary_command_service_and_permission_gate(tmp_p
         assert commands.calls == [] and reset_events == [] and declined
         assert "needs approval" in store.get(record["id"])["last_error"]
     assert service.tick(now=4000) == []
+
+
+def test_an_edit_that_would_fire_after_the_lifetime_is_refused_not_silently_expired(tmp_path):
+    store = WatchStore(tmp_path)
+    tools = WatchTools(SessionWatches(store, "s1", "acceptEdits"))
+    tools.execute("watch_after", {"after_s": 60, "instruction": "Check demo"})
+    record = store.list()[0]
+    with pytest.raises(WatchRefusal):
+        store.configure(record["id"], session="s1", changes={"every_s": 86400},
+                        now=record["expires_at"] - 3600)
+    assert store.get(record["id"]) == record
+

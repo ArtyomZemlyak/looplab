@@ -511,7 +511,7 @@ def build_core(state, *, run_id: str, lens_pack: list[dict],
     # projection as memberships. A shallow Pydantic copy preserves the complete folded state for
     # history while preventing deleted nodes from skewing deltas even when they no longer have tags.
     metric_state = state.model_copy(update={"nodes": _current_nodes(state)})
-    metrics = concept_metrics(metric_state, graph, tags)
+    metrics = concept_metrics(metric_state, graph, tags, effect_state=state)
     if metrics.get("baseline") is not None and finite_metric(metrics["baseline"]) is None:
         metrics["baseline"] = None
         reasons.add("nonfinite_metric")

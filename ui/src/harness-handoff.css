@@ -13,4 +13,6 @@
 .harness-recovery form { display: flex; flex-direction: column; align-items: flex-start; gap: 10px; }
 .harness-recovery label { display: flex; align-items: center; gap: 10px; max-width: 100%; }
 .harness-recovery input { width: 420px; max-width: 100%; }
-.harness-recovery [aria-label="Saved command receipt"] { overflow-wrap: anywhere; }
+/* A class, not the aria-label: the label is translated, so `[aria-label="Saved command receipt"]`
+   matched nothing in Russian. */
+.harness-recovery .harness-receipt-row { overflow-wrap: anywhere; }

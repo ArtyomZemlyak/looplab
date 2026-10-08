@@ -228,3 +228,18 @@ def test_damaged_global_settings_never_take_down_a_run_scoped_paid_path(tmp_path
             return Settings(**config)
     settings = llm_settings(Store(), tmp_path)
     assert settings.output_language == "en" and settings.llm_model == "run-model"
+
+
+def test_a_pre_field_snapshot_keeps_the_historical_prompt_whatever_the_environment(monkeypatch):
+    from looplab.core.config import settings_from_snapshot
+    monkeypatch.setenv("LOOPLAB_OUTPUT_LANGUAGE", "ru")
+    assert settings_from_snapshot({"llm_model": "x"}).output_language == "auto"
+
+
+def test_a_language_client_can_be_copied():
+    import copy
+    from looplab.core.output_language import LanguageClient
+    class Inner:
+        model = "m"
+    clone = copy.copy(LanguageClient(Inner(), "ru"))
+    assert clone.model == "m"

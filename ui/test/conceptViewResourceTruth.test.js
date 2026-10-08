@@ -160,6 +160,8 @@ test('ConceptView fences, retries and preserves truthful last-good resource stat
     let runId = 'run#one'
     let generation = GENERATION_A
     let displayedSequence = null
+    // The `/state` ENVELOPE's seq: RunView passes it beside the folded state, which has none.
+    let observedSeq = 9
     let state = {
       direction: 'max', engine_running: true, best_node_id: 0,
       node_concepts: { 0: ['loss/a'] }, concept_consolidation: {}, concept_edges: {},
@@ -169,7 +171,7 @@ test('ConceptView fences, retries and preserves truthful last-good resource stat
     }
     const render = () => act(async () => {
       root.render(React.createElement(conceptModule.default, {
-        runId, generation, sequence: displayedSequence, state, onPickNode: id => { picked = id },
+        runId, generation, sequence: displayedSequence, state, observedSeq, onPickNode: id => { picked = id },
       })); await settle()
     })
 
@@ -334,6 +336,10 @@ test('ConceptView fences, retries and preserves truthful last-good resource stat
     }), { generation: GENERATION_A, requestedSeq: null }), /Invalid concept projection/,
     'a live frame cannot silently lose the expected run generation')
     const baseProjectionKey = conceptModule.conceptProjectionKey(state)
+    assert.equal(Object.hasOwn(state, 'seq'), false, 'a folded RunState carries no seq of its own')
+    assert.notEqual(conceptModule.conceptProjectionKey(state, 9), conceptModule.conceptProjectionKey(state, 10),
+      'a fold-only event moves the envelope seq, and that alone must change the projection key')
+    assert.equal(conceptModule.conceptProjectionKey(state, 9), conceptModule.conceptProjectionKey({ ...state }, 9))
     assert.equal(baseProjectionKey,
       conceptModule.conceptProjectionKey({ ...state, engine_running: false }))
     for (const changed of [
@@ -484,6 +490,15 @@ test('ConceptView fences, retries and preserves truthful last-good resource stat
     await reply(requests.at(-1), conceptPayload('architecture/moe'))
     await click(button('Expand concept rows'))
     assert.equal(document.querySelector('.cv-crow.tagged .cv-cid')?.getAttribute('title'), 'architecture/moe')
+
+    // A fold-only event (e.g. `reward_hack_suspected` after a node terminal) leaves every key field of
+    // the state alone and moves only the envelope seq; concept effects read fold-internal rulers, so
+    // that alone must refresh the projection.
+    before = requests.length
+    state = { ...state }; observedSeq = 10
+    await render()
+    assert.equal(requests.length, before + 1, 'an envelope seq advance refreshes the projection')
+    await reply(requests.at(-1), conceptPayload('architecture/moe'))
 
     before = requests.length
     state = { ...state, nodes: { 0: { ...state.nodes[0], metric: 0.9 } } }
