@@ -768,7 +768,25 @@ def auto_resume_enabled() -> bool:
     return str(os.environ.get(AUTO_RESUME_ENV, "")).strip().lower() in {"1", "true", "yes", "on"}
 
 
-def _request_auto_resume(rd: Path, store, state) -> bool:
+# THE TWO BOUNDS on an auto-resume (critic 2026-10-08). A Ctrl-C'd CLI run writes no `run_finished`
+# and no pause, so without them every such run under the root — months old included — was resumed at
+# once on each server start, a concurrent LLM spend with no cap by default. A run whose log last
+# moved more than `MAX_AGE_H` hours ago is left for a human; at most `MAX_RUNS` are resumed per scan.
+AUTO_RESUME_MAX_AGE_ENV = "LOOPLAB_UI_AUTO_RESUME_MAX_AGE_H"
+AUTO_RESUME_MAX_RUNS_ENV = "LOOPLAB_UI_AUTO_RESUME_MAX_RUNS"
+_AUTO_RESUME_MAX_AGE_H = 24.0
+_AUTO_RESUME_MAX_RUNS = 4
+
+
+def _auto_resume_bound(name: str, default: float) -> float:
+    try:
+        value = float(os.environ.get(name, "") or default)
+    except ValueError:
+        return default
+    return value if value > 0 else default
+
+
+def _request_auto_resume(rd: Path, store, state, *, now: Optional[float] = None) -> bool:
     """Append a durable `resume_requested{mode: resume, auto_resume: true}` for a run a dead engine
     left IN PROGRESS, so the ordinary pending-resume path below spawns it (incident 2026-10-06: a
     container restart killed every engine and each run waited for a human to press resume).
@@ -785,6 +803,11 @@ def _request_auto_resume(rd: Path, store, state) -> bool:
     if _spawn_liveness(rd) is not False or not _resolve_task_file(rd):
         return False
     events = store.read_all()
+    last_ts = events[-1].ts if events else None
+    max_age_s = _auto_resume_bound(AUTO_RESUME_MAX_AGE_ENV, _AUTO_RESUME_MAX_AGE_H) * 3600.0
+    if not isinstance(last_ts, (int, float)) or (
+            (time.time() if now is None else now) - float(last_ts)) > max_age_s:
+        return False
     try:
         store.append(EV_RESUME_REQUESTED, {"mode": "resume", "auto_resume": True},
                      expected_last_seq=events[-1].seq if events else -1)
@@ -856,6 +879,7 @@ def install_resume_reconcile_hooks(
             run_dirs = list(root.iterdir()) if root.exists() else []
         except OSError:
             return
+        auto_left = int(_auto_resume_bound(AUTO_RESUME_MAX_RUNS_ENV, _AUTO_RESUME_MAX_RUNS))
         for rd in run_dirs:
             if not (rd / "events.jsonl").is_file():
                 continue
@@ -871,8 +895,9 @@ def install_resume_reconcile_hooks(
             except Exception:  # noqa: BLE001 - one corrupt run cannot block server startup recovery
                 continue
             if not state.resume_pending():
-                if not (auto and _request_auto_resume(rd, store, state)):
+                if not (auto and auto_left > 0 and _request_auto_resume(rd, store, state)):
                     continue
+                auto_left -= 1
                 state = fold(store.read_all())
             task_file = _resolve_task_file(rd)
             if not task_file:

@@ -25,6 +25,7 @@ import subprocess
 import sys
 import threading
 from dataclasses import dataclass, field
+from collections.abc import Mapping
 from typing import Optional
 
 from looplab.runtime.sandbox import is_secret_env
@@ -708,14 +709,39 @@ def absent_distributions(dists, *, python: Optional[str] = None,
     `installed_versions`' sibling with the opposite failure contract, on purpose: a receipt may read
     "could not observe" as `{}`, but a DECISION to re-run an install must not read it as "everything
     is gone" — None leaves the decision with the caller (incident 2026-10-06: a container restart
-    wiped the env that a durable `run_setup_finished` still vouched for)."""
-    names = sorted({str(d).strip() for d in (dists or []) if str(d or "").strip()})
+    wiped the env that a durable `run_setup_finished` still vouched for).
+
+    `dists` may be a MAPPING `{name: requirement line}` (`Declaration.pins`): a line guarded by an
+    environment marker (`tomli; python_version<"3.11"`) is asked only where its marker holds, and the
+    marker is evaluated IN the eval interpreter, whose version and platform are the ones it names
+    (critic 2026-10-08: pip skips such a line, so it never lands in `dropped_requirements`, and an
+    unevaluated marker re-ran the install on every resume). A marker that cannot be evaluated there
+    — no `packaging` importable, a malformed marker — counts the line as present: the error this
+    function must never make is re-running an install on a guess."""
+    if isinstance(dists, Mapping):
+        lines = {str(n).strip(): str(v or "") for n, v in dists.items() if str(n or "").strip()}
+    else:
+        lines = {str(d).strip(): "" for d in (dists or []) if str(d or "").strip()}
+    names = sorted(lines)
     if not names:
         return []
     probe = ("import json, sys\n"
              "from importlib.metadata import version\n"
+             "def _holds(line):\n"
+             "    if ';' not in line:\n"
+             "        return True\n"
+             "    try:\n"
+             "        try:\n"
+             "            from packaging.markers import Marker\n"
+             "        except ImportError:\n"
+             "            from pip._vendor.packaging.markers import Marker\n"
+             "        return bool(Marker(line.split(';', 1)[1].split('#', 1)[0].strip()).evaluate())\n"
+             "    except Exception:\n"
+             "        return False\n"
              "out = []\n"
-             "for n in json.loads(sys.argv[1]):\n"
+             "for n, line in json.loads(sys.argv[1]):\n"
+             "    if not _holds(line):\n"
+             "        continue\n"
              "    try:\n"
              "        version(n)\n"
              "    except Exception:\n"
@@ -723,7 +749,8 @@ def absent_distributions(dists, *, python: Optional[str] = None,
              "sys.stdout.write(json.dumps({'absent': out}))\n")
     try:
         import json as _json
-        proc = subprocess.run([python or sys.executable, "-c", probe, _json.dumps(names)],
+        proc = subprocess.run([python or sys.executable, "-c", probe,
+                               _json.dumps([[n, lines[n]] for n in names])],
                               capture_output=True, text=True, encoding="utf-8", errors="replace",
                               timeout=timeout, env={k: v for k, v in os.environ.items()
                                                     if k.upper().startswith("PIP_")

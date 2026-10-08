@@ -406,7 +406,8 @@ class EvalDispatchMixin:
             for rec in e.data.get("dropped_requirements") or []:
                 if isinstance(rec, dict) and isinstance(rec.get("name"), str):
                     dropped.add(rec["name"])
-        absent = deps.absent_distributions([n for n in decl.pins if n not in dropped],
+        absent = deps.absent_distributions({n: line for n, line in decl.pins.items()
+                                            if n not in dropped},
                                            python=getattr(self.sandbox, "python", None))
         return absent or []
 

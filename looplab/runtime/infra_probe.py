@@ -15,16 +15,17 @@ unrepaired, uncharged retry). The channel that does exist is the engine asking t
 ITSELF, after the eval died, about the paths the OPERATOR declared: the `data:` / `references:`
 mount sources, the editable source roots, the run directory the record is written into, and the
 eval interpreter. The candidate cannot make the engine's own `stat` of a declared mount fail, so the
-answer is the engine's, like `is_present`'s.
+answer is the engine's, like `is_present`'s. The ONE exception is a FULL run directory: the
+candidate's workdir shares its filesystem, so `disk_full_only` is believed once per lifecycle.
 
 WHAT COUNTS, per target, and why the strictness differs:
 
 | role | probe | a fault is |
 |---|---|---|
-| `mount` (a declared data/reference source) | `stat` + list one entry | ANY `OSError`, a missing source included: the operator declared it, and it existed when the run was set up |
+| `mount` (a declared data/reference source) | `stat` + list one entry | ANY `OSError`; a MISSING source only once the run has evaluated a node (`admissible_faults`: a `run_setup` may create it) |
 | `editable` (a declared source root) | `stat` + list one entry | ANY `OSError` |
 | `run_dir` | create, write one byte, unlink a probe file | ANY `OSError` (ENOSPC, EROFS, ENOTCONN…) |
-| `interpreter` | `stat`, executable bit | missing or not executable |
+| `interpreter` (the sandbox's, and the task's own `eval.python`) | `stat`, executable bit | not executable; missing only once the run has evaluated a node |
 | `env_path` (an absolute path in the DECLARED eval env) | `stat` | only an INFRA errno or a hang: a declared OUTPUT path that does not exist yet is not a fault |
 
 A HANG IS A FAULT. A dead NFS/FUSE mount often blocks a `stat` in uninterruptible sleep instead of
@@ -199,6 +200,33 @@ def declared_targets(*, run_dir=None, repo_spec: Optional[dict] = None,
                 and "," not in value and "\n" not in value):
             _add("env_path", value)
     return out
+
+
+# A path that does not exist (yet) — the two spellings a probe reports for it.
+_ABSENT_CAUSES = frozenset({"ENOENT", "missing"})
+_DISK_FULL_CAUSES = frozenset({"ENOSPC", "EDQUOT"})
+
+
+def admissible_faults(faults: Iterable[InfraFault], *, seen_working: bool) -> list[InfraFault]:
+    """The faults that may pause a run, given whether this run has ever evaluated a node.
+
+    A declared mount or the task's own interpreter that does not EXIST is a box fault only once the
+    box has been seen working (critic 2026-10-08): before the first evaluated node, an operator's
+    `run_setup` may still be about to download the data or build the env (`_ensure_run_setup` runs
+    inside the launch, after the pre-launch probe), and pausing there would pause on every resume,
+    forever. A path that exists but does not ANSWER (ENOTCONN, EIO, a hang) is a fault either way —
+    that is the incident's shape, and no setup step produces it."""
+    return [f for f in faults
+            if seen_working or not (f.role in ("mount", "interpreter") and f.cause in _ABSENT_CAUSES)]
+
+
+def disk_full_only(faults: Iterable[InfraFault]) -> bool:
+    """Is every fault the run directory being FULL? That one the candidate can cause itself — its
+    workdir is on the same filesystem, and `RLIMIT_FSIZE` bounds a file, not the sum — so the engine
+    believes it once per lifecycle and then lets the failure take the ordinary repair path
+    (`engine/evaluate.py::EvaluateMixin._eval_infra_pause`)."""
+    faults = list(faults)
+    return bool(faults) and all(f.role == "run_dir" and f.cause in _DISK_FULL_CAUSES for f in faults)
 
 
 def probe(targets: Iterable[tuple[str, str]], *,

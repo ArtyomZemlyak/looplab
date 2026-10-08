@@ -54,6 +54,7 @@ import logging
 import math
 import threading
 import time
+import os
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from typing import Any, Optional
@@ -3291,8 +3292,14 @@ class EvaluateMixin:
                 # resume, like an attempt a pause withheld — and the pause names the fault. Asked only
                 # for an OSError: a KeyError on a hand-edited node is not about the box, whatever its
                 # mounts say. The attempt the raise cut short goes uncharged, as below.
+                #
+                # Asked of every LEAF, not of `exc` itself (critic 2026-10-08, driven): `_run_eval`
+                # runs inside RUN_ATTEMPT's task group, and anyio wraps even its own body's raise in
+                # an `ExceptionGroup`, so a stage-log write hitting ENOTCONN mid-eval reached this
+                # handler as a group and closed the node `engine_error` — the very end this branch
+                # exists to prevent. Only `_eval_prepare_workdir`, outside the group, arrived bare.
                 faults: list = []
-                if isinstance(exc, OSError):
+                if any(isinstance(leaf, OSError) for leaf in exception_leaves(exc)):
                     try:
                         targets = self._infra_probe_targets()
                         if targets:
@@ -3308,6 +3315,8 @@ class EvaluateMixin:
                     # finishes; leaving this node pending would end the run with a node that has no
                     # terminal (`_pause_withholds_attempt`'s stop clause, the same defect). The stop is
                     # final, so the box fault closes the node as `engine_error` below, as it always did.
+                    from looplab.runtime.infra_probe import admissible_faults
+                    faults = admissible_faults(faults, seen_working=bool(state.evaluated_nodes()))
                     if faults and not (state.finished or state.stop_requested):
                         if not auto_pause_is_redundant(state):
                             self.store.append(EV_PAUSE, {
@@ -3644,10 +3653,20 @@ class EvaluateMixin:
             env = self._declared_eval_env({}, getattr(self, "_eval_spec", None)) or {}
         except (TypeError, ValueError, AttributeError):   # a malformed declaration probes no env path
             env = {}
-        return declared_targets(run_dir=getattr(self, "run_dir", None),
-                                repo_spec=getattr(self, "_repo_spec", None),
-                                interpreter=getattr(getattr(self, "sandbox", None), "python", None),
-                                env=env)
+        spec = getattr(self, "_repo_spec", None)
+        targets = declared_targets(run_dir=getattr(self, "run_dir", None), repo_spec=spec,
+                                   interpreter=getattr(getattr(self, "sandbox", None), "python", None),
+                                   env=env)
+        # …and the TASK's own interpreter (`RepoTask.task_python`, the declared `eval.python`), which
+        # is what the incident's wiped `/var/tmp` conda env was (critic 2026-10-08): the sandbox's is
+        # the engine's own binary and can hardly vanish under it. Host tiers only — a Docker tier
+        # names an interpreter inside the image.
+        task_python = spec.get("task_python") if isinstance(spec, dict) else None
+        if (isinstance(task_python, str) and os.path.isabs(task_python)
+                and getattr(getattr(self, "sandbox", None), "python", None) is not None
+                and ("interpreter", task_python) not in targets):
+            targets.append(("interpreter", task_python))
+        return targets
 
     async def _eval_infra_pause(self, a: "EvalAttempt", *, failed: bool = True) -> bool:
         """Probe the box — after a failed attempt (`failed`), or before a launch — and on a fault
@@ -3661,11 +3680,27 @@ class EvaluateMixin:
         the attempt and the node stays pending, so the resume re-runs it on a healthy box. A failure
         whose probe finds nothing proceeds to the ordinary repair path, unchanged."""
         from looplab.engine.speculation import auto_pause_is_redundant
-        from looplab.runtime.infra_probe import describe, probe
+        from looplab.runtime.infra_probe import (admissible_faults, describe, disk_full_only,
+                                                 probe)
         targets = self._infra_probe_targets()
         if not targets:
             return False
         faults = await anyio.to_thread.run_sync(functools.partial(probe, targets))
+        if not faults:
+            return False
+        events = self.store.read_all()
+        faults = admissible_faults(faults, seen_working=bool(fold(events).evaluated_nodes()))
+        if failed and disk_full_only(faults) and any(
+                e.type == EV_EVAL_ATTEMPT_WITHHELD and e.data.get("node_id") == a.node_id
+                and e.data.get("generation") == a.generation
+                and e.data.get("reason") == "infra_unavailable" for e in events):
+            # THE SAME LIFECYCLE FILLED THE DISK TWICE (critic 2026-10-08): the first time the
+            # engine believed the box and paused; on the resume the re-materialized workdir ran the
+            # same code into the same wall. That is the candidate's doing — a checkpoint per step —
+            # and the repair path is what can fix it.
+            _LOG.warning("node %s: the run directory is full again after a withheld attempt of "
+                         "this lifecycle; treating it as the candidate's failure", a.node_id)
+            return False
         if not faults:
             return False
         what = "failed" if failed else "was about to launch"

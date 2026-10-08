@@ -67,3 +67,27 @@ def test_a_paused_or_finished_run_is_left_alone(tmp_path, monkeypatch, extra):
     assert _start(tmp_path, monkeypatch, enabled=True) == []
     assert not [e for e in store.read_all() if e.type == "resume_requested"]
     assert not fold(store.read_all()).resume_pending()
+
+
+def test_a_stale_run_is_left_for_a_human(tmp_path, monkeypatch):
+    """critic 2026-10-08: a Ctrl-C'd CLI run writes no `run_finished`, so without an age bound every
+    such run under the root — months old — came back on each server start."""
+    store = _run(tmp_path)
+    events = store.read_all()
+    assert ep._request_auto_resume(tmp_path / "run", store, fold(events),
+                                   now=events[-1].ts + 25 * 3600) is False
+    assert not [e for e in store.read_all() if e.type == "resume_requested"]
+    monkeypatch.setenv(ep.AUTO_RESUME_MAX_AGE_ENV, "48")
+    monkeypatch.setattr(ep, "_spawn_liveness", lambda _rd: False)
+    assert ep._request_auto_resume(tmp_path / "run", store, fold(events),
+                                   now=events[-1].ts + 25 * 3600) is True
+
+
+def test_at_most_max_runs_are_resumed_per_scan(tmp_path, monkeypatch):
+    stores = [_run(tmp_path, f"run{i}") for i in range(5)]
+    monkeypatch.setenv(ep.AUTO_RESUME_MAX_RUNS_ENV, "2")
+    spawns = _start(tmp_path, monkeypatch, enabled=True)
+    resumed = [s for s in stores if any(e.type == "resume_requested" and e.data.get("auto_resume")
+                                        for e in s.read_all())]
+    assert len(resumed) == 2, [[e.data for e in s.read_all() if e.type == "resume_requested"]
+                               for s in stores]

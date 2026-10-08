@@ -101,3 +101,18 @@ def test_absent_distributions_reads_the_real_interpreter():
         "no-such-dist-looplab-xyz"]
     assert deps.absent_distributions([]) == []
     assert deps.absent_distributions(["pytest"], python="/nonexistent/python") is None
+
+
+def test_a_marker_guarded_requirement_is_asked_only_where_its_marker_holds():
+    """critic 2026-10-08: pip SKIPS `tomli; python_version<"3.11"` on a newer interpreter, so it is
+    never installed and never dropped — and an unevaluated marker re-ran the install every resume.
+    The marker is evaluated in the eval interpreter itself."""
+    from looplab.runtime.deps import absent_distributions
+    got = absent_distributions({
+        "pywin32": 'pywin32>=300; sys_platform=="win32" and sys_platform=="linux"',
+        "dataclasses-xyz": 'dataclasses-xyz; python_version<"3.0"',
+        "looplab-missing-xyz": "looplab-missing-xyz==1",
+        "looplab-missing-guarded": 'looplab-missing-guarded; python_version>="3.0"',
+        "pip": "pip"})
+    assert got == ["looplab-missing-guarded", "looplab-missing-xyz"]
+    assert absent_distributions(["looplab-missing-xyz", "pip"]) == ["looplab-missing-xyz"]
