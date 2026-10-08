@@ -70,12 +70,13 @@ def upstream_mode_setting(settings) -> str:
     return value if value in UPSTREAM_MODES else "off"
 
 
-def resolve_upstream_mode(settings, task) -> tuple[str, str]:
-    """`(mode, reason)` this run actually serves. Pure over the settings and the task declaration."""
+def resolve_upstream_mode(settings, upstream) -> tuple[str, str]:
+    """`(mode, reason)` this run actually serves. Pure over the settings and the task's `upstream`
+    declaration (None when it declares none)."""
     mode = upstream_mode_setting(settings)
     if mode == "off":
         return "off", "upstream_mode is off"
-    if getattr(task, "upstream", None) is None:
+    if upstream is None:
         return "off", "the task declares no upstream block (scorer boundary + tests), so nothing can be checked"
     if getattr(settings, "trust_mode", "trusted_local") != "trusted_local":
         return "off", "the upstream gate runs on the host and needs trust_mode=trusted_local"
@@ -93,7 +94,7 @@ def run_settings(run_dir):
         return None
 
 
-def auto_next_op(events, task) -> Optional[tuple[str, dict]]:
+def auto_next_op(events, seed_base) -> Optional[tuple[str, dict]]:
     """The next operation `auto` takes, or None. Pure over the log.
 
     The OLDEST proposal against the current base that still waits: one with no gate claim is
@@ -104,7 +105,7 @@ def auto_next_op(events, task) -> Optional[tuple[str, dict]]:
     from looplab.engine.upstream_state import active_base
     from looplab.events.run_generation import run_generation_token
     try:
-        active = active_base(events, getattr(task, "seed_base", None))
+        active = active_base(events, seed_base)
     except Exception:  # noqa: BLE001 — an unreadable base is the lane's refusal to state, not ours
         return None
     rows = [e for e in events if e.type.startswith("upstream_") or e.type == "base_advanced"]
@@ -167,7 +168,7 @@ def _arm(engine) -> dict:
     if serve.armed is None:
         spec = getattr(engine, "_repo_spec", None) or {}
         settings = run_settings(engine.run_dir) if spec.get("upstream") is not None else None
-        mode, reason = (resolve_upstream_mode(settings, engine.task) if settings is not None
+        mode, reason = (resolve_upstream_mode(settings, spec["upstream"]) if settings is not None
                         else ("off", "no upstream block or no readable config snapshot"))
         serve.armed = {"mode": mode, "reason": reason, "settings": settings,
                        "stamp": spec.get("effective_seed_base") if mode != "off" else None}
@@ -273,7 +274,7 @@ async def _settle(engine, lane, job: UpstreamJob) -> bool:
             elif job.op == "advance":
                 from looplab.engine.upstream_state import active_base
                 prepared = job.out[1]
-                current = active_base(store.read_all(), engine.task.seed_base)["revision"]
+                current = active_base(store.read_all(), engine._repo_spec.get("seed_base"))["revision"]
                 if current != prepared["proposal"]["expected_base_revision"]:
                     receipt = {"outcome": "refused", "code": "upstream_base_conflict"}
                 else:
@@ -382,7 +383,7 @@ async def serve_upstream_requests(engine, state) -> bool:
     if armed["mode"] != "auto":
         return False
     events = engine.store.read_all()
-    nxt = auto_next_op(events, engine.task)
+    nxt = auto_next_op(events, engine._repo_spec.get("seed_base"))
     if nxt is None:
         return False
     op, body = nxt

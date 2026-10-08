@@ -537,6 +537,10 @@ _LAYOUT = {
     "infra_probe": "runtime",  # the box before the candidate (incident 2026-10-06)
     "artifact_sync": "engine",  # the operator's copy-out of a finished node's workdir
     "upstream_board": "core",  # the one reading of the upstream lane's folded history (doc 73)
+    "track_lane": "engine",  # eval.tracks served by a live engine (doc 73 §1.4)
+    "artifact_fence": "engine",  # a uses-consumer reads the artifact it was admitted with
+    "artifact_ideas": "agents",  # Settings.researcher_artifacts: the Researcher's artifact schema
+    "upstream_serve": "engine",  # the upstream lane served by a live engine (doc 73 §2.5)
 }
 
 

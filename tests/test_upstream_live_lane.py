@@ -36,7 +36,7 @@ def _serve(engine, *, turns=40):
         for _ in range(turns):
             await serve_upstream_requests(engine, fold(engine.store.read_all()))
             job = engine._upstream_serve.job
-            if job is None and auto_next_op(engine.store.read_all(), engine.task) is None:
+            if job is None and auto_next_op(engine.store.read_all(), engine._repo_spec.get("seed_base")) is None:
                 state = fold(engine.store.read_all())
                 if state.lane_ops_done >= len(state.lane_op_requests):
                     return
@@ -62,9 +62,9 @@ def test_the_mode_has_one_reader_is_auto_and_resumes_off():
 
 
 def test_auto_degrades_to_off_where_nothing_can_be_checked():
-    declared = SimpleNamespace(upstream={"tests": []})
-    assert resolve_upstream_mode(Settings(), SimpleNamespace(upstream=None))[0] == "off"
-    assert "no upstream block" in resolve_upstream_mode(Settings(), SimpleNamespace(upstream=None))[1]
+    declared = {"tests": []}
+    assert resolve_upstream_mode(Settings(), None)[0] == "off"
+    assert "no upstream block" in resolve_upstream_mode(Settings(), None)[1]
     assert resolve_upstream_mode(Settings(trust_mode="untrusted"), declared)[0] == "off"
     assert resolve_upstream_mode(Settings(), declared) == ("auto", "")
     assert resolve_upstream_mode(Settings(upstream_mode="off"), declared)[0] == "off"
@@ -74,7 +74,7 @@ def test_auto_degrades_to_off_where_nothing_can_be_checked():
 def test_a_live_engine_checks_and_advances_a_proposal_without_a_pause(tmp_path):
     lane, store, generation, body, made = _live(tmp_path)
     pid = made["proposal_id"]
-    assert auto_next_op(store.read_all(), lane.task)[0] == "check"
+    assert auto_next_op(store.read_all(), lane.task.seed_base)[0] == "check"
     engine = _engine(lane, store)
     _serve(engine)
     events = store.read_all()
@@ -86,7 +86,7 @@ def test_a_live_engine_checks_and_advances_a_proposal_without_a_pause(tmp_path):
     assert len(advanced) == 1 and advanced[0].data["in_engine"] is True
     assert advanced[0].data["action_id"] == f"auto-advance-{pid}"
     assert active_base(events, lane.task.seed_base)["selector"] == made["selector"]
-    assert auto_next_op(events, lane.task) is None, "nothing left to do; a re-entry is idempotent"
+    assert auto_next_op(events, lane.task.seed_base) is None, "nothing left to do; a re-entry is idempotent"
     before = store.path.read_bytes()
     _serve(_engine(lane, store))
     assert store.path.read_bytes() == before

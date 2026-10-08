@@ -107,7 +107,7 @@ class UpstreamLane:
         stopped lane does before claiming work — and the receipt says `queued`: the engine appends the
         lane's own rows and the positional `lane_op_done` between turns, without a pause."""
         from looplab.engine.upstream_serve import OP_KINDS, resolve_upstream_mode
-        if self.task.upstream is None or resolve_upstream_mode(self.settings, self.task)[0] == "off":
+        if self.task.upstream is None or resolve_upstream_mode(self.settings, self.task.upstream)[0] == "off":
             return None
         if not isinstance(body.get("action_id"), str) or not re.fullmatch(r"[A-Za-z0-9_.:-]{1,128}", body["action_id"]):
             return None                     # `_mutation` refuses it with its own words

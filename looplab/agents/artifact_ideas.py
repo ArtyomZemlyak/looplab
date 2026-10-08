@@ -67,6 +67,15 @@ def drop_artifact_fields(idea, enabled: bool):
     return idea.model_copy(update={"node_kind": None, "uses": []})
 
 
+def artifact_turn(enabled: bool, state):
+    """One proposal's artifact half, for the plain Researcher's single structured call
+    (`roles.py::LLMResearcher.propose`): the cue its user turn appends ("" off), the emit model it
+    parses with, and the drop applied to what it parsed."""
+    from types import SimpleNamespace
+    return SimpleNamespace(cue=artifact_cue(state) if enabled else "", model=emission_model(enabled),
+                           drop=lambda idea: drop_artifact_fields(idea, enabled))
+
+
 def artifact_cue(state) -> str:
     """The user-turn block naming the run's PRODUCED artifact nodes (evaluated in their current
     lifecycle) and the two fields — every line derived from the fold, nothing from model text but the

@@ -45,7 +45,7 @@ from looplab.events.types import (BACKGROUND_APPENDABLE, DIAGNOSTIC_EVENTS,
     EV_SPEC_APPROVAL_REQUESTED,
     EV_SPEC_APPROVED, EV_SPEC_PROPOSED, PAUSE_REASON_EXTERNAL_OBLIGATIONS)
 from looplab.engine.artifact_fence import defer_waiting_consumers
-from looplab.engine.track_lane import drain_track_requests, serve_track_requests
+from looplab.engine.track_lane import cancel_track_lane, drain_track_requests, serve_track_requests
 from looplab.engine.upstream_serve import serve_upstream_requests
 from looplab.engine.ablation import AblationMixin
 from looplab.engine.metric_salvage import settle_mode as settle_metric_salvage_mode
@@ -1599,7 +1599,7 @@ class Engine(ConfirmPhaseMixin, NoiseFloorMixin, AblationMixin, NoveltyGateMixin
         finally:
             # A track worker never outlives the engine that started it: its subprocess is
             # tree-killed and its request stays queued for the next engine (`engine/track_lane.py`).
-            self._track_lane.cancel()
+            cancel_track_lane(self)
             # The raising exits' half of the run-loop exit receipt (see `_record_run_loop_exit`):
             # a no-op when the fall-through already recorded it or the loop was never entered. It runs
             # BEFORE the exporter is retired, so the receipt still reaches an open trace.
@@ -2316,7 +2316,7 @@ class Engine(ConfirmPhaseMixin, NoiseFloorMixin, AblationMixin, NoveltyGateMixin
         # §1.4) — a question asked of a running search is not dropped because the search ended
         # first. A PAUSE only cancels the one in flight: its request stays queued for the resume.
         if fold(self.store.read_all()).paused:
-            self._track_lane.cancel()
+            cancel_track_lane(self)
         else:
             await drain_track_requests(self, fold)
         # WHY THE LOOP STOPPED, exactly once — the receipt rule, the `finished` skip and the

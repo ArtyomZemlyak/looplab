@@ -235,6 +235,14 @@ async def _harvest(engine, job: TrackJob) -> None:
                            list(job.failed.items())[:_RECEIPT_ROWS]}} if job.failed else {})})
 
 
+def cancel_track_lane(engine) -> None:
+    """Cancel the in-flight track job, if this engine has a lane (an engine stand-in built without
+    `Engine.__init__` has none, and its `run` must still end cleanly)."""
+    lane = getattr(engine, "_track_lane", None)
+    if lane is not None:
+        lane.cancel()
+
+
 async def serve_track_requests(engine, state) -> bool:
     """One loop turn's look at the track queue. True when it appended (the caller re-folds)."""
     lane = getattr(engine, "_track_lane", None)
