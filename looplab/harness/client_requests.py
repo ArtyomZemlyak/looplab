@@ -137,7 +137,7 @@ class ClientRequests:
                     or not isinstance(request["body"], dict)
                     or not isinstance(request["body"].get("expected_generation"), str)
                     or request["body"]["expected_generation"].lower() != generation
-                    or row[self.identity_field] != self._identity(request, run_id)
+                    or row[self.identity_field] not in self._read_identities(request, run_id)
                     or path.name != row[self.identity_field] + ".json"
                     or row["request_sha256"] != _hash(_bytes(request))):
                 raise ValueError("client request identity/content invalid")
@@ -157,6 +157,11 @@ class ClientRequests:
                 ("A command POST needs a non-empty Idempotency-Key" if required and not key
                  else "The Idempotency-Key must be printable ASCII of at most 512 characters")
                 + "; nothing was saved and no HTTP request was made.")
+
+    def _read_identities(self, request, run_id):
+        """The identities a SAVED record may carry: today's, plus any earlier derivation records
+        on disk still use (a store is never rewritten in place)."""
+        return {self._identity(request, run_id)}
 
     def _identity(self, request, run_id):
         self._key(request["idempotency_key"])
@@ -300,6 +305,18 @@ class ClientActions(ClientRequests):
         # An unscoped route keeps its original two-item identity byte for byte.
         return "act_" + _hash(_bytes([namespace, action_id,
                                       *(request["body"][field] for field in scope)]))
+
+    def _read_identities(self, request, run_id):
+        identities = super()._read_identities(request, run_id)
+        prefix = f"/api/runs/{quote(run_id, safe='')}/"
+        suffix = request["path"][len(prefix):]
+        if ACTION_SCOPE_FIELDS.get(suffix):
+            # A checkpoint answer saved before its scope joined the identity (2026-10-05..07)
+            # carries the two-item one. Refusing it made `listing` fail for EVERY saved action of
+            # that generation, and the record was never superseded (a new save lands elsewhere).
+            namespace = "upstream" if suffix.startswith("upstream/") else suffix
+            identities.add("act_" + _hash(_bytes([namespace, request["body"]["action_id"]])))
+        return identities
 
     def save_action(self, run_id, generation, path, body, key="", *, credential=""):
         return self._save_request(run_id, generation,

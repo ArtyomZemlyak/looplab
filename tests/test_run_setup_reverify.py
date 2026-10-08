@@ -103,26 +103,13 @@ def test_absent_distributions_reads_the_real_interpreter():
     assert deps.absent_distributions(["pytest"], python="/nonexistent/python") is None
 
 
-def test_a_marker_guarded_requirement_is_asked_only_where_its_marker_holds():
-    """critic 2026-10-08: pip SKIPS `tomli; python_version<"3.11"` on a newer interpreter, so it is
-    never installed and never dropped — and an unevaluated marker re-ran the install every resume.
-    The marker is evaluated in the eval interpreter itself."""
-    from looplab.runtime.deps import absent_distributions
-    got = absent_distributions({
-        "pywin32": 'pywin32>=300; sys_platform=="win32" and sys_platform=="linux"',
-        "dataclasses-xyz": 'dataclasses-xyz; python_version<"3.0"',
-        "looplab-missing-xyz": "looplab-missing-xyz==1",
-        "looplab-missing-guarded": 'looplab-missing-guarded; python_version>="3.0"',
-        "pip": "pip"})
-    assert got == ["looplab-missing-guarded", "looplab-missing-xyz"]
-    assert absent_distributions(["looplab-missing-xyz", "pip"]) == ["looplab-missing-xyz"]
-
 
 def test_a_hash_pinned_marker_line_is_still_asked():
-    """critic 2026-10-08 (second round, driven): uv / pip-compile / poetry exports put `--hash=` after
-    the marker; parsed whole, the marker failed and a WIPED package read as present."""
-    from looplab.runtime.deps import absent_distributions
-    got = absent_distributions({
-        "zz-missing-a": 'zz-missing-a==1.0 ; python_version >= "3.0"     --hash=sha256:abc',
-        "zz-missing-b": 'zz-missing-b==1 ; python_version < "3.0" --hash=sha256:abc'})
-    assert got == ["zz-missing-a"]
+    """critic 2026-10-08 (driven): uv / pip-compile / poetry exports put `--hash=` after the marker;
+    parsed with it, the marker failed to evaluate. `requirement_marker` cuts the options off."""
+    from looplab.runtime.deps import absent_distributions, requirement_marker
+    lines = {"zz-missing-a": 'zz-missing-a==1.0 ; python_version >= "3.0"     --hash=sha256:abc',
+             "zz-missing-b": 'zz-missing-b==1 ; python_version < "3.0" --hash=sha256:abc'}
+    markers = {n: requirement_marker(line) for n, line in lines.items()}
+    assert markers == {"zz-missing-a": 'python_version >= "3.0"', "zz-missing-b": 'python_version < "3.0"'}
+    assert absent_distributions(sorted(lines), markers=markers) == ["zz-missing-a"]

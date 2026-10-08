@@ -4164,7 +4164,6 @@
     "warm light": "теплой лампочкой",
     "was not selected — multi-seed confirmation corrected a seed-lucky result.": "не был выбран — многосемянное подтверждение исправлено, что является результатом удачи семян.",
     "were measured under provably different evaluations": "были измерены в рамках явно различных оценок",
-    "were recovered from the preserved score log after the run, not recorded while it was happening — at the precision the scoring program chose to print, which is coarser than the objective. Two nodes equal on a reconstructed row are not known to be equal.": "После этого, не записавшись, он был найден в архиве, но при этом был сделан вывод, что при распечатке программ вычисления баллов, которые являются храброй целью. Два узла, равные реконструированному строку, не равны.",
     "were taken from the experiment's own stdout with nothing declaring or checking them — the code that produced the number also chose to print it. They are audit-only and never drive selection.": "Они были взяты из собственного теста, но ничего не объявляли или не проверяли их — код, который создал число, также решил его печатать.",
     "what changed": "что изменилось",
     "what this question's OWN experiments reached, before its sharper children": "что этот вопрос дошёл до экспериментов с WON, прежде чем его более острые дети",
@@ -5702,7 +5701,6 @@
     "Recover the stored run command before continuing": "Возвращать команду хранения, прежде чем продолжать",
     "Recover the stored run command before starting another": "Возвращать команду хранения, прежде чем начать другой",
     "Recovered a validated paid lens from the durable server terminal. No provider request was replayed.": "Вернули проверенный ренты с серверного терминала. Запрос провайдера не был воспроизведен.",
-    "Recovered from the preserved score log after the run, not recorded while it was happening. The": "После запуска, не записанная в журнале счёта, была найдена.",
     "Recovered terminal failed validation; new paid work remains disabled.": "Взыскание данных о терминале не удалось подтвердить; новые оплачиваемые работы остаются незавершенными.",
     "Recovered terminal: no model configured. No provider request was replayed.": "Вернутый терминал: модель не была спланирована. Запрос провайдера не был воспроизведен повторно.",
     "Recovered the previous paid lens terminal. No provider request was replayed.": "Получил предыдущий терминал с платными линзами.",
@@ -6697,7 +6695,6 @@
     "cmdbar-status thinking recovery error": "cmdbar-status thinking recovery error",
     "cmdbar-status thinking": "cmdbar-status thinking",
     "cmdbar-toast side": "cmdbar-toast side",
-    "coarser than the objective, so two nodes equal here are not known to be equal.": "чернее цели, так что два узла, равные здесь, не известны как равные.",
     "code event-json": "code event-json",
     "code is being produced": "готовится код",
     "code md-code": "code md-code",
@@ -7089,7 +7086,6 @@
     "operator dropped": "оператор сброшен",
     "operator or engine removed the work item": "- оператор или движок снял с эксплуатации элемент, касающийся работы;",
     "operator reopened": "вновь открыт оператор",
-    "operator's own scoring program printed it — but at the precision it chose to print, which is": "Оценочная программа оператора напечатала его, но с точностью, которую она решила напечатать, которая состоит в том, что",
     "operator's protected scoring stage": "Защищенная стадия баллов оператора",
     "opposition-only evidence": "доказательства, представленные только оппозицией",
     "origin-chip compact": "origin-chip compact",
@@ -7695,6 +7691,10 @@
     "Assistant adds nodes": "Ассистент добавляет узлы",
     "Lets the Assistant add experiment or data-preparation nodes, each behind a confirm card.": "Позволяет Ассистенту добавлять узлы экспериментов или подготовки данных, каждый через карточку подтверждения.",
     "Developer: state the capabilities promoted into the base": "Разработчик: сообщать о возможностях, перенесённых в базу",
-    "When the upstream lane has promoted a champion's general capability into the run's base (behind a named flag whose default keeps the old behaviour), every Developer build turn lists those promotions — flag, default and enabled value, source experiment, summary — so the role that writes the code switches a flag on instead of re-implementing it, and does not repair around a failure a promoted fix already cured. A run that never promoted anything is unchanged. Off = the pre-2026-10-07 prompt, byte for byte.": "Когда upstream-полоса перенесла общую возможность чемпиона в базу запуска (за именованным флагом, значение по умолчанию которого сохраняет прежнее поведение), каждый ход сборки Разработчика перечисляет эти переносы — флаг, значение по умолчанию и включённое значение, исходный эксперимент, краткое описание, — чтобы роль, пишущая код, включала флаг, а не реализовывала возможность заново, и не обходила сбой, который перенесённое исправление уже устранило. Запуск, в котором ничего не переносилось, не меняется. Выключено = промпт до 2026-10-07, байт в байт."
+    "When the upstream lane has promoted a champion's general capability into the run's base (behind a named flag whose default keeps the old behaviour), every Developer build turn lists those promotions — flag, default and enabled value, source experiment, summary — so the role that writes the code switches a flag on instead of re-implementing it, and does not repair around a failure a promoted fix already cured. A run that never promoted anything is unchanged. Off = the pre-2026-10-07 prompt, byte for byte.": "Когда upstream-полоса перенесла общую возможность чемпиона в базу запуска (за именованным флагом, значение по умолчанию которого сохраняет прежнее поведение), каждый ход сборки Разработчика перечисляет эти переносы — флаг, значение по умолчанию и включённое значение, исходный эксперимент, краткое описание, — чтобы роль, пишущая код, включала флаг, а не реализовывала возможность заново, и не обходила сбой, который перенесённое исправление уже устранило. Запуск, в котором ничего не переносилось, не меняется. Выключено = промпт до 2026-10-07, байт в байт.",
+    "were added to the record after the run, not recorded while the run was evaluating — recovered from the preserved score log, imported by the operator, or measured afterwards by an evaluation track. Their precision may be coarser than the objective's, so two nodes equal on a reconstructed row are not known to be equal.": "— эти значения добавлены в запись после запуска, а не записаны во время его оценки: они восстановлены из сохранённого журнала оценивания, импортированы оператором или измерены позже треком оценки. Их точность может быть грубее, чем у цели, поэтому равенство двух узлов в такой строке не означает, что они действительно равны.",
+    "Added to the record after the run, not recorded while the run was evaluating.": "Добавлено в запись после запуска, а не записано во время его оценки.",
+    "It was recovered from the preserved score log, imported by the operator, or measured afterwards by an evaluation track; the record does not say which.": "Значение восстановлено из сохранённого журнала оценивания, импортировано оператором или измерено позже треком оценки; из записи не видно, каким из этих способов.",
+    "Its precision may be coarser than the objective's, so two nodes equal here are not known to be equal.": "Его точность может быть грубее, чем у цели, поэтому равенство двух узлов здесь не означает, что они действительно равны."
   }
 }

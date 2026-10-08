@@ -357,64 +357,12 @@ def test_a_mount_that_does_not_ANSWER_is_a_fault_even_before_the_first_evaluatio
         fault, gone, no_python]
 
 
-def test_a_full_run_dir_is_believed_once_per_lifecycle(tmp_path, monkeypatch):
-    """critic 2026-10-08: the candidate's workdir shares the run dir's filesystem, so a script that
-    fills the disk would otherwise pause the run, be withheld, re-run on the resume and fill it
-    again, forever — never repaired. The second time in one lifecycle it is the candidate's."""
-    full = [infra_probe.InfraFault("run_dir", "/run", "ENOSPC")]
-    assert infra_probe.disk_full_only(full)
-    assert not infra_probe.disk_full_only(full + [infra_probe.InfraFault("mount", "/m", "EIO")])
-    assert not infra_probe.disk_full_only([])
-    engine, _data, _evals = _engine_with_mount(tmp_path)
-    engine._inline_repair = False
-    monkeypatch.setattr(infra_probe, "probe", lambda targets, **k: list(full))
-    crashed = RunResult(exit_code=1, stdout="", metric=None, timed_out=False,
-                        stderr="OSError: [Errno 28] No space left on device")
-    engine._run_eval = lambda *a, **k: crashed
-    # The pre-launch probe would pause first; this drives the post-failure decision alone.
-    monkeypatch.setattr(type(engine), "_infra_probe_targets", lambda self: [("run_dir", "/run")])
-    real = type(engine)._eval_infra_pause
-
-    async def only_after_failure(self, a, *, failed=True):
-        return await real(self, a, failed=failed) if failed else False
-
-    monkeypatch.setattr(type(engine), "_eval_infra_pause", only_after_failure)
-    anyio.run(engine._evaluate, 0, anyio.CapacityLimiter(1), None)
-    st = fold(engine.store.read_all())
-    assert st.paused and st.nodes[0].status.value == "pending", "the first time, the box is believed"
-    engine.store.append("resume", {})
-    anyio.run(engine._evaluate, 0, anyio.CapacityLimiter(1), None)
-    st = fold(engine.store.read_all())
-    assert not st.paused and st.nodes[0].status.value == "failed", (
-        "the same lifecycle filling the disk again is the candidate's failure")
-
-
 def test_the_tasks_own_interpreter_is_probed(tmp_path):
     engine = make_engine(tmp_path / "run")
     engine._repo_spec = {"task_python": "/var/tmp/conda/envs/x/bin/python"}
     targets = engine._infra_probe_targets()
     if getattr(engine.sandbox, "python", None) is not None:
         assert ("interpreter", "/var/tmp/conda/envs/x/bin/python") in targets
-
-
-def test_an_earlier_DEAD_MOUNT_withhold_is_not_a_previous_disk_full(tmp_path):
-    """critic 2026-10-08, second round: the once-per-lifecycle rule matched ANY earlier infra
-    withhold; it reads the withheld row's `fault` now."""
-    from looplab.engine.evaluate import box_seen_working
-    engine, _data, _evals = _engine_with_mount(tmp_path)
-    engine.store.append("eval_attempt_withheld", {"node_id": 0, "generation": 0, "attempt": 0,
-                                                  "at": "decide_repair", "reason": "infra_unavailable",
-                                                  "eval_seconds": 0.0})
-
-    class _A:
-        node_id, generation = 0, 0
-
-    import unittest.mock as um
-    with um.patch.object(infra_probe, "probe",
-                         lambda targets, **k: [infra_probe.InfraFault("run_dir", "/run", "ENOSPC")]):
-        assert anyio.run(engine._eval_infra_pause, _A()) == "disk_full", "believed: no disk-full before"
-    st = fold(engine.store.read_all())
-    assert box_seen_working(st, engine.store.read_all())
 
 
 def test_a_run_whose_nodes_all_failed_has_still_seen_its_box_work():

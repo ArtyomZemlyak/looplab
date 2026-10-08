@@ -65,6 +65,29 @@ test('the progress mirror fills the buffered gap and never fights a live stream'
   assert.equal(shouldSurfaceProgress('', { active: true }), false, 'no text is not progress')
 })
 
+test('a turn deep in tool rounds still moves its bubble behind a buffering proxy', () => {
+  // Since the server keeps `text` for the answer and sends the inter-round prose as `activity`, a
+  // frame mid-tool-rounds has NO text to be longer than the stream's — and the old gate left the
+  // bubble on a dead "thinking" for the whole turn.
+  const frame = { active: true, text: '', steps: ['Read run r1'],
+    activity: [{ type: 'text', content: 'Looking at the run.' }, { type: 'tools', labels: ['Read run r1'] }],
+    last_event: 1_700_000_010 }
+  assert.equal(shouldSurfaceProgress('', frame), true, 'activity is news while the stream is silent')
+  assert.equal(shouldSurfaceProgress('', frame, { surfaced: frame }), false,
+    'the same frame polled again is not news')
+  assert.equal(shouldSurfaceProgress('', { ...frame, last_event: 1_700_000_011 }, { surfaced: frame }),
+    true, 'a newer last_event is news')
+  assert.equal(shouldSurfaceProgress('', { ...frame, activity: [...frame.activity,
+    { type: 'text', content: 'Now the next one.' }] }, { surfaced: frame }), true, 'so is new activity')
+  // …and it never fights a working stream: once the stream delivered a step, a prose line or a
+  // token, it owns the bubble.
+  assert.equal(shouldSurfaceProgress('', frame, { streamEvents: 1 }), false)
+  assert.equal(shouldSurfaceProgress('tok', frame), false)
+  assert.equal(shouldSurfaceProgress('', { ...frame, active: false }), false)
+  assert.equal(shouldSurfaceProgress('', { active: true, text: '', steps: [], activity: [],
+    last_event: 1_700_000_012 }), false, 'a bare heartbeat with nothing to show is not news')
+})
+
 test('a terminal frame is decided by the transcript, in one order', () => {
   const mine = { role: 'user', content: 'hi', turn_id: 't1' }
   const reply = { role: 'assistant', content: 'done' }

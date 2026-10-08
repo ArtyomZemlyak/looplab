@@ -103,13 +103,35 @@ test('an import marks only the keys it added, beside live ones (2026-10-07)', as
   assert.equal(perKey(whole, 'FUR@20'), true, 'a marker without keys is the whole map, as before')
 })
 
-test('an imported key names what measured it, not the score log (critic 2026-10-08)', () => {
+test('the help names every way a value is reconstructed, not only the score log', async () => {
+  // An import (`looplab import-metrics`) or a track (`looplab evaluate-track`) was never in the
+  // score log, and the marker does not say which writer added a key — so the help is generic.
+  const { EXTRA_METRIC_RECONSTRUCTED_HELP: help, anyReconstructedExtraMetric: any } =
+    await import('../src/extraMetrics.js')
+  assert.match(help, /after the run/)
+  assert.match(help, /preserved score log, imported by the operator, or measured afterwards/)
+  assert.doesNotMatch(help, /^Recovered from the preserved score log/)
+  const node = {
+    extra_metrics: { 'FUR@20': 0.13, 'FUR@200': 0.36 },
+    extra_metrics_backfill: { backfilled: true, keys: ['FUR@200'] },
+  }
+  assert.equal(any([node], ['FUR@20', 'FUR@200']), true)
+  assert.equal(any([node], ['FUR@20']), false, 'a live key alone is not a reconstruction')
+  assert.equal(any([null, node], ['FUR@200']), true, 'an absent champion is skipped')
+  assert.equal(any([{ ...node, extra_metrics: { 'FUR@20': 0.13 } }], ['FUR@200']), false,
+    'a marker naming a key with no value shows nothing')
+  assert.equal(any([recovered], ['ndcg@100']), true, 'a whole-map marker covers every key')
+  assert.equal(any([live], ['ndcg@100']), false)
+})
+
+test('an imported key names what measured it when the record says (2026-10-08)', () => {
   const node = {
     extra_metrics: { 'FUR@20': 0.1, 'FUR@200': 0.3 },
     extra_metrics_provenance: { 'FUR@20': 'declared', 'FUR@200': 'declared' },
     extra_metrics_backfill: { backfilled: true, keys: ['FUR@200'], sources: { 'FUR@200': 'scoring service v2' } },
   }
   assert.match(extraMetricSourceHelp(node, 'FUR@200'), /source: scoring service v2/)
-  assert.doesNotMatch(extraMetricSourceHelp(node, 'FUR@200'), /score log/)
   assert.doesNotMatch(extraMetricSourceHelp(node, 'FUR@20'), /Imported/)
+  const unsourced = { ...node, extra_metrics_backfill: { backfilled: true, keys: ['FUR@200'] } }
+  assert.match(extraMetricSourceHelp(unsourced, 'FUR@200'), /does not say which/)
 })

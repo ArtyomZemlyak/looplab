@@ -21,7 +21,7 @@ import { nodeFeasibilityStatus, isSalvagedMetricViolation,
   objectiveSourceHelp } from './trustSemantics.js'
 import {
   extraMetricChannel, extraMetricCaveated, extraMetricSourceHelp,
-  extraMetricSourceLabel, extraMetricIsBackfilled } from './extraMetrics.js'
+  extraMetricSourceLabel, anyReconstructedExtraMetric } from './extraMetrics.js'
 import { inspectorTabs } from './runRouteState.js'
 import { readOnlyLabel } from './runMode.js'
 import { currentRetarget, objectiveKey, objectiveLabel, retargetableKeys } from './objectiveModel.js'
@@ -2960,11 +2960,13 @@ export function Metrics({ n: detailNode, detail, state, runId, expectedGeneratio
         not discoverable, an operator scanning a table does not hover every cell" — is STRONGER
         here, because the harm is a silent tie: the recovered suite is printed to two decimals while
         the objective is read at six, so two nodes that differ can render identical on every
-        recovered row. `extraMetricIsBackfilled` is per NODE (the fold declines a node that already
-        carries any extra metric, so a backfilled map is backfilled entirely) and the champion's
-        record is read separately, because the `best #N` column is a different node's number. */}
-    {(extraMetricIsBackfilled(n) || (champ && extraMetricIsBackfilled(champ))) && (
-      <div className="muted">{uiText("Rows marked ")}<b>{uiText("reconstructed")}</b>{uiText(" were recovered from the preserved score log after the run, not recorded while it was happening — at the precision the scoring program chose to print, which is coarser than the objective. Two nodes equal on a reconstructed row are not known to be equal.")}</div>)}
+        recovered row. It is asked PER KEY (`extraMetrics.js::anyReconstructedExtraMetric`): an
+        operator import or an evaluation track adds reconstructed keys BESIDE live ones, so a node's
+        map can be part measured, part reconstructed; the champion's record is read separately,
+        because the `best #N` column is a different node's number. The sentence is generic about the
+        source because the marker does not record which writer added a key. */}
+    {anyReconstructedExtraMetric([n, champ], objKey ? [objKey, ...extraKeys] : extraKeys) && (
+      <div className="muted">{uiText("Rows marked ")}<b>{uiText("reconstructed")}</b>{uiText(" were added to the record after the run, not recorded while the run was evaluating — recovered from the preserved score log, imported by the operator, or measured afterwards by an evaluation track. Their precision may be coarser than the objective's, so two nodes equal on a reconstructed row are not known to be equal.")}</div>)}
     {vals.length > 0 && <>
       <div className="section-h">{uiText("Per-seed confirmation")}</div>
       <DataTable caption={uiText("Per-seed confirmation metrics")} card={false}><table className="tbl"><thead><tr><th>{uiText("seed")}</th><th>{uiText("metric")}</th></tr></thead>

@@ -15,8 +15,7 @@ unrepaired, uncharged retry). The channel that does exist is the engine asking t
 ITSELF, after the eval died, about the paths the OPERATOR declared: the `data:` / `references:`
 mount sources, the editable source roots, the run directory the record is written into, and the
 eval interpreter. The candidate cannot make the engine's own `stat` of a declared mount fail, so the
-answer is the engine's, like `is_present`'s. The ONE exception is a FULL run directory: the
-candidate's workdir shares its filesystem, so `disk_full_only` is believed once per lifecycle.
+answer is the engine's, like `is_present`'s.
 
 WHAT COUNTS, per target, and why the strictness differs:
 
@@ -204,7 +203,6 @@ def declared_targets(*, run_dir=None, repo_spec: Optional[dict] = None,
 
 # A path that does not exist (yet) — the two spellings a probe reports for it.
 _ABSENT_CAUSES = frozenset({"ENOENT", "missing"})
-_DISK_FULL_CAUSES = frozenset({"ENOSPC", "EDQUOT"})
 
 
 def admissible_faults(faults: Iterable[InfraFault], *, seen_working: bool) -> list[InfraFault]:
@@ -221,15 +219,6 @@ def admissible_faults(faults: Iterable[InfraFault], *, seen_working: bool) -> li
             if seen_working or not (f.role in ("mount", "interpreter") and f.cause in _ABSENT_CAUSES)]
 
 
-def disk_full_only(faults: Iterable[InfraFault]) -> bool:
-    """Is every fault the run directory being FULL? That one the candidate can cause itself — its
-    workdir is on the same filesystem, and `RLIMIT_FSIZE` bounds a file, not the sum — so the engine
-    believes it once per lifecycle and then lets the failure take the ordinary repair path
-    (`engine/evaluate.py::EvaluateMixin._eval_infra_pause`)."""
-    faults = list(faults)
-    return bool(faults) and all(f.role == "run_dir" and f.cause in _DISK_FULL_CAUSES for f in faults)
-
-
 def probe(targets: Iterable[tuple[str, str]], *,
           timeout: float = DEFAULT_TIMEOUT_S) -> list[InfraFault]:
     """Every fault among `targets`, in their order. Empty means the box answered for all of them.
@@ -243,6 +232,31 @@ def probe(targets: Iterable[tuple[str, str]], *,
         if fault is not None:
             faults.append(fault)
     return faults
+
+
+# The faults a CANDIDATE can cause by itself on a healthy box: its workdir lives under the run
+# directory, so a candidate that writes checkpoints until the disk (or the user's quota) is full makes
+# the engine's own `run_dir` probe answer exactly these. Nothing else in the probe table writes, so no
+# other role can see them from a candidate's writes.
+CANDIDATE_FILLABLE_ERRNOS: frozenset[str] = frozenset({"ENOSPC", "EDQUOT"})
+
+
+def candidate_may_have_caused(faults: Iterable[InfraFault]) -> bool:
+    """True when EVERY fault is the run directory being full (`CANDIDATE_FILLABLE_ERRNOS`) — the one
+    probe answer a candidate's own writes can produce — and there is at least one.
+
+    WHY (review 2026-10-08, driven). A candidate that filled the disk with checkpoints died ENOSPC;
+    the probe AFTER that failure found the run directory full, paused the run and withheld the
+    attempt; the resume's fresh workdir freed the space; the same code filled it again — a pause loop
+    with the node pending forever and the Developer never told. So a failed attempt whose probe sees
+    ONLY this is not withheld as the box's fault: it takes the ordinary failure path with the probe's
+    sentence as evidence. Any other fault beside it (a dead mount, an `EIO`, a vanished interpreter)
+    keeps the whole answer the box's — "a dead mount never blames the candidate" is untouched. The
+    probe BEFORE a launch does not ask this: nothing of the attempt has run yet, so a full disk then
+    is not this attempt's doing."""
+    faults = list(faults)
+    return bool(faults) and all(f.role == "run_dir" and f.cause in CANDIDATE_FILLABLE_ERRNOS
+                                for f in faults)
 
 
 def describe(faults: Iterable[InfraFault]) -> str:

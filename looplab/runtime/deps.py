@@ -25,7 +25,6 @@ import subprocess
 import sys
 import threading
 from dataclasses import dataclass, field
-from collections.abc import Mapping
 from typing import Optional
 
 from looplab.runtime.sandbox import is_secret_env
@@ -701,8 +700,61 @@ def installed_versions(dists, *, python: Optional[str] = None,
     return {k: str(v) for k, v in got.items()} if isinstance(got, dict) else {}
 
 
+def requirement_marker(line) -> Optional[str]:
+    """The PEP 508 environment MARKER of one requirement line (`pywin32==306; sys_platform ==
+    "win32"` -> `sys_platform == "win32"`), or None when it carries none.
+
+    The separator is the first `;` for a name-based requirement and only a `;` preceded by
+    whitespace for a URL one (`pkg @ https://h/p;x` keeps `;x` in the URL, as PEP 508 states). Not
+    evaluated here: whether a marker holds is a fact about the EVAL interpreter, which may not be
+    the engine's own (`absent_distributions` asks it there)."""
+    text = _REQ_COMMENT_RE.sub("", str(line or "")).strip()
+    m = _REQ_NAME_RE.match(text)
+    rest = text[m.end():] if m else text
+    sep = re.search(r"\s;" if rest.lstrip().startswith("@") else r";", rest)
+    if sep is None:
+        return None
+    # A hash-pinned export (uv / pip-compile / poetry: `pkg==1 ; python_version >= "3.9" \` then
+    # `--hash=sha256:…`, joined by `parse_requirements`) carries its OPTIONS after the marker; they
+    # are not part of it, and a marker parsed with them fails to evaluate (critic 2026-10-08).
+    marker = re.split(r"\s--", " " + rest[sep.end():])[0].strip()
+    return marker or None
+
+
+# Run INSIDE the eval interpreter by `absent_distributions`. A marker is evaluated with that
+# interpreter's own `packaging` — or the copy pip vendors, which is present wherever the derived
+# install could run at all — and a marker it cannot evaluate (no packaging, an invalid expression,
+# an `extra` it has no value for) counts as APPLYING, so the name is probed as before: a marker
+# never hides a distribution the probe could not rule out.
+_ABSENT_PROBE = ("import json, sys\n"
+                 "from importlib.metadata import version\n"
+                 "try:\n"
+                 "    from packaging.markers import Marker\n"
+                 "except Exception:\n"
+                 "    try:\n"
+                 "        from pip._vendor.packaging.markers import Marker\n"
+                 "    except Exception:\n"
+                 "        Marker = None\n"
+                 "markers = json.loads(sys.argv[2]) if len(sys.argv) > 2 else {}\n"
+                 "out = []\n"
+                 "for n in json.loads(sys.argv[1]):\n"
+                 "    m = markers.get(n)\n"
+                 "    if m and Marker is not None:\n"
+                 "        try:\n"
+                 "            if not Marker(m).evaluate():\n"
+                 "                continue\n"
+                 "        except Exception:\n"
+                 "            pass\n"
+                 "    try:\n"
+                 "        version(n)\n"
+                 "    except Exception:\n"
+                 "        out.append(n)\n"
+                 "sys.stdout.write(json.dumps({'absent': out}))\n")
+
+
 def absent_distributions(dists, *, python: Optional[str] = None,
-                         timeout: float = 60.0) -> Optional[list[str]]:
+                         timeout: float = 60.0,
+                         markers: Optional[dict] = None) -> Optional[list[str]]:
     """The names in `dists` the eval interpreter does NOT have, sorted — or None when the question
     could not be asked (the interpreter did not start, the probe timed out or printed nothing).
 
@@ -711,50 +763,23 @@ def absent_distributions(dists, *, python: Optional[str] = None,
     is gone" — None leaves the decision with the caller (incident 2026-10-06: a container restart
     wiped the env that a durable `run_setup_finished` still vouched for).
 
-    `dists` may be a MAPPING `{name: requirement line}` (`Declaration.pins`): a line guarded by an
-    environment marker (`tomli; python_version<"3.11"`) is asked only where its marker holds, and the
-    marker is evaluated IN the eval interpreter, whose version and platform are the ones it names
-    (critic 2026-10-08: pip skips such a line, so it never lands in `dropped_requirements`, and an
-    unevaluated marker re-ran the install on every resume). A marker that cannot be evaluated there
-    — no `packaging` importable, a malformed marker — counts the line as present: the error this
-    function must never make is re-running an install on a guess. A hash-pinned export
-    (`pkg==1.0 ; python_version >= "3.9" --hash=sha256:…`, uv / pip-compile / poetry) carries its
-    options after the marker; they are cut off before the marker is parsed."""
-    if isinstance(dists, Mapping):
-        lines = {str(n).strip(): str(v or "") for n, v in dists.items() if str(n or "").strip()}
-    else:
-        lines = {str(d).strip(): "" for d in (dists or []) if str(d or "").strip()}
-    names = sorted(lines)
+    `markers` maps a name in `dists` to its requirement's environment marker
+    (`requirement_marker`). A name whose marker is FALSE on the eval interpreter is not asked about
+    (review 2026-10-08, driven): `pywin32==306; sys_platform == "win32"` on Linux, or `tomli;
+    python_version < "3.11"` on 3.12, was never installed — pip skipped it — so reporting it absent
+    re-ran the whole install on every resume under a false `reverified_missing`. Evaluated IN that
+    interpreter, never with the engine's own `sys`, because the two may differ in version and
+    platform."""
+    names = sorted({str(d).strip() for d in (dists or []) if str(d or "").strip()})
     if not names:
         return []
-    probe = ("import json, re, sys\n"
-             "from importlib.metadata import version\n"
-             "def _holds(line):\n"
-             "    if ';' not in line:\n"
-             "        return True\n"
-             "    try:\n"
-             "        try:\n"
-             "            from packaging.markers import Marker\n"
-             "        except ImportError:\n"
-             "            from pip._vendor.packaging.markers import Marker\n"
-             "        marker = line.split(';', 1)[1].split('#', 1)[0]\n"
-             "        marker = re.split(r'\\s--', ' ' + marker)[0].strip()\n"
-             "        return bool(Marker(marker).evaluate())\n"
-             "    except Exception:\n"
-             "        return False\n"
-             "out = []\n"
-             "for n, line in json.loads(sys.argv[1]):\n"
-             "    if not _holds(line):\n"
-             "        continue\n"
-             "    try:\n"
-             "        version(n)\n"
-             "    except Exception:\n"
-             "        out.append(n)\n"
-             "sys.stdout.write(json.dumps({'absent': out}))\n")
+    probe = _ABSENT_PROBE
+    marker_map = {n: str(m) for n, m in (markers or {}).items()
+                  if n in names and isinstance(m, str) and m.strip()}
     try:
         import json as _json
-        proc = subprocess.run([python or sys.executable, "-c", probe,
-                               _json.dumps([[n, lines[n]] for n in names])],
+        proc = subprocess.run([python or sys.executable, "-c", probe, _json.dumps(names),
+                               _json.dumps(marker_map)],
                               capture_output=True, text=True, encoding="utf-8", errors="replace",
                               timeout=timeout, env={k: v for k, v in os.environ.items()
                                                     if k.upper().startswith("PIP_")

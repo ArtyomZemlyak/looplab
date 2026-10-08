@@ -1,5 +1,3 @@
-import { shouldSurfaceProgress } from './assistantTurnModel.js'
-
 // What a POLLED turn progress (`GET /api/assistant/progress`) means for the live assistant message.
 //
 // A pure model beside `AssistantBar.jsx`, which applies it at three sites — the send path's
@@ -54,23 +52,21 @@ export function progressHasNews(progress) {
     || (Array.isArray(progress.activity) && progress.activity.length))
 }
 
-/** May the fallback poll apply this frame to the live message? (critic 2026-10-08)
- *
- *  The historical rule (`assistantTurnModel.js::shouldSurfaceProgress`) surfaces a frame only when
- *  its `text` is longer than what the stream produced. Since `text` became the ANSWER alone, a turn
- *  behind a buffering proxy has `text === ''` for its whole tool phase, so nothing surfaced: no
- *  steps, no "last activity" line — the opaque-liveness incident on the very path this fallback is
- *  for. So a frame also applies when it carries news and either no SSE event has arrived yet
- *  (`streamLive` false: the stream is buffered) or the poll already owns the activity (`ownsActivity`:
- *  once a frame wrote the server's whole list, the batched SSE events must not append it again). */
-export function progressFrameApplies(streamed, progress, { streamLive = false, ownsActivity = false } = {}) {
-  if (!progress || progress.active !== true) return false
-  if (shouldSurfaceProgress(streamed, progress)) return true
-  // ACTIVITY news only — a frame whose answer is not longer than the stream's has nothing for the
-  // answer bubble, and the caller keeps the streamed text (`AssistantBar.jsx::runLLM`'s onProgress).
-  const activity = (Array.isArray(progress.activity) && progress.activity.length > 0)
-    || (Array.isArray(progress.steps) && progress.steps.length > 0)
-  return (!streamLive || ownsActivity) && activity
+/** Has this frame MOVED since `previous` — the frame the caller last surfaced, or null? A newer
+ *  `last_event`, or activity/steps/answer that differ from it. A frame with no news never has.
+ *  The send path's buffered-proxy fallback (`assistantTurnModel.js::shouldSurfaceProgress`) asks it
+ *  so a turn deep in tool rounds — `text` empty, the prose in `activity` — still moves its bubble,
+ *  and so an unchanged frame polled again does not re-render the live Turn once a second. */
+export function progressMovedSince(progress, previous) {
+  if (!progressHasNews(progress)) return false
+  if (!previous) return true
+  const at = frame => {
+    const moved = Number(frame && frame.last_event)
+    return Number.isFinite(moved) && moved > 0 ? moved : 0
+  }
+  if (at(progress) > at(previous)) return true
+  const shape = frame => JSON.stringify([frame.text || '', frame.steps || null, frame.activity || null])
+  return shape(progress) !== shape(previous)
 }
 
 /** "HH:MM:SS" of a ms timestamp in the viewer's clock, or '' for none. The live line prints the

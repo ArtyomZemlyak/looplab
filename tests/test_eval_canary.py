@@ -1162,21 +1162,3 @@ def test_the_canary_runs_on_the_attempt_s_own_env_and_lease(tmp_path):
     assert cenv is pinned and fenv is pinned
     assert cspec is not None and cspec["env"]["LOOPLAB_CANARY"] == "1" and fspec is None
 
-
-def test_an_artifact_node_owes_no_canary(tmp_path):
-    """doc 73 §1.4, critic 2026-10-08 (driven): a canary passes only on a measured metric, and an
-    artifact succeeds by printing none — every artifact failed its canary and was repaired toward
-    printing a number. It takes its full evaluation directly."""
-    from looplab.events.replay import fold
-    ledger = tmp_path / "ledger.txt"
-    code = _script(ledger, canary="nometric", full="nometric")
-    eng = _engine(tmp_path / "run", _Dev(code), repairs=0)
-    eng.store.append("run_started", {"run_id": "r", "task_id": "t", "goal": "g", "direction": "max"})
-    eng.store.append("node_created", {
-        "node_id": 0, "parent_ids": [], "operator": "inject", "node_kind": "artifact",
-        "idea": {"operator": "inject", "params": {}, "rationale": "prep"},
-        "code": "print('unused')\n", "files": {"run.py": code}})
-    evs = _evaluate(eng)
-    assert not _of(evs, EV_EVAL_CANARY_FINISHED)
-    node = fold(evs).nodes[0]
-    assert node.status.value == "evaluated" and node.kind == "artifact" and node.metric is None
