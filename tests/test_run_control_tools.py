@@ -1357,3 +1357,12 @@ def test_set_directive_approval_card_states_a_cut_of_a_long_directive(tmp_path):
     assert len(card["preview"]) <= APPROVAL_PREVIEW_CHARS
     assert "are NOT shown above, and approving applies ALL of it" in card["preview"]
     assert "replace: yes" in card["preview"]
+
+
+def test_a_long_single_line_preview_shows_its_head_not_only_the_cut_receipt():
+    from looplab.tools.perm_modes import APPROVAL_PREVIEW_CHARS, clip_approval_preview
+    text = "set_directive(r)\nreplace: no\ntext:\n" + "word " * 2000
+    card = clip_approval_preview(text)
+    assert len(card) <= APPROVAL_PREVIEW_CHARS
+    assert card.count("word") > 100, "the reviewer reads a head of the directive itself"
+    assert clip_approval_preview(card) == card, "idempotent: the router re-bounds every preview"
