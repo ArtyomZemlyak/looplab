@@ -1205,6 +1205,11 @@ class Engine(ConfirmPhaseMixin, NoiseFloorMixin, AblationMixin, NoveltyGateMixin
         # (`engine/upstream_serve.py`) — one operation at a time, every row appended by the main task.
         from looplab.engine.upstream_serve import UpstreamServe
         self._upstream_serve = UpstreamServe()
+        # doc 73 §4.2 (G1): the live hint board — the MAIN task posts each advance, Developer
+        # sessions at work hear it at a turn boundary and append their own diagnostic receipt.
+        from looplab.engine.upstream_hints import UpstreamHintBoard
+        from looplab.engine.upstream_serve import hint_receipt_sink
+        self._upstream_hints = UpstreamHintBoard(sink=hint_receipt_sink(self))
         # Fail loudly: a repo task with no trusted eval AND no onboarder would silently
         # evaluate every node via the empty solution.py path. Require one or the other.
         if self._repo_spec and not self._eval_spec and onboarder is None:

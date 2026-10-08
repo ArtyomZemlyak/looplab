@@ -409,7 +409,8 @@ def _on_upstream_execution(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> 
 HANDLERS = {
     **{name: _on_upstream for name in ("upstream_proposal_started", "upstream_proposed",
        "upstream_proposal_failed", "upstream_gate_started",
-       "upstream_gate_finished", "upstream_gate_abandoned", "base_advanced")},
+       "upstream_gate_finished", "upstream_gate_abandoned", "base_advanced",
+       "upstream_hint_issued")},
     "upstream_execution": _on_upstream_execution,
     EV_DATA_PROFILED: _on_data_profiled,
     EV_DATA_PROVENANCE: _on_data_provenance,

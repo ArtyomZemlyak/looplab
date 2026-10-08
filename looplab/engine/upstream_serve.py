@@ -66,6 +66,51 @@ _STARTED = ("upstream_proposal_started", "upstream_gate_started")
 AUTO_RETRY_AFTER_S = 300.0
 
 
+def hint_receipt_sink(engine):
+    """The DIAGNOSTIC receipt a Developer session's own worker thread appends when it hears a hint
+    (`engine/upstream_hints.py`, doc 73 §4.2 G1) — invariant #1 admits diagnostics from any thread."""
+    def _sink(row: dict) -> None:
+        from looplab.events.types import EV_UPSTREAM_HINT_DELIVERED
+        engine.store.append(EV_UPSTREAM_HINT_DELIVERED, {
+            "hint_id": row["hint_id"], "session": row["session"],
+            **({"node_id": row["node_id"]} if "node_id" in row else {})})
+    return _sink
+
+
+def _issue_hint(engine, store, proposal: dict, advanced) -> None:
+    """`upstream_hint_issued` for one live advance, then post it to the Developer sessions at work
+    (doc 73 §4.2 G1). MAIN task, under the write lock; once per proposal."""
+    from looplab.engine.upstream_hints import hint_id_for, hint_text
+    from looplab.events.types import EV_UPSTREAM_HINT_ISSUED
+    hint_id = hint_id_for(proposal["proposal_id"])
+    board = getattr(engine, "_upstream_hints", None)
+    sessions = board.open_sessions() if board is not None else []
+    kind = "fix" if proposal.get("repair_only") is True else "capability"
+    text = hint_text(kind=kind, source_node_id=proposal.get("source_node_id"),
+                     summary=proposal.get("summary", ""), flag=proposal.get("flag"),
+                     paths=proposal.get("capability_paths") or [])
+    store.append(EV_UPSTREAM_HINT_ISSUED, {
+        "hint_id": hint_id, "proposal_id": proposal["proposal_id"], "advance_seq": advanced.seq,
+        "kind": kind, "source_node_id": proposal.get("source_node_id"), "text": text,
+        "sessions": sessions[:32]})
+    if board is not None:
+        board.post({"hint_id": hint_id, "text": text})
+
+
+def _unhinted_advance(events):
+    """`(base_advanced, upstream_proposed data)` of a LIVE advance whose hint row is missing — the
+    engine died between the two appends — or None."""
+    issued = {e.data.get("proposal_id") for e in events if e.type == "upstream_hint_issued"}
+    for e in events:
+        if (e.type == "base_advanced" and e.data.get("in_engine") is True
+                and e.data.get("proposal_id") not in issued):
+            proposal = next((p.data for p in events if p.type == "upstream_proposed"
+                             and p.data.get("proposal_id") == e.data.get("proposal_id")), None)
+            if proposal is not None:
+                return e, proposal
+    return None
+
+
 def upstream_mode_setting(settings) -> str:
     """THE ONE READER of `Settings.upstream_mode`. Anything unreadable is `off`."""
     value = getattr(settings, "upstream_mode", "off")
@@ -477,7 +522,9 @@ async def _settle(engine, lane, job: UpstreamJob) -> bool:
                 if current != prepared["proposal"]["expected_base_revision"]:
                     receipt = {"outcome": "refused", "code": "upstream_base_conflict"}
                 else:
-                    receipt = {"outcome": "succeeded", "seq": lane._advance_commit(prepared, store.append).seq}
+                    advanced = lane._advance_commit(prepared, store.append)
+                    _issue_hint(engine, store, prepared["proposal"], advanced)
+                    receipt = {"outcome": "succeeded", "seq": advanced.seq}
                     # The Developers build on the promoted base from their NEXT call
                     # (`sync_developer_base`), and a node built by one that has not rebound yet
                     # names its own base on `node_created`.
@@ -671,9 +718,14 @@ async def serve_upstream_requests(engine, state) -> bool:
         serve.job = UpstreamJob(op=str(request.get("op")), body=body, idx=done)
         _start(engine, lane, serve.job)
         return False
+    events = engine.store.read_all()
+    lost = _unhinted_advance(events) if armed["mode"] != "off" else None
+    if lost is not None:
+        async with engine._write_lock:
+            _issue_hint(engine, engine.store, lost[1], lost[0])
+        return True
     if armed["mode"] != "auto":
         return False
-    events = engine.store.read_all()
     nxt = auto_next_op(events, engine._repo_spec.get("seed_base"))
     if nxt is None:
         _start_author(engine, armed, state, events)

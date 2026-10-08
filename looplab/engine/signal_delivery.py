@@ -188,6 +188,20 @@ SIGNALS: tuple[SignalRoute, ...] = (
         call_sites=(("looplab/adapters/repo_developer.py",
                      "developer_base_note(getattr(self, \"_memory_state\", None))"),
                     ("looplab/adapters/repo_developer.py", "+ self._upstream_base_note()"))),
+    SignalRoute(
+        name="upstream_advance_hint",
+        produced_by="engine/upstream_serve.py _issue_hint (EV_UPSTREAM_HINT_ISSUED after a live "
+                    "base_advanced, doc 73 §4.2 G1)",
+        folded_into="RunState.upstream_history (upstream_hint_issued rows); live copy on "
+                    "Engine._upstream_hints",
+        # PUSH into a session ALREADY at work: its prompt was rendered before the advance (the route
+        # above reaches only the NEXT call), so the notice rides the tool loop's turn boundary.
+        channel="push",
+        inject="looplab.engine.upstream_hints:UpstreamHintBoard.drain",
+        consumer="Developer build/repair sessions at work (tool-loop turn boundary)",
+        call_sites=(("looplab/engine/upstream_serve.py", "board.post({"),
+                    ("looplab/engine/node_build.py", "developer_session(getattr(self, \"_upstream_hints\", None)"),
+                    ("looplab/agents/tool_loop.py", "_interject = _interjection_ctx.get()"))),
 )
 
 

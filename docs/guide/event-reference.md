@@ -23,7 +23,7 @@ The event type itself is the contract's identity and is never renamed or reused;
 
 <!-- generated: event types -->
 
-183 event types — 128 folded into `RunState`, 55 diagnostic; 1207 declared payload keys; 30 types whose whole payload is stored by the fold.
+185 event types — 129 folded into `RunState`, 56 diagnostic; 1217 declared payload keys; 31 types whose whole payload is stored by the fold.
 
 | type | fold | records | required keys | optional keys |
 |---|---|---|---|---|
@@ -204,6 +204,8 @@ The event type itself is the contract's identity and is never renamed or reused;
 | `upstream_gate_abandoned` | folded · whole | Operator recovery of an interrupted claim; grants no pass. | `action_id`, `claim_action_id`, `proposal_id`, `reason`, `request_hash` | — |
 | `upstream_gate_finished` | folded · whole | Measured gate verdict bound to actual source and inputs. | `action_id`, `evidence_token`, `proposal_id`, `request_hash`, `result` | — |
 | `upstream_gate_started` | folded · whole | Claim before real equivalence/regression work; no implicit retry. | `action_id`, `input_identity`, `proposal_id`, `request_hash` | — |
+| `upstream_hint_delivered` | diagnostic | A Developer session heard an upstream notice at a tool-loop turn boundary. | `hint_id`, `session` | `node_id` |
+| `upstream_hint_issued` | folded · whole | The bounded notice the live engine issued to the Developer sessions at work after a base advance. | `advance_seq`, `hint_id`, `kind`, `proposal_id`, `sessions`, `text` | `source_node_id` |
 | `upstream_proposal_failed` | folded · whole | A proposal failed; no gate permission. | `action_id`, `code`, `proposal_id`, `request_hash` | — |
 | `upstream_proposal_started` | folded · whole | Durable claim before run-owned Maintainer work; optional pointer to the retained original request. | `action_id`, `proposal_id`, `request_hash` | `request_path` |
 | `upstream_proposed` | folded · whole | Generalized capability with immutable candidate archive and separate source recipe. | `action_id`, `base_revision`, `capability_paths`, `commit`, `critic`, `expected_base_revision`, `flag`, `hunk_hashes`, `manifest_hash`, `old_selector`, `proposal_id`, `repair_trigger_nodes`, `request_hash`, `selector`, `source_node_id`, `source_recipe`, `source_signature`, `summary` | `repair_only` |

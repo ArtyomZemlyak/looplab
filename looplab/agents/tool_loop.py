@@ -1461,6 +1461,17 @@ def drive_tool_loop(client, tools, messages: list, emit_spec: dict, *,
             if _note and _note != _last_budget_note[0]:
                 _last_budget_note[0] = _note
                 messages.append({"role": "user", "content": "Reminder — " + _note.strip()})
+        # AN ENGINE NOTICE FOR A SESSION ALREADY AT WORK (doc 73 §4.3, `engine/upstream_hints.py`):
+        # under an `interjection_scope` each pending notice is one `user` turn, here at the turn
+        # boundary and never inside a tool result. No scope → nothing read, nothing appended.
+        _interject = _interjection_ctx.get()
+        if _interject is not None:
+            try:
+                _notes = [str(n) for n in (_interject() or ()) if n]
+            except Exception:  # noqa: BLE001 - a notice that cannot be read must not end a session
+                _notes = []
+            for _n in _notes:
+                messages.append({"role": "user", "content": _n})
         # NB: a transport failure (LLMError after the client's retries) PROPAGATES out of the loop by
         # design — the caller decides how to degrade. The assistant's `run_turn` surfaces it as an
         # error dict; the engine's agentic callers (ToolUsingResearcher.propose /
@@ -1999,6 +2010,27 @@ def phase_cancel_scope(cancelled):
             yield
     finally:
         _phase_cancel_ctx.reset(tok)
+
+
+# AN ENGINE NOTICE SOURCE for the loops run in this context (doc 73 §4.3): a zero-argument callable
+# returning the `user` turns to append at the next turn boundary (`engine/upstream_hints.py` drains
+# its board through it). None outside a scope — every existing caller is byte-identical.
+_interjection_ctx: contextvars.ContextVar = contextvars.ContextVar(
+    "LOOPLAB_loop_interjection", default=None)
+
+
+@contextlib.contextmanager
+def interjection_scope(source):
+    """Publish `source` as the notice source of every `drive_tool_loop` run in this context. A
+    non-callable is a no-op."""
+    if not callable(source):
+        yield
+        return
+    tok = _interjection_ctx.set(source)
+    try:
+        yield
+    finally:
+        _interjection_ctx.reset(tok)
 
 
 def phase_cancel_check():
