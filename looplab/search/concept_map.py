@@ -162,6 +162,11 @@ def syntactic_renames(ids, tags: dict, *, decided=()) -> dict:
     `_`, so a tie keeps the hyphenated spelling). A level with one spelling keeps it — the fold
     collapses COLLISIONS, it does not re-spell an id nothing collides with.
 
+    The VALUE strip is not carried: it removes only TRAILING value segments, as mint-time
+    `hygienic_concept_id` does. `lora/r16` collapses onto `lora` while `lora/r16/dropout` keeps its
+    middle `r16` (a qualifier, not the knob's value), so two distinct concepts are never merged
+    through their parent; the consolidation re-creates `lora/r16` as that child's gap parent.
+
     `decided` is the recorded consolidation (its raws AND canonicals, B3): such an id is never renamed
     here, and an id under it keeps its spelling of that level, so a recorded decision is never
     re-decided by this pass either."""

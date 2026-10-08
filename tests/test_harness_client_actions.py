@@ -415,3 +415,19 @@ def test_reused_action_id_with_changed_body_names_the_conflict(tmp_path):
     refused = client.request("POST", path, {**body, "reason": "other"})
     assert refused["outcome"] == "not_sent" and refused["code"] == "client_request_conflict"
     assert "durably saved" not in refused["message"] and len(seen) == 1
+
+
+def test_a_checkpoint_answer_saved_before_its_scope_joined_the_identity_still_lists(tmp_path, monkeypatch):
+    """Records are never rewritten in place: one saved under the earlier two-item identity must
+    read back, or `listing` failed for every saved action of its generation."""
+    client = api(tmp_path, lambda request: httpx.Response(200, json={"ok": True}))
+    path = "/api/runs/demo/harness-checkpoints"
+    body = {"expected_generation": GEN, "action_id": "answer", "verdict": "watch",
+            "reason": "keep watching", "checkpoint_id": "a" * 32}
+    monkeypatch.delitem(ACTION_SCOPE_FIELDS, "harness-checkpoints")   # the pre-scope client
+    assert client.request("POST", path, body)["status"] == 200
+    monkeypatch.undo()
+    assert client.request("POST", "/api/runs/demo/lessons", {
+        "expected_generation": GEN, "action_id": "l1", "statement": "x"})["status"] == 200
+    listed = client.saved_actions("demo", GEN)
+    assert listed.get("total") == 2, listed

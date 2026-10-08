@@ -818,9 +818,26 @@ class LessonMemory(LessonPriorsMixin, LessonDistillMixin, LessonReconcileMixin,
                 not concepts and evidence_nodes_incomplete == 0
                 and (not classifier_observed or evidence_nodes_total == 0))
             best = final.best()
+            from looplab.core.concepts import normalized_concept_renames
             from looplab.search.concept_effects import concept_effects
-            effects = (concept_effects(final, outcomes, classifier_only=True)
-                       if getattr(final, "objective_key", None) is None else {})
+            from looplab.search.concept_projection import canonical_recorded_concept
+            effects = {}
+            if getattr(final, "objective_key", None) is None:
+                # The outcome keys are the READER's raw spelling (`normalize_key`: casefolded,
+                # spaces kept, no consolidation), but the estimator matches the CURRENT projection
+                # (renames applied, `normalize_concept_id`). Keyed by the raw spelling, a renamed or
+                # spaced tag (`optimization/lr/1e-3` -> `optimization/lr`, `data augmentation`)
+                # recorded `no_with_concept` though the run measured it. Each key is resolved the
+                # way the projection resolves it; one that resolves to nothing records no effect.
+                try:
+                    renames = dict(normalized_concept_renames(
+                        getattr(final, "concept_consolidation", None) or {}))
+                except (TypeError, ValueError):
+                    renames = {}
+                canonical = {key: canonical_recorded_concept(key, renames)[0] for key in outcomes}
+                estimated = concept_effects(final, {c for c in canonical.values() if c},
+                                            classifier_only=True)
+                effects = {key: estimated[c] for key, c in canonical.items() if c in estimated}
             capsule = build_concept_capsule(
                 run_id=run_id, run_uid=getattr(final, "run_uid", ""),
                 task_id=final.task_id, direction=direction,

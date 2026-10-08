@@ -1012,3 +1012,24 @@ def test_a_substituted_nodes_number_is_not_its_concepts_outcome(tmp_path):
     LessonMemory(_fake_engine(mem)).store_concept_capsule(fold(s.read_all()))
     [cap] = ConceptCapsuleStore(mem / "concept_capsules.jsonl").all()
     assert cap["concept_outcomes"]["data/hard-negative-mining"] == 0.80
+
+
+@pytest.mark.parametrize("raw,canonical", [
+    ("optimization/lr/1e-3", "optimization/lr"),   # a recorded consolidation rename
+    ("data augmentation", None)])                   # a spaced tag: `normalize_key` keeps the space
+def test_capsule_effect_is_estimated_under_the_projections_spelling_of_its_key(tmp_path, raw, canonical):
+    """The outcome key is the reader's raw spelling; the estimator matches the current projection.
+    Keyed raw, a renamed or spaced tag recorded `no_with_concept` though the run measured it."""
+    from tests.test_concept_effects import run
+    mem = tmp_path / "mem"
+    mem.mkdir()
+    st = run([(["base"], 0.5, []), (["base", raw], 0.8, [0])])
+    if canonical:
+        st.concept_consolidation[raw] = canonical
+    for node in st.nodes.values():
+        st.node_concept_provenance[node.id] = "classifier"
+    LessonMemory(_fake_engine(mem)).store_concept_capsule(st)
+    c = ConceptCapsuleStore(mem / "concept_capsules.jsonl").all()[0]
+    (key,) = [k for k in c["concept_outcomes"] if k != "base"]
+    effect = c["concept_effects"][key]
+    assert effect["status"] == "matched" and effect["estimate"] == pytest.approx(0.3), effect
