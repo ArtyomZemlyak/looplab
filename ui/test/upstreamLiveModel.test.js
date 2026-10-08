@@ -1,6 +1,6 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { upstreamLiveLabel, upstreamLiveSummary } from '../src/upstreamLiveModel.js'
+import { upstreamHeldLabel, upstreamLiveLabel, upstreamLiveSummary } from '../src/upstreamLiveModel.js'
 
 test('absent or malformed projections read as no live lane', () => {
   for (const value of [undefined, null, 'auto', {}, { mode: 'later' }]) {
@@ -49,4 +49,29 @@ test('the kill switch, the held steps and the author spend read only from well-f
   assert.equal(old.autoPaused, false, 'only an explicit true says the automation is stopped')
   assert.equal(old.authorSpentUsd, 0)
   assert.deepEqual(old.held, [])
+})
+
+test('a failed receipt says what its operation failed at, not always the check', () => {
+  assert.equal(upstreamLiveLabel('status', 'failed', 'check'), 'check did not pass')
+  assert.equal(upstreamLiveLabel('status', 'failed', 'propose'), 'proposal failed')
+  assert.equal(upstreamLiveLabel('status', 'failed', 'advance'), 'advance failed')
+  assert.equal(upstreamLiveLabel('status', 'failed'), 'check did not pass', 'an older row with no op')
+  assert.equal(upstreamLiveLabel('status', 'refused', 'advance'), 'refused by the lane')
+})
+
+test('a held row is a cap or a refusal that retired the step', () => {
+  assert.equal(upstreamHeldLabel({ op: 'advance', reason: 'rate_cap:2/h' }), 'advance held at the hourly cap')
+  assert.equal(upstreamHeldLabel({ op: 'check', reason: 'refused:upstream_source_changed' }),
+    'automatic check refused by the lane, not asked again')
+  assert.equal(upstreamHeldLabel({ op: 'advance', reason: 'refused:upstream_evidence_changed' }),
+    'automatic advance refused by the lane, not asked again')
+  assert.equal(upstreamHeldLabel(null), 'unknown')
+})
+
+test('an armed mode with no engine alive reads as nobody serving the lane now', () => {
+  assert.equal(upstreamLiveSummary({ mode: 'auto' }, false).idle, true)
+  assert.equal(upstreamLiveSummary({ mode: 'auto' }, true).idle, false)
+  assert.equal(upstreamLiveSummary({ mode: 'auto' }).idle, false, 'unknown liveness promises nothing')
+  assert.equal(upstreamLiveSummary({ mode: 'auto', configured: true }, false).idle, false,
+    'a configured mode already says no engine confirmed it')
 })

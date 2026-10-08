@@ -5,7 +5,7 @@ import { baseChoices } from './baseRevision.js'
 import { upstreamCheckSummary, upstreamHistoryRows } from './upstreamCheckModel.js'
 import { useAssistantUILanguage } from './useAssistantLanguage.js'
 import { upstreamProposalSummary, upstreamRecoveryDraft } from './upstreamProposalModel.js'
-import { upstreamLiveLabel, upstreamLiveSummary } from './upstreamLiveModel.js'
+import { upstreamHeldLabel, upstreamLiveLabel, upstreamLiveSummary } from './upstreamLiveModel.js'
 import UpstreamRecovery from './UpstreamRecovery.jsx'
 
 export default function UpstreamPanel({ state, onClose }) {
@@ -18,7 +18,7 @@ export default function UpstreamPanel({ state, onClose }) {
   const history = upstreamHistoryRows(state.upstream_history)
   const advances = (history || []).filter(row => row.type === 'base_advanced')
   const proposal = upstreamProposalSummary(state.upstream_history)
-  const live = upstreamLiveSummary(state.upstream_live)
+  const live = upstreamLiveSummary(state.upstream_live, state.engine_running)
   // Once a proposal is visible, its own check is the only relevant verdict.
   // A new/failed authoring claim must not display a preceding proposal's pass.
   const check = history ? (proposal ? proposal.check : upstreamCheckSummary(history)) : { status: 'unknown' }
@@ -40,13 +40,13 @@ export default function UpstreamPanel({ state, onClose }) {
     <p>{((ru ? 'Полезное изменение из одного эксперимента можно проверить и добавить в общий исходный код следующих экспериментов.' : uiText('A useful change from one experiment can be checked and added to the shared starting code for future experiments.')))}</p>
     <p className="muted">{((enabled && proposal ? (ru ? 'Разберите записанный перенос с Assistant перед выбором следующего действия.' : uiText('Inspect recorded code reuse with Assistant before choosing the next action.')) : (enabled ? (ru ? 'Начните с Assistant: выберите изменение и обсудите проверки. Если результатов ещё нет, сначала оцените эксперимент.' : uiText('Start with Assistant: choose a change and discuss checks. If there are no results yet, evaluate an experiment first.')) : (ru ? 'В этом запуске перенос кода не включён. Assistant поможет подготовить новый запуск с записанной исходной базой и нужными проверками.' : uiText('Code reuse is not enabled for this run. Assistant can help prepare a new run with a recorded starting base and the required checks.')))))}</p>
     {live && <div className="upstream-live">
-      <p><strong>{((ru ? 'Полоса upstream' : uiText('Upstream lane')))}:</strong> {uiText(upstreamLiveLabel('mode', live.mode))}{live.configured && <span className="muted"> · {((ru ? 'по настройкам; движок ещё не подтвердил' : uiText('as configured; no engine has confirmed it yet')))}</span>}{live.reason && <span className="muted"> · {uiText(live.reason)}</span>}</p>
+      <p><strong>{((ru ? 'Полоса upstream' : uiText('Upstream lane')))}:</strong> {uiText(upstreamLiveLabel('mode', live.mode))}{live.configured && <span className="muted"> · {((ru ? 'по настройкам; движок ещё не подтвердил' : uiText('as configured; no engine has confirmed it yet')))}</span>}{live.idle && <span className="muted"> · {((ru ? 'сейчас движок не обслуживает запуск; так он работал в последний раз' : uiText('no engine is serving this run now; this is the mode it last served')))}</span>}{live.reason && <span className="muted"> · {uiText(live.reason)}</span>}</p>
       {live.mode !== 'off' && <p className="muted">{((ru ? `Ожидают выполнения: ${live.pending} из ${live.total} операций` : uiMessage('{0} of {1} queued operations waiting', [live.pending, live.total])))}</p>}
-      {live.recent.length > 0 && <ol className="upstream-queue" aria-live="polite">{live.recent.map(row => <li key={`${row.idx}-${row.seq}`}>{row.op} · <code>{row.action_id}</code> · {uiText(upstreamLiveLabel('status', row.status))}{row.code ? ` (${row.code})` : ''}</li>)}</ol>}
+      {live.recent.length > 0 && <ol className="upstream-queue" aria-live="polite">{live.recent.map(row => <li key={`${row.idx}-${row.seq}`}>{row.op} · <code>{row.action_id}</code> · {uiText(upstreamLiveLabel('status', row.status, row.op))}{row.code ? ` (${row.code})` : ''}</li>)}</ol>}
       {live.author && <p className="muted">{((ru ? `Движок сам пишет предложения: сначала исправления после ремонтов, затем возможности чемпиона. Черновиков: ${live.authoredTotal}` : uiMessage("The engine drafts proposals itself: fixes from repairs first, then the champion's capabilities. {0} drafts so far", [live.authoredTotal])))}</p>}
       {live.autoPaused && <p className="warning">{((ru ? 'Автоматика полосы остановлена оператором: движок сам ничего не пишет, не проверяет и не продвигает; операции из очереди выполняются' : uiText('Automation stopped by the operator: the engine drafts, checks and promotes nothing on its own; queued operations still run')))}</p>}
       {live.authorSpentUsd > 0 && <p className="muted">{((ru ? `Расход автора: $${live.authorSpentUsd.toFixed(2)}` : uiMessage('Author spend so far: ${0}', [live.authorSpentUsd.toFixed(2)])))}</p>}
-      {live.held.length > 0 && <ol className="upstream-held">{live.held.map(row => <li key={row.seq}>{uiText(upstreamLiveLabel('held', row.op))} · <code>{row.reason}</code></li>)}</ol>}
+      {live.held.length > 0 && <ol className="upstream-held">{live.held.map(row => <li key={row.seq}>{uiText(upstreamHeldLabel(row))} · <code>{row.reason}</code></li>)}</ol>}
       {live.authored.length > 0 && <ol className="upstream-authored">{live.authored.map(row => <li key={row.seq}>{((ru ? 'Эксперимент' : uiText('Experiment')))} #{row.source_node_id} · {uiText(upstreamLiveLabel('track', row.track))} · {uiText(upstreamLiveLabel('outcome', row.outcome))}</li>)}</ol>}
     </div>}
     <UpstreamRecovery proposal={proposal} ru={ru} />
