@@ -2078,6 +2078,9 @@ A node is measured only when it is evaluated in its current lifecycle AND its wo
 Results land beside the live metrics through the same row `import-metrics` writes
 (`extra_metrics_imported`, `source: track <name>`, reconstructed key by key); a recorded key can be the
 objective (`metric_retarget`). `--apply` holds `engine.lock`; output goes to `<run>/track_<name>.log`.
+The command runs from the node's workdir (`score_service.py` above is a file there); a track
+declaring `env_passthrough` (credential NAMES read from the engine's environment) runs from the run
+directory instead, so it names the node's files through `{workdir}`.
 
 ## `import-metrics`
 

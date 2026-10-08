@@ -2436,7 +2436,10 @@ export default function AssistantBar({ runId, hidden = false, onReady }) {
     // WHO OWNS THE ACTIVITY (critic 2026-10-08). Behind a buffering proxy no SSE event arrives until
     // the end, so the poll writes the server's whole ordered activity; the batched SSE `text`/`step`
     // events that then flush must not append it a second time. `sseLive`: any SSE event has
-    // arrived. `pollActivity`: a poll frame has written the activity — from then on it alone does.
+    // arrived. `pollActivity`: a poll frame wrote the activity BEFORE the stream was live. The first
+    // SSE event after that clears it and hands the activity back to the stream, which then rebuilds
+    // it whole, in order (a buffered flush carries every event from the start) — so the steps after
+    // the last poll frame are not lost either (second round).
     let sseLive = false
     let pollActivity = false
     let streamedFailure = ''
@@ -2454,7 +2457,7 @@ export default function AssistantBar({ runId, hidden = false, onReady }) {
       ownsActivity: () => pollActivity,
       onProgress: pp => patchLast(prev => {
         if (!(prev && prev.role === 'assistant' && prev.streaming)) return prev
-        if (Array.isArray(pp.activity) && pp.activity.length) pollActivity = true
+        if (!sseLive && Array.isArray(pp.activity) && pp.activity.length) pollActivity = true
         const patch = progressPatch(pp, prev)
         // The mirrored answer only when it is AHEAD of the stream: a frame applied for its activity
         // must never overwrite longer streamed tokens with a shorter mirror.
@@ -2474,11 +2477,15 @@ export default function AssistantBar({ runId, hidden = false, onReady }) {
           patchLast({ content: assistantErrorInfo(acc) ? normalizedFailureText(acc) : acc,
             lastEventAt: Date.now() })
         }),
-        onText: safeAttempt((txt) => { sseLive = true; patchLast(prev => (pollActivity ? { lastEventAt: Date.now() }
-          : { activity: [...(prev.activity || []), { type: 'text', content: txt }], lastEventAt: Date.now() })) }),
-        onStep: safeAttempt((s) => { sseLive = true; patchLast(prev => {
-          if (pollActivity) return { lastEventAt: Date.now() }
-          const a = prev.activity || []; const last = a[a.length - 1]
+        onText: safeAttempt((txt) => {
+          const fresh = pollActivity; pollActivity = false; sseLive = true
+          patchLast(prev => ({ activity: [...(fresh ? [] : (prev.activity || [])), { type: 'text', content: txt }],
+            lastEventAt: Date.now() }))
+        }),
+        onStep: safeAttempt((s) => {
+          const fresh = pollActivity; pollActivity = false; sseLive = true
+          patchLast(prev => {
+          const a = fresh ? [] : (prev.activity || []); const last = a[a.length - 1]
           return last && last.type === 'tools'
             ? { activity: [...a.slice(0, -1), { ...last, labels: [...last.labels, s] }], lastEventAt: Date.now() }
             : { activity: [...a, { type: 'tools', labels: [s] }], lastEventAt: Date.now() }

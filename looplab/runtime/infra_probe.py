@@ -22,10 +22,10 @@ WHAT COUNTS, per target, and why the strictness differs:
 
 | role | probe | a fault is |
 |---|---|---|
-| `mount` (a declared data/reference source) | `stat` + list one entry | ANY `OSError`; a MISSING source only once the run has evaluated a node (`admissible_faults`: a `run_setup` may create it) |
+| `mount` (a declared data/reference source) | `stat` + list one entry | ANY `OSError`; a MISSING source only once the box was seen working — a node evaluated, a stage ran `ok`, a run setup finished (`admissible_faults`: a `run_setup` may create it) |
 | `editable` (a declared source root) | `stat` + list one entry | ANY `OSError` |
 | `run_dir` | create, write one byte, unlink a probe file | ANY `OSError` (ENOSPC, EROFS, ENOTCONN…) |
-| `interpreter` (the sandbox's, and the task's own `eval.python`) | `stat`, executable bit | not executable; missing only once the run has evaluated a node |
+| `interpreter` (the sandbox's, and the task's own `eval.python`) | `stat`, executable bit | not executable; missing only once the box was seen working |
 | `env_path` (an absolute path in the DECLARED eval env) | `stat` | only an INFRA errno or a hang: a declared OUTPUT path that does not exist yet is not a fault |
 
 A HANG IS A FAULT. A dead NFS/FUSE mount often blocks a `stat` in uninterruptible sleep instead of
@@ -208,7 +208,8 @@ _DISK_FULL_CAUSES = frozenset({"ENOSPC", "EDQUOT"})
 
 
 def admissible_faults(faults: Iterable[InfraFault], *, seen_working: bool) -> list[InfraFault]:
-    """The faults that may pause a run, given whether this run has ever evaluated a node.
+    """The faults that may pause a run, given whether its box was ever seen working
+    (`engine/evaluate.py::box_seen_working`: a node evaluated, a stage ran `ok`, a setup finished).
 
     A declared mount or the task's own interpreter that does not EXIST is a box fault only once the
     box has been seen working (critic 2026-10-08): before the first evaluated node, an operator's

@@ -74,6 +74,15 @@ def passthrough_env(spec) -> dict:
     return {n: os.environ[n] for n in names if isinstance(n, str) and n in os.environ}
 
 
+def sync_cwd(workdir, run_dir, env) -> str:
+    """Where an operator copy-out or track runs: the node's WORKDIR, as documented (a relative
+    `./` or `score.py` names the node's files) — except when it is handed credentials
+    (`env_passthrough`), which run from the RUN directory (critic 2026-10-08): the workdir is the
+    candidate's, and a `python -m <tool>` started there imports whatever module the candidate left
+    beside the key. Two rounds of review: always-run-dir broke every workdir-relative command."""
+    return str(run_dir if env else workdir)
+
+
 def workdir_stamp(workdir: Path) -> Optional[bytes]:
     """The bytes of a node workdir's `.looplab-manifest` stamp, or None. Through THE reader of a file
     a candidate can write (`core/node_evidence.py::read_bounded_regular_file`): the stamp is written
@@ -129,10 +138,8 @@ def _run(engine, node_id, generation, argv, workdir, run_dir, timeout, env=None)
     started = time.monotonic()
     before = workdir_stamp(workdir)
     try:
-        # FROM THE RUN DIRECTORY, not the workdir (critic 2026-10-08): the workdir is the candidate's,
-        # and a `python -m <tool>` started there imports whatever module the candidate left beside
-        # the credentials this command was just handed.
-        rc, _out, err, timed = _run_argv(argv, str(run_dir), timeout, env=dict(env or {}),
+        rc, _out, err, timed = _run_argv(argv, sync_cwd(workdir, run_dir, env), timeout,
+                                         env=dict(env or {}),
                                          log_path=str(run_dir / "artifact_sync.log"))
     except (OSError, ValueError) as exc:          # no such tool, an unusable cwd
         rc, err, timed = -1, f"{type(exc).__name__}: {exc}", False

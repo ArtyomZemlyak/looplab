@@ -786,6 +786,23 @@ def _auto_resume_bound(name: str, default: float) -> float:
     return value if value > 0 else default
 
 
+def _last_alive_ts(rd: Path, events, state) -> Optional[float]:
+    """When the run was last seen ALIVE: its last event, or the newest stage log of a node it was
+    still evaluating (critic 2026-10-08, second round: one long training stage writes no event while
+    it runs, so a restart at hour 20 of a 24-hour stage read as a stale run and was never resumed).
+    Bounded: the pending nodes' own top-level `*.log` files, nothing deeper."""
+    stamps = [float(events[-1].ts)] if events and isinstance(events[-1].ts, (int, float)) else []
+    for node in list(state.pending_nodes())[:32]:
+        try:
+            with os.scandir(rd / "nodes" / f"node_{node.id}") as it:
+                for entry in it:
+                    if entry.name.endswith(".log") and entry.is_file(follow_symlinks=False):
+                        stamps.append(entry.stat(follow_symlinks=False).st_mtime)
+        except OSError:
+            continue
+    return max(stamps) if stamps else None
+
+
 def _request_auto_resume(rd: Path, store, state, *, now: Optional[float] = None) -> bool:
     """Append a durable `resume_requested{mode: resume, auto_resume: true}` for a run a dead engine
     left IN PROGRESS, so the ordinary pending-resume path below spawns it (incident 2026-10-06: a
@@ -803,10 +820,9 @@ def _request_auto_resume(rd: Path, store, state, *, now: Optional[float] = None)
     if _spawn_liveness(rd) is not False or not _resolve_task_file(rd):
         return False
     events = store.read_all()
-    last_ts = events[-1].ts if events else None
+    last_ts = _last_alive_ts(rd, events, state)
     max_age_s = _auto_resume_bound(AUTO_RESUME_MAX_AGE_ENV, _AUTO_RESUME_MAX_AGE_H) * 3600.0
-    if not isinstance(last_ts, (int, float)) or (
-            (time.time() if now is None else now) - float(last_ts)) > max_age_s:
+    if last_ts is None or ((time.time() if now is None else now) - last_ts) > max_age_s:
         return False
     try:
         store.append(EV_RESUME_REQUESTED, {"mode": "resume", "auto_resume": True},

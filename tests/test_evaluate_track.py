@@ -142,3 +142,18 @@ def test_an_imported_key_carries_what_measured_it(tmp_path):
     st = fold(store.read_all())
     assert extra_metric_source(st.nodes[0], "FUR@200") == "track at200"
     assert extra_metric_source(st.nodes[0], "FUR@20") is None
+
+
+def test_a_workdir_relative_track_script_runs(tmp_path):
+    """critic 2026-10-08, second round (driven): the documented `python score_service.py` names a
+    file in the node's workdir, which is where a track without credentials runs."""
+    rd, store = _run(tmp_path)
+    snap = json.loads((rd / "task.snapshot.json").read_text())
+    snap["eval"]["tracks"]["at200"]["command"] = [sys.executable, "score_service.py", "--ckpt",
+                                                  "{workdir}/ckpt.txt"]
+    (rd / "task.snapshot.json").write_text(json.dumps(snap))
+    for nid in (0, 1):
+        (rd / "nodes" / f"node_{nid}" / "score_service.py").write_text(
+            "import json,sys; print(json.dumps({'FUR@200': float(open(sys.argv[2]).read())}))")
+    out = _cli(rd, "--apply")
+    assert "recorded on 2 node(s)" in out.output, out.output

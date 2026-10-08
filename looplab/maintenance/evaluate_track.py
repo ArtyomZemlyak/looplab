@@ -105,7 +105,7 @@ def track_refusal(run_dir: Path, node) -> Optional[str]:
 
 def evaluate_track(run_dir: Path, track: str, nodes: str, *, apply: bool) -> str:
     """Plan (and with `apply`, run and record) `track` over `nodes` (`"all"` or `"3,5"`)."""
-    from looplab.engine.artifact_sync import passthrough_env, render_argv
+    from looplab.engine.artifact_sync import passthrough_env, render_argv, sync_cwd
     from looplab.events.types import EV_EXTRA_METRICS_IMPORTED
     from looplab.maintenance.backfill_applied_params import offline_run
     from looplab.runtime.sandbox import run_argv
@@ -140,11 +140,11 @@ def evaluate_track(run_dir: Path, track: str, nodes: str, *, apply: bool) -> str
                 continue
             started = time.monotonic()
             try:
-                # From the RUN directory with the declared credentials by name, as the copy-out
-                # (`engine/artifact_sync.py`): the workdir is the candidate's, and a tool started
-                # there imports what the candidate left beside the key it was handed.
-                rc, out, err, timed = run_argv(argv, str(run_dir), float(spec.get("timeout") or 3600.0),
-                                               env=passthrough_env(spec),
+                # The declared credentials by NAME, and the working directory they imply, as the
+                # copy-out (`engine/artifact_sync.py::sync_cwd`).
+                env = passthrough_env(spec)
+                rc, out, err, timed = run_argv(argv, sync_cwd(workdir, run_dir, env),
+                                               float(spec.get("timeout") or 3600.0), env=env,
                                                log_path=str(run_dir / f"track_{track}.log"))
             except (OSError, ValueError) as exc:
                 lines.append(f"  node {nid}: could not run — {type(exc).__name__}: {exc}")

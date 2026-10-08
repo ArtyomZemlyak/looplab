@@ -116,3 +116,13 @@ def test_a_marker_guarded_requirement_is_asked_only_where_its_marker_holds():
         "pip": "pip"})
     assert got == ["looplab-missing-guarded", "looplab-missing-xyz"]
     assert absent_distributions(["looplab-missing-xyz", "pip"]) == ["looplab-missing-xyz"]
+
+
+def test_a_hash_pinned_marker_line_is_still_asked():
+    """critic 2026-10-08 (second round, driven): uv / pip-compile / poetry exports put `--hash=` after
+    the marker; parsed whole, the marker failed and a WIPED package read as present."""
+    from looplab.runtime.deps import absent_distributions
+    got = absent_distributions({
+        "zz-missing-a": 'zz-missing-a==1.0 ; python_version >= "3.0"     --hash=sha256:abc',
+        "zz-missing-b": 'zz-missing-b==1 ; python_version < "3.0" --hash=sha256:abc'})
+    assert got == ["zz-missing-a"]

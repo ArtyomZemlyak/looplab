@@ -395,3 +395,38 @@ def test_the_tasks_own_interpreter_is_probed(tmp_path):
     targets = engine._infra_probe_targets()
     if getattr(engine.sandbox, "python", None) is not None:
         assert ("interpreter", "/var/tmp/conda/envs/x/bin/python") in targets
+
+
+def test_an_earlier_DEAD_MOUNT_withhold_is_not_a_previous_disk_full(tmp_path):
+    """critic 2026-10-08, second round: the once-per-lifecycle rule matched ANY earlier infra
+    withhold; it reads the withheld row's `fault` now."""
+    from looplab.engine.evaluate import box_seen_working
+    engine, _data, _evals = _engine_with_mount(tmp_path)
+    engine.store.append("eval_attempt_withheld", {"node_id": 0, "generation": 0, "attempt": 0,
+                                                  "at": "decide_repair", "reason": "infra_unavailable",
+                                                  "eval_seconds": 0.0})
+
+    class _A:
+        node_id, generation = 0, 0
+
+    import unittest.mock as um
+    with um.patch.object(infra_probe, "probe",
+                         lambda targets, **k: [infra_probe.InfraFault("run_dir", "/run", "ENOSPC")]):
+        assert anyio.run(engine._eval_infra_pause, _A()) == "disk_full", "believed: no disk-full before"
+    st = fold(engine.store.read_all())
+    assert box_seen_working(st, engine.store.read_all())
+
+
+def test_a_run_whose_nodes_all_failed_has_still_seen_its_box_work():
+    """A stage that ran `ok` (or a finished run setup) proves the box worked, even when every node
+    failed later — the restart that wipes the env then pauses instead of buying triages."""
+    from looplab.core.models import RunState
+    from looplab.engine.evaluate import box_seen_working
+    from looplab.events.eventstore import Event
+    st = RunState()
+    stage = Event(seq=0, ts=0.0, type="stage_finished", data={"node_id": 0, "name": "prep", "status": "ok"})
+    failed = Event(seq=0, ts=0.0, type="stage_finished", data={"node_id": 0, "name": "prep", "status": "failed"})
+    setup = Event(seq=0, ts=0.0, type="run_setup_finished",
+                  data={"command": ["x"], "exit_code": 0, "timed_out": False})
+    assert box_seen_working(st, [stage]) and box_seen_working(st, [setup])
+    assert not box_seen_working(st, [failed]) and not box_seen_working(st, [])

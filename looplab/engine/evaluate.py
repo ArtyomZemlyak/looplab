@@ -1534,6 +1534,22 @@ def _take_handed_admission_fold(node_id, tail_seq: int):
     return state if handed_node == int(node_id) and handed_tail == tail_seq else None
 
 
+def box_seen_working(state, events) -> bool:
+    """Has this run's box ever been seen WORKING — the precondition under which a missing declared
+    mount or interpreter is a fault (`runtime/infra_probe.py::admissible_faults`)? A node evaluated,
+    a run setup that finished, or any stage that ran to `ok` (critic 2026-10-08, second round: a run
+    whose every node had FAILED so far still ran its stages on that box, and a restart wiping the
+    env then sent each node to triage instead of pausing)."""
+    if state.evaluated_nodes():
+        return True
+    from looplab.events.types import EV_RUN_SETUP_FINISHED
+    return any((e.type == EV_STAGE_FINISHED and isinstance(e.data, dict)
+                and e.data.get("status") == "ok")
+               or (e.type == EV_RUN_SETUP_FINISHED and isinstance(e.data, dict)
+                   and e.data.get("exit_code") == 0 and not e.data.get("timed_out"))
+               for e in events)
+
+
 @dataclass(slots=True)
 class EvalAttempt:
     """One node lifecycle's evaluation, as the record the `_eval_*` phases read and write.
@@ -3316,7 +3332,7 @@ class EvaluateMixin:
                     # terminal (`_pause_withholds_attempt`'s stop clause, the same defect). The stop is
                     # final, so the box fault closes the node as `engine_error` below, as it always did.
                     from looplab.runtime.infra_probe import admissible_faults
-                    faults = admissible_faults(faults, seen_working=bool(state.evaluated_nodes()))
+                    faults = admissible_faults(faults, seen_working=box_seen_working(state, events))
                     if faults and not (state.finished or state.stop_requested):
                         if not auto_pause_is_redundant(state):
                             self.store.append(EV_PAUSE, {
@@ -3615,7 +3631,7 @@ class EvaluateMixin:
         return self._eval_intervention_seen(a.node_id, a.generation, a.start_seq, card_id) is None
 
     async def _record_eval_withheld(self, a: "EvalAttempt", at: str, seconds: float, *,
-                                    reason: str = "paused") -> None:
+                                    reason: str = "paused", fault: Optional[str] = None) -> None:
         """The durable record of a withheld attempt (doc 69 69.12a): WHERE the pause (or a stop)
         held it (`EVAL_WITHHELD_POINTS`) and the eval seconds it had spent that NO other row carries
         — the lifecycle's next terminal charges them (`_durable_withheld_seconds`), or the
@@ -3634,7 +3650,12 @@ class EvaluateMixin:
             async with self._write_lock:
                 self.store.append(EV_EVAL_ATTEMPT_WITHHELD, {
                     "node_id": a.node_id, "generation": a.generation, "attempt": a.attempt,
-                    "at": at, "reason": reason, "eval_seconds": spent})
+                    "at": at, "reason": reason, "eval_seconds": spent,
+                    # WHICH box fault, when it is one the candidate can cause itself
+                    # (`"disk_full"`): what the once-per-lifecycle rule in `_eval_infra_pause`
+                    # reads back (critic 2026-10-08, second round: matching ANY earlier infra
+                    # withhold treated a dead-mount pause as a previous disk-full).
+                    **({"fault": fault} if reason == "infra_unavailable" and fault else {})})
         except OSError:
             # A DIAGNOSTIC row: failing to write it loses the seconds' record, as before 69.12a,
             # and must not end the lifecycle — raised, `_evaluate`'s containment turned a withheld
@@ -3668,7 +3689,7 @@ class EvaluateMixin:
             targets.append(("interpreter", task_python))
         return targets
 
-    async def _eval_infra_pause(self, a: "EvalAttempt", *, failed: bool = True) -> bool:
+    async def _eval_infra_pause(self, a: "EvalAttempt", *, failed: bool = True):
         """Probe the box — after a failed attempt (`failed`), or before a launch — and on a fault
         PAUSE the run and answer True.
 
@@ -3689,11 +3710,13 @@ class EvaluateMixin:
         if not faults:
             return False
         events = self.store.read_all()
-        faults = admissible_faults(faults, seen_working=bool(fold(events).evaluated_nodes()))
-        if failed and disk_full_only(faults) and any(
+        faults = admissible_faults(faults, seen_working=box_seen_working(fold(events), events))
+        disk_full = failed and disk_full_only(faults)
+        if disk_full and any(
                 e.type == EV_EVAL_ATTEMPT_WITHHELD and e.data.get("node_id") == a.node_id
                 and e.data.get("generation") == a.generation
-                and e.data.get("reason") == "infra_unavailable" for e in events):
+                and e.data.get("reason") == "infra_unavailable"
+                and e.data.get("fault") == "disk_full" for e in events):
             # THE SAME LIFECYCLE FILLED THE DISK TWICE (critic 2026-10-08): the first time the
             # engine believed the box and paused; on the resume the re-materialized workdir ran the
             # same code into the same wall. That is the candidate's doing — a checkpoint per step —
@@ -3711,7 +3734,8 @@ class EvaluateMixin:
         async with self._write_lock:
             if not auto_pause_is_redundant(fold(self.store.read_all())):
                 self.store.append(EV_PAUSE, {"reason": "infra_unavailable", "detail": detail})
-        return True
+        # Truthy either way; `"disk_full"` is the fault the caller records on the withheld row.
+        return "disk_full" if disk_full else True
 
     def _eval_canary_due(self, a: "EvalAttempt") -> bool:
         """Does THIS attempt owe an eval canary before its full eval (`engine/eval_canary.py`)?
@@ -5026,7 +5050,8 @@ class EvaluateMixin:
         # (a stop is final and the finish waits on this worker), BEFORE the pause check (that branch is
         # what withholds the attempt, and it must name why).
         withheld_reason = "paused"
-        if not halted.paused and await self._eval_infra_pause(a):
+        infra = (not halted.paused) and await self._eval_infra_pause(a)
+        if infra:
             withheld_reason = "infra_unavailable"
             halted = fold(self.store.read_all())
         if halted.paused:
@@ -5042,7 +5067,8 @@ class EvaluateMixin:
             # The attempt that just failed has no `node_repaired` row (no repair was bought), so its
             # seconds ride on the withheld row to the chain's next terminal (doc 69 69.12a).
             await self._record_eval_withheld(a, "decide_repair", a.attempt_eval_seconds,
-                                             reason=withheld_reason)
+                                             reason=withheld_reason,
+                                             fault=infra if isinstance(infra, str) else None)
             return PHASE_RETURN
         if self.external_harness:
             # The external session reads the terminal failure and decides whether to submit a

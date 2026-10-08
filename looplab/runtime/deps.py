@@ -717,7 +717,9 @@ def absent_distributions(dists, *, python: Optional[str] = None,
     (critic 2026-10-08: pip skips such a line, so it never lands in `dropped_requirements`, and an
     unevaluated marker re-ran the install on every resume). A marker that cannot be evaluated there
     — no `packaging` importable, a malformed marker — counts the line as present: the error this
-    function must never make is re-running an install on a guess."""
+    function must never make is re-running an install on a guess. A hash-pinned export
+    (`pkg==1.0 ; python_version >= "3.9" --hash=sha256:…`, uv / pip-compile / poetry) carries its
+    options after the marker; they are cut off before the marker is parsed."""
     if isinstance(dists, Mapping):
         lines = {str(n).strip(): str(v or "") for n, v in dists.items() if str(n or "").strip()}
     else:
@@ -725,7 +727,7 @@ def absent_distributions(dists, *, python: Optional[str] = None,
     names = sorted(lines)
     if not names:
         return []
-    probe = ("import json, sys\n"
+    probe = ("import json, re, sys\n"
              "from importlib.metadata import version\n"
              "def _holds(line):\n"
              "    if ';' not in line:\n"
@@ -735,7 +737,9 @@ def absent_distributions(dists, *, python: Optional[str] = None,
              "            from packaging.markers import Marker\n"
              "        except ImportError:\n"
              "            from pip._vendor.packaging.markers import Marker\n"
-             "        return bool(Marker(line.split(';', 1)[1].split('#', 1)[0].strip()).evaluate())\n"
+             "        marker = line.split(';', 1)[1].split('#', 1)[0]\n"
+             "        marker = re.split(r'\\s--', ' ' + marker)[0].strip()\n"
+             "        return bool(Marker(marker).evaluate())\n"
              "    except Exception:\n"
              "        return False\n"
              "out = []\n"

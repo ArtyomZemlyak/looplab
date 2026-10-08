@@ -1743,7 +1743,7 @@ EVENT_PAYLOAD_KEYS: dict[str, PayloadContract] = {
     "eval_attempt_withheld": PayloadContract(
         "A pause, a stop or an infra_unavailable pause withheld a lifecycle's evaluation; its seconds, for its next terminal.",
         required=("at", "attempt", "eval_seconds", "generation", "node_id", "reason"),
-        optional=(),
+        optional=("fault",),
     ),
     "artifact_synced": PayloadContract(
         "The operator's eval.artifact_sync command ran over a node's workdir after its terminal.",

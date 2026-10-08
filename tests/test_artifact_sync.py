@@ -125,3 +125,11 @@ def test_the_spec_refuses_a_passthrough_that_is_not_a_name():
     assert ArtifactSyncSpec(command=["x"], env_passthrough=["A", "A", "B_2"]).env_passthrough == ["A", "B_2"]
     with pytest.raises(ValueError):
         ArtifactSyncSpec(command=["x"], env_passthrough=["NOT A NAME"])
+
+
+def test_without_credentials_the_copy_runs_from_the_workdir(tmp_path):
+    """critic 2026-10-08, second round (driven): always-run-dir broke every workdir-relative command
+    (`rsync -a ./ dest` copied the whole run dir, events.jsonl included)."""
+    from looplab.engine.artifact_sync import sync_cwd
+    assert sync_cwd("/r/nodes/node_1", "/r", {}) == "/r/nodes/node_1"
+    assert sync_cwd("/r/nodes/node_1", "/r", {"AWS_SECRET_ACCESS_KEY": "x"}) == "/r"

@@ -91,3 +91,20 @@ def test_at_most_max_runs_are_resumed_per_scan(tmp_path, monkeypatch):
                                         for e in s.read_all())]
     assert len(resumed) == 2, [[e.data for e in s.read_all() if e.type == "resume_requested"]
                                for s in stores]
+
+
+def test_a_long_stage_s_fresh_log_keeps_the_run_resumable(tmp_path, monkeypatch):
+    """critic 2026-10-08, second round: a training stage writes no event while it runs, so the
+    last event can be a day old on exactly the run auto-resume exists for."""
+    import os
+    store = _run(tmp_path, "run", ("node_created", {"node_id": 0, "parent_ids": [], "operator": "draft",
+                                                    "idea": {"operator": "draft"}, "code": "x"}))
+    events = store.read_all()
+    monkeypatch.setattr(ep, "_spawn_liveness", lambda _rd: False)
+    later = events[-1].ts + 30 * 3600
+    assert ep._request_auto_resume(tmp_path / "run", store, fold(events), now=later) is False
+    log = tmp_path / "run" / "nodes" / "node_0" / "train.log"
+    log.parent.mkdir(parents=True)
+    log.write_text("epoch 9/10\n")
+    os.utime(log, (later - 3600, later - 3600))
+    assert ep._request_auto_resume(tmp_path / "run", store, fold(events), now=later) is True
