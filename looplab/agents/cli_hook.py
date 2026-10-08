@@ -86,6 +86,15 @@ def external_hint_setting(settings) -> bool:
     return getattr(settings, "upstream_hint_external", False) is True
 
 
+def external_notice_kwargs(settings) -> dict:
+    """`CliAgentDeveloper`'s notice keywords from the run's settings, for the composition root
+    (`agents/developer_backends.py::external_cli_developer`): the switch, and the untrusted-evidence
+    label its promotions paragraph is fenced with while the envelope is on (`core/evidence.py`)."""
+    from looplab.core.evidence import EVIDENCE_LABEL, envelope_enabled
+    return {"upstream_note": external_hint_setting(settings),
+            "evidence_label": EVIDENCE_LABEL if envelope_enabled(settings) else ""}
+
+
 def _command(argv: list[str]) -> str:
     """One shell command line for the hook (Claude Code runs a hook's `command` through a shell)."""
     if os.name == "nt":

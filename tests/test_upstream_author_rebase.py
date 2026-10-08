@@ -185,3 +185,23 @@ def test_a_merge_that_cannot_run_is_an_unpaid_answer_not_a_paid_failure(tmp_path
     out = rebase_source(lane.rd, lane.task, pick)
     assert out["outcome"] == "rebase_conflict" and out["outcome"] not in PAID_OUTCOMES
     assert out["code"] and out["conflicts"] == []
+
+
+def test_a_rebased_source_that_nominates_nothing_writes_nothing_and_is_not_asked_again(tmp_path, monkeypatch):
+    """A source whose only edits are a recipe (no capability hunk) merges cleanly and nominates
+    nothing: memoized against the base and the pending triggers like the native path, no row, no
+    call, and the next turn does not merge it again."""
+    import looplab.engine.upstream_author as author
+    lane, store, generation, body = fixture(tmp_path, source_files={"recipe.env": "MOMENTUM=0.2\n"})
+    _advance_base(lane, store, tmp_path, train=TRAIN.replace(_TAIL, _MOVED_TAIL))
+    merges = []
+    real = author.rebase_source
+    monkeypatch.setattr(author, "rebase_source", lambda *a, **k: merges.append(1) or real(*a, **k))
+    calls = []
+    _model(monkeypatch, _draft(GENERAL), calls=calls)
+    engine = _live_engine(lane, store)
+    _serve(engine, turns=6)
+    assert merges == [1] and calls == []
+    assert not [e for e in store.read_all() if e.type == "lane_authored"]
+    assert list(engine._upstream_serve.author_skipped.values()) and all(
+        v is not None for v in engine._upstream_serve.author_skipped.values()), "memoized, not for good"

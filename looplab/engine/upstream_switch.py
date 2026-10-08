@@ -51,7 +51,7 @@ def set_upstream_auto(run_dir, enabled: bool, reason: Optional[str] = None) -> s
     """`looplab upstream-auto`: append the switch for `run_dir` and say what it does now."""
     from looplab.core.errors import ConfigRefusal
     from looplab.events.eventstore import EventStore
-    from looplab.events.replay import fold
+    from looplab.engine.shared import engine_fold as fold
     from looplab.events.run_generation import run_generation_token
     from looplab.events.types import EV_UPSTREAM_AUTO_SET
     run_dir = Path(run_dir)

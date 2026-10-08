@@ -129,9 +129,7 @@ def external_cli_developer(task: TaskAdapter, settings, developer, *, param_sear
 
     if settings.developer_backend not in PRESETS or param_search:
         return None
-    from looplab.agents.cli_agent import CliAgentDeveloper, opencode_config
-    from looplab.core.evidence import EVIDENCE_LABEL
-    from looplab.agents.cli_hook import external_hint_setting
+    from looplab.agents.cli_agent import CliAgentDeveloper, external_notice_kwargs, opencode_config
     # An EXTERNAL coding agent carries its own `.model`/`.host` — it has no role `.client` for
     # `_set_role_client` to rebind (that helper explicitly skips clientless objects, naming this
     # very case). So the developer-stage overrides applied further down never reached it and the
@@ -174,11 +172,7 @@ def external_cli_developer(task: TaskAdapter, settings, developer, *, param_sear
         # that WRITES THE CODE is the one role missing from `llm_usage` and `looplab tokens`.
         # Its invocations land unpriced (`calls` without `priced_calls`), which is the honest
         # shape: the tokens are spent inside the child process.
-        accountant=run_cost_accountant(settings),
-        # doc 73 §4.3: the upstream notice for an external agent — its own hook mid-session where its
-        # CLI has one, the promotions paragraph in every call's message — fenced under the envelope.
-        upstream_note=external_hint_setting(settings),
-        evidence_label=(EVIDENCE_LABEL if envelope_enabled(settings) else ""))
+        accountant=run_cost_accountant(settings), **external_notice_kwargs(settings))  # doc 73 §4.3
     if settings.validate_agent:
         from looplab.agents.roles import ValidatingDeveloper
         return ValidatingDeveloper(

@@ -25,6 +25,8 @@ from looplab.core.jsonutil import surrogate_safe
 from looplab.core.llm import CostAccountant, request_cancelled
 from looplab.core.models import Idea, developer_artifact_footprint
 from looplab.core.validate import AgentRun
+# Re-exported for the composition root (`agents/developer_backends.py`), beside the class it configures.
+from looplab.agents.cli_hook import external_notice_kwargs  # noqa: F401
 
 _SEED = 'import json\n\n# TODO: implement the solution.\nprint(json.dumps({"metric": 0.0}))\n'
 
