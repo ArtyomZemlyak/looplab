@@ -367,6 +367,14 @@ EV_CARD_DROPPED = "card_dropped"                # explicit operator stop intent 
 # stopped a line of work and why is history a reopen must not erase — the same rule
 # `Card.discarded_nodes` keeps for nodes that never ran.
 EV_CARD_REOPENED = "card_reopened"              # explicit operator resume intent (server-stamped)
+# THE CORRECTION PATH THE RESEARCH-LINEAGE EDGE NEVER HAD (`core/cards.py::Card.parent_card_id`).
+# An experiment reaches a research question only through `parent_card_id`, which is authored at
+# proposal time — and every operator-INJECTED env names none (measured on
+# `minionerec-backbones-v11`: 3 of 45 experiments filed, 39 of them operator injects). The operator
+# files one card under one question (or un-files it with `parent_card_id: null`), server-stamped,
+# folded LAST WRITE WINS per card and overlaid with the other operator controls, so it is the
+# operator's decision on the record — never a guess the fold makes. A log without one folds as before.
+EV_CARD_FILED = "card_filed"                    # explicit operator filing intent (server-stamped)
 # Layer 5's request/done execution ledger. Both are folded and main-task-only: the request is the
 # durable selection+compute gate; done advances it after commit or an explicit producer-failure give-up.
 EV_CARD_BUILD_REQUESTED = "card_build_requested"
@@ -1156,6 +1164,23 @@ EV_NODE_OVERLAY_REBASED = "node_overlay_rebased"
 # readers key on that prefix and an action id, and a queue entry is neither a claim nor a verdict.
 EV_LANE_OP_REQUESTED = "lane_op_requested"
 EV_LANE_OP_DONE = "lane_op_done"
+# WHAT THE DEVELOPERS AT WORK WERE TOLD (doc 73 §4.2 G1, `engine/upstream_hints.py`): one row per live
+# `base_advanced`, by the MAIN task — the exact bounded notice and the Developer sessions open to hear
+# it. FOLDED into the upstream history. `upstream_hint_delivered` is the DIAGNOSTIC receipt the
+# Developer's own worker thread appends when a session actually heard it at a tool-loop turn boundary.
+# No `action_id` on either: the lane's ACK readers key on that.
+EV_UPSTREAM_HINT_ISSUED = "upstream_hint_issued"
+EV_UPSTREAM_HINT_DELIVERED = "upstream_hint_delivered"
+# THE KILL SWITCH (doc 73 §4.2 G2): a CONTROL intent (UI / API / MCP through `/commands`) —
+# `enabled: false` stops every AUTOMATIC upstream step of a live run (the author, the automatic check
+# and advance), `true` lets them resume; operator-queued operations are still served. Folded into
+# `RunState.upstream_auto_paused` and into the upstream history (who stopped it, why).
+EV_UPSTREAM_AUTO_SET = "upstream_auto_set"
+# AN AUTOMATIC STEP THE LIVE ENGINE HELD BACK (doc 73 §4.2 G3/G4): a passed gate past
+# `Settings.upstream_advances_per_hour` (`op: advance`, once per proposal), or the author past
+# `Settings.upstream_author_usd` (`op: author`, once). DIAGNOSTIC — the audit of a cap, like
+# `lane_authored`; the cap itself is re-read from the log and the settings every turn.
+EV_LANE_HELD = "lane_held"
 # THE AUTOMATED AUTHOR's record (doc 73 §2.5, `engine/upstream_author.py`): one row per source
 # lifecycle it paid to draft for — drafted (the lane's own propose rows follow under the same action
 # id), declined by its critic, skipped, or failed. DIAGNOSTIC: the fold reads nothing of it; the
@@ -1300,6 +1325,7 @@ DIAGNOSTIC_EVENTS: frozenset[str] = frozenset({
     EV_EVAL_INVOCATION_CLAIMED, EV_EVAL_INVOCATION_SETTLED, EV_EVAL_INVOCATION_RECOVERED,
     EV_EVAL_CANARY_STARTED, EV_EVAL_CANARY_FINISHED, EV_EVAL_ATTEMPT_WITHHELD,
     EV_TASK_CHANGED, EV_ARTIFACT_SYNCED, EV_ARTIFACT_SYNC_STARTED,
+    EV_UPSTREAM_HINT_DELIVERED, EV_LANE_HELD,
     EV_LANE_AUTHORED, EV_LANE_ARMED,
 })
 
@@ -1391,7 +1417,11 @@ EVENT_PAYLOAD_KEYS: dict[str, PayloadContract] = {
     "base_advanced": PayloadContract("Explicit CAS — the stopped lane's, or the live engine's (`in_engine`): only future lifecycles adopt the verified base.", required=('action_id', 'evidence_token', 'flag', 'from_revision', 'gate_seq', 'hunk_hashes', 'proposal_id', 'request_hash', 'selector', 'source_node_id', 'summary'), optional=('in_engine',), stored_whole=True),
     "lane_op_requested": PayloadContract("An upstream propose/check/advance queued for the LIVE engine that serves the lane.", required=('action_id', 'op', 'request_hash'), optional=('body', 'proposal_id', 'request_path')),
     "lane_armed": PayloadContract("A live engine armed the upstream lane: the mode it serves until it restarts, and why.", required=('author', 'mode', 'reason'), optional=()),
-    "lane_authored": PayloadContract("The automated upstream author settled one source lifecycle: drafted, declined by its critic, skipped or failed.", required=('action_id', 'outcome', 'source_node_id', 'track'), optional=('code', 'hunk_hashes', 'reason')),
+    "lane_authored": PayloadContract("The automated upstream author settled one source lifecycle: drafted, declined by its critic, skipped or failed.", required=('action_id', 'outcome', 'source_node_id', 'track'), optional=('code', 'cost_usd', 'hunk_hashes', 'reason')),
+    "upstream_hint_issued": PayloadContract("The bounded notice the live engine issued to the Developer sessions at work after a base advance.", required=('advance_seq', 'hint_id', 'kind', 'proposal_id', 'sessions', 'text'), optional=('source_node_id',), stored_whole=True),
+    "upstream_auto_set": PayloadContract("The operator's kill switch for every automatic upstream step of a live run.", required=('enabled',), optional=('reason',), stored_whole=True),
+    "lane_held": PayloadContract("The live engine held an automatic upstream step back at a cap: an advance past the hourly limit, the author past its budget.", required=('op', 'reason'), optional=('proposal_id',)),
+    "upstream_hint_delivered": PayloadContract("A Developer session heard an upstream notice at a tool-loop turn boundary.", required=('hint_id', 'session'), optional=('node_id',)),
     "lane_op_done": PayloadContract("The live engine settled a queued upstream operation; the lane's own rows carry what it did.", required=('idx', 'op', 'outcome'), optional=('action_id', 'code', 'seq')),
     "ablate": PayloadContract(
         "One ablation of the champion's code: which blocks were removed and what each removal cost the metric.",
@@ -1595,6 +1625,11 @@ EVENT_PAYLOAD_KEYS: dict[str, PayloadContract] = {
         "The foresight rankings a staged Card's proposal made, held for the node the Card becomes.",
         required=("at_node", "card_id"),
         optional=("foresight", "hyp_priority"),
+    ),
+    "card_filed": PayloadContract(
+        "The operator filed one Card under a research question, or un-filed it (server-stamped).",
+        required=("id", "parent_card_id"),
+        optional=("source",),
     ),
     "card_reopened": PayloadContract(
         "The operator resumed a dropped Card (server-stamped).",

@@ -397,6 +397,13 @@ def _on_upstream(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
         st.upstream_base = {"seq": e.seq, **d}
 
 
+def _on_upstream_auto_set(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
+    # The kill switch (doc 73 §4.2 G2): only a real bool moves it; the row is also audit history.
+    if type(d.get("enabled")) is bool:
+        st.upstream_auto_paused = not d["enabled"]
+    _on_upstream(st, e, d, ctx)
+
+
 def _on_upstream_execution(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
     _on_upstream(st, e, d, ctx)
     row = d.get("execution")
@@ -409,7 +416,9 @@ def _on_upstream_execution(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> 
 HANDLERS = {
     **{name: _on_upstream for name in ("upstream_proposal_started", "upstream_proposed",
        "upstream_proposal_failed", "upstream_gate_started",
-       "upstream_gate_finished", "upstream_gate_abandoned", "base_advanced")},
+       "upstream_gate_finished", "upstream_gate_abandoned", "base_advanced",
+       "upstream_hint_issued")},
+    "upstream_auto_set": _on_upstream_auto_set,
     "upstream_execution": _on_upstream_execution,
     EV_DATA_PROFILED: _on_data_profiled,
     EV_DATA_PROVENANCE: _on_data_provenance,

@@ -443,7 +443,12 @@ from looplab.search.speculation_calibration import (SPECULATION_CALIBRATION_PROF
 # INERT for a calibration replicate: the toy task declares no upstream block, so it resolves `off`.
 # 2026-10-08: upstream_author (doc 73 §2.5), none removed (removing it re-derives 0d85cc96).
 # INERT for a calibration replicate: it acts only where upstream_mode resolves `auto`.
-_EXPECTED_DIGEST = "sha256:9db8b1f76cc4b748cb46fa4188cf18ce1b7708a63183daac1c55514b82db31b4"
+# 2026-10-08: upstream_author_usd, upstream_advances_per_hour (doc 73 §4.2 G3/G4), none removed
+# (removing them re-derives 9db8b1f7). INERT for a calibration replicate: no upstream block, so no
+# author and no automatic advance.
+# 2026-10-08: upstream_verify (doc 73 §4.2 G5), none removed (removing it re-derives bf576ab3).
+# INERT for a calibration replicate: no upstream block, so no gate is ever bought.
+_EXPECTED_DIGEST = "sha256:8beb702f5cdcb760ec146e2177036628ea4027e87d84436f40dbb23068dfe386"
 #   2026-09-06  + endgame_reserve_frac (doc 52 row 18: the plan's endgame reserve the dispatcher
 #               honours). The 'field set changed too' branch: 220 -> 221, both pins re-set. A
 #               calibration replicate runs the toy workload under `EngineOptions`, whose reserve is
@@ -969,7 +974,9 @@ _EXPECTED_DIGEST = "sha256:9db8b1f76cc4b748cb46fa4188cf18ce1b7708a63183daac1c555
 # 2026-10-08: researcher_artifacts (doc 73 §1.4, Researcher-proposed artifact nodes): 289 -> 290.
 # 2026-10-08: upstream_mode (doc 73 §2.5, the live upstream lane): 290 -> 291.
 # 2026-10-08: upstream_author (doc 73 §2.5, the automated upstream author): 291 -> 292.
-_EXPECTED_FIELD_COUNT = 292
+# 2026-10-08: upstream_author_usd, upstream_advances_per_hour (doc 73 §4.2 G3/G4): 292 -> 294.
+# 2026-10-08: upstream_verify (doc 73 §4.2 G5, the canary gate): 294 -> 295.
+_EXPECTED_FIELD_COUNT = 295
 
 
 def test_the_digest_did_not_change_when_the_profile_moved():

@@ -23,7 +23,7 @@ The event type itself is the contract's identity and is never renamed or reused;
 
 <!-- generated: event types -->
 
-182 event types — 127 folded into `RunState`, 55 diagnostic; 1204 declared payload keys; 30 types whose whole payload is stored by the fold.
+187 event types — 130 folded into `RunState`, 57 diagnostic; 1223 declared payload keys; 32 types whose whole payload is stored by the fold.
 
 | type | fold | records | required keys | optional keys |
 |---|---|---|---|---|
@@ -54,6 +54,7 @@ The event type itself is the contract's identity and is never renamed or reused;
 | `card_dropped` | folded | The operator stopped a Card (server-stamped). | `id` | `by`, `dropped_by`, `reason` |
 | `card_edited` | folded | The operator rewrote a Card's statement. | `id` | `source`, `statement` |
 | `card_enriched` | folded | A Card's novelty / cross-run / footprint delta (last write by seq wins). | — | `claim_refs`, `concept_tags`, `confidence`, `cross_run_prior`, `footprint`, `foresight_rank`, `generation`, `id`, `lesson_refs`, `node_id`, `novelty_verdict`, `proposal_ref`, `research_origin`, `steering_context` |
+| `card_filed` | folded | The operator filed one Card under a research question, or un-filed it (server-stamped). | `id`, `parent_card_id` | `source` |
 | `card_merged` | folded | Alias Cards folded into a canonical one, with the seq that decided the edge. | `aliases`, `canonical`, `merged_by`, `source_event_seq` | `statement` |
 | `card_ranked` | folded | The board's priority order over the Cards, with per-Card confidence and reason. | — | `at_node`, `confidence`, `order`, `ranked`, `reason` |
 | `card_ranking_staged` | diagnostic | The foresight rankings a staged Card's proposal made, held for the node the Card becomes. | `at_node`, `card_id` | `foresight`, `hyp_priority` |
@@ -117,7 +118,8 @@ The event type itself is the contract's identity and is never renamed or reused;
 | `inject_failed` | diagnostic | An `inject_node` request that could not be materialized, with the reason. | `error`, `idx`, `reason` | — |
 | `inject_node` | folded · whole | An operator-authored node: its idea and code, or a branch of an existing (possibly foreign) node. | — | `code`, `deleted`, `files`, `forked_from`, `idea`, `node_kind`, `origin`, `parent_generations`, `parent_id`, `parent_ids`, `uses`, `uses_attempts` |
 | `lane_armed` | diagnostic | A live engine armed the upstream lane: the mode it serves until it restarts, and why. | `author`, `mode`, `reason` | — |
-| `lane_authored` | diagnostic | The automated upstream author settled one source lifecycle: drafted, declined by its critic, skipped or failed. | `action_id`, `outcome`, `source_node_id`, `track` | `code`, `hunk_hashes`, `reason` |
+| `lane_authored` | diagnostic | The automated upstream author settled one source lifecycle: drafted, declined by its critic, skipped or failed. | `action_id`, `outcome`, `source_node_id`, `track` | `code`, `cost_usd`, `hunk_hashes`, `reason` |
+| `lane_held` | diagnostic | The live engine held an automatic upstream step back at a cap: an advance past the hourly limit, the author past its budget. | `op`, `reason` | `proposal_id` |
 | `lane_op_done` | folded | The live engine settled a queued upstream operation; the lane's own rows carry what it did. | `idx`, `op`, `outcome` | `action_id`, `code`, `seq` |
 | `lane_op_requested` | folded | An upstream propose/check/advance queued for the LIVE engine that serves the lane. | `action_id`, `op`, `request_hash` | `body`, `proposal_id`, `request_path` |
 | `lessons_distilled` | folded · whole | The lessons one distillation pass drew from this run's node pairs. | `at_node`, `count`, `lessons`, `pairs`, `trigger` | — |
@@ -199,10 +201,13 @@ The event type itself is the contract's identity and is never renamed or reused;
 | `train_monitor_alert` | diagnostic | The live training-log judge's verdict about one running stage, and the log role it judged. | `confidence`, `generation`, `log_role`, `node_id`, `reason`, `status` | `checkpoint_id`, `citation_resolved`, `confidence_valid`, `evidence_locator`, `evidence_source`, `fault`, `kill`, `kill_role_withheld`, `kill_superseded_by`, `overrun_alert_floor_s`, `overrun_beyond_noise_s`, `projected_overrun_s`, `repair_decided`, `source`, `stage`, `stage_grace_s`, `stage_wall_s`, `stop_decided`, `trajectory`, `trajectory_veto` |
 | `trust_gate_changed` | folded | The run's trust gate was changed, by a named source (last write wins). | `source`, `trust_gate` | — |
 | `trust_scan` | diagnostic | Which trust detectors ran over one node's code, how many findings they made, over what digest. | — | `code_digest`, `detectors`, `evidence_version`, `findings`, `generation`, `node_id` |
+| `upstream_auto_set` | folded · whole | The operator's kill switch for every automatic upstream step of a live run. | `enabled` | `reason` |
 | `upstream_execution` | folded · whole | Separate charged gate execution, never a node score. | `action_id`, `execution`, `proposal_id`, `request_hash` | — |
 | `upstream_gate_abandoned` | folded · whole | Operator recovery of an interrupted claim; grants no pass. | `action_id`, `claim_action_id`, `proposal_id`, `reason`, `request_hash` | — |
 | `upstream_gate_finished` | folded · whole | Measured gate verdict bound to actual source and inputs. | `action_id`, `evidence_token`, `proposal_id`, `request_hash`, `result` | — |
 | `upstream_gate_started` | folded · whole | Claim before real equivalence/regression work; no implicit retry. | `action_id`, `input_identity`, `proposal_id`, `request_hash` | — |
+| `upstream_hint_delivered` | diagnostic | A Developer session heard an upstream notice at a tool-loop turn boundary. | `hint_id`, `session` | `node_id` |
+| `upstream_hint_issued` | folded · whole | The bounded notice the live engine issued to the Developer sessions at work after a base advance. | `advance_seq`, `hint_id`, `kind`, `proposal_id`, `sessions`, `text` | `source_node_id` |
 | `upstream_proposal_failed` | folded · whole | A proposal failed; no gate permission. | `action_id`, `code`, `proposal_id`, `request_hash` | — |
 | `upstream_proposal_started` | folded · whole | Durable claim before run-owned Maintainer work; optional pointer to the retained original request. | `action_id`, `proposal_id`, `request_hash` | `request_path` |
 | `upstream_proposed` | folded · whole | Generalized capability with immutable candidate archive and separate source recipe. | `action_id`, `base_revision`, `capability_paths`, `commit`, `critic`, `expected_base_revision`, `flag`, `hunk_hashes`, `manifest_hash`, `old_selector`, `proposal_id`, `repair_trigger_nodes`, `request_hash`, `selector`, `source_node_id`, `source_recipe`, `source_signature`, `summary` | `repair_only` |

@@ -66,6 +66,66 @@ _STARTED = ("upstream_proposal_started", "upstream_gate_started")
 AUTO_RETRY_AFTER_S = 300.0
 
 
+def hint_receipt_sink(engine):
+    """The DIAGNOSTIC receipt a Developer session's own worker thread appends when it hears a hint
+    (`engine/upstream_hints.py`, doc 73 §4.2 G1) — invariant #1 admits diagnostics from any thread."""
+    def _sink(row: dict) -> None:
+        from looplab.events.types import EV_UPSTREAM_HINT_DELIVERED
+        engine.store.append(EV_UPSTREAM_HINT_DELIVERED, {
+            "hint_id": row["hint_id"], "session": row["session"],
+            **({"node_id": row["node_id"]} if "node_id" in row else {})})
+    return _sink
+
+
+def _issue_hint(engine, store, proposal: dict, advanced) -> None:
+    """`upstream_hint_issued` for one live advance, then post it to the Developer sessions at work
+    (doc 73 §4.2 G1). MAIN task, under the write lock; once per proposal."""
+    from looplab.engine.upstream_hints import hint_id_for, hint_text
+    from looplab.events.types import EV_UPSTREAM_HINT_ISSUED
+    hint_id = hint_id_for(proposal["proposal_id"])
+    board = getattr(engine, "_upstream_hints", None)
+    sessions = board.open_sessions() if board is not None else []
+    kind = "fix" if proposal.get("repair_only") is True else "capability"
+    text = hint_text(kind=kind, source_node_id=proposal.get("source_node_id"),
+                     summary=proposal.get("summary", ""), flag=proposal.get("flag"),
+                     paths=proposal.get("capability_paths") or [])
+    store.append(EV_UPSTREAM_HINT_ISSUED, {
+        "hint_id": hint_id, "proposal_id": proposal["proposal_id"], "advance_seq": advanced.seq,
+        "kind": kind, "source_node_id": proposal.get("source_node_id"), "text": text,
+        "sessions": sessions[:32]})
+    if board is not None:
+        board.post({"hint_id": hint_id, "text": text})
+
+
+def _unhinted_advance(events):
+    """`(base_advanced, upstream_proposed data)` of a LIVE advance whose hint row is missing — the
+    engine died between the two appends — or None."""
+    issued = {e.data.get("proposal_id") for e in events if e.type == "upstream_hint_issued"}
+    for e in events:
+        if (e.type == "base_advanced" and e.data.get("in_engine") is True
+                and e.data.get("proposal_id") not in issued):
+            proposal = next((p.data for p in events if p.type == "upstream_proposed"
+                             and p.data.get("proposal_id") == e.data.get("proposal_id")), None)
+            if proposal is not None:
+                return e, proposal
+    return None
+
+
+def advances_per_hour(settings) -> int:
+    """THE ONE READER of `Settings.upstream_advances_per_hour` (doc 73 §4.2 G3): automatic advances a
+    live engine may make in any rolling hour; 0 (or anything unreadable) = no cap."""
+    value = getattr(settings, "upstream_advances_per_hour", 0)
+    return value if type(value) is int and value >= 0 else 0
+
+
+def auto_advances_in_window(events, now: float, window_s: float = 3600.0) -> int:
+    """The engine's OWN automatic advances (`auto-advance-*`, `in_engine`) appended in the last
+    `window_s` seconds — an operator's advance never counts and is never held."""
+    return sum(1 for e in events if e.type == "base_advanced" and e.data.get("in_engine") is True
+               and str(e.data.get("action_id") or "").startswith("auto-advance-")
+               and float(e.ts or 0.0) >= now - window_s)
+
+
 def upstream_mode_setting(settings) -> str:
     """THE ONE READER of `Settings.upstream_mode`. Anything unreadable is `off`."""
     value = getattr(settings, "upstream_mode", "off")
@@ -160,12 +220,22 @@ def upstream_live_view(run_dir, events, *, cursor: Optional[int] = None) -> Opti
         mode, reason = (resolve_upstream_mode(settings, upstream) if settings is not None
                         else ("off", "no readable config snapshot"))
         author, configured = mode == "auto" and upstream_author_setting(settings), True
+    from looplab.engine.upstream_author import author_spent_usd
     authored = [{"seq": e.seq, "action_id": e.data.get("action_id"), "track": e.data.get("track"),
                  "source_node_id": e.data.get("source_node_id"), "outcome": e.data.get("outcome")}
                 for e in events if e.type == "lane_authored"]
+    # doc 73 §4.2 G2-G4: the kill switch as the log last set it, the caps that held a step back,
+    # and what the author has spent.
+    switch = next((e for e in reversed(events) if e.type == "upstream_auto_set"
+                   and type(e.data.get("enabled")) is bool), None)
+    held = [{"seq": e.seq, "op": e.data.get("op"), "reason": e.data.get("reason"),
+             **({"proposal_id": e.data["proposal_id"]} if e.data.get("proposal_id") else {})}
+            for e in events if e.type == "lane_held"]
     return {"mode": mode, "reason": reason, "author": author, "configured": configured,
             "queue": live_queue(events, cursor), "authored": authored[-LIVE_AUTHORED_ROWS:],
-            "authored_total": len(authored)}
+            "authored_total": len(authored),
+            "auto_paused": switch is not None and switch.data["enabled"] is False,
+            "held": held[-LIVE_AUTHORED_ROWS:], "author_spent_usd": round(author_spent_usd(events), 6)}
 
 
 def claims_unresolved(events) -> bool:
@@ -477,7 +547,9 @@ async def _settle(engine, lane, job: UpstreamJob) -> bool:
                 if current != prepared["proposal"]["expected_base_revision"]:
                     receipt = {"outcome": "refused", "code": "upstream_base_conflict"}
                 else:
-                    receipt = {"outcome": "succeeded", "seq": lane._advance_commit(prepared, store.append).seq}
+                    advanced = lane._advance_commit(prepared, store.append)
+                    _issue_hint(engine, store, prepared["proposal"], advanced)
+                    receipt = {"outcome": "succeeded", "seq": advanced.seq}
                     # The Developers build on the promoted base from their NEXT call
                     # (`sync_developer_base`), and a node built by one that has not rebound yet
                     # names its own base on `node_created`.
@@ -543,8 +615,18 @@ def _author_work(engine, pick, generation):
     span = getattr(engine, "_op_span", None)
     scope = (span("upstream_author", node_id=pick["node"].id, track=pick["track"])
              if callable(span) else contextlib.nullcontext())
-    with scope:
-        return author_draft(engine, pick, generation=generation)
+    # THE MONEY (doc 73 §4.2 G4): what THIS thread committed across the two calls, recorded on the
+    # source's `lane_authored` row whether the draft succeeded or raised.
+    from looplab.core.llm_budget import thread_committed_usd_exact
+    start = thread_committed_usd_exact()
+    try:
+        with scope:
+            return author_draft(engine, pick, generation=generation)
+    finally:
+        try:
+            pick["cost_usd"] = round(max(0.0, float(thread_committed_usd_exact() - start)), 6)
+        except OverflowError:
+            pick["cost_usd"] = float("inf")
 
 
 async def _settle_author(engine, lane, job: UpstreamJob) -> bool:
@@ -562,6 +644,8 @@ async def _settle_author(engine, lane, job: UpstreamJob) -> bool:
             row["reason"] = str(out["reason"])[:500]
         if out.get("code"):
             row["code"] = out["code"]
+        if isinstance(pick.get("cost_usd"), float):
+            row["cost_usd"] = pick["cost_usd"]
         engine.store.append("lane_authored", row)
         if out["outcome"] == "drafted":
             job.authored = {k: row[k] for k in ("action_id", "track", "source_node_id", "hunk_hashes")}
@@ -671,14 +755,42 @@ async def serve_upstream_requests(engine, state) -> bool:
         serve.job = UpstreamJob(op=str(request.get("op")), body=body, idx=done)
         _start(engine, lane, serve.job)
         return False
+    events = engine.store.read_all()
+    lost = _unhinted_advance(events) if armed["mode"] != "off" else None
+    if lost is not None:
+        async with engine._write_lock:
+            _issue_hint(engine, engine.store, lost[1], lost[0])
+        return True
     if armed["mode"] != "auto":
         return False
-    events = engine.store.read_all()
+    # THE KILL SWITCH (`upstream_auto_set {enabled: false}`, doc 73 §4.2 G2): no author, no automatic
+    # check, no automatic advance. Operator-queued operations above are still served.
+    if getattr(state, "upstream_auto_paused", False):
+        return False
     nxt = auto_next_op(events, engine._repo_spec.get("seed_base"))
     if nxt is None:
+        from looplab.engine.upstream_author import author_spent_usd, author_usd_cap, upstream_author_setting
+        cap_usd = author_usd_cap(armed["settings"])
+        if (upstream_author_setting(armed["settings"]) and cap_usd
+                and author_spent_usd(events) >= cap_usd):
+            if not any(e.type == "lane_held" and e.data.get("op") == "author" for e in events):
+                async with engine._write_lock:
+                    engine.store.append("lane_held", {"op": "author", "reason": f"cost_cap:{cap_usd:g}usd"})
+                return True
+            return False
         _start_author(engine, armed, state, events)
         return False
     op, body = nxt
+    per_hour = advances_per_hour(armed["settings"])
+    if op == "advance" and per_hour and auto_advances_in_window(events, time.time()) >= per_hour:
+        # THE HOURLY CAP (doc 73 §4.2 G3): the passed gate waits; said once per proposal.
+        if not any(e.type == "lane_held" and e.data.get("proposal_id") == body["proposal_id"]
+                   for e in events):
+            async with engine._write_lock:
+                engine.store.append("lane_held", {"op": "advance", "reason": f"rate_cap:{per_hour}/h",
+                                                  "proposal_id": body["proposal_id"]})
+            return True
+        return False
     refused_at = serve.refused_auto.get((op, body["action_id"]))
     if refused_at is not None and time.monotonic() - refused_at < AUTO_RETRY_AFTER_S:
         return False

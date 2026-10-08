@@ -178,3 +178,33 @@ test('the unfiled section is absent when nothing is unfiled', async () => {
   }))
   assert.ok(!markup.includes('Not filed under any question'))
 })
+
+test('the filing control: Keep here records the concept suggestion, the menu files anywhere, read-only offers none', async () => {
+  // The operator's way to put a filing ON the run's record (`card_filed`). On
+  // `minionerec-backbones-v11` none of the 39 operator-injected cards named a question; the concept
+  // suggestion drew most of them somewhere, but only on this screen.
+  const { default: ResearchView } = await loadView()
+  const cards = [
+    { id: 'q1', card_kind: 'direction', statement: 'does a bigger backbone help', concept_tags: ['backbone'] },
+    { id: 'q2', card_kind: 'direction', statement: 'does beam width matter', concept_tags: ['beam'] },
+    { id: 'e1', card_kind: 'experiment', concept_tags: ['backbone', 'metric'] },   // inferred → q1
+    { id: 'e2', card_kind: 'experiment', parent_card_id: 'q2', filed_by: 'operator' },
+    { id: 'e3', card_kind: 'experiment', filed_by: 'operator', concept_tags: ['beam'] },  // un-filed
+  ]
+  const html = onFile => renderToStaticMarkup(React.createElement(ResearchView, {
+    cards, state: { nodes: {} }, onFile,
+    renderCard: card => React.createElement('span', { key: card.id, 'data-card': card.id }, card.id),
+  }))
+  const live = html(() => {})
+  assert.ok(live.includes('Keep here'), 'the inferred card offers to make the suggestion permanent')
+  assert.ok(live.includes('filed by the operator'), 'an operator filing says who filed it')
+  assert.ok(live.includes('un-filed by the operator'),
+    'an operator un-filing is drawn as such and NOT re-inferred under q2 by its concept')
+  assert.equal((live.match(/research-filing-select/g) || []).length, 3,
+    'every experiment carries the File under menu')
+  assert.ok(live.includes('does beam width matter'), 'the menu lists the questions by statement')
+  const readOnly = html(null)
+  assert.ok(!readOnly.includes('research-filing-select') && !readOnly.includes('Keep here'),
+    'a read-only board shows provenance and offers no control')
+  assert.ok(readOnly.includes('filed by concepts'), 'the provenance chip stays')
+})

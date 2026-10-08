@@ -37,3 +37,16 @@ test('a lane no engine confirmed yet says so', () => {
   assert.equal(upstreamLiveSummary({ mode: 'auto', configured: true }).configured, true)
   assert.equal(upstreamLiveSummary({ mode: 'auto' }).configured, false)
 })
+
+test('the kill switch, the held steps and the author spend read only from well-formed fields', () => {
+  const out = upstreamLiveSummary({ mode: 'auto', auto_paused: true, author_spent_usd: 0.5,
+    held: [{ seq: 4, op: 'advance', reason: 'rate_cap:2/h', proposal_id: 'up_x' }, { op: 'author' }, null] })
+  assert.equal(out.autoPaused, true)
+  assert.equal(out.authorSpentUsd, 0.5)
+  assert.deepEqual(out.held.map(row => row.seq), [4])
+  assert.equal(upstreamLiveLabel('held', 'advance'), 'advance held at the hourly cap')
+  const old = upstreamLiveSummary({ mode: 'auto', auto_paused: 'yes', author_spent_usd: -1 })
+  assert.equal(old.autoPaused, false, 'only an explicit true says the automation is stopped')
+  assert.equal(old.authorSpentUsd, 0)
+  assert.deepEqual(old.held, [])
+})

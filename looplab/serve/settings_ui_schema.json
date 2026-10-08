@@ -1503,6 +1503,37 @@
           "shortHelp": "Paid drafts of fixes and champion capabilities for the base (auto mode only)."
         },
         {
+          "key": "upstream_author_usd",
+          "label": "Upstream author budget (USD per run)",
+          "type": "float",
+          "default": 2.0,
+          "help": "Only when the engine drafts upstream proposals itself (upstream mode auto). The total the author's paid calls (the Maintainer's draft and its critic) may spend over the whole run; each draft's cost is recorded, and once the sum reaches this the author stops. 0 = no money cap (at most 6 drafts still apply).",
+          "shortLabel": "Author budget",
+          "shortHelp": "USD per run for the engine's automatic upstream drafts; 0 = no money cap."
+        },
+        {
+          "key": "upstream_advances_per_hour",
+          "label": "Automatic base advances per hour",
+          "type": "int",
+          "default": 2,
+          "help": "How many times a live engine may advance the base on its own in any rolling hour. A passed check beyond the cap waits and is recorded as held. Advances an operator asks for are never held. 0 = no cap.",
+          "shortLabel": "Advances per hour",
+          "shortHelp": "Cap on automatic base advances per rolling hour; 0 = none."
+        },
+        {
+          "key": "upstream_verify",
+          "label": "Upstream check profile",
+          "type": "enum",
+          "options": [
+            "canary",
+            "full"
+          ],
+          "default": "canary",
+          "help": "How an upstream check measures that the new base reproduces the source experiment. canary: one old/new pair under the task's declared eval canary (cheap on a GPU task; a task without a canary still gets full repeats). full: the declared number of paired full evaluations and the source's own score reproduced.",
+          "shortLabel": "Check profile",
+          "shortHelp": "canary (one pair on the declared canary) or full (paired full repeats)."
+        },
+        {
           "key": "established_context",
           "label": "Carry earlier phases' reads into each new phase",
           "type": "bool",

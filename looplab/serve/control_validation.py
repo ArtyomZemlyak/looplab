@@ -55,12 +55,12 @@ from looplab.events.comment_projection import (
 from looplab.events.finalize_scope import is_guarded_abort
 from looplab.events.types import (
     EV_ANNOTATION, EV_APPROVAL_GRANTED, EV_BUDGET_EXTEND, EV_DEEP_RESEARCH,
-    EV_CARD_DROPPED, EV_CARD_EDITED, EV_CARD_REOPENED, EV_CARD_REPRIORITIZED,
+    EV_CARD_DROPPED, EV_CARD_EDITED, EV_CARD_FILED, EV_CARD_REOPENED, EV_CARD_REPRIORITIZED,
     EV_CARD_RESOURCE_PINNED,
     EV_COMMENT_CREATED, EV_COMMENT_EDITED, EV_COMMENT_RESOLUTION_CHANGED, EV_CONCEPT_TAG_EDITED,
     EV_FORCE_ABLATE, EV_FORCE_CONFIRM, EV_FORK, EV_HINT, EV_HYPOTHESIS_ADDED,
     EV_HYPOTHESIS_UPDATED, EV_INJECT_NODE, EV_METRIC_RETARGET, EV_NODE_ABORT, EV_NODE_RESET,
-    EV_TRACK_REQUESTED,
+    EV_TRACK_REQUESTED, EV_UPSTREAM_AUTO_SET,
     EV_PAUSE, EV_PROMOTE, EV_RESTART, EV_RESUME, EV_RUN_ABORT, EV_RUN_CONCEPTS, EV_RUN_REOPENED,
     EV_SET_STRATEGY, EV_SPEC_APPROVED, EV_RESEARCH_COMPLETED, EV_REPORT_GENERATED)
 from looplab.serve.engine_proc import _resolve_task_file
@@ -775,6 +775,19 @@ def _normalize_track_requested(ctx: _ControlIntake) -> dict:
     return {"track": track, "node_ids": node_ids}
 
 
+# ------------------------------------------------------------------ upstream_auto_set
+
+def _normalize_upstream_auto_set(ctx: _ControlIntake) -> dict:
+    """`upstream_auto_set` (doc 73 §4.2 G2): the kill switch of every AUTOMATIC upstream step of a live
+    run — `enabled: false` stops the authors (fix rollout, champion integrator) and the automatic
+    check/advance, `true` lets them resume. Queued operator operations are unaffected."""
+    enabled = ctx.data.get("enabled")
+    if type(enabled) is not bool:
+        raise HTTPException(400, "enabled must be true or false")
+    reason = ctx.text("reason", required=False, limit=300)
+    return {"enabled": enabled, **({"reason": reason} if reason else {})}
+
+
 # ------------------------------------------------------------------ metric_retarget
 
 def _declares_withheld_scorer(rd: Path) -> bool:
@@ -1073,6 +1086,28 @@ def _normalize_fork_receipt(ctx: _ControlIntake, parents: list, idea: Idea) -> d
     }
 
 
+def _check_inject_question(ctx: _ControlIntake, question_id: Optional[str]) -> None:
+    """An inject that names the research question it answers (`idea.parent_card_id`) must name one.
+
+    Every inject path now offers the field (the UI form, the Assistant's `inject_experiment`); before
+    any of them did, none of v11's 39 operator injects named a question. A name the board does not
+    hold was ACCEPTED and silently dropped by `card_ledger.py::_apply_card_lineage` (an edge to a
+    missing card becomes a root), so the operator believed the experiment was filed and the Research
+    view showed it unfiled. Refused here instead, while the operator is still looking.
+    """
+    if not question_id:
+        return
+    question = ctx.state().cards.get(question_id)
+    if (question is None or getattr(question, "card_kind", None) != "direction"
+            or getattr(question, "merged_into", None) is not None):
+        raise HTTPException(400, {
+            "code": "inject_question_invalid",
+            "message": f"idea.parent_card_id {question_id!r} is not an open research question "
+                       "on this board",
+            "remediation": "name one of the run's research questions, or leave it out",
+        })
+
+
 def _normalize_inject_node(ctx: _ControlIntake) -> dict:
     data = ctx.data
     # BEFORE the import, because the import MINTS this key and after it runs a server-derived
@@ -1134,6 +1169,7 @@ def _normalize_inject_node(ctx: _ControlIntake) -> dict:
                   for row in exc.errors(include_url=False)[:5]]
         raise HTTPException(400, f"idea is invalid: {'; '.join(issues)}") from exc
     data["idea"] = durable_idea_payload(normalized_idea)
+    _check_inject_question(ctx, normalized_idea.parent_card_id)
     if data.get("parent_id") is not None:
         data["parent_id"] = ctx.node("parent_id")
     if data.get("parent_ids") is not None:
@@ -1713,6 +1749,61 @@ def _normalize_card_reopened(ctx: _ControlIntake) -> dict:
     return {"id": card_id, "reason": reason, "by": "operator"}
 
 
+def _card_filing_refusal(state, card_id: str, card, target: Optional[str]) -> Optional[dict]:
+    """Why `card_filed` may not file `card` under `target` on this fold, or None.
+
+    ONE rule for intake and for the append-time recheck, so the two cannot come to disagree. Only an
+    EXPERIMENT is filed (a question's place is its concept set — `ui/src/questionLattice.js` — and the
+    Research view never draws a question as somebody's experiment), only under a QUESTION that is on
+    the board now, and never on a merged-away row: the canonical card is the one to file.
+    """
+    if getattr(card, "merged_into", None) is not None:
+        return _error("card_lifecycle_closed",
+                      f"the Card {card_id!r} was merged into {card.merged_into!r}",
+                      "file the card it was merged into")
+    if getattr(card, "card_kind", None) == "direction":
+        return _error("card_filing_not_experiment",
+                      f"the Card {card_id!r} is a research question, not an experiment",
+                      "only an experiment is filed under a question")
+    if target is None:
+        if not getattr(card, "parent_card_id", None):
+            return _error("card_filing_unchanged", f"the Card {card_id!r} is not filed",
+                          "refresh the Research view")
+        return None
+    question = state.cards.get(target)
+    if question is None or getattr(question, "card_kind", None) != "direction":
+        return _error("card_filing_target_invalid",
+                      f"{target!r} is not a research question on this board",
+                      "choose one of the run's open questions")
+    if getattr(question, "merged_into", None) is not None:
+        return _error("card_filing_target_invalid",
+                      f"the question {target!r} was merged into {question.merged_into!r}",
+                      "file under the question it was merged into")
+    if getattr(card, "parent_card_id", None) == target:
+        return _error("card_filing_unchanged",
+                      f"the Card {card_id!r} is already filed under {target!r}",
+                      "refresh the Research view")
+    return None
+
+
+def _normalize_card_filed(ctx: _ControlIntake) -> dict:
+    """The operator files one experiment under a question, or un-files it (`parent_card_id: null`).
+
+    `parent_card_id` is REQUIRED as a key: an absent key is a malformed request, never read as an
+    un-filing nobody asked for. Provenance is stamped here, never accepted from the client.
+    """
+    card_id, card = ctx.card()
+    if "parent_card_id" not in ctx.data:
+        raise HTTPException(400, "parent_card_id is required (a question id, or null to un-file)")
+    target = ctx.text("parent_card_id", required=False, limit=256)
+    if ctx.data.get("parent_card_id") is not None and not target:
+        raise HTTPException(400, "parent_card_id must be a question id or null")
+    refusal = _card_filing_refusal(ctx.state(), card_id, card, target)
+    if refusal is not None:
+        raise HTTPException(409 if refusal["code"] == "card_filing_unchanged" else 400, refusal)
+    return {"id": card_id, "parent_card_id": target, "source": "operator"}
+
+
 # ------------------------------------------------------------------ append-time preconditions
 #
 # Every one of these runs against a FRESH fold, immediately before the strict-lock append, inside
@@ -1770,6 +1861,9 @@ def _precondition_card(state, event_type: str, data: dict, envelope) -> Optional
             "refresh the Card board; an engine retirement is part of the run's own lifecycle and "
             "is not an operator control",
         )
+    if event_type == EV_CARD_FILED:
+        # The question can have been merged or the card re-filed since intake.
+        return _card_filing_refusal(state, card_id, card, data.get("parent_card_id"))
     if event_type == EV_CARD_RESOURCE_PINNED:
         gpus = data.get("gpus")
         memory = data.get("gpu_mem_mib")
@@ -1990,6 +2084,7 @@ _CONTROL_NORMALIZERS: dict[str, Optional[Callable]] = {
     EV_SET_STRATEGY: _normalize_set_strategy,
     EV_METRIC_RETARGET: _normalize_metric_retarget,
     EV_TRACK_REQUESTED: _normalize_track_requested,
+    EV_UPSTREAM_AUTO_SET: _normalize_upstream_auto_set,
     EV_FORCE_CONFIRM: _normalize_node_target,
     EV_FORCE_ABLATE: _normalize_node_target,
     EV_FORK: _normalize_fork,
@@ -2013,6 +2108,7 @@ _CONTROL_NORMALIZERS: dict[str, Optional[Callable]] = {
     EV_CARD_RESOURCE_PINNED: _normalize_card_resource_pinned,
     EV_CARD_DROPPED: _normalize_card_dropped,
     EV_CARD_REOPENED: _normalize_card_reopened,
+    EV_CARD_FILED: _normalize_card_filed,
 }
 assert set(_CONTROL_NORMALIZERS) == set(CONTROL_EVENTS), (
     "every control event needs an explicit intake normalizer (None = allow-list only)")
@@ -2034,6 +2130,7 @@ _CONTROL_PRECONDITIONS: dict[str, Optional[Callable]] = {
     EV_SET_STRATEGY: None,
     EV_METRIC_RETARGET: None,
     EV_TRACK_REQUESTED: None,
+    EV_UPSTREAM_AUTO_SET: None,
     EV_FORCE_CONFIRM: None,
     EV_FORCE_ABLATE: None,
     EV_FORK: None,
@@ -2057,6 +2154,7 @@ _CONTROL_PRECONDITIONS: dict[str, Optional[Callable]] = {
     EV_CARD_RESOURCE_PINNED: _precondition_card,
     EV_CARD_DROPPED: _precondition_card,
     EV_CARD_REOPENED: _precondition_card,
+    EV_CARD_FILED: _precondition_card,
 }
 assert set(_CONTROL_PRECONDITIONS) == set(CONTROL_EVENTS), (
     "every control event needs an explicit append-time precondition (None = not applicable)")
@@ -2079,6 +2177,7 @@ _CONTROL_DECISIONS: dict[str, Optional[Callable]] = {
     EV_SET_STRATEGY: None,
     EV_METRIC_RETARGET: None,
     EV_TRACK_REQUESTED: None,
+    EV_UPSTREAM_AUTO_SET: None,
     EV_FORCE_CONFIRM: None,
     EV_FORCE_ABLATE: None,
     EV_FORK: None,
@@ -2102,6 +2201,7 @@ _CONTROL_DECISIONS: dict[str, Optional[Callable]] = {
     EV_CARD_RESOURCE_PINNED: None,
     EV_CARD_DROPPED: None,
     EV_CARD_REOPENED: None,
+    EV_CARD_FILED: None,
 }
 assert set(_CONTROL_DECISIONS) == set(CONTROL_EVENTS), (
     "every control event needs an explicit engine decision (None = the shared policy tail)")
@@ -2143,6 +2243,8 @@ _CONTROL_POLICIES: dict[str, tuple[EnginePolicy, str]] = {
     # A folded queue entry the LIVE engine serves (doc 73 §1.4, `engine/track_lane.py`); a stopped
     # run keeps it queued for its next engine (`looplab evaluate-track` answers on a stopped run).
     EV_TRACK_REQUESTED: (EnginePolicy.NO_SPAWN, "folded_intent"),
+    # A folded flag the live engine reads at its next turn; a stopped run needs no engine to hold it.
+    EV_UPSTREAM_AUTO_SET: (EnginePolicy.NO_SPAWN, "folded_intent"),
     EV_FORCE_CONFIRM: (EnginePolicy.ENSURE_RUNNING, "engine_ack"),
     EV_FORCE_ABLATE: (EnginePolicy.ENSURE_RUNNING, "engine_ack"),
     EV_FORK: (EnginePolicy.ENSURE_RUNNING, "engine_ack"),
@@ -2168,6 +2270,7 @@ _CONTROL_POLICIES: dict[str, tuple[EnginePolicy, str]] = {
     EV_CARD_RESOURCE_PINNED: (EnginePolicy.NO_SPAWN, "folded_intent"),
     EV_CARD_DROPPED: (EnginePolicy.NO_SPAWN, "folded_intent"),
     EV_CARD_REOPENED: (EnginePolicy.NO_SPAWN, "folded_intent"),
+    EV_CARD_FILED: (EnginePolicy.NO_SPAWN, "folded_intent"),
 }
 
 

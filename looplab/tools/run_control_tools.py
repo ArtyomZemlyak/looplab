@@ -278,7 +278,10 @@ class RunControlTools:
                  "kind": {"type": "string", "enum": ["experiment", "artifact"]},
                  "uses": {"type": "array", "items": {"type": "integer"}},
                  "parent_id": {"type": "integer",
-                               "description": "optional: the node this one builds on"}},
+                               "description": "optional: the node this one builds on"},
+                 "question_id": {"type": "string",
+                                 "description": "optional: the id of the run's research question "
+                                                "this node answers, so it is filed under it"}},
                 ["run_id", "rationale"])] if self.allow_inject else []) + ([fn_spec("evaluate_track",
                 "Run one of the task's DECLARED evaluation tracks (eval.tracks: e.g. @200 where the search "
                 "scores @20, a drift week) over settled nodes of a run, served by its live engine on the "
@@ -542,6 +545,13 @@ class RunControlTools:
         if not rationale:
             return "(inject_experiment needs a rationale: what the node does and why)"
         data: dict = {"idea": {"operator": "inject", "rationale": rationale}}
+        # The research question it answers (`idea.parent_card_id`). The server refuses a name that is
+        # not an open question on the board (`inject_question_invalid`), so this only shapes it.
+        question = args.get("question_id")
+        if question not in (None, ""):
+            if not isinstance(question, str) or not question.strip():
+                return "(question_id must be a research question id)"
+            data["idea"]["parent_card_id"] = question.strip()
         kind = args.get("kind")
         if kind not in (None, "", "experiment", "artifact"):
             return "(kind must be 'experiment' or 'artifact')"
@@ -574,6 +584,8 @@ class RunControlTools:
                 f"parent: #{parent} (lifecycle {data['parent_generations'][str(parent)]})")
         if data.get("uses"):
             preview_lines.append(f"uses: {data['uses']}")
+        if data["idea"].get("parent_card_id"):
+            preview_lines.append(f"answers question: {data['idea']['parent_card_id']}")
         preview_lines += ["rationale:", rationale]
         blocked, formed_generation = self._gate(
             name, rid, rd, f"inject {'an artifact' if kind == 'artifact' else 'a node'} into {rid}: "
@@ -581,6 +593,8 @@ class RunControlTools:
             scope={"run_id": rid, "node_kind": data.get("node_kind", "experiment"),
                    "uses": data.get("uses", []), "parent_id": parent,
                    "parent_generations": data.get("parent_generations", {}),
+                   **({"question_id": data["idea"]["parent_card_id"]}
+                      if data["idea"].get("parent_card_id") else {}),
                    "rationale_digest": hashlib.sha256(rationale.encode("utf-8")).hexdigest()},
             preview="\n".join(preview_lines))
         if blocked:

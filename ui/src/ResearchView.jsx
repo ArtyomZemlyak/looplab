@@ -14,7 +14,7 @@ import React, { useMemo, useState } from 'react'
 import { cardIsDirection, childrenByParent, descendantsOf } from './cardLineageModel.js'
 import { isRecord } from './panelPrimitives.js'
 import { UNGROUPED_ID, inferQuestionFiling, latticeRollups, latticeRows, questionClosure,
-  offPageParentExperiments, unfiledExperiments } from './questionLattice.js'
+  offPageParentExperiments, questionFilingOptions, unfiledExperiments } from './questionLattice.js'
 import { COMPARABILITY_REFUSAL_TEXT } from './runIndex.js'
 
 const _text = value => (typeof value === 'string' ? value.trim() : '')
@@ -37,6 +37,44 @@ function addedConcepts(row, byRowKey) {
   return row.tags.filter(tag => !inherited.has(tag))
 }
 
+// WHERE AN EXPERIMENT IS FILED, said and — for the operator — changeable, on the card itself.
+//
+// Every operator-injected card arrives naming no question (measured on `minionerec-backbones-v11`:
+// none of 39 operator injects named a question; 3 of 45 experiments were filed on the record). The concept inference draws most of
+// them somewhere, but only on this screen; the run's record — the question board the Researcher
+// reads, the open-question cap — still had them unfiled. This control is how the operator's
+// decision gets ON the record (`card_filed`): "Keep here" makes the concept suggestion permanent,
+// the menu files it anywhere else, and "not under a question" un-files it. Read-only boards get the
+// provenance chip and no control.
+function FilingControl({ card, options, onFile, locked }) {
+  useUILanguage()
+
+  const inferred = isRecord(card.question_inferred) ? card.question_inferred : null
+  const byOperator = card.filed_by === 'operator'
+  const current = typeof card.parent_card_id === 'string' ? card.parent_card_id : ''
+  const shared = Array.isArray(inferred?.shared) ? inferred.shared : []
+  return <div className="research-filing">
+    {inferred && <span className="chip muted research-inferred-chip"
+      title={uiText("No question names this experiment; it is shown here because its concepts overlap this question's the most. Not counted in this question's best.")}>
+      {uiText("filed by concepts")}: {shared.join(', ')}</span>}
+    {byOperator && <span className="chip muted research-operator-chip"
+      title={uiText("The operator filed this experiment here; it is on the run's record.")}>
+      {current ? uiText("filed by the operator") : uiText("un-filed by the operator")}</span>}
+    {onFile && inferred && current && <button type="button" className="btn sm ghost"
+      disabled={locked} onClick={() => onFile(card, current)}
+      title={uiText("Record this question as the one this experiment answers")}>{uiText("Keep here")}</button>}
+    {onFile && <label className="research-filing-select">
+      <span className="muted">{uiText("File under")}</span>{' '}
+      <select value={inferred ? '' : current} disabled={locked}
+        aria-label={uiMessage("Research question for {0}", [card.id])}
+        onChange={event => onFile(card, event.target.value || null)}>
+        <option value="">{inferred ? uiText("choose a question…") : uiText("not under a question")}</option>
+        {options.map(option => <option key={option.id} value={option.id}>{uiText(option.label)}</option>)}
+      </select>
+    </label>}
+  </div>
+}
+
 // A row becomes collapsible only when a sharper question is already visible below it.
 // Stamping leaves as collapsed hides their empty-evidence message and can silently hide a child
 // added later, even though no collapse control was available for that leaf.
@@ -45,7 +83,8 @@ function branchKeys(rows) {
     .map(row => row.rowKey.slice(0, row.rowKey.lastIndexOf('>'))))
 }
 
-export default function ResearchView({ cards, state, renderCard, onShowLanes, onDiscuss }) {
+export default function ResearchView({ cards, state, renderCard, onShowLanes, onDiscuss,
+  onFile = null, filingLocked = false }) {
   useUILanguage()
 
   const [collapsed, setCollapsed] = useState(() => new Set())
@@ -79,6 +118,12 @@ export default function ResearchView({ cards, state, renderCard, onShowLanes, on
   const childKids = useMemo(() => childrenByParent(filed), [filed])
 
   const rows = useMemo(() => latticeRows(questions), [questions])
+  const filingOptions = useMemo(() => questionFilingOptions(questions), [questions])
+  // One experiment as this view draws it: its filing (provenance + the operator's control) above the
+  // shared card body. Every placement goes through here so no section offers a different control.
+  const experiment = card => <div key={card.id} className="research-experiment">
+    <FilingControl card={card} options={filingOptions} onFile={onFile} locked={filingLocked} />
+    {renderCard(card)}</div>
   // The complement of the ladder. Without it a parentless experiment is drawn by NOTHING here, and
   // the Directions tab's "Not filed under any direction" group stays the only surface that has it —
   // which is exactly why that tab cannot be retired until this exists.
@@ -272,13 +317,7 @@ export default function ResearchView({ cards, state, renderCard, onShowLanes, on
           </div>
           {kids.length > 0 && <details className="research-evidence">
             <summary>{uiPlural(kids.length, '{0} experiment · show evidence', '{0} experiments · show evidence')}</summary>
-            <div className="research-experiments">{kids.map(child => child.question_inferred
-              ? <div key={child.id} className="research-inferred">
-                  <span className="chip muted research-inferred-chip"
-                    title={uiText("No question names this experiment; it is shown here because its concepts overlap this question's the most. Not counted in this question's best.")}>
-                    {uiText("filed by concepts")}: {child.question_inferred.shared.join(', ')}</span>
-                  {renderCard(child)}</div>
-              : renderCard(child))}</div>
+            <div className="research-experiments">{kids.map(experiment)}</div>
           </details>}
           {!isCollapsed && kids.length === 0 && !branch && <div className="muted card-empty">{uiText("no experiment proposed against this yet")}</div>}
         </li>
@@ -291,8 +330,8 @@ export default function ResearchView({ cards, state, renderCard, onShowLanes, on
       aria-labelledby="research-unfiled-h">
       <h3 id="research-unfiled-h" className="research-unfiled-h">{uiText("Not filed under any question ")}<span className="muted">{unfiled.length}</span>
       </h3>
-      <div className="muted card-empty">{uiPlural(unfiled.length, 'no question claims this experiment — the Researcher proposed it without naming a direction', 'no question claims these experiments — the Researcher proposed them without naming a direction')}</div>
-      <div className="research-experiments">{unfiled.map(card => renderCard(card))}</div>
+      <div className="muted card-empty">{uiPlural(unfiled.length, 'no question names this experiment and its concepts match none unambiguously — file it under one below', 'no question names these experiments and their concepts match none unambiguously — file each under one below')}</div>
+      <div className="research-experiments">{unfiled.map(experiment)}</div>
     </section>}
     {/* Same rule as the unfiled block: the parent this card names is off the page. */}
     {!filtering && offPage.length > 0 && <section className="research-unfiled"

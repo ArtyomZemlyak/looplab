@@ -1,7 +1,7 @@
 {
   "schema": 1,
   "language": "ru",
-  "count": 7666,
+  "count": 7702,
   "messages": {
     "# LoopLab run report — {0}": "# Отчёт запуска LoopLab — {0}",
     "## Agent narrative (advisory)": "## Пояснения агента (рекомендации)",
@@ -6706,7 +6706,6 @@
     "grp-tab nodrag nopan": "grp-tab nodrag nopan",
     "h ago": "Хммм.",
     "hidden change": "скрытые изменения",
-    "hint metric_retarget pause resume run_abort node_abort fork promote annotation inject_node force_confirm force_ablate approval_requested approval_granted budget_extend run_reopened spec_approved spec_approval_requested spec_proposed command_ack fork_done inject_done node_reset node_tombstoned concept_tag_edited card_reprioritized card_edited card_resource_pinned card_dropped card_reopened inject_failed comment_created comment_edited comment_resolution_changed trust_gate_changed restart": "подсказка metric_retarget Повторное остановку run_abort node_abort Вилка способствует аннотации inject_node force_confirm force_ablate approval_requested approval_granted budget_extend run_reopened spec_approved spec_approval_requested spec_proposed command_ack fork_done inject_done node_reset node_tombstoned concept_tag_edited card_reprioritized card_edited card_resource_pinned card_dropped card_reopened inject_failed comment_created comment_edited comment_resolution_changed trust_gate_changed возобновление работы",
     "historical edges_present lens_edges_present authoritative complete": "Исторический edges_present lens_edges_present полностью",
     "holds its evaluation": "проводит свою оценку",
     "host scorer": "оценщик хоста",
@@ -7668,7 +7667,44 @@
     "The engine drafts proposals itself: fixes from repairs first, then the champion's capabilities. {0} drafts so far": "Движок сам пишет предложения: сначала исправления после ремонтов, затем возможности чемпиона. Черновиков: {0}",
     "Maintainer proposal → between turns, without a pause, the engine runs the measured checks and advances the starting base. Experiments whose evaluation already started stay on their base. Interrupted checks require operator recovery.": "Предложение Maintainer → движок между ходами, без паузы, выполняет измеренные проверки и обновляет исходную базу. Эксперименты, чья оценка уже началась, остаются на своей базе. Прерванные проверки восстанавливает оператор.",
     "Artifact copy-out did not finish": "Выгрузка артефакта не завершилась",
-    "A copy-out of this experiment started and has no receipt: the engine stopped first. Run the eval.artifact_sync command for it again.": "Выгрузка артефакта этого эксперимента началась, но квитанции о ней нет: движок остановился раньше. Запустите для неё команду eval.artifact_sync ещё раз."
+    "A copy-out of this experiment started and has no receipt: the engine stopped first. Run the eval.artifact_sync command for it again.": "Выгрузка артефакта этого эксперимента началась, но квитанции о ней нет: движок остановился раньше. Запустите для неё команду eval.artifact_sync ещё раз.",
+    "Filing the experiment…": "Привязываю эксперимент…",
+    "Experiment filed": "Эксперимент привязан",
+    "Could not file the experiment": "Не удалось привязать эксперимент",
+    "chip muted research-operator-chip": "chip muted research-operator-chip",
+    "The operator filed this experiment here; it is on the run's record.": "Оператор привязал этот эксперимент к этому вопросу; это записано в журнале прогона.",
+    "filed by the operator": "привязан оператором",
+    "un-filed by the operator": "отвязан оператором",
+    "Record this question as the one this experiment answers": "Записать этот вопрос как тот, на который отвечает эксперимент",
+    "Keep here": "Оставить здесь",
+    "File under": "Привязать к",
+    "Research question for {0}": "Исследовательский вопрос для {0}",
+    "choose a question…": "выберите вопрос…",
+    "not under a question": "без вопроса",
+    "Card {0} filed under question {1}": "Карточка {0} привязана к вопросу {1}",
+    "Card {0} un-filed from its question": "Карточка {0} отвязана от вопроса",
+    "hint metric_retarget pause resume run_abort node_abort fork promote annotation inject_node force_confirm force_ablate approval_requested approval_granted budget_extend run_reopened spec_approved spec_approval_requested spec_proposed command_ack fork_done inject_done node_reset node_tombstoned concept_tag_edited card_reprioritized card_edited card_resource_pinned card_dropped card_reopened card_filed inject_failed comment_created comment_edited comment_resolution_changed trust_gate_changed restart": "подсказка metric_retarget Повторное остановку run_abort node_abort Вилка способствует аннотации inject_node force_confirm force_ablate approval_requested approval_granted budget_extend run_reopened spec_approved spec_approval_requested spec_proposed command_ack fork_done inject_done node_reset node_tombstoned concept_tag_edited card_reprioritized card_edited card_resource_pinned card_dropped card_reopened card_filed inject_failed comment_created comment_edited comment_resolution_changed trust_gate_changed возобновление работы",
+    "Answers question": "Отвечает на вопрос",
+    "None — not filed under a research question": "Нет — не привязан к исследовательскому вопросу",
+    "Suggested: the question its parent's experiment is filed under.": "Предложено: вопрос, к которому привязан эксперимент-родитель.",
+    "No research question is on the board yet.": "На доске пока нет исследовательских вопросов.",
+    "That research question is no longer on the board.": "Этого исследовательского вопроса больше нет на доске.",
+    "Automation stopped by the operator: the engine drafts, checks and promotes nothing on its own; queued operations still run": "Автоматика полосы остановлена оператором: движок сам ничего не пишет, не проверяет и не продвигает; операции из очереди выполняются",
+    "Author spend so far: ${0}": "Расход автора: ${0}",
+    "advance held at the hourly cap": "продвижение ждёт: лимит в час",
+    "author stopped at its budget": "автор остановлен: бюджет исчерпан",
+    "Upstream author budget (USD per run)": "Бюджет автора upstream (USD на запуск)",
+    "Only when the engine drafts upstream proposals itself (upstream mode auto). The total the author's paid calls (the Maintainer's draft and its critic) may spend over the whole run; each draft's cost is recorded, and once the sum reaches this the author stops. 0 = no money cap (at most 6 drafts still apply).": "Только когда движок сам составляет предложения upstream (режим upstream auto). Сколько всего могут потратить платные вызовы автора (черновик Maintainer и его критик) за весь запуск; стоимость каждого черновика записывается, и когда сумма достигает этого значения, автор останавливается. 0 — без денежного лимита (ограничение в 6 черновиков остаётся).",
+    "Author budget": "Бюджет автора",
+    "USD per run for the engine's automatic upstream drafts; 0 = no money cap.": "USD на запуск для автоматических черновиков upstream; 0 — без денежного лимита.",
+    "Automatic base advances per hour": "Автоматических обновлений базы в час",
+    "How many times a live engine may advance the base on its own in any rolling hour. A passed check beyond the cap waits and is recorded as held. Advances an operator asks for are never held. 0 = no cap.": "Сколько раз живой движок может сам обновить базу за любой скользящий час. Пройденная проверка сверх лимита ждёт и записывается как отложенная. Обновления, запрошенные оператором, никогда не откладываются. 0 — без лимита.",
+    "Advances per hour": "Обновлений в час",
+    "Cap on automatic base advances per rolling hour; 0 = none.": "Лимит автоматических обновлений базы за скользящий час; 0 — без лимита.",
+    "Upstream check profile": "Профиль проверки upstream",
+    "How an upstream check measures that the new base reproduces the source experiment. canary: one old/new pair under the task's declared eval canary (cheap on a GPU task; a task without a canary still gets full repeats). full: the declared number of paired full evaluations and the source's own score reproduced.": "Как проверка upstream измеряет, что новая база воспроизводит исходный эксперимент. canary: одна пара старая/новая на объявленной в задаче канарейке оценки (дёшево на GPU-задаче; задача без канарейки всё равно получает полные повторы). full: объявленное число парных полных оценок и воспроизведение собственного результата источника.",
+    "Check profile": "Профиль проверки",
+    "canary (one pair on the declared canary) or full (paired full repeats).": "canary (одна пара на объявленной канарейке) или full (парные полные повторы)."
   },
   "plurals": {
     "({0} paraphrases folded)": {
@@ -8242,11 +8278,11 @@
       "few": "память: повышено {0} устоявшихся навыка",
       "many": "память: повышено {0} устоявшихся навыков"
     },
-    "no question claims these experiments — the Researcher proposed them without naming a direction": {
-      "exact1": "ни один вопрос не относит к себе этот эксперимент — Исследователь предложил его, не указав направления",
-      "one": "ни один вопрос не относит к себе эти эксперименты — Исследователь предложил их, не указав направления",
-      "few": "ни один вопрос не относит к себе эти эксперименты — Исследователь предложил их, не указав направления",
-      "many": "ни один вопрос не относит к себе эти эксперименты — Исследователь предложил их, не указав направления"
+    "no question names these experiments and their concepts match none unambiguously — file each under one below": {
+      "exact1": "ни один вопрос не называет этот эксперимент, и его концепты однозначно не совпадают ни с одним — привяжите его к вопросу ниже",
+      "one": "ни один вопрос не называет эти эксперименты, и их концепты однозначно не совпадают ни с одним — привяжите каждый к вопросу ниже",
+      "few": "ни один вопрос не называет эти эксперименты, и их концепты однозначно не совпадают ни с одним — привяжите каждый к вопросу ниже",
+      "many": "ни один вопрос не называет эти эксперименты, и их концепты однозначно не совпадают ни с одним — привяжите каждый к вопросу ниже"
     },
     "over {0} steps (first eligible {1} → numeric frontier {2}).": {
       "one": "за {0} шаг (первое допустимое {1} → числовой фронт {2}).",

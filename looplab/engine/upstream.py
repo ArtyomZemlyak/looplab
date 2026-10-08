@@ -491,9 +491,11 @@ class UpstreamLane:
             raise UpstreamRefusal("upstream_gate_required", "The latest gate is unresolved/abandoned or its evidence is inconsistent; check afresh")
         gate_event = gates[-1]
         score = node.task_metric if node.task_metric is not None else node.metric
+        from looplab.engine.upstream_gate import gate_profile
         if (not gate_matches_policy(result, self.task.upstream, score,
                 repair_required=bool(proposal["repair_trigger_nodes"]),
-                repair_only=proposal.get("repair_only") is True)
+                repair_only=proposal.get("repair_only") is True,
+                profile=gate_profile(self.settings, self.task))
                 or claimed_gate_executions(events, gate_event) != result["executions"]):
             raise UpstreamRefusal("upstream_gate_required", "The latest gate is incomplete or differs from its declared probes, tolerances or recorded executions; inspect the evidence and check afresh")
         if input_identity(self.task, self.settings, node, proposal) != result["input_identity"]:

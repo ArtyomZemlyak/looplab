@@ -38,8 +38,36 @@ def execution(row):
             s["status"] in ("ok", "reused") and s["exit_code"] == 0 for s in row["stages"] or [])))
 
 
+# THE EQUIVALENCE PROFILES (doc 73 §4.2 G5). `full`: `upstream.repeats` paired full evaluations per
+# side and the source's own score reproduced (doc 72). `canary`: ONE old/new pair under the task's
+# declared `eval.canary` (`Settings.upstream_verify`) — a different slice, so no source reproduction.
+EQUIVALENCE_PROFILES = ("full", "canary")
+
+
+def _canary_equivalence(row):
+    values = row.get("values")
+    if (not isinstance(values, list) or len(values) != 2
+            or not all(isinstance(v, list) and len(v) <= 1 and all(number(x) for x in v) for v in values)):
+        return False
+    fields = {"means", "tolerance", "delta"}
+    if not fields.intersection(row):
+        return row["passed"] is False
+    if (not fields <= row.keys() or len(values[0]) != 1 or len(values[1]) != 1
+            or not number(row["tolerance"]) or row["tolerance"] < 0 or not number(row["delta"])
+            or row.get("means") != [values[0][0], values[1][0]]):
+        return False
+    try:
+        delta = values[1][0] - values[0][0]
+        return (math.isclose(row["delta"], delta, rel_tol=1e-9, abs_tol=1e-12)
+                and row["passed"] == (abs(delta) <= row["tolerance"]))
+    except (OverflowError, ValueError):
+        return False
+
+
 def equivalence(row):
     """Full paired samples and their statistics, including readable failed comparisons."""
+    if row.get("profile") == "canary":
+        return _canary_equivalence(row)
     values = row.get("values")
     if (row.get("profile") != "full" or not isinstance(values, list) or len(values) != 2
         or not all(isinstance(v, list) and len(v) <= 10 and all(number(x) for x in v) for v in values)):
@@ -101,9 +129,10 @@ def passing_checks(row):
                   else rows[0]["exit_code"] != 0 or not rows[0]["artifacts"]
                   or rows[0]["artifacts"] != rows[1]["artifacts"])):
             return False
+    label = "canary" if eq is not None and eq.get("profile") == "canary" else "source"
     for i, execution_row in enumerate(executions[-2 * repeats:] if repeats else []):
         side, repeat = i % 2, i // 2
-        if (execution_row["label"] != ("old-source" if side == 0 else "new-source") + str(repeat)
+        if (execution_row["label"] != ("old-" if side == 0 else "new-") + label + str(repeat)
             or not execution_row["valid"] or execution_row["timed_out"] or execution_row["exit_code"] != 0
             or execution_row["metric"] != eq["values"][side][repeat]):
             return False
@@ -137,7 +166,8 @@ def _probe_rows(probes, executions):
         offset += count
 
 
-def gate_matches_policy(row, declaration, source_metric, *, repair_required=False, repair_only=False):
+def gate_matches_policy(row, declaration, source_metric, *, repair_required=False, repair_only=False,
+                        profile="full"):
     """Bind a complete passing result to the launched observable gate obligations.
 
     Offline readers lack the operator declaration. Before granting a new base,
@@ -163,7 +193,11 @@ def gate_matches_policy(row, declaration, source_metric, *, repair_required=Fals
             set(r["artifacts"]) == set(probe["artifacts"])
             for (kind, probe), rows in _probe_rows(probes, row["executions"])
             for r in (rows[1:] if kind == "repair" else rows))
-    if eq is None or len(eq["values"][0]) != declaration["repeats"]:
+    # The equivalence profile is the one the ENGINE expects (`upstream_gate.py::gate_profile`, from
+    # the launched settings and the task), never the one the result names (doc 73 §4.2 G5).
+    if eq is None or eq.get("profile") != profile:
+        return False
+    if profile == "full" and len(eq["values"][0]) != declaration["repeats"]:
         return False
     offset = 0
     for kind, probe in probes:
@@ -175,6 +209,10 @@ def gate_matches_policy(row, declaration, source_metric, *, repair_required=Fals
         required_rows = rows[1:] if kind == "repair" else rows
         if any(set(r["artifacts"]) != set(probe["artifacts"]) for r in required_rows):
             return False
+    if profile == "canary":
+        means = [eq["values"][0][0], eq["values"][1][0]]
+        tolerance = declaration["atol"] + declaration["rtol"] * max(map(abs, means))
+        return number(tolerance) and eq["tolerance"] == tolerance and abs(means[1] - means[0]) <= tolerance
     means = [statistics.mean(v) for v in eq["values"]]
     sem = [statistics.stdev(v) / math.sqrt(len(v)) for v in eq["values"]]
     tolerance = declaration["atol"] + declaration["rtol"] * max(map(abs, means)) + declaration["sigma"] * math.hypot(*sem)

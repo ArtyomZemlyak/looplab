@@ -568,7 +568,11 @@ class NodeBuildMixin:
             # creation site hands to `_emit_node_created` explicitly (never a thread's leftover).
             from looplab.engine.upstream_serve import sync_developer_base
             authored = sync_developer_base(self, developer, pinned_base)
-            code = fn(*args, **kwargs)
+            # doc 73 §4.2 (G1): a session the live lane can tell, at a tool-loop turn boundary, that
+            # the base advanced WHILE it works (`engine/upstream_hints.py`); a no-op without a board.
+            from looplab.engine.upstream_hints import developer_session
+            with developer_session(getattr(self, "_upstream_hints", None), fn, args):
+                code = fn(*args, **kwargs)
             return dataclasses.replace(self._capture_developer_result(developer, code),
                                        authored_base=authored)
 

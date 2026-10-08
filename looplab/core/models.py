@@ -2824,6 +2824,10 @@ class RunState(BaseModel):
     upstream_history: list[dict] = Field(default_factory=list)
     upstream_base: Optional[dict] = None
     upstream_enabled: bool = False
+    # THE AUTOMATION'S KILL SWITCH (doc 73 §4.2 G2): the last `upstream_auto_set {enabled}` control
+    # intent. True = the live engine authors nothing and checks/advances nothing on its own; queued
+    # operator operations are still served (`engine/upstream_serve.py`).
+    upstream_auto_paused: bool = False
     # P1-2 separate budget buckets: the SAME cumulative eval seconds split by category (node/search
     # eval vs multi-seed confirm) for observability — where the compute went, not just the total. LLM
     # spend is already its own bucket (llm_cost -> total_llm_*); holdout re-scores existing predictions
@@ -3097,6 +3101,9 @@ class RunState(BaseModel):
     card_priority_pins: dict[str, int] = Field(default_factory=dict)
     card_operator_edits: dict[str, dict] = Field(default_factory=dict)
     card_resource_pins: dict[str, dict] = Field(default_factory=dict)
+    # `card_filed`: the operator's filing of one card under a research question (or `None` = un-filed),
+    # last write wins per card, overlaid with the maps above (`card_ledger.py::_apply_card_operator_overlays`).
+    card_filings: dict[str, dict] = Field(default_factory=dict)
     # Agent-authored run report (selection-neutral narrative; never read by best-selection).
     # The latest `report_generated` event's content is also the replay-safe regeneration-cadence receipt.
     # The UI renders deterministic node analysis and layers this narrative on top.

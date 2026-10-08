@@ -3212,6 +3212,21 @@ def _apply_card_operator_overlays(
                 c.priority = int(pri)
             except (TypeError, ValueError):
                 pass
+    # `card_filed`: the operator's research-lineage edge REPLACES the authored one (or clears it, on
+    # an un-filing). Written here, BEFORE `_apply_card_lineage`, on purpose: that phase canonicalizes
+    # the target and refuses a missing target, a self edge and a cycle for every edge alike, so an
+    # operator filing gets exactly the forest guarantees a proposal's does and no second copy of them.
+    # Iterated in last-write order; an alias and its canonical filed separately resolve to the LATER.
+    for raw_id, filing in (st.card_filings or {}).items():
+        bounded_id = _card_id(raw_id)
+        c = cards.get(_canon(bounded_id)) if bounded_id is not None else None
+        if c is None or not isinstance(filing, dict) or filing.get("source") != "operator":
+            continue
+        parent = filing.get("parent_card_id")
+        c.parent_card_id = parent if isinstance(parent, str) and parent else None
+        c.filed_by = "operator"
+        event_seq = filing.get("event_seq")
+        c.filed_seq = event_seq if type(event_seq) is int and 0 <= event_seq <= (1 << 31) - 1 else None
     for raw_id, pin in (st.card_resource_pins or {}).items():
         bounded_id = _card_id(raw_id)
         c = cards.get(_canon(bounded_id)) if bounded_id is not None else None

@@ -142,6 +142,18 @@ def _probe_upstream_promotions():
     return dev._upstream_base_note(), "flag `fast_attn`"
 
 
+def _probe_upstream_advance_hint():
+    """Through the REAL board and the REAL tool loop's notice source: a hint posted while a session
+    is open is what that session's next turn boundary reads."""
+    from looplab.agents.tool_loop import _interjection_ctx
+    from looplab.engine.upstream_hints import UpstreamHintBoard, hint_text
+    board = UpstreamHintBoard()
+    with board.session("repair_from"):
+        board.post({"hint_id": "hint-p1", "text": hint_text(
+            kind="fix", source_node_id=4, summary="parser skips comments", flag=None, paths=["train.py"])})
+        return "\n".join(_interjection_ctx.get()()), "FIX from experiment #4"
+
+
 _PROBES = {
     "trust_flags": _probe_trust_flags,
     "watchdog_signals": _probe_watchdog_signals,
@@ -154,6 +166,7 @@ _PROBES = {
     "operator_directives": _probe_operator_directives,
     "run_states": _probe_run_states,
     "upstream_promotions": _probe_upstream_promotions,
+    "upstream_advance_hint": _probe_upstream_advance_hint,
 }
 
 

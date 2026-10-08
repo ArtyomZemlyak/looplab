@@ -138,3 +138,13 @@ test('only an OPERATOR drop can be reopened', () => {
   // control, so the fallback decides and the head author is read as it always was.
   assert.equal(cardReopenable({ id: 'c7', status: 'dropped', dropped_by: 'engine', reopenable: 'yes' }), false)
 })
+
+test('the file kind reaches its own transport call and is reflected by the operator stamp', () => {
+  // Same two halves as `reopen`: the labels row (derived above) makes it reachable, this makes it
+  // the RIGHT command — without the branch the ladder falls through to `CONTROL.dropCard`, i.e.
+  // "File under" would drop the experiment.
+  assert.ok(SRC.includes("kind === 'file'"), 'the dispatch ladder branches on it')
+  assert.ok(SRC.includes('CONTROL.fileCard('), 'and reaches the filing transport')
+  assert.match(SRC, /kind === 'file'\) return card\.filed_by === 'operator'/,
+    'reflection waits for the OPERATOR stamp — an authored edge to the same question is not it')
+})

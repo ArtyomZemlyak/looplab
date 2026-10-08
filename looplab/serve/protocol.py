@@ -56,14 +56,14 @@ from typing import Optional
 from looplab.events.types import (
     PAUSE_REASON_EXTERNAL_OBLIGATIONS,
     EV_ANNOTATION, EV_APPROVAL_GRANTED, EV_BUDGET_EXTEND, EV_DEEP_RESEARCH,
-    EV_CARD_DROPPED, EV_CARD_EDITED, EV_CARD_REOPENED, EV_CARD_REPRIORITIZED,
+    EV_CARD_DROPPED, EV_CARD_EDITED, EV_CARD_FILED, EV_CARD_REOPENED, EV_CARD_REPRIORITIZED,
     EV_CARD_RESOURCE_PINNED, EV_COMMAND_ACK,
     EV_COMMENT_CREATED, EV_COMMENT_EDITED, EV_COMMENT_RESOLUTION_CHANGED, EV_CONCEPT_TAG_EDITED,
     EV_FORCE_ABLATE, EV_FORCE_CONFIRM, EV_FORK, EV_HINT, EV_HYPOTHESIS_ADDED,
     EV_HYPOTHESIS_UPDATED, EV_INJECT_NODE, EV_METRIC_RETARGET, EV_NODE_ABORT, EV_NODE_RESET,
     EV_PAUSE, EV_PROMOTE, EV_RESTART, EV_RESUME, EV_RUN_ABORT, EV_RUN_CONCEPTS, EV_RUN_FINISHED,
     EV_RUN_REOPENED, EV_SET_STRATEGY, EV_SPEC_APPROVED, EV_RESEARCH_COMPLETED, EV_REPORT_GENERATED,
-    EV_TRACK_REQUESTED)
+    EV_TRACK_REQUESTED, EV_UPSTREAM_AUTO_SET)
 
 # ---- run-generation command precondition ---------------------------------------------------------
 # The read model exposes the generation currently occupying a reusable run id. A brand-new durable
@@ -338,6 +338,7 @@ CONTROL_EVENTS = frozenset({
     EV_SET_STRATEGY,   # A7: operator pins/overrides the Strategist's choice (HITL parity)
     EV_METRIC_RETARGET,  # doc 68 68.2: operator makes a DECLARED extra metric the objective
     EV_TRACK_REQUESTED,  # doc 73 §1.4: run a declared eval.tracks evaluation on a LIVE run
+    EV_UPSTREAM_AUTO_SET,  # doc 73 §4.2 G2: the kill switch of every automatic upstream step
     EV_DEEP_RESEARCH,  # P2: operator asks the engine to run the Deep-Research stage now
     # The same projections as the built-in research/report writers. The command intake binds
     # provenance and sanitizes content; an external agent never appends an event directly.
@@ -356,6 +357,9 @@ CONTROL_EVENTS = frozenset({
     # and server-stamped like every other card control, and folded LAST-RECEIPT-WINS against the
     # drop by event index, so drop/reopen/drop is expressible and replays identically.
     EV_CARD_REOPENED,
+    # The operator files one experiment under a research question (or un-files it): the correction
+    # path for `Card.parent_card_id`, which every operator-injected card arrived without.
+    EV_CARD_FILED,
 })
 
 # Request-field metadata is also read by remote MCP clients without the UI extra.
@@ -377,6 +381,7 @@ CONTROL_DATA_FIELDS: dict[str, frozenset[str]] = {
     EV_SET_STRATEGY: frozenset({"strategy"}),
     EV_METRIC_RETARGET: frozenset({"key", "direction", "goal"}),
     EV_TRACK_REQUESTED: frozenset({"track", "node_ids"}),
+    EV_UPSTREAM_AUTO_SET: frozenset({"enabled", "reason"}),
     EV_FORCE_CONFIRM: frozenset({"node_id", "generation"}),
     EV_FORCE_ABLATE: frozenset({"node_id", "generation"}),
     EV_FORK: frozenset({"from_node_id", "generation"}),
@@ -414,6 +419,7 @@ CONTROL_DATA_FIELDS: dict[str, frozenset[str]] = {
     EV_CARD_RESOURCE_PINNED: frozenset({"id", "gpus", "gpu_mem_mib"}),
     EV_CARD_DROPPED: frozenset({"id", "reason"}),
     EV_CARD_REOPENED: frozenset({"id", "reason"}),
+    EV_CARD_FILED: frozenset({"id", "parent_card_id"}),
 }
 assert set(CONTROL_DATA_FIELDS) == set(CONTROL_EVENTS), "every control event needs a data allowlist"
 # These keys are required on the EVENT but deliberately absent from the REQUEST. The command
@@ -431,7 +437,7 @@ COLLABORATION_EVENTS = frozenset({
     EV_COMMENT_CREATED, EV_COMMENT_EDITED, EV_COMMENT_RESOLUTION_CHANGED,
     EV_CONCEPT_TAG_EDITED,
     EV_CARD_REPRIORITIZED, EV_CARD_EDITED, EV_CARD_RESOURCE_PINNED, EV_CARD_DROPPED,
-    EV_CARD_REOPENED,
+    EV_CARD_REOPENED, EV_CARD_FILED,
     # PART V (D): a base-concept edit is command-only too — force it through the generation-fenced command
     # endpoint so a write formed against an old generation can't land on a
     # post-reset replacement run, exactly like its per-node sibling EV_CONCEPT_TAG_EDITED.

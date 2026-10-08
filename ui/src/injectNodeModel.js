@@ -17,6 +17,8 @@
 //     attempt 2 is refused if the parent has been re-run since.
 // The server is the authority; a refusal it returns is printed as it came.
 
+import { questionFilingOptions } from './questionLattice.js'
+
 export const INJECT_KINDS = Object.freeze(['experiment', 'artifact'])
 export const INJECT_USES_MAX = 32
 export const INJECT_RATIONALE_MAX = 20_000
@@ -46,6 +48,37 @@ export function injectCandidates(state) {
 }
 
 /**
+ * THE QUESTION AN INJECT ANSWERS (`idea.parent_card_id`). Every operator-injected env on
+ * `minionerec-backbones-v11` named none — 39 of 39 — because no inject surface offered the field, so
+ * the Research view could only guess where they belonged. The open questions on the board, labelled
+ * by statement (`questionLattice.js::questionFilingOptions`); a merged-away row is not offered, the
+ * server refuses it (`inject_question_invalid`).
+ */
+export function injectQuestions(state) {
+  const cards = state?.cards && typeof state.cards === 'object' && !Array.isArray(state.cards)
+    ? Object.entries(state.cards)
+      .filter(([id, card]) => id && card && typeof card === 'object' && !card.merged_into)
+      .map(([id, card]) => ({ ...card, id }))
+    : []
+  return questionFilingOptions(cards)
+}
+
+/**
+ * The DETERMINISTIC suggestion: a node built on parent P continues P's line of work, so it is offered
+ * the question P's card is filed under — nothing else is guessed (a concept match needs concepts the
+ * new node does not have yet). Null when there is no parent, the parent's card is unfiled, or that
+ * question is not on the board.
+ */
+export function suggestedInjectQuestion(state, parentId) {
+  if (parentId == null) return null
+  const node = state?.nodes?.[parentId] ?? state?.nodes?.[String(parentId)]
+  const cardId = typeof node?.idea?.card_id === 'string' ? node.idea.card_id : null
+  const card = cardId && state?.cards && typeof state.cards === 'object' ? state.cards[cardId] : null
+  const question = typeof card?.parent_card_id === 'string' ? card.parent_card_id : null
+  return question && injectQuestions(state).some(q => q.id === question) ? question : null
+}
+
+/**
  * Parse the optional parameters box: empty is "no params" (absent), else a JSON OBJECT of numbers —
  * `Idea.params` is `dict[str, float]`, so a string value would be refused by the server after the
  * operator had been told the form was fine.
@@ -70,6 +103,7 @@ export const INJECT_BLOCKED_REASONS = Object.freeze({
   bad_kind: 'Choose an experiment or an artifact node.',
   unknown_parent: 'That parent is no longer an evaluated experiment of this run.',
   unknown_artifact: 'One of the artifacts it uses is no longer produced.',
+  unknown_question: 'That research question is no longer on the board.',
   too_many_uses: `An experiment may use at most ${INJECT_USES_MAX} artifacts.`,
   bad_params: 'Fix the parameters first.',
   submitting: 'Already submitting.',
@@ -77,7 +111,8 @@ export const INJECT_BLOCKED_REASONS = Object.freeze({
 
 /**
  * Whether the draft may be sent, and if not the FIRST reason's `code`. `draft` is
- * `{rationale, kind, uses, parentId, params}` where `params` is `parseInjectParams`'s answer.
+ * `{rationale, kind, uses, parentId, params, questionId}` where `params` is `parseInjectParams`'s
+ * answer and `questionId` the research question it answers (null: none).
  */
 export function injectSubmitDecision({ state, draft, submitting = false }) {
   if (submitting) return { ok: false, code: 'submitting' }
@@ -93,6 +128,9 @@ export function injectSubmitDecision({ state, draft, submitting = false }) {
   const uses = Array.isArray(draft?.uses) ? draft.uses : []
   if (uses.length > INJECT_USES_MAX) return { ok: false, code: 'too_many_uses' }
   if (uses.some(id => !artifacts.some(a => a.id === id))) return { ok: false, code: 'unknown_artifact' }
+  if (draft?.questionId != null && !injectQuestions(state).some(q => q.id === draft.questionId)) {
+    return { ok: false, code: 'unknown_question' }
+  }
   return { ok: true, code: null }
 }
 
@@ -106,6 +144,7 @@ export function buildInjectPayload({ state, draft }) {
   if (!injectSubmitDecision({ state, draft }).ok) return null
   const idea = { operator: 'inject', rationale: String(draft.rationale).trim() }
   if (draft.params?.ok && draft.params.value !== undefined) idea.params = draft.params.value
+  if (draft.questionId != null) idea.parent_card_id = draft.questionId
   const payload = { idea }
   if (draft.parentId != null) {
     const parent = injectCandidates(state).parents.find(p => p.id === draft.parentId)

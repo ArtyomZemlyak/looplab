@@ -6,7 +6,7 @@ import { readFileSync } from 'node:fs'
 import { test } from 'node:test'
 import {
   UNGROUPED_ID, conceptSet, descendantIds, isStrictSubset, latticeRollups, latticeRows,
-  questionClosure,
+  questionClosure, inferQuestionFiling, questionFilingOptions,
   UNFILED_EXPERIMENTS_ID, unfiledExperiments,
 } from '../src/questionLattice.js'
 
@@ -431,4 +431,33 @@ test('a tie the narrower rule cannot break leaves the card unfiled', async () =>
     { id: 'E', card_kind: 'experiment', concept_tags: ['x'] },
   ]
   assert.equal(inferQuestionFiling(cards).find(c => c.id === 'E').parent_card_id, undefined)
+})
+
+test('an OPERATOR filing is final: an un-filed card is not re-inferred, a filed one keeps its edge', () => {
+  const cards = [
+    q('q1', ['a'], { card_kind: 'direction' }),
+    { id: 'e1', card_kind: 'experiment', concept_tags: ['a'], filed_by: 'operator' },
+    { id: 'e2', card_kind: 'experiment', concept_tags: ['a'] },
+    { id: 'e3', card_kind: 'experiment', concept_tags: ['a'], parent_card_id: 'q9', filed_by: 'operator' },
+  ]
+  const out = new Map(inferQuestionFiling(cards).map(card => [card.id, card]))
+  assert.equal(out.get('e1').parent_card_id, undefined,
+    'MUTATION: drop the `filed_by` guard and the operator\'s "under no question" is undone on screen')
+  assert.equal(out.get('e2').parent_card_id, 'q1', 'an unclaimed card is still inferred')
+  assert.equal(out.get('e3').parent_card_id, 'q9')
+  assert.equal(out.get('e3').question_inferred, undefined)
+})
+
+test('questionFilingOptions lists every question by its clipped statement, in a stable order', () => {
+  const long = 'x'.repeat(200)
+  const options = questionFilingOptions([
+    { id: 'q2', card_kind: 'direction', statement: '  beam   width ' },
+    { id: 'q1', card_kind: 'direction', statement: long },
+    { id: 'q3', card_kind: 'direction' },
+    { id: 'e1', card_kind: 'experiment', statement: 'not a question' },
+  ])
+  assert.deepEqual(options.map(o => o.id), ['q2', 'q3', 'q1'])
+  assert.equal(options[0].label, 'beam width')
+  assert.equal(options[1].label, 'q3', 'a question with no statement is labelled by its id')
+  assert.ok(options[2].label.length <= 90 && options[2].label.endsWith('…'))
 })

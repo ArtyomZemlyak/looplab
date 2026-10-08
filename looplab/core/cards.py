@@ -1461,10 +1461,10 @@ class Card(BaseModel):
     #
     # `parent_card_id` is DURABLE-derived — decoded from the `card_added` payload's own
     # `parent_card_id` member, or — on a path with no receipt to decode — from the owning node's
-    # `Idea.parent_card_id`. THERE IS NO CORRECTION PATH YET: an earlier draft of this comment
-    # promised a `card_relinked` control event and no such event exists (`grep -rn card_relinked`
-    # returned only the promise), so a wrong edge today can only be changed by re-proposing. That
-    # is a real gap, stated rather than implied. It is deliberately
+    # `Idea.parent_card_id` — or by the OPERATOR's `card_filed` control (2026-10-08), the correction
+    # path this comment used to say did not exist ("a wrong edge today can only be changed by
+    # re-proposing"). An operator filing overrides the authored edge, is overlaid last with the other
+    # operator controls, and is marked by `filed_by`/`filed_seq` below. It is deliberately
     # NOT part of the action digest: a research-lineage annotation must never change the executable
     # identity, exactly as `steering_context` does not. It is canonicalized through merges, may never
     # be a self-edge, and may never close a cycle — `_apply_card_lineage` walks the chain and refuses
@@ -1541,6 +1541,12 @@ class Card(BaseModel):
     # False on a card that is not dropped: there is nothing to reopen, which is not the same as a
     # refusal, so the server keeps treating that as the tolerant no-op it always was.
     reopenable: bool = False
+    # WHO PUT `parent_card_id` THERE when it was not the proposer: "operator" when a `card_filed`
+    # control filed (or un-filed) this card, None when the edge is the one the proposal authored. The
+    # Research view keys its "filed by the operator" mark and its refusal to re-infer an un-filed card
+    # on this, and `filed_seq` names the event so the claim is checkable against the log.
+    filed_by: Optional[str] = None
+    filed_seq: Optional[int] = Field(default=None, ge=0)
     # Prospective parent anchor — the Layer-5 freshness gate re-derives improve/merge legality for a
     # not-yet-built card against state.best()/rank_by_metric[:2]/breedable_nodes().
     parent_id: Optional[int] = None

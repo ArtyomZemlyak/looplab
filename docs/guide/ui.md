@@ -614,7 +614,13 @@ node workspaces.
   env is such a card) is drawn under the question it overlaps MOST — a tie goes to the narrower
   question, an unbroken tie stays unfiled — and marked **filed by concepts: …**; it is display only
   (`questionLattice.js::inferQuestionFiling`): the run's record is untouched and the question's
-  `best` keeps counting only the experiments filed under it on purpose. Below the ladder, **Not
+  `best` keeps counting only the experiments filed under it on purpose. Every experiment in the
+  view carries a **File under** menu (live runs only) and an inferred one a **Keep here** button:
+  either records a `card_filed` control — the operator's filing, on the run's record, replacing the
+  authored edge, marked **filed by the operator** — and "not under a question" un-files it (the
+  view then never re-infers that card). Only a recorded filing reaches the engine: the question
+  board the Researcher reads, the question's rollup and the open-question cap, which counts only
+  questions with no experiment filed under them. Below the ladder, **Not
   filed under any question** holds the experiments no question claims and no concept matches:
   they have no position in a concept lattice, so they are a section beside it rather than a row
   inside it, and the section is rendered only when occupied. Between the ladder and that section

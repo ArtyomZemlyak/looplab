@@ -6,7 +6,7 @@ import PanelShell from './PanelShell.jsx'
 import { CONTROL, submitCommand } from './api.js'
 import {
   INJECT_BLOCKED_REASONS, INJECT_RATIONALE_MAX, buildInjectPayload, injectCandidates,
-  injectSubmitDecision, parseInjectParams,
+  injectQuestions, injectSubmitDecision, parseInjectParams, suggestedInjectQuestion,
 } from './injectNodeModel.js'
 
 // Add an experiment or an ARTIFACT node to the run by hand (doc 73 §1.4) — the React half of
@@ -23,14 +23,20 @@ export default function InjectNodePanel({ state, runId, readOnly = false, onToas
   const [parentId, setParentId] = useState(null)
   const [uses, setUses] = useState([])
   const [paramsText, setParamsText] = useState('')
+  // The question this node answers. `undefined` = the operator has not chosen, so the parent's own
+  // question is offered (`suggestedInjectQuestion`); a choice — including "none" (null) — sticks.
+  const [chosenQuestion, setChosenQuestion] = useState(undefined)
   const [submitting, setSubmitting] = useState(false)
   const [outcome, setOutcome] = useState(null)    // {kind: 'landed'|'error', text}
   const aliveRef = useRef(true)
   useEffect(() => () => { aliveRef.current = false }, [])
 
   const candidates = useMemo(() => injectCandidates(state), [state?.nodes])
+  const questions = useMemo(() => injectQuestions(state), [state?.cards])
+  const suggestion = suggestedInjectQuestion(state, parentId)
+  const questionId = chosenQuestion === undefined ? suggestion : chosenQuestion
   const params = parseInjectParams(paramsText)
-  const draft = { rationale, kind, uses, parentId, params }
+  const draft = { rationale, kind, uses, parentId, params, questionId }
   const decision = injectSubmitDecision({ state, draft, submitting })
   const blocked = readOnly ? 'This view cannot steer the run.'
     : (decision.ok ? null : (decision.code === 'bad_params' ? params.error
@@ -60,6 +66,7 @@ export default function InjectNodePanel({ state, runId, readOnly = false, onToas
       setRationale('')
       setParamsText('')
       setUses([])
+      setChosenQuestion(undefined)
     }
   }
 
@@ -99,6 +106,20 @@ export default function InjectNodePanel({ state, runId, readOnly = false, onToas
           {candidates.parents.map(p => <option key={p.id} value={String(p.id)}>
             #{p.id}{p.label ? ` — ${p.label}` : ''}</option>)}
         </select>
+      </div>
+    </div>
+    <div className="sf-field">
+      <label className="sf-label" htmlFor="inject-question">{uiText('Answers question')}</label>
+      <div className="sf-input">
+        <select id="inject-question" value={questionId ?? ''} disabled={submitting}
+          onChange={event => setChosenQuestion(event.target.value === '' ? null : event.target.value)}>
+          <option value="">{uiText('None — not filed under a research question')}</option>
+          {questions.map(q => <option key={q.id} value={q.id}>{uiText(q.label)}</option>)}
+        </select>
+        {suggestion && chosenQuestion === undefined && <div className="muted">
+          {uiText("Suggested: the question its parent's experiment is filed under.")}</div>}
+        {questions.length === 0 && <div className="muted">
+          {uiText('No research question is on the board yet.')}</div>}
       </div>
     </div>
     <div className="sf-field">

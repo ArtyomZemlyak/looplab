@@ -290,11 +290,15 @@ def test_every_control_event_has_one_explicit_engine_policy():
         # spawning — and it landed without being added here, so this guard was red on master.
         "card_reprioritized", "card_edited", "card_resource_pinned", "card_dropped",
         "card_reopened", "research_completed", "report_generated",
+        # `card_filed`: the operator's research-lineage correction — a folded overlay, no compute.
+        "card_filed",
         # doc 68 68.2: a retarget re-ranks every node in the FOLD; a stopped run needs no engine.
         "metric_retarget",
         # doc 73 §1.4: a queued evaluation track — the LIVE engine serves it; a stopped run keeps
         # it queued for its next engine (`looplab evaluate-track` answers there).
         "track_requested",
+        # doc 73 §4.2 G2: the upstream automation's kill switch — a folded flag the live engine reads.
+        "upstream_auto_set",
     }
 
 

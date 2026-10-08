@@ -49,7 +49,8 @@ from looplab.events.replay_ctx import (_MISSING, _FoldCtx, _event_generation, _g
                                        _node_for_event)
 from looplab.events.types import (
     EV_CARD_ADDED, EV_CARD_AUTO_DROPPED, EV_CARD_BUILD_ATTEMPTED, EV_CARD_BUILD_DONE,
-    EV_CARD_BUILD_REQUESTED, EV_CARD_DROPPED, EV_CARD_EDITED, EV_CARD_ENRICHED, EV_CARD_MERGED,
+    EV_CARD_BUILD_REQUESTED, EV_CARD_DROPPED, EV_CARD_EDITED, EV_CARD_ENRICHED, EV_CARD_FILED,
+    EV_CARD_MERGED,
     EV_CARD_RANKED, EV_CARD_REOPENED, EV_CARD_REPRIORITIZED, EV_CARD_RESOURCE_PINNED,
     EV_HYPOTHESIS_ADDED, EV_HYPOTHESIS_MERGED, EV_HYPOTHESIS_RANKED, EV_HYPOTHESIS_UPDATED,
 )
@@ -228,6 +229,30 @@ def _on_card_edited(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
         if type(e.seq) is int and e.seq >= 0:
             edit["event_seq"] = e.seq
         st.card_operator_edits[card_id] = edit
+
+
+def _on_card_filed(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
+    """Fold the operator's filing of one card under a research question — or its un-filing.
+
+    LAST WRITE WINS per card, like `card_edited`, and only an operator-stamped row counts (the server
+    stamps `source`; a forged or engine-authored row is not an operator decision). `parent_card_id`
+    must be PRESENT: a card id files, an explicit null un-files, and a row with neither is refused
+    rather than read as an un-filing nobody asked for. Whether the target exists, is not the card
+    itself and closes no cycle is `card_ledger.py::_apply_card_lineage`'s call, made on the canonical
+    ids — the same refusals every authored edge gets.
+    """
+    card_id = _card_replay_id(d.get("id"))
+    if card_id is None or d.get("source") != "operator" or "parent_card_id" not in d:
+        return
+    raw_parent = d.get("parent_card_id")
+    parent = _card_replay_id(raw_parent) if raw_parent is not None else None
+    if raw_parent is not None and parent is None:
+        return
+    filing: dict = {"parent_card_id": parent, "source": "operator"}
+    if type(e.seq) is int and e.seq >= 0:
+        filing["event_seq"] = e.seq
+    st.card_filings.pop(card_id, None)
+    st.card_filings[card_id] = filing
 
 
 def _on_card_resource_pinned(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
@@ -589,6 +614,7 @@ HANDLERS = {
     EV_CARD_REPRIORITIZED: _on_card_reprioritized,
     EV_CARD_EDITED: _on_card_edited,
     EV_CARD_REOPENED: _on_card_reopened,
+    EV_CARD_FILED: _on_card_filed,
     EV_CARD_RESOURCE_PINNED: _on_card_resource_pinned,
     EV_CARD_ENRICHED: _on_card_enriched,
     EV_CARD_RANKED: _on_card_ranked,

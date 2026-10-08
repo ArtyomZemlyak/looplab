@@ -3,13 +3,13 @@
 import { authoringTextRevision, COMMAND_ID_RE, COMMAND_PENDING, COMMAND_STATUSES, validRunGeneration } from './api.js'
 
 export const RECEIPT_CONTROL_EVENTS = new Set([
-  'annotation', 'approval_granted', 'budget_extend', 'card_dropped', 'card_edited',
+  'annotation', 'approval_granted', 'budget_extend', 'card_dropped', 'card_edited', 'card_filed',
   'card_reopened', 'card_reprioritized', 'card_resource_pinned', 'comment_created',
   'comment_edited', 'comment_resolution_changed', 'concept_tag_edited', 'deep_research',
   'force_ablate', 'force_confirm', 'fork', 'hint', 'hypothesis_added', 'hypothesis_updated',
   'inject_node', 'metric_retarget', 'node_abort', 'node_reset', 'pause', 'promote',
   'report_generated', 'research_completed', 'restart', 'resume', 'run_abort', 'run_concepts',
-  'run_reopened', 'set_strategy', 'spec_approved', 'track_requested',
+  'run_reopened', 'set_strategy', 'spec_approved', 'track_requested', 'upstream_auto_set',
 ])
 
 export function validReceipt(value, generation, commandId = '') {
