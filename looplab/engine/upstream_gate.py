@@ -132,6 +132,31 @@ def evaluation_context(task, settings, events):
     return context
 
 
+UPSTREAM_VERIFY_MODES = ("canary", "full")
+
+
+def upstream_verify_setting(settings) -> str:
+    """THE ONE READER of `Settings.upstream_verify` (doc 73 §4.2 G5). Anything unreadable is `full` —
+    the strict, historical gate."""
+    value = getattr(settings, "upstream_verify", "full")
+    return value if value in UPSTREAM_VERIFY_MODES else "full"
+
+
+def gate_profile(settings, task) -> str:
+    """The equivalence profile a gate on this run MUST measure: `canary` when the setting asks for it
+    AND the task declares an `eval.canary` (a cheap slice the operator vouched for), else `full`
+    paired repetitions. Re-derived at advance time (`gate_matches_policy(profile=)`), so a result
+    naming another profile grants nothing."""
+    from looplab.engine.eval_canary import canary_spec
+    if upstream_verify_setting(settings) != "canary":
+        return "full"
+    try:
+        declared = canary_spec(task.eval_spec())
+    except Exception:  # noqa: BLE001 — an unreadable eval spec declares no canary; the strict profile applies
+        declared = None
+    return "canary" if declared is not None else "full"
+
+
 def waives_equivalence(declaration, proposal) -> bool:
     """The operator declared `repair_gate: probes` AND this proposal promotes ONLY a repair: it has
     a pending trigger to probe and every nominated hunk is repair-origin (`repair_only`, recorded on
@@ -152,7 +177,7 @@ def execute_gate(rd, task, settings, source, proposal, manifest, action_id, char
     root = owned_path(rd, "upstream/checks/" + digest(action_id)[:24])
     root.mkdir(parents=True, exist_ok=False)
 
-    def run(label, selector, files, deleted=(), probe=None, failed_artifacts_ok=False):
+    def run(label, selector, files, deleted=(), probe=None, failed_artifacts_ok=False, canary=None):
         nonlocal index
         index += 1
         work = root / f"{index:03d}-{label}"
@@ -173,6 +198,12 @@ def execute_gate(rd, task, settings, source, proposal, manifest, action_id, char
             cwd = str(work)
         else:
             argv, timeout, stages, _ = context._eval_pipeline(source, work, "full")
+            if canary is not None:
+                # The task's declared canary (`eval_canary.py`): its env last, every stage and the
+                # single command capped at its timeout — the slice a node's own canary runs.
+                from looplab.engine.eval_canary import capped_pipeline
+                timeout, stages = capped_pipeline(timeout, stages, canary["timeout"])
+                env = {**env, **canary["env"]}
             metric, cwd = es["metric"], str(work / (es.get("cwd") or "."))
             if Path(es.get("cwd") or ".").is_absolute():
                 raise UpstreamRefusal("upstream_scope_unsupported", "Upstream evaluator cwd must be workspace relative")
@@ -251,6 +282,32 @@ def execute_gate(rd, task, settings, source, proposal, manifest, action_id, char
                 "input_identity": before, "inputs_unchanged": before == after, "checks": checks,
                 "executions": executions, "eval_seconds": sum(r["seconds"] for r in executions),
                 "scope": "declared scorer, old recipes and trigger probes (repair_gate=probes)"}
+    if gate_profile(settings, task) == "canary":
+        # doc 73 §4.2 G5: ONE old/new pair on the declared canary instead of the paired full
+        # repetitions — hours on a GPU task become minutes. A different slice than the source's own
+        # measurement, so its score is not asked to reproduce; the tolerance is the operator's.
+        from looplab.engine.eval_canary import canary_spec
+        declared = canary_spec(task.eval_spec())
+        values = [[], []]
+        for side, selector, files, deleted in (
+            (0, proposal["old_selector"], source.files, source.deleted),
+            (1, proposal["selector"], manifest["recipe_files"], manifest.get("recipe_deleted", []))):
+            r = run(("old-canary" if side == 0 else "new-canary") + "0", selector, files, deleted,
+                    canary=declared)
+            if r["valid"] and r["exit_code"] == 0:
+                values[side].append(r["metric"])
+        equivalence = {"kind": "equivalence", "passed": False, "values": values, "profile": "canary"}
+        if all(len(v) == 1 for v in values):
+            means = [values[0][0], values[1][0]]
+            tolerance = declaration["atol"] + declaration["rtol"] * max(map(abs, means))
+            equivalence.update(means=means, tolerance=tolerance, delta=means[1] - means[0],
+                               passed=abs(means[1] - means[0]) <= tolerance)
+        checks.append(equivalence)
+        after = input_identity(task, settings, source, proposal)
+        return {"passed": before == after and all(c["passed"] for c in checks),
+                "input_identity": before, "inputs_unchanged": before == after, "checks": checks,
+                "executions": executions, "eval_seconds": sum(r["seconds"] for r in executions),
+                "scope": "declared scorer, old recipes, trigger probes and one canary pair"}
     values = [[], []]
     for repeat in range(declaration["repeats"]):
         for side, selector, files, deleted in (

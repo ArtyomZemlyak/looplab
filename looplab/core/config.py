@@ -3157,6 +3157,12 @@ class Settings(BaseSettings):
     # (`lane_held {op: advance}`, once per proposal) until the hour frees. Operator-asked advances are
     # never held. 0 = no cap. One reader: `engine/upstream_serve.py::advances_per_hour`.
     upstream_advances_per_hour: int = 2
+    # THE EQUIVALENCE PROFILE of every upstream gate (doc 73 §4.2 G5, `engine/upstream_gate.py::
+    # gate_profile`): `canary` = ONE old/new pair under the task's declared `eval.canary` (cheap on a GPU
+    # task; a task that declares no canary still gets full repeats), `full` = `upstream.repeats` paired
+    # full evaluations and the source's own score reproduced (doc 72's strict gate). A pre-field run
+    # resumes `full`. One reader: `upstream_gate.py::upstream_verify_setting`.
+    upstream_verify: typing.Literal["canary", "full"] = "canary"
     # A5 (docs/60 §60.9): seed every chain root (Researcher propose, Developer stages/plan/step/
     # implement/repair) with a small block carrying what EARLIER phases of this run already read —
     # the reference file, the manifest, the config — verbatim under `established_context_bytes`,
@@ -3846,6 +3852,9 @@ def unknown_snapshot_keys(data) -> list[str]:
 # Keep their historical effective behavior when newer product defaults become active: re-entry must not
 # silently add paid calls, interventions, concurrency or a different selection policy to an old run.
 LEGACY_CONFIG_SNAPSHOT_DEFAULTS: dict[str, object] = {
+    # THE CANARY GATE (doc 73 §4.2 G5), added 2026-10-08 defaulting `canary`: a resumed pre-field run
+    # keeps doc 72's paired full repetitions — also on its stopped lane — whatever its task declares.
+    "upstream_verify": "full",
     # THE LIVE UPSTREAM LANE, added 2026-10-08 defaulting `auto` (doc 73 §2.5). A resumed pre-field run
     # keeps the stopped-engine lane it launched with: `auto` buys gate executions and advances the base
     # on its own, which that run's operator never chose.

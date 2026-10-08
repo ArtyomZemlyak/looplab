@@ -1521,6 +1521,19 @@
           "shortHelp": "Cap on automatic base advances per rolling hour; 0 = none."
         },
         {
+          "key": "upstream_verify",
+          "label": "Upstream check profile",
+          "type": "enum",
+          "options": [
+            "canary",
+            "full"
+          ],
+          "default": "canary",
+          "help": "How an upstream check measures that the new base reproduces the source experiment. canary: one old/new pair under the task's declared eval canary (cheap on a GPU task; a task without a canary still gets full repeats). full: the declared number of paired full evaluations and the source's own score reproduced.",
+          "shortLabel": "Check profile",
+          "shortHelp": "canary (one pair on the declared canary) or full (paired full repeats)."
+        },
+        {
           "key": "established_context",
           "label": "Carry earlier phases' reads into each new phase",
           "type": "bool",

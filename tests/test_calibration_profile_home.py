@@ -446,7 +446,9 @@ from looplab.search.speculation_calibration import (SPECULATION_CALIBRATION_PROF
 # 2026-10-08: upstream_author_usd, upstream_advances_per_hour (doc 73 §4.2 G3/G4), none removed
 # (removing them re-derives 9db8b1f7). INERT for a calibration replicate: no upstream block, so no
 # author and no automatic advance.
-_EXPECTED_DIGEST = "sha256:bf576ab36e8d1aaf1842e6c65f70489db55a383c7a658aa317bed3a818ac7fca"
+# 2026-10-08: upstream_verify (doc 73 §4.2 G5), none removed (removing it re-derives bf576ab3).
+# INERT for a calibration replicate: no upstream block, so no gate is ever bought.
+_EXPECTED_DIGEST = "sha256:8beb702f5cdcb760ec146e2177036628ea4027e87d84436f40dbb23068dfe386"
 #   2026-09-06  + endgame_reserve_frac (doc 52 row 18: the plan's endgame reserve the dispatcher
 #               honours). The 'field set changed too' branch: 220 -> 221, both pins re-set. A
 #               calibration replicate runs the toy workload under `EngineOptions`, whose reserve is
@@ -973,7 +975,8 @@ _EXPECTED_DIGEST = "sha256:bf576ab36e8d1aaf1842e6c65f70489db55a383c7a658aa317bed
 # 2026-10-08: upstream_mode (doc 73 §2.5, the live upstream lane): 290 -> 291.
 # 2026-10-08: upstream_author (doc 73 §2.5, the automated upstream author): 291 -> 292.
 # 2026-10-08: upstream_author_usd, upstream_advances_per_hour (doc 73 §4.2 G3/G4): 292 -> 294.
-_EXPECTED_FIELD_COUNT = 294
+# 2026-10-08: upstream_verify (doc 73 §4.2 G5, the canary gate): 294 -> 295.
+_EXPECTED_FIELD_COUNT = 295
 
 
 def test_the_digest_did_not_change_when_the_profile_moved():
