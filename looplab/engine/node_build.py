@@ -511,14 +511,30 @@ class NodeBuildMixin:
         seeded with `parent`'s files as its working set and, when its `implement_from` accepts the
         keyword, is shown the co-parents' code and traces too — a recombination that sees one
         lineage is an improve with a longer rationale. A Developer without the keyword is called
-        exactly as before."""
+        exactly as before.
+
+        THE BASE IS THE PARENT'S (doc 73 §2.5). A call seeded with the parent's files edits an
+        overlay OF THE BASE THOSE FILES WERE WRITTEN ON (`upstream_serve.py::files_base`), so the
+        Developer is pinned to that base and the child names it: the next lifecycle then merges
+        the child onto the run's current base. Bound to the current base instead, the child's
+        overlay (the parent's old copy of a file the live lane since promoted, plus this call's
+        edits) was stamped as if written on the new base, so materialization merged nothing and the
+        old copy silently reverted the promotion (critic 2026-10-08). The same pin serves every
+        site that builds from a parent through here: an improve, an ensemble merge, a node-reset
+        rebuild (`_rerun_node`), an ablation's refine_block, an operator inject on a parent."""
         developer = developer or self.developer
         impl_from = getattr(developer, "implement_from", None)
         if parent is not None and callable(impl_from):
+            pinned = None
+            if getattr(parent, "files", None) or getattr(parent, "deleted", None):
+                from looplab.engine.upstream_serve import files_base
+                pinned = files_base(self, parent)
             if co_parents and accepts_co_parents(impl_from):
                 return self._run_developer(developer, impl_from, idea, parent,
-                                           bind_to=state, co_parents=tuple(co_parents))
-            return self._run_developer(developer, impl_from, idea, parent, bind_to=state)
+                                           bind_to=state, co_parents=tuple(co_parents),
+                                           pinned_base=pinned)
+            return self._run_developer(developer, impl_from, idea, parent, bind_to=state,
+                                       pinned_base=pinned)
         return self._run_developer(developer, developer.implement, idea, bind_to=state)
 
     def _run_developer(self, developer, fn, *args, bind_to=_OMIT, pinned_base=None,
@@ -575,6 +591,23 @@ class NodeBuildMixin:
                 code = fn(*args, **kwargs)
             return dataclasses.replace(self._capture_developer_result(developer, code),
                                        authored_base=authored)
+
+    def _inject_files_base(self, req: dict, state) -> Optional[dict]:
+        """The base an operator inject's SUPPLIED files are an overlay of, when they were forked from
+        a node (`forked_from`, the server-stamped receipt): that node's files base
+        (`upstream_serve.py::files_base`), so a fork of a node written before a live advance merges
+        onto the new base instead of reverting the promotion with the node's old copy (critic
+        2026-10-08). None otherwise — and while the live lane is off — which keeps the creation
+        prefix ruling, as every stopped-lane row does."""
+        receipt = req.get("forked_from")
+        if not isinstance(receipt, dict) or not (req.get("files") or req.get("deleted")):
+            return None
+        source_id = receipt.get("node_id")
+        source = state.nodes.get(source_id) if type(source_id) is int else None
+        if source is None:
+            return None
+        from looplab.engine.upstream_serve import files_base
+        return files_base(self, source)
 
     @staticmethod
     def _capture_developer_result(developer, code) -> DeveloperResult:
@@ -2536,10 +2569,13 @@ class NodeBuildMixin:
                     files=(req.get("files")
                            or ({} if req.get("code") or _inj is None else dict(_inj.last_files))) or {},
                     deleted=req.get("deleted") or [],
-                    # doc 73 §2.5: only files the Developer call produced carry the base it authored
-                    # on; supplied files keep the creation prefix, as every stopped-lane row does.
+                    # doc 73 §2.5: files the Developer call produced carry the base it authored on,
+                    # and files the operator FORKED from a node carry that node's
+                    # (`_inject_files_base`); other supplied files keep the creation prefix, as
+                    # every stopped-lane row does.
                     base_selector=(_inj.authored_base if _inj is not None and not req.get("files")
-                                   and not req.get("code") else None),
+                                   and not req.get("code")
+                                   else self._inject_files_base(req, state)),
                     footprint_finalized=footprint_finalized,
                     stale_error="parent lifecycle changed while building",
                     rejected_error="injected node creation was rejected during replay",

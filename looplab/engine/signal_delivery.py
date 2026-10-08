@@ -186,7 +186,7 @@ SIGNALS: tuple[SignalRoute, ...] = (
         inject="looplab.core.upstream_board:developer_base_note",
         consumer="Developer (repo build turns, under Settings.upstream_board_brief)",
         call_sites=(("looplab/adapters/repo_developer.py",
-                     "developer_base_note(getattr(self, \"_memory_state\", None))"),
+                     "developer_base_note(getattr(self, \"_memory_state\", None), base=base)"),
                     ("looplab/adapters/repo_developer.py", "+ self._upstream_base_note()"))),
     SignalRoute(
         name="upstream_advance_hint",
