@@ -50,3 +50,21 @@ test('the kill switch, the held steps and the author spend read only from well-f
   assert.equal(old.authorSpentUsd, 0)
   assert.deepEqual(old.held, [])
 })
+
+test('the caps and the rebase marks read only from well-formed fields (doc 73 §4.3)', () => {
+  const out = upstreamLiveSummary({ mode: 'auto', author_usd_cap: 2, advances_per_hour: 2, advances_last_hour: 1,
+    authored: [{ seq: 1, source_node_id: 2, outcome: 'rebase_conflict', rebased: true },
+      { seq: 2, source_node_id: 3, outcome: 'drafted', rebased: 'yes' }],
+    held: [{ seq: 3, op: 'advance', reason: 'rate_cap:2/h', waiting: true }, { seq: 4, op: 'author', reason: 'x' }] })
+  assert.equal(out.authorUsdCap, 2)
+  assert.equal(out.advancesPerHour, 2)
+  assert.equal(out.advancesLastHour, 1)
+  assert.deepEqual(out.authored.map(row => row.rebased), [false, true], 'newest first; only true counts')
+  assert.deepEqual(out.held.map(row => row.waiting), [undefined, true])
+  assert.equal(upstreamLiveLabel('outcome', 'rebase_conflict'), 'its code conflicts with the newer base — skipped')
+  assert.equal(upstreamLiveLabel('heldState', 'true'), 'still waiting')
+  const old = upstreamLiveSummary({ mode: 'auto', author_usd_cap: -1, advances_per_hour: 1.5 })
+  assert.equal(old.authorUsdCap, null)
+  assert.equal(old.advancesPerHour, null)
+  assert.equal(old.advancesLastHour, null)
+})
