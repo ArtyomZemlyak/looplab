@@ -248,3 +248,27 @@ def test_a_failed_artifact_is_never_salvaged(tmp_path):
                                    timed_out=False, stderr="Traceback: killed"))
     assert fold(engine.store.read_all()).nodes[0].status.value == "failed"
     assert asked == [], "salvage is not even asked for an artifact"
+
+
+def test_a_child_of_a_consumer_inherits_what_it_uses():
+    """critic 2026-10-08: an improve/merge/ablation of a consumer copies code reading
+    `LOOPLAB_USES_WORKDIRS`; the fold gives it its parents' `uses` (artifacts only)."""
+    from looplab.events.eventstore import Event
+    rows, seq = [], iter(range(100))
+
+    def add(kind, data):
+        rows.append(Event(seq=next(seq), ts=0.0, type=kind, data=data))
+
+    for nid, extra in ((0, {"node_kind": "artifact"}), (1, {"node_kind": "artifact"}),
+                       (2, {"uses": [0]}), (3, {"uses": [1, 0]})):
+        add("node_created", {"node_id": nid, "parent_ids": [], "operator": "inject",
+                             "idea": {"operator": "inject"}, "code": "x", **extra})
+    add("node_created", {"node_id": 4, "parent_ids": [2, 3], "operator": "merge",
+                         "idea": {"operator": "merge"}, "code": "y"})
+    add("node_created", {"node_id": 5, "parent_ids": [4], "operator": "improve",
+                         "idea": {"operator": "improve"}, "code": "z"})
+    add("node_created", {"node_id": 6, "parent_ids": [2], "operator": "improve",
+                         "idea": {"operator": "improve"}, "code": "w", "uses": []})
+    st = fold(rows)
+    assert st.nodes[4].uses == [0, 1] and st.nodes[5].uses == [0, 1]
+    assert st.nodes[6].uses == [], "an explicit `uses` — even empty — is what the writer said"

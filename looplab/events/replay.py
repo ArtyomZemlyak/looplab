@@ -383,6 +383,24 @@ def _simplification_receipt(d: dict, parent_ids: list, st: RunState) -> Optional
             "ablation_id": ablation_id[:64]}
 
 
+def _inherited_uses(st: RunState, parent_ids: list) -> list:
+    """The artifacts a node built FROM consumers reads (doc 73 §1.4; critic 2026-10-08): the union
+    of its parents' `uses`, in parent order, bounded, artifact nodes only. An improve / merge /
+    ablation of a consumer copies code that reads `LOOPLAB_USES_WORKDIRS`, and every creation path
+    but the inject and the rebuild wrote no `uses` — the child got no variable and died of a
+    KeyError, buying a triage and a repair. Derived HERE, from rows already folded, so every
+    creation path is covered and no payload changes; a log written before `uses` existed has none
+    to inherit, so it folds as before."""
+    out: list = []
+    for pid in parent_ids:
+        parent = st.nodes.get(pid)
+        for used in (getattr(parent, "uses", None) or []):
+            producer = st.nodes.get(used)
+            if used not in out and getattr(producer, "kind", None) == "artifact":
+                out.append(used)
+    return out[:32]
+
+
 def _on_node_created(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
     # Don't let a duplicate node_created RESURRECT a settled node (invariant #2 "first terminal
     # wins"): if the id already exists AND is in a TERMINAL state (evaluated/failed), skip the event.
@@ -479,7 +497,7 @@ def _on_node_created(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
             forked_from=d.get("forked_from"),
             kind=("artifact" if d.get("node_kind") == "artifact" else None),
             uses=([x for x in d["uses"][:32] if type(x) is int and x >= 0]
-                  if isinstance(d.get("uses"), list) else []),
+                  if isinstance(d.get("uses"), list) else _inherited_uses(st, parent_ids)),
             research_origin=d.get("research_origin"),   # 💡 proposed just after a deep-research memo
             model_arm=str(d.get("model_arm") or "")[:64],  # doc 52 row 19: the routed model arm
             # doc 67 67.5: the node's parent with one block commented out, or None — and the cut it

@@ -50,13 +50,35 @@ def _child(parents):
     return Node(id=5, operator="improve", parent_ids=list(parents), idea=Idea(operator="improve"))
 
 
+def _parents(eng, tmp_path, *, evaluated=(3, 4), failed=(6,), stale=(7,)):
+    """Parents in every state the variable must tell apart, with their workdirs on disk."""
+    from looplab.engine.evaluate import workdir_manifest_digest
+    from looplab.events.replay import fold
+    for pid in (*evaluated, *failed, *stale):
+        eng.store.append("node_created", {"node_id": pid, "parent_ids": [], "operator": "draft",
+                                          "idea": {"operator": "draft"}, "code": f"print({pid})"})
+        if pid in failed:
+            eng.store.append("node_failed", {"node_id": pid, "generation": 0, "error": "x",
+                                             "reason": "crash"})
+        else:
+            eng.store.append("node_evaluated", {"node_id": pid, "generation": 0, "metric": 1.0,
+                                                "violations": []})
+    st = fold(eng.store.read_all())
+    for pid in (*evaluated, *failed, *stale):
+        wd = tmp_path / "run" / "nodes" / f"node_{pid}"
+        wd.mkdir(parents=True)
+        stamp = "0" * 64 if pid in stale else workdir_manifest_digest(st.nodes[pid])
+        (wd / ".looplab-manifest").write_text(stamp, encoding="ascii")
+
+
 def test_on_a_child_sees_its_parents_workdirs(tmp_path, monkeypatch):
+    """Only a parent evaluated in its current lifecycle whose workdir still holds that lifecycle's
+    files (critic 2026-10-08): a FAILED parent (6) and a re-materialized one (7) are left out."""
     eng = _engine(tmp_path, on=True)
-    for pid in (3, 4):
-        (tmp_path / "run" / "nodes" / f"node_{pid}").mkdir(parents=True)
+    _parents(eng, tmp_path)
     wd = tmp_path / "run" / "nodes" / "node_5"
     wd.mkdir(parents=True)
-    env = _captured_env(eng, monkeypatch, _child([3, 4, 9]), wd)   # 9 has no workdir: skipped
+    env = _captured_env(eng, monkeypatch, _child([3, 4, 6, 7, 9]), wd)   # 9 has no node: skipped
     want = os.pathsep.join(str((tmp_path / "run" / "nodes" / f"node_{p}").resolve())
                            for p in (3, 4))
     assert env["LOOPLAB_PARENT_WORKDIRS"] == want

@@ -1309,3 +1309,20 @@ def test_the_inject_switch_has_one_reader():
     assert assistant.assistant_inject_enabled(None) is False
     body = code_text(inspect.getsource(assistant))
     assert body.count('"assistant_inject_tool"') == 1, "a second spelling of the switch"
+
+
+def test_the_inject_card_shows_the_whole_rationale(tmp_path):
+    """critic 2026-10-08: the card's verb shows 60 characters while the Developer builds from up to
+    2,000 — the operator must see what they approve."""
+    rd = tmp_path / "svc"
+    _run(rd)
+    seen: list = []
+    rationale = "build the fifty-item history shards from the March export, " * 6
+    t = RunControlTools(tmp_path, alive_fn=lambda _rd: False, mode="default",
+                        command_service=_RecordingCommands(tmp_path, append=False),
+                        approver=lambda action: (seen.append(action), "allow_once")[1],
+                        allow_inject=True)
+    assert "completed" in t.execute("inject_experiment", {
+        "run_id": "svc", "rationale": rationale, "kind": "artifact"})
+    assert seen and " ".join(rationale.split()) in seen[0]["preview"]
+    assert seen[0]["preview"].startswith("artifact")

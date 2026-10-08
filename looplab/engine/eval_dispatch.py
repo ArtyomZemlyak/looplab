@@ -926,13 +926,27 @@ class EvalDispatchMixin:
         run_dir = getattr(self, "run_dir", None)
         if run_dir is None:
             return {}
+        from looplab.core.node_evidence import read_bounded_regular_file
+        from looplab.engine.evaluate import workdir_manifest_digest
+        # ONLY A PARENT EVALUATED IN ITS CURRENT LIFECYCLE whose workdir still holds that lifecycle's
+        # files (critic 2026-10-08): a failed parent's half-written checkpoint, or a workdir being
+        # re-materialized by a reset, is not what the child was built to continue from. One fold, and
+        # only for a task that asked for this variable.
+        state = fold(self.store.read_all())
         paths = []
         for pid in getattr(node, "parent_ids", None) or []:
             if isinstance(pid, bool) or not isinstance(pid, int):
                 continue
+            parent = state.nodes.get(pid)
+            if parent is None or parent.status is not NodeStatus.evaluated:
+                continue
             wd = Path(run_dir) / "nodes" / f"node_{pid}"
-            if wd.is_dir() and not wd.is_symlink():
-                paths.append(str(wd.resolve()))
+            if not wd.is_dir() or wd.is_symlink():
+                continue
+            stamp = read_bounded_regular_file(wd / ".looplab-manifest", 256)
+            if stamp is None or stamp.decode("ascii", "replace").strip() != workdir_manifest_digest(parent):
+                continue
+            paths.append(str(wd.resolve()))
         return {self.PARENT_WORKDIRS_ENV: os.pathsep.join(paths)} if paths else {}
 
     USES_WORKDIRS_ENV = "LOOPLAB_USES_WORKDIRS"
@@ -992,8 +1006,9 @@ class EvalDispatchMixin:
         parents = self._parent_workdirs_env(node)
         if parents:
             env = {**(env or {}), **parents}
-        # …and the ARTIFACT nodes this node declares it uses (doc 73 §1.4), unconditionally: `uses`
-        # exists only on a node an operator injected naming them, so nothing else carries it.
+        # …and the ARTIFACT nodes this node uses (doc 73 §1.4), unconditionally: `uses` exists only
+        # on a node an operator injected naming them and on the nodes built from it, which inherit
+        # it in the fold (`events/replay.py::_inherited_uses`), so nothing else carries it.
         used = self._uses_workdirs_env(node)
         if used:
             env = {**(env or {}), **used}
@@ -1063,7 +1078,12 @@ class EvalDispatchMixin:
             from looplab.runtime.sandbox import docker_tier_kwargs
             wrap = (command_eval.make_docker_wrap(
                         root, **docker_tier_kwargs(self),
-                        binds=self._data_binds(workdir),
+                        # …and the ARTIFACT workdirs this node `uses` (doc 73 §1.4), read-only at
+                        # their own host paths, so `LOOPLAB_USES_WORKDIRS` names paths the container
+                        # can see (critic 2026-10-08: it named host paths that did not exist there).
+                        binds=((self._data_binds(workdir) or [])
+                               + [(p, True) for p in (used.get(self.USES_WORKDIRS_ENV) or "")
+                                  .split(os.pathsep) if p]) or None,
                         env=env)   # forward LOOPLAB_EVAL_SEED etc. into the container (per-eval env)
                     if self.trust_mode in ("untrusted", "hostile") else None)
             # The operator's declared metric SUBJECT, filtered to strings HERE rather than trusted:

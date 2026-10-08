@@ -96,12 +96,23 @@ def upstream_board(state) -> dict:
                              "source_node_id": _node_id(row.get("source_node_id")),
                              "summary": _text(row.get("summary"), _SUMMARY_CAP),
                              "flag": _flag(row.get("flag"))})
+    base = getattr(state, "upstream_base", None)
+    # THE FOLD KEEPS ONLY THE LAST 200 upstream rows (`replay_journals.py::_on_upstream`), and every
+    # per-probe `upstream_execution` counts, so a promotion can fall out of the window while the base
+    # still carries it (critic 2026-10-08). `upstream_base` is never trimmed: the latest promotion is
+    # read from it when the window no longer holds its row.
+    if isinstance(base, dict) and not any(a["seq"] == base.get("seq") for a in advanced):
+        pid = base.get("proposal_id")
+        advanced.append({"proposal_id": pid[:80] if isinstance(pid, str) else "",
+                         "seq": base.get("seq"), "source_node_id": _node_id(base.get("source_node_id")),
+                         "summary": _text(base.get("summary"), _SUMMARY_CAP),
+                         "flag": _flag(base.get("flag"))})
+        advanced.sort(key=lambda a: a["seq"] if type(a["seq"]) is int else -1)
     last_promotion = max((a["seq"] for a in advanced if type(a["seq"]) is int), default=None)
     for entry in rows.values():
         if (entry["status"] in IN_FLIGHT_STATUSES and last_promotion is not None
                 and type(entry.get("seq")) is int and entry["seq"] < last_promotion):
             entry["status"] = "superseded"
-    base = getattr(state, "upstream_base", None)
     base_view = None
     if isinstance(base, dict):
         selector = base.get("selector")

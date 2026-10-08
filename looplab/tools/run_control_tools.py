@@ -289,11 +289,15 @@ class RunControlTools:
         return rd
 
     def _gate(self, name: str, rid: str, rd: Path, verb: str, *,
-              scope: Optional[dict] = None) -> tuple[Optional[str], Optional[str]]:
-        # Returns a "declined/disabled" string to short-circuit, or None to proceed.
-        from looplab.tools.perm_modes import decide_action, refusal_for
+              scope: Optional[dict] = None,
+              preview: Optional[str] = None) -> tuple[Optional[str], Optional[str]]:
+        # Returns a "declined/disabled" string to short-circuit, or None to proceed. `preview` is the
+        # card's body when the call carries text the operator must read to approve it (an inject's
+        # rationale is the whole build instruction), bounded by the ONE rule that says what it cut.
+        from looplab.tools.perm_modes import clip_approval_preview, decide_action, refusal_for
         action = {"tool": name, "tool_kind": "run_control", "label": f"{name} {rid}",
-                  "verb": verb, "preview": f"{name}({rid})", "run_id": rid,
+                  "verb": verb, "run_id": rid,
+                  "preview": (clip_approval_preview(preview) if preview else f"{name}({rid})"),
                   "scope": dict(scope or {"run_id": rid})}
         denied = ("(run control is disabled in read-only plan mode — switch to "
                   "default/acceptEdits/auto.)")
@@ -502,7 +506,12 @@ class RunControlTools:
             scope={"run_id": rid, "node_kind": data.get("node_kind", "experiment"),
                    "uses": data.get("uses", []), "parent_id": parent,
                    "parent_generations": data.get("parent_generations", {}),
-                   "rationale_digest": hashlib.sha256(rationale.encode("utf-8")).hexdigest()})
+                   "rationale_digest": hashlib.sha256(rationale.encode("utf-8")).hexdigest()},
+            # The WHOLE rationale on the card (critic 2026-10-08): the verb shows 60 characters and
+            # the Developer builds from up to 2,000, so the operator approved text they never saw.
+            preview=(f"{'artifact' if kind == 'artifact' else 'experiment'}"
+                     + (f" using {data['uses']}" if data.get("uses") else "")
+                     + (f" from #{parent}" if parent is not None else "") + f"\n{rationale}"))
         if blocked:
             return blocked
         with self._mutation_intent(

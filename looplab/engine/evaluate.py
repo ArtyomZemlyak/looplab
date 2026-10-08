@@ -3723,6 +3723,11 @@ class EvaluateMixin:
         round that changed no code, does not re-run a canary already paid for)."""
         if not self._eval_canary or not self._eval_spec:
             return False
+        # NOT FOR AN ARTIFACT NODE (doc 73 §1.4; critic 2026-10-08, driven): a canary passes only on
+        # a measured metric, and a preparation step succeeds by printing none — every artifact
+        # failed its canary, went to triage and was repaired toward printing a number.
+        if getattr(a.node, "kind", None) == "artifact":
+            return False
         if canary_spec(self._eval_spec) is None:
             return False
         return not canary_already_passed(self.store.read_all(), a.node_id, a.generation,

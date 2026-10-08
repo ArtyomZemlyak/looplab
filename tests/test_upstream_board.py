@@ -174,3 +174,17 @@ def test_on_every_build_turn_states_the_promotion(tmp_path, monkeypatch, promote
     assert set(turns) >= {"declare_stages", "done"}, turns.keys()
     for name in ("declare_stages", "done"):
         assert "flag `fast_attn`" in turns[name], name
+
+
+def test_a_promotion_out_of_the_history_window_is_still_read_from_the_base():
+    """critic 2026-10-08: the fold keeps the last 200 upstream rows, executions included; the base
+    is never trimmed, so the Developer keeps being told what it carries."""
+    st = _history(*[{"type": "upstream_execution", "proposal_id": "z"} for _ in range(3)],
+                  {"type": "upstream_proposed", "proposal_id": "old", "seq_hint": 1})
+    st.upstream_history[-1]["seq"] = 50
+    st.upstream_base = {"seq": 40, "type": "base_advanced", "proposal_id": "won",
+                        "source_node_id": 4, "summary": "bf16 kernel", "flag": _FLAG}
+    board = upstream_board(st)
+    assert [a["proposal_id"] for a in board["advanced"]] == ["won"]
+    assert "flag `fast_attn`" in developer_base_note(st)
+    assert _status(board, "old") == "proposed", "proposed AFTER the promotion: still in flight"

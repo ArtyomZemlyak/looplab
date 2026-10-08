@@ -413,7 +413,9 @@ at the wall is NOT in the number — plan on the declared ceiling.
 
 **A parent's workdir, on request (`eval.parent_workdirs_env: true`, off by default).** Every stage of
 a node's eval then gets `LOOPLAB_PARENT_WORKDIRS`: the absolute workdirs of the node's parents that
-exist, joined by `os.pathsep`, in `parent_ids` order. It is how an operator's runner warm-starts or
+are EVALUATED in their current lifecycle and whose workdir still carries that lifecycle's manifest
+stamp (a failed parent's partial checkpoint, or a workdir a reset is rebuilding, is left out),
+joined by `os.pathsep`, in `parent_ids` order. It is how an operator's runner warm-starts or
 fine-tunes from a parent's final weights ("a second epoch of node 43") without an absolute path
 copied into an idea. Host tiers only — a Docker tier binds no other node's workdir. The run
 directory is already readable to an eval and never writable, so the parent's files can be read,

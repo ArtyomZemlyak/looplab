@@ -780,6 +780,9 @@ It stays what it is: a retargeted objective never ranks it (even when an import 
 a failed artifact is never metric-salvaged, and a rebuild (`node_reset` from implement) carries
 `node_kind`/`uses` forward. The run graph marks an artifact with ▣ and a consumer with ⇠; the
 Assistant creates either through its `inject_experiment` tool (`Settings.assistant_inject_tool`).
+A node built FROM a consumer (an improve, a merge, an ablation) inherits its parents' `uses`, so
+the copied code still finds its data. On a Docker tier each used workdir is bound read-only at its
+own path. The canary (`eval_canary`) is skipped for an artifact: it passes only on a metric.
 The producer's workdir is read as it stands when the consumer runs — resetting an artifact while
 consumers wait is not fenced yet (doc 73, status table).
 
