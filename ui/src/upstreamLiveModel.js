@@ -13,6 +13,10 @@ const queueRow = row => row && typeof row === 'object' && typeof row.op === 'str
 const authoredRow = row => row && typeof row === 'object' && typeof row.outcome === 'string'
   && Number.isSafeInteger(row.seq) && Number.isSafeInteger(row.source_node_id)
 
+// A step the engine held back at a cap (doc 73 §4.2 G3/G4, the diagnostic `lane_held`).
+const heldRow = row => row && typeof row === 'object' && typeof row.op === 'string'
+  && typeof row.reason === 'string' && Number.isSafeInteger(row.seq)
+
 export function upstreamLiveSummary(live) {
   if (!live || typeof live !== 'object' || !MODES.has(live.mode)) return null
   const queue = live.queue && typeof live.queue === 'object' ? live.queue : {}
@@ -30,6 +34,11 @@ export function upstreamLiveSummary(live) {
     recent: rows.slice(-RECENT).reverse(),
     authored: authored.slice(-RECENT).reverse(),
     authoredTotal: count(live.authored_total, authored.length),
+    // The operator's kill switch (`upstream_auto_set`), the caps that held a step back, and what
+    // the author spent — doc 73 §4.2 G2-G4. Absent on an older payload: not stopped, nothing held.
+    autoPaused: live.auto_paused === true,
+    held: (Array.isArray(live.held) ? live.held : []).filter(heldRow).slice(-RECENT).reverse(),
+    authorSpentUsd: Number.isFinite(live.author_spent_usd) && live.author_spent_usd >= 0 ? live.author_spent_usd : 0,
   }
 }
 
@@ -47,6 +56,7 @@ const LABELS = {
     rejected: 'the draft could not be absorbed', refused: 'refused by the lane',
   },
   track: { repair: 'fix from a repair', champion: 'champion' },
+  held: { advance: 'advance held at the hourly cap', author: 'author stopped at its budget' },
 }
 
 export function upstreamLiveLabel(kind, value) {

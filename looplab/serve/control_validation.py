@@ -60,7 +60,7 @@ from looplab.events.types import (
     EV_COMMENT_CREATED, EV_COMMENT_EDITED, EV_COMMENT_RESOLUTION_CHANGED, EV_CONCEPT_TAG_EDITED,
     EV_FORCE_ABLATE, EV_FORCE_CONFIRM, EV_FORK, EV_HINT, EV_HYPOTHESIS_ADDED,
     EV_HYPOTHESIS_UPDATED, EV_INJECT_NODE, EV_METRIC_RETARGET, EV_NODE_ABORT, EV_NODE_RESET,
-    EV_TRACK_REQUESTED,
+    EV_TRACK_REQUESTED, EV_UPSTREAM_AUTO_SET,
     EV_PAUSE, EV_PROMOTE, EV_RESTART, EV_RESUME, EV_RUN_ABORT, EV_RUN_CONCEPTS, EV_RUN_REOPENED,
     EV_SET_STRATEGY, EV_SPEC_APPROVED, EV_RESEARCH_COMPLETED, EV_REPORT_GENERATED)
 from looplab.serve.engine_proc import _resolve_task_file
@@ -773,6 +773,19 @@ def _normalize_track_requested(ctx: _ControlIntake) -> dict:
         if missing:
             raise HTTPException(404, f"no node(s) {missing[:8]} in this run")
     return {"track": track, "node_ids": node_ids}
+
+
+# ------------------------------------------------------------------ upstream_auto_set
+
+def _normalize_upstream_auto_set(ctx: _ControlIntake) -> dict:
+    """`upstream_auto_set` (doc 73 §4.2 G2): the kill switch of every AUTOMATIC upstream step of a live
+    run — `enabled: false` stops the authors (fix rollout, champion integrator) and the automatic
+    check/advance, `true` lets them resume. Queued operator operations are unaffected."""
+    enabled = ctx.data.get("enabled")
+    if type(enabled) is not bool:
+        raise HTTPException(400, "enabled must be true or false")
+    reason = ctx.text("reason", required=False, limit=300)
+    return {"enabled": enabled, **({"reason": reason} if reason else {})}
 
 
 # ------------------------------------------------------------------ metric_retarget
@@ -2071,6 +2084,7 @@ _CONTROL_NORMALIZERS: dict[str, Optional[Callable]] = {
     EV_SET_STRATEGY: _normalize_set_strategy,
     EV_METRIC_RETARGET: _normalize_metric_retarget,
     EV_TRACK_REQUESTED: _normalize_track_requested,
+    EV_UPSTREAM_AUTO_SET: _normalize_upstream_auto_set,
     EV_FORCE_CONFIRM: _normalize_node_target,
     EV_FORCE_ABLATE: _normalize_node_target,
     EV_FORK: _normalize_fork,
@@ -2116,6 +2130,7 @@ _CONTROL_PRECONDITIONS: dict[str, Optional[Callable]] = {
     EV_SET_STRATEGY: None,
     EV_METRIC_RETARGET: None,
     EV_TRACK_REQUESTED: None,
+    EV_UPSTREAM_AUTO_SET: None,
     EV_FORCE_CONFIRM: None,
     EV_FORCE_ABLATE: None,
     EV_FORK: None,
@@ -2162,6 +2177,7 @@ _CONTROL_DECISIONS: dict[str, Optional[Callable]] = {
     EV_SET_STRATEGY: None,
     EV_METRIC_RETARGET: None,
     EV_TRACK_REQUESTED: None,
+    EV_UPSTREAM_AUTO_SET: None,
     EV_FORCE_CONFIRM: None,
     EV_FORCE_ABLATE: None,
     EV_FORK: None,
@@ -2227,6 +2243,8 @@ _CONTROL_POLICIES: dict[str, tuple[EnginePolicy, str]] = {
     # A folded queue entry the LIVE engine serves (doc 73 §1.4, `engine/track_lane.py`); a stopped
     # run keeps it queued for its next engine (`looplab evaluate-track` answers on a stopped run).
     EV_TRACK_REQUESTED: (EnginePolicy.NO_SPAWN, "folded_intent"),
+    # A folded flag the live engine reads at its next turn; a stopped run needs no engine to hold it.
+    EV_UPSTREAM_AUTO_SET: (EnginePolicy.NO_SPAWN, "folded_intent"),
     EV_FORCE_CONFIRM: (EnginePolicy.ENSURE_RUNNING, "engine_ack"),
     EV_FORCE_ABLATE: (EnginePolicy.ENSURE_RUNNING, "engine_ack"),
     EV_FORK: (EnginePolicy.ENSURE_RUNNING, "engine_ack"),

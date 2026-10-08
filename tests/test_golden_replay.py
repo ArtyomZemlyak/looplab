@@ -82,6 +82,9 @@ the diff that justified it:
 * 2026-10-08 — `RunState.card_filings` (`core/models.py`: the operator's `card_filed` journal, the
   correction path for `Card.parent_card_id`). The diff was 1 insertion and 0 deletions —
   `"card_filings": {}`, what a log with no filing folds to — and no shared leaf changed.
+* 2026-10-08 — `RunState.upstream_auto_paused` (`core/models.py`, doc 73 §4.2 G2: the upstream
+  automation's kill switch). The diff was 1 insertion and 0 deletions — `"upstream_auto_paused":
+  false`, what a log with no `upstream_auto_set` folds to — and no shared leaf changed.
 """
 from __future__ import annotations
 

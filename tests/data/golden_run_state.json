@@ -1005,6 +1005,7 @@
   "track_requests": [],
   "tracks_done": 0,
   "trust_gate": "audit",
+  "upstream_auto_paused": false,
   "upstream_base": null,
   "upstream_enabled": false,
   "upstream_history": [],

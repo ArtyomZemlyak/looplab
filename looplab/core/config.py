@@ -3147,6 +3147,16 @@ class Settings(BaseSettings):
     # `auto` resolves `off` (no upstream block, not `trusted_local`); at most 6 drafts per run. A
     # pre-field snapshot resumes OFF. One reader: `engine/upstream_author.py::upstream_author_setting`.
     upstream_author: bool = True
+    # THE AUTHOR'S MONEY FOR THE WHOLE RUN (doc 73 §4.2 G4), in USD: the two calls of every draft are
+    # read off the worker's own thread (`core/llm_budget.py::thread_committed_usd_exact`) onto its
+    # `lane_authored.cost_usd`, and once their sum reaches this the author pays for nothing more
+    # (`lane_held {op: author}`). 0 = no money cap (the 6-draft count still holds). One reader:
+    # `engine/upstream_author.py::author_usd_cap`.
+    upstream_author_usd: float = 2.0
+    # AUTOMATIC BASE ADVANCES PER ROLLING HOUR (doc 73 §4.2 G3): a passed gate past it waits
+    # (`lane_held {op: advance}`, once per proposal) until the hour frees. Operator-asked advances are
+    # never held. 0 = no cap. One reader: `engine/upstream_serve.py::advances_per_hour`.
+    upstream_advances_per_hour: int = 2
     # A5 (docs/60 §60.9): seed every chain root (Researcher propose, Developer stages/plan/step/
     # implement/repair) with a small block carrying what EARLIER phases of this run already read —
     # the reference file, the manifest, the config — verbatim under `established_context_bytes`,

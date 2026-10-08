@@ -23,7 +23,7 @@ The event type itself is the contract's identity and is never renamed or reused;
 
 <!-- generated: event types -->
 
-185 event types — 129 folded into `RunState`, 56 diagnostic; 1217 declared payload keys; 31 types whose whole payload is stored by the fold.
+187 event types — 130 folded into `RunState`, 57 diagnostic; 1223 declared payload keys; 32 types whose whole payload is stored by the fold.
 
 | type | fold | records | required keys | optional keys |
 |---|---|---|---|---|
@@ -118,7 +118,8 @@ The event type itself is the contract's identity and is never renamed or reused;
 | `inject_failed` | diagnostic | An `inject_node` request that could not be materialized, with the reason. | `error`, `idx`, `reason` | — |
 | `inject_node` | folded · whole | An operator-authored node: its idea and code, or a branch of an existing (possibly foreign) node. | — | `code`, `deleted`, `files`, `forked_from`, `idea`, `node_kind`, `origin`, `parent_generations`, `parent_id`, `parent_ids`, `uses`, `uses_attempts` |
 | `lane_armed` | diagnostic | A live engine armed the upstream lane: the mode it serves until it restarts, and why. | `author`, `mode`, `reason` | — |
-| `lane_authored` | diagnostic | The automated upstream author settled one source lifecycle: drafted, declined by its critic, skipped or failed. | `action_id`, `outcome`, `source_node_id`, `track` | `code`, `hunk_hashes`, `reason` |
+| `lane_authored` | diagnostic | The automated upstream author settled one source lifecycle: drafted, declined by its critic, skipped or failed. | `action_id`, `outcome`, `source_node_id`, `track` | `code`, `cost_usd`, `hunk_hashes`, `reason` |
+| `lane_held` | diagnostic | The live engine held an automatic upstream step back at a cap: an advance past the hourly limit, the author past its budget. | `op`, `reason` | `proposal_id` |
 | `lane_op_done` | folded | The live engine settled a queued upstream operation; the lane's own rows carry what it did. | `idx`, `op`, `outcome` | `action_id`, `code`, `seq` |
 | `lane_op_requested` | folded | An upstream propose/check/advance queued for the LIVE engine that serves the lane. | `action_id`, `op`, `request_hash` | `body`, `proposal_id`, `request_path` |
 | `lessons_distilled` | folded · whole | The lessons one distillation pass drew from this run's node pairs. | `at_node`, `count`, `lessons`, `pairs`, `trigger` | — |
@@ -200,6 +201,7 @@ The event type itself is the contract's identity and is never renamed or reused;
 | `train_monitor_alert` | diagnostic | The live training-log judge's verdict about one running stage, and the log role it judged. | `confidence`, `generation`, `log_role`, `node_id`, `reason`, `status` | `checkpoint_id`, `citation_resolved`, `confidence_valid`, `evidence_locator`, `evidence_source`, `fault`, `kill`, `kill_role_withheld`, `kill_superseded_by`, `overrun_alert_floor_s`, `overrun_beyond_noise_s`, `projected_overrun_s`, `repair_decided`, `source`, `stage`, `stage_grace_s`, `stage_wall_s`, `stop_decided`, `trajectory`, `trajectory_veto` |
 | `trust_gate_changed` | folded | The run's trust gate was changed, by a named source (last write wins). | `source`, `trust_gate` | — |
 | `trust_scan` | diagnostic | Which trust detectors ran over one node's code, how many findings they made, over what digest. | — | `code_digest`, `detectors`, `evidence_version`, `findings`, `generation`, `node_id` |
+| `upstream_auto_set` | folded · whole | The operator's kill switch for every automatic upstream step of a live run. | `enabled` | `reason` |
 | `upstream_execution` | folded · whole | Separate charged gate execution, never a node score. | `action_id`, `execution`, `proposal_id`, `request_hash` | — |
 | `upstream_gate_abandoned` | folded · whole | Operator recovery of an interrupted claim; grants no pass. | `action_id`, `claim_action_id`, `proposal_id`, `reason`, `request_hash` | — |
 | `upstream_gate_finished` | folded · whole | Measured gate verdict bound to actual source and inputs. | `action_id`, `evidence_token`, `proposal_id`, `request_hash`, `result` | — |

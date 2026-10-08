@@ -54,6 +54,29 @@ def upstream_author_setting(settings) -> bool:
     return getattr(settings, "upstream_author", False) is True
 
 
+def author_usd_cap(settings) -> float:
+    """THE ONE READER of `Settings.upstream_author_usd` (doc 73 §4.2 G4): the author's money for the
+    whole run; 0 (or anything unreadable) = no money cap."""
+    try:
+        value = float(getattr(settings, "upstream_author_usd", 0.0))
+    except (TypeError, ValueError):
+        return 0.0
+    return value if value > 0 and value != float("inf") else 0.0
+
+
+def author_spent_usd(events) -> float:
+    """What the author's calls cost so far: the `cost_usd` its `lane_authored` rows carry (a row
+    written before the field existed counts 0 — an older run's spend is unknown, not free)."""
+    total = 0.0
+    for e in events:
+        if e.type == "lane_authored":
+            try:
+                total += max(0.0, float(e.data.get("cost_usd") or 0.0))
+            except (TypeError, ValueError):
+                continue
+    return total
+
+
 def author_action_id(node, track: str) -> str:
     """The deterministic action id of one source LIFECYCLE on one track: a re-built node is a new
     source, and a repaired champion is asked once for its fix and once for its capability."""

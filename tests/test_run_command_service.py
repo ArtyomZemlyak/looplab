@@ -297,6 +297,8 @@ def test_every_control_event_has_one_explicit_engine_policy():
         # doc 73 §1.4: a queued evaluation track — the LIVE engine serves it; a stopped run keeps
         # it queued for its next engine (`looplab evaluate-track` answers there).
         "track_requested",
+        # doc 73 §4.2 G2: the upstream automation's kill switch — a folded flag the live engine reads.
+        "upstream_auto_set",
     }
 
 

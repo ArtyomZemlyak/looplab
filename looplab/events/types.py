@@ -1171,6 +1171,16 @@ EV_LANE_OP_DONE = "lane_op_done"
 # No `action_id` on either: the lane's ACK readers key on that.
 EV_UPSTREAM_HINT_ISSUED = "upstream_hint_issued"
 EV_UPSTREAM_HINT_DELIVERED = "upstream_hint_delivered"
+# THE KILL SWITCH (doc 73 §4.2 G2): a CONTROL intent (UI / API / MCP through `/commands`) —
+# `enabled: false` stops every AUTOMATIC upstream step of a live run (the author, the automatic check
+# and advance), `true` lets them resume; operator-queued operations are still served. Folded into
+# `RunState.upstream_auto_paused` and into the upstream history (who stopped it, why).
+EV_UPSTREAM_AUTO_SET = "upstream_auto_set"
+# AN AUTOMATIC STEP THE LIVE ENGINE HELD BACK (doc 73 §4.2 G3/G4): a passed gate past
+# `Settings.upstream_advances_per_hour` (`op: advance`, once per proposal), or the author past
+# `Settings.upstream_author_usd` (`op: author`, once). DIAGNOSTIC — the audit of a cap, like
+# `lane_authored`; the cap itself is re-read from the log and the settings every turn.
+EV_LANE_HELD = "lane_held"
 # THE AUTOMATED AUTHOR's record (doc 73 §2.5, `engine/upstream_author.py`): one row per source
 # lifecycle it paid to draft for — drafted (the lane's own propose rows follow under the same action
 # id), declined by its critic, skipped, or failed. DIAGNOSTIC: the fold reads nothing of it; the
@@ -1315,7 +1325,7 @@ DIAGNOSTIC_EVENTS: frozenset[str] = frozenset({
     EV_EVAL_INVOCATION_CLAIMED, EV_EVAL_INVOCATION_SETTLED, EV_EVAL_INVOCATION_RECOVERED,
     EV_EVAL_CANARY_STARTED, EV_EVAL_CANARY_FINISHED, EV_EVAL_ATTEMPT_WITHHELD,
     EV_TASK_CHANGED, EV_ARTIFACT_SYNCED, EV_ARTIFACT_SYNC_STARTED,
-    EV_UPSTREAM_HINT_DELIVERED,
+    EV_UPSTREAM_HINT_DELIVERED, EV_LANE_HELD,
     EV_LANE_AUTHORED, EV_LANE_ARMED,
 })
 
@@ -1407,8 +1417,10 @@ EVENT_PAYLOAD_KEYS: dict[str, PayloadContract] = {
     "base_advanced": PayloadContract("Explicit CAS — the stopped lane's, or the live engine's (`in_engine`): only future lifecycles adopt the verified base.", required=('action_id', 'evidence_token', 'flag', 'from_revision', 'gate_seq', 'hunk_hashes', 'proposal_id', 'request_hash', 'selector', 'source_node_id', 'summary'), optional=('in_engine',), stored_whole=True),
     "lane_op_requested": PayloadContract("An upstream propose/check/advance queued for the LIVE engine that serves the lane.", required=('action_id', 'op', 'request_hash'), optional=('body', 'proposal_id', 'request_path')),
     "lane_armed": PayloadContract("A live engine armed the upstream lane: the mode it serves until it restarts, and why.", required=('author', 'mode', 'reason'), optional=()),
-    "lane_authored": PayloadContract("The automated upstream author settled one source lifecycle: drafted, declined by its critic, skipped or failed.", required=('action_id', 'outcome', 'source_node_id', 'track'), optional=('code', 'hunk_hashes', 'reason')),
+    "lane_authored": PayloadContract("The automated upstream author settled one source lifecycle: drafted, declined by its critic, skipped or failed.", required=('action_id', 'outcome', 'source_node_id', 'track'), optional=('code', 'cost_usd', 'hunk_hashes', 'reason')),
     "upstream_hint_issued": PayloadContract("The bounded notice the live engine issued to the Developer sessions at work after a base advance.", required=('advance_seq', 'hint_id', 'kind', 'proposal_id', 'sessions', 'text'), optional=('source_node_id',), stored_whole=True),
+    "upstream_auto_set": PayloadContract("The operator's kill switch for every automatic upstream step of a live run.", required=('enabled',), optional=('reason',), stored_whole=True),
+    "lane_held": PayloadContract("The live engine held an automatic upstream step back at a cap: an advance past the hourly limit, the author past its budget.", required=('op', 'reason'), optional=('proposal_id',)),
     "upstream_hint_delivered": PayloadContract("A Developer session heard an upstream notice at a tool-loop turn boundary.", required=('hint_id', 'session'), optional=('node_id',)),
     "lane_op_done": PayloadContract("The live engine settled a queued upstream operation; the lane's own rows carry what it did.", required=('idx', 'op', 'outcome'), optional=('action_id', 'code', 'seq')),
     "ablate": PayloadContract(

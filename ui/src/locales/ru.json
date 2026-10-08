@@ -1,7 +1,7 @@
 {
   "schema": 1,
   "language": "ru",
-  "count": 7686,
+  "count": 7690,
   "messages": {
     "# LoopLab run report — {0}": "# Отчёт запуска LoopLab — {0}",
     "## Agent narrative (advisory)": "## Пояснения агента (рекомендации)",
@@ -7688,7 +7688,11 @@
     "None — not filed under a research question": "Нет — не привязан к исследовательскому вопросу",
     "Suggested: the question its parent's experiment is filed under.": "Предложено: вопрос, к которому привязан эксперимент-родитель.",
     "No research question is on the board yet.": "На доске пока нет исследовательских вопросов.",
-    "That research question is no longer on the board.": "Этого исследовательского вопроса больше нет на доске."
+    "That research question is no longer on the board.": "Этого исследовательского вопроса больше нет на доске.",
+    "Automation stopped by the operator: the engine drafts, checks and promotes nothing on its own; queued operations still run": "Автоматика полосы остановлена оператором: движок сам ничего не пишет, не проверяет и не продвигает; операции из очереди выполняются",
+    "Author spend so far: ${0}": "Расход автора: ${0}",
+    "advance held at the hourly cap": "продвижение ждёт: лимит в час",
+    "author stopped at its budget": "автор остановлен: бюджет исчерпан"
   },
   "plurals": {
     "({0} paraphrases folded)": {

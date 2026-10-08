@@ -9,7 +9,7 @@ export const RECEIPT_CONTROL_EVENTS = new Set([
   'force_ablate', 'force_confirm', 'fork', 'hint', 'hypothesis_added', 'hypothesis_updated',
   'inject_node', 'metric_retarget', 'node_abort', 'node_reset', 'pause', 'promote',
   'report_generated', 'research_completed', 'restart', 'resume', 'run_abort', 'run_concepts',
-  'run_reopened', 'set_strategy', 'spec_approved', 'track_requested',
+  'run_reopened', 'set_strategy', 'spec_approved', 'track_requested', 'upstream_auto_set',
 ])
 
 export function validReceipt(value, generation, commandId = '') {
