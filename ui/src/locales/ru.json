@@ -7645,7 +7645,16 @@
     "Write upstream proposals automatically": "Писать предложения upstream автоматически",
     "Only when the upstream lane runs in auto mode. The engine drafts a proposal once for each node a repair made run, then for the champion: a Maintainer model call writes the generalized patch behind a flag and a separate critic call reviews it. A reviewed draft is checked like any proposal and reaches the base only if its measured gate passes. At most 6 drafts per run.": "Только когда полоса upstream работает в режиме auto. Движок один раз составляет предложение для каждого узла, который заработал после ремонта, затем для чемпиона: вызов модели Maintainer пишет обобщённый патч за флагом, а отдельный вызов критика его проверяет. Одобренный черновик проверяется как любое предложение и попадает в базу, только если прошла его измеренная проверка. Не более 6 черновиков за запуск.",
     "Auto upstream author": "Автоавтор upstream",
-    "Paid drafts of fixes and champion capabilities for the base (auto mode only).": "Платные черновики фиксов и возможностей чемпиона для базы (только режим auto)."
+    "Paid drafts of fixes and champion capabilities for the base (auto mode only).": "Платные черновики фиксов и возможностей чемпиона для базы (только режим auto).",
+    "Upstream lane": "Полоса upstream",
+    "off — proposing, checking and promoting need a paused run": "выключена — предложение, проверка и перенос требуют паузы",
+    "propose — operations are queued and run between turns": "propose — операции ставятся в очередь и выполняются между ходами",
+    "auto — the engine checks and promotes on its own": "auto — движок сам проверяет и переносит",
+    "declined by its critic": "отклонён критиком",
+    "fix from a repair": "фикс из ремонта",
+    "{0} of {1} queued operations waiting": "Операций в очереди: {0} ожидают из {1}",
+    "The engine drafts proposals itself: fixes from repairs first, then the champion's capabilities. {0} drafts so far": "Движок сам пишет предложения: сначала фиксы из ремонтов, затем возможности чемпиона. Черновиков: {0}",
+    "Maintainer proposal → between turns, without a pause, the engine runs the measured checks and advances the starting base. Experiments whose evaluation already started stay on their base. Interrupted checks require operator recovery.": "Предложение Maintainer → движок между ходами, без паузы, выполняет измеренные проверки и обновляет исходную базу. Эксперименты, чья оценка уже началась, остаются на своей базе. Прерванные проверки восстанавливает оператор."
   },
   "plurals": {
     "({0} paraphrases folded)": {

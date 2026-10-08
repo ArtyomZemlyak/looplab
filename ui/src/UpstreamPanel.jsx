@@ -5,6 +5,7 @@ import { baseChoices } from './baseRevision.js'
 import { upstreamCheckSummary, upstreamHistoryRows } from './upstreamCheckModel.js'
 import { useAssistantUILanguage } from './useAssistantLanguage.js'
 import { upstreamProposalSummary, upstreamRecoveryDraft } from './upstreamProposalModel.js'
+import { upstreamLiveLabel, upstreamLiveSummary } from './upstreamLiveModel.js'
 import UpstreamRecovery from './UpstreamRecovery.jsx'
 
 export default function UpstreamPanel({ state, onClose }) {
@@ -17,6 +18,7 @@ export default function UpstreamPanel({ state, onClose }) {
   const history = upstreamHistoryRows(state.upstream_history)
   const advances = (history || []).filter(row => row.type === 'base_advanced')
   const proposal = upstreamProposalSummary(state.upstream_history)
+  const live = upstreamLiveSummary(state.upstream_live)
   // Once a proposal is visible, its own check is the only relevant verdict.
   // A new/failed authoring claim must not display a preceding proposal's pass.
   const check = history ? (proposal ? proposal.check : upstreamCheckSummary(history)) : { status: 'unknown' }
@@ -37,6 +39,13 @@ export default function UpstreamPanel({ state, onClose }) {
     <div className="ov-section-head"><h3>{((ru ? 'Код для следующих экспериментов' : uiText('Code for future experiments')))}</h3><span>{((history ? ru ? `Обновлений базы: ${advances.length}` : uiMessage("{0} recorded base updates", [advances.length]) : (ru ? 'История обновлений недоступна' : uiText('Base update history unavailable'))))}</span></div>
     <p>{((ru ? 'Полезное изменение из одного эксперимента можно проверить и добавить в общий исходный код следующих экспериментов.' : uiText('A useful change from one experiment can be checked and added to the shared starting code for future experiments.')))}</p>
     <p className="muted">{((enabled && proposal ? (ru ? 'Разберите записанный перенос с Assistant перед выбором следующего действия.' : uiText('Inspect recorded code reuse with Assistant before choosing the next action.')) : (enabled ? (ru ? 'Начните с Assistant: выберите изменение и обсудите проверки. Если результатов ещё нет, сначала оцените эксперимент.' : uiText('Start with Assistant: choose a change and discuss checks. If there are no results yet, evaluate an experiment first.')) : (ru ? 'В этом запуске перенос кода не включён. Assistant поможет подготовить новый запуск с записанной исходной базой и нужными проверками.' : uiText('Code reuse is not enabled for this run. Assistant can help prepare a new run with a recorded starting base and the required checks.')))))}</p>
+    {live && <div className="upstream-live">
+      <p><strong>{((ru ? 'Полоса upstream' : uiText('Upstream lane')))}:</strong> {uiText(upstreamLiveLabel('mode', live.mode, ru))}{live.reason && <span className="muted"> · {live.reason}</span>}</p>
+      {live.mode !== 'off' && <p className="muted">{((ru ? `Операций в очереди: ${live.pending} ожидают из ${live.total}` : uiMessage('{0} of {1} queued operations waiting', [live.pending, live.total])))}</p>}
+      {live.recent.length > 0 && <ol className="upstream-queue">{live.recent.map(row => <li key={`${row.idx}-${row.seq}`}>{row.op} · <code>{row.action_id}</code> · {uiText(upstreamLiveLabel('status', row.status, ru))}{row.code ? ` (${row.code})` : ''}</li>)}</ol>}
+      {live.author && <p className="muted">{((ru ? `Движок сам пишет предложения: сначала фиксы из ремонтов, затем возможности чемпиона. Черновиков: ${live.authoredTotal}` : uiMessage("The engine drafts proposals itself: fixes from repairs first, then the champion's capabilities. {0} drafts so far", [live.authoredTotal])))}</p>}
+      {live.authored.length > 0 && <ol className="upstream-authored">{live.authored.map(row => <li key={row.seq}>{((ru ? 'Эксперимент' : uiText('Experiment')))} #{row.source_node_id} · {uiText(upstreamLiveLabel('track', row.track, ru))} · {uiText(upstreamLiveLabel('outcome', row.outcome, ru))}</li>)}</ol>}
+    </div>}
     <UpstreamRecovery proposal={proposal} ru={ru} />
     <button type="button" className="btn" onClick={discuss}>{((enabled && proposal ? (ru ? 'Разобрать перенос с Assistant' : uiText('Inspect code reuse with Assistant')) : (enabled ? (ru ? 'Выбрать изменение с Assistant' : uiText('Choose a change with Assistant')) : (ru ? 'Подготовить с Assistant' : uiText('Prepare with Assistant')))))}</button>
     <p className="muted">{((ru ? 'Кнопка подготовит сообщение. Проверьте его и нажмите «Отправить» для обращения к модели; возможна оплата провайдеру.' : uiText('The button prepares a message. Review it and press Send to contact the model; provider charges may apply.')))}</p>
@@ -49,6 +58,8 @@ export default function UpstreamPanel({ state, onClose }) {
       : <>{((ru ? 'Записанная завершённая проверка' : uiText('Recorded completed check')))}: <strong>{((ru ? check.status === 'passed' ? 'пройдена' : 'не пройдена' : uiText(check.status)))}</strong> · {((check.executions === null ? (ru ? 'число выполнений неизвестно' : uiText('execution count unavailable')) : ru ? `Выполнений: ${check.executions}` : uiMessage("{0} explicit executions", [check.executions])))} · {((check.seconds === null ? (ru ? 'затраты времени неизвестны' : uiText('cost unavailable')) : `${check.seconds.toFixed(1)} ${ru ? 'с' : 's'}`))}</>}</p>}
     {check && <p className="muted">{((ru ? 'Перед обновлением базы прочитайте актуальные доказательства; записанный результат сам по себе не разрешает перенос.' : uiText('Read current upstream evidence before advancement; recorded results do not approve it.')))}</p>}
     {advances.length > 0 && <details><summary>{((ru ? 'Откуда взяты изменения' : uiText('Where the changes came from')))}</summary><ol>{advances.map(row => <li key={row.seq}>{((ru ? 'Эксперимент' : uiText('Experiment')))} #{row.source_node_id} → <code>{row.selector?.digest?.slice(0, 12)}</code> · {row.summary} · {((ru ? 'флаг' : uiText('flag')))} {row.flag?.name}, {((ru ? 'прежнее значение' : uiText('old default')))} {row.flag?.default}</li>)}</ol></details>}
-    {enabled && <details><summary>{((ru ? 'Как переносится код' : uiText('How code reuse works')))}</summary><p className="muted">{((ru ? 'Пауза → завершение движка → предложение Maintainer → измеренные проверки → явное обновление исходной базы → отдельное возобновление. Прерванные проверки восстанавливает оператор.' : uiText('Pause → wait for engine exit → Maintainer proposal → measured checks → explicit base advance → resume. Interrupted checks require operator recovery.')))}</p></details>}
+    {enabled && <details><summary>{((ru ? 'Как переносится код' : uiText('How code reuse works')))}</summary><p className="muted">{live && live.mode !== 'off'
+      ? ((ru ? 'Предложение Maintainer → движок между ходами, без паузы, выполняет измеренные проверки и обновляет исходную базу. Эксперименты, чья оценка уже началась, остаются на своей базе. Прерванные проверки восстанавливает оператор.' : uiText('Maintainer proposal → between turns, without a pause, the engine runs the measured checks and advances the starting base. Experiments whose evaluation already started stay on their base. Interrupted checks require operator recovery.')))
+      : ((ru ? 'Пауза → завершение движка → предложение Maintainer → измеренные проверки → явное обновление исходной базы → отдельное возобновление. Прерванные проверки восстанавливает оператор.' : uiText('Pause → wait for engine exit → Maintainer proposal → measured checks → explicit base advance → resume. Interrupted checks require operator recovery.')))}</p></details>}
   </section>
 }

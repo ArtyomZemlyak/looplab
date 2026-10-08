@@ -186,3 +186,40 @@ test('live Russian view withdraws a passing check after reordered history', asyn
     assert.deepEqual(harness.fetch.calls, [])
   } finally { await mounted.unmount() }
 })
+
+// ------------------------------------------------------------------ the live lane (doc 73 §2.5)
+const live = {
+  mode: 'auto', reason: '', author: true, authored_total: 2,
+  queue: { pending: 1, total: 2, rows: [
+    { idx: 0, seq: 30, op: 'check', action_id: 'chk-1', status: 'succeeded' },
+    { idx: 1, seq: 31, op: 'advance', action_id: 'adv-1', status: 'pending' }] },
+  authored: [{ seq: 40, action_id: 'auto-author-a', track: 'repair', source_node_id: 3, outcome: 'drafted' },
+    { seq: 41, action_id: 'auto-author-b', track: 'champion', source_node_id: 5, outcome: 'declined' }],
+}
+
+test('the live lane shows its mode, its queue with receipts and the author rows', () => {
+  const markup = harness.render(UpstreamPanel, {
+    state: { nodes: {}, upstream_enabled: true, upstream_history: [], upstream_live: live } })
+  assert.match(markup, /auto — the engine checks and promotes on its own/)
+  assert.match(markup, /1 of 2 queued operations waiting/)
+  assert.match(markup, /adv-1<\/code> · waiting/)
+  assert.match(markup, /fix from a repair · drafted → proposal/)
+  assert.match(markup, /champion · declined by its critic/)
+  assert.match(markup, /without a pause, the engine runs the measured checks/)
+  assert.deepEqual(harness.fetch.calls, [])
+})
+
+test('a run without the live projection keeps the stopped-lane story', () => {
+  const markup = harness.render(UpstreamPanel, {
+    state: { nodes: {}, upstream_enabled: true, upstream_history: [] } })
+  assert.doesNotMatch(markup, /Upstream lane/)
+  assert.match(markup, /Pause → wait for engine exit/)
+})
+
+test('an off lane says why and shows no queue', () => {
+  const markup = harness.render(UpstreamPanel, { state: { nodes: {}, upstream_enabled: true,
+    upstream_history: [], upstream_live: { mode: 'off', reason: 'upstream_mode is off', queue: {} } } })
+  assert.match(markup, /off — proposing, checking and promoting need a paused run/)
+  assert.match(markup, /upstream_mode is off/)
+  assert.doesNotMatch(markup, /queued operations waiting/)
+})

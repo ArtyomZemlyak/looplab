@@ -836,6 +836,14 @@ class AppState:
         # `upto_seq` fold reports what was in flight THEN, and so it caches with the rest of the
         # payload.
         d["card_authoring"] = card_authoring(evs, st)
+        # THE LIVE UPSTREAM LANE (doc 73 §2.5): the mode this run serves (a fact of its LAUNCHED
+        # settings, not of the log), its queue with receipts and the automated author's rows. Absent
+        # on a run that declares no upstream block and queued nothing, so every other payload keeps
+        # its shape; cached with the body, because a mode only changes with a resume, which appends.
+        from looplab.engine.upstream_serve import upstream_live_view
+        live = upstream_live_view(rd, evs)
+        if live is not None:
+            d["upstream_live"] = live
         return d, last_seq, max_seq, generation, event_count
 
     def state_probe(self, rd: Path) -> dict:

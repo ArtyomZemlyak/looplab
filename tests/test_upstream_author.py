@@ -188,3 +188,24 @@ def test_the_run_stops_paying_after_its_cap(tmp_path):
 def test_the_draft_prompt_names_its_track():
     assert "FIX" in author_messages("repair", "ctx")[1]["content"]
     assert "CHAMPION" in author_messages("champion", "ctx")[1]["content"]
+
+
+def test_the_state_payload_carries_the_live_lane_only_where_it_exists(tmp_path, monkeypatch):
+    """`upstream_live` (doc 73 §2.5): the UI's one read of the mode, the queue and the author rows."""
+    pytest.importorskip("fastapi")
+    from looplab.serve.server import make_app
+    lane, store, generation, body = fixture(tmp_path)
+    _model(monkeypatch, _champion_draft(), verdict="fail")
+    _serve(_live_engine(lane, store))
+    srv = make_app(tmp_path).state.looplab
+    state = srv.state_payload(lane.rd)["state"]
+    live = state["upstream_live"]
+    assert live["mode"] == "auto" and live["reason"] == "" and live["author"] is True
+    assert [r["outcome"] for r in live["authored"]] == ["declined"] and live["authored_total"] == 1
+    assert live["queue"] == {"pending": 0, "total": 0, "rows": []}
+    plain = tmp_path / "plain"
+    plain.mkdir()
+    from looplab.events.eventstore import EventStore
+    EventStore(plain / "events.jsonl").append("run_started", {"run_id": "p", "task_id": "t",
+                                                             "goal": "g", "direction": "min"})
+    assert "upstream_live" not in srv.state_payload(plain)["state"], "every other payload keeps its shape"

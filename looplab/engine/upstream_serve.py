@@ -124,6 +124,33 @@ def live_queue(events) -> dict:
             "total": len(rows), "rows": rows[-LIVE_QUEUE_ROWS:]}
 
 
+LIVE_AUTHORED_ROWS = 20
+
+
+def upstream_live_view(run_dir, events) -> Optional[dict]:
+    """What the UI shows of the live lane (`serve/appstate.py`'s state payload, `upstream_live`): the
+    mode this run serves and why, its queue with receipts, and the automated author's last rows.
+    None for a run that declares no upstream block and queued nothing — the payload keeps its shape.
+    The mode is read from the LAUNCHED settings and the `run_started` declaration, the same two
+    halves the engine arms from (`_arm`)."""
+    started = next((e for e in events if e.type == "run_started"), None)
+    upstream = started.data.get("upstream") if started is not None else None
+    upstream = upstream if isinstance(upstream, dict) and upstream else None
+    if upstream is None and not any(e.type == "lane_op_requested" for e in events):
+        return None
+    settings = run_settings(run_dir)
+    mode, reason = (resolve_upstream_mode(settings, upstream) if settings is not None
+                    else ("off", "no readable config snapshot"))
+    from looplab.engine.upstream_author import upstream_author_setting
+    authored = [{"seq": e.seq, "action_id": e.data.get("action_id"), "track": e.data.get("track"),
+                 "source_node_id": e.data.get("source_node_id"), "outcome": e.data.get("outcome")}
+                for e in events if e.type == "lane_authored"]
+    return {"mode": mode, "reason": reason,
+            "author": mode == "auto" and upstream_author_setting(settings),
+            "queue": live_queue(events), "authored": authored[-LIVE_AUTHORED_ROWS:],
+            "authored_total": len(authored)}
+
+
 def auto_next_op(events, seed_base) -> Optional[tuple[str, dict]]:
     """The next operation `auto` takes, or None. Pure over the log.
 

@@ -1396,6 +1396,12 @@ including the base-update count. A retained advance without proposal records off
 with no invented original identity. Measured base provenance tolerates unreadable history;
 its existing separate recorded-base fallback must still match the measured digest.
 This is a diagnostic hint: read current upstream evidence before retrying or advancing the base.
+The panel also shows the LIVE lane (doc 73 §2.5) from the state payload's `upstream_live`
+(`engine/upstream_serve.py::upstream_live_view`, absent on a run with no upstream block): the mode
+the run serves and why (`off` / `propose` / `auto`, from its launched settings), the queued
+propose/check/advance operations with each receipt (`lane_op_requested` / `lane_op_done`), and the
+automated author's rows (`lane_authored`: source node, fix or champion, drafted / declined /
+skipped / failed). `ui/src/upstreamLiveModel.js` drops a malformed row rather than show it.
 Assistant command suggestions use
 `AssistantBar.jsx::suggestionPop` and `.cmdbar-pop`, not the retired `.cmd-suggest` styles.
 Run `npm run check:bundle` after building: passing a route budget does not imply the
