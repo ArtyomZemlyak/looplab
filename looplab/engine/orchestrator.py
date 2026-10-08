@@ -48,7 +48,8 @@ from looplab.engine.artifact_fence import defer_waiting_consumers, refuse_unrunn
 from looplab.engine.track_lane import (cancel_track_lane, drain_track_requests,
                                        refuse_finish_over_track_queue, serve_track_requests,
                                        track_drain_due)
-from looplab.engine.upstream_serve import serve_upstream_requests
+from looplab.engine.upstream_serve import (drain_upstream_job, refuse_finish_over_upstream_job,
+                                           serve_upstream_requests)
 from looplab.engine.ablation import AblationMixin
 from looplab.engine.metric_salvage import settle_mode as settle_metric_salvage_mode
 from looplab.engine.widths import LLM_WIDTH_MAX
@@ -1421,6 +1422,10 @@ class Engine(ConfirmPhaseMixin, NoiseFloorMixin, AblationMixin, NoveltyGateMixin
         # inside the open scope and made the staged finish read as abandoned (review 2026-10-08).
         if refuse_finish_over_track_queue(self, state, data):
             return False
+        # …and so does the live upstream lane's operation in flight: settled first, nothing new
+        # started meanwhile (`upstream_serve.py::refuse_finish_over_upstream_job`).
+        if refuse_finish_over_upstream_job(self, state, data):
+            return False
         report_planned = (not self.external_harness and self.report_writer is not None
                           and self.report_every > 0)
         if not report_planned:
@@ -2358,6 +2363,10 @@ class Engine(ConfirmPhaseMixin, NoiseFloorMixin, AblationMixin, NoveltyGateMixin
         # clean finish: before this, the child's raise cancelled the drain and the run ended on the
         # ceiling, and it still does — after the siblings have landed, before `finalize_run`.
         await self._raise_deferred_eval_budget_stop()
+        # The live upstream lane's ONE operation in flight is settled, not dropped (doc 73 §2.5): a
+        # claimed gate's charges and verdict, a claimed proposal's rows — waited for like the
+        # evaluations above. Nothing new starts (`upstream_serve.py::drain_upstream_job`).
+        await drain_upstream_job(self)
         # The operator's queued evaluation TRACKS were answered before a search-ended finish claimed
         # its scope (`refuse_finish_over_track_queue`); NOTHING is served here, inside that open
         # scope (review 2026-10-08). Any other exit — a pause, a stop, an approval wait, the wall

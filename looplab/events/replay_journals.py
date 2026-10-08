@@ -390,9 +390,19 @@ def _on_report_generated(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> No
 # This family's rows of the fold's dispatch table. `replay.py::_HANDLERS` is assembled from every
 # family's table and refuses a type two of them claim, so a journal handler is registered HERE,
 # beside its body, and nowhere else.
+_UPSTREAM_HISTORY_ROWS = 200
+
+
 def _on_upstream(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
     st.upstream_history.append({"seq": e.seq, "type": e.type, **d})
-    del st.upstream_history[:-200]
+    if len(st.upstream_history) > _UPSTREAM_HISTORY_ROWS:
+        # The window keeps the last 200 rows, and every per-probe `upstream_execution` counts — so a
+        # PROMOTION fell out of it while the base still carried it, and the Developer's note and
+        # `looplab inspect` (`core/upstream_board.py`) lost every one but the newest (critic
+        # 2026-10-08). `base_advanced` rows are kept out of the trim, the last 200 of them.
+        cut = len(st.upstream_history) - _UPSTREAM_HISTORY_ROWS
+        kept = [r for r in st.upstream_history[:cut] if r.get("type") == "base_advanced"]
+        st.upstream_history[:cut] = kept[-_UPSTREAM_HISTORY_ROWS:]
     if e.type == "base_advanced":
         st.upstream_base = {"seq": e.seq, **d}
 

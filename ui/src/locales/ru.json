@@ -1,7 +1,7 @@
 {
   "schema": 1,
   "language": "ru",
-  "count": 7705,
+  "count": 7710,
   "messages": {
     "# LoopLab run report — {0}": "# Отчёт запуска LoopLab — {0}",
     "## Agent narrative (advisory)": "## Пояснения агента (рекомендации)",
@@ -7707,7 +7707,12 @@
     "canary (one pair on the declared canary) or full (paired full repeats).": "canary (одна пара на объявленной канарейке) или full (парные полные повторы).",
     "{0} refused": "{0}: отклонено",
     "#{0} — no longer an evaluated experiment": "#{0} — больше не оценённый эксперимент",
-    "#{0} — no longer produced: untick it to send the rest": "#{0} — больше не произведён: снимите отметку, чтобы отправить остальное"
+    "#{0} — no longer produced: untick it to send the rest": "#{0} — больше не произведён: снимите отметку, чтобы отправить остальное",
+    "proposal failed": "предложение не удалось",
+    "advance failed": "обновление базы не удалось",
+    "automatic check refused by the lane, not asked again": "автоматическая проверка отклонена полосой и больше не запрашивается",
+    "automatic advance refused by the lane, not asked again": "автоматическое обновление базы отклонено полосой и больше не запрашивается",
+    "no engine is serving this run now; this is the mode it last served": "сейчас движок не обслуживает запуск; так он работал в последний раз"
   },
   "plurals": {
     "({0} paraphrases folded)": {

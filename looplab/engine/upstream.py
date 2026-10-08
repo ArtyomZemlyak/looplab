@@ -21,11 +21,46 @@ from looplab.engine.seed_archive import capture_seed_archive, verified_seed_arch
 from looplab.engine.seed_base import selected_seed_base
 from looplab.engine.upstream_gate import boundary_at, execute_gate, input_identity
 from looplab.engine.upstream_spec import normalize_request
-from looplab.engine.upstream_state import active_base, claimed_gate_executions, digest, events_for, node_signature, repair_probe_covers, source_node, upstream_candidates
+from looplab.engine.upstream_state import RETAINED_REQUEST_MAX_BYTES, active_base, claimed_gate_executions, digest, events_for, node_signature, read_retained_json, repair_probe_covers, source_node, upstream_candidates
 from looplab.engine.upstream_workspace import checked_overlay, git_at, maintainer_worktree, snapshot_worktree, verify_approved_candidate, write_overlay, owned_path
 from looplab.events.eventstore import EventStore, interprocess_lock
 from looplab.engine.shared import engine_fold as fold
 from looplab.events.run_generation import run_generation_token
+from looplab.events.types import EV_LANE_OP_REQUESTED, LANE_QUEUE_APPENDABLE
+
+
+def absorbed_implementation(rows, body):
+    """`(implementation, repair_recipes, patch_paths)` of a propose body over its nominated `rows`:
+    the code the patch must own — every nominated path less a repair's pending configuration
+    recipe, plus every non-configuration path it writes other than its documentation. ONE rule for
+    the lane's admit (`UpstreamLane._propose_admit`) and the automated author's free precheck
+    (`upstream_author.py::precheck_draft`), so the author never pays a critic for a draft the lane
+    would refuse `upstream_capability_not_absorbed`."""
+    from looplab.engine.activation import is_config_path
+    patch_paths = set(body["files"]) | set(body["deleted"])
+    nominated_paths = {r["path"] for r in rows}
+    repair_recipes = {r["path"] for r in rows if r["origin"] == "repair" and r["pending_trigger_nodes"] and is_config_path(r["path"])}
+    implementation = (nominated_paths - repair_recipes) | {p for p in patch_paths
+        if not is_config_path(p) and p != body["documentation_path"]}
+    return implementation, repair_recipes, patch_paths
+
+
+def validate_shared_patch(declaration, body, implementation):
+    """The shared implementation is the base's alone: neither the source recipe nor a declared probe
+    may carry one of its paths (case-folded, the declaration's portable path identity). The lane's
+    admit and its fresh checks call it, and so does the author's precheck."""
+    from looplab.engine.activation import is_config_path
+    patch_paths = set(body["files"]) | set(body["deleted"])
+    shared_patch = set(implementation) | {p for p in patch_paths if not is_config_path(p)}
+    # Use the declaration's portable path identity across separate overlays;
+    # NTFS writes RUNNER.py onto runner.py. Retain exact request spelling.
+    shared_keys = {p.casefold() for p in shared_patch}
+    recipe_keys = {p.casefold() for p in set(body["recipe_files"]) | set(body.get("recipe_deleted", []))}
+    if shared_keys & recipe_keys:
+        raise UpstreamRefusal("upstream_capability_not_absorbed", "The source recipe cannot overwrite the shared implementation")
+    probes = sum((declaration[k] for k in ("tests", "regressions", "repair_probes")), [])
+    if any(shared_keys & {p.casefold() for p in probe["files"]} for probe in probes):
+        raise UpstreamRefusal("upstream_probe_masks_capability", "Probes cannot replace the shared implementation; exercise the actual old/new base")
 
 
 class UpstreamLane:
@@ -40,9 +75,11 @@ class UpstreamLane:
                 or type(candidate_limit) is not int or not 1 <= candidate_limit <= 200
                 or source_node_id is not None and (type(source_node_id) is not int or source_node_id < 0)):
             raise ValueError("Use nonnegative source/offsets, history limit 1..100 and candidate limit 1..200")
-        from looplab.engine.upstream_serve import live_queue, resolve_upstream_mode
+        from looplab.engine.upstream_serve import auto_switched_off, live_queue, served_mode
         events = self._current(expected_generation)
-        mode, mode_reason = resolve_upstream_mode(self.settings, self.task.upstream)
+        alive = engine_alive(self.rd)
+        # The mode a LIVE engine armed with wins over the snapshot's (`served_mode`).
+        mode, mode_reason = served_mode(events, self.settings, self.task.upstream, alive=alive)
         active = active_base(events, self.task.seed_base)
         history = [{"seq": e.seq, "type": e.type, **self._view(e.data)} for e in events
                    if e.type.startswith("upstream_") or e.type == "base_advanced"]
@@ -54,9 +91,9 @@ class UpstreamLane:
                 offset=candidate_offset, limit=candidate_limit) if self.task.upstream else
                 {"rows": [], "bounded": False, "limit": candidate_limit, "offset": candidate_offset,
                  "next_offset": None, "source_node_id": source_node_id},
-            "instruction": self._instruction(mode),
+            "instruction": self._instruction(mode, auto_off=mode == "auto" and auto_switched_off(events)),
             "maintainer_instruction": Maintainer.instruction,
-            "engine_running": engine_alive(self.rd),
+            "engine_running": alive,
             # doc 73 §2.5: which lane this run serves, and its live queue with each receipt.
             "upstream_mode": {"mode": mode, "reason": mode_reason},
             "live_queue": live_queue(events)}
@@ -66,13 +103,19 @@ class UpstreamLane:
                             "gate, advance explicitly, then resume. No automatic advancement.")
 
     @classmethod
-    def _instruction(cls, mode):
+    def _instruction(cls, mode, *, auto_off=False):
+        """`auto_off`: the operator's kill switch (`upstream_auto_set {enabled: false}`) stops every
+        automatic step while the mode stays `auto` — an agent told "it advances on its own" would
+        wait for an advance that never comes. The text is unchanged while the switch is on."""
         if mode == "off":
             return cls._STOPPED_INSTRUCTION
         return ("Do NOT pause: on this run a propose/check/advance asked while the engine runs is QUEUED "
                 "for it and served between turns (status 'queued'; read live_queue and history for the "
                 "result). "
-                + ("It also checks each proposal against the current base once and advances each whose "
+                + ("The operator switched its automatic steps OFF (upstream_auto_set): it neither checks "
+                   "nor advances proposals on its own until they switch it back on, so check and advance "
+                   "explicitly. " if mode == "auto" and auto_off else
+                   "It also checks each proposal against the current base once and advances each whose "
                    "measured gate passed, on its own. " if mode == "auto" else
                    "Inspect the measured gate and advance explicitly. ")
                 + "A stopped run takes the same actions directly.")
@@ -121,25 +164,39 @@ class UpstreamLane:
         """QUEUE the operation for a LIVE engine that serves the lane (doc 73 §2.5,
         `engine/upstream_serve.py`), or None to take the stopped-engine path.
 
-        None — and so today's answers, byte for byte — when the task declares no upstream, when
-        the run resolves `upstream_mode` to `off`, when no engine is alive, and when this action id
-        already has lane rows (its exact ACK, which `_mutation` returns). Otherwise one
-        `lane_op_requested` row carries it — the propose body retained durably first, as the
-        stopped lane does before claiming work — and the receipt says `queued`: the engine appends the
-        lane's own rows and the positional `lane_op_done` between turns, without a pause."""
-        from looplab.engine.upstream_serve import OP_KINDS, resolve_upstream_mode
-        if self.task.upstream is None or resolve_upstream_mode(self.settings, self.task.upstream)[0] == "off":
+        None — and so today's answers, byte for byte — when the task declares no upstream, when no
+        engine is alive, when the lane is SERVED `off` (`served_mode`: a live engine's armed mode
+        wins over the snapshot's), and when this action id already has lane rows (its exact ACK,
+        which `_mutation` returns). Otherwise one `lane_op_requested` row carries it — the propose
+        body retained durably first, as the stopped lane does before claiming work — and the receipt
+        says `queued`: the engine appends the lane's own rows and the positional `lane_op_done`
+        between turns, without a pause. An exact retry of an action the engine already REFUSED on
+        its receipt answers that refusal (`status: refused`), never `queued` again.
+
+        A WRITER BESIDE A LIVE ENGINE, so a declared seam of invariant #1:
+        `events/types.py::LANE_QUEUE_APPENDABLE`, whose splice neutrality
+        `tests/test_lane_queue_appendable.py` proves."""
+        from looplab.engine.upstream_serve import OP_KINDS, armed_row, resolve_upstream_mode, served_mode
+        if self.task.upstream is None:
             return None
         if not isinstance(body.get("action_id"), str) or not re.fullmatch(r"[A-Za-z0-9_.:-]{1,128}", body["action_id"]):
             return None                     # `_mutation` refuses it with its own words
         # A SAVED ANSWER NEEDS NO ENGINE PROBE: an action with lane rows (its ACK, its abandoned claim,
         # a conflicting body) is `_mutation`'s, and asking `engine_alive` first would make a read of a
         # settled action depend on the engine's state.
+        current = self._current(body.get("expected_generation"))
         if any((e.type.startswith("upstream_") or e.type == "base_advanced")
-               and e.data.get("action_id") == body["action_id"]
-               for e in self._current(body.get("expected_generation"))):
+               and e.data.get("action_id") == body["action_id"] for e in current):
+            return None
+        # …and neither does a lane that is `off` whoever serves it: the snapshot resolves `off` and
+        # no engine ever armed another mode, so `_mutation` alone asks whether one is running.
+        armed = armed_row(current)
+        if ((armed is None or armed.data.get("mode") == "off")
+                and resolve_upstream_mode(self.settings, self.task.upstream)[0] == "off"):
             return None
         if not engine_alive(self.rd):
+            return None
+        if served_mode(current, self.settings, self.task.upstream, alive=True)[0] == "off":
             return None
         with interprocess_lock(self.rd / ".upstream.lock", required=True):
             events = self._current(body.get("expected_generation"))
@@ -152,6 +209,9 @@ class UpstreamLane:
                 if queued[-1].data.get("op") != op or queued[-1].data.get("request_hash") != digest(body):
                     raise UpstreamRefusal("upstream_action_conflict", "This action_id is already queued with a different exact body")
                 row = queued[-1]
+                refused = self._queued_refusal(events, row)
+                if refused is not None:
+                    return refused
             else:
                 data = {"op": op, "action_id": body["action_id"], "request_hash": digest(body)}
                 if op == "propose":
@@ -162,13 +222,34 @@ class UpstreamLane:
                                 request_path=self._retain_proposal_request(body, proposal_id))
                 else:
                     data["body"] = dict(body)
+                assert EV_LANE_OP_REQUESTED in LANE_QUEUE_APPENDABLE   # the declared seam (invariant #1)
                 row = EventStore(self.rd / "events.jsonl").append(
-                    "lane_op_requested", data, require_lock=True, require_durable=True)
+                    EV_LANE_OP_REQUESTED, data, require_lock=True, require_durable=True)
         assert op in OP_KINDS
         return {"version": 1, "status": "queued", "event_type": "lane_op_requested", "seq": row.seq,
                 "op": op, "action_id": body["action_id"],
                 **({"proposal_id": row.data["proposal_id"]} if "proposal_id" in row.data else {}),
                 "message": "The live engine serves this operation between turns; read upstream history for its result"}
+
+    @staticmethod
+    def _queued_refusal(events, row):
+        """The receipt of a queued request the engine REFUSED on its `lane_op_done` (the mode was off,
+        the lane refused it at admission, its retained body changed), as this action's answer — or
+        None while it waits or when it was served. A served one has lane rows of its own, which
+        `_mutation` acknowledges; a refused one has none, and answering `queued` again told the
+        caller to wait for a result that will never come (critic 2026-10-08)."""
+        requests = [e.seq for e in events if e.type == EV_LANE_OP_REQUESTED]
+        idx = requests.index(row.seq) if row.seq in requests else None
+        receipt = next((e for e in events if e.type == "lane_op_done" and e.data.get("idx") == idx
+                        and idx is not None), None)
+        if receipt is None or receipt.data.get("outcome") != "refused":
+            return None
+        return {"version": 1, "status": "refused", "event_type": "lane_op_done", "seq": receipt.seq,
+                "op": row.data.get("op"), "action_id": row.data.get("action_id"),
+                "code": str(receipt.data.get("code") or "refused"),
+                **({"proposal_id": row.data["proposal_id"]} if "proposal_id" in row.data else {}),
+                "message": "The live engine refused this queued operation on its receipt; read the code, "
+                           "resolve its cause and use a new action_id"}
 
     def _append(self, kind, payload):
         events = events_for(self.rd)
@@ -198,8 +279,8 @@ class UpstreamLane:
         path = owned_path(self.rd, relative)
         try:
             if path.exists():
-                raw = read_bounded_regular_file(path, 2 * 1024 * 1024 + 1)
-                if raw is None or len(raw) > 2 * 1024 * 1024 or digest(json.loads(raw)) != digest(body):
+                retained = read_retained_json(path)
+                if retained is None or digest(retained) != digest(body):
                     raise ValueError("Retained request differs or is unavailable")
             # A prior write may have become visible without a confirmed parent
             # sync. Re-publish identical values durably before admitting a claim;
@@ -211,18 +292,7 @@ class UpstreamLane:
         return relative
 
     def _validate_shared_patch(self, body, implementation):
-        from looplab.engine.activation import is_config_path
-        patch_paths = set(body["files"]) | set(body["deleted"])
-        shared_patch = set(implementation) | {p for p in patch_paths if not is_config_path(p)}
-        # Use the declaration's portable path identity across separate overlays;
-        # NTFS writes RUNNER.py onto runner.py. Retain exact request spelling.
-        shared_keys = {p.casefold() for p in shared_patch}
-        recipe_keys = {p.casefold() for p in set(body["recipe_files"]) | set(body.get("recipe_deleted", []))}
-        if shared_keys & recipe_keys:
-            raise UpstreamRefusal("upstream_capability_not_absorbed", "The source recipe cannot overwrite the shared implementation")
-        probes = sum((self.task.upstream[k] for k in ("tests", "regressions", "repair_probes")), [])
-        if any(shared_keys & {p.casefold() for p in probe["files"]} for probe in probes):
-            raise UpstreamRefusal("upstream_probe_masks_capability", "Probes cannot replace the shared implementation; exercise the actual old/new base")
+        validate_shared_patch(self.task.upstream, body, implementation)
 
     def _proposal(self, events, proposal_id):
         event = next((e for e in events if e.type == "upstream_proposed" and e.data.get("proposal_id") == proposal_id), None)
@@ -231,8 +301,8 @@ class UpstreamLane:
         p = event.data
         relative = "upstream/proposals/" + p["proposal_id"] + "/manifest.json"
         path = owned_path(self.rd, relative)
-        raw = read_bounded_regular_file(path, 2 * 1024 * 1024 + 1)
-        if raw is None or len(raw) > 2 * 1024 * 1024:
+        raw = read_bounded_regular_file(path, RETAINED_REQUEST_MAX_BYTES + 1)
+        if raw is None or len(raw) > RETAINED_REQUEST_MAX_BYTES:
             raise UpstreamRefusal("upstream_manifest_unavailable", f"Inspect {relative}: restore the original bounded regular proposal manifest before acting")
         try:
             manifest = json.loads(raw)
@@ -308,12 +378,7 @@ class UpstreamLane:
         rows = [r for r in advice if r["node_id"] == node.id and r["hunk_hash"] in body.get("hunk_hashes", [])]
         if not rows or len(rows) != len(set(body.get("hunk_hashes", []))) or any(r["classification"] != "capability" for r in rows):
             raise UpstreamRefusal("upstream_nomination_invalid", "Select current reusable capability hunks; recipes and already promoted hunks cannot advance")
-        patch_paths = set(body["files"]) | set(body["deleted"])
-        nominated_paths = {r["path"] for r in rows}
-        from looplab.engine.activation import is_config_path
-        repair_recipes = {r["path"] for r in rows if r["origin"] == "repair" and r["pending_trigger_nodes"] and is_config_path(r["path"])}
-        implementation = (nominated_paths - repair_recipes) | {p for p in patch_paths
-            if not is_config_path(p) and p != body["documentation_path"]}
+        implementation, repair_recipes, patch_paths = absorbed_implementation(rows, body)
         # Generalization can add helpers absent from the nominated source.
         # Neither a probe nor the source recipe may replace those shared bytes;
         # naming code as documentation does not exempt it from this boundary.

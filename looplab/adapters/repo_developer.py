@@ -2570,13 +2570,18 @@ class LLMRepoDeveloper:
 
         The promotion summaries are model-written text reaching the build/repair prompts outside a
         tool result, so the evidence envelope fences them (`core/evidence.py`) — only while this
-        Developer's `evidence_envelope` is on; off, the call below is the historical one."""
+        Developer's `evidence_envelope` is on; off, the call below is the historical one.
+
+        Only the promotions IN the base this call authors on (`authored_base`, which the live lane
+        rebinds — a repair to its lifecycle's base) are stated (`upstream_board.py::promotions_in`)."""
         if not getattr(self, "_upstream_board", False):
             return ""
         from looplab.core.upstream_board import developer_base_note
+        base = getattr(self, "authored_base", None)
         if getattr(self, "_evidence_envelope", False):
-            return developer_base_note(getattr(self, "_memory_state", None), label=EVIDENCE_LABEL)
-        return developer_base_note(getattr(self, "_memory_state", None))
+            return developer_base_note(getattr(self, "_memory_state", None), label=EVIDENCE_LABEL,
+                                       base=base)
+        return developer_base_note(getattr(self, "_memory_state", None), base=base)
 
     def _time_budget_note(self) -> str:
         """The operator's per-eval WALL-CLOCK budget, for the role that actually spends it (docs/29 F1h).

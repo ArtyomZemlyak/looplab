@@ -88,7 +88,7 @@ def test_junk_rows_are_skipped_never_raised_on():
     board = upstream_board(st)
     assert _status(board, "x") == "check_failed"
     assert board["advanced"] == [{"proposal_id": "y", "seq": 3, "source_node_id": None,
-                                  "summary": "", "flag": None}]
+                                  "summary": "", "flag": None, "digest": None}]
 
 
 def test_the_projection_reads_the_real_fold():
@@ -225,3 +225,71 @@ def test_a_promotion_out_of_the_history_window_is_still_read_from_the_base():
     assert [a["proposal_id"] for a in board["advanced"]] == ["won"]
     assert "flag `fast_attn`" in developer_base_note(st)
     assert _status(board, "old") == "proposed", "proposed AFTER the promotion: still in flight"
+
+
+# ------------------------------------------------------------------------------- critic 2026-10-08
+def _advance(seq, pid, digest, name):
+    return Event(seq=seq, ts=0.0, type="base_advanced", data={
+        "proposal_id": pid, "source_node_id": 4, "summary": f"cap {name}",
+        "flag": {"name": name, "default": "0", "enabled": "1"}, "selector": {"digest": digest}})
+
+
+def test_every_promotion_survives_the_history_window(tmp_path):
+    """The fold kept the last 200 upstream rows and every per-probe charge counts, so all promotions
+    but the newest fell out of the Developer's note and `looplab inspect` on a long-lived run."""
+    rows = [Event(seq=0, ts=0.0, type="run_started", data={"run_id": "r", "direction": "min"})]
+    for i, name in enumerate(("f1", "f2", "f3")):
+        rows.append(_advance(len(rows), f"p{i}", f"{i}" * 64, name))
+    rows += [Event(seq=len(rows) + k, ts=0.0, type="upstream_execution",
+                   data={"proposal_id": "z", "execution": {"seconds": 0.0}}) for k in range(450)]
+    st = fold(rows)
+    assert len(st.upstream_history) == 203, "the window plus the promotions kept out of its trim"
+    assert [a["proposal_id"] for a in upstream_board(st)["advanced"]] == ["p0", "p1", "p2"]
+    note = developer_base_note(st)
+    assert all(f"`{n}`" in note for n in ("f1", "f2", "f3"))
+
+
+def test_the_note_states_only_the_promotions_in_the_base_the_call_authors_on():
+    rows = [Event(seq=0, ts=0.0, type="run_started", data={"run_id": "r", "direction": "min"}),
+            _advance(1, "p1", "1" * 64, "f1"), _advance(2, "p2", "2" * 64, "f2")]
+    st = fold(rows)
+    both = developer_base_note(st)
+    assert "`f1`" in both and "`f2`" in both, "no base known: the historical reading"
+    first = developer_base_note(st, base={"digest": "1" * 64})
+    assert "`f1`" in first and "`f2`" not in first, "a lifecycle seeded on the first promotion"
+    assert developer_base_note(st, base={"digest": "0" * 64}) == "", (
+        "a base no promotion produced (the launch seed) has none of them")
+    dev = _developer(st, envelope=False)
+    dev.authored_base = {"digest": "1" * 64}
+    assert dev._upstream_base_note() == first, "the Developer asks with the base it authors on"
+
+
+def test_an_abandoned_check_claim_leaves_the_proposal_in_flight():
+    st = _history(
+        {"type": "upstream_proposed", "proposal_id": "p", "source_node_id": 1},
+        {"type": "upstream_gate_started", "proposal_id": "p"},
+        {"type": "upstream_gate_abandoned", "proposal_id": "p"},
+        {"type": "upstream_proposal_started", "proposal_id": "q"},
+        {"type": "upstream_gate_abandoned", "proposal_id": "q"})
+    board = upstream_board(st)
+    assert _status(board, "p") == "check_abandoned", "the proposal stands; it may be checked again"
+    assert _status(board, "q") == "abandoned", "an abandoned PROPOSAL claim never became one"
+    assert [p["proposal_id"] for p in board["in_flight"]] == ["p"]
+
+
+def test_superseded_reads_the_base_a_proposal_extends_when_the_window_holds_it():
+    st = _history(
+        {"type": "base_advanced", "proposal_id": "won", "selector": {"digest": "b" * 64}},
+        {"type": "upstream_proposed", "proposal_id": "new", "old_selector": {"digest": "b" * 64}},
+        {"type": "upstream_proposed", "proposal_id": "stale", "old_selector": {"digest": "a" * 64}})
+    st.upstream_base = {"seq": 0, "type": "base_advanced", "proposal_id": "won",
+                        "selector": {"digest": "b" * 64}}
+    board = upstream_board(st)
+    assert _status(board, "new") == "proposed" and _status(board, "stale") == "superseded"
+
+
+def test_inspect_never_prints_a_missing_source_as_none():
+    st = _history({"type": "base_advanced", "proposal_id": "a", "selector": {"digest": "ab" * 32}})
+    st.upstream_base = {"seq": 0, "proposal_id": "a", "selector": {"digest": "ab" * 32}}
+    line = board_lines(st)[0]
+    assert "#None" not in line and "from ?" in line

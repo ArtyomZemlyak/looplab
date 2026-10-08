@@ -17,7 +17,10 @@ const authoredRow = row => row && typeof row === 'object' && typeof row.outcome 
 const heldRow = row => row && typeof row === 'object' && typeof row.op === 'string'
   && typeof row.reason === 'string' && Number.isSafeInteger(row.seq)
 
-export function upstreamLiveSummary(live) {
+// `engineRunning` is the payload's present-time `engine_running` (the projection itself caches with
+// the log, so it cannot know): `false` with an engine-armed mode means nobody serves the lane NOW —
+// the mode shown is what the last engine served, not a promise (`idle`).
+export function upstreamLiveSummary(live, engineRunning) {
   if (!live || typeof live !== 'object' || !MODES.has(live.mode)) return null
   const queue = live.queue && typeof live.queue === 'object' ? live.queue : {}
   const rows = (Array.isArray(queue.rows) ? queue.rows : []).filter(queueRow)
@@ -28,6 +31,7 @@ export function upstreamLiveSummary(live) {
     // `configured`: no engine has armed the lane yet, so this is what the settings SAY, not what
     // an engine serves (`upstream_serve.py::upstream_live_view`).
     configured: live.configured === true,
+    idle: live.configured !== true && engineRunning === false,
     author: live.author === true,
     pending: count(queue.pending, rows.filter(row => row.status === 'pending').length),
     total: count(queue.total, rows.length),
@@ -51,14 +55,26 @@ const LABELS = {
     auto: 'auto — the engine checks and promotes on its own',
   },
   status: { pending: 'waiting', succeeded: 'succeeded', failed: 'check did not pass', refused: 'refused by the lane', settled: 'settled' },
+  // A `failed` receipt means what its OPERATION failed at: only a check has a gate to not pass.
+  failed: { propose: 'proposal failed', check: 'check did not pass', advance: 'advance failed' },
   outcome: {
     drafted: 'drafted → proposal', declined: 'declined by its critic', skipped: 'not drafted', failed: 'drafting failed',
     rejected: 'the draft could not be absorbed', refused: 'refused by the lane',
   },
   track: { repair: 'fix from a repair', champion: 'champion' },
   held: { advance: 'advance held at the hourly cap', author: 'author stopped at its budget' },
+  // `lane_held {reason: "refused:<code>"}`: the lane refused an automatic step for a reason about the
+  // proposal itself, so the engine never asks it again (`upstream_serve.py::refused_for_good`).
+  refused: { check: 'automatic check refused by the lane, not asked again', advance: 'automatic advance refused by the lane, not asked again' },
 }
 
-export function upstreamLiveLabel(kind, value) {
+export function upstreamLiveLabel(kind, value, op) {
+  if (kind === 'status' && value === 'failed' && typeof op === 'string' && LABELS.failed[op]) return LABELS.failed[op]
   return LABELS[kind]?.[value] ?? 'unknown'
+}
+
+// One held row's label: a cap that held the step back, or a refusal that retired it.
+export function upstreamHeldLabel(row) {
+  const refused = typeof row?.reason === 'string' && row.reason.startsWith('refused:')
+  return upstreamLiveLabel(refused ? 'refused' : 'held', row?.op)
 }

@@ -30,8 +30,10 @@ _STATUS_BY_TYPE = {
     "base_advanced": "advanced",
 }
 # What still waits on someone: a proposal being written, one awaiting its check, one being checked,
-# and one whose check PASSED and awaits the explicit `advance`.
-IN_FLIGHT_STATUSES = frozenset({"proposing", "proposed", "checking", "passed"})
+# one whose check PASSED and awaits the explicit `advance`, and one whose check CLAIM the operator
+# abandoned — the proposal itself stands and may be checked again under a new action id
+# (`UpstreamLane.abandon` grants nothing and refuses nothing about it), so it is not settled.
+IN_FLIGHT_STATUSES = frozenset({"proposing", "proposed", "checking", "passed", "check_abandoned"})
 
 DEVELOPER_NOTE_MAX_PROMOTIONS = 5
 _SUMMARY_CAP = 300
@@ -43,6 +45,12 @@ def _text(value, cap: int) -> str:
 
 def _node_id(value) -> Optional[int]:
     return value if type(value) is int and value >= 0 else None
+
+
+def _selector_digest(value) -> Optional[str]:
+    """The full digest of a seed selector — the base an advance PRODUCED — or None."""
+    digest = value.get("digest") if isinstance(value, dict) else None
+    return digest if isinstance(digest, str) and digest else None
 
 
 def _flag(value) -> Optional[dict]:
@@ -61,7 +69,10 @@ def upstream_board(state) -> dict:
     `proposals` holds one row per proposal id in first-seen order — its `status`, the source
     experiment, summary and flag it was proposed with. A proposal whose base was superseded by a
     LATER promotion of another proposal is `superseded`, not in flight: its check (or its advance)
-    would be refused against the base it no longer extends."""
+    would be refused against the base it no longer extends. Which base it extends is its own
+    `upstream_proposed.old_selector` when the window still holds that row — the first SURVIVING row
+    of a proposal whose start was trimmed is no measure of when it was made — else its first row's
+    position against the last promotion."""
     history = getattr(state, "upstream_history", None) or []
     rows: dict[str, dict] = {}
     advanced: list[dict] = []
@@ -76,6 +87,11 @@ def upstream_board(state) -> dict:
         entry = rows.setdefault(pid, {"proposal_id": pid[:80], "status": "proposing",
                                       "source_node_id": None, "summary": "", "flag": None,
                                       "seq": row.get("seq")})
+        if kind == "upstream_proposed":
+            extends = row.get("old_selector")
+            extends = extends.get("digest") if isinstance(extends, dict) else None
+            if isinstance(extends, str) and extends:
+                entry["_extends"] = extends
         if kind == "upstream_gate_finished":
             result = row.get("result")
             passed = isinstance(result, dict) and result.get("passed") is True
@@ -83,6 +99,10 @@ def upstream_board(state) -> dict:
             code = result.get("code") if isinstance(result, dict) else None
             if not passed and isinstance(code, str):
                 entry["code"] = code[:80]
+        elif kind == "upstream_gate_abandoned" and entry["status"] == "checking":
+            # The CHECK's claim was abandoned: the proposal stands, re-checkable (`IN_FLIGHT_STATUSES`).
+            # An abandoned PROPOSAL claim never became a proposal — that one is settled.
+            entry["status"] = "check_abandoned"
         else:
             entry["status"] = _STATUS_BY_TYPE[kind]
             if kind == "upstream_proposal_failed" and isinstance(row.get("code"), str):
@@ -97,7 +117,8 @@ def upstream_board(state) -> dict:
             advanced.append({"proposal_id": pid[:80], "seq": row.get("seq"),
                              "source_node_id": _node_id(row.get("source_node_id")),
                              "summary": _text(row.get("summary"), _SUMMARY_CAP),
-                             "flag": _flag(row.get("flag"))})
+                             "flag": _flag(row.get("flag")),
+                             "digest": _selector_digest(row.get("selector"))})
     base = getattr(state, "upstream_base", None)
     # THE FOLD KEEPS ONLY THE LAST 200 upstream rows (`replay_journals.py::_on_upstream`), and every
     # per-probe `upstream_execution` counts, so a promotion can fall out of the window while the base
@@ -108,12 +129,20 @@ def upstream_board(state) -> dict:
         advanced.append({"proposal_id": pid[:80] if isinstance(pid, str) else "",
                          "seq": base.get("seq"), "source_node_id": _node_id(base.get("source_node_id")),
                          "summary": _text(base.get("summary"), _SUMMARY_CAP),
-                         "flag": _flag(base.get("flag"))})
+                         "flag": _flag(base.get("flag")),
+                         "digest": _selector_digest(base.get("selector"))})
         advanced.sort(key=lambda a: a["seq"] if type(a["seq"]) is int else -1)
     last_promotion = max((a["seq"] for a in advanced if type(a["seq"]) is int), default=None)
+    current = _selector_digest(base.get("selector")) if isinstance(base, dict) else None
     for entry in rows.values():
-        if (entry["status"] in IN_FLIGHT_STATUSES and last_promotion is not None
-                and type(entry.get("seq")) is int and entry["seq"] < last_promotion):
+        extends = entry.pop("_extends", None)
+        if entry["status"] not in IN_FLIGHT_STATUSES or last_promotion is None:
+            continue
+        if extends is not None and isinstance(current, str):
+            stale = extends != current
+        else:
+            stale = type(entry.get("seq")) is int and entry["seq"] < last_promotion
+        if stale:
             entry["status"] = "superseded"
     base_view = None
     if isinstance(base, dict):
@@ -134,10 +163,26 @@ def _flag_phrase(flag: Optional[dict]) -> str:
     return f"flag `{flag['name']}` (default `{flag['default']}`, enabled `{flag['enabled']}`)"
 
 
-def developer_base_note(state, *, label: str = "") -> str:
+def promotions_in(advanced: list, base) -> list:
+    """The promotions a Developer authoring on `base` (a seed selector) has in its code: every one up
+    to and including the advance that PRODUCED that base. `base` None (not known) keeps them all —
+    the historical reading; a base no promotion of this run produced (the run's initial seed, or a
+    lifecycle pinned before the first advance) has none of them."""
+    digest = base.get("digest") if isinstance(base, dict) else None
+    if not isinstance(digest, str) or not digest:
+        return advanced
+    at = next((i for i, a in enumerate(advanced) if a.get("digest") == digest), None)
+    return [] if at is None else advanced[:at + 1]
+
+
+def developer_base_note(state, *, label: str = "", base=None) -> str:
     """The Developer's paragraph, or "" when nothing was ever promoted (every run without the
     upstream lane renders its historical bytes). States only PROMOTIONS — what is in the code a
     lifecycle is seeded with — never a proposal still being checked, which is not in that code.
+
+    `base` is the seed selector the call authors on (`LLMRepoDeveloper.authored_base`): only the
+    promotions IN it are stated (`promotions_in`) — a repair pinned to a lifecycle seeded before
+    an advance must not be told to switch on a flag its code does not have (critic 2026-10-08).
 
     `label` is the untrusted-evidence envelope (`core/evidence.py`). Each promotion line carries a
     MODEL-WRITTEN summary (and flag values) that reaches the build and repair prompts outside any
@@ -146,7 +191,7 @@ def developer_base_note(state, *, label: str = "") -> str:
     default "" the paragraph is byte-identical to the unfenced one (a prompt is a contract). The
     caller reads the switch (`adapters/repo_developer.py::LLMRepoDeveloper._upstream_base_note`,
     the Developer's `evidence_envelope`, itself `envelope_enabled(settings)`)."""
-    promotions = upstream_board(state)["advanced"][-DEVELOPER_NOTE_MAX_PROMOTIONS:]
+    promotions = promotions_in(upstream_board(state)["advanced"], base)[-DEVELOPER_NOTE_MAX_PROMOTIONS:]
     if not promotions:
         return ""
     lines = []
@@ -171,8 +216,8 @@ def board_lines(state) -> list[str]:
     out = []
     base = board["base"]
     if base:
-        out.append(f"upstream base: {base['digest'] or '?'} from #{base['source_node_id']}"
-                   f" — {base['summary'][:120]}")
+        src = f"#{base['source_node_id']}" if base["source_node_id"] is not None else "?"
+        out.append(f"upstream base: {base['digest'] or '?'} from {src} — {base['summary'][:120]}")
     else:
         out.append("upstream base: the task's seed (nothing promoted)")
     for p in board["in_flight"]:

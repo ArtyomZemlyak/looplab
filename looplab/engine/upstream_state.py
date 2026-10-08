@@ -29,6 +29,25 @@ def digest(value):
                                    ensure_ascii=False, allow_nan=False).encode()).hexdigest()
 
 
+# THE RETAINED REQUEST BOUND: a proposal body the lane keeps on disk (the stopped lane's
+# `upstream/requests/<id>/request.json`, a queued propose's copy, the automated author's retained draft)
+# is at most this many bytes — the same bound `upstream_spec.py::normalize_request` admits a body by.
+RETAINED_REQUEST_MAX_BYTES = 2 * 1024 * 1024
+
+
+def read_retained_json(path):
+    """THE ONE READER of a retained upstream request body: the parsed JSON of a bounded regular file
+    of at most `RETAINED_REQUEST_MAX_BYTES`, or None when it is missing, linked, oversized or not
+    JSON. The caller decides what a None or a changed digest refuses with."""
+    raw = read_bounded_regular_file(path, RETAINED_REQUEST_MAX_BYTES + 1)
+    if raw is None or len(raw) > RETAINED_REQUEST_MAX_BYTES:
+        return None
+    try:
+        return json.loads(raw)
+    except (ValueError, RecursionError):
+        return None
+
+
 def events_for(rd):
     path = Path(rd) / "events.jsonl"
     raw = read_bounded_regular_file(path, 32 * 1024 * 1024 + 1)
@@ -162,12 +181,17 @@ def repair_probe_covers(row, repair_probes) -> bool:
                    for path, tokens in row["trigger_tokens"].items()) for probe in repair_probes)
 
 
-def upstream_candidates(rd, task, events=None, *, source_node_id=None, offset=0, limit=200, hunk_hashes=None):
-    """Paged advice; admission inspects the chosen source/hunks beyond any UI page."""
+def upstream_candidates(rd, task, events=None, *, source_node_id=None, offset=0, limit=200, hunk_hashes=None,
+                        state=None, archive=None):
+    """Paged advice; admission inspects the chosen source/hunks beyond any UI page.
+
+    `state` is the caller's fold of exactly `events` and `archive` the source's archive it already
+    verified (`source_node_id` given): the automated author holds both, and refolding the log and
+    re-hashing the archive per source per turn was the cost (`upstream_author.py::author_next`)."""
     from looplab.engine.activation import CHANGE_CAPABILITY, is_config_path
     from looplab.engine.seed_archive import verified_seed_archive
     events = events if events is not None else events_for(rd)
-    state, rows, skipped = fold(events), [], 0
+    state, rows, skipped = (state if state is not None else fold(events)), [], 0
     def page(more):
         return {"rows": rows, "bounded": more, "limit": limit, "offset": offset,
                 "next_offset": offset + limit if more else None, "source_node_id": source_node_id}
@@ -180,11 +204,12 @@ def upstream_candidates(rd, task, events=None, *, source_node_id=None, offset=0,
             receipt = _source_receipt(node, events_by_seq)
         except UpstreamRefusal:
             continue  # an ineligible source grants no nomination; reads stay diagnostic
-        archive = verified_seed_archive(rd, receipt)
-        if archive is None:
+        verified = (archive if archive is not None and source_node_id is not None
+                    else verified_seed_archive(rd, receipt))
+        if verified is None:
             continue
         for name in sorted(set(node.files) | set(node.deleted)):
-            raw = read_bounded_regular_file(archive / name, 1024 * 1024 + 1)
+            raw = read_bounded_regular_file(verified / name, 1024 * 1024 + 1)
             if raw is not None and len(raw) > 1024 * 1024:
                 continue  # bounded advice; the full archive remains authoritative
             try:
