@@ -1,12 +1,13 @@
 
-import { uiText, useUILanguage } from './uiLanguage.js'
+import { effectiveUILanguage, uiMessage, uiText, useUILanguage } from './uiLanguage.js'
 import React, { useEffect, useMemo, useRef, useState } from 'react'
 
 import PanelShell from './PanelShell.jsx'
 import { CONTROL, submitCommand } from './api.js'
 import {
-  INJECT_BLOCKED_REASONS, INJECT_RATIONALE_MAX, buildInjectPayload, injectCandidates,
-  injectQuestions, injectSubmitDecision, parseInjectParams, suggestedInjectQuestion,
+  INJECT_RATIONALE_MAX, buildInjectPayload, injectBlockedMessage, injectCandidates,
+  injectQuestions, injectSubmitDecision, parseInjectParams, staleInjectSelections,
+  suggestedInjectQuestion,
 } from './injectNodeModel.js'
 
 // Add an experiment or an ARTIFACT node to the run by hand (doc 73 §1.4) — the React half of
@@ -38,9 +39,14 @@ export default function InjectNodePanel({ state, runId, readOnly = false, onToas
   const params = parseInjectParams(paramsText)
   const draft = { rationale, kind, uses, parentId, params, questionId }
   const decision = injectSubmitDecision({ state, draft, submitting })
-  const blocked = readOnly ? 'This view cannot steer the run.'
-    : (decision.ok ? null : (decision.code === 'bad_params' ? params.error
-      : INJECT_BLOCKED_REASONS[decision.code]))
+  // What the draft still names that the run no longer offers, shown with its own clear control.
+  const stale = staleInjectSelections(state, draft)
+  // A catalogue key and its values, rendered here (`injectBlockedMessage`), so the Russian entry is
+  // found: an English sentence with the number already spliced in matched nothing.
+  const blockedMessage = decision.ok ? null : injectBlockedMessage(decision.code, {
+    params, locale: effectiveUILanguage() === 'ru' ? 'ru-RU' : 'en-US' })
+  const blocked = readOnly ? uiText('This view cannot steer the run.')
+    : (blockedMessage ? uiMessage(blockedMessage.key, blockedMessage.values) : null)
 
   const toggleUse = id => setUses(current => (current.includes(id)
     ? current.filter(x => x !== id) : [...current, id]))
@@ -54,10 +60,10 @@ export default function InjectNodePanel({ state, runId, readOnly = false, onToas
     const what = kind === 'artifact' ? uiText('Artifact node') : uiText('Experiment')
     const feedback = await submitCommand(
       CONTROL.injectPayload(runId, payload, { waitMs: INJECT_COMMAND_WAIT_MS }), {
-        success: `${what} queued — the engine builds it at its next turn.`,
-        executing: `${what} submitted — the engine is creating it.`,
+        success: uiMessage('{0} queued — the engine builds it at its next turn.', [what]),
+        executing: uiMessage('{0} submitted — the engine is creating it.', [what]),
         requested: what,
-        failure: `${what} refused`,
+        failure: uiMessage('{0} refused', [what]),
       }, onToast)
     if (!aliveRef.current) return
     setSubmitting(false)
@@ -105,6 +111,8 @@ export default function InjectNodePanel({ state, runId, readOnly = false, onToas
           <option value="">{uiText('None — start from the task code')}</option>
           {candidates.parents.map(p => <option key={p.id} value={String(p.id)}>
             #{p.id}{p.label ? ` — ${p.label}` : ''}</option>)}
+          {stale.parentId != null && <option value={String(stale.parentId)}>
+            {uiMessage('#{0} — no longer an evaluated experiment', [stale.parentId])}</option>}
         </select>
       </div>
     </div>
@@ -125,12 +133,16 @@ export default function InjectNodePanel({ state, runId, readOnly = false, onToas
     <div className="sf-field">
       <span className="sf-label">{uiText('Uses artifacts')}</span>
       <div className="sf-input">
-        {candidates.artifacts.length === 0
+        {candidates.artifacts.length === 0 && stale.uses.length === 0
           ? <span className="muted">{uiText('No artifact node has been produced in this run yet.')}</span>
           : candidates.artifacts.map(a => <label key={a.id} style={{ display: 'block' }}>
             <input type="checkbox" checked={uses.includes(a.id)} disabled={submitting}
               onChange={() => toggleUse(a.id)} /> #{a.id}{a.label ? ` — ${a.label}` : ''}
           </label>)}
+        {stale.uses.map(id => <label key={`stale-${id}`} style={{ display: 'block' }}>
+          <input type="checkbox" checked disabled={submitting} onChange={() => toggleUse(id)} />
+          {' '}{uiMessage('#{0} — no longer produced: untick it to send the rest', [id])}
+        </label>)}
       </div>
     </div>
     <div className="sf-field">
@@ -140,17 +152,19 @@ export default function InjectNodePanel({ state, runId, readOnly = false, onToas
           disabled={submitting} aria-invalid={params.ok ? undefined : true}
           onChange={event => setParamsText(event.target.value)} />
       </div>
-      {!params.ok && <div className="muted" role="alert">{uiText(params.error)}</div>}
+      {!params.ok && <div className="muted" role="alert">
+        {params.message ? uiMessage(params.message.key, params.message.values) : uiText(params.error)}
+      </div>}
     </div>
     {outcome && <div className="notice" role={outcome.kind === 'error' ? 'alert' : 'status'}>
       {uiText(outcome.text)}</div>}
     <div className="row" style={{ display: 'flex', gap: 8, marginTop: 12 }}>
       <button type="button" className="btn primary" disabled={!!blocked || submitting}
-        title={blocked ? uiText(blocked) : undefined} onClick={submit}>
+        title={blocked || undefined} onClick={submit}>
         {submitting ? uiText('Adding…') : uiText('Add to the run')}
       </button>
       <button type="button" className="btn ghost" onClick={onClose}>{uiText('Close')}</button>
-      {blocked && !submitting && <span className="muted" role="status">{uiText(blocked)}</span>}
+      {blocked && !submitting && <span className="muted" role="status">{blocked}</span>}
     </div>
   </PanelShell>
 }

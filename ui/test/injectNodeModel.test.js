@@ -3,9 +3,11 @@
 // operator saw, `uses` only naming produced artifacts.
 import test from 'node:test'
 import assert from 'node:assert/strict'
+import { readFileSync } from 'node:fs'
 
 import {
-  buildInjectPayload, injectCandidates, injectQuestions, injectSubmitDecision, parseInjectParams,
+  INJECT_BLOCKED_REASONS, buildInjectPayload, injectBlockedMessage, injectCandidates,
+  injectQuestions, injectSubmitDecision, parseInjectParams, staleInjectSelections,
   suggestedInjectQuestion,
 } from '../src/injectNodeModel.js'
 import { RUN_ROUTE_PANELS, REVIEW_SAFE_PANEL_NAMES } from '../src/runRouteState.js'
@@ -95,4 +97,42 @@ test('an inject may name the question it answers; the parent\'s question is the 
   assert.ok(!('parent_card_id' in none.idea), 'naming none sends no key — the historical shape')
   assert.equal(injectSubmitDecision({ state: withBoard, draft: draft({ questionId: 'q-old' }) }).code,
     'unknown_question')
+})
+
+test('a ticked artifact that stops being produced stays visible and can be unticked', () => {
+  // Critic 2026-10-08: the form kept refusing `unknown_artifact` over a box that had vanished from
+  // the list, with no control left to clear it. The stale choice is SHOWN, never cleared for them.
+  const later = { nodes: { ...state.nodes,
+    0: { ...state.nodes[0], status: 'pending', attempt: 1 },          // reset: being re-produced
+    1: { ...state.nodes[1], tombstoned: true } } }                     // the parent was deleted
+  const chosen = draft({ uses: [0], parentId: 1 })
+  assert.equal(injectSubmitDecision({ state: later, draft: chosen }).code, 'unknown_parent')
+  assert.deepEqual(staleInjectSelections(later, chosen), { uses: [0], parentId: 1 })
+  assert.deepEqual(staleInjectSelections(state, chosen), { uses: [], parentId: null })
+  const unticked = draft({ uses: [], parentId: null })
+  assert.deepEqual(staleInjectSelections(later, unticked), { uses: [], parentId: null })
+  assert.equal(injectSubmitDecision({ state: later, draft: unticked }).ok, true)
+})
+
+test('every refusal the panel shows is a catalogue key with its values, never a spliced sentence', () => {
+  const catalogue = JSON.parse(readFileSync(new URL('../src/locales/ru.json', import.meta.url))).messages
+  for (const code of Object.keys(INJECT_BLOCKED_REASONS)) {
+    const m = injectBlockedMessage(code)
+    assert.ok(catalogue[m.key], `no Russian entry for ${code}: ${m.key}`)
+  }
+  assert.deepEqual(injectBlockedMessage('too_long', { locale: 'en-US' }).values, ['20,000'])
+  assert.equal(injectBlockedMessage('too_many_uses').text, 'An experiment may use at most 32 artifacts.')
+  for (const text of ['{"lr": "fast"}', '[1]', '{oops']) {
+    const parsed = parseInjectParams(text)
+    assert.ok(catalogue[parsed.message.key], parsed.message.key)
+    assert.equal(injectBlockedMessage('bad_params', { params: parsed }), parsed.message)
+  }
+  assert.equal(parseInjectParams('{"lr": "fast"}').error, 'Parameter "lr" must be a number.')
+  for (const key of ['{0} queued — the engine builds it at its next turn.',
+    '{0} submitted — the engine is creating it.', '{0} refused',
+    '#{0} — no longer an evaluated experiment', '#{0} — no longer produced: untick it to send the rest']) {
+    assert.ok(catalogue[key], key)
+  }
+  const panel = readFileSync(new URL('../src/InjectNodePanel.jsx', import.meta.url), 'utf8')
+  assert.ok(!/`\$\{what\}/.test(panel), 'no interpolated copy reaches submitCommand')
 })
