@@ -1140,6 +1140,14 @@ EV_UPSTREAM_GATE_FINISHED = "upstream_gate_finished"
 EV_UPSTREAM_GATE_ABANDONED = "upstream_gate_abandoned"
 EV_BASE_ADVANCED = "base_advanced"
 EV_NODE_OVERLAY_REBASED = "node_overlay_rebased"
+# THE LIVE LANE'S QUEUE (doc 73 §2.5, `engine/upstream_serve.py`): an upstream propose/check/advance
+# asked of a run whose engine is ALIVE and whose `upstream_mode` serves it is queued by the lane
+# (`engine/upstream.py::UpstreamLane._queue_if_live`, the same writer and lock as every upstream row)
+# and served by that engine between turns; `lane_op_done {idx}` is the positional receipt
+# (`_advance_request_cursor`). Deliberately NOT `upstream_`-prefixed: the lane's ACK and history
+# readers key on that prefix and an action id, and a queue entry is neither a claim nor a verdict.
+EV_LANE_OP_REQUESTED = "lane_op_requested"
+EV_LANE_OP_DONE = "lane_op_done"
 
 ALL_EVENT_TYPES: frozenset[str] = frozenset(
     v for k, v in globals().items() if k.startswith("EV_") and isinstance(v, str)
@@ -1361,7 +1369,9 @@ EVENT_PAYLOAD_KEYS: dict[str, PayloadContract] = {
     "upstream_execution": PayloadContract("Separate charged gate execution, never a node score.", required=('action_id', 'execution', 'proposal_id', 'request_hash'), stored_whole=True),
     "upstream_gate_finished": PayloadContract("Measured gate verdict bound to actual source and inputs.", required=('action_id', 'evidence_token', 'proposal_id', 'request_hash', 'result'), stored_whole=True),
     "upstream_gate_abandoned": PayloadContract("Operator recovery of an interrupted claim; grants no pass.", required=('action_id', 'claim_action_id', 'proposal_id', 'reason', 'request_hash'), stored_whole=True),
-    "base_advanced": PayloadContract("Explicit stopped-engine CAS: only future lifecycles adopt the verified base.", required=('action_id', 'evidence_token', 'flag', 'from_revision', 'gate_seq', 'hunk_hashes', 'proposal_id', 'request_hash', 'selector', 'source_node_id', 'summary'), stored_whole=True),
+    "base_advanced": PayloadContract("Explicit CAS — the stopped lane's, or the live engine's (`in_engine`): only future lifecycles adopt the verified base.", required=('action_id', 'evidence_token', 'flag', 'from_revision', 'gate_seq', 'hunk_hashes', 'proposal_id', 'request_hash', 'selector', 'source_node_id', 'summary'), optional=('in_engine',), stored_whole=True),
+    "lane_op_requested": PayloadContract("An upstream propose/check/advance queued for the LIVE engine that serves the lane.", required=('action_id', 'op', 'request_hash'), optional=('body', 'proposal_id', 'request_path')),
+    "lane_op_done": PayloadContract("The live engine settled a queued upstream operation; the lane's own rows carry what it did.", required=('idx', 'op', 'outcome'), optional=('action_id', 'code', 'seq')),
     "ablate": PayloadContract(
         "One ablation of the champion's code: which blocks were removed and what each removal cost the metric.",
         required=("generation", "impacts", "parent_id"),
@@ -2075,7 +2085,7 @@ EVENT_PAYLOAD_KEYS: dict[str, PayloadContract] = {
         "A node exists: its idea, the code and files the Developer wrote, and its parents.",
         required=("code", "files", "idea", "node_id", "operator", "parent_ids"),
         optional=(
-            "attempt", "card_build_generation", "deleted", "eval_start_boundary",
+            "attempt", "base_selector", "card_build_generation", "deleted", "eval_start_boundary",
             "footprint_finalized", "forked_from", "generation", "materialize_aborted_intent",
             "model_arm", "node_kind", "origin", "parent_generations", "research_origin", "seed",
             "simplified", "speculative", "uses"

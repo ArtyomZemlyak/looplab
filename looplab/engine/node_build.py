@@ -724,6 +724,14 @@ class NodeBuildMixin:
                      ("node_kind", node_kind), ("uses", uses)):
             if v is not _OMIT:
                 data[k] = v
+        # doc 73 §2.5: the base this node's overlay was AUTHORED on, while this engine serves the
+        # upstream lane live — an advance it makes does not rebind the Developers built at launch,
+        # so `upstream_workspace.py::materialization_plan` must merge from this base, not from the
+        # one active when the row landed. None (and so the historical shape) otherwise.
+        from looplab.engine.upstream_serve import base_stamp
+        stamp = base_stamp(self)
+        if stamp is not None:
+            data["base_selector"] = dict(stamp)
         append_kwargs = (
             {} if expected_last_seq is _OMIT
             else {"expected_last_seq": expected_last_seq}

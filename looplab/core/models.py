@@ -2942,6 +2942,11 @@ class RunState(BaseModel):
     # each, served in order by a live engine; `tracks_done` is the cursor `track_done` advances.
     track_requests: list[dict] = Field(default_factory=list)
     tracks_done: int = 0
+    # Queued `lane_op_requested` upstream operations (doc 73 §2.5, `engine/upstream_serve.py`):
+    # `{op, action_id, request_hash, body?|proposal_id+request_path}` each, served in order by a live
+    # engine whose `upstream_mode` serves the lane; `lane_ops_done` is the cursor `lane_op_done` moves.
+    lane_op_requests: list[dict] = Field(default_factory=list)
+    lane_ops_done: int = 0
     annotations: dict[int, list[str]] = Field(default_factory=dict)  # legacy `annotation`: node notes
     # Modern collaboration is read only through authenticated, bounded projections.  Excluding it
     # here prevents free-form comment text from entering the tokenless /state + SSE payload.

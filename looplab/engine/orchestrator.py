@@ -46,6 +46,7 @@ from looplab.events.types import (BACKGROUND_APPENDABLE, DIAGNOSTIC_EVENTS,
     EV_SPEC_APPROVED, EV_SPEC_PROPOSED, PAUSE_REASON_EXTERNAL_OBLIGATIONS)
 from looplab.engine.artifact_fence import defer_waiting_consumers
 from looplab.engine.track_lane import drain_track_requests, serve_track_requests
+from looplab.engine.upstream_serve import serve_upstream_requests
 from looplab.engine.ablation import AblationMixin
 from looplab.engine.metric_salvage import settle_mode as settle_metric_salvage_mode
 from looplab.engine.widths import LLM_WIDTH_MAX
@@ -1200,6 +1201,10 @@ class Engine(ConfirmPhaseMixin, NoiseFloorMixin, AblationMixin, NoveltyGateMixin
         # (`engine/track_lane.py`) — one worker at a time, results appended by the main task.
         from looplab.engine.track_lane import TrackLane
         self._track_lane = TrackLane()
+        # doc 73 §2.5: the upstream lane served by this live engine under `Settings.upstream_mode`
+        # (`engine/upstream_serve.py`) — one operation at a time, every row appended by the main task.
+        from looplab.engine.upstream_serve import UpstreamServe
+        self._upstream_serve = UpstreamServe()
         # Fail loudly: a repo task with no trusted eval AND no onboarder would silently
         # evaluate every node via the empty solution.py path. Require one or the other.
         if self._repo_spec and not self._eval_spec and onboarder is None:
@@ -2045,6 +2050,8 @@ class Engine(ConfirmPhaseMixin, NoiseFloorMixin, AblationMixin, NoveltyGateMixin
             # The operator's queued evaluation TRACKS (doc 73 §1.4): started in a worker, harvested
             # by this task once done; True only on the turn that appended, which re-folds.
             if await serve_track_requests(self, state):
+                continue
+            if await serve_upstream_requests(self, state):
                 continue
 
             if self.external_harness:

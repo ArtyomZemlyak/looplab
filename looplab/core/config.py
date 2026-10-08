@@ -3130,6 +3130,15 @@ class Settings(BaseSettings):
     # defaults it OFF and a pre-field snapshot resumes OFF (its `LEGACY_CONFIG_SNAPSHOT_DEFAULTS`
     # row). One reader: `adapters/repo_developer.py::upstream_board_enabled`.
     upstream_board_brief: bool = True
+    # THE UPSTREAM LANE SERVED BY THE LIVE ENGINE (doc 73 §2.5; `engine/upstream_serve.py`). `off`: the
+    # stopped-engine lane exactly as doc 72 shipped it. `propose`: a propose/check/advance asked of a
+    # live run is QUEUED (`lane_op_requested`) and served between turns, without a pause. `auto`:
+    # `propose`, and the engine also checks each proposal once and advances each whose measured gate
+    # passed. Proposals are still authored by the Assistant / an agent / the operator. A task with no
+    # `upstream` block (or not `trusted_local`) resolves to `off` with the reason stated, so the default
+    # costs nothing where the operator declared nothing. One reader:
+    # `engine/upstream_serve.py::upstream_mode_setting`; `resolve_upstream_mode` adds the task's half.
+    upstream_mode: typing.Literal["off", "propose", "auto"] = "auto"
     # A5 (docs/60 §60.9): seed every chain root (Researcher propose, Developer stages/plan/step/
     # implement/repair) with a small block carrying what EARLIER phases of this run already read —
     # the reference file, the manifest, the config — verbatim under `established_context_bytes`,
@@ -3819,6 +3828,10 @@ def unknown_snapshot_keys(data) -> list[str]:
 # Keep their historical effective behavior when newer product defaults become active: re-entry must not
 # silently add paid calls, interventions, concurrency or a different selection policy to an old run.
 LEGACY_CONFIG_SNAPSHOT_DEFAULTS: dict[str, object] = {
+    # THE LIVE UPSTREAM LANE, added 2026-10-08 defaulting `auto` (doc 73 §2.5). A resumed pre-field run
+    # keeps the stopped-engine lane it launched with: `auto` buys gate executions and advances the base
+    # on its own, which that run's operator never chose.
+    "upstream_mode": "off",
     # A RESEARCHER THAT MAY PROPOSE ARTIFACT NODES, added 2026-10-08 defaulting OFF (doc 73 §1.4). ON
     # it changes the Researcher's emit schema and user turn, so a resumed pre-field run keeps its
     # historical request; `tests/test_researcher_artifacts.py` holds that `false` is byte for byte.

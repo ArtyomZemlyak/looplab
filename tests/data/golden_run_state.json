@@ -165,6 +165,8 @@
   "hypothesis_ranking": null,
   "inject_requests": [],
   "injects_done": 0,
+  "lane_op_requests": [],
+  "lane_ops_done": 0,
   "last_finish_seq": 43,
   "last_resume_launch_seq": 0,
   "last_resume_launch_ts": 0.0,

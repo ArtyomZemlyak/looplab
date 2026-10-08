@@ -76,6 +76,9 @@ the diff that justified it:
   the live evaluation-track queue and its cursor). The diff was 2 insertions and 0 deletions —
   `"track_requests": []` and `"tracks_done": 0`, what a log with no track request folds to — and no
   shared leaf changed.
+* 2026-10-08 — `RunState.lane_op_requests` + `RunState.lane_ops_done` (`core/models.py`, doc 73
+  §2.5: the live upstream lane's queue and its cursor). The diff was 2 insertions and 0 deletions —
+  `"lane_op_requests": []` and `"lane_ops_done": 0` — and no shared leaf changed.
 """
 from __future__ import annotations
 

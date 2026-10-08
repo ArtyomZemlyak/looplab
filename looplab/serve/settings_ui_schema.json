@@ -1480,6 +1480,20 @@
           "help": "When the upstream lane has promoted a champion's general capability into the run's base (behind a named flag whose default keeps the old behaviour), every Developer build turn lists those promotions — flag, default and enabled value, source experiment, summary — so the role that writes the code switches a flag on instead of re-implementing it, and does not repair around a failure a promoted fix already cured. A run that never promoted anything is unchanged. Off = the pre-2026-10-07 prompt, byte for byte."
         },
         {
+          "key": "upstream_mode",
+          "label": "Upstream lane on a live run",
+          "type": "enum",
+          "options": [
+            "off",
+            "propose",
+            "auto"
+          ],
+          "default": "auto",
+          "help": "Only for a task that declares an upstream block. off: proposing, checking and promoting a capability into the base needs a paused run. propose: those steps are queued and the live engine performs them between turns. auto: the engine also checks every proposal and promotes every one whose measured gate passed.",
+          "shortLabel": "Upstream mode",
+          "shortHelp": "off, propose (queued on a live run) or auto (checked and promoted automatically)."
+        },
+        {
           "key": "established_context",
           "label": "Carry earlier phases' reads into each new phase",
           "type": "bool",

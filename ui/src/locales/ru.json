@@ -1,7 +1,7 @@
 {
   "schema": 1,
   "language": "ru",
-  "count": 7732,
+  "count": 7736,
   "messages": {
     "# LoopLab run report — {0}": "# Отчёт запуска LoopLab — {0}",
     "## Agent narrative (advisory)": "## Пояснения агента (рекомендации)",
@@ -7734,6 +7734,10 @@
     "An experiment may use at most {0} artifacts.": "Эксперимент может использовать не более {0} артефактов.",
     "Fix the parameters first.": "Сначала исправьте параметры.",
     "Already submitting.": "Уже отправляется.",
-    "Add experiment": "Добавить эксперимент"
+    "Add experiment": "Добавить эксперимент",
+    "Upstream lane on a live run": "Полоса upstream на живом запуске",
+    "Only for a task that declares an upstream block. off: proposing, checking and promoting a capability into the base needs a paused run. propose: those steps are queued and the live engine performs them between turns. auto: the engine also checks every proposal and promotes every one whose measured gate passed.": "Только для задачи с объявленным блоком upstream. off: предложение, проверка и перенос возможности в базу требуют паузы запуска. propose: эти шаги ставятся в очередь, и живой движок выполняет их между ходами. auto: движок также проверяет каждое предложение и переносит в базу каждое, чья измеренная проверка прошла.",
+    "Upstream mode": "Режим upstream",
+    "off, propose (queued on a live run) or auto (checked and promoted automatically).": "off, propose (очередь на живом запуске) или auto (проверка и перенос автоматически)."
   }
 }

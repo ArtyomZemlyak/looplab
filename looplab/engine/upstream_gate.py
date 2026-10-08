@@ -132,7 +132,7 @@ def evaluation_context(task, settings, events):
     return context
 
 
-def execute_gate(rd, task, settings, source, proposal, manifest, action_id, charge):
+def execute_gate(rd, task, settings, source, proposal, manifest, action_id, charge, *, extra_env=None):
     from looplab.engine.shared import effective_eval_spec, effective_max_eval_timeout
     spec, declaration = task.repo_spec(), task.upstream
     before = input_identity(task, settings, source, proposal)
@@ -152,7 +152,9 @@ def execute_gate(rd, task, settings, source, proposal, manifest, action_id, char
         write_overlay(work, files, deleted)
         if boundary_at(work, spec["scorer_boundary"]) != baseline_boundary:
             raise UpstreamRefusal("upstream_scorer_changed", "Gate workspace changed declared scorer bytes")
-        env = evaluation_env(settings, spec)
+        # `extra_env`: the devices a LIVE engine leased for this gate (`engine/upstream_serve.py`) —
+        # only `CUDA_VISIBLE_DEVICES`; None on the stopped lane, which owns the box.
+        env = {**evaluation_env(settings, spec), **(extra_env or {})}
         events = events_for(Path(rd))
         context = evaluation_context(task, settings, events)
         es = effective_eval_spec(context)
