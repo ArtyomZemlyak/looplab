@@ -1749,7 +1749,7 @@ EVENT_PAYLOAD_KEYS: dict[str, PayloadContract] = {
         "The operator's eval.artifact_sync command ran over a node's workdir after its terminal.",
         required=("command", "exit_code", "generation", "node_id", "seconds", "stderr_tail",
                   "timed_out"),
-        optional=(),
+        optional=("workdir_changed",),
     ),
     "extra_metrics_imported": PayloadContract(
         "An operator imported metrics measured after the run for one node, beside its live ones.",

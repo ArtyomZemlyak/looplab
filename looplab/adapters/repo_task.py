@@ -1231,6 +1231,15 @@ def host_scorer_outside_editables(task) -> Optional[str]:
     return scorer_outside_editables(task, "host_scorer")
 
 
+def _env_passthrough_names(value, where: str) -> list[str]:
+    """Environment variable NAMES an operator command may receive from the engine's environment."""
+    if not isinstance(value, list) or not all(
+            isinstance(x, str) and re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]{0,127}", x) for x in value):
+        raise ValueError(f"{where} must be a list of environment variable names, "
+                         "e.g. [\"AWS_ACCESS_KEY_ID\", \"AWS_SECRET_ACCESS_KEY\"]")
+    return list(dict.fromkeys(value))[:64]
+
+
 class ArtifactSyncSpec(BaseModel):
     """`eval.artifact_sync`: the operator's own command that copies a finished node's workdir to
     durable storage (incident 2026-10-06: a 10-hour training's checkpoint lived only on a mount that
@@ -1244,6 +1253,17 @@ class ArtifactSyncSpec(BaseModel):
 
     command: list[str]
     timeout: float = 1800.0
+    # THE CREDENTIALS IT NEEDS, by NAME (critic 2026-10-08): every launch strips secret-shaped
+    # variables from the host environment (`runtime/sandbox.py::run_argv`), so `AWS_SECRET_ACCESS_KEY`
+    # / `MC_HOST_<alias>` never reached `aws`/`mc` and every copy-out failed on the pods that inject
+    # them. Each name listed here is read from the ENGINE's environment at copy time and handed to
+    # this one command; values are never stored in the task or the receipt.
+    env_passthrough: list[str] = Field(default_factory=list)
+
+    @field_validator("env_passthrough")
+    @classmethod
+    def _env_names(cls, value):
+        return _env_passthrough_names(value, "eval.artifact_sync.env_passthrough")
 
     @field_validator("command")
     @classmethod
@@ -1276,6 +1296,13 @@ class TrackSpec(BaseModel):
     timeout: float = 3600.0
     keys: Optional[list[str]] = None
     key_prefix: str = ""
+    # As `ArtifactSyncSpec.env_passthrough`: a scoring service's API key by NAME.
+    env_passthrough: list[str] = Field(default_factory=list)
+
+    @field_validator("env_passthrough")
+    @classmethod
+    def _track_env_names(cls, value):
+        return _env_passthrough_names(value, "eval.tracks.<name>.env_passthrough")
 
     @field_validator("command")
     @classmethod

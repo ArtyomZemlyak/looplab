@@ -393,7 +393,12 @@ def normalize_extra_metric_channels(value, *, max_items: int = 256) -> dict[str,
 # @200 scored by a service for nodes the run scored at @20) is added BESIDE the live keys, never
 # over them, so that node's map is part measured, part reconstructed. The marker then names the
 # reconstructed `keys`; a marker WITHOUT `keys` keeps its historical meaning — the whole map.
-EXTRA_METRIC_BACKFILL_KEYS = ("backfilled", "backfilled_at", "precision_decimals", "keys")
+#
+# …AND `sources` beside `keys` (critic 2026-10-08): `{key: what measured it}` from the import's
+# required `--source` (or `track <name>`), so a surface states WHO measured an imported value
+# instead of the score-log sentence, which is false for a service import or a track.
+EXTRA_METRIC_BACKFILL_KEYS = ("backfilled", "backfilled_at", "precision_decimals", "keys",
+                              "sources")
 
 
 def normalize_extra_metric_backfill(value, *, max_items: int = 256) -> dict:
@@ -426,7 +431,22 @@ def normalize_extra_metric_backfill(value, *, max_items: int = 256) -> dict:
         named = sorted({k[:200] for k in keys if isinstance(k, str) and k})[:max_items]
         if named:
             out["keys"] = named
+    sources = value.get("sources")
+    if isinstance(sources, dict):
+        kept_sources = {k[:200]: v[:400] for k, v in list(sources.items())[:max_items]
+                        if isinstance(k, str) and k and isinstance(v, str) and v.strip()}
+        if kept_sources:
+            out["sources"] = kept_sources
     return out
+
+
+def extra_metric_source(node, key: str) -> Optional[str]:
+    """What measured an IMPORTED key (`--source`, or `track <name>`), or None — a live value, or a
+    reconstruction from the run's own score log, which names no other source."""
+    record = getattr(node, "extra_metrics_backfill", None)
+    sources = record.get("sources") if isinstance(record, dict) else None
+    found = sources.get(key) if isinstance(sources, dict) else None
+    return found if isinstance(found, str) and found else None
 
 
 def extra_metric_is_backfilled(node) -> bool:

@@ -102,3 +102,14 @@ test('an import marks only the keys it added, beside live ones (2026-10-07)', as
   const whole = { ...node, extra_metrics_backfill: { backfilled: true } }
   assert.equal(perKey(whole, 'FUR@20'), true, 'a marker without keys is the whole map, as before')
 })
+
+test('an imported key names what measured it, not the score log (critic 2026-10-08)', () => {
+  const node = {
+    extra_metrics: { 'FUR@20': 0.1, 'FUR@200': 0.3 },
+    extra_metrics_provenance: { 'FUR@20': 'declared', 'FUR@200': 'declared' },
+    extra_metrics_backfill: { backfilled: true, keys: ['FUR@200'], sources: { 'FUR@200': 'scoring service v2' } },
+  }
+  assert.match(extraMetricSourceHelp(node, 'FUR@200'), /source: scoring service v2/)
+  assert.doesNotMatch(extraMetricSourceHelp(node, 'FUR@200'), /score log/)
+  assert.doesNotMatch(extraMetricSourceHelp(node, 'FUR@20'), /Imported/)
+})

@@ -87,19 +87,26 @@ def track_refusal(run_dir: Path, node) -> Optional[str]:
         return "not evaluated in its current lifecycle"
     workdir = Path(run_dir) / "nodes" / f"node_{node.id}"
     stamp = workdir / ".looplab-manifest"
+    from looplab.core.node_evidence import read_bounded_regular_file
     try:
         if workdir.is_symlink() or not workdir.is_dir():
             return "its workdir is gone"
-        if stamp.read_text(encoding="ascii").strip() != workdir_manifest_digest(node):
-            return "its workdir holds another lifecycle's or code's files (manifest stamp differs)"
     except OSError:
+        return "its workdir is gone"
+    # THE ONE READER OF A FILE THE CANDIDATE CAN WRITE (critic 2026-10-08): the stamp is written
+    # before the candidate's eval runs in that same workdir, and a FIFO there made a plain
+    # `read_text` block forever — with `--apply` holding `engine.lock` the whole time.
+    raw = read_bounded_regular_file(stamp, 256)
+    if raw is None:
         return "its workdir carries no readable manifest stamp"
+    if raw.decode("ascii", errors="replace").strip() != workdir_manifest_digest(node):
+        return "its workdir holds another lifecycle's or code's files (manifest stamp differs)"
     return None
 
 
 def evaluate_track(run_dir: Path, track: str, nodes: str, *, apply: bool) -> str:
     """Plan (and with `apply`, run and record) `track` over `nodes` (`"all"` or `"3,5"`)."""
-    from looplab.engine.artifact_sync import render_argv
+    from looplab.engine.artifact_sync import passthrough_env, render_argv
     from looplab.events.types import EV_EXTRA_METRICS_IMPORTED
     from looplab.maintenance.backfill_applied_params import offline_run
     from looplab.runtime.sandbox import run_argv
@@ -134,7 +141,11 @@ def evaluate_track(run_dir: Path, track: str, nodes: str, *, apply: bool) -> str
                 continue
             started = time.monotonic()
             try:
-                rc, out, err, timed = run_argv(argv, str(workdir), float(spec.get("timeout") or 3600.0),
+                # From the RUN directory with the declared credentials by name, as the copy-out
+                # (`engine/artifact_sync.py`): the workdir is the candidate's, and a tool started
+                # there imports what the candidate left beside the key it was handed.
+                rc, out, err, timed = run_argv(argv, str(run_dir), float(spec.get("timeout") or 3600.0),
+                                               env=passthrough_env(spec),
                                                log_path=str(run_dir / f"track_{track}.log"))
             except (OSError, ValueError) as exc:
                 lines.append(f"  node {nid}: could not run — {type(exc).__name__}: {exc}")

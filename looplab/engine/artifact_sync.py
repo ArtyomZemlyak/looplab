@@ -27,6 +27,7 @@ THREE PROPERTIES, each the reason for a choice:
 from __future__ import annotations
 
 import logging
+import os
 import re
 import threading
 import time
@@ -63,6 +64,21 @@ def sync_spec(eval_spec) -> Optional[dict]:
     return spec
 
 
+def passthrough_env(spec) -> dict:
+    """`{NAME: value}` for every name the declaration's `env_passthrough` lists that the ENGINE's
+    environment holds (`adapters/repo_task.py::ArtifactSyncSpec.env_passthrough`). Shared with
+    `maintenance/evaluate_track.py`; a value never leaves this dict for a record."""
+    names = spec.get("env_passthrough") if isinstance(spec, dict) else None
+    if not isinstance(names, list):
+        return {}
+    return {n: os.environ[n] for n in names if isinstance(n, str) and n in os.environ}
+
+
+def _stamp(workdir: Path) -> Optional[bytes]:
+    from looplab.core.node_evidence import read_bounded_regular_file
+    return read_bounded_regular_file(workdir / ".looplab-manifest", 256)
+
+
 def start_artifact_sync(engine, node_id: int, generation: int) -> Optional[threading.Thread]:
     """Start the declared copy-out of node `node_id`'s workdir in a background thread, or None
     (nothing declared, or no workdir to copy). Never raises."""
@@ -84,7 +100,7 @@ def start_artifact_sync(engine, node_id: int, generation: int) -> Optional[threa
     except (TypeError, ValueError):
         timeout = 1800.0
     worker = threading.Thread(target=_run, args=(engine, node_id, generation, argv, workdir,
-                                                  run_dir, timeout),
+                                                  run_dir, timeout, passthrough_env(spec)),
                               name=f"looplab-artifact-sync:{node_id}", daemon=False)
     with _INFLIGHT_LOCK:
         _INFLIGHT[:] = [t for t in _INFLIGHT if t.is_alive()]
@@ -103,16 +119,23 @@ def wait_for_inflight(timeout: Optional[float] = None) -> bool:
     return not any(t.is_alive() for t in threads)
 
 
-def _run(engine, node_id, generation, argv, workdir, run_dir, timeout) -> None:
+def _run(engine, node_id, generation, argv, workdir, run_dir, timeout, env=None) -> None:
     from looplab.runtime.sandbox import _run_argv
     redact = getattr(engine, "_redact", None) or (lambda text: text)
     started = time.monotonic()
+    before = _stamp(workdir)
     try:
-        rc, _out, err, timed = _run_argv(argv, str(workdir), timeout,
+        # FROM THE RUN DIRECTORY, not the workdir (critic 2026-10-08): the workdir is the candidate's,
+        # and a `python -m <tool>` started there imports whatever module the candidate left beside
+        # the credentials this command was just handed.
+        rc, _out, err, timed = _run_argv(argv, str(run_dir), timeout, env=dict(env or {}),
                                          log_path=str(run_dir / "artifact_sync.log"))
     except (OSError, ValueError) as exc:          # no such tool, an unusable cwd
         rc, err, timed = -1, f"{type(exc).__name__}: {exc}", False
     seconds = round(time.monotonic() - started, 3)
+    # A reset of this node re-materializes the workdir while the copy reads it; the receipt says so
+    # instead of vouching for a tree that may mix two lifecycles (critic 2026-10-08).
+    changed = before is not None and _stamp(workdir) != before
     if rc != 0 or timed:
         _LOG.warning("artifact sync of node %s failed (exit %s%s); the node is unaffected — see "
                      "artifact_sync.log", node_id, rc, ", timed out" if timed else "")
@@ -120,7 +143,11 @@ def _run(engine, node_id, generation, argv, workdir, run_dir, timeout) -> None:
         engine.store.append(EV_ARTIFACT_SYNCED, {
             "node_id": node_id, "generation": generation,
             "command": [redact(a) for a in argv], "exit_code": rc, "timed_out": bool(timed),
-            "seconds": seconds, "stderr_tail": redact(str(err or "")[-_STDERR_TAIL:])})
+            **({"workdir_changed": True} if changed else {}),
+            "seconds": seconds,
+            # Redacted WHOLE, then cut (`engine/audit.py::Engine._redact`): a cut first can leave
+            # the tail of a secret that straddled it unmasked.
+            "stderr_tail": redact(str(err or ""))[-_STDERR_TAIL:]})
     except OSError:
         _LOG.warning("artifact sync of node %s: could not record its receipt", node_id,
                      exc_info=True)

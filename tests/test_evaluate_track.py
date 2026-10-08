@@ -114,3 +114,31 @@ def test_a_bad_input_is_a_refusal_and_a_bug_keeps_its_traceback(tmp_path, monkey
     monkeypatch.setattr(module, "evaluate_track", _bug)
     out = _cli(rd)
     assert out.exit_code == 1 and isinstance(out.exception, ValueError)
+
+
+def test_a_fifo_stamp_is_refused_not_waited_on(tmp_path):
+    """critic 2026-10-08: the candidate can replace its own workdir's stamp; a FIFO there blocked a
+    plain read forever while `--apply` held `engine.lock`."""
+    import os
+
+    import pytest
+    from looplab.maintenance.evaluate_track import track_refusal
+    if not hasattr(os, "mkfifo"):
+        pytest.skip("no FIFOs on this platform")
+    rd, store = _run(tmp_path)
+    stamp = rd / "nodes" / "node_0" / ".looplab-manifest"
+    stamp.unlink()
+    os.mkfifo(stamp)
+    node = fold(store.read_all()).nodes[0]
+    assert track_refusal(rd, node) == "its workdir carries no readable manifest stamp"
+
+
+def test_an_imported_key_carries_what_measured_it(tmp_path):
+    """critic 2026-10-08: `--source` / `track <name>` was written on the row and read by nothing,
+    so every surface said the value came from the run's own score log."""
+    from looplab.core.models import extra_metric_source
+    rd, store = _run(tmp_path)
+    assert _cli(rd, "--apply").exit_code == 0
+    st = fold(store.read_all())
+    assert extra_metric_source(st.nodes[0], "FUR@200") == "track at200"
+    assert extra_metric_source(st.nodes[0], "FUR@20") is None

@@ -99,10 +99,9 @@ export function unverifiedExtraMetricKeys(nodes, keys) {
 // "the print statement cannot tell them apart" are different claims, and a table that renders the
 // second as the first is stating something false.
 //
-// NOT PER KEY, because the writer cannot produce a partially-backfilled node: the fold declines a
-// node that already carries ANY extra metric, so a backfilled map is backfilled entirely. The
-// `node` argument is still taken per call so the two readers below have the same shape as the
-// channel ones and a caller cannot pass the wrong object silently.
+// PER KEY since 2026-10-07: the score-log backfill still fills only an EMPTY map (whole-map marker,
+// no `keys`), but an operator import or a track adds keys BESIDE live ones and names them in the
+// marker's `keys`, with what measured them in `sources` (`extraMetricImportSource`).
 export const EXTRA_METRIC_RECONSTRUCTED_LABEL = 'reconstructed'
 export const EXTRA_METRIC_RECONSTRUCTED_HELP =
   'Recovered from the preserved score log after the run, not recorded while it was happening. The '
@@ -149,12 +148,27 @@ export function extraMetricSourceLabel(node, key) {
   return `${EXTRA_METRIC_CHANNEL_LABEL[channel]} · ${EXTRA_METRIC_RECONSTRUCTED_LABEL}`
 }
 
+// What measured an IMPORTED key — the browser half of `core/models.py::extra_metric_source`: the
+// import's `--source` (or `track <name>`), or null for a live value and for a reconstruction from
+// the run's own score log (critic 2026-10-08: the score-log sentence was shown for both, which is
+// false for a service import or a track).
+export function extraMetricImportSource(node, key) {
+  const record = node && node.extra_metrics_backfill
+  const sources = record && typeof record === 'object' && !Array.isArray(record) ? record.sources : null
+  const found = sources && typeof sources === 'object' && !Array.isArray(sources) ? sources[key] : null
+  return typeof found === 'string' && found ? found : null
+}
+
 export function extraMetricSourceHelp(node, key) {
   const channel = extraMetricChannel(node, key)
   if (!extraMetricKeyIsBackfilled(node, key)) return EXTRA_METRIC_CHANNEL_HELP[channel]
   const decimals = extraMetricPrecision(node, key)
   const precision = decimals == null ? '' : ` Printed to ${decimals} decimal place(s).`
-  return `${EXTRA_METRIC_CHANNEL_HELP[channel]} ${EXTRA_METRIC_RECONSTRUCTED_HELP}${precision}`
+  const source = extraMetricImportSource(node, key)
+  const how = source
+    ? `Imported after the run (source: ${source}), not recorded while it was happening.`
+    : EXTRA_METRIC_RECONSTRUCTED_HELP
+  return `${EXTRA_METRIC_CHANNEL_HELP[channel]} ${how}${precision}`
 }
 
 // A value that is caveated for EITHER reason — the channel is not the guarded one, or the whole map

@@ -419,12 +419,16 @@ copied into an idea. Host tiers only — a Docker tier binds no other node's wor
 directory is already readable to an eval and never writable, so the parent's files can be read,
 not changed. Off, the variable is absent and the task snapshot's `eval` dump is byte-identical.
 
-**Further evaluations on demand (`eval.tracks`, none by default).** `{"tracks": {"at200": {"command": [...], "keys": [...], "key_prefix": "", "timeout": 3600}}}` declares evaluators that never run during the search: `looplab evaluate-track RUN at200 --nodes all --apply` runs one over each settled node's preserved workdir (refusing a node whose workdir is not its evaluated code) and records the numbers beside the live metrics — see the [CLI reference](cli-reference.md#evaluate-track).
+**Further evaluations on demand (`eval.tracks`, none by default).** `{"tracks": {"at200": {"command": [...], "keys": [...], "key_prefix": "", "timeout": 3600}}}` declares evaluators that never run during the search: `looplab evaluate-track RUN at200 --nodes all --apply` runs one over each settled node's preserved workdir (refusing a node whose workdir is not its evaluated code; the argv runs from the run directory and takes `env_passthrough` exactly as `artifact_sync` does) and records the numbers beside the live metrics — see the [CLI reference](cli-reference.md#evaluate-track).
 
 **Copying a finished node's workdir to durable storage (`eval.artifact_sync`, off by default).**
 `{"artifact_sync": {"command": ["mc", "cp", "-r", "{workdir}", "minio/bucket/{run_id}/node_{node_id}/"], "timeout": 1800}}`
-runs YOUR argv (no shell) after each node's terminal, with the host environment `run_setup` gets
-so the tool finds its own credentials. Placeholders: `{workdir}`, `{run_dir}`, `{run_id}`,
+runs YOUR argv (no shell) after each node's terminal, from the RUN directory, with the host
+environment minus secret-shaped variables: a tool's config file (`~/.aws/credentials`,
+`~/.mc/config.json`) works as it is, and a credential held in an environment variable is passed by
+NAME — `"env_passthrough": ["AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY"]` — its value read from
+the engine's environment at copy time and never written anywhere. A receipt whose workdir was
+re-materialized during the copy (a reset of that node) carries `workdir_changed`. Placeholders: `{workdir}`, `{run_dir}`, `{run_id}`,
 `{node_id}`, `{generation}`; any other brace stays literal. It runs in a background thread, so the
 eval slot (and its GPU lease) is free during the upload; the interpreter waits for an in-flight copy
 at exit, up to its `timeout`. Its receipt is the diagnostic `artifact_synced` row, its output

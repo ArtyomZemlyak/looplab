@@ -1345,11 +1345,20 @@ def _on_extra_metrics_imported(st: RunState, e: Event, d: dict, ctx: "_FoldCtx")
     node.extra_metrics = {**live, **added}
     node.extra_metrics_provenance = normalize_extra_metric_channels(
         {**(node.extra_metrics_provenance or {}), **{k: EXTRA_METRIC_DECLARED for k in added}})
+    # WHO measured each added key (critic 2026-10-08): the import's own `source`, kept per key so
+    # two imports from two services stay told apart. The FIRST reconstruction's time stands — a
+    # later import must not re-date an earlier score-log backfill.
+    sources = dict(marker.get("sources") or {})
+    source = d.get("source")
+    if isinstance(source, str) and source.strip():
+        sources.update({k: source for k in added})
     node.extra_metrics_backfill = normalize_extra_metric_backfill({
         "backfilled": True,
-        "backfilled_at": d.get("imported_at"),
+        "backfilled_at": (marker.get("backfilled_at") if marker.get("backfilled_at") is not None
+                          else d.get("imported_at")),
         "precision_decimals": decimals,
         "keys": sorted(reconstructed),
+        "sources": sources,
     })
     _apply_objective(st, node)
 

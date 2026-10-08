@@ -90,3 +90,38 @@ def test_the_spec_refuses_an_empty_command():
         ArtifactSyncSpec(command=[])
     with pytest.raises(ValidationError):
         ArtifactSyncSpec(command=["mc"], timeout=0)
+
+
+_NEEDS_KEY = ("import os, sys; k = os.environ.get('AWS_SECRET_ACCESS_KEY', ''); "
+              "sys.stderr.write('using ' + k + '\\n'); "
+              "sys.exit(3 if len(k) != 24 else 4 if os.path.basename(os.getcwd()) != 'run' else 0)")
+
+
+def test_a_credential_named_in_env_passthrough_reaches_the_copy_and_it_runs_from_the_run_dir(
+        tmp_path, monkeypatch):
+    """critic 2026-10-08: every launch strips secret-shaped variables, so `aws`/`mc` never saw the
+    pod's injected keys. Named in `env_passthrough`, the value reaches this one command — from the
+    RUN directory, never the candidate's workdir — and never the receipt."""
+    monkeypatch.setenv("AWS_SECRET_ACCESS_KEY", "wJalrXUtnFEMIK7MDENGbPxR")
+    engine = make_engine(tmp_path / "run")
+    engine.store.append("node_created", {
+        "node_id": 0, "parent_ids": [], "operator": "draft",
+        "idea": {"operator": "draft", "params": {"x": 1.0}, "rationale": "r"}, "code": "print(1)"})
+    (tmp_path / "run" / "nodes" / "node_0").mkdir(parents=True)
+    for passthrough, code in (([], 3), (["AWS_SECRET_ACCESS_KEY"], 0)):
+        engine._eval_spec = {"artifact_sync": {"command": [sys.executable, "-c", _NEEDS_KEY],
+                                               "env_passthrough": passthrough}}
+        artifact_sync.start_artifact_sync(engine, 0, 0)
+        assert artifact_sync.wait_for_inflight(30)
+        rows = [e.data for e in engine.store.read_all() if e.type == "artifact_synced"]
+        assert rows[-1]["exit_code"] == code, rows[-1]
+    assert "wJalrXUtnFEMIK7MDENGbPxR" not in (tmp_path / "run" / "events.jsonl").read_text(), (
+        "the value printed by the tool is masked on the receipt")
+
+
+def test_the_spec_refuses_a_passthrough_that_is_not_a_name():
+    import pytest
+    from looplab.adapters.repo_task import ArtifactSyncSpec
+    assert ArtifactSyncSpec(command=["x"], env_passthrough=["A", "A", "B_2"]).env_passthrough == ["A", "B_2"]
+    with pytest.raises(ValueError):
+        ArtifactSyncSpec(command=["x"], env_passthrough=["NOT A NAME"])
