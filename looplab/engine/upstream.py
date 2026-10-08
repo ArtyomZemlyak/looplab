@@ -21,7 +21,7 @@ from looplab.engine.seed_archive import capture_seed_archive, verified_seed_arch
 from looplab.engine.seed_base import selected_seed_base
 from looplab.engine.upstream_gate import boundary_at, execute_gate, input_identity
 from looplab.engine.upstream_spec import normalize_request
-from looplab.engine.upstream_state import active_base, claimed_gate_executions, digest, events_for, node_signature, source_node, upstream_candidates
+from looplab.engine.upstream_state import active_base, claimed_gate_executions, digest, events_for, node_signature, repair_probe_covers, source_node, upstream_candidates
 from looplab.engine.upstream_workspace import checked_overlay, git_at, maintainer_worktree, snapshot_worktree, verify_approved_candidate, write_overlay, owned_path
 from looplab.events.eventstore import EventStore, interprocess_lock
 from looplab.engine.shared import engine_fold as fold
@@ -322,8 +322,7 @@ class UpstreamLane:
         self._validate_shared_patch(body, implementation)
         for row in rows:
             if row["pending_trigger_nodes"] and row["origin"] == "repair":
-                if not any(all(any(token in list(map(str.strip, probe["files"].get(path, "").splitlines())) for token in tokens)
-                    for path, tokens in row["trigger_tokens"].items()) for probe in self.task.upstream["repair_probes"]):
+                if not repair_probe_covers(row, self.task.upstream["repair_probes"]):
                     raise UpstreamRefusal("upstream_trigger_required", "Declare a repair probe with the recorded failing pending recipe trigger")
         for name in set(node.files) | set(body["recipe_files"]):
             if name not in patch_paths | repair_recipes and node.files.get(name) != body["recipe_files"].get(name):

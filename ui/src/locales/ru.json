@@ -7641,7 +7641,11 @@
     "Upstream lane on a live run": "Полоса upstream на живом запуске",
     "Only for a task that declares an upstream block. off: proposing, checking and promoting a capability into the base needs a paused run. propose: those steps are queued and the live engine performs them between turns. auto: the engine also checks every proposal and promotes every one whose measured gate passed.": "Только для задачи с объявленным блоком upstream. off: предложение, проверка и перенос возможности в базу требуют паузы запуска. propose: эти шаги ставятся в очередь, и живой движок выполняет их между ходами. auto: движок также проверяет каждое предложение и переносит в базу каждое, чья измеренная проверка прошла.",
     "Upstream mode": "Режим upstream",
-    "off, propose (queued on a live run) or auto (checked and promoted automatically).": "off, propose (очередь на живом запуске) или auto (проверка и перенос автоматически)."
+    "off, propose (queued on a live run) or auto (checked and promoted automatically).": "off, propose (очередь на живом запуске) или auto (проверка и перенос автоматически).",
+    "Write upstream proposals automatically": "Писать предложения upstream автоматически",
+    "Only when the upstream lane runs in auto mode. The engine drafts a proposal once for each node a repair made run, then for the champion: a Maintainer model call writes the generalized patch behind a flag and a separate critic call reviews it. A reviewed draft is checked like any proposal and reaches the base only if its measured gate passes. At most 6 drafts per run.": "Только когда полоса upstream работает в режиме auto. Движок один раз составляет предложение для каждого узла, который заработал после ремонта, затем для чемпиона: вызов модели Maintainer пишет обобщённый патч за флагом, а отдельный вызов критика его проверяет. Одобренный черновик проверяется как любое предложение и попадает в базу, только если прошла его измеренная проверка. Не более 6 черновиков за запуск.",
+    "Auto upstream author": "Автоавтор upstream",
+    "Paid drafts of fixes and champion capabilities for the base (auto mode only).": "Платные черновики фиксов и возможностей чемпиона для базы (только режим auto)."
   },
   "plurals": {
     "({0} paraphrases folded)": {

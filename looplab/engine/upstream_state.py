@@ -152,6 +152,16 @@ def repair_origin(events, node, name, changed_lines):
     return None, []
 
 
+def repair_probe_covers(row, repair_probes) -> bool:
+    """A declared repair probe carries every recorded trigger token of a repair hunk `row` — what
+    `UpstreamLane._propose_admit` refuses a pending-trigger repair hunk without, and what the
+    automated author (`upstream_author.py::author_next`) filters on so it never pays for a draft the
+    lane would refuse."""
+    return any(all(any(token in list(map(str.strip, probe["files"].get(path, "").splitlines()))
+                       for token in tokens)
+                   for path, tokens in row["trigger_tokens"].items()) for probe in repair_probes)
+
+
 def upstream_candidates(rd, task, events=None, *, source_node_id=None, offset=0, limit=200, hunk_hashes=None):
     """Paged advice; admission inspects the chosen source/hunks beyond any UI page."""
     from looplab.engine.activation import CHANGE_CAPABILITY, is_config_path

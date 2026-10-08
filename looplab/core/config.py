@@ -3139,6 +3139,14 @@ class Settings(BaseSettings):
     # costs nothing where the operator declared nothing. One reader:
     # `engine/upstream_serve.py::upstream_mode_setting`; `resolve_upstream_mode` adds the task's half.
     upstream_mode: typing.Literal["off", "propose", "auto"] = "auto"
+    # THE AUTOMATED UPSTREAM AUTHOR (doc 73 §2.5, tracks 1 and 2; `engine/upstream_author.py`). Under
+    # `upstream_mode: auto` the engine itself drafts a proposal once per source lifecycle — a node a
+    # repair made run (the FIX), then the champion (its reusable capability) — with two PAID calls on
+    # the Developer's client: the Maintainer's draft and a separate critic. A passed draft becomes an
+    # ordinary proposal that the lane checks and advances only on its measured gate. Inert wherever
+    # `auto` resolves `off` (no upstream block, not `trusted_local`); at most 6 drafts per run. A
+    # pre-field snapshot resumes OFF. One reader: `engine/upstream_author.py::upstream_author_setting`.
+    upstream_author: bool = True
     # A5 (docs/60 §60.9): seed every chain root (Researcher propose, Developer stages/plan/step/
     # implement/repair) with a small block carrying what EARLIER phases of this run already read —
     # the reference file, the manifest, the config — verbatim under `established_context_bytes`,
@@ -3832,6 +3840,9 @@ LEGACY_CONFIG_SNAPSHOT_DEFAULTS: dict[str, object] = {
     # keeps the stopped-engine lane it launched with: `auto` buys gate executions and advances the base
     # on its own, which that run's operator never chose.
     "upstream_mode": "off",
+    # THE AUTOMATED UPSTREAM AUTHOR, added 2026-10-08 defaulting ON (doc 73 §2.5): two paid calls per
+    # source lifecycle that run's operator never chose.
+    "upstream_author": False,
     # A RESEARCHER THAT MAY PROPOSE ARTIFACT NODES, added 2026-10-08 defaulting OFF (doc 73 §1.4). ON
     # it changes the Researcher's emit schema and user turn, so a resumed pre-field run keeps its
     # historical request; `tests/test_researcher_artifacts.py` holds that `false` is byte for byte.

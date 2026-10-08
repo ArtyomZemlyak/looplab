@@ -441,7 +441,9 @@ from looplab.search.speculation_calibration import (SPECULATION_CALIBRATION_PROF
 # INERT for a calibration replicate: OFF by default, and the toy Researcher has no emit schema.
 # 2026-10-08: upstream_mode (doc 73 §2.5), none removed (removing it re-derives 92b70f60).
 # INERT for a calibration replicate: the toy task declares no upstream block, so it resolves `off`.
-_EXPECTED_DIGEST = "sha256:0d85cc96cea7fe16905b208970c1b79e51c6d83e4d13ade2ce84972743f8c7f8"
+# 2026-10-08: upstream_author (doc 73 §2.5), none removed (removing it re-derives 0d85cc96).
+# INERT for a calibration replicate: it acts only where upstream_mode resolves `auto`.
+_EXPECTED_DIGEST = "sha256:9db8b1f76cc4b748cb46fa4188cf18ce1b7708a63183daac1c55514b82db31b4"
 #   2026-09-06  + endgame_reserve_frac (doc 52 row 18: the plan's endgame reserve the dispatcher
 #               honours). The 'field set changed too' branch: 220 -> 221, both pins re-set. A
 #               calibration replicate runs the toy workload under `EngineOptions`, whose reserve is
@@ -966,7 +968,8 @@ _EXPECTED_DIGEST = "sha256:0d85cc96cea7fe16905b208970c1b79e51c6d83e4d13ade2ce849
 # 2026-10-08: assistant_track_tool (doc 73 §1.4, the Assistant's evaluate_track tool): 288 -> 289.
 # 2026-10-08: researcher_artifacts (doc 73 §1.4, Researcher-proposed artifact nodes): 289 -> 290.
 # 2026-10-08: upstream_mode (doc 73 §2.5, the live upstream lane): 290 -> 291.
-_EXPECTED_FIELD_COUNT = 291
+# 2026-10-08: upstream_author (doc 73 §2.5, the automated upstream author): 291 -> 292.
+_EXPECTED_FIELD_COUNT = 292
 
 
 def test_the_digest_did_not_change_when_the_profile_moved():

@@ -1,0 +1,190 @@
+"""The automated upstream author on a LIVE engine (doc 73 §2.5, `engine/upstream_author.py`).
+
+Real CPU SGD through the doc-72 fixture, with only the two model calls replaced: under `upstream_mode:
+auto` an engine with nothing to check drafts a proposal from the champion (track 2) or from a node a
+repair made run (track 1, first), its critic reviews it, and the draft continues as the lane's own
+propose → check → advance — the base moves on the measured gate alone. A declined draft is recorded
+and never paid for again; a spend ceiling the worker met stops the run.
+"""
+from __future__ import annotations
+
+import pytest
+
+from looplab.agents.maintainer import (AUTHOR_CRITIC_REVIEWER, MaintainerCritique, MaintainerDraft,
+                                       Maintainer, author_messages)
+from looplab.core.config import LEGACY_CONFIG_SNAPSHOT_DEFAULTS, Settings
+from looplab.engine.upstream_author import (AUTHOR_MAX_PER_RUN, author_action_id, author_next,
+                                            build_body, upstream_author_setting)
+from looplab.engine.upstream_state import active_base
+from looplab.events.replay import fold
+from tests.test_upstream_lane import GENERAL, fixture
+from tests.test_upstream_live_lane import _engine, _serve
+from tests.test_upstream_repairs import repair_fixture
+
+_DOC = "MOMENTUM: default 0.0; set MOMENTUM=0.2 in recipe.env.\n"
+
+
+class _Client:
+    pass
+
+
+def _model(monkeypatch, draft, verdict="pass", calls=None):
+    """Replace the two paid calls: the draft for `MaintainerDraft`, the verdict for the critic."""
+    import looplab.core.parse as parse
+
+    def fake(client, messages, model, parser="tool_call"):
+        if calls is not None:
+            calls.append((model.__name__, messages))
+        if model is MaintainerDraft:
+            return MaintainerDraft.model_validate(draft)
+        return MaintainerCritique(verdict=verdict, reason="generalized behind a flag, old default kept")
+    monkeypatch.setattr(parse, "parse_structured", fake)
+
+
+def _live_engine(lane, store):
+    store.append("resume", {})
+    engine = _engine(lane, store)
+    engine.developer = type("Dev", (), {"client": _Client()})()
+    return engine
+
+
+def _champion_draft():
+    return {"files": {"train.py": GENERAL, "README.md": _DOC}, "summary": "Momentum through recipe.env",
+            "flag": {"name": "MOMENTUM", "default": "0.0", "enabled": "0.2"},
+            "documentation_path": "README.md"}
+
+
+def test_the_switch_has_one_reader_is_on_and_resumes_off():
+    assert Settings().upstream_author is True
+    assert upstream_author_setting(Settings(upstream_author=False)) is False
+    assert upstream_author_setting(object()) is False
+    assert LEGACY_CONFIG_SNAPSHOT_DEFAULTS["upstream_author"] is False
+
+
+def test_the_champion_capability_reaches_the_base_through_the_measured_gate(tmp_path, monkeypatch):
+    lane, store, generation, body = fixture(tmp_path)
+    calls = []
+    _model(monkeypatch, _champion_draft(), calls=calls)
+    engine = _live_engine(lane, store)
+    _serve(engine)
+    events = store.read_all()
+    authored, = [e for e in events if e.type == "lane_authored"]
+    node = fold(events).nodes[0]
+    assert authored.data["action_id"] == author_action_id(node)
+    assert authored.data["track"] == "champion" and authored.data["outcome"] == "drafted"
+    proposed, = [e for e in events if e.type == "upstream_proposed"]
+    assert proposed.data["action_id"] == authored.data["action_id"]
+    assert proposed.data["critic"]["reviewer"] == AUTHOR_CRITIC_REVIEWER
+    assert [name for name, _ in calls] == ["MaintainerDraft", "MaintainerCritique"], "two calls"
+    assert calls[0][1][0]["content"] == Maintainer.instruction
+    advanced, = [e for e in events if e.type == "base_advanced"]
+    assert advanced.data["in_engine"] is True
+    assert active_base(events, lane.task.seed_base)["selector"] == proposed.data["selector"]
+    before = store.path.read_bytes()
+    _serve(engine)
+    assert store.path.read_bytes() == before, "one draft per source lifecycle"
+
+
+def test_a_repair_fix_is_drafted_first_and_carries_its_trigger(tmp_path, monkeypatch):
+    lane, store, generation, proposal = repair_fixture(tmp_path)
+    _model(monkeypatch, {"files": proposal["files"], "summary": "Opt-in sentinel momentum",
+                         "flag": proposal["flag"], "documentation_path": "README.md"})
+    engine = _live_engine(lane, store)
+    pick = author_next(lane.rd, lane.task, fold(store.read_all()), store.read_all())
+    assert pick["track"] == "repair" and [r["origin"] for r in pick["rows"]] == ["repair"]
+    _serve(engine)
+    events = store.read_all()
+    authored, = [e for e in events if e.type == "lane_authored"]
+    assert authored.data["track"] == "repair" and authored.data["outcome"] == "drafted"
+    proposed, = [e for e in events if e.type == "upstream_proposed"]
+    assert proposed.data["repair_trigger_nodes"] == [1]
+    assert any(e.type == "base_advanced" for e in events), [e.type for e in events][-12:]
+
+
+def test_a_repair_without_a_declared_trigger_probe_is_not_paid_for(tmp_path):
+    lane, store, generation, proposal = repair_fixture(tmp_path)
+    lane.task.upstream["repair_probes"] = []
+    events = store.read_all()
+    skipped = set()
+    state = fold(events)
+    assert author_next(lane.rd, lane.task, state, events, skipped=skipped) is None, (
+        "its only capability hunk needs a probe nobody declared: the lane would refuse the draft")
+    assert skipped == {author_action_id(state.nodes[0])}, "and it is not read again this process"
+
+
+def test_a_declined_draft_is_recorded_and_never_asked_again(tmp_path, monkeypatch):
+    lane, store, generation, body = fixture(tmp_path)
+    calls = []
+    _model(monkeypatch, _champion_draft(), verdict="fail", calls=calls)
+    engine = _live_engine(lane, store)
+    _serve(engine)
+    events = store.read_all()
+    authored, = [e for e in events if e.type == "lane_authored"]
+    assert authored.data["outcome"] == "declined" and authored.data["reason"]
+    assert not [e for e in events if e.type.startswith("upstream_proposal")]
+    _serve(engine)
+    assert len(calls) == 2, "not paid for again"
+
+
+def test_the_author_is_off_with_its_switch_and_under_propose(tmp_path, monkeypatch):
+    for update in ({"upstream_author": False}, {"upstream_mode": "propose"}):
+        root = tmp_path / next(iter(update))
+        root.mkdir()
+        lane, store, generation, body = fixture(root)
+        snapshot = lane.rd / "config.snapshot.json"
+        snapshot.write_text(Settings.model_validate_json(snapshot.read_bytes()).model_copy(
+            update=update).model_dump_json(), encoding="utf8")
+        calls = []
+        _model(monkeypatch, _champion_draft(), calls=calls)
+        _serve(_live_engine(lane, store))
+        assert calls == [] and not [e for e in store.read_all() if e.type == "lane_authored"]
+
+
+def test_a_spend_ceiling_met_while_drafting_stops_the_run(tmp_path, monkeypatch):
+    import anyio
+
+    import looplab.core.parse as parse
+    from looplab.core.llm_budget import BudgetExceeded
+    from looplab.engine.upstream_serve import serve_upstream_requests
+    lane, store, generation, body = fixture(tmp_path)
+
+    def broke(*a, **k):
+        raise BudgetExceeded("llm_cost_limit reached")
+    monkeypatch.setattr(parse, "parse_structured", broke)
+    engine = _live_engine(lane, store)
+
+    async def _drive():
+        await serve_upstream_requests(engine, fold(store.read_all()))
+        while not engine._upstream_serve.job.done:
+            await anyio.sleep(0.02)
+        await serve_upstream_requests(engine, fold(store.read_all()))
+    with pytest.raises(BudgetExceeded):
+        anyio.run(_drive)
+    authored, = [e for e in store.read_all() if e.type == "lane_authored"]
+    assert authored.data["outcome"] == "failed" and engine._upstream_serve.job is None
+
+
+def test_the_recipe_never_carries_a_code_path_the_patch_owns(tmp_path):
+    lane, store, generation, body = fixture(tmp_path)
+    events = store.read_all()
+    pick = author_next(lane.rd, lane.task, fold(events), events)
+    draft = MaintainerDraft.model_validate({**_champion_draft(),
+                                            "recipe_overrides": {"train.py": "x", "recipe.env": "y"}})
+    out = build_body(pick, draft, MaintainerCritique(verdict="pass", reason="ok"), generation=generation)
+    assert out["recipe_files"] == {"recipe.env": "MOMENTUM=0.2\n"}, "train.py is the base's now"
+    assert out["hunk_hashes"] == sorted({r["hunk_hash"] for r in pick["rows"]})
+    assert out["expected_base_revision"] == active_base(events, lane.task.seed_base)["revision"]
+
+
+def test_the_run_stops_paying_after_its_cap(tmp_path):
+    lane, store, generation, body = fixture(tmp_path)
+    for i in range(AUTHOR_MAX_PER_RUN):
+        store.append("lane_authored", {"action_id": f"auto-author-{i}", "track": "repair",
+                                       "source_node_id": 9, "outcome": "declined"})
+    events = store.read_all()
+    assert author_next(lane.rd, lane.task, fold(events), events) is None
+
+
+def test_the_draft_prompt_names_its_track():
+    assert "FIX" in author_messages("repair", "ctx")[1]["content"]
+    assert "CHAMPION" in author_messages("champion", "ctx")[1]["content"]

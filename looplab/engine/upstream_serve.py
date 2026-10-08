@@ -15,9 +15,10 @@ THE MODES (`resolve_upstream_mode`, the one reader of the setting):
   positional `lane_op_done` receipt.
 * `auto` — `propose`, and the engine also CHECKS every proposal against the current base once and
   ADVANCES every one whose measured gate passed (`auto_next_op`, deterministic action ids, so a crash
-  re-entry is the lane's own idempotent retry, invariant #3). Proposals are still authored by the
-  Assistant / an external agent / the operator: an automated author would be a paid, prompt-defined
-  Maintainer, which this change does not add.
+  re-entry is the lane's own idempotent retry, invariant #3). With nothing left to check or advance,
+  the AUTOMATED AUTHOR (`engine/upstream_author.py`, `Settings.upstream_author`) drafts the next
+  proposal itself — a repair's fix, then the champion's capability — and the draft continues as an
+  ordinary `propose` job. The Assistant / an external agent / the operator still propose as before.
 
 A task with no `upstream` block, or one whose gate cannot run (anything but `trusted_local`, a host
 scorer, run setup — `upstream_gate.py::input_identity`'s own refusals), resolves to `off` with the
@@ -41,6 +42,7 @@ never re-runs one on its own, and an auto operation the lane refused is asked ag
 """
 from __future__ import annotations
 
+import contextvars
 import logging
 import threading
 import time
@@ -189,6 +191,8 @@ class UpstreamServe:
         self.job: Optional[UpstreamJob] = None
         self.armed: Optional[dict] = None
         self.refused_auto: dict = {}
+        # Source lifecycles the author found nothing to nominate in (`author_next(skipped=)`).
+        self.author_skipped: set = set()
 
 
 def _arm(engine) -> dict:
@@ -346,10 +350,14 @@ def _gate(engine, lane, job: UpstreamJob) -> dict:
             engine._release_gpus(reservation.get("gpu_ids"))
 
 
-def _spawn(job: UpstreamJob, fn) -> None:
+def _spawn(job: UpstreamJob, fn, *, carry_context: bool = False) -> None:
+    # `carry_context`: the author's PAID calls run in the spawning task's context, so they land in its
+    # trace and the run's broker lane like any other paid call (`_author_work`).
+    context = contextvars.copy_context() if carry_context else None
+
     def _work():
         try:
-            job.out = fn()
+            job.out = context.run(fn) if context is not None else fn()
         except BaseException as exc:  # noqa: BLE001 — the worker reports; the MAIN task decides what it means
             job.error = exc
     job.thread = threading.Thread(target=_work, name=f"looplab-upstream:{job.op}", daemon=True)
@@ -369,6 +377,8 @@ async def _settle(engine, lane, job: UpstreamJob) -> bool:
     """The MAIN task's half of one finished phase. True when it appended."""
     store = engine.store
     receipt: Optional[dict] = None
+    if job.op == "author":
+        return await _settle_author(engine, lane, job)
     async with engine._write_lock:
         if job.phase == "admit":
             if job.error is not None:
@@ -428,6 +438,63 @@ async def _settle(engine, lane, job: UpstreamJob) -> bool:
         _LOG.info("upstream %s %s refused: %s", job.op, job.body.get("action_id"), receipt.get("code"))
     engine._upstream_serve.job = None
     return True
+
+
+def _author_work(engine, pick, generation):
+    """The author's worker: its two paid calls under a span (`_paid_progress`), the body back."""
+    import contextlib
+
+    from looplab.engine.upstream_author import author_draft
+    paid = getattr(engine, "_paid_progress", None)
+    scope = (paid("upstream", "author", node_id=pick["node"].id, track=pick["track"])
+             if callable(paid) else contextlib.nullcontext())
+    with scope:
+        return author_draft(engine, pick, generation=generation)
+
+
+async def _settle_author(engine, lane, job: UpstreamJob) -> bool:
+    """The MAIN task's half of an authoring job: the `lane_authored` row, then — for a drafted
+    proposal — the same job continues as the lane's `propose` (its own refusals, rows and Git work).
+    A spend ceiling the worker met is the run's to stop on: raised here, after the job is cleared."""
+    from looplab.core.errors import budget_stop_leaf
+    pick, serve = job.ctx, engine._upstream_serve
+    out = job.out if job.error is None else {"outcome": "failed", "code": _code(job.error)}
+    async with engine._write_lock:
+        row = {"action_id": job.body["action_id"], "track": pick["track"],
+               "source_node_id": pick["node"].id, "outcome": out["outcome"]}
+        row["hunk_hashes"] = sorted({r["hunk_hash"] for r in pick["rows"]})
+        if out.get("reason"):
+            row["reason"] = str(out["reason"])[:500]
+        if out.get("code"):
+            row["code"] = out["code"]
+        engine.store.append("lane_authored", row)
+        if out["outcome"] == "drafted":
+            job.op, job.body, job.ctx, job.out = "propose", out["body"], None, None
+            _start(engine, lane, job)
+            return True
+    serve.job = None
+    stop = budget_stop_leaf(job.error)
+    if stop is not None:
+        raise stop
+    if job.error is not None:
+        _LOG.warning("upstream author failed on node %s: %s", pick["node"].id, _code(job.error))
+    return True
+
+
+def _start_author(engine, armed, state, events) -> None:
+    """Start the automated author on the next source, when it is on and one is due."""
+    from looplab.engine.upstream_author import author_next, upstream_author_setting
+    from looplab.events.run_generation import run_generation_token
+    serve = engine._upstream_serve
+    if not upstream_author_setting(armed["settings"]):
+        return
+    pick = author_next(engine.run_dir, engine.task, state, events, skipped=serve.author_skipped)
+    if pick is None:
+        return
+    generation = run_generation_token(events)
+    serve.job = UpstreamJob(op="author", body={"action_id": pick["action_id"]}, idx=None,
+                            phase="author", ctx=pick)
+    _spawn(serve.job, lambda: _author_work(engine, pick, generation), carry_context=True)
 
 
 def _queued_body(lane, request: dict) -> dict:
@@ -494,6 +561,7 @@ async def serve_upstream_requests(engine, state) -> bool:
     events = engine.store.read_all()
     nxt = auto_next_op(events, engine._repo_spec.get("seed_base"))
     if nxt is None:
+        _start_author(engine, armed, state, events)
         return False
     op, body = nxt
     refused_at = serve.refused_auto.get((op, body["action_id"]))

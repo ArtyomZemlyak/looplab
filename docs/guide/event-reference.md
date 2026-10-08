@@ -23,7 +23,7 @@ The event type itself is the contract's identity and is never renamed or reused;
 
 <!-- generated: event types -->
 
-180 event types — 127 folded into `RunState`, 53 diagnostic; 1192 declared payload keys; 30 types whose whole payload is stored by the fold.
+181 event types — 127 folded into `RunState`, 54 diagnostic; 1199 declared payload keys; 30 types whose whole payload is stored by the fold.
 
 | type | fold | records | required keys | optional keys |
 |---|---|---|---|---|
@@ -116,6 +116,7 @@ The event type itself is the contract's identity and is never renamed or reused;
 | `inject_done` | folded | The fulfillment receipt for one `inject_node` request. | `idx` | — |
 | `inject_failed` | diagnostic | An `inject_node` request that could not be materialized, with the reason. | `error`, `idx`, `reason` | — |
 | `inject_node` | folded · whole | An operator-authored node: its idea and code, or a branch of an existing (possibly foreign) node. | — | `code`, `deleted`, `files`, `forked_from`, `idea`, `node_kind`, `origin`, `parent_generations`, `parent_id`, `parent_ids`, `uses`, `uses_attempts` |
+| `lane_authored` | diagnostic | The automated upstream author settled one source lifecycle: drafted, declined by its critic, skipped or failed. | `action_id`, `outcome`, `source_node_id`, `track` | `code`, `hunk_hashes`, `reason` |
 | `lane_op_done` | folded | The live engine settled a queued upstream operation; the lane's own rows carry what it did. | `idx`, `op`, `outcome` | `action_id`, `code`, `seq` |
 | `lane_op_requested` | folded | An upstream propose/check/advance queued for the LIVE engine that serves the lane. | `action_id`, `op`, `request_hash` | `body`, `proposal_id`, `request_path` |
 | `lessons_distilled` | folded · whole | The lessons one distillation pass drew from this run's node pairs. | `at_node`, `count`, `lessons`, `pairs`, `trigger` | — |

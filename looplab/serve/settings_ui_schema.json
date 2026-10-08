@@ -1494,6 +1494,15 @@
           "shortHelp": "off, propose (queued on a live run) or auto (checked and promoted automatically)."
         },
         {
+          "key": "upstream_author",
+          "label": "Write upstream proposals automatically",
+          "type": "bool",
+          "default": true,
+          "help": "Only when the upstream lane runs in auto mode. The engine drafts a proposal once for each node a repair made run, then for the champion: a Maintainer model call writes the generalized patch behind a flag and a separate critic call reviews it. A reviewed draft is checked like any proposal and reaches the base only if its measured gate passes. At most 6 drafts per run.",
+          "shortLabel": "Auto upstream author",
+          "shortHelp": "Paid drafts of fixes and champion capabilities for the base (auto mode only)."
+        },
+        {
           "key": "established_context",
           "label": "Carry earlier phases' reads into each new phase",
           "type": "bool",

@@ -542,6 +542,7 @@ _LAYOUT = {
     "artifact_fence": "engine",  # a uses-consumer reads the artifact it was admitted with
     "artifact_ideas": "agents",  # Settings.researcher_artifacts: the Researcher's artifact schema
     "upstream_serve": "engine",  # the upstream lane served by a live engine (doc 73 §2.5)
+    "upstream_author": "engine",  # the automated upstream author (doc 73 §2.5)
 }
 
 

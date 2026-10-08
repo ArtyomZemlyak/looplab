@@ -4,6 +4,10 @@ The caller supplies its already-accounted model/author function. This role owns
 generalization instructions and validation; it never edits the owner checkout,
 executes an opaque training command, certifies a score or advances a base.
 """
+from typing import Literal
+
+from pydantic import BaseModel, Field
+
 from looplab.core.errors import UpstreamRefusal
 
 
@@ -39,3 +43,69 @@ class Maintainer:
         if not isinstance(text, str) or flag["name"] not in text or not isinstance(body["summary"], str) or not body["summary"].strip():
             raise UpstreamRefusal("upstream_maintainer_invalid", "Patch must document the flag in an editable file and explain generalization")
         return body
+
+
+# ---------------------------------------------------------------------------------------------------
+# THE AUTOMATED AUTHOR's two paid calls (doc 73 §2.5; driven by `engine/upstream_author.py`). The
+# draft and its critic are TWO calls on purpose: `validate` above demands a named critic's reasoned
+# pass, and a model grading its own draft in the same turn is not one. Neither verdict is evidence —
+# the proposal still buys its measured gate (`engine/upstream_gate.py`) before anything advances.
+AUTHOR_CRITIC_REVIEWER = "looplab-auto-critic"
+
+
+class MaintainerFlag(BaseModel):
+    name: str = Field(description="A Python identifier naming the new behaviour's switch.")
+    default: str = Field(description="The value that keeps the base's PRIOR behaviour (the default).")
+    enabled: str = Field(description="The value that turns the new behaviour on.")
+
+
+class MaintainerDraft(BaseModel):
+    files: dict[str, str] = Field(description="The FULL new contents of every base file the patch "
+                                              "changes or adds, keyed by its path in the base.")
+    deleted: list[str] = Field(default_factory=list, description="Base paths the patch deletes.")
+    recipe_overrides: dict[str, str] = Field(
+        default_factory=dict, description="Only for a configuration path the patch ALSO "
+        "changes: the FULL contents the source node's recipe needs there to switch the flag on. "
+        "Every other recipe file is copied from the source node unchanged.")
+    summary: str = Field(description="What capability the patch generalizes, and why it is reusable "
+                                     "beyond the source node.")
+    flag: MaintainerFlag
+    documentation_path: str = Field(description="One of the paths in `files` whose text documents "
+                                                "the flag by its name.")
+
+
+class MaintainerCritique(BaseModel):
+    verdict: Literal["pass", "fail"] = Field(
+        description="pass = the patch generalizes a reusable capability behind a flag whose default "
+                    "keeps the old behaviour, touches no evaluator/metric/label/split code, and keeps "
+                    "the source's scientific knobs out of the base; fail otherwise.")
+    reason: str = Field(description="One or two sentences naming the specific evidence.")
+
+
+AUTHOR_TRACK_NOTES = {
+    "repair": ("TRACK: a FIX. The hunks below are what a repair changed to make the source node run; "
+               "later nodes built on the same base would hit the same failure. Promote the fix so the "
+               "base no longer has the defect."),
+    "champion": ("TRACK: the CHAMPION's capability. The hunks below are reusable code the run's best "
+                 "node added (not its recipe). Promote the capability behind a flag so later nodes can "
+                 "turn it on; the champion's own settings stay in its recipe."),
+}
+
+
+def author_messages(track: str, context: str) -> list[dict]:
+    """The draft call's messages: the role's instruction, the track, and the engine-built context."""
+    return [{"role": "system", "content": Maintainer.instruction},
+            {"role": "user", "content": AUTHOR_TRACK_NOTES[track] + "\n\n" + context
+             + "\n\nWrite the patch. Return the full contents of every changed base file."}]
+
+
+def critic_messages(track: str, context: str, draft: MaintainerDraft) -> list[dict]:
+    """The critic call's messages: the same rules, the source context and the draft — a separate
+    reviewer, not the author grading itself."""
+    shown = "\n\n".join(f"--- {path} (proposed)\n{text}" for path, text in sorted(draft.files.items()))
+    return [{"role": "system", "content": "You review a Maintainer patch for LoopLab. "
+             + Maintainer.instruction},
+            {"role": "user", "content": AUTHOR_TRACK_NOTES[track] + "\n\n" + context
+             + f"\n\nPROPOSED PATCH\nsummary: {draft.summary}\nflag: {draft.flag.name} "
+             f"(default {draft.flag.default!r}, enabled {draft.flag.enabled!r})\n"
+             f"deleted: {draft.deleted}\n\n{shown}\n\nDoes this patch pass review?"}]
