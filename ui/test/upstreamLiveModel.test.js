@@ -10,8 +10,9 @@ test('absent or malformed projections read as no live lane', () => {
 
 test('malformed rows are dropped, never shown as receipts, and counts are not invented', () => {
   const out = upstreamLiveSummary({ mode: 'propose', queue: { pending: -1, total: 'x',
-    rows: [null, { op: 'check', status: 'pending', idx: 0 }, { status: 'succeeded' }] },
-  authored: [{ outcome: 'drafted', seq: 1 }, { seq: 2 }] })
+    rows: [null, { op: 'check', status: 'pending', idx: 0, action_id: 'a' }, { status: 'succeeded' },
+      { op: 'check', idx: 1, action_id: { not: 'a string' } }] },
+  authored: [{ outcome: 'drafted', seq: 1, source_node_id: 2 }, { seq: 2 }, { outcome: 'drafted', source_node_id: 3 }] })
   assert.equal(out.pending, 1)
   assert.equal(out.total, 1)
   assert.equal(out.recent.length, 1)
@@ -20,13 +21,19 @@ test('malformed rows are dropped, never shown as receipts, and counts are not in
 })
 
 test('the newest rows come first and at most five', () => {
-  const rows = Array.from({ length: 8 }, (_, idx) => ({ idx, op: 'check', status: 'succeeded' }))
+  const rows = Array.from({ length: 8 }, (_, idx) => ({ idx, op: 'check', status: 'succeeded', action_id: `a${idx}` }))
   const out = upstreamLiveSummary({ mode: 'auto', queue: { rows } })
   assert.deepEqual(out.recent.map(row => row.idx), [7, 6, 5, 4, 3])
 })
 
-test('labels read in both languages and an unknown value reads as itself', () => {
-  assert.equal(upstreamLiveLabel('status', 'refused', true), 'отклонено')
-  assert.equal(upstreamLiveLabel('track', 'champion', false), 'champion')
-  assert.equal(upstreamLiveLabel('outcome', 'brand-new', true), 'brand-new')
+test('an unknown or missing value reads as unknown, never an empty cell', () => {
+  assert.equal(upstreamLiveLabel('status', 'refused'), 'refused by the lane')
+  assert.equal(upstreamLiveLabel('track', 'champion'), 'champion')
+  assert.equal(upstreamLiveLabel('outcome', 'brand-new'), 'unknown')
+  assert.equal(upstreamLiveLabel('status', undefined), 'unknown')
+})
+
+test('a lane no engine confirmed yet says so', () => {
+  assert.equal(upstreamLiveSummary({ mode: 'auto', configured: true }).configured, true)
+  assert.equal(upstreamLiveSummary({ mode: 'auto' }).configured, false)
 })

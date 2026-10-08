@@ -45,7 +45,26 @@ def test_the_waiver_is_the_declarations_never_the_rows(tmp_path):
     result = lane.check({"expected_generation": generation, "action_id": "fix-check",
                          "proposal_id": made["proposal_id"]})["result"]
     full = {k: v for k, v in lane.task.upstream.items() if k != "repair_gate"}
-    assert gate_matches_policy(result, lane.task.upstream, 0.0, repair_required=True)
-    assert not gate_matches_policy(result, full, 0.0, repair_required=True), "full demands repetitions"
-    assert not gate_matches_policy(result, lane.task.upstream, 0.0, repair_required=False), (
-        "a waiver on a proposal that promotes no repair grants nothing")
+    assert gate_matches_policy(result, lane.task.upstream, 0.0, repair_required=True, repair_only=True)
+    assert not gate_matches_policy(result, full, 0.0, repair_required=True, repair_only=True), (
+        "full demands repetitions")
+    assert not gate_matches_policy(result, lane.task.upstream, 0.0, repair_required=False,
+                                   repair_only=True), "a waiver on a proposal that promotes no repair grants nothing"
+    assert not gate_matches_policy(result, lane.task.upstream, 0.0, repair_required=True), (
+        "nor on one whose nomination is not repairs only")
+
+
+def test_one_repair_hunk_beside_idea_hunks_does_not_buy_the_waiver(tmp_path):
+    """Critic 2026-10-08: the waiver keyed on `repair_trigger_nodes` alone, which ONE repair-origin
+    hunk makes non-empty — an agent could nominate idea hunks plus one repair hunk and skip the
+    paired repetitions for all of them. The proposal now records `repair_only`."""
+    from looplab.engine.upstream_gate import waives_equivalence
+    lane, store, generation, proposal = repair_fixture(tmp_path, repair_gate="probes")
+    made = lane.propose(proposal)
+    row, = [e for e in store.read_all() if e.type == "upstream_proposed"]
+    assert row.data["repair_only"] is True and made["proposal_id"] == row.data["proposal_id"]
+    declared = lane.task.upstream
+    assert waives_equivalence(declared, row.data)
+    assert not waives_equivalence(declared, {**row.data, "repair_only": False})
+    legacy = {k: v for k, v in row.data.items() if k != "repair_only"}
+    assert not waives_equivalence(declared, legacy), "an older proposal keeps the full gate"

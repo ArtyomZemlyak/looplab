@@ -377,6 +377,10 @@ class UpstreamLane:
             "source_recipe": {"files": body["recipe_files"], "deleted": body.get("recipe_deleted", [])},
             "capability_paths": sorted(ctx["implementation"]),
             "hunk_hashes": body["hunk_hashes"], "repair_trigger_nodes": sorted({n for r in rows for n in r["pending_trigger_nodes"] if r["origin"] == "repair"}),
+            # doc 73 §2.3: EVERY nominated hunk is a repair's — the only proposal the declared
+            # `repair_gate: probes` may waive the paired repetitions for (`upstream_gate.py::
+            # waives_equivalence`). One repair hunk beside idea hunks does not buy the waiver.
+            "repair_only": all(r["origin"] == "repair" for r in rows),
             "summary": body["summary"], "flag": body["flag"], "critic": body["critic"]})
 
     @staticmethod
@@ -488,7 +492,8 @@ class UpstreamLane:
         gate_event = gates[-1]
         score = node.task_metric if node.task_metric is not None else node.metric
         if (not gate_matches_policy(result, self.task.upstream, score,
-                repair_required=bool(proposal["repair_trigger_nodes"]))
+                repair_required=bool(proposal["repair_trigger_nodes"]),
+                repair_only=proposal.get("repair_only") is True)
                 or claimed_gate_executions(events, gate_event) != result["executions"]):
             raise UpstreamRefusal("upstream_gate_required", "The latest gate is incomplete or differs from its declared probes, tolerances or recorded executions; inspect the evidence and check afresh")
         if input_identity(self.task, self.settings, node, proposal) != result["input_identity"]:

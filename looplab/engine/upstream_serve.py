@@ -99,11 +99,16 @@ def run_settings(run_dir):
 LIVE_QUEUE_ROWS = 50
 
 
-def live_queue(events) -> dict:
+def live_queue(events, cursor: Optional[int] = None) -> dict:
     """The live lane's queue as a reader sees it (API, UI, the Assistant): the last
     `LIVE_QUEUE_ROWS` requests in order, each with its receipt once the engine settled it, and how
-    many still wait. Pure over the log; the fold's cursor rule (`_advance_request_cursor`) is what
-    pairs a receipt with its request, so this pairs by the receipt's own `idx`."""
+    many still wait. WAITING is the fold's own answer — `RunState.lane_ops_done`, the cursor
+    `_advance_request_cursor` moves, which a receipt advances THROUGH its position — so a request
+    below the cursor whose own receipt is missing reads `settled`, never `pending` forever.
+    `cursor` is that fold's value when the caller has it; folded here otherwise."""
+    if cursor is None:
+        from looplab.events.replay import fold
+        cursor = int(fold(events).lane_ops_done or 0)
     requests = [e for e in events if e.type == "lane_op_requested"]
     done = {}
     for e in events:
@@ -112,43 +117,66 @@ def live_queue(events) -> dict:
     rows = []
     for idx, req in enumerate(requests):
         receipt = done.get(idx)
+        status = (receipt.data.get("outcome") if receipt is not None
+                  else "settled" if idx < cursor else "pending")
         rows.append({"idx": idx, "seq": req.seq, "op": req.data.get("op"),
                      "action_id": req.data.get("action_id"),
                      **({"proposal_id": req.data["proposal_id"]} if req.data.get("proposal_id")
                         else {"proposal_id": (req.data.get("body") or {}).get("proposal_id")}
                         if isinstance(req.data.get("body"), dict) else {}),
-                     "status": "pending" if receipt is None else receipt.data.get("outcome"),
+                     "status": status,
                      **({"code": receipt.data["code"]} if receipt is not None and receipt.data.get("code")
                         else {})})
-    return {"pending": sum(1 for r in rows if r["status"] == "pending"),
+    return {"pending": max(0, len(rows) - min(cursor, len(rows))),
             "total": len(rows), "rows": rows[-LIVE_QUEUE_ROWS:]}
 
 
 LIVE_AUTHORED_ROWS = 20
 
 
-def upstream_live_view(run_dir, events) -> Optional[dict]:
+def upstream_live_view(run_dir, events, *, cursor: Optional[int] = None) -> Optional[dict]:
     """What the UI shows of the live lane (`serve/appstate.py`'s state payload, `upstream_live`): the
     mode this run serves and why, its queue with receipts, and the automated author's last rows.
     None for a run that declares no upstream block and queued nothing — the payload keeps its shape.
-    The mode is read from the LAUNCHED settings and the `run_started` declaration, the same two
-    halves the engine arms from (`_arm`)."""
+
+    THE MODE IS THE ENGINE'S, not the snapshot's: an engine records what it armed with on the
+    diagnostic `lane_armed` row (`serve_upstream_requests`), and it keeps serving that mode until it
+    restarts — a `PUT /config` edit of the snapshot changes nothing live. So the latest such row in
+    `events` (a historical prefix reads the mode in force then) is the answer; only a run whose
+    engine never armed falls back to its launched settings and the `run_started` declaration, marked
+    `configured: true`."""
     started = next((e for e in events if e.type == "run_started"), None)
     upstream = started.data.get("upstream") if started is not None else None
     upstream = upstream if isinstance(upstream, dict) and upstream else None
     if upstream is None and not any(e.type == "lane_op_requested" for e in events):
         return None
-    settings = run_settings(run_dir)
-    mode, reason = (resolve_upstream_mode(settings, upstream) if settings is not None
-                    else ("off", "no readable config snapshot"))
-    from looplab.engine.upstream_author import upstream_author_setting
+    armed = next((e for e in reversed(events) if e.type == "lane_armed"), None)
+    if armed is not None:
+        mode = armed.data.get("mode") if armed.data.get("mode") in UPSTREAM_MODES else "off"
+        reason, author, configured = str(armed.data.get("reason") or ""), armed.data.get("author") is True, False
+    else:
+        from looplab.engine.upstream_author import upstream_author_setting
+        settings = run_settings(run_dir)
+        mode, reason = (resolve_upstream_mode(settings, upstream) if settings is not None
+                        else ("off", "no readable config snapshot"))
+        author, configured = mode == "auto" and upstream_author_setting(settings), True
     authored = [{"seq": e.seq, "action_id": e.data.get("action_id"), "track": e.data.get("track"),
                  "source_node_id": e.data.get("source_node_id"), "outcome": e.data.get("outcome")}
                 for e in events if e.type == "lane_authored"]
-    return {"mode": mode, "reason": reason,
-            "author": mode == "auto" and upstream_author_setting(settings),
-            "queue": live_queue(events), "authored": authored[-LIVE_AUTHORED_ROWS:],
+    return {"mode": mode, "reason": reason, "author": author, "configured": configured,
+            "queue": live_queue(events, cursor), "authored": authored[-LIVE_AUTHORED_ROWS:],
             "authored_total": len(authored)}
+
+
+def claims_unresolved(events) -> bool:
+    """A lane claim (a proposal's or a gate's) has no completion and was not abandoned — the lane
+    refuses every new operation until the operator resolves it, so `auto` asks none and the author
+    pays for no draft the lane would refuse."""
+    rows = [e for e in events if e.type.startswith("upstream_")]
+    finished = {e.data.get("action_id") for e in rows
+                if e.type in ("upstream_proposed", "upstream_proposal_failed", "upstream_gate_finished")}
+    abandoned = {e.data.get("claim_action_id") for e in rows if e.type == "upstream_gate_abandoned"}
+    return any(e.type in _STARTED and e.data.get("action_id") not in finished | abandoned for e in rows)
 
 
 def auto_next_op(events, seed_base) -> Optional[tuple[str, dict]]:
@@ -166,10 +194,7 @@ def auto_next_op(events, seed_base) -> Optional[tuple[str, dict]]:
     except Exception:  # noqa: BLE001 — an unreadable base is the lane's refusal to state, not ours
         return None
     rows = [e for e in events if e.type.startswith("upstream_") or e.type == "base_advanced"]
-    finished = {e.data.get("action_id") for e in rows
-                if e.type in ("upstream_proposed", "upstream_proposal_failed", "upstream_gate_finished")}
-    abandoned = {e.data.get("claim_action_id") for e in rows if e.type == "upstream_gate_abandoned"}
-    if any(e.type in _STARTED and e.data.get("action_id") not in finished | abandoned for e in rows):
+    if claims_unresolved(events):
         return None
     generation = run_generation_token(events)
     advanced = {e.data.get("proposal_id") for e in rows if e.type == "base_advanced"}
@@ -204,6 +229,9 @@ class UpstreamJob:
     error: Optional[BaseException] = None
     ctx: object = None
     charges: list = field(default_factory=list)
+    # A propose the automated author drafted: `{action_id, track, source_node_id, hunk_hashes}`, so a
+    # lane refusal of it is recorded on its own `lane_authored` row (`refused`).
+    authored: Optional[dict] = None
 
     @property
     def done(self) -> bool:
@@ -219,7 +247,9 @@ class UpstreamServe:
         self.armed: Optional[dict] = None
         self.refused_auto: dict = {}
         # Source lifecycles the author found nothing to nominate in (`author_next(skipped=)`).
-        self.author_skipped: set = set()
+        self.author_skipped: dict = {}
+        # The mode this engine armed with, recorded once on the diagnostic `lane_armed` row.
+        self.announced = False
 
 
 def _arm(engine) -> dict:
@@ -229,16 +259,20 @@ def _arm(engine) -> dict:
         settings = run_settings(engine.run_dir) if spec.get("upstream") is not None else None
         mode, reason = (resolve_upstream_mode(settings, spec["upstream"]) if settings is not None
                         else ("off", "no upstream block or no readable config snapshot"))
+        launch = spec.get("effective_seed_base") if mode != "off" else None
+        # `stamp` is the LAUNCH base and never moves: it is what a Developer that cannot rebind
+        # authored on. `current` is the base the engine's live advances moved to — what the
+        # Developers that CAN rebind are moved onto before their next call.
         serve.armed = {"mode": mode, "reason": reason, "settings": settings,
-                       "stamp": spec.get("effective_seed_base") if mode != "off" else None}
+                       "stamp": launch, "current": launch}
     return serve.armed
 
 
 def base_stamp(engine) -> Optional[dict]:
-    """The base this engine's Developers build on — the launch base (`repo_spec()
-    ["effective_seed_base"]`) until a LIVE advance moves it — or None when the live lane is off
-    (every other run's `node_created` keeps its shape). A node's own Developer call names the base it
-    actually authored on (`take_authored`), which wins over this at `_emit_node_created`."""
+    """The LAUNCH base (`repo_spec()["effective_seed_base"]`) while this engine serves the live lane,
+    None when the lane is off — so every other run's `node_created` keeps its shape. It never moves:
+    it is what a Developer that cannot rebind (a CLI agent's worktree, `sync_developer_base`) wrote
+    its code on."""
     serve = getattr(engine, "_upstream_serve", None)
     if serve is None:
         return None
@@ -248,79 +282,103 @@ def base_stamp(engine) -> Optional[dict]:
         return None
 
 
-_AUTHORED = threading.local()
-_NO_BASE = object()
+def current_base(engine) -> Optional[dict]:
+    """The base the live lane advanced to (the launch base until an in-engine advance), None when
+    the lane is off — the target `sync_developer_base` rebinds the Developers to."""
+    if base_stamp(engine) is None:
+        return None
+    return _arm(engine).get("current")
 
 
-def note_authored(base) -> None:
-    """Record, for THIS thread, the base the Developer call it just made authored on."""
-    _AUTHORED.base = base
+_CHAIN_ATTRS = ("inner", "developer", "fallback", "base")
 
 
-def take_authored():
-    """The base this thread's last Developer call authored on, consumed (`_NO_BASE` when none)."""
-    base = getattr(_AUTHORED, "base", _NO_BASE)
-    _AUTHORED.base = _NO_BASE
-    return base
-
-
-def _authoring_owners(developer):
-    """Every object in a Developer's wrapper chain that OWNS an authored base — the walk
-    `node_build.py::_reset_developer_footprint` makes, for the same `__getattr__`-proxy reason."""
-    pending, seen = [developer], set()
+def _developer_chain(developer):
+    """Every object in a Developer's wrapper chain and which of them are LEAVES (no wrapped member
+    of its own) — the walk `node_build.py::_reset_developer_footprint` makes, for the same
+    `__getattr__`-proxy reason (only attributes in the instance `__dict__` are followed)."""
+    pending, seen, members, leaves = [developer], set(), [], []
     while pending:
         current = pending.pop()
         if current is None or id(current) in seen:
             continue
         seen.add(id(current))
-        if "authored_base" in getattr(current, "__dict__", {}) and callable(
-                getattr(type(current), "rebind_base", None)):
-            yield current
-        for attr in ("inner", "developer", "fallback", "base"):
-            child = getattr(current, attr, None) if attr in getattr(current, "__dict__", {}) else None
-            if child is not None and child is not current:
-                pending.append(child)
+        members.append(current)
+        own = getattr(current, "__dict__", {})
+        children = [own[a] for a in _CHAIN_ATTRS if own.get(a) is not None and own.get(a) is not current]
+        if not children:
+            leaves.append(current)
+        pending.extend(children)
+    return members, leaves
+
+
+def _owns_base(member) -> bool:
+    return "authored_base" in getattr(member, "__dict__", {}) and callable(
+        getattr(type(member), "rebind_base", None))
 
 
 def sync_developer_base(engine, developer, pinned=None):
-    """Rebind a Developer whose base is not the one this call must author on, and return that base
-    (None when no owner in its chain carries one). The target is the engine's current base
-    (`base_stamp`), or `pinned` — a REPAIR's lifecycle base (`lifecycle_base`), because the workdir
-    it repairs was seeded from it. Under the instance's call lock (`node_build.py::_run_developer`),
-    so a call in flight finishes on the base it started with."""
-    target = pinned if pinned is not None else base_stamp(engine)
-    authored = None
-    for owner in _authoring_owners(developer):
+    """The base the Developer call about to run authors on, after rebinding it — or None while the
+    live lane is off (the node's row then keeps its historical shape).
+
+    The target is the engine's current base (`current_base`), or `pinned`: a REPAIR's lifecycle base
+    (`lifecycle_base`), because the workdir it repairs was seeded from it. A chain is rebound only
+    when EVERY leaf owns a base (`LLMRepoDeveloper.rebind_base`); one that holds a member which
+    cannot rebind (a CLI agent seeding its worktree from launch-time directories, even beside a
+    rebindable fallback) is left alone whole and answers the LAUNCH base, because which member
+    writes the code is not known before the call. Under the instance's call lock
+    (`node_build.py::_run_developer`), so a call in flight finishes on the base it started with."""
+    launch = base_stamp(engine)
+    if launch is None:
+        return None
+    members, leaves = _developer_chain(developer)
+    if not leaves or not all(_owns_base(m) for m in leaves):
+        return dict(launch)
+    target = pinned if pinned is not None else current_base(engine)
+    owners = [m for m in members if _owns_base(m)]
+    for owner in owners:
         if target is not None and owner.authored_base != target:
             try:
                 owner.rebind_base() if pinned is None else owner.rebind_base(dict(pinned))
-            except Exception as exc:  # noqa: BLE001 — a failed rebind keeps the old base; the stamp below says which
-                _LOG.warning("upstream: Developer rebind failed (%s); it keeps its base", exc)
-        authored = owner.authored_base if authored is None else authored
-    return authored
+            except Exception:  # noqa: BLE001 — a failed rebind keeps the old base; the stamp below says which
+                _LOG.warning("upstream: Developer rebind failed; it keeps its base", exc_info=True)
+    bases = {repr(o.authored_base) for o in leaves}
+    # A leaf whose rebind failed is on another base than its siblings: nothing says which one the
+    # call will use, so the run's launch stamp is no better — name the leaves' base only when they
+    # agree, else the target the engine asked for (the overlay is then merged from it).
+    return dict(leaves[0].authored_base) if len(bases) == 1 and leaves[0].authored_base else (
+        dict(target) if target is not None else dict(launch))
 
 
 def lifecycle_base(engine, node) -> Optional[dict]:
-    """The base node `node`'s CURRENT lifecycle was seeded on (its binding `workspace_seeded`
-    selection), while this engine serves the live lane; None otherwise, or before it was seeded."""
+    """The base node `node`'s CURRENT lifecycle was seeded on, while this engine serves the live
+    lane; None otherwise, or before its current generation was seeded. The same reading
+    `upstream_workspace.py::materialization_plan` pins a started lifecycle with (`seeded_basis`)."""
     if base_stamp(engine) is None or node is None:
         return None
-    from looplab.events.replay import event_generation_binds
-    keys = ("run_dir", "event_seq", "digest")
-    found = None
-    for e in engine.store.read_all():
-        # The same two rows `upstream_workspace.py::materialization_plan` reads the lifecycle's
-        # origin from, bound by the ONE generation rule: the seed, then a migration that re-based
-        # the pending overlay before its evaluation started.
-        if (e.type not in ("workspace_seeded", "node_overlay_rebased")
-                or e.data.get("node_id") != node.id
-                or not event_generation_binds(e.data, node.attempt)):
-            continue
-        selection = ((e.data.get("base_revision") or {}).get("selection")
-                     if e.type == "workspace_seeded" else e.data.get("selector"))
-        if isinstance(selection, dict) and all(k in selection for k in keys):
-            found = {k: selection[k] for k in keys}
-    return found
+    from looplab.engine.upstream_workspace import seeded_basis
+    events = engine.store.read_all()
+    created = getattr(node, "creation_event_seq", None)
+    if created is None:
+        return None
+    selector, seeded_now = seeded_basis(node, events, created)
+    return dict(selector) if seeded_now and isinstance(selector, dict) else None
+
+
+def files_base(engine, node) -> Optional[dict]:
+    """The base `node.files` are an overlay OF — what a node built from them with no Developer call
+    (a simplification) must name: its seeded lifecycle base, else the base its own `node_created`
+    named. None while the lane is off or when neither is recorded (the creation prefix then rules,
+    as on every stopped-lane row)."""
+    if base_stamp(engine) is None or node is None:
+        return None
+    seeded = lifecycle_base(engine, node)
+    if seeded is not None:
+        return seeded
+    created = next((e for e in engine.store.read_all() if e.type == "node_created"
+                    and e.seq == getattr(node, "creation_event_seq", None)), None)
+    named = created.data.get("base_selector") if created is not None else None
+    return dict(named) if isinstance(named, dict) else None
 
 
 def _lane(engine, settings):
@@ -424,7 +482,7 @@ async def _settle(engine, lane, job: UpstreamJob) -> bool:
                     # (`sync_developer_base`), and a node built by one that has not rebound yet
                     # names its own base on `node_created`.
                     selector = prepared["proposal"]["selector"]
-                    _arm(engine)["stamp"] = {k: selector[k] for k in ("run_dir", "event_seq", "digest")}
+                    _arm(engine)["current"] = {k: selector[k] for k in ("run_dir", "event_seq", "digest")}
             else:
                 job.ctx = job.out[1]
                 if job.op == "propose":
@@ -461,6 +519,13 @@ async def _settle(engine, lane, job: UpstreamJob) -> bool:
             store.append("lane_op_done", done)
         elif receipt.get("outcome") == "refused":
             engine._upstream_serve.refused_auto[(job.op, job.body.get("action_id"))] = time.monotonic()
+            if job.authored is not None and job.op == "propose":
+                # The lane refused a draft the author paid for: said on its own row, so the UI
+                # does not read `drafted` as "proposed" and a re-entry does not propose it again.
+                refusal = {"action_id": job.authored["action_id"], "track": job.authored["track"],
+                           "source_node_id": job.authored["source_node_id"], "outcome": "refused"}
+                refusal["code"] = receipt.get("code") or "refused"
+                store.append("lane_authored", refusal)
     if receipt.get("outcome") == "refused":
         _LOG.info("upstream %s %s refused: %s", job.op, job.body.get("action_id"), receipt.get("code"))
     engine._upstream_serve.job = None
@@ -472,9 +537,12 @@ def _author_work(engine, pick, generation):
     import contextlib
 
     from looplab.engine.upstream_author import author_draft
-    paid = getattr(engine, "_paid_progress", None)
-    scope = (paid("upstream", "author", node_id=pick["node"].id, track=pick["track"])
-             if callable(paid) else contextlib.nullcontext())
+    # A SPAN, not a `_paid_progress` beacon: its phase is a closed word of one node's build or
+    # evaluation (`events/types.py::PROGRESS_PHASES`), and authoring is neither — the cadence shape
+    # `engine/value_estimate.py` takes for the same reason.
+    span = getattr(engine, "_op_span", None)
+    scope = (span("upstream_author", node_id=pick["node"].id, track=pick["track"])
+             if callable(span) else contextlib.nullcontext())
     with scope:
         return author_draft(engine, pick, generation=generation)
 
@@ -496,6 +564,7 @@ async def _settle_author(engine, lane, job: UpstreamJob) -> bool:
             row["code"] = out["code"]
         engine.store.append("lane_authored", row)
         if out["outcome"] == "drafted":
+            job.authored = {k: row[k] for k in ("action_id", "track", "source_node_id", "hunk_hashes")}
             job.op, job.body, job.ctx, job.out = "propose", out["body"], None, None
             _start(engine, lane, job)
             return True
@@ -512,8 +581,18 @@ def _start_author(engine, armed, state, events) -> None:
     """Start the automated author on the next source, when it is on and one is due."""
     from looplab.engine.upstream_author import author_next, upstream_author_setting
     from looplab.events.run_generation import run_generation_token
+    from looplab.engine.upstream_author import unproposed_draft
     serve = engine._upstream_serve
-    if not upstream_author_setting(armed["settings"]):
+    if not upstream_author_setting(armed["settings"]) or claims_unresolved(events):
+        return
+    # A draft paid for and recorded, whose proposal the lane never claimed (a crash in between):
+    # proposed again from its retained body, with no new call.
+    pending = unproposed_draft(engine.run_dir, events)
+    if pending is not None:
+        row, body = pending
+        serve.job = UpstreamJob(op="propose", body=body, idx=None, authored={
+            k: row.get(k) for k in ("action_id", "track", "source_node_id", "hunk_hashes")})
+        _start(engine, _lane(engine, armed["settings"]), serve.job)
         return
     pick = author_next(engine.run_dir, engine.task, state, events, skipped=serve.author_skipped)
     if pick is None:
@@ -563,6 +642,15 @@ async def serve_upstream_requests(engine, state) -> bool:
     armed = _arm(engine)
     if state.halted:
         return False
+    if not serve.announced:
+        # What THIS engine serves, once per process (`upstream_live_view` reads it): diagnostic, so
+        # its position keys nothing.
+        from looplab.engine.upstream_author import upstream_author_setting
+        serve.announced = True
+        async with engine._write_lock:
+            engine.store.append("lane_armed", {
+                "mode": armed["mode"], "reason": armed["reason"],
+                "author": armed["mode"] == "auto" and upstream_author_setting(armed["settings"])})
     if done < len(requests):
         request = requests[done]
         if armed["mode"] == "off":

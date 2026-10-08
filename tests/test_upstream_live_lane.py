@@ -87,9 +87,12 @@ def test_a_live_engine_checks_and_advances_a_proposal_without_a_pause(tmp_path):
     assert advanced[0].data["action_id"] == f"auto-advance-{pid}"
     assert active_base(events, lane.task.seed_base)["selector"] == made["selector"]
     assert auto_next_op(events, lane.task.seed_base) is None, "nothing left to do; a re-entry is idempotent"
-    before = store.path.read_bytes()
+    lane_rows = lambda: [e.data for e in store.read_all() if e.type != "lane_armed"]  # noqa: E731
+    before = lane_rows()
     _serve(_engine(lane, store))
-    assert store.path.read_bytes() == before
+    assert lane_rows() == before, "a re-entered engine only records what it armed with"
+    armed = [e.data for e in store.read_all() if e.type == "lane_armed"]
+    assert armed[-1] == {"mode": "auto", "reason": "", "author": True} and len(armed) == 2
 
 
 def test_a_lifecycle_whose_evaluation_started_stays_on_its_base(tmp_path):
@@ -226,7 +229,6 @@ def test_a_developer_built_at_launch_rebinds_to_the_advanced_base(tmp_path):
 
 def test_run_developer_rebinds_before_the_call_and_records_what_it_authored_on(tmp_path):
     from factories import make_engine
-    from looplab.engine.upstream_serve import _NO_BASE, take_authored
 
     class Dev:
         def __init__(self):
@@ -238,13 +240,12 @@ def test_run_developer_rebinds_before_the_call_and_records_what_it_authored_on(t
 
     engine = make_engine(tmp_path / "run")
     engine._upstream_serve.armed = {"mode": "auto", "reason": "", "settings": None,
-                                    "stamp": {"digest": "b"}}
+                                    "stamp": {"digest": "a"}, "current": {"digest": "b"}}
     dev = Dev()
     seen = []
     result = engine._run_developer(dev, lambda: seen.append(dev.authored_base) or "code")
     assert dev.rebinds == 1 and seen == [{"digest": "b"}], "rebound BEFORE the call"
-    assert result.authored_base == {"digest": "b"} and take_authored() == {"digest": "b"}
-    assert take_authored() is _NO_BASE, "consumed once"
+    assert result.authored_base == {"digest": "b"}, "the envelope names it; no thread keeps it"
     engine._run_developer(dev, lambda: "again")
     assert dev.rebinds == 1, "already on the engine's base: no second rebind"
     pinned = engine._run_developer(dev, lambda: "repair", pinned_base={"digest": "a"})
@@ -262,7 +263,9 @@ def test_a_repair_reads_the_base_its_lifecycle_was_seeded_on(tmp_path):
     store.append("node_eval_started", {"node_id": 2, "generation": 0})
     engine = _engine(lane, store)
     _serve(engine)
-    assert base_stamp(engine)["digest"] == made["selector"]["digest"], "the engine moved on"
+    from looplab.engine.upstream_serve import current_base
+    assert current_base(engine)["digest"] == made["selector"]["digest"], "the engine moved on"
+    assert base_stamp(engine)["digest"] == old["digest"], "the launch stamp never moves"
     node = fold(store.read_all()).nodes[2]
     assert lifecycle_base(engine, node) == old, "the lifecycle stays on the base it was seeded from"
     dev = LLMRepoDeveloper(object(), lane.task, plan_decompose=False)
@@ -271,4 +274,69 @@ def test_a_repair_reads_the_base_its_lifecycle_was_seeded_on(tmp_path):
     dev.rebind_base(lifecycle_base(engine, node))
     assert dev.authored_base == old
     assert any(old["digest"] in str(ed) for ed in dev._editables)
-    assert lifecycle_base(engine, SimpleNamespace(id=99, attempt=0)) is None, "never seeded"
+    assert lifecycle_base(engine, SimpleNamespace(id=99, attempt=0, creation_event_seq=None)) is None, (
+        "never seeded")
+
+
+
+def test_a_developer_that_cannot_rebind_is_named_on_the_launch_base(tmp_path):
+    """Critic 2026-10-08: a CLI agent seeds its worktree from launch-time directories and cannot
+    rebind, so after a live advance its code is still the launch base's — and a chain holding one
+    (even beside a rebindable fallback) is left alone whole: which member writes is not known."""
+    from factories import make_engine
+
+    class Rebindable:
+        def __init__(self):
+            self.authored_base, self.rebinds = {"digest": "a"}, 0
+
+        def rebind_base(self, selector=None):
+            self.rebinds += 1
+            self.authored_base = dict(selector) if selector is not None else {"digest": "b"}
+
+    class Cli:
+        pass
+
+    class Validating:
+        def __init__(self, inner, fallback):
+            self.inner, self.fallback = inner, fallback
+
+    engine = make_engine(tmp_path / "run")
+    engine._upstream_serve.armed = {"mode": "auto", "reason": "", "settings": None,
+                                    "stamp": {"digest": "a"}, "current": {"digest": "b"}}
+    assert engine._run_developer(Cli(), lambda: "code").authored_base == {"digest": "a"}
+    fallback = Rebindable()
+    mixed = engine._run_developer(Validating(Cli(), fallback), lambda: "code")
+    assert mixed.authored_base == {"digest": "a"} and fallback.rebinds == 0
+    both = Validating(Rebindable(), Rebindable())
+    assert engine._run_developer(both, lambda: "code").authored_base == {"digest": "b"}
+
+
+def test_no_base_is_named_while_the_lane_is_off(tmp_path):
+    from factories import make_engine
+
+    class Rebindable:
+        authored_base = None
+
+        def __init__(self):
+            self.authored_base = {"digest": "a"}
+
+        def rebind_base(self, selector=None):
+            raise AssertionError("never rebound while the lane is off")
+    engine = make_engine(tmp_path / "run")
+    assert engine._run_developer(Rebindable(), lambda: "code").authored_base is None, (
+        "every other run's node_created keeps its historical shape")
+
+
+def test_a_simplification_names_its_parents_base_not_the_runs(tmp_path):
+    """Critic 2026-10-08: a simplification copies the parent's files with no Developer call, so the
+    base they are an overlay of is the PARENT's — naming the run's current base would make the next
+    lifecycle's merge revert a promoted capability."""
+    from looplab.engine.upstream_serve import files_base
+    lane, store, generation, body, made = _live(tmp_path)
+    old = active_base(store.read_all(), lane.task.seed_base)["selector"]
+    create(store, 2, {"recipe.env": "MOMENTUM=0.3\n"})
+    materialize(lane, store, 2)
+    engine = _engine(lane, store)
+    _serve(engine)
+    node = fold(store.read_all()).nodes[2]
+    assert files_base(engine, node) == old and old != made["selector"]

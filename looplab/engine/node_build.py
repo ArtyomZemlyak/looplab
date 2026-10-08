@@ -523,12 +523,11 @@ class NodeBuildMixin:
                     bind_state(bind_to)
             self._reset_developer_footprint(developer)
             # doc 73 §2.5: a Developer whose base the live upstream lane advanced rebinds BEFORE
-            # this call, under this lock — and the base it authors on rides the envelope and this
-            # thread's record, which `_emit_node_created` stamps on the node it builds.
-            from looplab.engine.upstream_serve import note_authored, sync_developer_base
+            # this call, under this lock — and the base it authors on rides the ENVELOPE, which each
+            # creation site hands to `_emit_node_created` explicitly (never a thread's leftover).
+            from looplab.engine.upstream_serve import sync_developer_base
             authored = sync_developer_base(self, developer, pinned_base)
             code = fn(*args, **kwargs)
-            note_authored(authored)
             return dataclasses.replace(self._capture_developer_result(developer, code),
                                        authored_base=authored)
 
@@ -771,19 +770,13 @@ class NodeBuildMixin:
             if v is not _OMIT:
                 data[k] = v
         # doc 73 §2.5: the base this node's overlay was AUTHORED on, while this engine serves the
-        # upstream lane live — an advance it makes does not rebind the Developers built at launch,
-        # so `upstream_workspace.py::materialization_plan` must merge from this base, not from the
-        # one active when the row landed. None (and so the historical shape) otherwise.
-        # The base the build's OWN Developer call authored on — handed in by a site that carried it
-        # across threads (a Card build), else this thread's last call — wins over the engine's.
-        from looplab.engine.upstream_serve import _NO_BASE, base_stamp, take_authored
-        engine_base = base_stamp(self)
-        authored = take_authored()
-        stamp = (base_selector if base_selector is not _OMIT and base_selector is not None
-                 else authored if authored is not _NO_BASE and authored is not None
-                 else engine_base)
-        if stamp is not None and engine_base is not None:
-            data["base_selector"] = dict(stamp)
+        # upstream lane live, so `upstream_workspace.py::materialization_plan` merges from it rather
+        # than from the base active when the row landed. Handed in EXPLICITLY by the site that knows
+        # it — a build's `DeveloperResult.authored_base`, a simplification's parent base
+        # (`upstream_serve.py::files_base`) — and None (so the historical shape, the creation prefix
+        # ruling) for every row whose files no Developer call produced, and while the lane is off.
+        if isinstance(base_selector, dict):
+            data["base_selector"] = dict(base_selector)
         append_kwargs = (
             {} if expected_last_seq is _OMIT
             else {"expected_last_seq": expected_last_seq}
@@ -1576,6 +1569,8 @@ class NodeBuildMixin:
                     parents=parents, parent_generations=parent_generations,
                     idea=idea, code=code,
                     files=dict(built.last_files),                # the envelope's, never the instance's
+                    # doc 73 §2.5: the base the Developer call authored these files on.
+                    base_selector=built.authored_base,
                     deleted=list(built.last_deleted),
                     footprint_finalized=footprint_finalized,
                     stale_error="parent lifecycle changed while building",
@@ -2191,6 +2186,7 @@ class NodeBuildMixin:
                     parents=parents, parent_generations=parent_generations,
                     idea=idea, code=code,
                     files=dict(built.last_files),
+                    base_selector=built.authored_base,     # doc 73 §2.5, as in `_create_node_scoped`
                     deleted=list(built.last_deleted),
                     footprint_finalized=footprint_finalized,
                     stale_error="node lifecycle changed while rebuilding",
@@ -2483,6 +2479,10 @@ class NodeBuildMixin:
                     files=(req.get("files")
                            or ({} if req.get("code") or _inj is None else dict(_inj.last_files))) or {},
                     deleted=req.get("deleted") or [],
+                    # doc 73 §2.5: only files the Developer call produced carry the base it authored
+                    # on; supplied files keep the creation prefix, as every stopped-lane row does.
+                    base_selector=(_inj.authored_base if _inj is not None and not req.get("files")
+                                   and not req.get("code") else None),
                     footprint_finalized=footprint_finalized,
                     stale_error="parent lifecycle changed while building",
                     rejected_error="injected node creation was rejected during replay",

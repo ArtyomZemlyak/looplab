@@ -203,6 +203,7 @@ test('the live lane shows its mode, its queue with receipts and the author rows'
   assert.match(markup, /auto — the engine checks and promotes on its own/)
   assert.match(markup, /1 of 2 queued operations waiting/)
   assert.match(markup, /adv-1<\/code> · waiting/)
+  assert.doesNotMatch(markup, /as configured/)
   assert.match(markup, /fix from a repair · drafted → proposal/)
   assert.match(markup, /champion · declined by its critic/)
   assert.match(markup, /without a pause, the engine runs the measured checks/)
@@ -221,5 +222,7 @@ test('an off lane says why and shows no queue', () => {
     upstream_history: [], upstream_live: { mode: 'off', reason: 'upstream_mode is off', queue: {} } } })
   assert.match(markup, /off — proposing, checking and promoting need a paused run/)
   assert.match(markup, /upstream_mode is off/)
+  assert.match(harness.render(UpstreamPanel, { state: { nodes: {}, upstream_enabled: true, upstream_history: [],
+    upstream_live: { ...live, configured: true } } }), /as configured; no engine has confirmed it yet/)
   assert.doesNotMatch(markup, /queued operations waiting/)
 })

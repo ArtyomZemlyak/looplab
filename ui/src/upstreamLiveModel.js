@@ -5,19 +5,25 @@
 const MODES = new Set(['off', 'propose', 'auto'])
 const RECENT = 5
 
-const rowsOf = (value, key) => (Array.isArray(value) ? value : [])
-  .filter(row => row && typeof row === 'object' && typeof row[key] === 'string')
-
 const count = (value, fallback) => (Number.isSafeInteger(value) && value >= 0 ? value : fallback)
+
+const queueRow = row => row && typeof row === 'object' && typeof row.op === 'string'
+  && typeof row.action_id === 'string' && Number.isSafeInteger(row.idx)
+
+const authoredRow = row => row && typeof row === 'object' && typeof row.outcome === 'string'
+  && Number.isSafeInteger(row.seq) && Number.isSafeInteger(row.source_node_id)
 
 export function upstreamLiveSummary(live) {
   if (!live || typeof live !== 'object' || !MODES.has(live.mode)) return null
   const queue = live.queue && typeof live.queue === 'object' ? live.queue : {}
-  const rows = rowsOf(queue.rows, 'op')
-  const authored = rowsOf(live.authored, 'outcome')
+  const rows = (Array.isArray(queue.rows) ? queue.rows : []).filter(queueRow)
+  const authored = (Array.isArray(live.authored) ? live.authored : []).filter(authoredRow)
   return {
     mode: live.mode,
     reason: typeof live.reason === 'string' ? live.reason : '',
+    // `configured`: no engine has armed the lane yet, so this is what the settings SAY, not what
+    // an engine serves (`upstream_serve.py::upstream_live_view`).
+    configured: live.configured === true,
     author: live.author === true,
     pending: count(queue.pending, rows.filter(row => row.status === 'pending').length),
     total: count(queue.total, rows.length),
@@ -27,25 +33,22 @@ export function upstreamLiveSummary(live) {
   }
 }
 
-// One label table per vocabulary, both languages, so an unknown value reads as itself.
+// English labels only: the panel renders each through `uiText`, so the Russian lives in ru.json
+// alone. An unknown value reads as `unknown`, never as an empty cell.
 const LABELS = {
   mode: {
-    off: ['off — proposing, checking and promoting need a paused run', 'выключена — предложение, проверка и перенос требуют паузы'],
-    propose: ['propose — operations are queued and run between turns', 'propose — операции ставятся в очередь и выполняются между ходами'],
-    auto: ['auto — the engine checks and promotes on its own', 'auto — движок сам проверяет и переносит'],
+    off: 'off — proposing, checking and promoting need a paused run',
+    propose: 'propose — operations are queued and run between turns',
+    auto: 'auto — the engine checks and promotes on its own',
   },
-  status: {
-    pending: ['waiting', 'ожидает'], succeeded: ['done', 'выполнено'],
-    failed: ['failed', 'не прошло'], refused: ['refused', 'отклонено'],
-  },
+  status: { pending: 'waiting', succeeded: 'succeeded', failed: 'check did not pass', refused: 'refused by the lane', settled: 'settled' },
   outcome: {
-    drafted: ['drafted → proposal', 'черновик → предложение'], declined: ['declined by its critic', 'отклонён критиком'],
-    skipped: ['skipped', 'пропущен'], failed: ['failed', 'ошибка'],
+    drafted: 'drafted → proposal', declined: 'declined by its critic', skipped: 'not drafted', failed: 'drafting failed',
+    rejected: 'the draft could not be absorbed', refused: 'refused by the lane',
   },
-  track: { repair: ['fix from a repair', 'фикс из ремонта'], champion: ['champion', 'чемпион'] },
+  track: { repair: 'fix from a repair', champion: 'champion' },
 }
 
-export function upstreamLiveLabel(kind, value, ru) {
-  const pair = LABELS[kind]?.[value]
-  return pair ? pair[ru ? 1 : 0] : String(value ?? '')
+export function upstreamLiveLabel(kind, value) {
+  return LABELS[kind]?.[value] ?? 'unknown'
 }

@@ -981,8 +981,10 @@ charged separately from experiment scores.
 promotes what a repair changed had no metric before the fix, so its gate is the tests, both
 regression sides, the repair probe (old fails, new passes) and the unchanged scorer bytes —
 the paired source repetitions are waived and recorded as an `equivalence_waived` check.
-Every other proposal keeps the full gate, and the CAS recomputes the waiver from this
-declaration, never from the gate's own row.
+Only a proposal whose EVERY nominated hunk is a repair's qualifies (`repair_only` on
+`upstream_proposed`): one repair hunk nominated beside idea hunks does not waive the
+repetitions for them. Every other proposal keeps the full gate, and the CAS recomputes the
+waiver from this declaration and that record, never from the gate's own row.
 
 This declaration is fixed at launch; changing it requires another task/run.
 Repair probes must exercise the original failing trigger, and cannot replace the

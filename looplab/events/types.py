@@ -1159,6 +1159,10 @@ EV_LANE_OP_DONE = "lane_op_done"
 # author reads it back off the raw log so a re-entry never pays twice. Not `upstream_`-prefixed for
 # the reason above: it shares its action id with the proposal it may become.
 EV_LANE_AUTHORED = "lane_authored"
+# The mode a live engine ARMED the upstream lane with, once per engine process
+# (`engine/upstream_serve.py::serve_upstream_requests`): what the UI reports, because an engine keeps
+# serving that mode until it restarts whatever the snapshot says since. DIAGNOSTIC.
+EV_LANE_ARMED = "lane_armed"
 
 ALL_EVENT_TYPES: frozenset[str] = frozenset(
     v for k, v in globals().items() if k.startswith("EV_") and isinstance(v, str)
@@ -1293,7 +1297,7 @@ DIAGNOSTIC_EVENTS: frozenset[str] = frozenset({
     EV_EVAL_INVOCATION_CLAIMED, EV_EVAL_INVOCATION_SETTLED, EV_EVAL_INVOCATION_RECOVERED,
     EV_EVAL_CANARY_STARTED, EV_EVAL_CANARY_FINISHED, EV_EVAL_ATTEMPT_WITHHELD,
     EV_TASK_CHANGED, EV_ARTIFACT_SYNCED, EV_ARTIFACT_SYNC_STARTED,
-    EV_LANE_AUTHORED,
+    EV_LANE_AUTHORED, EV_LANE_ARMED,
 })
 
 # ROWS THAT CANNOT MOVE A DECISION FENCE — one named predicate, because each fence spelling its own
@@ -1376,13 +1380,14 @@ EVENT_PAYLOAD_KEYS: dict[str, PayloadContract] = {
     "node_overlay_rebased": PayloadContract("A future lifecycle's effective overlay, after verified base migration or exact capability absorption.", required=("deleted", "files", "generation", "node_id", "selector"), optional=("attempt",)),
     "upstream_proposal_started": PayloadContract("Durable claim before run-owned Maintainer work; optional pointer to the retained original request.", required=('action_id', 'proposal_id', 'request_hash'), optional=('request_path',), stored_whole=True),
     "upstream_proposal_failed": PayloadContract("A proposal failed; no gate permission.", required=('action_id', 'code', 'proposal_id', 'request_hash'), stored_whole=True),
-    "upstream_proposed": PayloadContract("Generalized capability with immutable candidate archive and separate source recipe.", required=('action_id', 'base_revision', 'capability_paths', 'commit', 'critic', 'expected_base_revision', 'flag', 'hunk_hashes', 'manifest_hash', 'old_selector', 'proposal_id', 'repair_trigger_nodes', 'request_hash', 'selector', 'source_node_id', 'source_recipe', 'source_signature', 'summary'), stored_whole=True),
+    "upstream_proposed": PayloadContract("Generalized capability with immutable candidate archive and separate source recipe.", required=('action_id', 'base_revision', 'capability_paths', 'commit', 'critic', 'expected_base_revision', 'flag', 'hunk_hashes', 'manifest_hash', 'old_selector', 'proposal_id', 'repair_trigger_nodes', 'request_hash', 'selector', 'source_node_id', 'source_recipe', 'source_signature', 'summary'), optional=('repair_only',), stored_whole=True),
     "upstream_gate_started": PayloadContract("Claim before real equivalence/regression work; no implicit retry.", required=('action_id', 'input_identity', 'proposal_id', 'request_hash'), stored_whole=True),
     "upstream_execution": PayloadContract("Separate charged gate execution, never a node score.", required=('action_id', 'execution', 'proposal_id', 'request_hash'), stored_whole=True),
     "upstream_gate_finished": PayloadContract("Measured gate verdict bound to actual source and inputs.", required=('action_id', 'evidence_token', 'proposal_id', 'request_hash', 'result'), stored_whole=True),
     "upstream_gate_abandoned": PayloadContract("Operator recovery of an interrupted claim; grants no pass.", required=('action_id', 'claim_action_id', 'proposal_id', 'reason', 'request_hash'), stored_whole=True),
     "base_advanced": PayloadContract("Explicit CAS — the stopped lane's, or the live engine's (`in_engine`): only future lifecycles adopt the verified base.", required=('action_id', 'evidence_token', 'flag', 'from_revision', 'gate_seq', 'hunk_hashes', 'proposal_id', 'request_hash', 'selector', 'source_node_id', 'summary'), optional=('in_engine',), stored_whole=True),
     "lane_op_requested": PayloadContract("An upstream propose/check/advance queued for the LIVE engine that serves the lane.", required=('action_id', 'op', 'request_hash'), optional=('body', 'proposal_id', 'request_path')),
+    "lane_armed": PayloadContract("A live engine armed the upstream lane: the mode it serves until it restarts, and why.", required=('author', 'mode', 'reason'), optional=()),
     "lane_authored": PayloadContract("The automated upstream author settled one source lifecycle: drafted, declined by its critic, skipped or failed.", required=('action_id', 'outcome', 'source_node_id', 'track'), optional=('code', 'hunk_hashes', 'reason')),
     "lane_op_done": PayloadContract("The live engine settled a queued upstream operation; the lane's own rows carry what it did.", required=('idx', 'op', 'outcome'), optional=('action_id', 'code', 'seq')),
     "ablate": PayloadContract(

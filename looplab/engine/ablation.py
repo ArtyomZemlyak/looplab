@@ -29,6 +29,7 @@ from looplab.core.models import Idea, durable_idea_payload
 from looplab.engine.card_reservation import RESERVATION_RACES, scored_anchor
 # Through the ENGINE's fold seam, not `replay.fold` directly — see `shared.py::engine_fold`.
 from looplab.engine.shared import engine_fold as fold
+from looplab.engine.upstream_serve import files_base
 from looplab.events.types import EV_ABLATE, EV_NODE_BUILDING, EV_NODE_FAILED
 from looplab.runtime.sandbox import GpuPinUnenforceable
 from looplab.search.policy import simplify_actions
@@ -420,6 +421,7 @@ class AblationMixin:
             node_id=node_id, parent_ids=[parent_id], operator="refine_block",
             idea=durable_idea_payload(idea), code=code,
             files=dict(built.last_files),
+            base_selector=built.authored_base,    # doc 73 §2.5: the base the call authored on
             eval_start_boundary=True,
             parent_generations={str(parent_id): generation},
             **({"footprint_finalized": True} if footprint_finalized else {}))
@@ -540,6 +542,9 @@ class AblationMixin:
             idea=durable_idea_payload(reservation.idea), code=self._comment_block(
                 parent.code, blocks[block]),
             files=dict(parent.files), eval_start_boundary=True,
+            # doc 73 §2.5: the parent's files are an overlay of the PARENT's base, whatever the run
+            # advanced to since — a simplification names it, or the merge would revert a promotion.
+            base_selector=files_base(self, parent),
             parent_generations={str(parent_id): generation},
             simplified={"parent_id": parent_id, "generation": generation, "block": block,
                         "ablation_id": ablation_id})
@@ -589,6 +594,7 @@ class AblationMixin:
             node_id=current.id, parent_ids=parents, operator="simplify",
             idea=durable_idea_payload(current.idea),
             code=comment_block(parent.code, spans[receipt["block"]]), files=dict(parent.files),
+            base_selector=files_base(self, parent),   # doc 73 §2.5, as in `_simplify`
             eval_start_boundary=True, generation=current.attempt,
             parent_generations={str(parent.id): parent.attempt},
             simplified={**receipt, "generation": parent.attempt})

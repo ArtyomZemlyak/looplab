@@ -133,9 +133,13 @@ def evaluation_context(task, settings, events):
 
 
 def waives_equivalence(declaration, proposal) -> bool:
-    """The operator declared `repair_gate: probes` AND this proposal promotes a repair."""
+    """The operator declared `repair_gate: probes` AND this proposal promotes ONLY a repair: it has
+    a pending trigger to probe and every nominated hunk is repair-origin (`repair_only`, recorded on
+    `upstream_proposed`; absent on an older proposal, which therefore keeps the full gate). A repair
+    hunk nominated beside idea hunks would otherwise skip the repetitions for all of them."""
     return (declaration.get("repair_gate") == "probes"
-            and bool(proposal.get("repair_trigger_nodes")))
+            and bool(proposal.get("repair_trigger_nodes"))
+            and proposal.get("repair_only") is True)
 
 
 def execute_gate(rd, task, settings, source, proposal, manifest, action_id, charge, *, extra_env=None):

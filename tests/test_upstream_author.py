@@ -70,7 +70,7 @@ def test_the_champion_capability_reaches_the_base_through_the_measured_gate(tmp_
     events = store.read_all()
     authored, = [e for e in events if e.type == "lane_authored"]
     node = fold(events).nodes[0]
-    assert authored.data["action_id"] == author_action_id(node)
+    assert authored.data["action_id"] == author_action_id(node, "champion")
     assert authored.data["track"] == "champion" and authored.data["outcome"] == "drafted"
     proposed, = [e for e in events if e.type == "upstream_proposed"]
     assert proposed.data["action_id"] == authored.data["action_id"]
@@ -105,11 +105,15 @@ def test_a_repair_without_a_declared_trigger_probe_is_not_paid_for(tmp_path):
     lane, store, generation, proposal = repair_fixture(tmp_path)
     lane.task.upstream["repair_probes"] = []
     events = store.read_all()
-    skipped = set()
+    skipped = {}
     state = fold(events)
     assert author_next(lane.rd, lane.task, state, events, skipped=skipped) is None, (
         "its only capability hunk needs a probe nobody declared: the lane would refuse the draft")
-    assert skipped == {author_action_id(state.nodes[0])}, "and it is not read again this process"
+    pending = sorted(n.id for n in state.pending_nodes())
+    assert pending == [1] and set(skipped) == {author_action_id(state.nodes[0], "repair"),
+                                               author_action_id(state.nodes[0], "champion")}
+    assert all(sig is not None for sig in skipped.values()), (
+        "memoized against the pending triggers, not for good: they may settle")
 
 
 def test_a_declined_draft_is_recorded_and_never_asked_again(tmp_path, monkeypatch):
@@ -209,3 +213,105 @@ def test_the_state_payload_carries_the_live_lane_only_where_it_exists(tmp_path, 
     EventStore(plain / "events.jsonl").append("run_started", {"run_id": "p", "task_id": "t",
                                                              "goal": "g", "direction": "min"})
     assert "upstream_live" not in srv.state_payload(plain)["state"], "every other payload keeps its shape"
+
+
+# ------------------------------------------------------------------ critic 2026-10-08 regressions
+def test_the_author_runs_under_a_real_engines_span(tmp_path, monkeypatch):
+    """BLOCKER: `_paid_progress` refuses a stage outside `PROGRESS_STAGES`, so on a REAL engine every
+    draft failed before its first call. The SimpleNamespace stand-in hid it; this drives
+    `_author_work` through `make_engine`'s own `_op_span`."""
+    from factories import make_engine
+    from looplab.engine.upstream_serve import _author_work
+    lane, store, generation, body = fixture(tmp_path)
+    _model(monkeypatch, _champion_draft())
+    real = make_engine(tmp_path / "engine-run")
+    events = store.read_all()
+    pick = author_next(lane.rd, lane.task, fold(events), events)
+    stand_in = type("E", (), {"developer": type("D", (), {"client": _Client()})(), "task": lane.task,
+                              "run_dir": lane.rd, "_op_span": real._op_span,
+                              "_redact": real._redact})()
+    out = _author_work(stand_in, pick, generation)
+    assert out["outcome"] == "drafted", out
+
+
+def test_nothing_is_drafted_while_a_lane_claim_is_unresolved(tmp_path, monkeypatch):
+    lane, store, generation, body = fixture(tmp_path)
+    store.append("upstream_gate_started", {"action_id": "stuck", "proposal_id": "up_x",
+                                           "request_hash": "h", "input_identity": "i"})
+    calls = []
+    _model(monkeypatch, _champion_draft(), calls=calls)
+    _serve(_live_engine(lane, store), turns=3)
+    assert calls == [] and not [e for e in store.read_all() if e.type == "lane_authored"]
+
+
+def test_a_repaired_champion_is_asked_for_its_fix_and_for_its_capability():
+    from types import SimpleNamespace
+
+    from looplab.engine.upstream_author import _sources
+    node = SimpleNamespace(id=4, attempt=0, tombstoned=False, status=SimpleNamespace(value="evaluated"))
+    state = SimpleNamespace(nodes={4: node}, best_node_id=4)
+    events = [SimpleNamespace(type="node_repaired", data={"node_id": 4, "generation": 0})]
+    assert [(t, n.id) for t, n in _sources(state, events)] == [("repair", 4), ("champion", 4)]
+
+
+def test_a_draft_retained_before_a_crash_is_proposed_without_paying_again(tmp_path, monkeypatch):
+    from looplab.engine.upstream_author import retain_draft
+    from looplab.engine.upstream_serve import upstream_live_view
+    lane, store, generation, body = fixture(tmp_path)
+    events = store.read_all()
+    pick = author_next(lane.rd, lane.task, fold(events), events)
+    draft = MaintainerDraft.model_validate(_champion_draft())
+    drafted = build_body(pick, draft, MaintainerCritique(verdict="pass", reason="ok"), generation=generation)
+    retain_draft(lane.rd, drafted)
+    store.append("lane_authored", {"action_id": pick["action_id"], "track": "champion",
+                                   "source_node_id": 0, "outcome": "drafted"})
+    calls = []
+    _model(monkeypatch, _champion_draft(), calls=calls)
+    _serve(_live_engine(lane, store))
+    assert calls == [], "the paid draft was on disk"
+    events = store.read_all()
+    assert [e.data["action_id"] for e in events if e.type == "upstream_proposed"] == [pick["action_id"]]
+    assert any(e.type == "base_advanced" for e in events)
+    assert upstream_live_view(lane.rd, events)["configured"] is False, "the engine said what it armed"
+
+
+def test_a_draft_the_lane_refuses_is_recorded_refused(tmp_path, monkeypatch):
+    """A drafted row alone would read "proposed" in the UI; the lane's ADMIT refusal (here a base the
+    run no longer holds) is recorded on its own row, and a re-entry does not propose it again."""
+    import looplab.engine.upstream_author as author
+    lane, store, generation, body = fixture(tmp_path)
+    real = author.build_body
+    monkeypatch.setattr(author, "build_body", lambda *a, **k: {**real(*a, **k),
+                                                              "expected_base_revision": "0" * 64})
+    calls = []
+    _model(monkeypatch, _champion_draft(), calls=calls)
+    engine = _live_engine(lane, store)
+    _serve(engine, turns=6)
+    rows = [e.data for e in store.read_all() if e.type == "lane_authored"]
+    assert [r["outcome"] for r in rows] == ["drafted", "refused"], rows
+    assert rows[-1]["code"] == "upstream_base_conflict"
+    _serve(engine, turns=3)
+    assert len(calls) == 2 and len([e for e in store.read_all() if e.type == "lane_authored"]) == 2
+
+
+def test_a_draft_that_cannot_absorb_the_capability_does_not_buy_the_critic(tmp_path, monkeypatch):
+    lane, store, generation, body = fixture(tmp_path)
+    calls = []
+    _model(monkeypatch, {"files": {"README.md": _DOC}, "summary": "docs only",
+                         "flag": {"name": "MOMENTUM", "default": "0.0", "enabled": "0.2"},
+                         "documentation_path": "README.md"}, calls=calls)
+    _serve(_live_engine(lane, store))
+    row, = [e.data for e in store.read_all() if e.type == "lane_authored"]
+    assert row["outcome"] == "rejected" and row["code"] == "upstream_capability_not_absorbed"
+    assert [name for name, _ in calls] == ["MaintainerDraft"], "one call, not two"
+    assert not [e for e in store.read_all() if e.type.startswith("upstream_proposal")]
+
+
+def test_the_prompts_fence_candidate_text_while_the_envelope_is_on():
+    from looplab.agents.maintainer import critic_messages
+    draft = MaintainerDraft.model_validate(_champion_draft())
+    plain = critic_messages("champion", "ctx", draft)
+    fenced = critic_messages("champion", "ctx", draft, evidence_label="UNTRUSTED_RUN_EVIDENCE")
+    assert "UNTRUSTED" not in plain[0]["content"] + plain[1]["content"]
+    assert fenced[1]["content"].count("UNTRUSTED_RUN_EVIDENCE") >= 4, "the context AND the draft"
+    assert "quoted evidence" in fenced[0]["content"]

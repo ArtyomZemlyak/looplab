@@ -137,7 +137,7 @@ def _probe_rows(probes, executions):
         offset += count
 
 
-def gate_matches_policy(row, declaration, source_metric, *, repair_required=False):
+def gate_matches_policy(row, declaration, source_metric, *, repair_required=False, repair_only=False):
     """Bind a complete passing result to the launched observable gate obligations.
 
     Offline readers lack the operator declaration. Before granting a new base,
@@ -154,8 +154,9 @@ def gate_matches_policy(row, declaration, source_metric, *, repair_required=Fals
             (kind, probe["name"]) for kind, probe in probes]:
         return False
     # The waiver is granted by the DECLARATION and the proposal, recomputed here, never by the row:
-    # `repair_gate: probes` and a repair proposal (doc 73 §2.3, track 1).
-    waived = declaration.get("repair_gate") == "probes" and repair_required
+    # `repair_gate: probes` and a proposal promoting ONLY a repair (doc 73 §2.3, track 1) — the
+    # rule `engine/upstream_gate.py::waives_equivalence` applied when it ran the gate.
+    waived = declaration.get("repair_gate") == "probes" and repair_required and repair_only
     eq = next((c for c in row["checks"] if c["kind"] == "equivalence"), None)
     if waived:
         return eq is None and any(c["kind"] == "equivalence_waived" for c in row["checks"]) and all(

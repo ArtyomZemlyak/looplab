@@ -67,6 +67,11 @@ _SUMMARY_OMIT_KEYS = {
     # is omitted — `research_origin` is WITHIN-run provenance (which deep-research memo steered the
     # proposal) and deliberately survives.
     "origin",
+    # The live upstream lane's projection (`engine/upstream_serve.py::upstream_live_view`): the mode
+    # and the automated author's switch are run CONFIGURATION, which `_REVIEW_CONFIG_KEYS` keeps
+    # owner-only, and the queue's action ids are the operator's own handles. Nothing a one-run
+    # reviewer was granted reads them.
+    "upstream_live",
     # A property of the SERVER PROCESS, not of this run: which of the operator's `.py` modules
     # moved under a running `looplab ui`, by relative path, plus the package's file counts. A
     # review link is a capability over ONE RUN — it was granted the run, not the deployment — and

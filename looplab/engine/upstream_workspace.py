@@ -267,6 +267,39 @@ def rebase_overlay(files, deleted, old_archive, new_archive):
     return out, removed, conflicts
 
 
+
+def seeded_basis(node, events, created_seq):
+    """`(selector, seeded_now)`: the base the pending overlay of `node` was last SEEDED on — its
+    lifecycle's `workspace_seeded` selection, or a migration (`node_overlay_rebased`) the fold applied
+    — counting only rows after its authoring event (`created_seq`) while the node was pending; and
+    whether a seed of THIS generation (`node.attempt`) is among them. `(None, False)` before any.
+
+    The ONE reading both `materialization_plan` (the pinned lifecycle) and the live lane's repair
+    (`upstream_serve.py::lifecycle_base`, which base a repair's Developer must read) ask: a late old
+    attempt, a terminal confirmation or a rebase the fold did not apply cannot redefine the basis."""
+    selector, seeded_now = None, False
+    for index, e in enumerate(events):
+        if e.data.get("node_id") != node.id or e.seq < created_seq:
+            continue
+        if e.type not in ("workspace_seeded", "node_overlay_rebased"):
+            continue
+        # A late old attempt or a terminal confirmation is diagnostic only. It
+        # cannot redefine the basis of a pending scientific overlay after reset.
+        prior_state = fold(events[:index])
+        prior = prior_state.nodes.get(node.id)
+        if (prior is None or prior.status.value != "pending" or prior.tombstoned
+                or node.id in prior_state.aborted_nodes
+                or not event_generation_binds(e.data, prior.attempt)):
+            continue
+        if e.type == "workspace_seeded" and (e.data.get("base_revision") or {}).get("selection"):
+            selector = {k: e.data["base_revision"]["selection"][k] for k in ("run_dir", "event_seq", "digest")}
+            seeded_now = seeded_now or prior.attempt == node.attempt
+        elif e.type == "node_overlay_rebased":
+            applied = fold(events[:index + 1]).nodes[node.id]
+            if applied.files == e.data.get("files") and applied.deleted == e.data.get("deleted"):
+                selector = e.data["selector"]
+    return selector, seeded_now
+
 def materialization_plan(spec, node, events):
     """Migrate pending lifecycles; confirmations retain the measured implementation."""
     current = active_base(events, spec["seed_base"])
@@ -321,28 +354,11 @@ def materialization_plan(spec, node, events):
     # base. The stopped lane never met this case (`advance` refuses `upstream_work_pending` over such
     # a lifecycle); an advance the ENGINE makes while it runs does. A lifecycle seeded but not yet
     # started still migrates, as doc 72 designed, and so does every new lifecycle.
-    pinned = False
     started = bool(getattr(current_node, "eval_activity_started", False))
-    for index, e in enumerate(events):
-        if e.data.get("node_id") != node.id or e.seq < created.seq:
-            continue
-        if e.type not in ("workspace_seeded", "node_overlay_rebased"):
-            continue
-        # A late old attempt or a terminal confirmation is diagnostic only. It
-        # cannot redefine the basis of a pending scientific overlay after reset.
-        prior_state = fold(events[:index])
-        prior = prior_state.nodes.get(node.id)
-        if (prior is None or prior.status.value != "pending" or prior.tombstoned
-                or node.id in prior_state.aborted_nodes
-                or not event_generation_binds(e.data, prior.attempt)):
-            continue
-        if e.type == "workspace_seeded" and (e.data.get("base_revision") or {}).get("selection"):
-            origin["selector"] = {k: e.data["base_revision"]["selection"][k] for k in ("run_dir", "event_seq", "digest")}
-            pinned = pinned or (started and prior.attempt == node.attempt)
-        elif e.type == "node_overlay_rebased":
-            applied = fold(events[:index + 1]).nodes[node.id]
-            if applied.files == e.data.get("files") and applied.deleted == e.data.get("deleted"):
-                origin["selector"] = e.data["selector"]
+    seeded_on, seeded_now = seeded_basis(node, events, created.seq)
+    if seeded_on is not None:
+        origin["selector"] = seeded_on
+    pinned = started and seeded_now
     if pinned:
         selected_seed_base(origin["selector"])
         effective = {**spec, "effective_seed_base": origin["selector"],

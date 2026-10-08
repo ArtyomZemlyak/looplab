@@ -23,9 +23,12 @@ WHAT IT DOES, once per source lifecycle, only under `upstream_mode: auto`:
    lane's `propose` job; `auto` then checks it and advances it only if its MEASURED gate passes.
 
 EVERY ROW is appended by the MAIN task (invariant #1): the diagnostic `lane_authored` row, then
-the lane's own rows. The action id is a digest of the source lifecycle (`author_action_id`), so a
-re-entry never pays for the same source twice once its row landed; `AUTHOR_MAX_PER_RUN` bounds the
-spend of a run whose every proposal fails.
+the lane's own rows. The action id is a digest of the source lifecycle and its track
+(`author_action_id`), so a re-entry never pays for the same source twice once its row landed; a
+drafted body is RETAINED (`retain_draft`) before its row, so a crash between the row and the lane's
+claim re-proposes it unpaid; a propose the lane refuses is recorded (`refused`).
+`AUTHOR_MAX_PER_RUN` bounds the spend of a run whose every proposal fails. Nothing is drafted while
+a lane claim is unresolved — the lane would refuse the proposal it bought.
 
 What the author is NOT: evidence. Its prose and the critic's verdict only admit a proposal to the
 gate; the base moves on measurements alone.
@@ -51,11 +54,17 @@ def upstream_author_setting(settings) -> bool:
     return getattr(settings, "upstream_author", False) is True
 
 
-def author_action_id(node) -> str:
-    """The deterministic action id of one source LIFECYCLE: a re-built node is a new source."""
+def author_action_id(node, track: str) -> str:
+    """The deterministic action id of one source LIFECYCLE on one track: a re-built node is a new
+    source, and a repaired champion is asked once for its fix and once for its capability."""
     from looplab.engine.upstream_state import digest, node_signature
     return "auto-author-" + digest({"node_id": node.id, "generation": int(node.attempt or 0),
-                                    "signature": node_signature(node)})[:24]
+                                    "signature": node_signature(node), "track": track})[:24]
+
+
+# Outcomes that cost the two paid calls — what `AUTHOR_MAX_PER_RUN` counts. `skipped` made none, and
+# `refused` is the lane's later answer to a draft already counted as `drafted`.
+PAID_OUTCOMES = ("drafted", "declined", "rejected", "failed")
 
 
 def _attempted(events) -> tuple[set, int]:
@@ -65,12 +74,13 @@ def _attempted(events) -> tuple[set, int]:
     ids = {e.data.get("action_id") for e in authored}
     ids |= {e.data.get("action_id") for e in events if e.type.startswith("upstream_proposal")
             or e.type == "upstream_proposed"}
-    return ids, sum(1 for e in authored if e.data.get("outcome") != "skipped")
+    return ids, sum(1 for e in authored if e.data.get("outcome") in PAID_OUTCOMES)
 
 
 def _sources(state, events) -> list[tuple[str, object]]:
     """`(track, node)` in the order the author asks them: repaired lifecycles newest first, then the
-    champion. Evaluated, live nodes only; the lane's own eligibility is checked after."""
+    champion — a repaired champion appears on both tracks (its fix, then its capability). Evaluated,
+    live nodes only; the lane's own eligibility is checked after."""
     from looplab.events.replay import event_generation_binds
     out, seen = [], set()
     repaired = []
@@ -85,18 +95,65 @@ def _sources(state, events) -> list[tuple[str, object]]:
             seen.add(node.id)
             out.append(("repair", node))
     best = state.nodes.get(state.best_node_id) if state.best_node_id is not None else None
-    if best is not None and best.id not in seen and not best.tombstoned:
+    if best is not None and not best.tombstoned:
         out.append(("champion", best))
     return out
 
 
-def author_next(rd, task, state, events, *, skipped=frozenset()) -> Optional[dict]:
-    """The next source to author from, or None. `{"action_id", "track", "node", "rows", "archive"}`.
+def _draft_path(rd, action_id: str):
+    from looplab.engine.upstream_state import digest
+    from looplab.engine.upstream_workspace import owned_path
+    return owned_path(rd, "upstream/authored/" + digest(action_id)[:24] + ".json")
 
-    `skipped` is the caller's per-process memo of action ids that yielded no nomination, ADDED TO here
-    when it is a set: a source with no eligible capability hunk is read once per process, not on
-    every loop turn. A lifecycle's nomination only shrinks (the base only advances), so the memo
-    never hides a source that became eligible."""
+
+def retain_draft(rd, body: dict) -> None:
+    """Publish a drafted body durably BEFORE its `lane_authored` row (the worker's last step): a
+    crash between that row and the lane's claim re-proposes it from here, unpaid."""
+    import json
+
+    from looplab.core.atomicio import strict_atomic_write_bytes
+    path = _draft_path(rd, body["action_id"])
+    path.parent.mkdir(parents=True, exist_ok=True)
+    strict_atomic_write_bytes(path, json.dumps(body, ensure_ascii=False).encode())
+
+
+def retained_draft(rd, action_id: str) -> Optional[dict]:
+    import json
+
+    from looplab.core.node_evidence import read_bounded_regular_file
+    raw = read_bounded_regular_file(_draft_path(rd, action_id), 2 * 1024 * 1024 + 1)
+    try:
+        body = json.loads(raw) if raw is not None and len(raw) <= 2 * 1024 * 1024 else None
+    except ValueError:
+        return None
+    return body if isinstance(body, dict) and body.get("action_id") == action_id else None
+
+
+def unproposed_draft(rd, events) -> Optional[tuple[dict, dict]]:
+    """`(row data, body)` of a `drafted` row whose proposal the lane never claimed and never
+    refused — a crash between the two — with its retained body; None otherwise."""
+    lane_ids = {e.data.get("action_id") for e in events if e.type.startswith("upstream_proposal")
+                or e.type == "upstream_proposed"}
+    refused = {e.data.get("action_id") for e in events
+               if e.type == "lane_authored" and e.data.get("outcome") == "refused"}
+    for e in events:
+        if (e.type == "lane_authored" and e.data.get("outcome") == "drafted"
+                and e.data.get("action_id") not in lane_ids | refused):
+            body = retained_draft(rd, e.data["action_id"])
+            if body is not None:
+                return dict(e.data), body
+    return None
+
+
+def author_next(rd, task, state, events, *, skipped=None) -> Optional[dict]:
+    """The next source to author from, or None. `{"action_id", "track", "node", "rows", "archive",
+    "revision"}`.
+
+    `skipped` is the caller's per-process memo, `{action_id: signature}`, ADDED TO here when it is a
+    dict. A source the lane can never take (unmeasured, built on an older base — the base only
+    advances — or with no readable archive) is memoized for good (`None`); one with no eligible
+    capability hunk is memoized against the active base revision and the pending node ids, because
+    a repair hunk whose trigger nodes are still pending becomes nominable once they settle."""
     from looplab.core.errors import UpstreamRefusal
     from looplab.engine.seed_archive import verified_seed_archive
     from looplab.engine.upstream_state import (_source_receipt, active_base, repair_probe_covers,
@@ -111,28 +168,32 @@ def author_next(rd, task, state, events, *, skipped=frozenset()) -> Optional[dic
         active = active_base(events, getattr(task, "seed_base", None))
     except Exception:  # noqa: BLE001 — an unreadable base is the lane's refusal to state; the author waits
         return None
+    memo = skipped if isinstance(skipped, dict) else {}
+    pending = (active["revision"], tuple(sorted(n.id for n in state.pending_nodes())))
     by_seq = {e.seq: e for e in events}
-    remember = skipped.add if isinstance(skipped, set) else (lambda _id: None)
     for track, node in _sources(state, events):
-        action_id = author_action_id(node)
-        if action_id in ids or action_id in skipped:
+        action_id = author_action_id(node, track)
+        if action_id in ids or (action_id in memo and memo[action_id] in (None, pending)):
             continue
         try:
             receipt = _source_receipt(node, by_seq)
         except UpstreamRefusal:
-            remember(action_id)
+            memo[action_id] = None
             continue
         if receipt.get("digest") != active["selector"]["digest"]:
-            remember(action_id)           # built on an older base: the lane refuses it as a source
+            memo[action_id] = None        # built on an older base: the lane refuses it as a source
+            continue
+        archive = verified_seed_archive(rd, receipt)
+        if archive is None:
+            memo[action_id] = None
             continue
         rows = [r for r in upstream_candidates(rd, task, events, source_node_id=node.id)["rows"]
                 if r["classification"] == "capability"
                 and (track == "champion" or r["origin"] == "repair")
                 and not (r["origin"] == "repair" and r["pending_trigger_nodes"]
                          and not repair_probe_covers(r, upstream.get("repair_probes", [])))]
-        archive = verified_seed_archive(rd, receipt) if rows else None
-        if not rows or archive is None:
-            remember(action_id)
+        if not rows:
+            memo[action_id] = pending
             continue
         return {"action_id": action_id, "track": track, "node": node, "rows": rows,
                 "archive": archive, "revision": active["revision"]}
@@ -206,30 +267,68 @@ def build_body(pick, draft, critique, *, generation: str) -> dict:
                        "reviewer": AUTHOR_CRITIC_REVIEWER}}
 
 
+def precheck_draft(pick, body) -> Optional[str]:
+    """Why the lane would refuse this body whatever the critic says — or None. Run between the draft
+    and the critic, so a draft that cannot be absorbed does not buy the second call: the request's
+    own bounds (`normalize_request`: 2 MiB, 128 hunks), the documented flag, and the rule
+    `UpstreamLane._propose_admit` refuses `upstream_capability_not_absorbed` by — the nominated code
+    paths (less a repair's pending recipe) must all be in the patch, and it must implement one."""
+    from looplab.core.errors import UpstreamRefusal
+    from looplab.engine.activation import is_config_path
+    from looplab.engine.upstream_spec import normalize_request
+    try:
+        normalize_request("propose", body)
+    except UpstreamRefusal as exc:
+        return exc.code
+    doc = body["files"].get(body["documentation_path"])
+    if not isinstance(doc, str) or body["flag"]["name"] not in doc:
+        return "upstream_maintainer_invalid"
+    patch = set(body["files"]) | set(body["deleted"])
+    nominated = {r["path"] for r in pick["rows"]}
+    repair_recipes = {r["path"] for r in pick["rows"] if r["origin"] == "repair"
+                      and r["pending_trigger_nodes"] and is_config_path(r["path"])}
+    implementation = (nominated - repair_recipes) | {
+        p for p in patch if not is_config_path(p) and p != body["documentation_path"]}
+    if not implementation or not implementation <= patch:
+        return "upstream_capability_not_absorbed"
+    return None
+
+
 def author_draft(engine, pick, *, generation: str) -> dict:
-    """The worker's paid half: draft, critic, body. Returns `{"outcome": "drafted", "body"}` or
-    `{"outcome": "declined"|"skipped", "reason"}`. Raises what the model layer raises (a budget stop
-    included — the main task re-raises it)."""
+    """The worker's paid half: draft, local precheck, critic, body. Returns `{"outcome": "drafted",
+    "body", "reason"}` (the body retained on disk first, `retain_draft`) or `{"outcome":
+    "declined"|"rejected"|"skipped", "reason"|"code"}`. Raises what the model layer raises (a budget
+    stop included — the main task re-raises it)."""
     from looplab.agents.maintainer import (MaintainerCritique, MaintainerDraft, author_messages,
                                            critic_messages)
     from looplab.core.parse import parse_structured
+    from looplab.engine.shared import judge_evidence_kwargs
     client = getattr(getattr(engine, "developer", None), "client", None)
     if client is None:
         return {"outcome": "skipped", "reason": "no model client"}
     context = author_context(engine.task, pick)
     if context is None:
         return {"outcome": "skipped", "reason": "a nominated file is too large or not text"}
-    # The context is the candidate's own code and rationale: quoted evidence while the run's
-    # untrusted-evidence envelope is on (`core/evidence.py`), the one reading every engine judge asks.
-    from looplab.core.evidence import fence_untrusted
-    from looplab.engine.shared import judge_evidence_kwargs
-    label = judge_evidence_kwargs(engine).get("tool_result_label")
-    if label:
-        context = fence_untrusted(context, label)
-    draft = parse_structured(client, author_messages(pick["track"], context), MaintainerDraft)
-    critique = parse_structured(client, critic_messages(pick["track"], context, draft),
-                                MaintainerCritique)
+    # The context and the draft are the candidate's own code and rationale: fenced evidence, with
+    # the guard at system authority, while the run's untrusted-evidence envelope is on — the one
+    # reading every engine judge asks (`core/evidence.py`).
+    label = judge_evidence_kwargs(engine).get("tool_result_label") or ""
+    draft = parse_structured(client, author_messages(pick["track"], context, evidence_label=label),
+                             MaintainerDraft)
+    unchecked = MaintainerCritique(verdict="pass", reason="(pending)")
+    refusal = precheck_draft(pick, build_body(pick, draft, unchecked, generation=generation))
+    if refusal is not None:
+        return {"outcome": "rejected", "code": refusal}
+    critique = parse_structured(
+        client, critic_messages(pick["track"], context, draft, evidence_label=label),
+        MaintainerCritique)
+    # The critic's prose lands in the log twice (the row and the proposal): through the engine's ONE
+    # redaction funnel first (`engine/audit.py::Engine._redact`).
+    redact = getattr(engine, "_redact", None)
+    reason = (redact(critique.reason) if callable(redact) else critique.reason)[:500]
+    critique = critique.model_copy(update={"reason": reason or "(no reason given)"})
     if critique.verdict != "pass":
-        return {"outcome": "declined", "reason": critique.reason[:500]}
-    return {"outcome": "drafted", "body": build_body(pick, draft, critique, generation=generation),
-            "reason": critique.reason[:500]}
+        return {"outcome": "declined", "reason": critique.reason}
+    body = build_body(pick, draft, critique, generation=generation)
+    retain_draft(engine.run_dir, body)
+    return {"outcome": "drafted", "body": body, "reason": critique.reason}
