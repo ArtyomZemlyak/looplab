@@ -1,4 +1,4 @@
-import { uiText, uiMessage, useUILanguage } from './uiLanguage.js'
+import { uiText, uiMessage, uiPlural, useUILanguage } from './uiLanguage.js'
 // The RESEARCH view — the board read as a ladder of questions rather than as a lifecycle.
 //
 // The operator's objection is the reason it exists: a chain of sharpening claims ("distillation
@@ -173,18 +173,18 @@ export default function ResearchView({ cards, state, renderCard, onShowLanes, on
         <div className="research-empty-symbol" aria-hidden="true">?</div>
         <h2>{uiText("No research questions yet")}</h2>
         <p>{uiText("No research question registered yet for this run.")}</p>
-        {all.length > 0 && <p>{all.length}{uiText(" work item")}{all.length === 1 ? '' : 's'}{uiText(" already exist. They remain available below and in Lanes.")}</p>}
+        {all.length > 0 && <p>{uiPlural(all.length, '{0} work item already exist. They remain available below and in Lanes.', '{0} work items already exist. They remain available below and in Lanes.')}</p>}
         {(onDiscuss || onShowLanes) && <div className="research-empty-actions">
           {onDiscuss && <button type="button" className="btn primary" onClick={onDiscuss}>{uiText("Discuss a question in Assistant")}</button>}
           {onShowLanes && <button type="button" className="btn" onClick={onShowLanes}>{uiText("View work items in Lanes")}</button>}
         </div>}
       </div>
       {unfiled.length > 0 && <details className="research-empty-evidence">
-        <summary>{unfiled.length}{uiText(" experiment")}{unfiled.length === 1 ? '' : 's'}{uiText(" not filed under a question")}</summary>
+        <summary>{uiPlural(unfiled.length, '{0} experiment not filed under a question', '{0} experiments not filed under a question')}</summary>
         <div className="research-experiments">{unfiled.map(card => renderCard(card))}</div>
       </details>}
       {offPage.length > 0 && <details className="research-empty-evidence">
-        <summary>{offPage.length}{uiText(" experiment")}{offPage.length === 1 ? '' : 's'}{uiText(" whose question is not on this page")}</summary>
+        <summary>{uiPlural(offPage.length, '{0} experiment whose question is not on this page', '{0} experiments whose question is not on this page')}</summary>
         <div className="research-experiments">{offPage.map(card => renderCard(card))}</div>
       </details>}
     </div>
@@ -267,11 +267,11 @@ export default function ResearchView({ cards, state, renderCard, onShowLanes, on
               title={uiText("what this question's OWN experiments reached, before its sharper children")}>{uiText("own ")}{_delta(roll.own)}
             </span>}
             {roll.descendants > 0 && <span className="chip muted">
-              {roll.descendants}{uiText(" sharper question")}{roll.descendants === 1 ? '' : 's'}
+              {uiPlural(roll.descendants, '{0} sharper question', '{0} sharper questions')}
             </span>}
           </div>
           {kids.length > 0 && <details className="research-evidence">
-            <summary>{kids.length}{uiText(" experiment")}{kids.length === 1 ? '' : 's'}{uiText(" · show evidence")}</summary>
+            <summary>{uiPlural(kids.length, '{0} experiment · show evidence', '{0} experiments · show evidence')}</summary>
             <div className="research-experiments">{kids.map(child => child.question_inferred
               ? <div key={child.id} className="research-inferred">
                   <span className="chip muted research-inferred-chip"

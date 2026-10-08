@@ -1,4 +1,4 @@
-import { uiText, uiMessage, useUILanguage, effectiveUILanguage } from './uiLanguage.js'
+import { uiText, uiMessage, uiPlural, useUILanguage, effectiveUILanguage } from './uiLanguage.js'
 import React, { useCallback, useEffect, useRef, useState } from 'react'
 import { Turn, PermCard } from './AssistantChat.jsx'
 import AssistantModePicker from './AssistantModePicker.jsx'
@@ -3424,7 +3424,7 @@ export default function AssistantBar({ runId, hidden = false, onReady }) {
             share_ids: [], live_share_ids: [], share_expires_at: null, share_live: false } : session))
       setShareAckNotice(current => current?.sid === shareSid ? null : current)
       refreshSessions()
-      flash(result.revoked ? `Revoked ${result.revoked} link${result.revoked === 1 ? '' : 's'}.`
+      flash(result.revoked ? uiPlural(result.revoked, 'Revoked {0} link.', 'Revoked {0} links.')
         : 'No active links.')
     } catch (error) {
       if (!mountedRef.current) return
@@ -3611,7 +3611,7 @@ export default function AssistantBar({ runId, hidden = false, onReady }) {
         }} />
     </LazyBoundary></RunResultDisclosure>}
     {!historical && pending.length > 0 && <div className="asst-perm-region" role="region"
-      aria-label={uiMessage("{0} pending Assistant approval{1}", [pending.length, pending.length === 1 ? '' : 's'])}
+      aria-label={uiPlural(pending.length, '{0} pending Assistant approval', '{0} pending Assistant approvals')}
       aria-live="assertive" aria-atomic="false">
       {pending.map((req, index) => {
         const focusedFromAttention = attentionPermissionTargetVisible
@@ -4087,7 +4087,10 @@ export default function AssistantBar({ runId, hidden = false, onReady }) {
               onClick={() => openSession(s.id)}>
               <span className="asst-sess-t">{((s.title || uiText('Chat')))}</span>
               <span className="asst-sess-m">{((String(openingSid || '') === String(s.id) ? uiText('Opening…') : (s.cleanup_required ? uiText('Cleanup required · delete to retry') : s.shared
-                  ? `${Number(s.share_count) > 1 ? `${s.share_count} public links` : 'Public link'} ${s.share_live ? 'LIVE · new replies public' : 'active'}${s.share_expires_at ? ` · until ${fmtDate(s.share_expires_at)}` : ''}`
+                  ? (s.share_live
+                    ? `${Number(s.share_count) > 1 ? uiPlural(Number(s.share_count), '{0} public link', '{0} public links') : uiText('Public link')} ${uiText('LIVE · new replies public')}`
+                    : Number(s.share_count) > 1 ? uiPlural(Number(s.share_count), '{0} public link active', '{0} public links active') : uiText('Public link active'))
+                    + (s.share_expires_at ? ' · ' + uiMessage('until {0}', [fmtDate(s.share_expires_at)]) : '')
                   : fmtAgo(s.updated))))}</span>
             </button>
             <button type="button" className="asst-sess-x" onClick={(e) => requestDeleteSession(s, e)}

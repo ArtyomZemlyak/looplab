@@ -17,6 +17,7 @@
 // nothing.
 import { retryableCascadeIdentity } from './memoryCascadeModel.js'
 import { RUN_GENERATION_RE } from './panelPrimitives.js'
+import { uiMessage, uiPlural, uiText } from './uiLanguage.js'
 
 /** Runs are deleted oldest-selection-first; a batch that stops early has then done the ones the
  *  operator has been looking at longest. Nothing depends on it, but an arbitrary order would make
@@ -52,16 +53,21 @@ export function bulkDeletionPlan(selectedIds = [], runs = [], recoveries = new M
   return { ready, blocked }
 }
 
-const plural = (n, word) => `${n} ${word}${n === 1 ? '' : 's'}`
+// Every sentence below is built in the UI language: a count phrase is a `uiPlural` (Russian has
+// three integer forms, which an English `s` suffix could never carry), and once a fragment is
+// Russian the catalogue's pattern half can no longer translate the English sentence around it.
 
 /** The line on the confirm button and in the dialog header. */
 export function bulkDeletionSummary(plan) {
   const ready = plan?.ready?.length | 0
   const blocked = plan?.blocked?.length | 0
   if (!ready && !blocked) return ''
-  if (!ready) return `None of the ${plural(blocked, 'selected run')} can be deleted right now.`
-  return `Delete ${plural(ready, 'run')}`
-    + (blocked ? `; ${blocked} cannot be deleted right now.` : '.')
+  if (!ready) return uiPlural(blocked, 'None of the {0} selected run can be deleted right now.',
+    'None of the {0} selected runs can be deleted right now.')
+  return blocked
+    ? uiPlural(ready, 'Delete {0} run; {1} cannot be deleted right now.',
+      'Delete {0} runs; {1} cannot be deleted right now.', [ready, blocked])
+    : uiPlural(ready, 'Delete {0} run.', 'Delete {0} runs.')
 }
 
 /** Live progress while the queue drains. Names the run in flight — a bare count during a slow
@@ -70,7 +76,7 @@ export function bulkProgressLabel(state) {
   if (!state || !state.running) return ''
   const at = (state.done?.length | 0) + 1
   const total = state.total | 0
-  return `Deleting ${at} of ${total}${state.current ? ` — ${state.current}` : ''}…`
+  return uiMessage('Deleting {0} of {1}{2}…', [at, total, state.current ? ` — ${state.current}` : ''])
 }
 
 /** How many run ids a notice spells out before it starts counting. The dialog lists the whole plan;
@@ -81,7 +87,7 @@ const NAMED_RUN_CAP = 5
 const namedRuns = ids => {
   const shown = ids.slice(0, NAMED_RUN_CAP).map(id => `“${id}”`).join(', ')
   const rest = ids.length - Math.min(ids.length, NAMED_RUN_CAP)
-  return rest ? `${shown} and ${rest} more` : shown
+  return rest ? uiMessage('{0} and {1} more', [shown, rest]) : shown
 }
 
 /**
@@ -107,7 +113,8 @@ export function bulkOutcomeNotice(state) {
   const done = state.done?.length | 0
   const blocked = state.blocked?.length | 0
   const stopped = state.stoppedAt
-  const tail = blocked ? ` ${plural(blocked, 'selected run')} could not be deleted.` : ''
+  const tail = blocked ? ' ' + uiPlural(blocked, '{0} selected run could not be deleted.',
+    '{0} selected runs could not be deleted.') : ''
   // A half-purged memory store outranks everything else here. The runs are gone, their cards have
   // left the list, and this notice is the only surface left that can carry a retry — so it takes
   // the first unfinished purge's run id, and `retryRunId` is what renders the button.
@@ -117,10 +124,12 @@ export function bulkOutcomeNotice(state) {
   // the operator a store still holds a run's rows, with neither an affordance nor an explanation.
   const retryableMemory = retryableCascadeIdentity(unfinished?.memory)
   const memoryTail = unfinished
-    ? ` Cross-run memory was only partly removed for ${plural(state.memoryFailures.length, 'run')}`
-      + ` (first: “${unfinished.runId}”).`
-      + (retryableMemory ? '' : ' That run\u2019s identity was not recorded, so the purge cannot be'
-        + ' finished from here.')
+    ? ' ' + uiPlural(state.memoryFailures.length,
+      'Cross-run memory was only partly removed for {0} run (first: “{1}”).',
+      'Cross-run memory was only partly removed for {0} runs (first: “{1}”).',
+      [state.memoryFailures.length, unfinished.runId])
+      + (retryableMemory ? '' : ' '
+        + uiText('That run\u2019s identity was not recorded, so the purge cannot be finished from here.'))
     : ''
   // The identity travels with the handle, for the same reason `cascadeOutcome` carries one: the run
   // is already deleted, so the server cannot read `run_uid`/`memory_dir` back and refuses to guess
@@ -138,25 +147,27 @@ export function bulkOutcomeNotice(state) {
     if (!done) return blocked ? { kind: 'error', retryRunId: '', text: tail.trim() } : null
     return { kind: unfinished ? 'error' : 'status', retryRunId,
       retryIdentity,
-      text: `${plural(done, 'run')} permanently deleted: ${namedRuns(deleted)}.${tail}${memoryTail}` }
+      text: uiPlural(done, '{0} run permanently deleted: {1}.', '{0} runs permanently deleted: {1}.',
+        [done, namedRuns(deleted)]) + tail + memoryTail }
   }
-  const why = String(stopped.reason || 'the deletion did not complete')
+  const why = uiText(String(stopped.reason || 'the deletion did not complete'))
   // The stopping run's OWN outcome. `unknown` is the one value that forbids a claim about it in
   // either direction — see the block comment above.
   const unsettled = stopped.outcome === 'unknown'
   if (!done) {
     const opening = unsettled
-      ? `No deletion is confirmed. “${stopped.runId}” stopped the batch: ${why}.`
-        + ` Its own outcome is not established — check that run before assuming it still exists.`
-      : `Nothing was deleted. “${stopped.runId}” stopped the batch: ${why}.`
+      ? uiMessage('No deletion is confirmed. “{0}” stopped the batch: {1}.', [stopped.runId, why])
+        + ' ' + uiText('Its own outcome is not established — check that run before assuming it still exists.')
+      : uiMessage('Nothing was deleted. “{0}” stopped the batch: {1}.', [stopped.runId, why])
     return { kind: 'error', retryRunId, retryIdentity, text: `${opening}${tail}${memoryTail}` }
   }
   const untouched = Math.max(0, (state.total | 0) - done - 1)
   return { kind: 'error', retryRunId, retryIdentity, text:
-    `${plural(done, 'run')} deleted (${namedRuns(deleted)}), then the batch stopped at `
-    + `“${stopped.runId}”: ${why}.`
-    + (unsettled ? ' Its own outcome is not established — check that run before assuming it still'
-      + ' exists.' : '')
-    + (untouched ? ` The remaining ${plural(untouched, 'run')} were not touched.` : '')
-    + `${tail}${memoryTail}` }
+    uiPlural(done, '{0} run deleted ({1}), then the batch stopped at “{2}”: {3}.',
+      '{0} runs deleted ({1}), then the batch stopped at “{2}”: {3}.',
+      [done, namedRuns(deleted), stopped.runId, why])
+    + (unsettled ? ' ' + uiText('Its own outcome is not established — check that run before assuming it still exists.') : '')
+    + (untouched ? ' ' + uiPlural(untouched, 'The remaining {0} run were not touched.',
+      'The remaining {0} runs were not touched.') : '')
+    + tail + memoryTail }
 }

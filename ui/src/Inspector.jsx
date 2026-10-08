@@ -1,4 +1,4 @@
-import { uiText, uiMessage, useUILanguage } from './uiLanguage.js'
+import { uiText, uiMessage, uiPlural, useUILanguage } from './uiLanguage.js'
 import React, { useEffect, useId, useMemo, useState, useRef } from 'react'
 import { conditionalGet, costPricing, deadlineGet, get, fmt, fmtInt, isSweep, CONTROL,
   commandFeedback, commandCanRetry, createIdempotencyKey, getRunCommand,
@@ -747,8 +747,9 @@ function ConceptTags({ n, state, runId, onToast, draftStore, expectedGeneration 
         )
       const feedback = commandFeedback(
         record, {
-          success: `Re-tagged #${n.id} → ${concepts.length} concept${concepts.length === 1 ? '' : 's'}`
-            + `${dropped ? ` (${dropped} invalid dropped)` : ''} — the engine is processing it`,
+          success: uiPlural(concepts.length, 'Re-tagged #{1} → {0} concept{2} — the engine is processing it',
+            'Re-tagged #{1} → {0} concepts{2} — the engine is processing it',
+            [concepts.length, n.id, dropped ? ' ' + uiMessage('({0} invalid dropped)', [dropped]) : '']),
           noop: `#${n.id} already carries exactly those concepts`,
           executing: `Re-tag of #${n.id} requested — waiting for the engine`,
           failure: `Re-tag of #${n.id} failed`,
@@ -915,7 +916,7 @@ function CardLink({ link, onOpenCard }) {
     </div>
     {/* The count IS the correction. One card, N attempts — including attempts that are merely
         reserved for it and are not evidence yet, which is why the union and not `card.evidence`. */}
-    <div className="muted">{((summary.total === 1 ? uiText('This is the only attempt at this work item.') : uiMessage("{0} attempts at this work item — this one and {1} other{2}.", [summary.total, summary.total - 1, summary.total === 2 ? '' : 's'])))}
+    <div className="muted">{((summary.total === 1 ? uiText('This is the only attempt at this work item.') : uiPlural(summary.total - 1, '{1} attempts at this work item — this one and {0} other.', '{1} attempts at this work item — this one and {0} others.', [summary.total - 1, summary.total])))}
       {/* One clause list, joined once: the clauses are independent, and a leading ", " after the
           sentence above read ".," whenever the first count was zero. `evidence` is "counted in its
           verdict" because it leaves out a substituted node even while `card.evidence` still names it. */}
@@ -1236,7 +1237,7 @@ function GenBody({ c, thinkOpen, onThink }) {
     {c.completion
       ? <div className="msg"><pre className="code">{c.completion}</pre></div>
       : <div className="muted generation-empty">
-          {((nTools ? uiMessage("→ called {0} tool{1} (shown below)", [nTools, nTools > 1 ? 's' : '']) : uiText('(no text output)')))}</div>}
+          {((nTools ? uiPlural(nTools, '→ called {0} tool (shown below)', '→ called {0} tools (shown below)') : uiText('(no text output)')))}</div>}
     {c.thinking && <div className="msg think-debug">
       <button type="button" className="msg-role role-think disclosure-button" aria-expanded={think}
         onClick={() => onThink(!think)}>
@@ -1392,7 +1393,7 @@ function SpanRow({ row, t0, total, runId, expectedGeneration, open, io,
         {detail ? (open ? '▾' : '▸') : '·'}</span>
       {stage ? <><span className="stage-ic"><OpIcon name={icon} /></span><b>{role}</b>
         {roll.calls > 0 && <span className="stage-roll" title={uiMessage("{0} billed tokens", [roll.tok])}>
-          {roll.calls}{uiText(" call")}{roll.calls > 1 ? 's' : ''}
+          {uiPlural(roll.calls, '{0} call', '{0} calls')}
           {(roll.ctx ? uiMessage(" · {0} ctx", [ktok(roll.ctx)]) : '')}{(roll.out ? uiMessage(" · {0} out", [ktok(roll.out)]) : '')}</span>}
         <span className="spacer" /></>
         : <span className="span-name" title={desc}><OpIcon name={icon} className="t-ic" />
@@ -1487,7 +1488,7 @@ function VirtualSpanTree({ roots, t0, total, runId, expectedGeneration, identity
       <button type="button" className="seg" disabled={!matches.length} aria-label={uiText("Next span match")}
         onClick={() => find(1)}>↓</button>
       <span className="muted span-tree-count" role="status" aria-live="polite">
-        {((query ? (matches.length ? matchAt < 0 ? uiMessage("{0} matches", [matches.length]) : uiMessage("{0} of {1}", [matchAt + 1, matches.length]) : uiText('No matches')) : uiMessage("{0} span{1}", [rows.length, rows.length === 1 ? '' : 's'])))}</span>
+        {((query ? (matches.length ? matchAt < 0 ? uiMessage("{0} matches", [matches.length]) : uiMessage("{0} of {1}", [matchAt + 1, matches.length]) : uiText('No matches')) : uiPlural(rows.length, '{0} span', '{0} spans')))}</span>
     </div>
     <VirtualTimeline rows={rows} getKey={spanTreeKey} renderRow={row => {
       const state = spanState.get(row.key) || {}
@@ -1602,7 +1603,7 @@ function AgentReport({ r }) {
       <b>{uiText("Developer · agent validation")}</b>
       <span className="muted">{((r.fell_back ? uiText('fell back to template') : (r.ok ? uiText('shipped clean') : uiText('failed checks'))))}</span>
       <span className="spacer" />
-      <span className="muted">{r.attempts}{uiText(" attempt")}{r.attempts === 1 ? '' : 's'}</span>
+      <span className="muted">{uiPlural(r.attempts, '{0} attempt', '{0} attempts')}</span>
     </div>
     <DataTable caption={uiText("Agent attempt validation checks")} card={false}><table className="tbl"><thead><tr><th>{uiText("check")}</th><th>{uiText("ok")}</th><th>{uiText("detail")}</th></tr></thead>
       <tbody>{(r.checks || []).map((c, i) => <tr key={i}>
@@ -1725,11 +1726,11 @@ function ConvStage({ st, defaultOpen = true, log = '', logShare = null, live = f
       <b className="stage-role">{role}</b>
       {(roll.generations || roll.tools) ? <span className="stage-roll"
           title={(tk.total ? uiMessage("context window peaked at {0} tokens; the model generated {1}. Billed {2} total — a tool loop RE-SENDS the growing context every turn, so billed ≫ context.", [tk.context || 0, tk.completion || 0, tk.total]) : undefined)}>
-        {roll.generations || 0}{uiText(" turn")}{roll.generations === 1 ? '' : 's'}
-        {(roll.tools ? uiMessage(" · {0} tool call{1}", [roll.tools, roll.tools === 1 ? '' : 's']) : '')}
+        {uiPlural(roll.generations || 0, '{0} turn', '{0} turns')}
+        {(roll.tools ? ' · ' + uiPlural(roll.tools, '{0} tool call', '{0} tool calls') : '')}
         {(tk.context ? uiMessage(" · {0} ctx", [ktok(tk.context)]) : '')}
         {(tk.completion ? uiMessage(" · {0} out", [ktok(tk.completion)]) : '')}</span> : null}
-      {!open && nTurns ? <span className="muted stage-hidden-count">· {nTurns}{uiText(" step")}{nTurns === 1 ? '' : 's'}{uiText(" hidden")}</span> : null}
+      {!open && nTurns ? <span className="muted stage-hidden-count">· {uiPlural(nTurns, '{0} step hidden', '{0} steps hidden')}</span> : null}
     </button>
     {open && <div className="conv-turns">
       {/* Conversation Markdown is not part of the span-tree virtual window. Keep a local turn cap: a heavily-repaired / tool-looping stage
@@ -2231,8 +2232,8 @@ export function TraceSurface({
     <div className="muted trace-rollup-intro">
       {traceSubjectLead(subject)}{uiText(" · offset = start, bar = duration. Expand an observation for bounded, redacted I/O.")}{(roll.generations || roll.tools) ? <span className="trace-totals"
           title={(rtok.total ? uiMessage("context window peaked at {0} tokens; the model generated {1}. Billed {2} total — each turn RE-SENDS the growing context, so billed ≫ context.", [rtok.context || 0, rtok.completion || 0, rtok.total]) : undefined)}>
-        {' · '}{roll.generations || 0}{uiText(" generation")}{roll.generations === 1 ? '' : 's'}
-        {(roll.tools ? uiMessage(" · {0} tool call{1}", [roll.tools, roll.tools === 1 ? '' : 's']) : '')}
+        {' · '}{uiPlural(roll.generations || 0, '{0} generation', '{0} generations')}
+        {(roll.tools ? ' · ' + uiPlural(roll.tools, '{0} tool call', '{0} tool calls') : '')}
         {(rtok.context ? uiMessage(" · {0} ctx", [ktok(rtok.context)]) : '')}
         {(rtok.completion ? uiMessage(" · {0} out", [ktok(rtok.completion)]) : '')}
         {roll.cost ? ` · $${roll.cost}` : ''}
@@ -2990,7 +2991,7 @@ function Trials({ n, detail, state }) {
   const [sortDir, setSortDir] = useState(state.direction === 'min' ? 'asc' : 'desc')
   const [showAll, setShowAll] = useState(false)
   if (!trials.length) {
-    return <div className="muted">{((summary ? uiMessage("Sweep of {0} trial(s) — loading full results…", [summary.count]) : uiText('No trials recorded for this node.')))}</div>
+    return <div className="muted">{((summary ? uiPlural(summary.count, 'Sweep of {0} trial(s) — loading full results…', 'Sweep of {0} trial(s) — loading full results…') : uiText('No trials recorded for this node.')))}</div>
   }
   const dir = state.direction
   const params = Array.from(new Set(trials.flatMap(t => Object.keys(t.params || {}))))
@@ -3088,7 +3089,7 @@ function Trust({ n, drifts = [] }) {
       : null}
     <div className="section-h">{uiText("Metric drift")}</div>
     {drifts.length
-      ? <><State tone="alarm" label={uiMessage("{0} divergence{1} recorded", [drifts.length, drifts.length === 1 ? '' : 's'])} detail="The independent metric reader disagreed with the primary metric." /><DataTable caption={uiText("Metric drift cross-checks")} card={false}><table className="tbl"><thead><tr><th>{uiText("seed")}</th><th>{uiText("primary")}</th><th>{uiText("cross-check")}</th><th>{uiText("tol")}</th></tr></thead>
+      ? <><State tone="alarm" label={uiPlural(drifts.length, '{0} divergence recorded', '{0} divergences recorded')} detail="The independent metric reader disagreed with the primary metric." /><DataTable caption={uiText("Metric drift cross-checks")} card={false}><table className="tbl"><thead><tr><th>{uiText("seed")}</th><th>{uiText("primary")}</th><th>{uiText("cross-check")}</th><th>{uiText("tol")}</th></tr></thead>
         <tbody>{drifts.map((d, i) => <tr key={i}><td>{d.seed ?? '—'}</td><td className="flag">{fmt(d.primary)}</td><td>{fmt(d.cross)}</td><td className="muted">{fmt(d.tolerance)}</td></tr>)}</tbody></table>
         </DataTable>
       </>

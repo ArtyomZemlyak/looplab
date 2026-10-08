@@ -1,3 +1,4 @@
+import { uiMessage, uiPlural, uiText } from './uiLanguage.js'
 import { authoringRecoveryStorageKey } from './authoringRecoveryStorage.js'
 
 // Doc 25 UI-03's named residue: the ~250 lines of `retainedComment*` / `retainedAuthoring*` /
@@ -120,16 +121,16 @@ export function commentRetention({ runId, generation, entries = [], recovery }) 
 export function commentLeaveMessage({ drafts, durableCount, entryCount, recoveryUnavailable }) {
   return [
     drafts.length > 0
-      ? `${drafts.length} unsaved comment draft${drafts.length === 1 ? '' : 's'} will leave this in-memory workspace`
+      ? uiPlural(drafts.length, '{0} unsaved comment draft will leave this in-memory workspace', '{0} unsaved comment drafts will leave this in-memory workspace')
       : '',
     durableCount > 0
-      ? `${durableCount} exact comment recovery record${durableCount === 1 ? '' : 's'} will remain protected in this browser tab`
+      ? uiPlural(durableCount, '{0} exact comment recovery record will remain protected in this browser tab', '{0} exact comment recovery records will remain protected in this browser tab')
       : '',
     entryCount > drafts.length
-      ? `${entryCount - drafts.length} other active Comments state${entryCount - drafts.length === 1 ? '' : 's'} will leave the in-memory workspace`
+      ? uiPlural(entryCount - drafts.length, '{0} other active Comments state will leave the in-memory workspace', '{0} other active Comments states will leave the in-memory workspace')
       : '',
     recoveryUnavailable
-      ? 'Comments recovery storage cannot be inspected, so an exact saved command may still be protected in this tab'
+      ? uiText('Comments recovery storage cannot be inspected, so an exact saved command may still be protected in this tab')
       : '',
   ].filter(Boolean).join('; ')
 }
@@ -228,9 +229,9 @@ export function authoringRetention({ documents, uncertainSaves, damagedRecoverie
   const recoveryCount = durableRecoveryCount + memoryOnlyRecoveryCount
   const discardItems = [
     draftCount > 0
-      ? `${draftCount} unsaved in-memory Authoring draft${draftCount === 1 ? '' : 's'}` : '',
+      ? uiPlural(draftCount, '{0} unsaved in-memory Authoring draft', '{0} unsaved in-memory Authoring drafts') : '',
     memoryOnlyRecoveryCount > 0
-      ? `${memoryOnlyRecoveryCount} recovery snapshot${memoryOnlyRecoveryCount === 1 ? '' : 's'} that ${memoryOnlyRecoveryCount === 1 ? 'exists' : 'exist'} only in this tab` : '',
+      ? uiPlural(memoryOnlyRecoveryCount, '{0} recovery snapshot that exists only in this tab', '{0} recovery snapshots that exist only in this tab') : '',
   ].filter(Boolean)
   return {
     documentEntries,
@@ -241,8 +242,8 @@ export function authoringRetention({ documents, uncertainSaves, damagedRecoverie
     draftUnsafe: draftCount > 0 || recoveryCount > 0 || guardUnsafe,
     discardItems,
     discardStatement: discardItems.length > 0
-      ? `Leaving this run will discard ${discardItems.join(' and ')}.`
-      : 'No in-memory Authoring draft will be discarded.',
+      ? uiMessage('Leaving this run will discard {0}.', [discardItems.join(` ${uiText('and')} `)])
+      : uiText('No in-memory Authoring draft will be discarded.'),
   }
 }
 
@@ -253,7 +254,7 @@ export const configDraftScope = runId => `panel:config:${String(runId)}`
 export const AUTHORING_SCOPE = 'panel:authoring'
 
 const durableRecoveryClause = durableRecoveryCount => durableRecoveryCount > 0
-  ? ` ${durableRecoveryCount} durable recovery record${durableRecoveryCount === 1 ? '' : 's'} will remain protected in browser storage.`
+  ? ' ' + uiPlural(durableRecoveryCount, '{0} durable recovery record will remain protected in browser storage.', '{0} durable recovery records will remain protected in browser storage.')
   : ''
 
 /**
@@ -283,15 +284,16 @@ export function panelRetention({ runId, configDraft, guard, authoring }) {
   const leaveSummary = overrides?.leaveSummary
     ? overrides.leaveSummary
     : configDraftUnsafe
-      ? 'Leaving this run will discard an unsaved Run settings draft.'
+      ? uiText('Leaving this run will discard an unsaved Run settings draft.')
       : `${authoring?.discardStatement || ''}${durable}`
   const closeMessage = overrides?.closeMessage
     ? overrides.closeMessage
     : configDraftUnsafe
-      ? 'This tab is retaining an unsaved Run settings draft. Close the panel and discard it?'
-      : `${(authoring?.discardItems || []).length > 0
-        ? `Closing Authoring will discard ${authoring.discardItems.join(' and ')}.`
-        : 'No in-memory Authoring draft will be discarded.'}${durable} Close Authoring?`
+      ? uiText('This tab is retaining an unsaved Run settings draft. Close the panel and discard it?')
+      // The items are already in the UI language, so the sentence around them is too.
+      : ((authoring?.discardItems || []).length > 0
+        ? uiMessage('Closing Authoring will discard {0}.', [authoring.discardItems.join(` ${uiText('and')} `)])
+        : uiText('No in-memory Authoring draft will be discarded.')) + durable + ' ' + uiText('Close Authoring?')
   return {
     configStoredDraftUnsafe,
     configDraftUnsafe,
@@ -300,7 +302,7 @@ export function panelRetention({ runId, configDraft, guard, authoring }) {
     route,
     scope,
     leaveSummary,
-    leaveMessage: `${leaveSummary} Leave this run?`,
+    leaveMessage: `${leaveSummary} ${uiText('Leave this run?')}`,
     closeMessage,
   }
 }
@@ -310,7 +312,7 @@ export function runLeaveMessage({ panelDraftUnsafe, panelLeaveSummary,
   return [
     panelDraftUnsafe ? panelLeaveSummary : '',
     commentWorkUnsafe ? commentMessage : '',
-  ].filter(Boolean).join(' ') + ' Leave this run?'
+  ].filter(Boolean).join(' ') + ' ' + uiText('Leave this run?')
 }
 
 // -------------------------------------------------------------------------- navigation blocking

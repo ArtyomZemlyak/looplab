@@ -1,4 +1,4 @@
-import { uiText, uiMessage, useUILanguage } from './uiLanguage.js'
+import { uiText, uiMessage, uiPlural, useUILanguage } from './uiLanguage.js'
 import React from 'react'
 import HarnessNextStep from './HarnessNextStep.jsx'
 import AgentActivity from './AgentActivity.jsx'
@@ -70,7 +70,7 @@ export default function HarnessCycleBody({ progress, fresh, runId, offset, setOf
       {progress.candidate_requirements.effective_concepts && <p>{t('Effective concept tags are required on every submitted candidate.', 'Для каждого кандидата нужны действующие теги концептов.')}</p>}
       {progress.candidate_requirements.hypothesis_statement && <p>{t('A nonempty hypothesis statement is required on every submitted candidate; injection creates a new Card.', 'Для каждого кандидата нужна непустая гипотеза; отправка создаёт новую карточку.')}</p>}
       {perIdea.length ? <ul>{perIdea.map(([name, count]) => <li key={name}>
-        {name}: {(ru ? `вариантов для разбора: ${count}; для этой конкретной идеи` : uiMessage("review {0} option{1} for the exact Idea", [count, count === 1 ? '' : 's']))}
+        {name}: {(ru ? `вариантов для разбора: ${count}; для этой конкретной идеи` : uiPlural(count, 'review {0} option for the exact Idea', 'review {0} options for the exact Idea'))}
       </li>)}</ul> : <p>{t('No configured idea-specific review at this node count.', 'На этом числе экспериментов разбор конкретной идеи не требуется.')}</p>}
       <h3>{t('Evaluation questions', 'Вопросы оценки')}</h3>
       <p>{progress.pending_checkpoint_count} {t('pending. Answers remain in the checkpoint history below.', 'без ответа. Ответы сохраняются в истории вопросов ниже.')}</p>

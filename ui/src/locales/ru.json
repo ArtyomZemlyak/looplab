@@ -1,7 +1,7 @@
 {
   "schema": 1,
   "language": "ru",
-  "count": 7693,
+  "count": 7560,
   "messages": {
     "# LoopLab run report — {0}": "# Отчёт запуска LoopLab — {0}",
     "## Agent narrative (advisory)": "## Пояснения агента (рекомендации)",
@@ -52,7 +52,7 @@
     "({0} invalid dropped)": "({0} недействительный)",
     "({0} more not listed)": "({0} не указаны)",
     "({0} of them carried by every experiment in this run)": "({0} (из них каждый эксперимент в этом направлении)",
-    "({0} open proposal(s) wanting up to {1} GPU(s) of {2})": "({0} открытое предложение (предложения), {1} ГПУ {2})",
+    "({0} open proposal(s) wanting up to {1} GPU(s) of {2})": "(открытых предложений: {0}; нужно до {1} GPU из {2})",
     "({0} unsaved)": "({0} не сохранён)",
     "({0}). This group has no winner: it is a {1}-way tie, not an": "({0}). В группе нет единственного победителя: одинаковый результат у {1} участников, это не",
     ") is applied here once the revisioned policy is available.": ") применяется здесь, как только будет разработана пересмотренная политика.",
@@ -61,7 +61,6 @@
     "**Advisory only — not the deterministic verdict or trust decision.**": "**Только пояснение: оно не заменяет установленный итог или проверку надёжности.**",
     "**Agent headline:** {0}": "**Вывод агента:** {0}",
     "**Failures by reason:** {0}": "**Ошибки по причинам:** {0}",
-    "**Infeasible:** {0} node(s) violated a constraint and were excluded.": "**Нарушение ограничений:** исключено узлов: {0}.",
     "**Next step:** {0}": "**Дальше:** {0}",
     "**Node coverage:** {0}": "**Охват узлов:** {0}",
     "**Primary concept axes without a comparable score improvement:** {0}. Absence of an improvement is not evidence that an axis failed.": "** Первостепенные концептуальные оси без сопоставимого улучшения баллов:** {0}. Отсутствие улучшений не является доказательством того, что ось не сработала.",
@@ -71,7 +70,6 @@
     "+ Add": "+ Добавить",
     "+ files omitted (cap)": "+ файлы опущены (красный предел)",
     "+ runs of this scope. That is a statement about repetition, not about whether the pairing is interesting.": "+ запуски этой области. Это утверждение о повторении, а не о том, интересно ли спаривание.",
-    "+{0} experiment node{1}": "+{0} экспериментальный узел{1}",
     ", alongside cases.": ", вместе с делами.",
     ", and every decision taken earlier was taken on that objective. Each node keeps its own task metric in the record.": "Каждый узел хранит свою собственную метрическую задачу в отчете.",
     ", and nothing here will resume it. Complete the wrap-up from a shell:": "И ничего здесь не будет, чтобы его возобновить.",
@@ -117,7 +115,6 @@
     "0 is OFF and is the historical search. Above zero: when the node that just finished lands in the top 1-q of the nodes this run has evaluated, the next action is FORCED to be an improve on that node — the parent is pinned and draft/merge are off the table for that turn, whichever selector is otherwise in charge. 0.75 means \"the top quarter\". It exists because the same instruction written into the card was measured and did not pay: it moved behaviour (the run kept its kernel 15 times in 16 against 20 in 41) and not the score, while the loop proposed something other than its own winning kernel in 14 of 28 transitions. Needs at least four evaluated nodes before a quartile means anything. A search treatment: pinned at run start, so changing it here affects the next run you start.": "0 выключает правило и сохраняет обычный поиск. При значении выше нуля следующий шаг после результата из верхней доли 1-q обязательно улучшает именно этот узел: родитель фиксируется, создание нового варианта и слияние на этом шаге запрещены независимо от селектора. 0.75 означает верхнюю четверть. Правило действует после четырёх оценённых узлов. Закрепляется при запуске; изменение настройки применяется к следующему запуску.",
     "1 day": "1 день",
     "1 hour": "1 час",
-    "1 item{0} needs action": "Требует действий: 1{0}",
     "1px solid {0}": "1px твердое вещество {0}",
     "2+ runs": "2+ запуска",
     "30 days": "30 дней",
@@ -136,8 +133,6 @@
     "; repaired legacy snapshot drift in {0}": "; отремонтированный снимок снимка наследия в {0}",
     "; the effective launch values are shown and will be repaired when another editable setting is saved.": "; реальные значения запуска показаны и будут восстановлены, когда будет сохранена другая редактируемая установка.",
     "; this tree is temporarily showing raw run-authored ids, so governed merges and purges may be unapplied.": "; это дерево временно демонстрирует сырые спущенные идиды, поэтому управляемые слияния и чистки могут быть неприменены.",
-    "; totals may include them.": "; их могут включать итоговые показатели.",
-    "; {0} cannot be deleted right now.": "; {0} Сейчас нельзя удалить.",
     "; {0} experiments in this group across the graph": "; {0} эксперименты в этой группе по всему графику",
     "<memory dir>/skills/": "<memori dir>/Навыки/",
     "<package>/SKILL.md": "<упаковка>/SKILL.md",
@@ -187,7 +182,7 @@
     "A5: every chain root (Researcher propose, Developer stages/plan/step/implement/repair) is seeded with a small block carrying what earlier phases of this run already read — the reference file, the manifest, the config — verbatim under the byte budget, the rest as index rows naming the exact re-read call. Measured over 97 AlgoTune probe runs: 46.7% of tool-calling turns ($25 of $63 of prompt) requested nothing but content already retrieved in that run, almost all of it by a different phase. Changes no tool; OFF leaves every prompt byte for byte. With the evidence envelope on, carried pages ride inside the UNTRUSTED_RUN_EVIDENCE fence.": "A5: каждый цепной корень (предложение поиска, разработка этапов/плана/шап/основа/реализовать) посевным материалом, содержащим то, что уже было зачитано на предыдущих этапах этого запуска, — справочный файл, манифест, концерт — дословный, в байт-бюджете, остальное — как ряды указателей, обозначающие точный звонок. Измеряется более 97 запусков зонда AlgoTune: 46,7 % повершений с помощью инструментов (25 из 63 долл. США) запросили ничего, кроме содержания, уже найденного в этом запуске, почти в другой фазе. UNTRUSTED_RUN_EVIDENCE Забор.",
     "A5: surface remaining eval budget into the proposal prompt (needs a max eval-time budget).": "A5: оперативный учет остающегося еврального бюджета в предложении (требуется максимальный евальный бюджет).",
     "A6: skip the bottom fraction of candidates by proxy score (0 = never skip).": "A6: пропустить нижнюю часть кандидатов по опосредованным баллам (0 = никогда не пропускать).",
-    "A7 adaptive meta-control + richer proposal operators": "A7 Адаптивные мета-контроль + более богатые операторы предложений",
+    "A7 adaptive meta-control + richer proposal operators": "A7: адаптивное метауправление + расширенные операторы предложений",
     "API": "API",
     "API key": "Ключ API",
     "API key missing — enter to complete the pair": "Ключ API отсутствует — введите для заполнения пары",
@@ -215,7 +210,7 @@
     "Ablation refiner sees its probes": "Ускоритель абляции видит свои зонды",
     "Ablation simplifies the champion": "Облегчение упрощает чемпиона",
     "Ablation-driven refinement every N improves (0 = off; greedy only).": "Улучшается каждая N, при помощи абсорбирования (0 = выключен; только жадность).",
-    "Abort the run cleanly after this many seconds of wall-clock.": "Отменить запуск в чистоте после многих секунд в стене.",
+    "Abort the run cleanly after this many seconds of wall-clock.": "Корректно прервать запуск по истечении этого числа секунд реального времени.",
     "Absence and one-sided claim state withheld.": "Отсутствие и одностороннее требование не было удовлетворено.",
     "Acknowledge or resolve the LLM provider warning before changing its credential": "До того как изменить свою квалификацию, принять или разрешить предупреждение провайдера ОУЗС",
     "Acknowledge or resolve the LLM provider warning before saving a new configuration": "До сохранения новой конфигурации подтвердить или разрешить предупреждение провайдера ОУЗС",
@@ -265,11 +260,9 @@
     "Allow exact scope ·": "Разрешить точную сферу применения ·",
     "Allowed:": "Разрешено:",
     "Also credits": "Зачтенные также суммы",
-    "Also delete each run’s own cross-run memory — rows that merge evidence or concepts with": "Удалить также каждый запуск, собственную перекрестную память — ряды, которые объединяют доказательства или концепции с",
     "Also delete this run’s own cross-run memory": "Также удалите этот запуск, с собственной памятью",
     "Also delete this run’s own cross-run memory (no memory store is configured)": "Также удалите этот запуск, с собственной поперечной памятью (сохранение памяти не является конфигурацией)",
     "Also delete this run’s own cross-run memory (this run contributed none)": "Также убрать этот запуск, с собственной поперечной памятью (этот запуск не привел ни к одному)",
-    "Also delete this run’s own cross-run memory ({0})": "Также удалите этот запуск, с собственной поперечной памятью ({0})",
     "Also on its work item": "Также по пункту повестки дня",
     "Amber dots mark edits not yet saved; they disappear after a successful Save.": "Янтарные точки обозначают пока не сохраненные редакторы; они исчезают после успешного Сохранения.",
     "Ambient credential is read-only": "Природоохранное удостоверение является только считываемым",
@@ -424,8 +417,6 @@
     "Cancel · keep draft": "Отменить · сохранить черновик",
     "Cancellation of #{0} requested": "Испрошена отмена No {0}",
     "Cancellation of #{0} requested — waiting for the run": "Испрошена отмена No {0} - ожидание запуски",
-    "Cancellation requested for {0} experiment(s); {1} still pending": "Испрашиваемая отмена {0} эксперимент(ы); {1} еще не решен",
-    "Cancelled {0} pending experiment(s) under #{1}": "Отменено {0} Предстоит провести эксперимент(ы) в соответствии с пунктом (а){1}",
     "Candidates 2..K CONTINUE candidate 1's research session — one more turn asking for a different mechanism (at most 8 tool turns) — instead of K fresh sessions that re-read the same files. Only the tool-using Researcher continues; a one-shot Researcher still samples independently. Off = K independent sessions (the historical calls).": "2.K Продолжить исследовательскую сессию кандидата 1 — еще один поворот, в котором предлагается другой механизм (не более 8 поворачиваний инструментов), — вместо новых сеансов K, которые перечитывают те же файлы. Продолжает только исследователь, использующий инструменты; один разовый исследователь все еще проводит независимые пробы. Выключен = независимые сеансы (исторические звонки).",
     "Cap on plan length so a runaway planner can’t spawn 100 steps.": "Кэп на длину плана, чтобы беглый планировщик мог, не породить 100 шагов.",
     "Capability expansion on lock-in": "Расширение возможностей при блокировке",
@@ -445,7 +436,6 @@
     "Card {0} automatically dropped{1}": "Карточка {0} автоматически сбрасывается{1}",
     "Card {0} display statement edited{1}": "Карточка {0} Отредактировано заявление на дисплей{1}",
     "Card {0} priority pinned to": "Карточка {0} приоритет",
-    "Card {0} resource override: {1} GPU{2}{3}": "Карточка {0} Переключение ресурсов: {1} ГПУ{2}{3}",
     "Cards": "Карточки",
     "Cards carry the whole idea": "Карточки несут всю идею",
     "Carried over unchanged from #{0}:": "Перенос с {0} без изменений:",
@@ -453,7 +443,7 @@
     "Carry earlier phases' reads into each new phase": "Провести более ранние этапы в каждую новую фазу",
     "Caveats": "Оговорки",
     "Caveats:": "Кэвиат:",
-    "Ceiling on cumulative time spent INSIDE evals (survives resume).": "Потолочный показатель совокупного времени, затраченного на проведение аттестаций ИНСИДЕ (возобновление выживших).",
+    "Ceiling on cumulative time spent INSIDE evals (survives resume).": "Предел суммарного времени, проведённого ВНУТРИ оценок (сохраняется при возобновлении).",
     "Champion (this run)": "Шампион (этот запуск)",
     "Champion note at publication": "Пояснение к лучшему результату при публикации",
     "Changed": "Изменено",
@@ -671,7 +661,7 @@
     "Concepts · Enter to pin": "Концепты · Enter — закрепить",
     "Conclusion": "Заключение",
     "Conclusion — why this experiment next": "Вывод: почему этот эксперимент будет следующим?",
-    "Concurrent evaluations inside one Run (GPU/experiment consumers). 0 = AUTO at launch: one evaluation per detected GPU, clamped to at least 1 — and 0 is the DEFAULT, so an untouched run is already as wide as the box; set 1 for strictly serial evaluation. Separate local GPU-owning Runs in the same OS-user filesystem namespace serialize through a crash-released host lease; other users, containers, and hosts need external admission. Live Strategist/operator updates settle 0 to serial width 1. Canonical setting; max_parallel remains raw-config compatibility only.": "Сопутствующие оценки внутри одного из Ран (GPU/экспериментальных потребителей). 0 = AUTO на запуске: одна оценка на обнаруженный GPU, зажимаемая как минимум до 1, и 0 - это DEFAULT, так что нетронутый запуск уже так широк, как в рамке; назначаю 1 для строгой серийной оценки. Отдельные местные руны GPU-владения в том же пространстве с именем файловой системы OS-пользователя, которые снимаются с помощью аренды на хроностроении; другие пользователи, контейнеры и хосты нуждаются во внешнем доступе. Обновленные варианты печени/оператора оставляют 0 на серийную ширину 1. Каноническое расположение; max_parallel Остается только несовместимым.",
+    "Concurrent evaluations inside one Run (GPU/experiment consumers). 0 = AUTO at launch: one evaluation per detected GPU, clamped to at least 1 — and 0 is the DEFAULT, so an untouched run is already as wide as the box; set 1 for strictly serial evaluation. Separate local GPU-owning Runs in the same OS-user filesystem namespace serialize through a crash-released host lease; other users, containers, and hosts need external admission. Live Strategist/operator updates settle 0 to serial width 1. Canonical setting; max_parallel remains raw-config compatibility only.": "Число одновременных оценок внутри одного запуска (потребители GPU/экспериментов). 0 = AUTO при старте: одна оценка на каждый обнаруженный GPU, но не меньше 1 — и 0 является значением ПО УМОЛЧАНИЮ, так что запуск без настройки уже использует всю машину; укажите 1 для строго последовательной оценки. Отдельные локальные запуски, владеющие GPU, в пространстве файловой системы одного пользователя ОС выстраиваются в очередь через аренду хоста, освобождаемую при сбое; другим пользователям, контейнерам и хостам нужен внешний допуск. Обновления от Стратега или оператора во время работы превращают 0 в последовательную ширину 1. Каноническая настройка; max_parallel оставлен только для совместимости с исходной конфигурацией.",
     "Concurrent evaluations; 0 = AUTO (one per detected GPU).": "Совпадающие оценки; 0 = АВТО (по одному на один обнаруженный ГПС).",
     "Concurrent research (overlap eval)": "Совпадающие исследования (общий анализ)",
     "Configuration differences": "Разногласия в конфигурации",
@@ -759,7 +749,6 @@
     "Cross-run memory (priors + lessons)": "Перекрестная память (докторы + уроки)",
     "Cross-run memory could not be read, so what the lab learned about this concept is unknown — this is not a statement that it learned nothing.": "Перекрестная память не могла быть прочитана, поэтому то, что лаборатория узнала об этой концепции, неизвестно, — это не утверждение, что она ничего не узнала.",
     "Cross-run memory is empty, so nothing can be linked yet.": "Перекрестная память пуста, так что ничего пока не связывается.",
-    "Cross-run memory was only partly removed for {0}": "Перекрестная память была только частично удалена для {0}",
     "Cross-run prompt advisory": "Оперативное консультирование по перекрестному телефону",
     "Cross-run read tools": "Перекрестные считывающие инструменты",
     "Cross-run report ·": "Перекрестный отчет",
@@ -881,7 +870,6 @@
     "Discard saved resolution command": "Отключить команду сохранения разрешения",
     "Discard unaccepted action": "Отклонить непринятое решение",
     "Discard unreadable recovery": "Нечитаемое восстановление",
-    "Discard {0} releasable Comments work item{1} from this browser tab? Current-generation append-only recovery stays protected because it is not safe to release.": "Отмена {0} Рабочий элемент, касающийся замечаний{1} В данный момент только для восстановления, но не для восстановления, остаются в защите, потому что его не безопасно выпускать.",
     "Discard…": "Отставить...",
     "Discuss a question in Assistant": "Обсудить вопрос с ассистентом",
     "Discuss deep research memo #{0} for this run{1}. {2}": "Обсудим информацию о глубоком исследовании #{0} для этого запуска{1}. {2}",
@@ -984,7 +972,7 @@
     "Eval ceiling set to {0}s": "Предел оценки установлен: {0} с",
     "Eval noise-floor repeats": "Повторение звукового пояса",
     "Eval parallel": "Параллельно с евальным",
-    "Eval seeds per node (variance handling).": "Семена еврального материала на узел (обработка данных).",
+    "Eval seeds per node (variance handling).": "Число seed оценки на узел (учёт разброса результата).",
     "Eval spec needs ratification — type": "Эвральный спек требует ратификации — тип",
     "Eval trust": "Евальный доверительный фонд",
     "Eval trust mode is {0}; no independent drift check is claimed.": "Eval Trust Mode {0}; не требуется никакой независимой проверки дрейфа.",
@@ -1133,7 +1121,6 @@
     "First host refusal buys one repair": "Первый отказ носителя покупает один ремонт",
     "First-byte (response-headers) window for STREAM attempts — no headers ≈ a black-holed request, so fail over to a fresh connection fast instead of waiting the full idle timeout. Clamped to the idle timeout.": "Окно с ответными заголовками для попыток STRAEAM — нет заголовков : запрос с черными отверстиями, поэтому не переходите к новому подключению быстро, вместо того чтобы ждать полного холостого времени. Зажжено в холостой тайм.",
     "Fitted proposal brief": "Подготовленное предложение",
-    "Fix {0} before saving": "Исправить {0} до накопления",
     "Fixed when this run started": "Починено, когда началась эта запуск",
     "Fixed when this run started. Create a new run to use a different value; resume and replay keep this recorded value.": "Зафиксировано с началом этого запуска. Создать новый запуск для использования другого значения; возобновить и повторить это значение.",
     "Flagged": "С предупреждением",
@@ -1326,7 +1313,7 @@
     "Kernel syscall fence": "Забор с ядром",
     "Key findings": "Основные выводы",
     "KiB of this note was returned; the rest is not shown.": "KiB из этой записки был возвращен; остальные не показаны.",
-    "Kill a single eval after this long. Researcher = the “auto” per-node mode (it sizes heavy/neural-net experiments; this is the fallback).": "Убить один эвалент после этого долго. Исследователь = режим,auto, на один узел (он размер тяжёлых/невральных экспериментов с сетками; это запасной вариант).",
+    "Kill a single eval after this long. Researcher = the “auto” per-node mode (it sizes heavy/neural-net experiments; this is the fallback).": "Принудительно завершить одну оценку по истечении этого времени. Researcher — режим «auto» для каждого узла (он подбирает время для тяжёлых экспериментов и нейросетей; это значение — запасное).",
     "Kill branch": "Убить филиал",
     "Knowledge": "Знания",
     "Knowledge & memory": "Знания и память",
@@ -1490,7 +1477,6 @@
     "Median robust metric across eligible evaluated experiments (metric available and not explicitly infeasible); Δ columns are direction-normalized relative to this median.": "Медиана метрик подходящих оценённых экспериментов. Разности с этой медианой описывают результаты, а не вклад концепта.",
     "Members": "Участники",
     "Membership unavailable; not empty.": "Членство недоступно, не пусто.",
-    "Membership withheld for all {0} tagged experiment{1}; not empty.": "Членство не было обеспечено для всех {0} Эксперимент с маркировкой{1}; не пусто.",
     "Memberships are recorded claims; taxonomy semantics are not independently verified.": "Теги — записанные утверждения. Смысл концептов не проверен независимо.",
     "Memo #": "Материал #",
     "Memo history": "История исследований",
@@ -1529,7 +1515,7 @@
     "Model": "Модель",
     "Model card": "Карточка модели",
     "Model connection check": "Проверка подсоединения модели",
-    "Model id for live Researcher/Developer roles and optional model-backed memory features.": "Модель ID для функций исследователя/разработчика и факультативных элементов памяти, поддерживаемых моделью.",
+    "Model id for live Researcher/Developer roles and optional model-backed memory features.": "ID модели для рабочих ролей Researcher/Developer и необязательных функций памяти, использующих модель.",
     "Model settings": "Параметры модели",
     "Model-advisory narrative · not a selection decision": "Типовая рекомендующая описательная часть: решение о выборе не принимается",
     "Modified": "Изменено",
@@ -1694,7 +1680,7 @@
     "Node": "Узел",
     "Node #{0} · attempt {1}": "Узел #{0} · попытка {1}",
     "Node #{0} · {1}": "Узел No {0} · {1}",
-    "Node (experiment) budget — the loop stops after this many.": "Бюджет узла (эксперимент) — цикл заканчивается после стольких.",
+    "Node (experiment) budget — the loop stops after this many.": "Бюджет узлов (экспериментов) — цикл останавливается, когда их число достигнет этого значения.",
     "Node budget in the proposal": "Бюджет узла в предложении",
     "Node coverage unknown for {0} current nodes.": "Неизвестный охват узла {0} Текущие узлы.",
     "Node execution": "Исполнение",
@@ -1703,7 +1689,6 @@
     "Node {0} main code": "Узел {0} главный код",
     "Nodes": "Узлы",
     "None of the claim or curation sources returned usable data. Your runs were not changed.": "Ни один из источников претензии или критиков не возвращал пригодные данные.",
-    "None of the {0} can be deleted right now.": "Ничего из этого {0} можно удалить прямо сейчас.",
     "None of these {0} runs of {1} holds a rank: {2}.": "Ничего из этого {0} запуска {1} имеет ранг: {2}.",
     "None returned.": "Никакого возвращения.",
     "Not allowed:": "Не разрешено:",
@@ -1812,7 +1797,7 @@
     "Open {0} for experiment #{1} at event {2} in a read-only snapshot": "Открыто {0} для эксперимента #{1} при событии {2} только для чтения",
     "Open {0} panel": "Открыто {0} панель",
     "Open {0}, {1}, {2}": "Открыто {0}, {1}, {2}",
-    "OpenAI-compatible endpoint (Ollama by default).": "OpenAI-совместимый конечный пункт (Оллама по умолчанию).",
+    "OpenAI-compatible endpoint (Ollama by default).": "Сервер с OpenAI-совместимым API (по умолчанию Ollama).",
     "Opening Assistant chat.": "Вступительная беседа помощника.",
     "Opening chat {0}": "Вступительная беседа {0}",
     "Opening review…": "Вступительная рецензия...",
@@ -1943,7 +1928,6 @@
     "Primary concept axis": "Первичная концептуальная ось",
     "Primary objective metric · Unnamed metric · unit not recorded ·": "Основная метрика · название и единица измерения не записаны ·",
     "Print / PDF": "Печать/PDF",
-    "Printed to {0} decimal place(s).": "Отпечатано до {0} десятичное(ые) место(а).",
     "Priority (1 is highest)": "Приоритет (на 1 - выше)",
     "Priority for {0}": "Приоритет на {0}",
     "Profile": "Профиль",
@@ -2328,7 +2312,6 @@
     "Run-owned seed captured before this experiment’s overlay": "Исходная база запуска, сохранённая до наложения изменений этого эксперимента",
     "Running": "Выполняется",
     "Running best": "Стараюсь лучше.",
-    "Running best per evaluated experiment for {0} of {1} {2},": "Лучший способ проведения каждого из оцененных экспериментов {0} В процентах {1} {2},",
     "Running best · {0} · {1}": "Лучший способ работы · {0} · {1}",
     "Runs": "Запуски",
     "Runs a command that may change files, processes, or external systems.": "Запускает команду, которая может менять файлы, процессы или внешние системы.",
@@ -2458,7 +2441,6 @@
     "Shared Assistant transcript": "Совместный протокол работы помощника",
     "Shared chat": "Совместная беседа",
     "Shared chat could not be loaded. Retry when the service is reachable.": "Не удалось загрузить чат. Повтори, когда сервис поддается обслуживанию.",
-    "Shared chat loaded. {0} {1}.{2}": "Общий чат загружен. {0} {1}.{2}",
     "Shared chat loading timed out. Check your connection and retry.": "Время совместной загрузки. Проверьте связь и повторное рассмотрение.",
     "Shared credential is unbound": "Общее удостоверение не имеет связи",
     "Shared credential pair is incomplete": "Пара общих документов неполна",
@@ -2527,7 +2509,7 @@
     "Stall endgame length": "Длина конца игры",
     "Stamped": "Зафиксировано",
     "Standard deviation: {0}": "Стандартное отклонение: {0}",
-    "Standing watches": "Стоящие часы",
+    "Standing watches": "Постоянные наблюдения",
     "Start": "Начать",
     "Start a new run": "Новый запуск",
     "Start over completed, and the run changed again": "Начните сначала, и запуск снова изменится.",
@@ -2580,7 +2562,7 @@
     "Stored record": "Записи, хранящиеся на складе",
     "Stored report content is quarantined because its authority is unavailable. Regenerate to inspect it.": "Сохраненное содержание отчета карантинируется, поскольку его полномочия отсутствуют.",
     "Stored report freshness cannot be verified. Narrative, observations, and outcome claims are withheld.": "Обновленность составленных отчетов не может быть подтверждена.",
-    "Stored together with its normalized endpoint binding in a separate server-side secrets.json, never in a run snapshot or API response, and passed to active consumers as LOOPLAB_LLM_API_KEY with LOOPLAB_LLM_API_KEY_BASE_URL. POSIX mode 0600 is requested; Windows/shared-mount ACLs remain operator-managed. Leave blank to keep the existing stored credential material.": "Закреплено вместе с нормализованной конечной точкой, связывающей с отдельным сервером secrets.json, никогда не в режиме запуска или реакции API, и передано активным потребителям, как LOOPLAB_LLM_API_KEY с LOOPLAB_LLM_API_KEY_BASE_URL. Запрашивается режим POSIX 0600; Windows/общая ACL остаются в режиме управления оператором. Оставаться незаполненными для сохранения имеющегося в наличии материала, содержащегося в качестве документа.",
+    "Stored together with its normalized endpoint binding in a separate server-side secrets.json, never in a run snapshot or API response, and passed to active consumers as LOOPLAB_LLM_API_KEY with LOOPLAB_LLM_API_KEY_BASE_URL. POSIX mode 0600 is requested; Windows/shared-mount ACLs remain operator-managed. Leave blank to keep the existing stored credential material.": "Хранится вместе с нормализованной привязкой к адресу сервера в отдельном серверном файле secrets.json — никогда не в снимке запуска и не в ответе API — и передаётся активным потребителям как LOOPLAB_LLM_API_KEY вместе с LOOPLAB_LLM_API_KEY_BASE_URL. Запрашивается режим POSIX 0600; ACL в Windows и на общих монтированиях остаются под управлением оператора. Оставьте пустым, чтобы сохранить уже сохранённые учётные данные.",
     "Stored — leave blank to keep": "Запасы: оставлены пустыми, чтобы хранить",
     "Strategist": "Стратегист",
     "Strategist & operators": "Стратегист и операторы",
@@ -2620,7 +2602,6 @@
     "Surrogate explore": "Суррогатное исследование",
     "Surrogate proposer": "Предложения суррогатной модели",
     "Suspicious results: {0}": "Подозрительные результаты: {0}",
-    "Sweep of {0} trial(s) — loading full results…": "Показ {0} испытание (испытания) — загрузка полных результатов...",
     "Sweep timeout ×": "Время выключения х",
     "Switch between compact and comfortable information density": "Переключение между компактной и удобной плотностью информации",
     "Switching to All runs.": "Переключаюсь на все запуски.",
@@ -2728,7 +2709,6 @@
     "The recovery record changed to a valid id-less deletion. Resume its exact saved request.": "В случае восстановления данных в действительности было исключено исключение из списка.",
     "The recovery record changed to a valid permanent deletion. Check its exact command.": "Запись восстановления изменила на действительное постоянное исключение. Проверьте точную команду.",
     "The registry is unavailable; its exact filter is still active.": "Реестр отсутствует; его точный фильтр все еще активен.",
-    "The remaining {0} were not touched.": "Остальные {0} не трогали.",
     "The repair Developer is told what the engine recorded: whether a watchdog really stopped the stage or the diagnostician named the failure afterwards, how a silent process ended (a signal, a deadline), the metric key a run that printed none must print, and this node's earlier repairs. Off = the pre-2026-09-23 repair text, byte for byte.": "Разработчику говорят, что записал движок: действительно ли наблюдатель остановил сцену или диагностик назвал неудачу после, как закончился процесс молчания (сигнал, крайний срок), метрический ключ, который не должен печатать ни один, и этот узел ранее ремонтировал. Выключен = текст для ремонта до 2026-09-23, байт для байт.",
     "The replacement API key was not confirmed": "Заменяющий ключ API не был подтвержден",
     "The repo STAGES phase is told the scoring command is FIXED and protected and that it reads what the earlier stages produce. That is true of the command, and of the code it runs only when the write tools refuse that code. ON, when the file the command runs is one the Developer could edit — or no file can be named — the phase is told so: an edit to it changes the measurement, and work the command already does (prep, training) runs again inside the score stage. Every phase's instructions then say the same, and the phase may declare no stages at all: the command runs alone. Measured on a MiniOneRec run: an unprotected shell scorer that trained by itself was trained a second time by a declared train stage (~8 GPU-hours). A frozen scorer's prompt is unchanged. Off = the pre-2026-09-30 prompt, byte for byte.": "Фаза STAGES обычно получает указание, что команда оценки фиксирована и защищена и читает результаты предыдущих этапов. При включении, если разработчик может редактировать запускаемый файл или определить его нельзя, ей объясняется граница: изменение файла меняет измерение; подготовка и обучение, уже выполняемые командой, повторятся внутри оценки. Все фазы получают согласованные инструкции и могут не объявлять этапы вовсе, выполнив только команду. Для защищённой оценки запрос прежний. Выключение возвращает запрос до 2026-09-30.",
@@ -2744,14 +2724,13 @@
     "The run may not have created its first experiment, the LLM backend may be unavailable, or": "Возможно, в результате запуска не был создан первый эксперимент, а запасной вариант LLM может отсутствовать, или",
     "The run now ranks every node by {0}": "Бег теперь в ранге каждого узла {0}",
     "The run ranks by": "По званиям",
-    "The run was deleted, along with {0}": "запуск был удален вместе с {0}",
     "The run was deleted. It had contributed no cross-run memory of its own.": "запуск был удален. Он не подавал своих собственных перекрестных воспоминаний.",
     "The run was reset or replaced after this link was created. Node ids and sequence numbers may now mean something else, so LoopLab will not reinterpret the link.": "запуск был перезагружен или заменен после создания этой связи. Теперь узлы и номера последовательности могут означать что-то другое, поэтому LoopLab не будет переосмысливать ссылку.",
     "The run-control target shown in the preview": "Цель управления бегом, показываемая в предпросмотре",
     "The runs do not share one task and objective direction, or none scored. A single metric would compare different objectives.": "В ходе этих запусков не было ни одной задачи и объективного направления, ни ни одной оценки.",
     "The runs root's listing was cut at the entry bound.": "Корень ручек был вырезан на входе.",
-    "The run’s LLM spend cap in TOTAL TOKENS, reserved at the broker’s permit exactly like the cost cap (the estimate is the run’s own mean tokens per call). The one that holds against a local model that prices nothing. 0 = no cap.": "запуск, LLM тратит верхний предел в TOTAL TOKENS, резервируемый у брокера, позволяет точно так же, как и верхний предел стоимости (оценка - это запуск, собственные средние символы на вызов). Тот, который держит против местной модели, которая ничего не стоит. 0 = нет верхний предел.",
-    "The run’s LLM spend cap in the provider’s own currency (USD on every priced gateway), reserved at the broker’s permit BEFORE a request is queued: committed + reserved + this call’s estimate (the run’s own mean per priced call) may not exceed it, so a fan-out cannot overshoot by N calls the way a post-hoc check does. A refusal raises the same hard budget stop the accountant raises. 0 = no cap. On a gateway that reports no prices the committed cost is a floor and this cap is inert — use the token limit. It and llm_budget_usd are ONE ceiling since 2026-09-08: the tightest declared cap binds this reserve half AND the post-hoc accountant (with its node-open floor), and the refusal names the knob that was typed.": "запуск, LLM тратит верхний предел в поставщике, собственную валюту (долл. США на каждый ценный портал), резервируемую у брокера, позволяет БЕ ПОВЕ опаздывать: дан + зарезервирован + этот звонок, даёт оценку (совместимый средний за ценовой звонок) не может превышать его, поэтому фан-выпуск N не может вызвать перевыбор N, как чек. Отказ поднимает тот же жесткий бюджет, останавливает рост бухгалтера. 0 = нет. На портале, где не сообщается никаких цен, данная цена является полом, а этот потолок инертный, используется символический предел. Он и llm_budget_usd являются потолком ONE с 2026-09-08: самый жесткий объявленный верхний предел связывает эту половину резерва и пост-специальный бухгалтер (с его полом без деде-открытого), и имена отказа, которые были набраны на кноб, который был тип.",
+    "The run’s LLM spend cap in TOTAL TOKENS, reserved at the broker’s permit exactly like the cost cap (the estimate is the run’s own mean tokens per call). The one that holds against a local model that prices nothing. 0 = no cap.": "Предел расходов запуска на LLM в ОБЩЕМ ЧИСЛЕ ТОКЕНОВ; резервируется при выдаче разрешения брокером точно так же, как предел стоимости (оценка — среднее число токенов на вызов в этом запуске). Именно этот предел работает с локальной моделью, у которой нет цен. 0 = без ограничения.",
+    "The run’s LLM spend cap in the provider’s own currency (USD on every priced gateway), reserved at the broker’s permit BEFORE a request is queued: committed + reserved + this call’s estimate (the run’s own mean per priced call) may not exceed it, so a fan-out cannot overshoot by N calls the way a post-hoc check does. A refusal raises the same hard budget stop the accountant raises. 0 = no cap. On a gateway that reports no prices the committed cost is a floor and this cap is inert — use the token limit. It and llm_budget_usd are ONE ceiling since 2026-09-08: the tightest declared cap binds this reserve half AND the post-hoc accountant (with its node-open floor), and the refusal names the knob that was typed.": "Предел расходов запуска на LLM в валюте провайдера (USD на любом шлюзе с ценами); резервируется при выдаче разрешения брокером ДО того, как запрос встаёт в очередь: потраченное + зарезервированное + оценка этого вызова (средняя стоимость оплачиваемого вызова в этом запуске) не может его превысить, поэтому параллельная рассылка не перерасходует его на N вызовов, как это бывает при проверке задним числом. Отказ вызывает ту же жёсткую остановку по бюджету, что и учёт расходов. 0 = без ограничения. На шлюзе, который не сообщает цен, учтённая стоимость — лишь нижняя граница, и этот предел не действует — используйте лимит токенов. С 2026-09-08 он и llm_budget_usd — ОДИН предел: самый строгий из заданных связывает и эту резервирующую половину, И учёт задним числом (с его минимумом на открытие узла), а отказ называет ту настройку, которая была задана.",
     "The same directory the agents write to with their own": "Тот же каталог, который агенты пишут со своими собственными",
     "The same review link was recovered.": "Та же связь была восстановлена.",
     "The same snapshot link was recovered and copied · expires {0}.": "Та же снимок, который был найден, и скопирован, истек {0}.",
@@ -2852,7 +2831,6 @@
     "This scope carries more concepts than the tree renders. Narrow the scope to see the rest.": "Эта сфера имеет больше концепций, чем дерево.",
     "This section failed while loading or rendering. Reload LoopLab to fetch a consistent build and retry.": "Не удалось загрузить или отобразить раздел. Перезагрузите LoopLab, чтобы получить актуальную сборку.",
     "This server does not report when the command stops waiting.": "Этот сервер не сообщает, когда команда перестает ждать.",
-    "This server holds": "Этот сервер держит",
     "This shared chat is unavailable. It may have been removed or made private.": "Эта общая беседа недоступна, она может быть удалена или сделана закрытой.",
     "This shared snapshot has no complete turns.": "Этот общий снимок не имеет полных поворотов.",
     "This signal does not identify the current active attempt": "Этот сигнал не указывает на текущую активную попытку",
@@ -3062,7 +3040,7 @@
     "When you reject a claim (claim-decide --reject, or the Claims panel), the lessons that state it stop reaching the agents' cross-run prior and the lesson search they call themselves, and each says how many were held back. Without it the claims view showed your rejection while every later run's proposals were still told the rejected lesson. The same grouping and decision lookup as the Claims view decide what is withheld; if your decisions cannot be read, nothing is withheld and the prompt says so. Off = the prior as before.": "Когда вы отклоняете претензию (претензия-отклонение или коллегия по претензиям), уроки, в которых говорится, что она перестает доходить до перекрестного свершения агента, и поиск уроков, которые они называют себя, и каждый говорит, сколько из них были сдержаны. Без этого вид претензии показал ваше отклонение, в то время как предложения каждого последующего тура все еще были отвергнуты. Та же группировка и поиск решений, как и рассмотрение претензий, решают, что не удается прочитать; если ваши решения не могут быть зачтены, ничто не задерживается, и следователь говорит так. Отменить это.",
     "Where the changes came from": "В котором произошли изменения",
     "Which request param shapes reasoning. auto picks qwen (enable_thinking) for qwen* models, else effort (reasoning_effort).": "Параметр запроса для управления рассуждением. auto выбирает qwen (enable_thinking) для моделей qwen*, иначе effort (reasoning_effort).",
-    "Which roles do the work. llm is the DEFAULT: Researcher/Developer are the live model, and looplab run REFUSES to start when that endpoint is unreachable rather than degrading to empty fallback proposals that finish flat and report success. toy keeps Researcher/Developer offline (a deterministic optimizer) and is how you run without a model; optional embedding and Memora features may still use the configured model. Wrapping up a run that is already over (finalize, or a run/resume that only completes a pending finalization) never refuses — it warns and names the artifacts a missing model degrades.": "Какие роли выполняют работу. lm - это DEFAULT: исследовательский/разработчик - живая модель, и петлю запускает REFUSES, когда конечная точка недоступна, а унижает пустые предложения, которые заканчивают плоский и доклад об успехе. Игрушка поддерживает исследователя/разработчика от сети (детерминистический оптимизатор) и как вы работаете без модели; факультативные элементы встроенной и мемора могут по-прежнему использовать выбранную модель. Закручивая пробу, которая уже завершена (заканчивается или запуск/выпуск, который только завершает завершение завершения), никогда не отказывает — она предупреждает и называет артефакты недостающей модели.",
+    "Which roles do the work. llm is the DEFAULT: Researcher/Developer are the live model, and looplab run REFUSES to start when that endpoint is unreachable rather than degrading to empty fallback proposals that finish flat and report success. toy keeps Researcher/Developer offline (a deterministic optimizer) and is how you run without a model; optional embedding and Memora features may still use the configured model. Wrapping up a run that is already over (finalize, or a run/resume that only completes a pending finalization) never refuses — it warns and names the artifacts a missing model degrades.": "Какие роли выполняют работу. llm — значение ПО УМОЛЧАНИЮ: Researcher/Developer — это рабочая модель, и looplab run ОТКАЗЫВАЕТСЯ стартовать, если этот сервер недоступен, вместо того чтобы скатиться к пустым запасным предложениям, которые не дают улучшений и всё равно сообщают об успехе. toy держит Researcher/Developer офлайн (детерминированный оптимизатор) — так запускают без модели; необязательные функции эмбеддингов и Memora всё же могут использовать настроенную модель. Завершение уже закончившегося запуска (finalize или run/resume, которые лишь доводят до конца ожидающую финализацию) никогда не отклоняется — выводится предупреждение и перечисляются артефакты, которые без модели будут неполными.",
     "Whitespace-only API-key draft discarded; no server changes were made": "Отменен только черновик API-ключа, не было внесено никаких изменений в сервер",
     "Whole installation": "Весь LoopLab",
     "Why can this be empty?": "Почему это может быть пустым?",
@@ -3101,7 +3079,6 @@
     "[UI context: run \"{0}\" is open.{1} Use run tools if relevant.]": "[В контексте UI: бегите\"{0}\"открыта.{1} При необходимости используйте инструменты запуска.]",
     "_No improving steps recorded yet._": "* Пока не зарегистрированы шаги по улучшению.",
     "_No recorded failures or comparable regressions._": "_ Нет зарегистрированных неисправностей или сопоставимых регрессий._",
-    "a line holds its value until the experiment that beat it.{0}": "линия сохраняет свою ценность до тех пор, пока эксперимент не победит ее{0}",
     "a parent the board did not send — the run has a question for": "- родитель, которого не послала комиссия, -",
     "abandon — move to the Abandoned column (keeps the record)": "Отставить - перейти в оставленных колонн (ведется запись)",
     "ablate #": "ablet #",
@@ -3126,7 +3103,6 @@
     "all super-tasks": "все суперзадачи",
     "all tasks": "все задачи",
     "allowed": "разрешено",
-    "already exist. They remain available below and in Lanes.": "Они остаются доступными как в Лайнсе, так и ниже.",
     "also listed above": "также перечисленные выше",
     "an operator retarget made this declared extra metric these runs' objective: their numbers are its values, not the task's own metric, so they are ranked apart from every run ranked by it": "оператор перенацелил это объявленное дополнительное метрическое назначение этих запусков: их числа это его значения, а не метр задачи, поэтому они позиционируются отдельно от каждого позиционируемого ею метрического метра.",
     "an unfinished deletion already owns it": "незавершенное исключение уже принадлежит",
@@ -3149,7 +3125,6 @@
     "at": "в",
     "at an unknown time": "в неизвестное время",
     "at event {0}": "при событии {0}",
-    "at least {0} loaded {1} {2} unread": "не менее {0} загружено {1} {2} не прочитано",
     "at line {0}": "на строки {0}",
     "at node {0}": "в узле {0}",
     "at-a-glance run summary — best metric, budget, strategy, hints": "Краткий обзор: лучшая метрика, бюджет, стратегия и подсказки",
@@ -3282,7 +3257,7 @@
     "conversation": "разговор",
     "cost unavailable": "Стоимость отсутствует",
     "coverage": "Охват",
-    "crash recovery, dependency self-prep, and skipping doomed evals": "аварийное восстановление, самоподготовка и пропуск обреченных эвалов",
+    "crash recovery, dependency self-prep, and skipping doomed evals": "восстановление после сбоев, самостоятельная подготовка зависимостей и пропуск заведомо неудачных оценок",
     "create / manage super-tasks": "создавать/управлять суперзадач",
     "critic:hardcoded_metric": "Критик:hardcoded_metric",
     "cross": "перекресток",
@@ -3297,8 +3272,6 @@
     "dashed ring · infeasible": "pheld circulation · невозможно",
     "data is incomplete.": "Данные являются неполными.",
     "data-leakage scan flagged this run": "Сканирование утечки данных показало этот запуск",
-    "dataset profiled ({0} column{1})": "Профиль набора данных (показатель){0} колонка{1})",
-    "dataset provenance pinned ({0} asset{1})": "Пропускное устройство набора данных ({0} актив {1})",
     "debug": "Отладка",
     "debug — repair a failed parent": "Отладка — ремонт неудавшегося родителя",
     "declared observations": "замечания",
@@ -3309,7 +3282,6 @@
     "default": "по умолчанию",
     "default = in-house templated/LLM developer; or drive an external CLI coding agent.": "по умолчанию = внутрифирменный шаблон/разработчик LLM; или привод внешнего агента кодирования CLI.",
     "delete this hypothesis permanently (remove from the board)": "Удалить эту гипотезу навсегда (выбрать из доски)",
-    "deleted node{0} {1}": "удаляется узел{0} {1}",
     "demoted": "Пониженные должности",
     "demotion": "понижение в должности",
     "dependencies installed{0}": "Установленные зависимости{0}",
@@ -3329,9 +3301,8 @@
     "direct-confirmation": "непосредственное подтверждение",
     "direction": "направление",
     "direction unknown": "направление неизвестно",
-    "directories the scientist reads + literature/deep research": "Каталога, которые читает ученый + литература/глубокие исследования",
+    "directories the scientist reads + literature/deep research": "каталоги, которые читает исследователь + литература и глубокое исследование",
     "distilled at #": "Расщепление в #",
-    "distilled outside this run and cannot be resolved to their text here.": "Выдержан вне этого запуска и не может быть решен в отношении их текста здесь.",
     "does not exist or may have been removed.": "не существует или может быть удалено.",
     "done": "Завершён",
     "draft": "Первый вариант",
@@ -3375,7 +3346,6 @@
     "evaluation owns the node": "Оценка принадлежит узлу",
     "evaluation score": "оценка эксперимента",
     "evaluation unrecorded": "не зарегистрированная оценка",
-    "event log repaired{0}": "Ремонт журнала событий{0}",
     "event unknown": "событие неизвестно",
     "events & timeline": "События & график",
     "every evaluated node used the same {0}, so its correlation with the metric is undefined — vary it to measure one": "каждый оцениваемый узел использовал один и тот же {0}, поэтому его корреляция с метрикой не определена, изменяется для измерения одного.",
@@ -3400,7 +3370,7 @@
     "experiment #{0} is not present in this snapshot": "эксперимент #{0} не присутствует на этом снимке",
     "experiment #{0} — {1}": "эксперимент No {0} - {1}",
     "experiment injection failed{0}": "Ошибка впрыска эксперимента{0}",
-    "experimental Part IV/V portfolio memory, retrieval, and governance": "экспериментальная информация, поиск и управление портфелями, включенными в часть IV/V",
+    "experimental Part IV/V portfolio memory, retrieval, and governance": "экспериментальные функции частей IV/V: память портфеля, поиск и управление",
     "expired": "Время истекло",
     "expires": "истекает",
     "exploit — refine the leader": "эксплуатации - усовершенствовать лидер",
@@ -3471,7 +3441,7 @@
     "grouping": "группировка",
     "grouping only": "только группировка",
     "hack?": "Взлом?",
-    "hard ceilings (blank = unbounded) + guarding seed-lucky winners": "твердые потолки (бланк = без натяжек) + защита победителей семян",
+    "hard ceilings (blank = unbounded) + guarding seed-lucky winners": "жёсткие пределы (пусто = без ограничения) + защита от победителей, которым повезло с seed",
     "have no default directory—configure one in Settings. The exception is": "не иметь каталог по умолчанию - нарисовать один в параметрах. Исключение:",
     "hid": "спрятаны",
     "hidden": "скрытые",
@@ -3488,8 +3458,8 @@
     "holdout scored": "отложенная выборка оценена",
     "host-side grading active{0}{1}": "Активная сортировка по стороне базирования{0}{1}",
     "how long this phase has been running": "Как долго этот этап продолжается",
-    "how the loop explores the solution tree": "Как петля изучает дерево раствора",
-    "hypotheses merged — {0}{1}": "Слившиеся гипотезы - {0}{1}",
+    "how the loop explores the solution tree": "как цикл исследует дерево решений",
+    "hypotheses merged — {0}{1}": "гипотезы объединены — {0}{1}",
     "hypothesis": "Гипотеза",
     "hypothesis / rationale": "Гипотеза/обоснование",
     "hypothesis added{0} — {1}": "Добавлена гипотеза{0} — {1}",
@@ -3503,7 +3473,6 @@
     "in the Card’s evidence list — this attempt reached a terminal and fed the verdict": "в списке улик — эта попытка дошла до терминала и послужила основанием для вынесения приговора",
     "in the chat below.": "в чате ниже.",
     "in the shared memory dir, where Lab → Cross-run memory shows the stores themselves. A claim groups the same lessons by statement and records what supports and what opposes each one.": "В общей памяти, где Лаб β, ривер-резонанс памяти показывает сами магазины.",
-    "in this scope carry no concept at all.": "в этой области понятия вообще не имеет.",
     "incomplete merge": "Неполное объединение",
     "incomplete record": "неполный отчет",
     "infeasible": "ограничения нарушены",
@@ -3533,7 +3502,7 @@
     "is temporarily absent from the run list.": "временно отсутствует в списке кандидатов.",
     "is the cross-run concept map — the": "- это карта пересекающихся концепций -",
     "is_a": "is_a",
-    "isolation, human-in-the-loop, and audit-only monitors": "изолированность, индивидуальная работа и аудиторские проверки",
+    "isolation, human-in-the-loop, and audit-only monitors": "изоляция, участие человека и мониторы только для аудита",
     "it": "это",
     "it cannot continue until its storage is resolved by hand": "Он не может продолжать, пока его хранение не будет решено вручную",
     "it left the run list before its turn": "он оставил список запусков перед своим поворотом",
@@ -3549,7 +3518,6 @@
     "latest ›": "последний",
     "launch-pinned": "пусковые закладки",
     "leakage scan: LEAK DETECTED": "сканирование утечки: ЗАДЕРЖАННОЕ УСТРОЙСТВО",
-    "leakage scan: clean ({0} train row{1} the first test timestamp)": "сканирование утечки: чистым ({0} железнодорожный ряд{1} первая испытательная тампель)",
     "ledger-claim ledger-state-{0}": "Бухгалтерская книга-новость-{0}",
     "ledger-empty-source ledger-source-focus-target ledger-empty-source-{0}": "Внедренная бухгалтерская книга, без учета источников, в основном - в виде целевых бухгалтерских книг - в виде пустых источников - в виде источников{0}",
     "ledger-source-note ledger-source-focus-target ledger-source-{0}": "ledger-source-note ledger-source-focus-target ledger-source-{0}",
@@ -3604,7 +3572,6 @@
     "means the run predates this record; treat it as self-reported.": "означает, что запуск был проведен до начала этой записи; рассматривает ее как самоотчетную.",
     "measurement": "тип оценки",
     "members": "Члены",
-    "memory: {0} settled skill{1} promoted": "память: {0} Устройства{1} повышена в должности",
     "memory_skills": "memory_skills",
     "menu.": "меню.",
     "merge": "Объединение",
@@ -3695,7 +3662,6 @@
     "not available": "Данные отсутствуют",
     "not enough dimensions": "недостаточно габаритов",
     "not examined.": "не рассматривается.",
-    "not filed under a question": "не связано с вопросом",
     "not in snapshot": "не в снимке",
     "not in the current run list": "не в текущем списке",
     "not loaded": "не загружено",
@@ -3705,10 +3671,6 @@
     "not runnable by design": "не поддается расчетной эксплуатации",
     "not selectable: {0}": "не выбираем: {0}",
     "not shown": "не указано",
-    "not shown (bounded projection).": "не показан (связанный проекция).",
-    "not shown (claim limit).": "не указано (превышение уровня претензии).",
-    "not shown (render limit).": "не показан (предельный объем ренды).",
-    "not shown here — a question owns no experiment, so it has no lane.": "Не показываемый здесь вопрос — не имеет эксперимента, поэтому он не имеет полосы движения.",
     "not shown.": "не показано.",
     "not varied": "не изменятся",
     "note on #{0}: {1}": "No {0}: {1}",
@@ -3729,12 +3691,9 @@
     "of at least {0}": "по крайней мере {0}",
     "of them because they carry no concept at all": "потому что они вообще не имеют понятия",
     "of them ran; none was tagged, which is a fact about tagging and not about what was learned.": "Они бегали, и никто не был помечен, что является фактом, а не тем, что было усвоено.",
-    "of them sit in": "среди них сидят",
-    "of this task,": ", в связи с этой задачей,",
     "off": "выключено",
     "ok": "Хорошо.",
     "old default": "старый по умолчанию",
-    "omitted by the client render limit.": "не опущенные клиентом, оставляют предел.",
     "on": "включено",
     "on experiment #": "по эксперименту #",
     "one group…": "одна группа...",
@@ -3761,7 +3720,7 @@
     "operator-injected experiment awaiting materialization": "Эксперимент с впрыскиванием в результате впрыскивания, ожидающий материализации",
     "operators or agents": "агенты",
     "opposing": "против",
-    "optional external coding agent": "факультативный внешний кодирующий агент",
+    "optional external coding agent": "необязательный внешний агент для написания кода",
     "ordered line diff of the two nodes' code": "заказная линия, диффузия кода двух узлов",
     "output": "вывод",
     "over": "за",
@@ -3851,7 +3810,6 @@
     "recorded": "зарегистрировано",
     "recorded base {0}{1}": "зарегистрированная база {0}{1}",
     "recorded failures or comparable regressions": "зарегистрированных ошибок или сопоставимых ухудшений",
-    "recorded no metric and": "не зарегистрировано",
     "recorded objective": "зарегистрированная цель",
     "recorded value": "записанное значение",
     "recovered by": "взысканные",
@@ -3893,7 +3851,6 @@
     "resume": "продолжить",
     "retained in this tab.": "сохранено в этой вкладке.",
     "retained, readable run rows": "сохранены, учитываемые строки для запусков",
-    "retained. Switching is safe; closing loses them.": "Переключение безопасно; закрытие теряет их.",
     "retired": "Отставка",
     "retry of": "Повторное рассмотрение",
     "retry of work item": "повторное рассмотрение вопроса о работе",
@@ -3904,7 +3861,6 @@
     "reverting this exact file change": "Вернуть это точное изменение файла",
     "reverting…": "Вернуться...",
     "review": "проверка",
-    "review {0} option{1} for the exact Idea": "обзор {0} вариант{1} для точного представления",
     "revision": "пересмотр",
     "reward-hack suspected on #{0}: {1}": "Награда - хэк, подозреваемый в #{0}: {1}",
     "risk": "риск",
@@ -3917,7 +3873,7 @@
     "rows": "строки",
     "ru": "Русский",
     "run": "запуск",
-    "run budget extended — {0}": "продленный бюджет {0}",
+    "run budget extended — {0}": "бюджет запуска расширен — {0}",
     "run finished{0}": "запуск завершён{0}",
     "run median": "медиана запуска",
     "run report updated{0}": "Обновленный отчет{0}",
@@ -3930,7 +3886,6 @@
     "runs": "запуски",
     "runs are concept-tagged": "запусков размечены концептами",
     "runs are currently in this scope.": "В настоящее время в этом отношении имеются данные о пробах.",
-    "runs that still exist are kept{0}": "запуски, которые ещё существуют, сохраняются{0}",
     "runs · The Run column stays pinned; choose the evidence columns you need.": "запусков · Столбец «Запуск» закреплён; выберите нужные столбцы с доказательствами.",
     "runs. Evidence is bounded.": "Улики ограничены.",
     "s are": "s:",
@@ -3958,7 +3913,6 @@
     "selection ready": "Выбрано",
     "self-reported": "саморегистрация",
     "send (Enter)": "Отправить (Enter)",
-    "server code {0} file{1} behind": "код сервера {0} файл{1} сзади",
     "set by the operator.": "установлен оператором.",
     "set ceiling": "установить верхний предел",
     "set eval ceiling:": "установить потолок эвраль:",
@@ -4001,7 +3955,6 @@
     "span tree": "Поверочный дерево",
     "spans ·": "протяженности ·",
     "spec drift on #{0}{1} — metric discarded": "метрическая дрейфация на #{0}{1} — выброшена",
-    "spelled more than one way — shown separately, not merged": ", которые были указаны несколькими способами, — показано отдельно, но не сливаются",
     "split-dependent tag(s) remain raw.": "b) разделенная(ые) на две части маркировка(и) остается(ются) сырой(ыми).",
     "stale": "устарело",
     "stale snapshot — regenerate": "черная снимок - регенерат",
@@ -4053,12 +4006,11 @@
     "the deletion did not complete": "не завершено",
     "the event record is incomplete": "запись событий неполна",
     "the model endpoint that proposes ideas and writes code": "конечная точка модели, которая предлагает идеи и пишет код",
-    "the only run of their kind, so nothing on this box ranks them.": "Единственный бег их рода, так что ничто на этой коробке не поймает их.",
     "the outcome is not confirmed — only the exact saved deletion may be retried": "результат не подтвержден - только точное сохранение исключения может быть пересмотрено",
     "the refreshed run list could not be read": "не удалось прочитать",
     "the run": "запуска",
     "the run’s own declared reader": "запуска, собственные читатели",
-    "the self-driving agent loop + per-role model / endpoint overrides": "петля самовозглавляющего агента + модель/конечная точка",
+    "the self-driving agent loop + per-role model / endpoint overrides": "автономный цикл агента + модели и серверы для отдельных ролей",
     "the server accepted it and is still working — it has a saved recovery": "сервер принял его и все еще работает — он имеет сохранённое восстановление",
     "the server is still working on it; its recovery record is saved and can be resumed": "сервер все еще работает над ним; его рекорд восстановления сохранен и может быть возобновлен",
     "the system + user prompt for this sub-loop (shown once)": "система + пользователь быстро для этого под-образа (вывешивается один раз)",
@@ -4085,7 +4037,6 @@
     "this tab could not preserve an exact recovery record": "В этой вкладке не удалось сохранить точную запись о восстановлении",
     "those": "которые",
     "through the Knowledge authoring tools; no run provenance is inferred for legacy notes. Edit these in Lab →": "через инструменты для написания знаний; не существует ни одного источника данных для наследства. Правка этих записей в Лаб.",
-    "tied with {0} other run(s) at this value": "связаны {0} другой(ые) запуск(и) при этом значении",
     "time": "время",
     "time unknown": "время неизвестно",
     "timed out": "время ожидания истекло",
@@ -4168,7 +4119,6 @@
     "what changed": "что изменилось",
     "what this question's OWN experiments reached, before its sharper children": "что этот вопрос дошёл до экспериментов с WON, прежде чем его более острые дети",
     "which {0} to show": "которые {0} показать",
-    "whose question is not on this page": "Вопрос о том, кто не находится на этой странице",
     "width re-pinned from the proposals — {0}{1}": "Ширина, вновь закрепляемая в предложениях {0}{1}",
     "will start again from its saved task and settings. Current events, nodes, traces, and chat leave the live view and remain archived on disk.": "Текущие события, узлы, следы и чат оставляют живой вид и остаются архивированными на диске.",
     "with": "с",
@@ -4187,7 +4137,6 @@
     "{0} (already satisfied)": "{0} (удовлетворено)",
     "{0} ({1} in parallel)": "{0} ({1} параллельно)",
     "{0} / {1} bytes": "{0} / {1} байт",
-    "{0} Close Authoring anyway?": "{0} Закрыть авторство?",
     "{0} Close Authoring?": "{0} Закрыть авторство?",
     "{0} Close the run settings panel anyway?": "{0} Закрыть панель настройок?",
     "{0} Closing it discards this panel's client-only state. Close the Run settings panel anyway?": "{0} Закрытие не позволяет только клиенту закрыть панель настройок?",
@@ -4197,7 +4146,6 @@
     "{0} KB{1}": "{0} KB{1}",
     "{0} Last loaded details remain visible.": "{0} Последние детали загружены остаются видимыми.",
     "{0} Leave this run anyway?": "{0} Всё равно уйти со страницы запуска?",
-    "{0} Leave this run?": "{0} Оставить этот путь?",
     "{0} Leaving this run discards this panel's client-only state.": "{0} Покидая этот зал, выбрасывает только клиентское состояние этой группы.",
     "{0} Markdown {1} not returned.": "{0} Маркдаун {1} не вернулся.",
     "{0} Recovery remains locked so another operation cannot overlap it.": "{0} Восстановление остается заблокированным, так что другая операция не может его перекрывать.",
@@ -4206,7 +4154,6 @@
     "{0} This receipt predates the authored/inherited split, so it can only say the idea": "{0} Эта квитанция была получена до того, как автор/наследовал раздел, так что она может говорить только о идее",
     "{0} VRAM usage": "{0} Использование VRAM",
     "{0} Which parts of its idea the operator wrote was not recorded.": "{0} Какие части идеи, написанные оператором, не были записаны.",
-    "{0} across all settings": "{0} по всем настройкам",
     "{0} additional claim": "Дополнительных выводов: {0}",
     "{0} additional claims": "Дополнительных выводов: {0}",
     "{0} additional mixed-evidence record": "Дополнительных записей со смешанными данными: {0}",
@@ -4214,7 +4161,6 @@
     "{0} additional reference": "Дополнительных ссылок: {0}",
     "{0} additional references": "Дополнительных ссылок: {0}",
     "{0} applied": "{0} применяется",
-    "{0} attempts at this work item — this one and {1} other{2}.": "{0} - попытки по этому пункту повестки дня - {1} другие{2}.",
     "{0} belongs to another or unavailable Authoring directory. Draft not written; refresh the directory.": "{0} принадлежит другому или недоступному справочнику авторизации. черновик не написан; освежает каталог.",
     "{0} beyond the {1} lines the chart can tell apart, in rank order": "{0} за {1} строк, которые диаграмма может отличить друг от друга, в порядке звания",
     "{0} billed tokens": "{0} Выставленные символы",
@@ -4234,47 +4180,27 @@
     "{0} code": "{0} код",
     "{0} command is already in progress.": "{0} Командование уже в процессе.",
     "{0} comment on experiment #{1}.": "{0} комментирует эксперимент No {1}.",
-    "{0} comparable group(s) belong to other task IDs and are deliberately not shown here — their objectives are unrelated to this run.": "{0} сопоставимая(ые) группа(ы) относится(ы) к другим идентификаторам задач и преднамеренно не показана(ы) здесь: их цели не связаны с этим запуском.",
     "{0} compared; {1} not compared. First experiments and missing evidence are not failed experiments. Only evaluation scores are compared; the numeric frontier may include confirmation means.": "{0} сравниваемые данные; {1} Первые эксперименты и недостающие доказательства не являются неудачными экспериментами. Сопоставляются только оценочные оценки; цифровая граница может включать средства подтверждения.",
     "{0} controls credential resolution for this process, but it does not currently supply an API key. {1}": "{0} контроль за разрешением, имеющим право на этот процесс, но в настоящее время он не обеспечивает ключа API. {1}",
     "{0} cost an unknown amount.": "{0} Неизвестное количество.",
-    "{0} could not be deleted.": "{0} не может быть исключен.",
     "{0} could not be opened.": "{0} нельзя открыть.",
     "{0} could not be placed in a group: no task id or direction to read the metric with.": "{0} нельзя поместить в группу: нет задачи id или направления, чтобы прочитать метрическую характеристику.",
     "{0} counted in its verdict": "{0} в своем вердикте",
-    "{0} current-generation new-comment recover{1} protected until the exact command reaches a terminal outcome.": "{0} В настоящее время новый комментарий нового поколения восстанавливается {1} защищен до тех пор, пока точная команда не достигнет конечной цели.",
     "{0} customized value": "Изменённых значений: {0}",
     "{0} customized values": "Изменённых значений: {0}",
-    "{0} damaged new-comment recover{1} be safely released; restore the exact recovery data before continuing.": "{0} Поврежденный новый комментарий{1} - быть безопасными, чтобы их можно было выпускать;",
-    "{0} damaged recovery record{1} quarantined here.": "{0} поврежден рекорд восстановления {1} с карантином здесь.",
-    "{0} damaged recovery record{1} quarantined in this tab.": "{0} поврежден рекорд восстановления {1} с карантином в этой вкладке.",
-    "{0} damaged recovery record{1} remain quarantined. Leave Authoring?": "{0} поврежден рекорд восстановления {1} остается в карантине.",
-    "{0} damaged recovery record{1} review.": "{0} Поврежденная рекордная запись о восстановлении{1} обзор.",
     "{0} data pages": "{0} страницы данных",
-    "{0} declared coordinate{1}{2}": "{0} объявленная координата{1}{2}",
-    "{0} deleted ({1}), then the batch stopped at": "{0} удалено ({1}), затем партия остановилась на",
     "{0} details": "{0} Подробности",
     "{0} details for event {1}": "{0} Подробности события {1}",
     "{0} did not confirm the replacement API key. The previous server-resolved credential state remains authoritative; no new key is assumed. The typed draft is retained but is not part of that credential.": "{0} не подтвердил замену ключа API. Предыдущее редакционное состояние сервера остается авторитетным, не предполагается никаких новых ключей. Напечатанный черновик сохранен, но не является частью этого удостоверения.",
-    "{0} divergence{1} recorded": "{0} Расхождение{1} зарегистрировано",
     "{0} draft change": "Изменений черновика: {0}",
     "{0} draft changes": "Изменений черновика: {0}",
     "{0} draft remains while you {1}.": "{0} бросок остается, а вы {1}.",
     "{0} drawn coarser: more improvements than the row carries": "{0} нарисован дразер: больше усовершенствований, чем в строке",
-    "{0} durable recovery record{1} will remain protected in browser storage.": "{0} Вечная рекордная запись восстановления {1} будет сохранена в браузере.",
     "{0} enriched from node #{1}": "{0} обогащенный узлом No {1}",
     "{0} essential setting": "Основных настроек: {0}",
     "{0} essential settings": "Основных настроек: {0}",
     "{0} evaluated": "{0} оценка",
-    "{0} evaluated node(s) violated a constraint": "{0} Оценочный узел(ы) нарушил(ы) ограничение",
-    "{0} exact Comments command recover{1} saved in this tab.": "{0} Точная команда Комментариев вернёт {1}, сохраненная в этой вкладке.",
-    "{0} exact comment recovery record{1} will remain protected in this browser tab": "{0} Точная запись о восстановлении комментариев {1} будет сохранена в этой вкладке браузера",
-    "{0} excluded": "{0} исключен",
     "{0} experiments in this topology band, {1} in this group across the graph": "Эксперименты {0} в этой топологической группе, {1} в этой группе по графику",
-    "{0} experiment{1}": "{0} эксперимент{1}",
-    "{0} experiment{1} filed under it": "{0} эксперимент{1} поданы под него",
-    "{0} experiment{1} membership could not be materialized; counts are a lower bound and these experiments never match a filter.": "{0} эксперимент{1} Членство в нем невозможно реализовать; подсчеты являются более низким показателем, и эти эксперименты никогда не совпадают с фильтром.",
-    "{0} experiment{1} {2} this work item": "{0} эксперимент{1} {2} по этому пункту повестки дня",
     "{0} explicit executions": "{0} явные казни",
     "{0} failed": "{0} не сработало",
     "{0} failed trials": "{0} Неудавшиеся судебные процессы",
@@ -4288,7 +4214,6 @@
     "{0} hidden changes": "Скрытых изменений: {0}",
     "{0} in total": "{0} Всего",
     "{0} in {1}": "{0}; {1}",
-    "{0} in-memory Comments work item{1} retained in this tab.": "{0} Рабочий элемент, касающийся замечаний по существу{1} сохранено в этой вкладке.",
     "{0} interrupted · engine stopped": "{0} · выключен движок",
     "{0} invalid setting": "Некорректных настроек: {0}",
     "{0} invalid settings": "Некорректных настроек: {0}",
@@ -4300,22 +4225,18 @@
     "{0} is queued for its build{1}.": "{0} оканчивается строительством {1}.",
     "{0} is unavailable for this node or access level; opened Overview instead.": "{0} недоступен для этого узла или уровня доступа; вместо этого открыт Обзор.",
     "{0} is unavailable while Start over is being resolved.": "{0} недоступен, пока начинается процесс.",
-    "{0} items{1} need action": "Требуют действий: {0}{1}",
     "{0} job_id status": "Статус {0} job_id",
     "{0} lacks a complete writable revision. Refresh, or edit outside this truncated view.": "{0} не имеет полного редактируемого редактирования. Обновить или редактировать вне этого урезанного вида.",
     "{0} loaded": "{0} загружено",
     "{0} loaded events": "{0} Загруженные события",
     "{0} loaded of {1}": "{0} загружено {1}",
     "{0} loaded of {1} events": "{0} грузоподъемность {1} мероприятия",
-    "{0} loaded or previously verified items may need action": "{0} - загруженные или предварительно проверенные предметы могут нуждаться в принятии мер;",
     "{0} loaded {1} only a prefix.": "{0} загрузил только префикс {1}.",
     "{0} match": "Совпадений: {0}",
     "{0} matches": "Совпадений: {0}",
     "{0} matchs": "Совпадений: {0}",
     "{0} may still complete — waiting for the live fold": "{0} может быть все еще закончено, ожидая живого слона",
     "{0} measured experiment(s) behind it": "{0} - замеренный эксперимент(ы)",
-    "{0} metric observation{1}": "{0} метрическое наблюдение{1}",
-    "{0} metric-drift divergence(s) caught": "{0} Появленное(ые) расхождение(я) между метрическими и дрейфовыми данными",
     "{0} mixed": "{0} смешанные",
     "{0} more are not displayed.": "{0} Больше не отображаются.",
     "{0} more stay selected.": "{0} больше выберем.",
@@ -4323,17 +4244,12 @@
     "{0} must be a boolean": "{0} должно быть булевым",
     "{0} must be a number": "{0} должно быть номером",
     "{0} must be an integer{1}": "{0} должно быть целое{1}",
-    "{0} must be fixed before starting a run.": "{0} должен быть установлен перед началом запуска.",
     "{0} must be valid JSON: {1}": "{0} должно быть действительным: {1}",
-    "{0} new attention {1}.": "{0} новое внимание {1}.",
-    "{0} new event{1}; jump to live": "{0} новое событие {1}; прыжок к жизни",
     "{0} new items are ready to review.": "{0} Готовы к рассмотрению новые пункты.",
     "{0} new · jump to live": "{0} новый · прыжок к жизни",
     "{0} no longer running · run finished": "{0} не убегать больше : убегать закончено",
     "{0} no longer running · run is finalizing": "{0} не запущено;",
-    "{0} node(s) flagged as possible reward-hacks": "{0} Узел(ы) указал(ы) как можно более привлекательный",
     "{0} not in this snapshot": "{0} не на этом снимке",
-    "{0} not what ran. The experiment still ran and its number": "{0} не то, что было сделано. Эксперимент все еще продолжается и его число",
     "{0} of them": "{0} из них",
     "{0} of them are failures that a later attempt has not repeated.": "{0} из них - это неудачи, которые не повторялись в ходе последующих попыток.",
     "{0} of these runs have not finished. Their best is a": "{0} из этих запусков не закончены.",
@@ -4348,32 +4264,23 @@
     "{0} older entries": "Более ранних записей: {0}",
     "{0} older entry": "Более ранних записей: {0}",
     "{0} older entrys": "Более ранних записей: {0}",
-    "{0} omitted from this snapshot.": "{0} не указано в этом снимке.",
-    "{0} other active Comments state{1} will leave the in-memory workspace": "{0} Другие активные комментарии {1} покинут рабочее пространство в памяти",
     "{0} pairing(s) were seen in a single run — a tagger": "{0} парные пары были замечены в одном забеге — каменщик",
     "{0} panels": "{0} панели",
     "{0} params": "параметров: {0}",
     "{0} pending": "{0} еще не готов",
-    "{0} pending Assistant approval{1}": "Ожидают подтверждения в ассистенте: {0}{1}",
-    "{0} permanently deleted: {1}.{2}{3}": "{0}: удалено безвозвратно — {1}.{2}{3}",
-    "{0} prefix-folded {1} not drawn, for the reason {2} no rank": "{0} В префиксе {1} не набран, по причине {2} не звание",
     "{0} prompt → {1} completion tokens": "{0} motor ≥ {1} пропусков",
     "{0} proposal": "Предложений: {0}",
     "{0} proposals": "Предложений: {0}",
     "{0} provably differ from {1} ({2}), so each part is ranked on its own and": "{0} явно отличается от {1} ({2}), поэтому каждая часть имеет свой собственный статус и",
     "{0} provably disagree on their evaluation": "{0} явно не согласны с их оценкой",
     "{0} proves no difference.": "{0} не подтверждает различий.",
-    "{0} public field omission{1}": "{0} Пропуск на открытом поле {1}",
-    "{0} public links": "Публичных ссылок: {0}",
     "{0} rank warning": "{0} Предупреждение о звании",
     "{0} ranked apart from those runs, though a missing": "{0} отошло от этих запусков, хотя пропавший без вести",
-    "{0} read differently by two of this node's own configuration": "{0} читать по-разному по двум из конфигурации этого узла",
     "{0} record": "Записей: {0}",
     "{0} recorded base updates": "{0} обновление базы данных",
     "{0} recorded — a drain does not": "{0} зарегистрировано - слив не означает",
     "{0} recorded — the run is stopped,": "{0} зарегистрировано - запуск остановлен,",
     "{0} records": "Записей: {0}",
-    "{0} recovery snapshot{1} that {2} only in this tab": "{0} Снимок восстановления{1} что {2} только в этой вкладке",
     "{0} relative importance": "{0} относительное значение",
     "{0} remaining": "{0} Остальные",
     "{0} repeat checks; inspect spread and conditions.": "Повторных проверок: {0}; проверьте разброс и условия.",
@@ -4381,23 +4288,14 @@
     "{0} requested — waiting for completion": "{0} испрошенные - ожидание завершения",
     "{0} reserved but not evidence yet": "{0} зарезервированы, но пока не представлены доказательства",
     "{0} retained operation has an invalid digest; quarantined without server contact.": "Удержанная операция {0} имеет недействительный сборник; с карантином без контакта с сервером.",
-    "{0} retained run{1}": "{0} оставленный в запуске {1}",
     "{0} run workspace · {1}": "Рабочая область запуска «{0}» · {1}",
     "{0} run(s) in this group hold no rank: their event log": "{0} запуск(ы) в этой группе не имеет ранга: их журнал событий",
     "{0} run(s) in this group publish a best metric their own run": "{0} запуск(ы) в этой группе публикует(ют) лучший метр их собственного метра",
     "{0} run(s) of task {1}": "{0} запуск(ы) задачи {1}",
     "{0} runs tied for best {1} in this capture: {2}.": "{0} пробегы связаны для лучшего {1} в этом захвате: {2}.",
-    "{0} run{1} of task {2}": "{0} руны {1} задачи {2}",
-    "{0} run{1} recorded none of the source tree or protocol facets that split {2} task and key — not recorded, so not comparable with either side — and {3} grouped apart without a proven difference.": "{0} бег{1} не регистрировал ни одного из истоков дерева или протокольных аспектов, которые разделились {2} задача и ключ — не зарегистрированы, поэтому не сопоставимы с любой из сторон — и {3} , сгруппированные порознь без доказавших разницу.",
-    "{0} run{1} share a task and comparability key with others but provably differ from some of them in source tree or evaluation protocol, so {2} grouped by that as well.": "{0} пунк-та {1} имеет общий ключ и сопоставимость с другими, но явно отличается от некоторых из них в ёлке источника или протоколе оценки, поэтому {2} также сгруппированы по этому.",
-    "{0} run{1} shown without a rank: a pair in {2} group provably disagrees on its evaluation, and no split by source tree or protocol separates them.": "{0} un{1} показан без звания: пара в {2} группа явно не согласна с ее оценкой, и ни одна из групп не разделяет их по признаку происхождения или по протоколу.",
     "{0} save outcome is unconfirmed. Its exact operation and draft remain in this tab; check the receipt before retrying.": "{0} не подтвердился. Точное функционирование и черновик остаются в этой вкладке; проверьте квитанцию перед повторным судебным разбирательством.",
-    "{0} save outcome{1} may be unknown. Leave Authoring?": "{0} Сохранить результат {1} может быть неизвестно.",
-    "{0} save outcome{1} may be unknown; exact draft{2} retained here.": "{0} сохранит результат {1} может быть неизвестным; точный черновик {2} сохранен здесь.",
-    "{0} save outcome{1} may be unknown; review retained recovery before retrying.": "{0} сэкономить результат {1} может быть неизвестным; рассмотрение вопроса о удержанном возмещении перед повторным судебным разбирательством.",
     "{0} section": "Разделов: {0}",
     "{0} sections": "Разделов: {0}",
-    "{0} selected run{1}": "{0} Выбранный запуск{1}",
     "{0} setting": "Настроек: {0}",
     "{0} settings": "Настроек: {0}",
     "{0} settled, but its recovery record could not be released. Inspect it before another save.": "{0} урегулировал, но его рекорд не был выпущен. Проверьте его перед другим спасением.",
@@ -4405,9 +4303,7 @@
     "{0} source refreshes": "Обновлений источников: {0}",
     "{0} source refreshs": "Обновлений источников: {0}",
     "{0} source {1} not shown.": "{0} источник {1} не показано.",
-    "{0} span{1}": "{0} Протяженность{1}",
     "{0} spent in the latest state.": "{0} Проведён в последнем штате.",
-    "{0} standing watch{1}": "{0} стойкие часы {1}",
     "{0} start unknown": "{0} Начало неизвестно",
     "{0} steward log": "{0} Журнал стюарда",
     "{0} stopping · stop requested": "{0} остановки; просьба о остановки",
@@ -4422,36 +4318,20 @@
     "{0} unavailable": "{0} отсутствует",
     "{0} unclear": "{0} неясно",
     "{0} under an earlier attempt; superseded — no later attempt has reported on this stage": "{0} в ходе предыдущей попытки; подменить — ни одна из последующих попыток не дошла до этого момента",
-    "{0} unread items": "Непрочитанных уведомлений: {0}",
-    "{0} unread loaded {1}": "{0} не прочитано {1}",
-    "{0} unsaved Authoring draft{1} will be discarded.": "черновик {0} без сохранения {1} будет отклонен.",
     "{0} unsaved change": "Несохранённых изменений: {0}",
     "{0} unsaved changes": "Несохранённых изменений: {0}",
-    "{0} unsaved comment draft{1} will leave this in-memory workspace": "{0} Без сохранения черновика комментария {1} покинет это неупомянутое рабочее пространство",
-    "{0} unsaved draft{1} remain in memory.": "{0} Неосохраненный черновик{1} Оставайтесь в памяти.",
-    "{0} unsaved draft{1} will be lost.": "{0} Неосохраненный черновик{1} будет потерян.",
-    "{0} unsaved draft{1} will be lost. Leave?": "Несохранённых черновиков: {0}{1}. Они будут потеряны. Уйти?",
-    "{0} unsaved in-memory Authoring draft{1}": "{0} неосохранённый черновик, составленный в память{1}",
     "{0} utilization": "{0} использование",
     "{0} waiting for a slot": "{0} Жду, когда будет снято окно",
     "{0} waiting for an evaluation slot": "{0} Ожидание проведения оценки",
-    "{0} work item{1}": "{0} пункт повестки дня){1}",
     "{0} {1} Markers group nodes; rings show constraints.{2}": "{0} {1} Форма точек обозначает группы узлов; кольца показывают ограничения.{2}",
     "{0} {1} data": "{0} данные «{1}»",
     "{0} {1} data page": "{0} страница данных «{1}»",
     "{0} {1} in the loaded file inventory.": "{0} {1} в загруженном файле.",
-    "{0} {1} no series (no feasible measured node, or a row served before the series existed)": "{0} {1} не существует рядов (не представляется возможным измерить узел или ряд, который был вручен до того, как серия существовала)",
-    "{0} {1} not drawn, for the reason {2} no rank: a pair of this group's runs provably disagrees on its evaluation, and one axis would order them all the same": "{0} {1} не было нарисовано по причине {2} Нет звания: два исполнителя этой группы явно не согласны с ее оценкой, и одна ось будет заказывать их все одинаково",
-    "{0} {1} tagged {2} for {3}": "{0} {1} с маркировкой {2} для {3}",
-    "{0} {1} {2} {3} as read{4}": "{0} {1} {2} {3} читать {4}",
     "{0} {1} · {2} loaded": "{0} {1} · {2} погружены",
-    "{0} {1}{2} marked as read.{3}": "{0} {1}{2}: отмечено как прочитанное.{3}",
     "{0} · historical result": "{0} · исторический результат",
     "{0} · read-only. Live traces, metrics sidecars and actions are hidden.": "{0} - только для чтения. Следы в прямом эфире, метрические коляски и действия скрыты.",
     "{0} · report refresh disabled": "{0} · обновление отчёта отключено",
     "{0} · unread count incomplete": "{0} - нечитаемый показатель неполный",
-    "{0} · {1} experiment(s)": "{0} · {1} эксперимент(ы)",
-    "{0} · {1} experiment(s){2}": "{0} · {1} эксперимент(ы) {2}",
     "{0} — applied to new runs": "{0} - применяется к новым рейсам",
     "{0} — best {1}": "{0} - лучше {1}",
     "{0} — by a drain; the": "{0} - сливом;",
@@ -4472,7 +4352,6 @@
     "{0} — removed super-task": "{0} - удалена суперзадач",
     "{0} — selected task unverified": "{0} — выбранная задача непроверена",
     "{0} — super-task registry unavailable": "{0} — не имеется реестра суперзадач",
-    "{0} — the engine is processing it": "{0} — движок обрабатывает его",
     "{0} — the ledger still folds it {1}: the server says a pause": "{0} — в бухгалтерской книге все еще складывается {1}: сервер говорит, что пауза",
     "{0} — the stored intent was not replayed": "{0} — хранимое намерение не было воспроизведено повторно",
     "{0} — waiting for the live fold": "{0} - ожидание скидок в живую",
@@ -4496,7 +4375,6 @@
     "{0}m ago": "{0} мин. назад",
     "{0}s ago": "{0} с. назад",
     "{0}scored vs {1}": "{0} против {1}",
-    "{0}{1} Close Authoring?": "{0}{1} Закрыть авторство?",
     "{0}{1} recorded no {2}, while": "{0}{1} зарегистрировано No {2}, в то время как",
     "{0}{1} — click to remove": "{0}{1} — щелчок для удаления",
     "| operator | nodes | evaluated | compared with parent | better score | not compared | numeric frontier |": "| оператор | узлы | оценено | сравнено с родителем | оценка лучше | без сравнения | численный максимум |",
@@ -4527,7 +4405,6 @@
     "· every run in scope is tagged": "· каждый запуск в области применения обозначен маркированными знаками",
     "· evidence": "· доказательства",
     "· executable": "· Выполняемый",
-    "· expand to inspect": "· развернуть для просмотра",
     "· experiment #": "* эксперимент*",
     "· external harness": "- наружный жгут",
     "· flagged": "- помечено",
@@ -4565,21 +4442,17 @@
     "· run": "· запуск",
     "· seq": "· событие",
     "· shared with": "* совместно с",
-    "· show evidence": "- наличие доказательств;",
     "· snapshot freshness unknown": "- свежесть неизвестна;",
     "· snapshot:": "· снимок:",
     "· source metric {0}": "метрическая оценка источника {0}",
     "· spread not recorded": "· не регистрируется распределение",
     "· task": "· задача",
-    "· {0} built something else — not a test of it": "· {0} построил что-то другое, а не испытание",
     "· {0} ctx": "· {0} х",
     "· {0} error": "· {0} ошибка",
     "· {0} more": "· {0} больше",
-    "· {0} not in this snapshot": "· {0} не на этом снимке",
     "· {0} omitted": "· {0} опущен",
     "· {0} out": "· {0} Вышел",
     "· {0} tokens · {1}": "· {0} токенов · {1}",
-    "· {0} tool call{1}": "· {0} вызов инструмента{1}",
     "· {0}s timeout": "· {0}Время выхода",
     "Δ best": "Δ лучшее",
     "Δ columns are orientation-normalized; positive values mean better.": "Колонки Δ имеют ориентацию; положительные значения означают более высокое значение.",
@@ -4589,7 +4462,6 @@
     "— anything worth keeping that is not a per-run finding.": "- все, что стоит сохранить, это не по-своему.",
     "— attempt": "- попытка",
     "— carries no concept": "- не имеет понятия",
-    "— dropped {0} corrupt line{1}, kept {2}": "- выброшена {0} коррумпированная линия{1}, сохранено {2}",
     "— experiment #": "- эксперимент #",
     "— failed at {0}": "- не удалось {0}",
     "— from {0}": "- от {0}",
@@ -4630,7 +4502,6 @@
     "← runs": "← запуски",
     "↑ load earlier spans": "· нагрузка, которая наступает раньше",
     "→ called": ": Звонил",
-    "→ called {0} tool{1} (shown below)": ": Звонил {0} инструмент{1} (указать ниже)",
     "→ next frontier #": "♪ Следующая граница ♪",
     "→ numeric frontier": "→ лучшее числовое значение",
     "↗ Open": "↗ Открыть",
@@ -4745,7 +4616,6 @@
     "Open attention center. Checking for updates.": "Открыть центр внимания. Проверяем обновления.",
     "no items need action": "ничего не требует действий",
     "no unread items": "нет непрочитанных уведомлений",
-    "1 unread item": "1 непрочитанное уведомление",
     "current action total is unavailable; no action cards are loaded": "число требующих действий уведомлений недоступно; карточки не загружены",
     "no unread items are loaded; unread count is incomplete": "непрочитанные уведомления не загружены; их число неполно",
     "Open Assistant in side panel": "Открыть ассистента сбоку",
@@ -4771,7 +4641,6 @@
     ", so the claim cannot be checked and the node is excluded from winner selection.": ", поэтому требование не может быть проверено и узел исключен из отбора победителя.",
     ", so this best won a mixed field": ", так что это лучшее, чем выиграть смешанное поле",
     ", then pause": ", затем пауза",
-    "1 loaded or previously verified item may need action": "Возможно, требует действий 1 загруженное или ранее проверенное уведомление",
     "1 of them is a failure that a later attempt has not repeated.": "В одном случае зафиксирована ошибка, не повторявшаяся в более поздней попытке.",
     "1. Configure the MCP process": "1. Настроить процесс МКП",
     "2. Supply the scoped credential separately": "2. Поставить крупноразмерные удостоверения отдельно",
@@ -5332,7 +5201,6 @@
     "Its declaration was repaired after the fact and the artifact contract was then re-checked": "После того как это было сделано, его заявление было отремонтировано, а затем контракт с артефактом был перепроверен",
     "Its metric was also SALVAGED rather than measured.": "Его метрика также была SALVAGED, а не измерена.",
     "Its outcome cannot be trusted. Inspect the run list and provider activity before releasing this exact local fence.": "Нельзя доверять его результатам. Проверьте список и деятельность провайдера, прежде чем выпустить именно это местное заграждение.",
-    "Its own outcome is not established — check that run before assuming it still": "Его собственный результат не установлен: проверить, что происходит, прежде чем предположить, что он все еще",
     "Its unseen number cannot rank another objective; start a new run for the new target.": "Его невидимое число не может ранжировать другую цель; начать новый запуск для новой цели.",
     "Journal rows: decisions": "Количество строк в журналах: решения",
     "Keep this run. Read current state and generation; connecting MCP does not restart a stopped engine.": "Продолжайте работать. Читайте текущее состояние и поколение; подключение MCP не возобновляет работу остановленного движка.",
@@ -5355,7 +5223,7 @@
     "Launch validation did not return before its deadline.": "Подтверждение результатов запуска не было получено до истечения установленного срока.",
     "Leakage detected": "Обнаружена утечка",
     "Leakage detector verdicts": "Вердикты детектора утечки",
-    "Leave this run?": "Оставить этот путь?",
+    "Leave this run?": "Покинуть этот запуск?",
     "Leaving this run will discard an unsaved Run settings draft.": "Если мы оставим этот забег, то отбросим неосохранённый черновик настройок беговых работ.",
     "Legacy Direction focus is no longer supported; use the Concepts filter instead.": "Упор на наследие больше не поддерживается; вместо этого используйте фильтр концепций.",
     "Legacy note": "Наследие",
@@ -5423,7 +5291,7 @@
     "Next: restore browser storage": "Далее: восстановление хранилища браузера",
     "Next: review the checked plan and start": "Следующий: пересмотр проверенного плана и начало",
     "No action cards are shown. Current action status is unavailable; both sources were verified previously.": "Карты действий не показаны. Текущий статус действий отсутствует; оба источника были проверены ранее.",
-    "No active links.": "Никаких активных связей.",
+    "No active links.": "Активных ссылок нет.",
     "No agent reads observed": "Ни один агент не читает наблюдение",
     "No applicable evidence": "Никаких доказательств не имеется",
     "No cases stored.": "Никаких случаев.",
@@ -5655,7 +5523,7 @@
     "Provider outcome unresolved": "Исход запроса к модели неизвестен",
     "Provider test blocked by credential state": "Сначала проверьте доступ к модели в Settings",
     "Provider work or cost cannot be ruled out. Release this local recovery key only after inspecting the run and provider usage. The original run name remains reserved; use a new name for any later launch. Continue?": "Нельзя исключать работы или стоимость провайдера. Выпустить этот местный ключ только после проверки использования запуска и провайдера. Первоначальное название запуска остается записано; использовать новое название для любого последующего запуска. Продолжать?",
-    "Public link": "Связь с общественностью",
+    "Public link": "Публичная ссылка",
     "Public-link recovery could not be saved; no request was sent.": "Восстановление связи с общественностью не удалось сохранить; просьба не направлялась.",
     "Public-link recovery is unavailable · nothing was shared": "Недоступно восстановление связи с общественностью; ничего не было совместно",
     "Public-link status changed while checking · review the current status before sending": "Статус связи с общественностью изменился при проверке · просмотр текущего состояния перед отправкой",
@@ -6054,7 +5922,6 @@
     "That metric is optimized the other way from this run": "Эта метрика оптимизирована по-другому с этого момента",
     "That owner token was not accepted.": "Этот символ владельца не был принят.",
     "That public link was revoked or expired · create a new one": "- что связь с общественностью была отменена или просрочена;",
-    "That run’s identity was not recorded, so the purge cannot be": "Этот запуск, личность не была записана, так что очистка не может быть произведена",
     "The Assistant approval link is no longer valid; refresh the Attention Center": "Связь с утверждением помощника более не действует; оснащать Центр внимания",
     "The Assistant chat that owns this startup recovery no longer exists": "Помощник, который владеет этим стартапом, больше не существует",
     "The Assistant composer is unavailable in the current context": "Помощник композитора в нынешнем контексте отсутствует",
@@ -6536,7 +6403,6 @@
     "activity-chip queued": "activity-chip queued",
     "activity-chip unknown": "activity-chip unknown",
     "additional claim": "дополнительная претензия",
-    "additional mixed-evidence record": "дополнительные данные о смешанном свидетельстве",
     "additional reference": "дополнительная ссылка",
     "again, or it may be created twice.": "или же он может быть создан дважды.",
     "against the same test set, the same corpus or the same protocol — and unknown is not the": "против одного и того же испытательного набора, того же корпуса или того же протокола, и неизвестно, что",
@@ -6726,10 +6592,8 @@
     "conv-toggle memory-tabs": "conv-toggle memory-tabs",
     "conv-tool-h disclosure-button": "conv-tool-h disclosure-button",
     "corrupt_line dropped_lines": "corrupt_line dropped_lines",
-    "counts — but the run cannot say which value it was measured at.": "В этом случае, как правило, не существует никаких доказательств того, что это значение было измерено.",
     "cross-run lessons refresh skipped": "Пропущенные уроки обновления",
     "cross-run lessons refreshed": "Обновленные уроки сквозного использования",
-    "cross-run memory row": "Сверхпромышленная строка памяти",
     "cross-run tools": "Сверхпромышленные инструменты",
     "ctx-chip ctx-chip-action": "ctx-chip ctx-chip-action",
     "current champion": "чемпион текущего года",
@@ -6759,7 +6623,6 @@
     "direction resolved by evaluator": "решение, принятое экспертом по оценке",
     "directions differ": "направления",
     "disagree; a comparable group holds two or more runs a ranking may order": "не согласны; сопоставимая группа имеет два или более запусков, которые может распорядиться ранжировать",
-    "displayed concept node": "Показать концептуальный узел",
     "distill this phase for the next (fewer re-reads downstream)": "Перейти на эту фазу для следующего (перечитать вниз по течению)",
     "diversity archive updated": "Обновление архива разнообразия",
     "dock chat-dock": "dock chat-dock",
@@ -6826,7 +6689,6 @@
     "feed-msg chat": "feed-msg chat",
     "feed-msg k-": "feed-msg k-",
     "file change": "Изменение файла",
-    "files, and nothing in the record can order them. The experiment ran and its number still": "И ничего в записи не может заказать. Эксперимент прошёл, и его число все еще не изменилось.",
     "finished from here.": "Дальше я закончу.",
     "fired, and finished": "Уволили и закончили",
     "first eligible result": "первый результат,",
@@ -7019,7 +6881,7 @@
     "no readable response body": "не прочитываемый орган реагирования",
     "no result": "не достигнуто",
     "no selected result": "не выбранный результат",
-    "no standing watches": "нет стойких часов",
+    "no standing watches": "нет постоянных наблюдений",
     "no usable metric": "не используется",
     "node attempt": "Попытка узла",
     "node id": "unde id",
@@ -7079,10 +6941,8 @@
     "old evaluator attempt": "Старая попытка оценки",
     "older entries": "Старые записи",
     "older entry": "более старая запись",
-    "on this group's own axis — one task, one direction, one evaluation, nothing rescaled;": "на собственной оси этой группы — одна задача, одно направление, одна оценка, ничего не пересчитано;",
     "on this task, kept machine-readable. A later run on the SAME task is handed it in its": "В этом случае, в этом случае, он должен быть сохранен на машинном считывании.",
     "one experiment": "один эксперимент",
-    "only it owned.": "только он владел им.",
     "operator dropped": "оператор сброшен",
     "operator or engine removed the work item": "- оператор или движок снял с эксплуатации элемент, касающийся работы;",
     "operator reopened": "вновь открыт оператор",
@@ -7293,7 +7153,6 @@
     "standing unknown": "Неизвестно",
     "start unknown": "Неизвестно",
     "start-over-description start-over-cost-note": "Перенос на старт-описание-сверхстоимость-отсчет-отметка",
-    "still counts — but it is filed under parameters the configuration did not use.": "Однако он засчитывается в соответствии с параметрами, которые не использовалась конфигурация.",
     "still in memory": "Всё ещё в памяти",
     "stopped (frozen — not finalized)": "остановилась (замороженна - не завершена)",
     "stops being readable, so the value shown is the best of a PREFIX, not of the run.": "Перестает быть считываемым, поэтому показанное значение является лучшим из PREFIX, а не из запуска.",
@@ -7569,8 +7428,6 @@
     "Lessons, task solutions and meta notes carried across runs": "Уроки, решения задач и заметки, доступные между запусками",
     "Authored hints, skills and knowledge shared by all runs": "Инструкции, навыки и знания, общие для всех запусков",
     "Live nvidia-smi telemetry for the machine running the server": "Текущие показатели nvidia-smi на машине сервера",
-    "server code {0} file behind": "Код сервера устарел: изменён {0} файл",
-    "server code {0} files behind": "Код сервера устарел: изменено файлов — {0}",
     "run report": "отчёт запуска",
     "timeline": "временная шкала",
     "card board": "доска карточек",
@@ -7674,15 +7531,9 @@
     "origin-chip uses compact": "origin-chip uses compact",
     "Uses artifacts {0}": "Использует артефакты {0}",
     "Reads the workdirs of artifact nodes {0} (LOOPLAB_USES_WORKDIRS)": "Читает рабочие каталоги узлов-артефактов {0} (LOOPLAB_USES_WORKDIRS)",
-    "Imported after the run (source: {0}), not recorded while it was happening.": "Импортировано после прогона (источник: {0}), а не записано во время него.",
-    "agent chose {0}{1} (of {2} legal move){3}": "агент выбрал {0}{1} (допустимых ходов: {2}){3}",
-    "agent chose {0}{1} (of {2} legal moves){3}": "агент выбрал {0}{1} (допустимых ходов: {2}){3}",
-    "checkpoint — {0} node, {1}s elapsed": "контрольная точка — узлов: {0}, прошло {1} с",
-    "checkpoint — {0} nodes, {1}s elapsed": "контрольная точка — узлов: {0}, прошло {1} с",
+    "Imported after the run (source: {0}), not recorded while it was happening.": "Импортировано после запуска (источник: {0}), а не записано во время него.",
     "{0} exact command recovery is protected in browser storage.": "Точных записей восстановления команд в хранилище браузера: {0}.",
     "{0} exact command recoveries are protected in browser storage.": "Точных записей восстановления команд в хранилище браузера: {0}.",
-    "1 suspicious node flagged": "Отмечен 1 подозрительный узел",
-    "{0} suspicious nodes flagged": "Отмечено подозрительных узлов: {0}",
     "Covers {0} of {1} nodes · stale by 1 node.": "Охвачено узлов: {0} из {1} · отставание на 1 узел.",
     "Covers {0} of {1} nodes · stale by {2} nodes.": "Охвачено узлов: {0} из {1} · отставание (узлов): {2}.",
     "matching concepts": "подходящих концептов",
@@ -7695,6 +7546,894 @@
     "were added to the record after the run, not recorded while the run was evaluating — recovered from the preserved score log, imported by the operator, or measured afterwards by an evaluation track. Their precision may be coarser than the objective's, so two nodes equal on a reconstructed row are not known to be equal.": "— эти значения добавлены в запись после запуска, а не записаны во время его оценки: они восстановлены из сохранённого журнала оценивания, импортированы оператором или измерены позже треком оценки. Их точность может быть грубее, чем у цели, поэтому равенство двух узлов в такой строке не означает, что они действительно равны.",
     "Added to the record after the run, not recorded while the run was evaluating.": "Добавлено в запись после запуска, а не записано во время его оценки.",
     "It was recovered from the preserved score log, imported by the operator, or measured afterwards by an evaluation track; the record does not say which.": "Значение восстановлено из сохранённого журнала оценивания, импортировано оператором или измерено позже треком оценки; из записи не видно, каким из этих способов.",
-    "Its precision may be coarser than the objective's, so two nodes equal here are not known to be equal.": "Его точность может быть грубее, чем у цели, поэтому равенство двух узлов здесь не означает, что они действительно равны."
+    "Its precision may be coarser than the objective's, so two nodes equal here are not known to be equal.": "Его точность может быть грубее, чем у цели, поэтому равенство двух узлов здесь не означает, что они действительно равны.",
+    "Public link active": "Публичная ссылка активна",
+    "until {0}": "до {0}",
+    "{0} built something else — not a test of it": "{0} собрали что-то другое — это не проверка задачи",
+    "tagged here (not deeper) — highlights only these": "отмечено здесь (не глубже) — подсвечиваются только они",
+    "Deleting {0} of {1}{2}…": "Удаление {0} из {1}{2}…",
+    "{0} and {1} more": "{0} и ещё {1}",
+    "That run’s identity was not recorded, so the purge cannot be finished from here.": "Идентификатор этого запуска не был записан, поэтому завершить очистку отсюда нельзя.",
+    "Also delete each run’s own cross-run memory — rows that merge evidence or concepts with runs that still exist are kept": "Также удалить собственную межзапусковую память каждого запуска — строки, объединяющие данные или концепты с ещё существующими запусками, сохраняются",
+    "Close Authoring anyway?": "Всё равно закрыть редактор?",
+    "Close Authoring?": "Закрыть редактор?",
+    "wall-clock {0}s": "лимит времени {0} с",
+    "per-eval {0}s": "на оценку {0} с",
+    "memory: {0}{1}{2}": "память: {0}{1}{2}",
+    "coverage — {0} · {1}{2}": "покрытие — {0} · {1}{2}",
+    "dominant {0}%": "доминирует {0}%",
+    "event log repaired at divergence": "журнал событий восстановлен в точке расхождения"
+  },
+  "plurals": {
+    "({0} paraphrases folded)": {
+      "one": "(поглощена {0} перефразировка)",
+      "few": "(поглощено {0} перефразировки)",
+      "many": "(поглощено {0} перефразировок)"
+    },
+    "**Infeasible:** {0} node(s) violated a constraint and were excluded.": {
+      "one": "**Недопустимо:** {0} узел нарушил ограничение и исключён.",
+      "few": "**Недопустимо:** {0} узла нарушили ограничение и исключены.",
+      "many": "**Недопустимо:** {0} узлов нарушили ограничение и исключены."
+    },
+    "+{0} experiment nodes": {
+      "one": "+{0} узел эксперимента",
+      "few": "+{0} узла эксперимента",
+      "many": "+{0} узлов эксперимента"
+    },
+    "Also delete each run’s own cross-run memory — rows that merge evidence or concepts with runs that still exist are kept ({0} runs)": {
+      "one": "Также удалить собственную межзапусковую память каждого запуска — строки, объединяющие данные или концепты с ещё существующими запусками, сохраняются ({0} запуск)",
+      "few": "Также удалить собственную межзапусковую память каждого запуска — строки, объединяющие данные или концепты с ещё существующими запусками, сохраняются ({0} запуска)",
+      "many": "Также удалить собственную межзапусковую память каждого запуска — строки, объединяющие данные или концепты с ещё существующими запусками, сохраняются ({0} запусков)"
+    },
+    "Also delete this run’s own cross-run memory ({0} rows)": {
+      "one": "Также удалить собственную межзапусковую память этого запуска ({0} строка)",
+      "few": "Также удалить собственную межзапусковую память этого запуска ({0} строки)",
+      "many": "Также удалить собственную межзапусковую память этого запуска ({0} строк)"
+    },
+    "Cancellation requested for {0} experiment(s); {1} still pending": {
+      "one": "Запрошена отмена {0} эксперимента; ещё ожидают: {1}",
+      "few": "Запрошена отмена {0} экспериментов; ещё ожидают: {1}",
+      "many": "Запрошена отмена {0} экспериментов; ещё ожидают: {1}"
+    },
+    "Cancelled {0} pending experiment(s) under #{1}": {
+      "one": "Отменён {0} ожидающий эксперимент в #{1}",
+      "few": "Отменено {0} ожидающих эксперимента в #{1}",
+      "many": "Отменено {0} ожидающих экспериментов в #{1}"
+    },
+    "Card {1} resource override: {0} GPUs{2}": {
+      "one": "Карточка {1}: ресурсы переопределены — {0} GPU{2}",
+      "few": "Карточка {1}: ресурсы переопределены — {0} GPU{2}",
+      "many": "Карточка {1}: ресурсы переопределены — {0} GPU{2}"
+    },
+    "Cross-run memory was only partly removed for {0} runs (first: “{1}”).": {
+      "one": "Межзапусковая память удалена лишь частично для {0} запуска (первый: «{1}»).",
+      "few": "Межзапусковая память удалена лишь частично для {0} запусков (первый: «{1}»).",
+      "many": "Межзапусковая память удалена лишь частично для {0} запусков (первый: «{1}»)."
+    },
+    "Delete {0} runs.": {
+      "one": "Удалить {0} запуск.",
+      "few": "Удалить {0} запуска.",
+      "many": "Удалить {0} запусков."
+    },
+    "Delete {0} runs; {1} cannot be deleted right now.": {
+      "one": "Удалить {0} запуск; {1} сейчас удалить нельзя.",
+      "few": "Удалить {0} запуска; {1} сейчас удалить нельзя.",
+      "many": "Удалить {0} запусков; {1} сейчас удалить нельзя."
+    },
+    "Discard {0} releasable Comments work items from this browser tab? Current-generation append-only recovery stays protected because it is not safe to release.": {
+      "one": "Сбросить {0} освобождаемый рабочий элемент комментариев из этой вкладки? Восстановление текущего поколения (только добавление) остаётся защищённым, потому что его небезопасно освобождать.",
+      "few": "Сбросить {0} освобождаемых рабочих элемента комментариев из этой вкладки? Восстановление текущего поколения (только добавление) остаётся защищённым, потому что его небезопасно освобождать.",
+      "many": "Сбросить {0} освобождаемых рабочих элементов комментариев из этой вкладки? Восстановление текущего поколения (только добавление) остаётся защищённым, потому что его небезопасно освобождать."
+    },
+    "Fix {0} invalid settings before saving": {
+      "one": "Исправьте {0} недопустимую настройку перед сохранением",
+      "few": "Исправьте {0} недопустимые настройки перед сохранением",
+      "many": "Исправьте {0} недопустимых настроек перед сохранением"
+    },
+    "Hide {0} tagged experiments for {1}": {
+      "one": "Скрыть {0} отмеченный эксперимент для {1}",
+      "few": "Скрыть {0} отмеченных эксперимента для {1}",
+      "many": "Скрыть {0} отмеченных экспериментов для {1}"
+    },
+    "Mark all {0} unread items as read{1}": {
+      "one": "Отметить {0} непрочитанный элемент как прочитанный{1}",
+      "few": "Отметить все {0} непрочитанных элемента как прочитанные{1}",
+      "many": "Отметить все {0} непрочитанных элементов как прочитанные{1}"
+    },
+    "Mark {0} loaded unread items as read{1}": {
+      "one": "Отметить {0} загруженный непрочитанный элемент как прочитанный{1}",
+      "few": "Отметить {0} загруженных непрочитанных элемента как прочитанные{1}",
+      "many": "Отметить {0} загруженных непрочитанных элементов как прочитанные{1}"
+    },
+    "Membership withheld for all {0} tagged experiments; not empty.": {
+      "one": "Состав скрыт для {0} отмеченного эксперимента; группа не пуста.",
+      "few": "Состав скрыт для всех {0} отмеченных экспериментов; группа не пуста.",
+      "many": "Состав скрыт для всех {0} отмеченных экспериментов; группа не пуста."
+    },
+    "None of the {0} selected runs can be deleted right now.": {
+      "one": "Ни один из {0} выбранного запуска сейчас нельзя удалить.",
+      "few": "Ни один из {0} выбранных запусков сейчас нельзя удалить.",
+      "many": "Ни один из {0} выбранных запусков сейчас нельзя удалить."
+    },
+    "Printed to {0} decimal place(s).": {
+      "one": "Выведено с точностью до {0} знака после запятой.",
+      "few": "Выведено с точностью до {0} знаков после запятой.",
+      "many": "Выведено с точностью до {0} знаков после запятой."
+    },
+    "Re-tagged #{1} → {0} concepts{2} — the engine is processing it": {
+      "one": "#{1} перемечен → {0} концепт{2} — движок обрабатывает изменение",
+      "few": "#{1} перемечен → {0} концепта{2} — движок обрабатывает изменение",
+      "many": "#{1} перемечен → {0} концептов{2} — движок обрабатывает изменение"
+    },
+    "Review {0} hidden changes": {
+      "one": "Просмотреть {0} скрытое изменение",
+      "few": "Просмотреть {0} скрытых изменения",
+      "many": "Просмотреть {0} скрытых изменений"
+    },
+    "Revoked {0} links.": {
+      "one": "Отозвана {0} ссылка.",
+      "few": "Отозваны {0} ссылки.",
+      "many": "Отозвано {0} ссылок."
+    },
+    "Running best per evaluated experiment for {1} of {0} runs, on this group's own axis — one task, one direction, one evaluation, nothing rescaled; a line holds its value until the experiment that beat it.{2}": {
+      "one": "Текущий лучший результат по оценённым экспериментам для {1} из {0} запуска на собственной оси этой группы — одна задача, одно направление, одна оценка, без пересчёта масштаба; линия держит значение до эксперимента, который его превзошёл.{2}",
+      "few": "Текущий лучший результат по оценённым экспериментам для {1} из {0} запусков на собственной оси этой группы — одна задача, одно направление, одна оценка, без пересчёта масштаба; линия держит значение до эксперимента, который его превзошёл.{2}",
+      "many": "Текущий лучший результат по оценённым экспериментам для {1} из {0} запусков на собственной оси этой группы — одна задача, одно направление, одна оценка, без пересчёта масштаба; линия держит значение до эксперимента, который его превзошёл.{2}"
+    },
+    "Shared chat loaded. {0} messages.": {
+      "one": "Общий чат загружен. {0} сообщение.",
+      "few": "Общий чат загружен. {0} сообщения.",
+      "many": "Общий чат загружен. {0} сообщений."
+    },
+    "Show {0} tagged experiments for {1}": {
+      "one": "Показать {0} отмеченный эксперимент для {1}",
+      "few": "Показать {0} отмеченных эксперимента для {1}",
+      "many": "Показать {0} отмеченных экспериментов для {1}"
+    },
+    "Sweep of {0} trial(s) — loading full results…": {
+      "one": "Перебор из {0} испытания — загружаются полные результаты…",
+      "few": "Перебор из {0} испытаний — загружаются полные результаты…",
+      "many": "Перебор из {0} испытаний — загружаются полные результаты…"
+    },
+    "The remaining {0} runs were not touched.": {
+      "one": "Оставшийся {0} запуск не затронут.",
+      "few": "Оставшиеся {0} запуска не затронуты.",
+      "many": "Оставшиеся {0} запусков не затронуты."
+    },
+    "The run was deleted, along with {0} cross-run memory rows only it owned.": {
+      "one": "Запуск удалён вместе с {0} строкой межзапусковой памяти, принадлежавшей только ему.",
+      "few": "Запуск удалён вместе с {0} строками межзапусковой памяти, принадлежавшими только ему.",
+      "many": "Запуск удалён вместе с {0} строками межзапусковой памяти, принадлежавшими только ему."
+    },
+    "This server holds {0} runs": {
+      "one": "На этом сервере {0} запуск",
+      "few": "На этом сервере {0} запуска",
+      "many": "На этом сервере {0} запусков"
+    },
+    "across {0} roots": {
+      "one": "в {0} корне",
+      "few": "в {0} корнях",
+      "many": "в {0} корнях"
+    },
+    "agent chose {0}{1} (of {2} legal moves){3}": {
+      "one": "агент выбрал {0}{1} (из {2} допустимого хода){3}",
+      "few": "агент выбрал {0}{1} (из {2} допустимых ходов){3}",
+      "many": "агент выбрал {0}{1} (из {2} допустимых ходов){3}"
+    },
+    "at least {0} loaded items are unread": {
+      "one": "не прочитан как минимум {0} загруженный элемент",
+      "few": "не прочитаны как минимум {0} загруженных элемента",
+      "many": "не прочитаны как минимум {0} загруженных элементов"
+    },
+    "checkpoint — {0} nodes, {1}s elapsed": {
+      "one": "контрольная точка — {0} узел, прошло {1} с",
+      "few": "контрольная точка — {0} узла, прошло {1} с",
+      "many": "контрольная точка — {0} узлов, прошло {1} с"
+    },
+    "chose #{1}{2} over {0} candidate(s)": {
+      "one": "выбран #{1}{2} из {0} кандидата",
+      "few": "выбран #{1}{2} из {0} кандидатов",
+      "many": "выбран #{1}{2} из {0} кандидатов"
+    },
+    "dataset profiled ({0} columns)": {
+      "one": "профиль набора данных построен ({0} столбец)",
+      "few": "профиль набора данных построен ({0} столбца)",
+      "many": "профиль набора данных построен ({0} столбцов)"
+    },
+    "dataset provenance pinned ({0} assets)": {
+      "one": "происхождение данных закреплено ({0} ресурс)",
+      "few": "происхождение данных закреплено ({0} ресурса)",
+      "many": "происхождение данных закреплено ({0} ресурсов)"
+    },
+    "deleted nodes {1}": {
+      "one": "удалён узел {1}",
+      "few": "удалены узлы {1}",
+      "many": "удалены узлы {1}"
+    },
+    "distilled {0} lessons{1}": {
+      "one": "выделен {0} урок{1}",
+      "few": "выделено {0} урока{1}",
+      "many": "выделено {0} уроков{1}"
+    },
+    "event log repaired — dropped {0} corrupt lines, kept {1}": {
+      "one": "журнал событий восстановлен — отброшена {0} повреждённая строка, сохранено {1}",
+      "few": "журнал событий восстановлен — отброшено {0} повреждённые строки, сохранено {1}",
+      "many": "журнал событий восстановлен — отброшено {0} повреждённых строк, сохранено {1}"
+    },
+    "in {0} sections": {
+      "one": "в {0} разделе",
+      "few": "в {0} разделах",
+      "many": "в {0} разделах"
+    },
+    "leakage scan: clean ({0} train rows share the first test timestamp)": {
+      "one": "проверка утечки: чисто ({0} обучающая строка совпадает с первой тестовой меткой времени)",
+      "few": "проверка утечки: чисто ({0} обучающие строки совпадают с первой тестовой меткой времени)",
+      "many": "проверка утечки: чисто ({0} обучающих строк совпадают с первой тестовой меткой времени)"
+    },
+    "memory: {0} settled skills promoted": {
+      "one": "память: повышен {0} устоявшийся навык",
+      "few": "память: повышено {0} устоявшихся навыка",
+      "many": "память: повышено {0} устоявшихся навыков"
+    },
+    "review {0} options for the exact Idea": {
+      "one": "разобрать {0} вариант для этой конкретной идеи",
+      "few": "разобрать {0} варианта для этой конкретной идеи",
+      "many": "разобрать {0} вариантов для этой конкретной идеи"
+    },
+    "server code {0} files behind": {
+      "one": "код сервера отстаёт на {0} файл",
+      "few": "код сервера отстаёт на {0} файла",
+      "many": "код сервера отстаёт на {0} файлов"
+    },
+    "tied with {0} other run(s) at this value": {
+      "one": "делит это значение с {0} другим запуском",
+      "few": "делит это значение с {0} другими запусками",
+      "many": "делит это значение с {0} другими запусками"
+    },
+    "{0} GPUs": {
+      "one": "{0} GPU",
+      "few": "{0} GPU",
+      "many": "{0} GPU"
+    },
+    "{0} actions": {
+      "one": "{0} действие",
+      "few": "{0} действия",
+      "many": "{0} действий"
+    },
+    "{0} additional claims not shown (render limit).": {
+      "one": "Ещё {0} утверждение не показано (лимит отображения).",
+      "few": "Ещё {0} утверждения не показаны (лимит отображения).",
+      "many": "Ещё {0} утверждений не показаны (лимит отображения)."
+    },
+    "{0} additional mixed-evidence records not shown (bounded projection).": {
+      "one": "Ещё {0} запись со смешанными данными не показана (ограниченная проекция).",
+      "few": "Ещё {0} записи со смешанными данными не показаны (ограниченная проекция).",
+      "many": "Ещё {0} записей со смешанными данными не показаны (ограниченная проекция)."
+    },
+    "{0} additional observations omitted by the client render limit.": {
+      "one": "Ещё {0} наблюдение скрыто лимитом отображения в клиенте.",
+      "few": "Ещё {0} наблюдения скрыты лимитом отображения в клиенте.",
+      "many": "Ещё {0} наблюдений скрыты лимитом отображения в клиенте."
+    },
+    "{0} additional references not shown (claim limit).": {
+      "one": "Ещё {0} ссылка не показана (лимит утверждения).",
+      "few": "Ещё {0} ссылки не показаны (лимит утверждения).",
+      "many": "Ещё {0} ссылок не показаны (лимит утверждения)."
+    },
+    "{0} attempts": {
+      "one": "{0} попытка",
+      "few": "{0} попытки",
+      "many": "{0} попыток"
+    },
+    "{0} calls": {
+      "one": "{0} вызов",
+      "few": "{0} вызова",
+      "many": "{0} вызовов"
+    },
+    "{0} carry no series (no feasible measured node, or a row served before the series existed)": {
+      "one": "{0} не несёт ряда (нет допустимого измеренного узла, или строка отдана до появления рядов)",
+      "few": "{0} не несут ряда (нет допустимого измеренного узла, или строка отдана до появления рядов)",
+      "many": "{0} не несут ряда (нет допустимого измеренного узла, или строка отдана до появления рядов)"
+    },
+    "{0} claim groupings": {
+      "one": "{0} группа утверждений",
+      "few": "{0} группы утверждений",
+      "many": "{0} групп утверждений"
+    },
+    "{0} claims": {
+      "one": "{0} утверждение",
+      "few": "{0} утверждения",
+      "many": "{0} утверждений"
+    },
+    "{0} collapsed clusters": {
+      "one": "{0} свёрнутый кластер",
+      "few": "{0} свёрнутых кластера",
+      "many": "{0} свёрнутых кластеров"
+    },
+    "{0} comparable group(s) belong to other task IDs and are deliberately not shown here — their objectives are unrelated to this run.": {
+      "one": "{0} сопоставимая группа относится к другим ID задач и намеренно здесь не показана — её цели не связаны с этим запуском.",
+      "few": "{0} сопоставимые группы относятся к другим ID задач и намеренно здесь не показаны — их цели не связаны с этим запуском.",
+      "many": "{0} сопоставимых групп относятся к другим ID задач и намеренно здесь не показаны — их цели не связаны с этим запуском."
+    },
+    "{0} concepts": {
+      "one": "{0} концепт",
+      "few": "{0} концепта",
+      "many": "{0} концептов"
+    },
+    "{0} concepts spelled more than one way — shown separately, not merged": {
+      "one": "{0} концепт записан по-разному — показан отдельно, без объединения",
+      "few": "{0} концепта записаны по-разному — показаны отдельно, без объединения",
+      "many": "{0} концептов записаны по-разному — показаны отдельно, без объединения"
+    },
+    "{0} current-generation new-comment recoveries stay protected until the exact command reaches a terminal outcome.": {
+      "one": "{0} запись восстановления нового комментария текущего поколения остаётся защищённой, пока точная команда не получит окончательный результат.",
+      "few": "{0} записи восстановления новых комментариев текущего поколения остаются защищёнными, пока точная команда не получит окончательный результат.",
+      "many": "{0} записей восстановления новых комментариев текущего поколения остаются защищёнными, пока точная команда не получит окончательный результат."
+    },
+    "{0} customized values": {
+      "one": "{0} изменённое значение",
+      "few": "{0} изменённых значения",
+      "many": "{0} изменённых значений"
+    },
+    "{0} damaged new-comment recoveries cannot be safely released; restore the exact recovery data before continuing.": {
+      "one": "{0} повреждённую запись восстановления нового комментария нельзя безопасно освободить; восстановите точные данные восстановления, прежде чем продолжить.",
+      "few": "{0} повреждённые записи восстановления новых комментариев нельзя безопасно освободить; восстановите точные данные восстановления, прежде чем продолжить.",
+      "many": "{0} повреждённых записей восстановления новых комментариев нельзя безопасно освободить; восстановите точные данные восстановления, прежде чем продолжить."
+    },
+    "{0} damaged recovery records need review.": {
+      "one": "{0} повреждённая запись восстановления требует проверки.",
+      "few": "{0} повреждённые записи восстановления требуют проверки.",
+      "many": "{0} повреждённых записей восстановления требуют проверки."
+    },
+    "{0} damaged recovery records remain quarantined here.": {
+      "one": "{0} повреждённая запись восстановления остаётся здесь на карантине.",
+      "few": "{0} повреждённые записи восстановления остаются здесь на карантине.",
+      "many": "{0} повреждённых записей восстановления остаются здесь на карантине."
+    },
+    "{0} damaged recovery records remain quarantined in this tab.": {
+      "one": "{0} повреждённая запись восстановления остаётся на карантине в этой вкладке.",
+      "few": "{0} повреждённые записи восстановления остаются на карантине в этой вкладке.",
+      "many": "{0} повреждённых записей восстановления остаются на карантине в этой вкладке."
+    },
+    "{0} damaged recovery records remain quarantined. Leave Authoring?": {
+      "one": "{0} повреждённая запись восстановления остаётся на карантине. Покинуть редактор?",
+      "few": "{0} повреждённые записи восстановления остаются на карантине. Покинуть редактор?",
+      "many": "{0} повреждённых записей восстановления остаются на карантине. Покинуть редактор?"
+    },
+    "{0} declared coordinates are read differently by two of this node's own configuration files, and nothing in the record can order them. The experiment ran and its number still counts — but the run cannot say which value it was measured at.": {
+      "one": "{0} объявленная координата читается по-разному двумя собственными файлами конфигурации этого узла, и ничто в записи не может их упорядочить. Эксперимент выполнен, и его число по-прежнему учитывается — но запуск не может сказать, при каком значении оно измерено.",
+      "few": "{0} объявленные координаты читаются по-разному двумя собственными файлами конфигурации этого узла, и ничто в записи не может их упорядочить. Эксперимент выполнен, и его число по-прежнему учитывается — но запуск не может сказать, при каком значении оно измерено.",
+      "many": "{0} объявленных координат читаются по-разному двумя собственными файлами конфигурации этого узла, и ничто в записи не может их упорядочить. Эксперимент выполнен, и его число по-прежнему учитывается — но запуск не может сказать, при каком значении оно измерено."
+    },
+    "{0} declared coordinates of {1} checked are read differently by two of this node's own configuration files, and nothing in the record can order them. The experiment ran and its number still counts — but the run cannot say which value it was measured at.": {
+      "one": "{0} из {1} проверенных объявленных координат читается по-разному двумя собственными файлами конфигурации этого узла, и ничто в записи не может их упорядочить. Эксперимент выполнен, и его число по-прежнему учитывается — но запуск не может сказать, при каком значении оно измерено.",
+      "few": "{0} из {1} проверенных объявленных координат читаются по-разному двумя собственными файлами конфигурации этого узла, и ничто в записи не может их упорядочить. Эксперимент выполнен, и его число по-прежнему учитывается — но запуск не может сказать, при каком значении оно измерено.",
+      "many": "{0} из {1} проверенных объявленных координат читаются по-разному двумя собственными файлами конфигурации этого узла, и ничто в записи не может их упорядочить. Эксперимент выполнен, и его число по-прежнему учитывается — но запуск не может сказать, при каком значении оно измерено."
+    },
+    "{0} declared coordinates of {1} checked were not what ran. The experiment still ran and its number still counts — but it is filed under parameters the configuration did not use.": {
+      "one": "{0} из {1} проверенных объявленных координат не совпала с тем, что было запущено. Эксперимент всё равно выполнен, и его число учитывается — но оно записано под параметрами, которые конфигурация не использовала.",
+      "few": "{0} из {1} проверенных объявленных координат не совпали с тем, что было запущено. Эксперимент всё равно выполнен, и его число учитывается — но оно записано под параметрами, которые конфигурация не использовала.",
+      "many": "{0} из {1} проверенных объявленных координат не совпали с тем, что было запущено. Эксперимент всё равно выполнен, и его число учитывается — но оно записано под параметрами, которые конфигурация не использовала."
+    },
+    "{0} declared coordinates were not what ran. The experiment still ran and its number still counts — but it is filed under parameters the configuration did not use.": {
+      "one": "{0} объявленная координата не совпала с тем, что было запущено. Эксперимент всё равно выполнен, и его число учитывается — но оно записано под параметрами, которые конфигурация не использовала.",
+      "few": "{0} объявленные координаты не совпали с тем, что было запущено. Эксперимент всё равно выполнен, и его число учитывается — но оно записано под параметрами, которые конфигурация не использовала.",
+      "many": "{0} объявленных координат не совпали с тем, что было запущено. Эксперимент всё равно выполнен, и его число учитывается — но оно записано под параметрами, которые конфигурация не использовала."
+    },
+    "{0} displayed concept nodes": {
+      "one": "{0} показанный узел концепта",
+      "few": "{0} показанных узла концептов",
+      "many": "{0} показанных узлов концептов"
+    },
+    "{0} divergences recorded": {
+      "one": "Зафиксировано {0} расхождение",
+      "few": "Зафиксировано {0} расхождения",
+      "many": "Зафиксировано {0} расхождений"
+    },
+    "{0} draft changes excluded": {
+      "one": "{0} несохранённое изменение исключено",
+      "few": "{0} несохранённых изменения исключены",
+      "many": "{0} несохранённых изменений исключены"
+    },
+    "{0} drafts retained. Switching is safe; closing loses them.": {
+      "one": "Сохранён {0} черновик. Переключаться безопасно; при закрытии он будет потерян.",
+      "few": "Сохранено {0} черновика. Переключаться безопасно; при закрытии они будут потеряны.",
+      "many": "Сохранено {0} черновиков. Переключаться безопасно; при закрытии они будут потеряны."
+    },
+    "{0} durable recovery records will remain protected in browser storage.": {
+      "one": "{0} долговременная запись восстановления останется защищённой в хранилище браузера.",
+      "few": "{0} долговременные записи восстановления останутся защищёнными в хранилище браузера.",
+      "many": "{0} долговременных записей восстановления останутся защищёнными в хранилище браузера."
+    },
+    "{0} essential settings": {
+      "one": "{0} основная настройка",
+      "few": "{0} основные настройки",
+      "many": "{0} основных настроек"
+    },
+    "{0} evaluated node(s) violated a constraint": {
+      "one": "{0} оценённый узел нарушил ограничение",
+      "few": "{0} оценённых узла нарушили ограничение",
+      "many": "{0} оценённых узлов нарушили ограничение"
+    },
+    "{0} exact Comments command recoveries are saved in this tab.": {
+      "one": "{0} точная копия команды комментариев для восстановления сохранена в этой вкладке.",
+      "few": "{0} точные копии команд комментариев для восстановления сохранены в этой вкладке.",
+      "many": "{0} точных копий команд комментариев для восстановления сохранены в этой вкладке."
+    },
+    "{0} exact comment recovery records will remain protected in this browser tab": {
+      "one": "{0} точная запись восстановления комментария останется защищённой в этой вкладке браузера",
+      "few": "{0} точные записи восстановления комментариев останутся защищёнными в этой вкладке браузера",
+      "many": "{0} точных записей восстановления комментариев останутся защищёнными в этой вкладке браузера"
+    },
+    "{0} experiments": {
+      "one": "{0} эксперимент",
+      "few": "{0} эксперимента",
+      "many": "{0} экспериментов"
+    },
+    "{0} experiments filed under it": {
+      "one": "к ней отнесён {0} эксперимент",
+      "few": "к ней отнесены {0} эксперимента",
+      "many": "к ней отнесены {0} экспериментов"
+    },
+    "{0} experiments not filed under a question": {
+      "one": "{0} эксперимент не отнесён к вопросу",
+      "few": "{0} эксперимента не отнесены к вопросу",
+      "many": "{0} экспериментов не отнесены к вопросу"
+    },
+    "{0} experiments ran under this work item": {
+      "one": "{0} эксперимент выполнен в рамках этой рабочей задачи",
+      "few": "{0} эксперимента выполнены в рамках этой рабочей задачи",
+      "many": "{0} экспериментов выполнены в рамках этой рабочей задачи"
+    },
+    "{0} experiments tested this work item": {
+      "one": "{0} эксперимент проверил эту рабочую задачу",
+      "few": "{0} эксперимента проверили эту рабочую задачу",
+      "many": "{0} экспериментов проверили эту рабочую задачу"
+    },
+    "{0} experiments whose question is not on this page": {
+      "one": "{0} эксперимент, чей вопрос не на этой странице",
+      "few": "{0} эксперимента, чей вопрос не на этой странице",
+      "many": "{0} экспериментов, чей вопрос не на этой странице"
+    },
+    "{0} experiments · show evidence": {
+      "one": "{0} эксперимент · показать данные",
+      "few": "{0} эксперимента · показать данные",
+      "many": "{0} экспериментов · показать данные"
+    },
+    "{0} experiments' membership could not be materialized; counts are a lower bound and these experiments never match a filter.": {
+      "one": "Не удалось восстановить принадлежность {0} эксперимента; счётчики — нижняя граница, и этот эксперимент никогда не попадает в фильтр.",
+      "few": "Не удалось восстановить принадлежность {0} экспериментов; счётчики — нижняя граница, и эти эксперименты никогда не попадают в фильтр.",
+      "many": "Не удалось восстановить принадлежность {0} экспериментов; счётчики — нижняя граница, и эти эксперименты никогда не попадают в фильтр."
+    },
+    "{0} findings": {
+      "one": "{0} вывод",
+      "few": "{0} вывода",
+      "many": "{0} выводов"
+    },
+    "{0} generations": {
+      "one": "{0} генерация",
+      "few": "{0} генерации",
+      "many": "{0} генераций"
+    },
+    "{0} groups of this task,": {
+      "one": "{0} группа этой задачи,",
+      "few": "{0} группы этой задачи,",
+      "many": "{0} групп этой задачи,"
+    },
+    "{0} in-memory Comments work items are retained in this tab.": {
+      "one": "{0} рабочий элемент комментариев хранится в памяти этой вкладки.",
+      "few": "{0} рабочих элемента комментариев хранятся в памяти этой вкладки.",
+      "many": "{0} рабочих элементов комментариев хранятся в памяти этой вкладки."
+    },
+    "{0} invalid settings must be fixed before starting a run.": {
+      "one": "Перед запуском нужно исправить {0} недопустимую настройку.",
+      "few": "Перед запуском нужно исправить {0} недопустимые настройки.",
+      "many": "Перед запуском нужно исправить {0} недопустимых настроек."
+    },
+    "{0} invalid settings — review": {
+      "one": "{0} недопустимая настройка — проверить",
+      "few": "{0} недопустимые настройки — проверить",
+      "many": "{0} недопустимых настроек — проверить"
+    },
+    "{0} items marked as read.": {
+      "one": "{0} элемент отмечен как прочитанный.",
+      "few": "{0} элемента отмечены как прочитанные.",
+      "many": "{0} элементов отмечены как прочитанные."
+    },
+    "{0} items need action": {
+      "one": "{0} элемент требует действий",
+      "few": "{0} элемента требуют действий",
+      "many": "{0} элементов требуют действий"
+    },
+    "{0} items still need action": {
+      "one": "{0} элемент всё ещё требует действий",
+      "few": "{0} элемента всё ещё требуют действий",
+      "many": "{0} элементов всё ещё требуют действий"
+    },
+    "{0} lessons": {
+      "one": "{0} урок",
+      "few": "{0} урока",
+      "many": "{0} уроков"
+    },
+    "{0} loaded items marked as read.": {
+      "one": "{0} загруженный элемент отмечен как прочитанный.",
+      "few": "{0} загруженных элемента отмечены как прочитанные.",
+      "many": "{0} загруженных элементов отмечены как прочитанные."
+    },
+    "{0} loaded or previously verified items may need action": {
+      "one": "{0} загруженный или ранее проверенный элемент может требовать действий",
+      "few": "{0} загруженных или ранее проверенных элемента могут требовать действий",
+      "many": "{0} загруженных или ранее проверенных элементов могут требовать действий"
+    },
+    "{0} matches across all settings": {
+      "one": "{0} совпадение во всех настройках",
+      "few": "{0} совпадения во всех настройках",
+      "many": "{0} совпадений во всех настройках"
+    },
+    "{0} memos": {
+      "one": "{0} записка",
+      "few": "{0} записки",
+      "many": "{0} записок"
+    },
+    "{0} metric observations": {
+      "one": "{0} наблюдение метрики",
+      "few": "{0} наблюдения метрик",
+      "many": "{0} наблюдений метрик"
+    },
+    "{0} metric-drift divergence(s) caught": {
+      "one": "Обнаружено {0} расхождение дрейфа метрики",
+      "few": "Обнаружено {0} расхождения дрейфа метрики",
+      "many": "Обнаружено {0} расхождений дрейфа метрики"
+    },
+    "{0} metrics": {
+      "one": "{0} метрика",
+      "few": "{0} метрики",
+      "many": "{0} метрик"
+    },
+    "{0} more folders not examined.": {
+      "one": "Ещё {0} папка не просмотрена.",
+      "few": "Ещё {0} папки не просмотрены.",
+      "many": "Ещё {0} папок не просмотрены."
+    },
+    "{0} new attention items.": {
+      "one": "{0} новый элемент в центре внимания.",
+      "few": "{0} новых элемента в центре внимания.",
+      "many": "{0} новых элементов в центре внимания."
+    },
+    "{0} new events; jump to live": {
+      "one": "{0} новое событие; перейти к текущим",
+      "few": "{0} новых события; перейти к текущим",
+      "many": "{0} новых событий; перейти к текущим"
+    },
+    "{0} niches": {
+      "one": "{0} ниша",
+      "few": "{0} ниши",
+      "many": "{0} ниш"
+    },
+    "{0} node(s) flagged as possible reward-hacks": {
+      "one": "{0} узел помечен как возможный взлом награды",
+      "few": "{0} узла помечены как возможные взломы награды",
+      "many": "{0} узлов помечены как возможные взломы награды"
+    },
+    "{0} older entries not shown (render limit).": {
+      "one": "Ещё {0} более старая запись не показана (лимит отображения).",
+      "few": "Ещё {0} более старые записи не показаны (лимит отображения).",
+      "many": "Ещё {0} более старых записей не показаны (лимит отображения)."
+    },
+    "{0} other active Comments states will leave the in-memory workspace": {
+      "one": "{0} другое активное состояние комментариев покинет рабочее пространство в памяти",
+      "few": "{0} других активных состояния комментариев покинут рабочее пространство в памяти",
+      "many": "{0} других активных состояний комментариев покинут рабочее пространство в памяти"
+    },
+    "{0} pending Assistant approvals": {
+      "one": "{0} запрос ассистента ждёт подтверждения",
+      "few": "{0} запроса ассистента ждут подтверждения",
+      "many": "{0} запросов ассистента ждут подтверждения"
+    },
+    "{0} prefix-folded runs are not drawn, for the reason they hold no rank": {
+      "one": "{0} запуск, свёрнутый по префиксу журнала, не нарисован, потому что у него нет ранга",
+      "few": "{0} запуска, свёрнутых по префиксу журнала, не нарисованы, потому что у них нет ранга",
+      "many": "{0} запусков, свёрнутых по префиксу журнала, не нарисованы, потому что у них нет ранга"
+    },
+    "{0} proposals": {
+      "one": "{0} предложение",
+      "few": "{0} предложения",
+      "many": "{0} предложений"
+    },
+    "{0} public field omissions": {
+      "one": "пропущено {0} публичное поле",
+      "few": "пропущено {0} публичных поля",
+      "many": "пропущено {0} публичных полей"
+    },
+    "{0} public links": {
+      "one": "{0} публичная ссылка",
+      "few": "{0} публичные ссылки",
+      "many": "{0} публичных ссылок"
+    },
+    "{0} public links active": {
+      "one": "{0} публичная ссылка активна",
+      "few": "{0} публичные ссылки активны",
+      "many": "{0} публичных ссылок активны"
+    },
+    "{0} recent items loaded": {
+      "one": "Загружен {0} недавний элемент",
+      "few": "Загружено {0} недавних элемента",
+      "many": "Загружено {0} недавних элементов"
+    },
+    "{0} records; totals may include them.": {
+      "one": "{0} запись; итоги могут её учитывать.",
+      "few": "{0} записи; итоги могут их учитывать.",
+      "many": "{0} записей; итоги могут их учитывать."
+    },
+    "{0} recovery snapshots that exist only in this tab": {
+      "one": "{0} снимок восстановления, существующий только в этой вкладке",
+      "few": "{0} снимка восстановления, существующих только в этой вкладке",
+      "many": "{0} снимков восстановления, существующих только в этой вкладке"
+    },
+    "{0} referenced lessons were distilled outside this run and cannot be resolved to their text here.": {
+      "one": "{0} упомянутый урок выделен вне этого запуска, и его текст здесь недоступен.",
+      "few": "{0} упомянутых урока выделены вне этого запуска, и их текст здесь недоступен.",
+      "many": "{0} упомянутых уроков выделены вне этого запуска, и их текст здесь недоступен."
+    },
+    "{0} research questions not shown here — a question owns no experiment, so it has no lane.": {
+      "one": "{0} исследовательский вопрос здесь не показан — вопросу не принадлежат эксперименты, поэтому у него нет группы.",
+      "few": "{0} исследовательских вопроса здесь не показаны — вопросу не принадлежат эксперименты, поэтому у него нет группы.",
+      "many": "{0} исследовательских вопросов здесь не показаны — вопросу не принадлежат эксперименты, поэтому у него нет группы."
+    },
+    "{0} research steps": {
+      "one": "{0} шаг исследования",
+      "few": "{0} шага исследования",
+      "many": "{0} шагов исследования"
+    },
+    "{0} retained runs": {
+      "one": "{0} сохранённый запуск",
+      "few": "{0} сохранённых запуска",
+      "many": "{0} сохранённых запусков"
+    },
+    "{0} rows stay: {1}.": {
+      "one": "{0} строка остаётся: {1}.",
+      "few": "{0} строки остаются: {1}.",
+      "many": "{0} строк остаются: {1}."
+    },
+    "{0} runs": {
+      "one": "{0} запуск",
+      "few": "{0} запуска",
+      "many": "{0} запусков"
+    },
+    "{0} runs are not drawn, for the reason they hold no rank: a pair of this group's runs provably disagrees on its evaluation, and one axis would order them all the same": {
+      "one": "{0} запуск не нарисован, потому что у него нет ранга: пара запусков этой группы доказуемо расходится в оценке, а одна ось всё равно упорядочила бы их",
+      "few": "{0} запуска не нарисованы, потому что у них нет ранга: пара запусков этой группы доказуемо расходится в оценке, а одна ось всё равно упорядочила бы их",
+      "many": "{0} запусков не нарисованы, потому что у них нет ранга: пара запусков этой группы доказуемо расходится в оценке, а одна ось всё равно упорядочила бы их"
+    },
+    "{0} runs are shown without a rank: a pair in their group provably disagrees on its evaluation, and no split by source tree or protocol separates them.": {
+      "one": "{0} запуск показан без ранга: пара в его группе доказуемо расходится в оценке, и никакое разделение по дереву исходников или протоколу их не разводит.",
+      "few": "{0} запуска показаны без ранга: пара в их группе доказуемо расходится в оценке, и никакое разделение по дереву исходников или протоколу их не разводит.",
+      "many": "{0} запусков показаны без ранга: пара в их группе доказуемо расходится в оценке, и никакое разделение по дереву исходников или протоколу их не разводит."
+    },
+    "{0} runs deleted ({1}), then the batch stopped at “{2}”: {3}.": {
+      "one": "{0} запуск удалён ({1}), затем пакет остановился на «{2}»: {3}.",
+      "few": "{0} запуска удалены ({1}), затем пакет остановился на «{2}»: {3}.",
+      "many": "{0} запусков удалены ({1}), затем пакет остановился на «{2}»: {3}."
+    },
+    "{0} runs in this scope carry no concept at all.": {
+      "one": "{0} запуск в этой области не несёт ни одного концепта.",
+      "few": "{0} запуска в этой области не несут ни одного концепта.",
+      "many": "{0} запусков в этой области не несут ни одного концепта."
+    },
+    "{0} runs of task {1}": {
+      "one": "{0} запуск задачи {1}",
+      "few": "{0} запуска задачи {1}",
+      "many": "{0} запусков задачи {1}"
+    },
+    "{0} runs permanently deleted: {1}.": {
+      "one": "{0} запуск удалён безвозвратно: {1}.",
+      "few": "{0} запуска удалены безвозвратно: {1}.",
+      "many": "{0} запусков удалены безвозвратно: {1}."
+    },
+    "{0} runs recorded none of the source tree or protocol facets that split their task and key — not recorded, so not comparable with either side — and are grouped apart without a proven difference.": {
+      "one": "{0} запуск не записал ни одного признака дерева исходников или протокола, по которым разделены его задача и ключ — без записи он не сопоставим ни с одной стороной — и сгруппирован отдельно без доказанного различия.",
+      "few": "{0} запуска не записали ни одного признака дерева исходников или протокола, по которым разделены их задача и ключ — без записи они не сопоставимы ни с одной стороной — и сгруппированы отдельно без доказанного различия.",
+      "many": "{0} запусков не записали ни одного признака дерева исходников или протокола, по которым разделены их задача и ключ — без записи они не сопоставимы ни с одной стороной — и сгруппированы отдельно без доказанного различия."
+    },
+    "{0} runs share a task and comparability key with others but provably differ from some of them in source tree or evaluation protocol, so they are grouped by that as well.": {
+      "one": "{0} запуск делит задачу и ключ сопоставимости с другими, но доказуемо отличается от некоторых из них деревом исходников или протоколом оценки, поэтому сгруппирован ещё и по этому признаку.",
+      "few": "{0} запуска делят задачу и ключ сопоставимости с другими, но доказуемо отличаются от некоторых из них деревом исходников или протоколом оценки, поэтому сгруппированы ещё и по этому признаку.",
+      "many": "{0} запусков делят задачу и ключ сопоставимости с другими, но доказуемо отличаются от некоторых из них деревом исходников или протоколом оценки, поэтому сгруппированы ещё и по этому признаку."
+    },
+    "{0} runs · expand to inspect": {
+      "one": "{0} запуск · раскройте, чтобы посмотреть",
+      "few": "{0} запуска · раскройте, чтобы посмотреть",
+      "many": "{0} запусков · раскройте, чтобы посмотреть"
+    },
+    "{0} save outcomes may be unknown. Leave Authoring?": {
+      "one": "Результат {0} сохранения может быть неизвестен. Покинуть редактор?",
+      "few": "Результаты {0} сохранений могут быть неизвестны. Покинуть редактор?",
+      "many": "Результаты {0} сохранений могут быть неизвестны. Покинуть редактор?"
+    },
+    "{0} save outcomes may be unknown; exact drafts retained here.": {
+      "one": "Результат {0} сохранения может быть неизвестен; точный черновик сохранён здесь.",
+      "few": "Результаты {0} сохранений могут быть неизвестны; точные черновики сохранены здесь.",
+      "many": "Результаты {0} сохранений могут быть неизвестны; точные черновики сохранены здесь."
+    },
+    "{0} save outcomes may be unknown; review retained recovery before retrying.": {
+      "one": "Результат {0} сохранения может быть неизвестен; проверьте сохранённое восстановление перед повтором.",
+      "few": "Результаты {0} сохранений могут быть неизвестны; проверьте сохранённое восстановление перед повтором.",
+      "many": "Результаты {0} сохранений могут быть неизвестны; проверьте сохранённое восстановление перед повтором."
+    },
+    "{0} search variables": {
+      "one": "{0} переменная поиска",
+      "few": "{0} переменные поиска",
+      "many": "{0} переменных поиска"
+    },
+    "{0} selected runs": {
+      "one": "{0} выбранный запуск",
+      "few": "{0} выбранных запуска",
+      "many": "{0} выбранных запусков"
+    },
+    "{0} selected runs could not be deleted.": {
+      "one": "{0} выбранный запуск не удалось удалить.",
+      "few": "{0} выбранных запуска не удалось удалить.",
+      "many": "{0} выбранных запусков не удалось удалить."
+    },
+    "{0} settings": {
+      "one": "{0} настройка",
+      "few": "{0} настройки",
+      "many": "{0} настроек"
+    },
+    "{0} sharper questions": {
+      "one": "{0} более точный вопрос",
+      "few": "{0} более точных вопроса",
+      "many": "{0} более точных вопросов"
+    },
+    "{0} skills": {
+      "one": "{0} навык",
+      "few": "{0} навыка",
+      "many": "{0} навыков"
+    },
+    "{0} source refreshes failed.": {
+      "one": "{0} обновление источника не удалось.",
+      "few": "{0} обновления источников не удались.",
+      "many": "{0} обновлений источников не удались."
+    },
+    "{0} spans": {
+      "one": "{0} спан",
+      "few": "{0} спана",
+      "many": "{0} спанов"
+    },
+    "{0} standing watches": {
+      "one": "{0} постоянное наблюдение",
+      "few": "{0} постоянных наблюдения",
+      "many": "{0} постоянных наблюдений"
+    },
+    "{0} steps": {
+      "one": "{0} шаг",
+      "few": "{0} шага",
+      "many": "{0} шагов"
+    },
+    "{0} steps hidden": {
+      "one": "скрыт {0} шаг",
+      "few": "скрыто {0} шага",
+      "many": "скрыто {0} шагов"
+    },
+    "{0} suspicious nodes flagged": {
+      "one": "Отмечен {0} подозрительный узел",
+      "few": "Отмечено {0} подозрительных узла",
+      "many": "Отмечено {0} подозрительных узлов"
+    },
+    "{0} tagged concepts": {
+      "one": "{0} отмеченный концепт",
+      "few": "{0} отмеченных концепта",
+      "many": "{0} отмеченных концептов"
+    },
+    "{0} tagged experiments": {
+      "one": "{0} отмеченный эксперимент",
+      "few": "{0} отмеченных эксперимента",
+      "many": "{0} отмеченных экспериментов"
+    },
+    "{0} themes": {
+      "one": "{0} тема",
+      "few": "{0} темы",
+      "many": "{0} тем"
+    },
+    "{0} tool calls": {
+      "one": "{0} вызов инструмента",
+      "few": "{0} вызова инструментов",
+      "many": "{0} вызовов инструментов"
+    },
+    "{0} turns": {
+      "one": "{0} ход",
+      "few": "{0} хода",
+      "many": "{0} ходов"
+    },
+    "{0} unread items": {
+      "one": "{0} непрочитанный элемент",
+      "few": "{0} непрочитанных элемента",
+      "many": "{0} непрочитанных элементов"
+    },
+    "{0} unread loaded items": {
+      "one": "{0} непрочитанный загруженный элемент",
+      "few": "{0} непрочитанных загруженных элемента",
+      "many": "{0} непрочитанных загруженных элементов"
+    },
+    "{0} unsaved Authoring drafts will be discarded.": {
+      "one": "{0} несохранённый черновик редактора будет удалён.",
+      "few": "{0} несохранённых черновика редактора будут удалены.",
+      "many": "{0} несохранённых черновиков редактора будут удалены."
+    },
+    "{0} unsaved changes": {
+      "one": "{0} несохранённое изменение",
+      "few": "{0} несохранённых изменения",
+      "many": "{0} несохранённых изменений"
+    },
+    "{0} unsaved comment drafts will leave this in-memory workspace": {
+      "one": "{0} несохранённый черновик комментария покинет это рабочее пространство в памяти",
+      "few": "{0} несохранённых черновика комментариев покинут это рабочее пространство в памяти",
+      "many": "{0} несохранённых черновиков комментариев покинут это рабочее пространство в памяти"
+    },
+    "{0} unsaved drafts remain in memory.": {
+      "one": "{0} несохранённый черновик остаётся в памяти.",
+      "few": "{0} несохранённых черновика остаются в памяти.",
+      "many": "{0} несохранённых черновиков остаются в памяти."
+    },
+    "{0} unsaved drafts will be lost.": {
+      "one": "{0} несохранённый черновик будет потерян.",
+      "few": "{0} несохранённых черновика будут потеряны.",
+      "many": "{0} несохранённых черновиков будут потеряны."
+    },
+    "{0} unsaved drafts will be lost. Leave?": {
+      "one": "{0} несохранённый черновик будет потерян. Уйти?",
+      "few": "{0} несохранённых черновика будут потеряны. Уйти?",
+      "many": "{0} несохранённых черновиков будут потеряны. Уйти?"
+    },
+    "{0} unsaved in-memory Authoring drafts": {
+      "one": "{0} несохранённый черновик редактора в памяти",
+      "few": "{0} несохранённых черновика редактора в памяти",
+      "many": "{0} несохранённых черновиков редактора в памяти"
+    },
+    "{0} work items": {
+      "one": "{0} рабочая задача",
+      "few": "{0} рабочие задачи",
+      "many": "{0} рабочих задач"
+    },
+    "{0} work items already exist. They remain available below and in Lanes.": {
+      "one": "{0} рабочая задача уже существует. Она по-прежнему доступна ниже и в группах.",
+      "few": "{0} рабочие задачи уже существуют. Они по-прежнему доступны ниже и в группах.",
+      "many": "{0} рабочих задач уже существуют. Они по-прежнему доступны ниже и в группах."
+    },
+    "{0} work items were omitted from this snapshot.": {
+      "one": "{0} рабочая задача не вошла в этот снимок.",
+      "few": "{0} рабочие задачи не вошли в этот снимок.",
+      "many": "{0} рабочих задач не вошли в этот снимок."
+    },
+    "{1} attempts at this work item — this one and {0} others.": {
+      "one": "Попыток по этой рабочей задаче: {1} — эта и ещё {0} другая.",
+      "few": "Попыток по этой рабочей задаче: {1} — эта и ещё {0} другие.",
+      "many": "Попыток по этой рабочей задаче: {1} — эта и ещё {0} других."
+    },
+    "{1} of them sit in {0} comparable groups": {
+      "one": "{1} из них входят в {0} сопоставимую группу",
+      "few": "{1} из них входят в {0} сопоставимые группы",
+      "many": "{1} из них входят в {0} сопоставимых групп"
+    },
+    "{1} recorded no metric and {0} task/direction/evaluation combinations are the only run of their kind, so nothing on this box ranks them.": {
+      "one": "Без записанной метрики: {1}; {0} сочетание задачи, направления и оценки представлено единственным запуском, поэтому на этой машине их не с чем ранжировать.",
+      "few": "Без записанной метрики: {1}; {0} сочетания задачи, направления и оценки представлены единственным запуском, поэтому на этой машине их не с чем ранжировать.",
+      "many": "Без записанной метрики: {1}; {0} сочетаний задачи, направления и оценки представлены единственным запуском, поэтому на этой машине их не с чем ранжировать."
+    },
+    "{1} · {0} experiment(s)": {
+      "one": "{1} · {0} эксперимент",
+      "few": "{1} · {0} эксперимента",
+      "many": "{1} · {0} экспериментов"
+    },
+    "{1} · {0} experiment(s){2}": {
+      "one": "{1} · {0} эксперимент{2}",
+      "few": "{1} · {0} эксперимента{2}",
+      "many": "{1} · {0} экспериментов{2}"
+    },
+    "→ called {0} tools (shown below)": {
+      "one": "→ вызван {0} инструмент (показан ниже)",
+      "few": "→ вызвано {0} инструмента (показаны ниже)",
+      "many": "→ вызвано {0} инструментов (показаны ниже)"
+    }
   }
 }

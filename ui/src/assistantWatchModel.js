@@ -9,6 +9,7 @@
 // the honesty rules here are about which of those two a row is, and they are stated rather than
 // spread across JSX conditionals.
 
+import { uiPlural } from './uiLanguage.js'
 import { durationLabel } from './format.js'
 
 // Mirrors `serve/assistant_watch.py::WATCH_TERMINAL_STATUSES` field for field. A status this
@@ -128,7 +129,7 @@ export function watchStrip(watches, { now = Date.now() / 1000, recentSeconds = 6
     // "no watches" row is chrome, and chrome is what an operator learns to stop reading.
     visible: items.length > 0,
     summary: active.length
-      ? `${active.length} standing watch${active.length === 1 ? '' : 'es'}`
+      ? uiPlural(active.length, '{0} standing watch', '{0} standing watches')
       : 'no standing watches',
   }
 }

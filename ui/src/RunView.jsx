@@ -1,4 +1,4 @@
-import { uiText, uiMessage, useUILanguage } from './uiLanguage.js'
+import { uiText, uiMessage, uiPlural, useUILanguage } from './uiLanguage.js'
 import LanguageControl from './LanguageControl.jsx'
 import React, {
   lazy, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore,
@@ -1112,7 +1112,7 @@ export default function RunView({ runId, onBack, reviewMode = false, reviewMeta 
       return
     }
     if (!window.confirm(
-      uiMessage("Discard {0} releasable Comments work item{1} from this browser tab? Current-generation append-only recovery stays protected because it is not safe to release.", [total, total === 1 ? '' : 's']),
+      uiPlural(total, 'Discard {0} releasable Comments work item from this browser tab? Current-generation append-only recovery stays protected because it is not safe to release.', 'Discard {0} releasable Comments work items from this browser tab? Current-generation append-only recovery stays protected because it is not safe to release.'),
     )) return
     let cleared = true
     for (const intent of retainedCommentReleasableIntents) {
@@ -1545,8 +1545,8 @@ export default function RunView({ runId, onBack, reviewMode = false, reviewMeta 
           if (f.kind === 'pending') waiting++
         }
         showToast(waiting
-          ? `Cancellation requested for ${ids.length} experiment(s); ${waiting} still pending`
-          : `Cancelled ${ids.length} pending experiment(s) under #${id}`)
+          ? uiPlural(ids.length, 'Cancellation requested for {0} experiment(s); {1} still pending', 'Cancellation requested for {0} experiment(s); {1} still pending', [ids.length, waiting])
+          : uiPlural(ids.length, 'Cancelled {0} pending experiment(s) under #{1}', 'Cancelled {0} pending experiment(s) under #{1}', [ids.length, id]))
       }
     } catch (e) { showToast(e.message || 'Run command failed') }
   }
@@ -1904,9 +1904,9 @@ export default function RunView({ runId, onBack, reviewMode = false, reviewMeta 
           role={retainedCommentRecoveryUnavailable || retainedCommentRecovery.damaged.length > 0
             ? 'alert' : 'status'}>
           <b>{uiText("Comments work is retained in this tab.")}</b>{' '}
-          {(retainedCommentDrafts.length > 0 ? uiMessage("{0} unsaved draft{1} remain in memory. ", [retainedCommentDrafts.length, retainedCommentDrafts.length === 1 ? '' : 's']) : '')}
+          {(retainedCommentDrafts.length > 0 ? uiPlural(retainedCommentDrafts.length, '{0} unsaved draft remain in memory. ', '{0} unsaved drafts remain in memory. ') : '')}
           {(retainedCommentRecovery.valid.length > 0 ? uiMessage(retainedCommentRecovery.valid.length === 1 ? "{0} exact command recovery is protected in browser storage. " : "{0} exact command recoveries are protected in browser storage. ", [retainedCommentRecovery.valid.length]) : '')}
-          {(retainedCommentRecovery.damaged.length > 0 ? uiMessage("{0} damaged recovery record{1} review. ", [retainedCommentRecovery.damaged.length, retainedCommentRecovery.damaged.length === 1 ? ' needs' : 's need']) : '')}
+          {(retainedCommentRecovery.damaged.length > 0 ? uiPlural(retainedCommentRecovery.damaged.length, '{0} damaged recovery record needs review. ', '{0} damaged recovery records need review. ') : '')}
           {((retainedCommentRecoveryUnavailable ? uiText('Recovery storage cannot be inspected, so Start over remains blocked until it is available again. ') : ''))}{uiText("Nothing will be replayed automatically or rebound to the replacement generation.")}{(retainedCommentDrafts.length > 0 || retainedCommentRecovery.valid.length > 0) && <details>
             <summary>{uiText("View retained Comments work")}</summary>
             {retainedCommentDrafts.map((text, index) => <pre key={`draft:${index}`}
@@ -2235,12 +2235,12 @@ export default function RunView({ runId, onBack, reviewMode = false, reviewMeta 
         role={retainedCommentRecoveryUnavailable || retainedCommentRecovery.damaged.length > 0
           ? 'alert' : 'status'}>
         <OpIcon name="chat" size={13} />
-        <span>{(retainedCommentEntries.length > 0 ? uiMessage("{0} in-memory Comments work item{1} retained in this tab. ", [retainedCommentEntries.length, retainedCommentEntries.length === 1 ? ' is' : 's are']) : '')}
-          {(retainedCommentRecovery.valid.length > 0 ? uiMessage("{0} exact Comments command recover{1} saved in this tab.", [retainedCommentRecovery.valid.length, retainedCommentRecovery.valid.length === 1 ? 'y is' : 'ies are']) : '')}
-          {(retainedCommentRecovery.damaged.length > 0 ? uiMessage(" {0} damaged recovery record{1} review.", [retainedCommentRecovery.damaged.length, retainedCommentRecovery.damaged.length === 1 ? ' needs' : 's need']) : '')}
+        <span>{(retainedCommentEntries.length > 0 ? uiPlural(retainedCommentEntries.length, '{0} in-memory Comments work item is retained in this tab. ', '{0} in-memory Comments work items are retained in this tab. ') : '')}
+          {(retainedCommentRecovery.valid.length > 0 ? uiPlural(retainedCommentRecovery.valid.length, '{0} exact Comments command recovery is saved in this tab.', '{0} exact Comments command recoveries are saved in this tab.') : '')}
+          {(retainedCommentRecovery.damaged.length > 0 ? uiPlural(retainedCommentRecovery.damaged.length, ' {0} damaged recovery record needs review.', ' {0} damaged recovery records need review.') : '')}
           {((retainedCommentRecoveryUnavailable ? uiText(' Comments recovery storage cannot be inspected. Start over remains blocked; retry storage before continuing.') : ''))}
-          {(retainedCommentValidProtectedCreateCount > 0 ? uiMessage(" {0} current-generation new-comment recover{1} protected until the exact command reaches a terminal outcome.", [retainedCommentValidProtectedCreateCount, retainedCommentValidProtectedCreateCount === 1 ? 'y stays' : 'ies stay']) : '')}
-          {(retainedCommentDamagedProtectedCreateCount > 0 ? uiMessage(" {0} damaged new-comment recover{1} be safely released; restore the exact recovery data before continuing.", [retainedCommentDamagedProtectedCreateCount, retainedCommentDamagedProtectedCreateCount === 1 ? 'y cannot' : 'ies cannot']) : '')}
+          {(retainedCommentValidProtectedCreateCount > 0 ? uiPlural(retainedCommentValidProtectedCreateCount, ' {0} current-generation new-comment recovery stays protected until the exact command reaches a terminal outcome.', ' {0} current-generation new-comment recoveries stay protected until the exact command reaches a terminal outcome.') : '')}
+          {(retainedCommentDamagedProtectedCreateCount > 0 ? uiPlural(retainedCommentDamagedProtectedCreateCount, ' {0} damaged new-comment recovery cannot be safely released; restore the exact recovery data before continuing.', ' {0} damaged new-comment recoveries cannot be safely released; restore the exact recovery data before continuing.') : '')}
           {((currentCommentRecovery ? uiText(' Open its experiment to check the same command; nothing replays automatically.') : (retainedCommentDurableCount > 0 ? uiText(' The saved commands belong to an earlier generation and will not be rebound.') : uiText(' Review the retained work before leaving this run or starting over.'))))}
         </span>
         {(retainedCommentDrafts.length > 0 || retainedCommentRecovery.valid.length > 0) && <details>

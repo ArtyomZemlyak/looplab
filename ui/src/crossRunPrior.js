@@ -1,4 +1,4 @@
-import { uiMessage } from './uiLanguage.js'
+import { uiMessage, uiPlural } from './uiLanguage.js'
 import { normalizeConceptId } from './conceptId.js'
 
 const canonical = value => {
@@ -16,7 +16,7 @@ export function crossRunPriorNarration(data) {
   // the live event feed is a bounded audit preview, not an evidence authority. It never
   // turns a run-wide best into a concept outcome or claims coverage from independently retained rows.
   const history = runCount
-    ? `${runCount} retained run${runCount === 1 ? '' : 's'}`
+    ? uiPlural(runCount, '{0} retained run', '{0} retained runs')
     : 'match recorded'
   return uiMessage("cross-run prior{0} — {1} · evidence completeness unknown", [labels ? ': ' + labels : '', history])
 }

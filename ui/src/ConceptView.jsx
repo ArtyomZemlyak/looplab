@@ -1,4 +1,4 @@
-import { uiText, uiMessage, useUILanguage } from './uiLanguage.js'
+import { uiText, uiMessage, uiPlural, useUILanguage } from './uiLanguage.js'
 import React, { Fragment, useEffect, useMemo, useRef, useState } from 'react'
 import { deadlineGet, fmt, runApiPath } from './util.js'
 import {
@@ -27,8 +27,6 @@ const LENS_PROMPT_MAX_BYTES = 2_048
 const record = value => value !== null && typeof value === 'object' && !Array.isArray(value)
 const metric = value => value === null || (typeof value === 'number' && Number.isFinite(value))
 const count = value => Number.isSafeInteger(value) && value >= 0
-const counted = (value, singular, plural = `${singular}s`) =>
-  `${value} ${value === 1 ? singular : plural}`
 const sequence = value => Number.isSafeInteger(value) && value >= -1
 const conceptId = value => typeof value === 'string' && value.length > 0
 const derivedLensId = value => typeof value === 'string' && value.length <= 64
@@ -1369,8 +1367,8 @@ export default function ConceptView({ runId, generation, sequence: displayedSequ
     <header className="cv-bar">
       <div className="cv-heading"><strong>{uiText(projectionLabel)}</strong><span
         title={uiMessage("Concept frame sequence {0}", [data.captured_seq])}>
-        {counted(taggedConceptCount, 'tagged concept')} · {counted(displayedConceptNodeCount,
-          'displayed concept node')} · {counted(experimentCount, 'tagged experiment')}
+        {uiPlural(taggedConceptCount, '{0} tagged concept', '{0} tagged concepts')} · {uiPlural(displayedConceptNodeCount,
+          '{0} displayed concept node', '{0} displayed concept nodes')} · {uiPlural(experimentCount, '{0} tagged experiment', '{0} tagged experiments')}
       </span></div>
       <div className="cv-search cs">
         <div className={'cs-box' + (searching ? ' focus' : '')}>
@@ -1472,7 +1470,9 @@ export default function ConceptView({ runId, generation, sequence: displayedSequ
             {!!experiments.length && <button type="button" className="cv-badge btn xs"
               onClick={() => toggleEvidence(id)} aria-expanded={evidenceOpen}
               title={uiMessage("{0} tagged experiments for {1}", [evidenceOpen ? 'Hide' : 'Show', id])}
-              aria-label={uiMessage("{0} {1} tagged {2} for {3}", [evidenceOpen ? 'Hide' : 'Show', experiments.length, experiments.length === 1 ? 'experiment' : 'experiments', id])}>
+              aria-label={(evidenceOpen
+                ? uiPlural(experiments.length, 'Hide {0} tagged experiment for {1}', 'Hide {0} tagged experiments for {1}', [experiments.length, id])
+                : uiPlural(experiments.length, 'Show {0} tagged experiment for {1}', 'Show {0} tagged experiments for {1}', [experiments.length, id]))}>
               {experiments.length}{uiText(" refs")}</button>}
           </td>{cols.map(column => {
             const value = metricRows[id]?.[column.key]

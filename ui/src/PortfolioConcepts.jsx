@@ -1,4 +1,4 @@
-import { uiText, uiMessage, useUILanguage } from './uiLanguage.js'
+import { uiText, uiMessage, uiPlural, useUILanguage } from './uiLanguage.js'
 import React, { useEffect, useMemo, useRef, useState } from 'react'
 import { OpIcon } from './icons.jsx'
 import {
@@ -79,7 +79,7 @@ function ConceptRow({ row, selected, matched, expanded, forcedOpen, onToggle, on
           they tagged `optimization/lr`, and the parent row exists because the id spells it. */}
       {!node.tagged && <span className="pc-tag-note">{uiText("grouping")}</span>}
       <span className="pc-counts">
-        <span className="pc-runs">{node.runs}{uiText(" run")}{node.runs === 1 ? '' : 's'}</span>
+        <span className="pc-runs">{uiPlural(node.runs, '{0} run', '{0} runs')}</span>
         {node.tagged && <span className="pc-exp">{node.directExperiments}{uiText(" exp")}</span>}
         <BestMetric best={node.best} />
       </span>
@@ -103,7 +103,7 @@ function Partners({ cooccurrence, node }) {
         : <ul className="pc-partners">
             {partners.slice(0, MAX_DETAIL_PARTNERS).map(partner => <li key={partner.id}>
               <code>{partner.id}</code>
-              <span className="muted">{partner.runs}{uiText(" run")}{partner.runs === 1 ? '' : 's'}</span>
+              <span className="muted">{uiPlural(partner.runs, '{0} run', '{0} runs')}</span>
             </li>)}
           </ul>}
     {/* A pruned node's pairs were never counted. Saying "no partners" for it would turn a bound into
@@ -370,7 +370,7 @@ export default function PortfolioConcepts({
     {coverage && <div className={'pc-coverage' + (coverage.complete ? ' pc-complete' : '')}
       role="status">
       <b>{coverage.tagged}{uiText(" of ")}{coverage.runs}{uiText(" runs")}</b>{uiText(" carry concept tags")}{coverage.untagged > 0 && <> · <b>{coverage.untagged}{uiText(" untagged")}</b></>}
-      {' · '}{coverage.concepts}{uiText(" concept")}{coverage.concepts === 1 ? '' : 's'}{uiText(" across ")}{coverage.roots}{uiText(" root")}{coverage.roots === 1 ? '' : 's'}
+      {' · '}{uiPlural(coverage.concepts, '{0} concept', '{0} concepts')} {uiPlural(coverage.roots, 'across {0} root', 'across {0} roots')}
       {coverage.complete && <>{uiText(" · every run in scope is tagged")}</>}
       {coverage.malformedRuns > 0 && <> · <b>{coverage.droppedIds}{uiText(" unreadable tag(s)")}</b>{uiText(" in ")}{coverage.malformedRuns}{uiText(" run(s)")}</>}
     </div>}
@@ -398,7 +398,7 @@ export default function PortfolioConcepts({
         infer a taxonomy, and a global tree that quietly joined these roots would be doing exactly
         that. Renaming them for real is a governed cross-run action, not a render-time guess. */}
     {forest.variants.length > 0 && <details className="pc-variants">
-      <summary>{forest.variants.length}{uiText(" concept")}{forest.variants.length === 1 ? '' : 's'}{uiText(" spelled more than one way — shown separately, not merged")}</summary>
+      <summary>{uiPlural(forest.variants.length, '{0} concept spelled more than one way — shown separately, not merged', '{0} concepts spelled more than one way — shown separately, not merged')}</summary>
       <ul>
         {forest.variants.map(group => <li key={group.key}>
           {group.ids.map(id => <code key={id}>{id}</code>)}
@@ -444,7 +444,7 @@ export default function PortfolioConcepts({
             conceptShelf.js's rule for memory rows, which is the same rule for runs. */}
         <div className="pc-untagged">
           <b>{uiText("Untagged")}</b>
-          <span>{forest.untagged.runs}{uiText(" run")}{forest.untagged.runs === 1 ? '' : 's'}{uiText(" in this scope carry no concept at all.")}</span>
+          <span>{uiPlural(forest.untagged.runs, '{0} run in this scope carry no concept at all.', '{0} runs in this scope carry no concept at all.')}</span>
           {forest.untagged.runs > 0 && <span className="muted">{uiText("They are not in the tree above. That is a gap in tagging, not evidence that nothing was learned in them.")}</span>}
         </div>
 
@@ -480,7 +480,7 @@ export default function PortfolioConcepts({
                     <button type="button" className="pc-pair" onClick={() => setSelected(pair.b)}>
                       <code>{pair.b}</code>
                     </button>
-                    <span className="pc-pair-n">{pair.runs}{uiText(" run")}{pair.runs === 1 ? '' : 's'}</span>
+                    <span className="pc-pair-n">{uiPlural(pair.runs, '{0} run', '{0} runs')}</span>
                   </li>)}
                 </ol>
                 {cooccurrence.pairs.length > MAX_PAIR_ROWS

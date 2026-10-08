@@ -1,4 +1,4 @@
-import { uiText, uiMessage, useUILanguage } from './uiLanguage.js'
+import { uiText, uiMessage, uiPlural, useUILanguage } from './uiLanguage.js'
 import React, { useEffect, useId, useMemo, useRef, useState } from 'react'
 import { addConceptSelection, chipsAtPath, breadcrumb, matchingNodeIds,
   toggleConceptSelection } from './conceptChips.js'
@@ -141,7 +141,7 @@ export default function ConceptChipBar({ state, onHighlight }) {
       <div className="cb-head">
         <strong>{uiText("Concepts")}</strong>
         <span className="chip xs warn">{materialization.toUpperCase()}</span>
-        <span className="muted">{((materialization === 'unavailable' ? uiText('Membership unavailable; not empty.') : uiMessage("Membership withheld for all {0} tagged experiment{1}; not empty.", [withheld, withheld === 1 ? '' : 's'])))}</span>
+        <span className="muted">{((materialization === 'unavailable' ? uiText('Membership unavailable; not empty.') : uiPlural(withheld, 'Membership withheld for all {0} tagged experiment; not empty.', 'Membership withheld for all {0} tagged experiments; not empty.')))}</span>
       </div>
     </div>
   )
@@ -159,7 +159,7 @@ export default function ConceptChipBar({ state, onHighlight }) {
             not carry these concepts, and the graph filter cannot reach them. Say so rather than letting
             a silently short count read as the whole run. */}
         {withheld > 0 &&
-          <span className="chip xs warn" title={uiMessage("{0} experiment{1} membership could not be materialized; counts are a lower bound and these experiments never match a filter.", [withheld, withheld === 1 ? "'s" : "s'"])}>{uiText("PARTIAL · ")}{withheld}{uiText(" withheld")}</span>}
+          <span className="chip xs warn" title={uiPlural(withheld, "{0} experiment's membership could not be materialized; counts are a lower bound and these experiments never match a filter.", "{0} experiments' membership could not be materialized; counts are a lower bound and these experiments never match a filter.")}>{uiText("PARTIAL · ")}{withheld}{uiText(" withheld")}</span>}
         <nav className="cb-crumbs" aria-label={uiText("Concept breadcrumb")}>
           <button type="button" className={'cb-crumb' + (path ? '' : ' on')}
             onClick={() => setPath('')} aria-current={path ? undefined : 'true'}>{uiText("All")}</button>
@@ -201,7 +201,7 @@ export default function ConceptChipBar({ state, onHighlight }) {
                         tabIndex={-1} aria-selected={i === cursor}
                         className={'cs-res' + (i === cursor ? ' cursor' : '')}
                         onMouseEnter={() => setCursor(i)} onClick={() => commitConcept(r.id)}
-                        title={uiMessage("{0} · {1} experiment(s)", [r.id, r.count])}>
+                        title={uiPlural(r.count, '{1} · {0} experiment(s)', '{1} · {0} experiment(s)', [r.count, r.id])}>
                         <span><span className="cs-path">{parent}</span><Marked text={r.label} query={query} /></span>
                         <span className="cs-cnt">{r.count}</span>
                       </button>
@@ -241,7 +241,7 @@ export default function ConceptChipBar({ state, onHighlight }) {
                   + (!on && searching && matchedIds.has(chip.id) ? ' match' : '')}>
                 <button type="button" className="cb-chip-main" aria-pressed={on}
                   onClick={() => toggleSelect(key)}
-                  title={uiMessage("{0} · {1} experiment(s){2}", [chip.id, chip.count, chip.atLevel ? ' tagged here (not deeper) — highlights only these' : ''])}>
+                  title={uiPlural(chip.count, '{1} · {0} experiment(s){2}', '{1} · {0} experiment(s){2}', [chip.count, chip.id, chip.atLevel ? ' ' + uiText('tagged here (not deeper) — highlights only these') : ''])}>
                   {chip.atLevel && <span className="cb-here" aria-hidden="true">·</span>}
                   <span className="cb-name">{uiText(chip.label)}</span>
                   <span className="cb-count">{chip.count}</span>

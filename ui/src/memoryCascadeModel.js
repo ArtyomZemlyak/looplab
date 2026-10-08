@@ -10,6 +10,8 @@
 // extent the operator cannot see, and a dialog that showed neither would be a checkbox that does
 // something unknowable.
 
+import { uiPlural, uiText } from './uiLanguage.js'
+
 /** The store labels, in the order the dialog lists them, from a server survey. */
 export function cascadeStores(report) {
   const stores = Array.isArray(report?.stores) ? report.stores : []
@@ -25,8 +27,7 @@ export function cascadeStores(report) {
     }))
 }
 
-const plural = (n, word) => `${n} ${word}${n === 1 ? '' : 's'}`
-
+// A counted phrase is a `uiPlural` (Russian has three integer forms an English `s` cannot carry).
 /** The single line beside the checkbox: what it will delete, and what it will not. */
 export function cascadeLabel(report) {
   if (!report) return 'Also delete this run’s own cross-run memory'
@@ -37,7 +38,8 @@ export function cascadeLabel(report) {
   if (!deletable && !(report.kept | 0)) {
     return 'Also delete this run’s own cross-run memory (this run contributed none)'
   }
-  return `Also delete this run’s own cross-run memory (${plural(deletable, 'row')})`
+  return uiPlural(deletable, 'Also delete this run’s own cross-run memory ({0} row)',
+    'Also delete this run’s own cross-run memory ({0} rows)')
 }
 
 /**
@@ -53,7 +55,7 @@ export function cascadeKeptNotice(report) {
   const distinct = [...new Set(reasons.map(entry => entry.reason))]
   const because = distinct.length === 1 ? distinct[0]
     : 'they carry evidence or concepts shared with runs that still exist'
-  return `${plural(kept, 'row')} stay: ${because}.`
+  return uiPlural(kept, '{0} row stay: {1}.', '{0} rows stay: {1}.', [kept, uiText(because)])
 }
 
 /**
@@ -63,8 +65,10 @@ export function cascadeKeptNotice(report) {
  * that governs what happens, and the part a count was only ever standing in for.
  */
 export function bulkCascadeLabel(runCount = 0) {
-  return `Also delete each run’s own cross-run memory — rows that merge evidence or concepts with `
-    + `runs that still exist are kept${runCount ? ` (${runCount} run${runCount === 1 ? '' : 's'})` : ''}`
+  return runCount
+    ? uiPlural(runCount, 'Also delete each run’s own cross-run memory — rows that merge evidence or concepts with runs that still exist are kept ({0} run)',
+      'Also delete each run’s own cross-run memory — rows that merge evidence or concepts with runs that still exist are kept ({0} runs)')
+    : uiText('Also delete each run’s own cross-run memory — rows that merge evidence or concepts with runs that still exist are kept')
 }
 
 /**
@@ -116,6 +120,6 @@ export function cascadeOutcome(memory, runId = '') {
       text: 'The run was deleted. It had contributed no cross-run memory of its own.' }
   }
   return { kind: 'status', retryRunId: '',
-    text: `The run was deleted, along with ${plural(deleted, 'cross-run memory row')} `
-      + 'only it owned.' }
+    text: uiPlural(deleted, 'The run was deleted, along with {0} cross-run memory row only it owned.',
+      'The run was deleted, along with {0} cross-run memory rows only it owned.') }
 }

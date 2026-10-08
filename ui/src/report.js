@@ -1,4 +1,4 @@
-import { uiText, uiMessage } from './uiLanguage.js'
+import { uiText, uiMessage, uiPlural } from './uiLanguage.js'
 // Run-report analysis: derive the human-readable conclusions ("what worked / what didn't"), the
 // key-improvement waterfall, and per-operator/per-theme effectiveness purely from the folded node
 // set. Mirrors the engine's selection rule — only FEASIBLE evaluated nodes move the frontier — so
@@ -310,15 +310,15 @@ export function trustCaveats(state, best) {
   if (best && hacks.some(h => h.node_id === best.id))
     out.push({ kind: 'reward-hack', severity: 'alarm', text: 'champion flagged as a possible reward-hack', panel: 'trust' })
   else if (hacks.length)
-    out.push({ kind: 'reward-hack', severity: 'warn', text: `${rewardHackNodeCount(hacks)} node(s) flagged as possible reward-hacks`, panel: 'trust' })
+    out.push({ kind: 'reward-hack', severity: 'warn', text: uiPlural(rewardHackNodeCount(hacks), '{0} node(s) flagged as possible reward-hacks', '{0} node(s) flagged as possible reward-hacks'), panel: 'trust' })
   if (state.leakage?.leak)
     out.push({ kind: 'leakage', severity: 'alarm', text: 'data-leakage scan flagged this run', panel: 'data' })
   if ((state.drifts || []).length)
-    out.push({ kind: 'drift', severity: 'warn', text: `${state.drifts.length} metric-drift divergence(s) caught`, panel: 'trust' })
+    out.push({ kind: 'drift', severity: 'warn', text: uiPlural(state.drifts.length, '{0} metric-drift divergence(s) caught', '{0} metric-drift divergence(s) caught'), panel: 'trust' })
   const infeasible = Object.values(activeNodeMap(state.nodes || {}, state))
     .filter(n => isEvaluated(n) && n.feasible === false)
   if (infeasible.length)
-    out.push({ kind: 'infeasible', severity: 'warn', text: `${infeasible.length} evaluated node(s) violated a constraint`, panel: 'trust' })
+    out.push({ kind: 'infeasible', severity: 'warn', text: uiPlural(infeasible.length, '{0} evaluated node(s) violated a constraint', '{0} evaluated node(s) violated a constraint'), panel: 'trust' })
   if (best && !(Number.isFinite(best.confirmed_mean)
       && Number.isSafeInteger(best.confirmed_seeds) && best.confirmed_seeds >= 2))
     out.push({ kind: 'single-seed', severity: 'warn', text: 'multiple successful repeat checks are not established', panel: 'trust' })
@@ -525,7 +525,7 @@ export function toMarkdown(state, _best, context = {}) {
   const fr = Object.entries(a.failures)
   if (fr.length) { L.push(uiMessage("\n**Failures by reason:** {0}", [fr.map(([r, ns]) => `${r} (${ns.length})`).join(', ')])) }
   if (a.regressions.length) { L.push(uiMessage("\n**Worse evaluation scores:** {0} under matching recorded parent conditions.", [a.regressions.length])) }
-  if (a.infeasible.length) { L.push(uiMessage("\n**Infeasible:** {0} node(s) violated a constraint and were excluded.", [a.infeasible.length])) }
+  if (a.infeasible.length) { L.push('\n' + uiPlural(a.infeasible.length, '**Infeasible:** {0} node(s) violated a constraint and were excluded.', '**Infeasible:** {0} node(s) violated a constraint and were excluded.')) }
   const deadThemes = a.themes.filter(t => t.improved === 0)
   if (deadThemes.length) L.push(uiMessage("\n**Primary concept axes without a comparable score improvement:** {0}. Absence of an improvement is not evidence that an axis failed.", [deadThemes.map(t => t.key).join(', ')]))
   if (!fr.length && !a.regressions.length && !a.infeasible.length) L.push(uiText('\n_No recorded failures or comparable regressions._'))

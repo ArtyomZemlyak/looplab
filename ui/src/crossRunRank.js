@@ -1,4 +1,4 @@
-import { uiMessage } from './uiLanguage.js'
+import { uiMessage, uiPlural } from './uiLanguage.js'
 // Pure model for the CROSS-RUN metric overlay — the `Same-task run observations` panel's decisions.
 // No React, no I/O; unit-tested with `node --test` (`ui/test/crossRunRank.test.js`).
 //
@@ -484,7 +484,7 @@ function buildGroup(bucket, limit, { refusal = '' } = {}) {
 export function groupClaim(group) {
   if (!group) return null
   const objective = group.direction === 'min' ? 'lowest' : 'highest'
-  const scope = `${group.size} run${group.size === 1 ? '' : 's'} of task ${group.taskId}`
+  const scope = uiPlural(group.size, '{0} run of task {1}', '{0} runs of task {1}', [group.size, group.taskId])
   // A REFUSED group is worded from its own refusal: the sentence it replaced blamed "a split by
   // source tree or protocol" on a group nothing of the kind had split — its runs refused by keys,
   // or by task ids a trim made one (critic 2026-09-26).
@@ -737,16 +737,16 @@ export function trajectoryTitle(group) {
 // the group has.
 export function trajectoryClaim(group, overlay) {
   const size = Number.isSafeInteger(group?.size) ? group.size : 0
-  const plural = (n, one, many) => (n === 1 ? one : many)
+  // Each clause is built in the UI language (`uiPlural`: Russian has three integer forms).
   const left = []
-  if (overlay.noSeries) left.push(`${overlay.noSeries} ${plural(overlay.noSeries, 'carries', 'carry')} no series (no feasible measured node, or a row served before the series existed)`)
-  if (overlay.prefix) left.push(`${overlay.prefix} prefix-folded ${plural(overlay.prefix, 'run is', 'runs are')} not drawn, for the reason ${plural(overlay.prefix, 'it holds', 'they hold')} no rank`)
-  if (overlay.refused) left.push(`${overlay.refused} ${plural(overlay.refused, 'run is', 'runs are')} not drawn, for the reason ${plural(overlay.refused, 'it holds', 'they hold')} no rank: a pair of this group's runs provably disagrees on its evaluation, and one axis would order them all the same`)
-  if (overlay.beyondLimit) left.push(`${overlay.beyondLimit} beyond the ${overlay.limit} lines the chart can tell apart, in rank order`)
-  if (overlay.capped) left.push(`${overlay.capped} drawn coarser: more improvements than the row carries`)
+  if (overlay.noSeries) left.push(uiPlural(overlay.noSeries, '{0} carries no series (no feasible measured node, or a row served before the series existed)', '{0} carry no series (no feasible measured node, or a row served before the series existed)'))
+  if (overlay.prefix) left.push(uiPlural(overlay.prefix, '{0} prefix-folded run is not drawn, for the reason it holds no rank', '{0} prefix-folded runs are not drawn, for the reason they hold no rank'))
+  if (overlay.refused) left.push(uiPlural(overlay.refused, "{0} run is not drawn, for the reason it holds no rank: a pair of this group's runs provably disagrees on its evaluation, and one axis would order them all the same", "{0} runs are not drawn, for the reason they hold no rank: a pair of this group's runs provably disagrees on its evaluation, and one axis would order them all the same"))
+  if (overlay.beyondLimit) left.push(uiMessage('{0} beyond the {1} lines the chart can tell apart, in rank order', [overlay.beyondLimit, overlay.limit]))
+  if (overlay.capped) left.push(uiMessage('{0} drawn coarser: more improvements than the row carries', [overlay.capped]))
   const tail = left.length ? ` ${left.join('; ')}.` : ''
   if (!overlay.drawn) return uiMessage("No trajectory to draw for this group.{0}", [tail])
-  return `Running best per evaluated experiment for ${overlay.drawn} of ${size} ${plural(size, 'run', 'runs')}, `
-    + "on this group's own axis — one task, one direction, one evaluation, nothing rescaled; "
-    + `a line holds its value until the experiment that beat it.${tail}`
+  return uiPlural(size, "Running best per evaluated experiment for {1} of {0} run, on this group's own axis — one task, one direction, one evaluation, nothing rescaled; a line holds its value until the experiment that beat it.{2}",
+    "Running best per evaluated experiment for {1} of {0} runs, on this group's own axis — one task, one direction, one evaluation, nothing rescaled; a line holds its value until the experiment that beat it.{2}",
+    [size, overlay.drawn, tail])
 }

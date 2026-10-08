@@ -1,4 +1,4 @@
-import { uiText, uiMessage, useUILanguage } from './uiLanguage.js'
+import { uiText, uiMessage, uiPlural, useUILanguage } from './uiLanguage.js'
 import React, { useEffect, useMemo, useState } from 'react'
 import { get } from './api.js'
 import { fmt, fmtAgo } from './format.js'
@@ -28,7 +28,7 @@ export default function CampaignRuns() {
     <h2 className="muted" style={{ fontSize: 13, margin: '16px 2px 4px' }}>{uiText("Campaign folders")}</h2>
     <p className="muted" style={{ fontSize: 12, margin: '0 2px 8px' }}>{uiText("Runs inside a folder of the runs root, listed read-only. To open them, serve the folder as the root:")}</p>
     {folders.map(f => <details key={f.folder} className="notice compact">
-      <summary>{f.folder} · {f.runs.length}{uiText(" run")}{f.runs.length === 1 ? '' : 's'}
+      <summary>{f.folder} · {uiPlural(f.runs.length, '{0} run', '{0} runs')}
         {(f.runsSkipped > 0 && uiMessage(" ({0} more not listed)", [f.runsSkipped]))}
         {((f.listingCut && uiText(' (its listing was cut at the entry bound)')))}</summary>
       <code style={{ userSelect: 'all' }}>{openCommand(f.runRoot)}</code>
@@ -39,7 +39,7 @@ export default function CampaignRuns() {
         {r.updated !== null && <span className="muted"> · {fmtAgo(r.updated)}</span>}
       </li>)}</ul>
     </details>)}
-    {skipped > 0 && <p className="muted">{skipped}{uiText(" more folder")}{skipped === 1 ? '' : 's'}{uiText(" not examined.")}</p>}
+    {skipped > 0 && <p className="muted">{uiPlural(skipped, '{0} more folder not examined.', '{0} more folders not examined.')}</p>}
     {rootListingCut(payload) && <p className="muted">{uiText("The runs root's listing was cut at the entry bound.")}</p>}
   </section>
 }

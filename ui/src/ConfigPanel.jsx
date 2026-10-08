@@ -1,4 +1,4 @@
-import { uiText, uiMessage, useUILanguage } from './uiLanguage.js'
+import { uiText, uiMessage, uiPlural, useUILanguage } from './uiLanguage.js'
 // The per-run settings panel, lifted out of panels.jsx (doc 25 UI-04). It is a component with its
 // own draft persistence, mutation fencing and reconcile machinery, which is what makes it a module
 // rather than one more function in the hub. panels.jsx re-exports it, so RunView still funnels every
@@ -700,7 +700,7 @@ export function ConfigPanel({
           {invalidCount > 0 && <button type="button"
             className="settings-summary-link settings-save-state is-invalid"
             onClick={focusFirstInvalid}>
-            {invalidCount}{uiText(" invalid setting")}{invalidCount === 1 ? '' : 's'}{uiText(" — review")}</button>}
+            {uiPlural(invalidCount, '{0} invalid setting — review', '{0} invalid settings — review')}</button>}
           <button className="btn sm ghost" disabled={controlBusy || !hasChanges}
             onClick={revertConfigDraft}>{uiText("↺ revert")}</button>
           <button className="btn sm primary" disabled={controlBusy || !canSave} onClick={onSave}>{uiText("Save")}</button>

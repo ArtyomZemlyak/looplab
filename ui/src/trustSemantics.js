@@ -1,4 +1,4 @@
-import { uiText, uiMessage } from './uiLanguage.js'
+import { uiText, uiMessage, uiPlural } from './uiLanguage.js'
 // Pure trust-state wording shared by the run-wide Trust panel and the node Inspector.
 // Absence of a recorded flag is deliberately NOT treated as proof that a detector ran.
 import { rewardHackNodeCount } from './nodeProjection.js'
@@ -31,7 +31,7 @@ export function leakageStatus(leakage) {
 export function driftStatus(drifts, config, evaluatedCount = 0) {
   if ((drifts || []).length) return result(
     'alarm',
-    `${drifts.length} divergence${drifts.length === 1 ? '' : 's'} recorded`,
+    uiPlural(drifts.length, '{0} divergence recorded', '{0} divergences recorded'),
     'The independent metric cross-check disagreed with the primary metric.',
   )
   if (!config) return result(
@@ -59,7 +59,7 @@ export function driftStatus(drifts, config, evaluatedCount = 0) {
 export function rewardHackStatus(hacks, config, evaluatedCount = 0) {
   if ((hacks || []).length) return result(
     'alarm',
-    rewardHackNodeCount(hacks) === 1 ? '1 suspicious node flagged' : `${rewardHackNodeCount(hacks)} suspicious nodes flagged`,
+    uiPlural(rewardHackNodeCount(hacks), '{0} suspicious node flagged', '{0} suspicious nodes flagged'),
     'Review the recorded signals before trusting or promoting the result.',
   )
   if (!config) return result(

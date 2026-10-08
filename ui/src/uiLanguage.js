@@ -70,3 +70,31 @@ export function uiText(value) {
 export function uiMessage(key, values = []) {
   return uiText(key).replace(/\{(\d+)\}/g, (_, index) => String(values[Number(index)] ?? ''))
 }
+
+// Plural copy. English source text says its two forms and picks `one` for exactly 1 and `other`
+// for everything else — the `n === 1 ? '' : 's'` every call site used to glue on, byte for byte.
+// Russian needs three integer forms (1 узел, 2 узла, 5 узлов; 21 узел, 11 узлов), which no suffix
+// placeholder can carry, so the Russian forms live in the catalogue's `plurals` section keyed by
+// the English `other` text: { one, few, many, other? } with CLDR's categories (`other` is the
+// fractional form and defaults to `few`, "1,5 запуска"). `{N}` substitutes `values[N]` as in
+// `uiMessage`; `values` defaults to `[count]`. A key with no Russian forms falls back to the
+// English choice through `uiText`, so a missing entry reads English, never a glued fragment.
+// `scripts/localize-copy.mjs --check` collects every `uiPlural(count, '<one>', '<other>', …)`
+// call (both forms must be string literals) and refuses a missing, unused or ill-formed entry.
+export function russianPluralCategory(count) {
+  const n = Math.abs(Number(count))
+  if (!Number.isInteger(n)) return 'other'
+  const last = n % 10, lastTwo = n % 100
+  if (last === 1 && lastTwo !== 11) return 'one'
+  if (last >= 2 && last <= 4 && (lastTwo < 12 || lastTwo > 14)) return 'few'
+  return 'many'
+}
+export function uiPlural(count, one, other, values = [count]) {
+  // Keyed like `uiText`: whitespace-normalized and trimmed, with the source's own edges kept.
+  const key = typeof other === 'string' ? other.replace(/\s+/g, ' ').trim() : other
+  const forms = effectiveUILanguage() === 'ru' && dictionary?.plural ? dictionary.plural(key) : undefined
+  const template = forms
+    ? other.match(/^\s*/)[0] + (forms[russianPluralCategory(count)] ?? forms.few) + other.match(/\s*$/)[0]
+    : uiText(Number(count) === 1 ? one : other)
+  return template.replace(/\{(\d+)\}/g, (_, index) => String(values[Number(index)] ?? ''))
+}

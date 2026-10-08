@@ -1,4 +1,4 @@
-import { uiText, uiMessage, useUILanguage } from './uiLanguage.js'
+import { uiText, uiMessage, uiPlural, useUILanguage } from './uiLanguage.js'
 import React, { useEffect, useId, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import UpstreamPanel from './UpstreamPanel.jsx'
 import { deadlineGet, get, post, fmt, fmtInt, fmtBytes, fmtElapsedSeconds, CONTROL,
@@ -573,7 +573,7 @@ export function ResearchPanel({ state, runId, onToast, onClose, onSelect, onSele
   const latestSelected = selectedMemo?.sourceIndex === newestMemoIndex
   const finished = state.phase === 'finished'
   return (
-    <Panel title={uiText("Deep research")} sub={memos.length ? `${memos.length} memo${memos.length === 1 ? '' : 's'}` : 'none yet'} onClose={onClose}
+    <Panel title={uiText("Deep research")} sub={memos.length ? uiPlural(memos.length, '{0} memo', '{0} memos') : 'none yet'} onClose={onClose}
       size={memos.length ? 'board' : undefined} className={`research-panel${memos.length ? '' : ' empty'}`}>
       <p className="research-purpose" role="note">{uiText('Hypothesis search and experiment planning. Research claims are suggestions to verify, not measured conclusions about what worked.')}</p>
       {!memos.length && <div className="research-empty-state" role="status">
@@ -1366,14 +1366,14 @@ export function AuthoringPanel({
     || uncertainSaveCount > 0 || damagedRecoveryCount > 0
   const authoringNavigationSummary = [
     dirtyCount > 0
-      ? `${dirtyCount} unsaved Authoring draft${dirtyCount === 1 ? '' : 's'} will be discarded.` : '',
-    mutationBusy ? 'A save is in progress; its outcome may not remain visible.' : '',
+      ? uiPlural(dirtyCount, '{0} unsaved Authoring draft will be discarded.', '{0} unsaved Authoring drafts will be discarded.') : '',
+    mutationBusy ? uiText('A save is in progress; its outcome may not remain visible.') : '',
     uncertainSaveCount > 0
-      ? `${uncertainSaveCount} save outcome${uncertainSaveCount === 1 ? '' : 's'} may be unknown; review retained recovery before retrying.` : '',
+      ? uiPlural(uncertainSaveCount, '{0} save outcome may be unknown; review retained recovery before retrying.', '{0} save outcomes may be unknown; review retained recovery before retrying.') : '',
     damagedRecoveryCount > 0
-      ? `${damagedRecoveryCount} damaged recovery record${damagedRecoveryCount === 1 ? ' remains' : 's remain'} quarantined in this tab.` : '',
+      ? uiPlural(damagedRecoveryCount, '{0} damaged recovery record remains quarantined in this tab.', '{0} damaged recovery records remain quarantined in this tab.') : '',
   ].filter(Boolean).join(' ')
-  const authoringCloseMessage = `${authoringNavigationSummary} Close Authoring anyway?`
+  const authoringCloseMessage = `${authoringNavigationSummary} ${uiText('Close Authoring anyway?')}`
   const navigationUnsafeRef = useRef(navigationUnsafe)
   navigationUnsafeRef.current = navigationUnsafe
   useLayoutEffect(() => {
@@ -1399,12 +1399,12 @@ export function AuthoringPanel({
       allowRef: allowNavigationRef,
       guardedHash: location.hash,
       message: () => uncertainSaveCount > 0
-        ? `${uncertainSaveCount} save outcome${uncertainSaveCount === 1 ? '' : 's'} may be unknown. Leave Authoring?`
+        ? uiPlural(uncertainSaveCount, '{0} save outcome may be unknown. Leave Authoring?', '{0} save outcomes may be unknown. Leave Authoring?')
         : damagedRecoveryCount > 0
-          ? `${damagedRecoveryCount} damaged recovery record${damagedRecoveryCount === 1 ? '' : 's'} remain quarantined. Leave Authoring?`
+          ? uiPlural(damagedRecoveryCount, '{0} damaged recovery record remain quarantined. Leave Authoring?', '{0} damaged recovery records remain quarantined. Leave Authoring?')
         : mutationBusy
-          ? 'A save is in progress. Leave Authoring?'
-          : `${dirtyCount} unsaved draft${dirtyCount === 1 ? '' : 's'} will be lost. Leave?`,
+          ? uiText('A save is in progress. Leave Authoring?')
+          : uiPlural(dirtyCount, '{0} unsaved draft will be lost. Leave?', '{0} unsaved drafts will be lost. Leave?'),
       onAllow: () => draftStore.clear(AUTHORING_PANEL_DRAFT_SCOPE),
     })
   }, [navigationGuardOwner, draftStore, navigationUnsafe, mutationBusy, uncertainSaveCount,
@@ -1963,11 +1963,11 @@ export function AuthoringPanel({
       return
     }
     const warning = uncertainSaveCount > 0
-      ? `${uncertainSaveCount} save outcome${uncertainSaveCount === 1 ? '' : 's'} may be unknown; exact draft${uncertainSaveCount === 1 ? '' : 's'} retained here.`
+      ? uiPlural(uncertainSaveCount, '{0} save outcome may be unknown; exact draft retained here.', '{0} save outcomes may be unknown; exact drafts retained here.')
       : damagedRecoveryCount > 0
-        ? `${damagedRecoveryCount} damaged recovery record${damagedRecoveryCount === 1 ? ' remains' : 's remain'} quarantined here.`
-      : mutationBusy ? 'A save is in progress.'
-        : `${dirtyCount} unsaved draft${dirtyCount === 1 ? '' : 's'} will be lost.`
+        ? uiPlural(damagedRecoveryCount, '{0} damaged recovery record remains quarantined here.', '{0} damaged recovery records remain quarantined here.')
+      : mutationBusy ? uiText('A save is in progress.')
+        : uiPlural(dirtyCount, '{0} unsaved draft will be lost.', '{0} unsaved drafts will be lost.')
     if (!window.confirm(uiMessage("{0} Close Authoring?", [warning]))) return
     allowNavigationRef.current = true
     draftStore.clear(AUTHORING_PANEL_DRAFT_SCOPE)
@@ -2019,7 +2019,7 @@ export function AuthoringPanel({
       </div>
       <PanelResourceNotice resource={source} label={uiMessage("{0} files", [kind])} onRetry={retry} />
       {dirtyCount > 0 && <div className="notice" role="status" style={{ marginBottom: 10 }}>
-        {dirtyCount}{uiText(" draft")}{dirtyCount === 1 ? '' : 's'}{uiText(" retained. Switching is safe; closing loses them.")}</div>}
+        {uiPlural(dirtyCount, '{0} draft retained. Switching is safe; closing loses them.', '{0} drafts retained. Switching is safe; closing loses them.')}</div>}
       {selected && !selectedSourceReconciled && <div className="notice" role="status"
         style={{ marginBottom: 10 }}>{uiText("Save and server-copy stay disabled until current ")}{kind}{uiText(" reconciles with this draft.")}</div>}
       {!storageAvailable && <div className="report-inline-state error" role="alert" style={{ marginBottom: 10 }}>
@@ -2637,7 +2637,7 @@ export function CrossRunPanel({ state, onClose }) {
   // An unranked row names what holds it unranked — for a refused group, the refusal itself.
   const rankCell = (row, group) => (row.rank == null
     ? <span className="muted" title={unrankedRowTitle(group, row)}>—</span>
-    : <span title={((row.tied ? uiMessage("tied with {0} other run(s) at this value", [row.tied]) : uiText('rank within this comparable group')))}>
+    : <span title={((row.tied ? uiPlural(row.tied, 'tied with {0} other run(s) at this value', 'tied with {0} other run(s) at this value') : uiText('rank within this comparable group')))}>
         #{row.rank}{((row.tied ? uiText(' (tie)') : ''))}</span>)
   // The caveat rides in the OBJECTIVE cell, beside the number it qualifies, and not in the status
   // column: this table's whole job is to say which recorded value led, and a qualifier one column
@@ -2651,12 +2651,12 @@ export function CrossRunPanel({ state, onClose }) {
   </>
   return (
     <Panel title={uiText("Same-task run comparison")}
-      sub={resource.data ? `${observations} metric observation${observations === 1 ? '' : 's'}` : ''}
+      sub={resource.data ? uiPlural(observations, '{0} metric observation', '{0} metric observations') : ''}
       onClose={onClose} wide>
       <PanelResourceNotice resource={resource} label={uiText("Cross-run results")} onRetry={retry} />
       {resource.data && <div className="panel-resource-toolbar">
         <span className="muted">{uiText("task ID:")}</span><code>{((task || 'not recorded'))}</code>
-        <span className="muted">{tally.groups}{uiText(" group")}{tally.groups === 1 ? '' : 's'}{uiText(" of this task, ")}{tally.comparableGroups}{uiText(" comparable · ranked within a group only · ")}{GROUP_DEFINITION}</span>
+        <span className="muted">{uiPlural(tally.groups, '{0} group of this task, ', '{0} groups of this task, ')}{tally.comparableGroups}{uiText(" comparable · ranked within a group only · ")}{GROUP_DEFINITION}</span>
       </div>}
       {resource.data && !task && <div className="notice resource-warning" role="status">
         <b>{uiText("Same-task observations unavailable.")}</b>
@@ -2673,7 +2673,7 @@ export function CrossRunPanel({ state, onClose }) {
               (`splitClaims`, `unrankedRowTitle`): a fixed title said "provably differ" of a part
               set apart only because it recorded nothing, and a refused group's mark named no
               cause. */}
-          <b>{group.taskId} · {((group.direction === 'min' ? uiText('minimize') : uiText('maximize')))} · {group.size}{uiText(" run")}{group.size === 1 ? '' : 's'}
+          <b>{group.taskId} · {((group.direction === 'min' ? uiText('minimize') : uiText('maximize')))} · {uiPlural(group.size, '{0} run', '{0} runs')}
             {' · '}{group.partition
               ? <span title={((group.outcome === 'refused' ? uiText('these runs recorded the same comparability key, and a pair of them is refused all the same: the key groups them, it does not make them one evaluation') : uiText('these runs recorded the same comparability key, so their numbers were measured against the same declared evaluation inputs')))}>{uiText("evaluation ")}{group.partition}</span>
               : <span className="warn" title={uiText("no run in this group records what its number was measured against; unknown is not the same as comparable")}>{uiText("evaluation unrecorded")}</span>}
@@ -2722,11 +2722,11 @@ export function CrossRunPanel({ state, onClose }) {
         </div>
       })}
       {omitted > 0 && <div className="muted" style={{ marginTop: 8 }}>
-        {omitted}{uiText(" additional observation")}{omitted === 1 ? '' : 's'}{uiText(" omitted by the client render limit.")}</div>}
+        {uiPlural(omitted, '{0} additional observation omitted by the client render limit.', '{0} additional observations omitted by the client render limit.')}</div>}
       {/* Coverage, in the spirit of `conceptForest.js::forestCoverage`: what this screen ranked, and
           the far larger population it says nothing about. */}
-      {coverage && <div className="muted" style={{ marginTop: 8, fontSize: 11 }}>{uiText("This server holds ")}{coverage.runs}{uiText(" run")}{coverage.runs === 1 ? '' : 's'}; {coverage.comparableRuns}{uiText(" of them sit in ")}{coverage.comparableGroups}{uiText(" comparable group")}{coverage.comparableGroups === 1 ? '' : 's'}.
-        {' '}{coverage.noMetric}{uiText(" recorded no metric and ")}{coverage.singletonTasks}{uiText(" task/direction/evaluation")}{' '}{uiText("combination")}{((coverage.singletonTasks === 1 ? uiText(' is') : uiText('s are')))}{uiText(" the only run of their kind, so nothing on this box ranks them. ")}{/* EVALUATION is the third term since 2026-08-20: a group is
+      {coverage && <div className="muted" style={{ marginTop: 8, fontSize: 11 }}>{uiPlural(coverage.runs, 'This server holds {0} run', 'This server holds {0} runs')}; {uiPlural(coverage.comparableGroups, '{1} of them sit in {0} comparable group', '{1} of them sit in {0} comparable groups', [coverage.comparableGroups, coverage.comparableRuns])}.
+        {' '}{uiPlural(coverage.singletonTasks, '{1} recorded no metric and {0} task/direction/evaluation combination is the only run of their kind, so nothing on this box ranks them. ', '{1} recorded no metric and {0} task/direction/evaluation combinations are the only run of their kind, so nothing on this box ranks them. ', [coverage.singletonTasks, coverage.noMetric])}{/* EVALUATION is the third term since 2026-08-20: a group is
           partitioned by comparability key as well, so a task with several runs can hold several
           singletons — which is the finding, not a rounding error in this sentence. */}
         {/* UNIDENTIFIED is counted too (critic 2026-09-26): without it a box of 3 runs whose one
@@ -2740,10 +2740,10 @@ export function CrossRunPanel({ state, onClose }) {
             is said to be set apart, and the refused runs are counted on their own, split or not —
             "N of them still disagree after that split" was printed over a group no split
             touched. */}
-        {(coverage.splitProvenRuns > 0 && uiMessage(" {0} run{1} share a task and comparability key with others but provably differ from some of them in source tree or evaluation protocol, so {2} grouped by that as well.", [coverage.splitProvenRuns, coverage.splitProvenRuns === 1 ? '' : 's', coverage.splitProvenRuns === 1 ? 'it is' : 'they are']))}
-        {(coverage.splitUnrecordedRuns > 0 && uiMessage(" {0} run{1} recorded none of the source tree or protocol facets that split {2} task and key — not recorded, so not comparable with either side — and {3} grouped apart without a proven difference.", [coverage.splitUnrecordedRuns, coverage.splitUnrecordedRuns === 1 ? '' : 's', coverage.splitUnrecordedRuns === 1 ? 'its' : 'their', coverage.splitUnrecordedRuns === 1 ? 'is' : 'are']))}
-        {(coverage.refusedRuns > 0 && uiMessage(" {0} run{1} shown without a rank: a pair in {2} group provably disagrees on its evaluation, and no split by source tree or protocol separates them.", [coverage.refusedRuns, coverage.refusedRuns === 1 ? ' is' : 's are', coverage.refusedRuns === 1 ? 'its' : 'their']))}
-        {(elsewhere > 0 && uiMessage(" {0} comparable group(s) belong to other task IDs and are deliberately not shown here — their objectives are unrelated to this run.", [elsewhere]))}
+        {(coverage.splitProvenRuns > 0 && uiPlural(coverage.splitProvenRuns, ' {0} run share a task and comparability key with others but provably differ from some of them in source tree or evaluation protocol, so it is grouped by that as well.', ' {0} runs share a task and comparability key with others but provably differ from some of them in source tree or evaluation protocol, so they are grouped by that as well.'))}
+        {(coverage.splitUnrecordedRuns > 0 && uiPlural(coverage.splitUnrecordedRuns, ' {0} run recorded none of the source tree or protocol facets that split its task and key — not recorded, so not comparable with either side — and is grouped apart without a proven difference.', ' {0} runs recorded none of the source tree or protocol facets that split their task and key — not recorded, so not comparable with either side — and are grouped apart without a proven difference.'))}
+        {(coverage.refusedRuns > 0 && uiPlural(coverage.refusedRuns, ' {0} run is shown without a rank: a pair in its group provably disagrees on its evaluation, and no split by source tree or protocol separates them.', ' {0} runs are shown without a rank: a pair in their group provably disagrees on its evaluation, and no split by source tree or protocol separates them.'))}
+        {(elsewhere > 0 && uiPlural(elsewhere, ' {0} comparable group(s) belong to other task IDs and are deliberately not shown here — their objectives are unrelated to this run.', ' {0} comparable group(s) belong to other task IDs and are deliberately not shown here — their objectives are unrelated to this run.'))}
       </div>}
     </Panel>
   )

@@ -2,6 +2,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { parse } from "@babel/parser";
+import { validPluralForms } from "../src/localeCatalogue.js";
 const attrs = new Set([
   "title",
   "placeholder",
@@ -143,17 +144,34 @@ export function localizeSource(source, filename = "fixture.jsx") {
     edits = [],
     messages = new Set(),
     components = new Set(),
-    ownedVariables = new Set();
+    ownedVariables = new Set(),
+    plurals = new Set(),
+    pluralDefects = [];
   const add = (s) => {
       if (human(s)) messages.add(norm(s));
     },
     raw = (n) => source.slice(n.start, n.end);
   let changed = false;
+  // Only the `uiPlural` calls inside an already-localized call's arguments are collected: the
+  // rest of those arguments is opaque substitution data, which this collector never mined.
+  function walkPluralCalls(nodes) {
+    for (const x of nodes) {
+      if (!x || typeof x !== "object") continue;
+      if (Array.isArray(x)) walkPluralCalls(x);
+      else if (x.type === "CallExpression" && x.callee?.name === "uiPlural") walk(x);
+      else if (x.type)
+        walkPluralCalls(
+          Object.entries(x)
+            .filter(([k]) => !["loc", "extra", "comments"].includes(k))
+            .map(([, v]) => v),
+        );
+    }
+  }
   function copy(n) {
     if (!n) return null;
     if (
       n.type === "CallExpression" &&
-      ["uiText", "uiMessage"].includes(n.callee?.name)
+      ["uiText", "uiMessage", "uiPlural"].includes(n.callee?.name)
     )
       return null;
     if (
@@ -312,6 +330,20 @@ export function localizeSource(source, filename = "fixture.jsx") {
       n.arguments[0]?.type === "StringLiteral"
     ) {
       add(n.arguments[0].value);
+      // A substitution may itself be a plural phrase (`uiMessage('memory: {0}', [uiPlural(…)])`).
+      walkPluralCalls(n.arguments.slice(1));
+      return;
+    }
+    // `uiPlural(count, '<one>', '<other>', values?)`: the two English forms are ONE plural key
+    // (the `other` text) in the catalogue's `plurals` section, never two `messages` keys. Both
+    // forms must be literals, or no check could say which Russian forms the call needs. The count
+    // and the values are walked as ordinary code, so copy inside them is still collected.
+    if (n.type === "CallExpression" && n.callee?.name === "uiPlural") {
+      const [count, one, other, ...rest] = n.arguments;
+      if (one?.type === "StringLiteral" && other?.type === "StringLiteral")
+        plurals.add(norm(other.value));
+      else pluralDefects.push(`${filename}:${n.start} uiPlural forms must be string literals`);
+      for (const x of [count, ...rest]) walk(x, [...parents, n]);
       return;
     }
     // Translate only human prose returned by presentation helpers. Operational
@@ -541,7 +573,13 @@ export function localizeSource(source, filename = "fixture.jsx") {
       throw new Error(filename + ": " + e.message);
     }
   }
-  return { source: result, messages: [...messages], changed };
+  return {
+    source: result,
+    messages: [...messages],
+    plurals: [...plurals],
+    pluralDefects,
+    changed,
+  };
 }
 if (
   process.argv[1] &&
@@ -553,6 +591,8 @@ if (
     ),
     root = path.join(uiRoot, "src"),
     catalogue = {},
+    pluralCatalogue = {},
+    pluralDefects = [],
     files = [];
   for (const file of fs.readdirSync(root))
     if (
@@ -562,6 +602,8 @@ if (
       const full = path.join(root, file),
         r = localizeSource(fs.readFileSync(full, "utf8"), file);
       for (const key of r.messages) (catalogue[key] ??= []).push(file);
+      for (const key of r.plurals) (pluralCatalogue[key] ??= []).push(file);
+      pluralDefects.push(...r.pluralDefects);
       if (r.changed) {
         files.push(file);
         if (process.argv.includes("--write")) fs.writeFileSync(full, r.source);
@@ -616,14 +658,51 @@ if (
     const missing = Object.keys(catalogue).filter(
       (key) => !Object.hasOwn(page.messages, key),
     );
-    if (missing.length || files.length) {
-      console.error(JSON.stringify({ unlocalizedFiles: files, missing }));
+    // Plural entries are reachable ONLY through a literal `uiPlural` call, so unlike `messages`
+    // (which `uiText` also reaches with server text) an entry no call names is dead and refused.
+    const pages = page.plurals ?? {},
+      placeholders = (text) =>
+        [...text.matchAll(/\{\d+\}/g)].map((m) => m[0]).sort().join();
+    const missingPlurals = Object.keys(pluralCatalogue).filter(
+      (key) => !Object.hasOwn(pages, key),
+    );
+    const unusedPlurals = Object.keys(pages).filter(
+      (key) => !Object.hasOwn(pluralCatalogue, key),
+    );
+    const invalidPlurals = Object.entries(pages)
+      .filter(
+        ([key, forms]) =>
+          !validPluralForms(forms) ||
+          Object.values(forms).some(
+            (form) => placeholders(form) !== placeholders(key),
+          ),
+      )
+      .map(([key]) => key);
+    if (
+      missing.length ||
+      files.length ||
+      missingPlurals.length ||
+      unusedPlurals.length ||
+      invalidPlurals.length ||
+      pluralDefects.length
+    ) {
+      console.error(
+        JSON.stringify({
+          unlocalizedFiles: files,
+          missing,
+          missingPlurals,
+          unusedPlurals,
+          invalidPlurals,
+          pluralDefects,
+        }),
+      );
       process.exitCode = 1;
     }
   }
   console.log(
     JSON.stringify({
       messages: Object.keys(catalogue).length,
+      plurals: Object.keys(pluralCatalogue).length,
       files: files.length,
       chars: Object.keys(catalogue).join("").length,
     }),

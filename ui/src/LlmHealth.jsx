@@ -1,4 +1,4 @@
-import { uiText, uiMessage, useUILanguage } from './uiLanguage.js'
+import { uiText, uiMessage, uiPlural, useUILanguage } from './uiLanguage.js'
 import React, { useEffect, useId, useLayoutEffect, useRef, useState } from 'react'
 import { createIdempotencyKey, llmHealth } from './util.js'
 import { OpIcon } from './icons.jsx'
@@ -6,7 +6,6 @@ import { deadlineRequest } from './requestDeadline.js'
 import { publishModelCheck } from './modelConnection.js'
 import './llm-health.css'
 
-const countLabel = (count, singular, plural = `${singular}s`) => uiText(`${count} ${count === 1 ? singular : plural}`)
 // Outlive the server's 60s provider wall plus bounded teardown. The interaction
 // test imports this deadline so it cannot silently stop exercising timeout recovery.
 export const LLM_HEALTH_TIMEOUT_MS = 70_000
@@ -419,7 +418,7 @@ export function LlmHealth({
       {providerBlockedReason}
     </span>}
     {unsavedCount > 0 && <span id={draftNoteId} className="llm-health-note">
-      {(copy ? copy.draftNote(unsavedCount) : uiMessage("{0} excluded", [countLabel(unsavedCount, 'draft change')]))}
+      {(copy ? copy.draftNote(unsavedCount) : uiPlural(unsavedCount, '{0} draft change excluded', '{0} draft changes excluded'))}
     </span>}
     {visibleStatus && <span className="llm-health-result" role="status" aria-live="polite">
       <span className={'chip llm-health-status ' + (visibleStatus.ok ? 'ok'

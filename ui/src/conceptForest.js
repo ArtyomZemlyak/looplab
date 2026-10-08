@@ -20,6 +20,7 @@
 // key the cross-run concept surfaces need". So this fold needs NO new request and NO server work — it
 // runs over the exact array the list is showing, which is also what makes the scope shared by
 // CONSTRUCTION rather than by two code paths agreeing to filter the same way.
+import { uiPlural } from './uiLanguage.js'
 import { conceptMap, normalizeConceptId } from './conceptId.js'
 import { metricComparable, runObjective } from './runIndex.js'
 import { UNTAGGED } from './conceptShelf.js'
@@ -422,7 +423,7 @@ export function conceptScopeClaim({ scopeLabel = 'All runs', restrictToSelection
   const active = Number.isSafeInteger(activeCount) && activeCount > 0 ? activeCount : 0
   if (!restrictToSelection || !selected) return { name: scopeLabel, outOfScope: 0 }
   return {
-    name: `${active} selected run${active === 1 ? '' : 's'}`,
+    name: uiPlural(active, '{0} selected run', '{0} selected runs'),
     // Never negative: `active` is a filter OVER the selection, so it cannot exceed it — but a caller
     // that passed the two from different renders would otherwise print a negative disclosure.
     outOfScope: Math.max(0, selected - active),

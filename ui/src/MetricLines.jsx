@@ -1,4 +1,4 @@
-import { uiMessage } from './uiLanguage.js'
+import { uiMessage, uiPlural } from './uiLanguage.js'
 import { uiText, useUILanguage } from './uiLanguage.js'
 import React from 'react'
 import { fmt } from './util.js'
@@ -42,7 +42,7 @@ function MetricGroup({ name, tags, series, cols }) {
       <button type="button" className="metric-group-toggle" aria-expanded={open}
         aria-controls={groupId} onClick={() => setOpen(o => !o)}>
         <span style={{ opacity: 0.6, fontSize: 10, width: 10, display: 'inline-block' }}>{open ? '▾' : '▸'}</span>
-        {name} <span className="muted" style={{ fontWeight: 400 }}>· {tags.length}{uiText(" metric")}{tags.length === 1 ? '' : 's'}</span>
+        {name} <span className="muted" style={{ fontWeight: 400 }}>· {uiPlural(tags.length, '{0} metric', '{0} metrics')}</span>
       </button>
       {open && <div id={groupId} className="metric-group-grid"
         style={{ display: 'grid', gridTemplateColumns: `repeat(${cols}, minmax(0,1fr))`, gap: 10 }}>
