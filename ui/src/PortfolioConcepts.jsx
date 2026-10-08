@@ -359,7 +359,7 @@ export default function PortfolioConcepts({
         <button type="button" className="btn sm" onClick={collapseAll}>{uiText("Collapse all")}</button>
       </div>
       {search && <p className="pc-search-result" role="status">
-        {matches.size}{uiText(" matching concept")}{matches.size === 1 ? '' : 's'}{uiText(" highlighted in the tree.")}{((matches.size > 0 && uiText(' Matching paths stay open until search is cleared. Press Enter to focus the first match.')))}
+        {matches.size}{((matches.size === 1 ? uiText(" matching concept") : uiText(" matching concepts")))}{uiText(" highlighted in the tree.")}{((matches.size > 0 && uiText(' Matching paths stay open until search is cleared. Press Enter to focus the first match.')))}
       </p>}
     </div>
 

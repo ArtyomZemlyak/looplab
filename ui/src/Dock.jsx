@@ -700,7 +700,9 @@ export default function Dock({ runId, live, liveSeq, expectedGeneration, timelin
   onKindFiltersChange = null, focusOnMount = false, onInitialFocus = null,
   collapseControlRef = null, startOverState = null, onStartOver = null, evalStages = null,
   externalMode = false }) {
-  useUILanguage()
+  // The revision moves on an EN↔RU switch and when the catalogue arrives; the search index below
+  // holds NARRATED text, so it is rebuilt then or a Russian query matches only English rows.
+  const [, , localeRevision] = useUILanguage()
 
   const log = timeline.rows
   const collapseButtonRef = useRef(null)
@@ -902,7 +904,7 @@ export default function Dock({ runId, live, liveSeq, expectedGeneration, timelin
     let rawPreview = ''
     try { rawPreview = JSON.stringify(event.data ?? {}).slice(0, 500) } catch { /* cyclic/malformed data */ }
     return { event, search: `${event.type || ''} ${narration} ${rawPreview}`.toLowerCase() }
-  }), [log])
+  }), [log, localeRevision])
   const filterQuery = filter.trim().toLowerCase()
   const kindMatch = (e) => kinds.size === 0 || kinds.has(TYPE2GROUP[e.type] || 'lifecycle')
 

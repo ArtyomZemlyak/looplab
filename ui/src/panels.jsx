@@ -1100,7 +1100,10 @@ export { ConfigPanel, __testPublicConfigForm } from './ConfigPanel.jsx'
 // operator who followed that hint set it, saw the tab stay empty, and concluded prompts do not exist.
 const AUTHORING_KIND_ENV = { prompts: 'LOOPLAB_PROMPT_DIR', skills: 'LOOPLAB_SKILLS_DIR', knowledge: 'LOOPLAB_KNOWLEDGE_DIR', memory_skills: 'LOOPLAB_MEMORY_DIR' }
 
-const AUTHORING_KIND_PURPOSE = {
+// A FUNCTION, not a module constant: `uiText` reads the language when it runs, so copy built at
+// chunk load stays in whatever language the page opened in after an EN↔RU switch. The panel calls
+// it at render, behind its own `useUILanguage()` subscription.
+const authoringKindPurpose = () => ({
   prompts: {
     what: <><b>{uiText("Role prompt overrides.")}</b>{uiText(" A file named ")}<code>{"<prompt key>.md"}</code>{uiText(" REPLACES the built-in system prompt for that role, and is re-read on every call — an edit lands on the next agent turn with no restart.")}</>,
     disclosure: <>{uiText("A file whose name is not a known prompt key is never looked up: the built-in default keeps running, silently. The key list is ")}<code>{"looplab/core/prompts.py::PROMPT_KEYS"}</code>.</>,
@@ -1118,7 +1121,7 @@ const AUTHORING_KIND_PURPOSE = {
     what: <><b>{uiText("Free-form notes")}</b>{uiText(" for the agents to retrieve with ")}<code>{"kb_search"}</code>{uiText(" — anything worth keeping that is not a per-run finding.")}</>,
     disclosure: <>{uiText("The same directory the agents write to with their own ")}<code>{"remember"}</code>{uiText(" tool, and the same files Lab → Memory → Knowledge shows read-only. So this is the one kind BOTH you and the runs write.")}</>,
   },
-}
+})
 
 export function AuthoringPanel({
   onClose, onToast, draftStore: sharedDraftStore = null, navigationGuardOwner = 'panel',
@@ -2012,7 +2015,7 @@ export function AuthoringPanel({
       <div className="muted" style={{ fontSize: 11, marginBottom: 10, lineHeight: 1.5 }}>
         <b>{uiText("You")}</b>{uiText(" write these Markdown files; agents read them during runs. Run-written lessons, cases and meta-notes live in ")}<b>{uiText("Memory")}</b>. <b>{uiText("Prompts")}</b>{uiText(" and ")}<b>{uiText("skills")}</b>{uiText(" have no default directory—configure one in Settings. The exception is ")}<b>{uiText("memory_skills")}</b>{uiText(": those cards are written by the runs and shown here read-only, because the party who has to judge a distilled technique is you.")}</div>
       <div className="muted" style={{ fontSize: 11, marginBottom: 10, lineHeight: 1.5 }}>
-        {AUTHORING_KIND_PURPOSE[kind]?.what}{' '}{AUTHORING_KIND_PURPOSE[kind]?.disclosure}
+        {authoringKindPurpose()[kind]?.what}{' '}{authoringKindPurpose()[kind]?.disclosure}
       </div>
       <PanelResourceNotice resource={source} label={uiMessage("{0} files", [kind])} onRetry={retry} />
       {dirtyCount > 0 && <div className="notice" role="status" style={{ marginBottom: 10 }}>
@@ -2115,13 +2118,15 @@ export function AuthoringPanel({
 // line. Until then a case was injected into nothing and this copy said so; the kind was fixed
 // rather than deleted because the meta-note beside it carries the STORY and not the recipe
 // (docs/guide/memory.md measures that on the one real row in the shared store).
-const MEMORY_TAB_PURPOSE = {
+// Built at render for the same reason as `authoringKindPurpose`: a module-level constant froze the
+// language at chunk load.
+const memoryTabPurpose = () => ({
   lessons: <><b>{uiText("What generalizes.")}</b>{uiText(" One distilled claim per theme — a verdict (supported / tested / failed) plus the nodes it came from — written by the run's own reflection when the run ends. ")}<b>{uiText("This is the tier that changes the next run")}</b>{uiText(": the best fingerprint matches are pasted straight into the next Researcher / Developer prompt.")}</>,
   cases: <><b>{uiText("The winning run's exact configuration.")}</b>{uiText(" The parameter dict that produced the best metric on this task, the metric itself, and the rationale that proposed them. Upserted at run end and only when the metric BEATS the stored one, so there is exactly one active row per task and objective — a leaderboard, not a history.")}{' '}
     <b>{uiText("Pasted into the next Researcher prompt for the SAME task")}</b>{uiText(", one line beside the note below — the note says why it won, this says what to set. Also readable through ")}<code>{"kb_search"}</code>{uiText(", where cases share one top-3 index with the knowledge notes.")}</>,
   notes: <><b>{uiText("One line per finished run")}</b>{uiText(" — what won, and (when the model was reachable) why it may have won. Injected verbatim into the next run of the ")}<b>{uiText("same")}</b>{uiText(" task, last 3. This is the CAUSAL twin of a case: same win, written as the reason instead of as the recipe — and on a real run it names one hyperparameter where the case carries all of them.")}</>,
   knowledge: <><b>{uiText("Free-form Markdown")}</b>{uiText(" — the only tier a human writes directly. Edit it under Lab → Authoring → knowledge; the agents also write here through their own ")}<code>{"remember"}</code>{' '}{uiText("tool. Read back through ")}<code>{"kb_search"}</code>{uiText(", alongside cases.")}</>,
-}
+})
 
 function MemoryCompletenessNotice({ resource, onRetry, error = false, children }) {
   useUILanguage()
@@ -2338,7 +2343,7 @@ export function MemoryPanel({ onClose }) {
       {/* Per-tab purpose: the four tiers differ in who reads them back, which is the only difference
           an operator can act on. */}
       <div className="muted" style={{ fontSize: 11, marginBottom: 10, lineHeight: 1.5 }}>
-        {MEMORY_TAB_PURPOSE[tab]}
+        {memoryTabPurpose()[tab]}
       </div>
       {tab !== 'knowledge' && selectedReceipt?.windowDigest && <div className="muted"
         style={{ fontSize: 11, marginBottom: 10 }}>{uiText("Snapshot ")}<code>{selectedReceipt.windowDigest.slice(0, 16)}</code>

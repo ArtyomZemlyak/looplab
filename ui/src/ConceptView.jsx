@@ -370,7 +370,11 @@ export function legacyAxisFallbackPresent(state) {
 // Mirror all inputs used by projection + concept_metrics. Same-count retags, renames,
 // lifecycle/status/provenance changes, champion changes, typed edges,
 // feasibility and robust metrics refresh; an engine-liveness-only SSE tick does not.
-export function conceptProjectionKey(state) {
+// `observedSeq` is the event sequence the caller's state was folded at — the `/state` ENVELOPE's
+// `seq` (live) or the resolved historical seq. The folded RunState itself carries no `seq`, so keying
+// on `state.seq` alone read `undefined` forever and a fold-only change (a `reward_hack_suspected`
+// row after a node terminal) never refreshed concept effects.
+export function conceptProjectionKey(state, observedSeq = state?.seq) {
   const nodes = entries(state?.nodes).map(([key, node]) => [
     key, node?.id, node?.attempt, node?.status, node?.metric, node?.confirmed_mean,
     node?.feasible, !!node?.idea, !!node?.tombstoned,
@@ -386,7 +390,7 @@ export function conceptProjectionKey(state) {
     .map(([key, receipt]) => [key, receiptKey(receipt)])
   // Some measurement rulers are fold-internal. An event-prefix change must refresh their
   // effects even when the public scalar metric stayed identical. Liveness ticks keep seq stable.
-  return JSON.stringify([state?.seq, state?.direction || 'max', state?.best_node_id ?? null,
+  return JSON.stringify([observedSeq ?? null, state?.direction || 'max', state?.best_node_id ?? null,
     entries(state?.node_concepts), entries(state?.node_concept_provenance),
     materializationReceipts, receiptKey(state?.run_base_concept_receipt),
     entries(state?.concept_consolidation), edges, nodes, state?.aborted_nodes || []])
@@ -425,7 +429,7 @@ function StateCard({ tone, title, body, action, secondaryAction, pending = false
 // experiment the pane is answering about — without it the pane and the tree read as two unrelated
 // surfaces that happen to be side by side.
 export default function ConceptView({ runId, generation, sequence: displayedSequence, state, onPickNode,
-  selectedNodeId = null, onOpenLineage = null }) {
+  selectedNodeId = null, onOpenLineage = null, observedSeq = null }) {
   useUILanguage()
 
   const runKey = String(runId)
@@ -497,7 +501,8 @@ export default function ConceptView({ runId, generation, sequence: displayedSequ
   const pendingRequest = useRef(null)
   const latestRequest = useRef(null)
   const launchLatest = useRef(null)
-  const projectionKey = useMemo(() => conceptProjectionKey(state), [state])
+  const projectionKey = useMemo(() => conceptProjectionKey(state, observedSeq ?? state?.seq),
+    [state, observedSeq])
   const requestedSeq = displayedSequence == null ? null : displayedSequence
   const runDerivedLenses = derivedLenses.filter(item => item.scope === lensScope)
   const activeDerived = runDerivedLenses.find(item => item.name === lens)
