@@ -158,14 +158,14 @@ def author_next(rd, task, state, events, *, skipped=None) -> Optional[dict]:
     from looplab.engine.seed_archive import verified_seed_archive
     from looplab.engine.upstream_state import (_source_receipt, active_base, repair_probe_covers,
                                                upstream_candidates)
-    upstream = getattr(task, "upstream", None)
+    upstream = task.upstream
     if not upstream:
         return None
     ids, spent = _attempted(events)
     if spent >= AUTHOR_MAX_PER_RUN:
         return None
     try:
-        active = active_base(events, getattr(task, "seed_base", None))
+        active = active_base(events, task.seed_base)
     except Exception:  # noqa: BLE001 — an unreadable base is the lane's refusal to state; the author waits
         return None
     memo = skipped if isinstance(skipped, dict) else {}

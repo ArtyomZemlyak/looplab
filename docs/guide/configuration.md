@@ -90,8 +90,8 @@ and read leniently by read-only commands.
 ## Web editors, schema and concurrent saves
 
 The owner Web UI does not build forms by reflecting arbitrary Python fields in the browser. It fetches a
-server-owned curated catalogue with **259 of the 294 direct `Settings` fields in 10 groups**. The default
-**Essential** disclosure mode contains 19 high-frequency keys; search spans all 259 catalogued keys.
+server-owned curated catalogue with **260 of the 295 direct `Settings` fields in 10 groups**. The default
+**Essential** disclosure mode contains 19 high-frequency keys; search spans all 260 catalogued keys.
 Uncatalogued fields remain valid through environment/config/CLI inputs and are preserved by sparse Web
 writes. Which fields are catalogued is not a matter of taste: every `Settings` field is either a row or
 listed in `settings_ui_schema.py::SETTINGS_UI_SCHEMA_UNCURATED_FIELDS` with the reason the form omits it,

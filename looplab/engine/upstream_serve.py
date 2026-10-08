@@ -107,7 +107,7 @@ def live_queue(events, cursor: Optional[int] = None) -> dict:
     below the cursor whose own receipt is missing reads `settled`, never `pending` forever.
     `cursor` is that fold's value when the caller has it; folded here otherwise."""
     if cursor is None:
-        from looplab.events.replay import fold
+        from looplab.engine.shared import engine_fold as fold
         cursor = int(fold(events).lane_ops_done or 0)
     requests = [e for e in events if e.type == "lane_op_requested"]
     done = {}

@@ -330,8 +330,13 @@ def test_roles_is_no_longer_a_god_module():
     Researcher's one structured call takes its artifact half — the cue, the emit model, the drop —
     from ONE `agents/artifact_ideas.py::artifact_turn`, and those are the import and the call; the
     rest folded into existing lines. The cap moves to measured + 1.
+
+    `roles.py` 877 -> 882 on 2026-10-08 (doc 73 §2.5, the live upstream lane): `DeveloperResult`
+    gains `authored_base`, the base a Developer call authored on, decided by the ENGINE under the
+    call lock — a field of the envelope every build already reads, with its why-comment, so it
+    cannot live elsewhere. The cap moves to measured + 1.
     """
-    caps = {"agents/roles.py": 878, "agents/role_prompts.py": 344, "agents/state_brief.py": 646,
+    caps = {"agents/roles.py": 883, "agents/role_prompts.py": 344, "agents/state_brief.py": 646,
             "agents/role_wrappers.py": 467, "agents/toy_roles.py": 133}
     sizes = {rel: len((_PKG / rel).read_text(encoding="utf-8").splitlines()) for rel in caps}
     over = {rel: (n, caps[rel]) for rel, n in sizes.items() if n >= caps[rel]}
