@@ -5,8 +5,8 @@ persisted replies can be published after restart without calling the model.
 """
 from __future__ import annotations
 
-import json
 import logging
+import os
 import threading
 import time
 from pathlib import Path
@@ -17,13 +17,15 @@ import orjson
 from fastapi import HTTPException
 from pydantic import BaseModel, ConfigDict, Field
 
-from looplab.core.atomicio import file_identity, strict_atomic_write_bytes
+from looplab.core.atomicio import file_identity, same_file_entry, strict_atomic_write_bytes
 from looplab.core.config import read_config_snapshot
-from looplab.core.node_evidence import read_bounded_regular_file
+from looplab.core.jsonutil import strict_json_loads
+from looplab.core.node_evidence import open_untrusted_regular, read_bounded_regular_file
 from looplab.core.output_language import language_messages
 from looplab.core.parse import strip_think
 from looplab.core.redact import redact_secrets
-from looplab.events.eventstore import InterprocessLockContended, interprocess_lock
+from looplab.events.eventstore import InterprocessLockContended, decode_event_record, interprocess_lock
+from looplab.events.types import FENCE_NEUTRAL_EVENTS
 from looplab.serve.capability_store import store_process_lock
 from looplab.serve.paid_work import flush_pending_run_costs, metered_run_client
 
@@ -32,6 +34,8 @@ _MAX_BYTES = 4 * 1024 * 1024
 _MAX_JOBS = 2000
 _log = logging.getLogger("looplab.server")
 _TOKEN = r"^[0-9a-f]{64}$"
+# The most bytes of NEW log one no-work tick may scan before it gives up and does the full pass.
+_QUIET_SCAN_MAX = 1024 * 1024
 
 
 def _stamp(rd):
@@ -71,18 +75,9 @@ def _load(rd: Path) -> _Store | None:
     raw = read_bounded_regular_file(path, _MAX_BYTES)
     if raw is None:
         raise ValueError("commentary store unavailable")
-    def unique_object(pairs):
-        value = {}
-        for key, item in pairs:
-            if key in value:
-                raise ValueError("duplicate commentary store field")
-            value[key] = item
-        return value
-
-    try:
-        data = json.loads(raw, object_pairs_hook=unique_object)
-    except RecursionError as exc:
-        raise ValueError("commentary store nesting invalid") from exc
+    # The shared strict reader: a duplicate member, a non-finite constant and a too-deep document are
+    # each a `ValueError`, so a store two readers could read differently authorizes nothing.
+    data = strict_json_loads(raw)
     if not isinstance(data, dict) or type(data.get("version")) is not int:
         raise ValueError("commentary store version invalid")
     store = _Store.model_validate(data)
@@ -133,6 +128,12 @@ class ResultCommentaryService:
         self.stop_event = threading.Event()
         self.thread = None
         self.idle = {}
+        # rd -> (the log's `same_file_entry`, the other three `_stamp` identities, the log's exact
+        # identity, the byte offset scanned to) after a pass that left NO work pending. A live run
+        # changes `events.jsonl` every tick, so the exact-stamp `idle` skip never fired on one and
+        # every 2 s tick took a `ui_llm` activity lease (which makes delete/reset answer 409) and
+        # read + folded the whole log 2-3 times before learning there was nothing to explain.
+        self.quiet = {}
 
     def start(self):
         self.started_at = time.time()
@@ -158,6 +159,7 @@ class ResultCommentaryService:
             return
         present = {child.name for child in children}
         self.idle = {rd: stamp for rd, stamp in self.idle.items() if rd.name in present}
+        self.quiet = {rd: mark for rd, mark in self.quiet.items() if rd.name in present}
         for child in children:
             if self.stop_event.is_set():
                 break
@@ -176,15 +178,71 @@ class ResultCommentaryService:
         if after[:2] == before[:2]:
             self.idle[rd] = after
 
+    def _remember_quiet(self, rd, before):
+        """A pass ended with nothing left to do as of `before`. Only the log may grow past it; the
+        offset is `before`'s size, so a row appended DURING the pass is scanned again next tick."""
+        self._remember_idle(rd, before)
+        if before[0] is not None:
+            self.quiet[rd] = (before[0][:2], before[1:], before[0], before[0][2])
+
+    def _still_quiet(self, rd, before) -> bool:
+        """Whether every row appended since the last no-work pass is FENCE-NEUTRAL, read off the
+        log's new bytes alone — no lease, no fold, no `log_integrity`.
+
+        `events/types.py::FENCE_NEUTRAL_EVENTS` is the set used because it is the registry's own
+        statement of rows that move no decision: a diagnostic row is fold-ignored, so it cannot move
+        a receipt or its evidence token, and `llm_usage` moves only the cost no receipt carries. It
+        is an ALLOW-list: any other type — a terminal, a finish, a node, a trust or confirm row, a
+        type this build does not know — and anything unreadable (a replaced or shrunk log, an
+        undecodable line, more than `_QUIET_SCAN_MAX` new bytes) answers False and the full fenced
+        pass runs. A changed config, job store or presentation ledger does the same."""
+        mark = self.quiet.get(rd)
+        current = before[0]
+        if mark is None or current is None:
+            return False
+        entry, others, identity, offset = mark
+        if others != before[1:] or current[:2] != entry or current[2] < offset:
+            return False
+        if current[2] == offset:
+            return current == identity  # same size but rewritten: never assume quiet
+        if current[2] - offset > _QUIET_SCAN_MAX:
+            return False
+        try:
+            with open_untrusted_regular(rd / "events.jsonl") as fh:
+                if same_file_entry(os.fstat(fh.fileno())) != entry:
+                    return False
+                fh.seek(offset)
+                raw = fh.read(current[2] - offset)
+        except OSError:
+            return False
+        end = raw.rfind(b"\n") + 1  # only COMPLETE rows; a torn tail is rescanned next tick
+        for line in raw[:end].splitlines():
+            if not line.strip():
+                continue
+            try:
+                obj = orjson.loads(line)
+                if not isinstance(obj, dict):
+                    return False
+                rows = decode_event_record(obj)
+            except (ValueError, TypeError, RecursionError):
+                return False  # An undecodable row: the full fenced pass decides what it means.
+            if any(row.type not in FENCE_NEUTRAL_EVENTS for row in rows):
+                return False
+        self.quiet[rd] = (entry, others, current, offset + end)
+        return True
+
     def process_run(self, rd: Path):
         from looplab.serve.result_notices import _comments, _receipts, ledger_has_room, publish_internal
 
         before = _stamp(rd)
         if self.idle.get(rd) == before:
             return
+        if self._still_quiet(rd, before):
+            return  # Only neutral rows since a no-work pass: no lease, no read of the whole log.
+        self.quiet.pop(rd, None)
         settings = read_config_snapshot(rd / "config.snapshot.json")
         if settings.external_harness or settings.backend != "llm" or not settings.assistant_result_commentary:
-            self._remember_idle(rd, before)
+            self._remember_quiet(rd, before)
             return
         process_lock = store_process_lock(rd / _FILE)
         if not process_lock.acquire(blocking=False):
@@ -193,21 +251,24 @@ class ResultCommentaryService:
             with interprocess_lock(rd / (_FILE + ".lock"), required=True, blocking=False):
                 generation = self.srv.commands.run_generation(rd)
                 with self.srv.commands.run_activity(rd, "ui_llm", generation=generation):
-                    generation, receipts = _receipts(self.srv, rd, generation)
+                    source = {}
+                    # ONE read and ONE fold per processed tick: the history check and the paid
+                    # call's context read the same fold the receipts were derived from.
+                    generation, receipts = _receipts(self.srv, rd, generation, source)
+                    events, folded = source["events"], source["state"]
                     comments = _comments(rd)
                     if not flush_pending_run_costs(self.srv, rd):
                         return
                     store = _load(rd)
                     if store is None or store.generation != generation:
-                        events = self.srv.events(rd)
                         recent = any(e.type == "run_started" and e.ts >= self.started_at for e in events)
                         # Absent OR another generation's store: either way nothing here has been
                         # explained yet, and a run that finished before this server started must
                         # not buy its run-level receipt (the node receipts are cut by `after_seq`).
-                        if (self.srv.state(rd).finished and not recent
+                        if (folded.finished and not recent
                                 and not any(r["completed_at"] is not None
                                             and r["completed_at"] >= self.started_at for r in receipts)):
-                            self._remember_idle(rd, before)
+                            self._remember_quiet(rd, before)
                             return  # Opening old finished runs must not pay for their history.
                         # A store from ANOTHER generation is no licence to explain history: a run
                         # restored or replaced while the server was down would otherwise buy one
@@ -258,7 +319,7 @@ class ResultCommentaryService:
                             try:
                                 current = self.srv.llm_settings(rd)
                                 current = current.model_copy(update={"llm_timeout": min(current.llm_timeout, 30.0)})
-                                state = self.srv.state(rd)
+                                state = folded
                                 node = state.nodes.get(row.get("node_id", row.get("selected_node")))
                                 context = {"goal": redact_secrets(state.goal)[:1500], "receipt": row,
                                            "candidate": redact_secrets(node.idea.rationale or "")[:1200]
@@ -317,6 +378,11 @@ class ResultCommentaryService:
                         job.status = "published"
                         _save(rd, store)
                         return  # Fairness: at most one model call/publication per run per tick.
-                    self._remember_idle(rd, before)
+                    if folded.finished and not any(row["kind"] == "run" for row in receipts):
+                        # The run receipt waits on the ENGINE's exit (`_engine_liveness`), which
+                        # writes no row: a quiet mark would sleep through it on a neutral append.
+                        self._remember_idle(rd, before)
+                    else:
+                        self._remember_quiet(rd, before)
         finally:
             process_lock.release()

@@ -18,6 +18,8 @@ from __future__ import annotations
 
 from typing import Optional
 
+from looplab.core.evidence import fence_untrusted
+
 # Proposal lifecycle, keyed on the LAST upstream row a proposal id carries.
 _STATUS_BY_TYPE = {
     "upstream_proposal_started": "proposing",
@@ -132,10 +134,18 @@ def _flag_phrase(flag: Optional[dict]) -> str:
     return f"flag `{flag['name']}` (default `{flag['default']}`, enabled `{flag['enabled']}`)"
 
 
-def developer_base_note(state) -> str:
+def developer_base_note(state, *, label: str = "") -> str:
     """The Developer's paragraph, or "" when nothing was ever promoted (every run without the
     upstream lane renders its historical bytes). States only PROMOTIONS — what is in the code a
-    lifecycle is seeded with — never a proposal still being checked, which is not in that code."""
+    lifecycle is seeded with — never a proposal still being checked, which is not in that code.
+
+    `label` is the untrusted-evidence envelope (`core/evidence.py`). Each promotion line carries a
+    MODEL-WRITTEN summary (and flag values) that reaches the build and repair prompts outside any
+    tool result, so it takes the same switch as a tool result: with a label the promotion lines are
+    one `fence_untrusted` block and the engine's own framing sentences stay outside it; with the
+    default "" the paragraph is byte-identical to the unfenced one (a prompt is a contract). The
+    caller reads the switch (`adapters/repo_developer.py::LLMRepoDeveloper._upstream_base_note`,
+    the Developer's `evidence_envelope`, itself `envelope_enabled(settings)`)."""
     promotions = upstream_board(state)["advanced"][-DEVELOPER_NOTE_MAX_PROMOTIONS:]
     if not promotions:
         return ""
@@ -147,7 +157,7 @@ def developer_base_note(state) -> str:
     return ("\n\nVERIFIED CAPABILITIES IN THIS RUN'S BASE (promoted from earlier experiments after "
             "measured equivalence and regression checks; a lifecycle that started after a promotion "
             "is seeded with it, an earlier one and its repairs keep the base they started on):\n"
-            + "\n".join(lines)
+            + fence_untrusted("\n".join(lines), label)
             + "\nWhen this node needs one of them, switch its flag on instead of re-implementing it; "
               "a failure one of them fixed is fixed in that base, so build on it rather than around "
               "it.")

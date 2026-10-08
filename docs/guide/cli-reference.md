@@ -454,6 +454,15 @@ finish, and then exits; the run stays resumable (`looplab resume`) or you can `f
 The `pause` it appends names itself as the reason (``operator stop (`looplab stop`)``), so the run's
 `stop:` line says who froze it.
 
+**Ctrl-C in `looplab run` / `looplab resume` is a stop too.** Once the engine loop has stopped, the
+interrupted command appends the same `pause` with the reason
+``operator interrupt (Ctrl-C in `looplab run`/`looplab resume`)`` — so a server started with
+`LOOPLAB_UI_AUTO_RESUME=1` leaves the run alone instead of restarting (and spending on) it, and
+`looplab resume` continues it exactly as after a stop. Only SIGINT does this: a SIGTERM (a container
+restart, the server's engine reaper) or a SIGKILL leaves the run in progress, which is what
+auto-resume exists for. Nothing is appended for a run that is already paused, finished or being
+finalized, and a failure to append never hides the interrupt.
+
 **A stop never kills a running evaluation.** An evaluation that scores writes its result as usual,
 and so does a failure the engine closes BEFORE its repair decision: a live watchdog's kill for a
 reason the repair loop does not take (`asha_underperforming`, `monitor_broken`), a refused metric
@@ -2077,10 +2086,13 @@ A node is measured only when it is evaluated in its current lifecycle AND its wo
 `.looplab-manifest` stamp matches its code — a reset or rebuilt workdir is refused, never measured.
 Results land beside the live metrics through the same row `import-metrics` writes
 (`extra_metrics_imported`, `source: track <name>`, reconstructed key by key); a recorded key can be the
-objective (`metric_retarget`). `--apply` holds `engine.lock`; output goes to `<run>/track_<name>.log`.
+objective (`metric_retarget`). `--apply` holds `engine.lock`; output goes to `<run>/track_<name>.log`,
+written once the command exits with the `env_passthrough` values and every known secret masked, as is
+the failure line printed here.
 The command runs from the node's workdir (`score_service.py` above is a file there); a track
 declaring `env_passthrough` (credential NAMES read from the engine's environment) runs from the run
-directory instead, so it names the node's files through `{workdir}`.
+directory instead — decided by the declaration, not by which names this host holds — so it names the
+node's files through `{workdir}`.
 
 ## `import-metrics`
 

@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import atexit
 import logging
+import math
 import os
 import re
 import signal
@@ -807,39 +808,83 @@ def _pending_intent_is_auto_only(events, state) -> bool:
     return saw_auto
 
 
-# THE TWO BOUNDS on an auto-resume (critic 2026-10-08). A Ctrl-C'd CLI run writes no `run_finished`
-# and no pause, so without them every such run under the root — months old included — was resumed at
-# once on each server start, a concurrent LLM spend with no cap by default. A run last seen alive
-# more than `MAX_AGE_H` hours ago is left for a human; at most `MAX_RUNS` are resumed per scan.
+# THE TWO BOUNDS on an auto-resume (critic 2026-10-08). A crashed or killed engine writes no
+# `run_finished` and no pause (a Ctrl-C'd CLI run now records the operator's pause,
+# `cli/run_cmds.py::_record_interrupt_pause`, but a SIGKILL, an OOM or a power cut cannot), so without
+# them every such run under the root — months old included — was resumed at once on each server
+# start, a concurrent LLM spend with no cap by default. A run last seen alive more than `MAX_AGE_H`
+# hours ago is left for a human; at most `MAX_RUNS` are resumed per scan.
 AUTO_RESUME_MAX_AGE_ENV = "LOOPLAB_UI_AUTO_RESUME_MAX_AGE_H"
 AUTO_RESUME_MAX_RUNS_ENV = "LOOPLAB_UI_AUTO_RESUME_MAX_RUNS"
 _AUTO_RESUME_MAX_AGE_H = 24.0
 _AUTO_RESUME_MAX_RUNS = 4
 
 
-def _auto_resume_bound(name: str, default: float) -> float:
-    try:
-        value = float(os.environ.get(name, "") or default)
-    except ValueError:
+def _auto_resume_bound(name: str, default: float, *, integer: bool = False) -> float:
+    """One bound's value, TOTAL over whatever the environment holds (review 2026-10-08).
+
+    THE RULE: unset or empty is the default, silently; anything else that is not a FINITE number
+    above zero — garbage, `0`, a negative, `inf`/`nan`/`1e999`, and for an `integer` bound anything
+    that is not a whole number (`2.5`) — is ALSO the default, with a WARNING naming the variable.
+    Never raises: `int(float("1e999"))` used to raise `OverflowError` in the startup scan and the
+    server did not start, while `0` meant the default, `0.5` meant off and `0` hours meant 24 — three
+    spellings of one question. There is no "0 = off" spelling: auto-resume is turned off by
+    `LOOPLAB_UI_AUTO_RESUME` itself."""
+    raw = str(os.environ.get(name, "") or "").strip()
+    if not raw:
         return default
-    return value if value > 0 else default
+    try:
+        value = int(raw) if integer else float(raw)
+    except (ValueError, OverflowError):
+        value = None
+    if value is None or not math.isfinite(value) or value <= 0:
+        _log.warning("%s=%r is not a %s above zero; using the default %s", name, raw[:40],
+                     "whole number" if integer else "finite number", default)
+        return default
+    return value
 
 
-def _last_alive_ts(rd: Path, events, state) -> Optional[float]:
+def _last_alive_ts(rd: Path, events, state, *, now: Optional[float] = None) -> Optional[float]:
     """When the run was last seen ALIVE: its last event, or the newest stage log of a node it was
     still evaluating (critic 2026-10-08, second round: one long training stage writes no event while
     it runs, so a restart at hour 20 of a 24-hour stage read as a stale run and was never resumed).
-    Bounded: the pending nodes' own top-level `*.log` files, nothing deeper."""
-    stamps = [float(events[-1].ts)] if events and isinstance(events[-1].ts, (int, float)) else []
+    Bounded: the pending nodes' own top-level `*.log` files, nothing deeper.
+
+    A LOG STAMP IS CANDIDATE-WRITTEN EVIDENCE, so it is CLAMPED (review 2026-10-08): the candidate
+    owns that directory, and an `os.utime` into the future (or a skewed clock on a shared mount) made
+    the run look alive forever and defeated `MAX_AGE_H`. A log can extend the last event by at most
+    ONE launch — no launch outlives the per-launch ceiling (`Settings.max_launch_timeout_s`, read off
+    the run's snapshot; the absolute 7-day `LAUNCH_TIMEOUT_LIMIT_S` when it cannot be read) — and
+    never past `now`. A stage the operator declared longer than that ceiling is therefore resumable
+    for `MAX_AGE_H` past it and then left for a human: the conservative direction."""
+    now = time.time() if now is None else float(now)
+    last = float(events[-1].ts) if events and isinstance(events[-1].ts, (int, float)) else None
+    stamps = [last] if last is not None else []
+    ceiling = now
+    if last is not None:
+        ceiling = min(now, last + _launch_ceiling_s(rd))
     for node in list(state.pending_nodes())[:32]:
         try:
             with os.scandir(rd / "nodes" / f"node_{node.id}") as it:
                 for entry in it:
                     if entry.name.endswith(".log") and entry.is_file(follow_symlinks=False):
-                        stamps.append(entry.stat(follow_symlinks=False).st_mtime)
+                        stamp = entry.stat(follow_symlinks=False).st_mtime
+                        if math.isfinite(stamp):
+                            stamps.append(min(stamp, ceiling))
         except OSError:
             continue
     return max(stamps) if stamps else None
+
+
+def _launch_ceiling_s(rd: Path) -> float:
+    """The run's per-launch wall-clock ceiling, for `_last_alive_ts`'s clamp — or the absolute one."""
+    from looplab.core.config import read_config_snapshot
+    from looplab.core.numeric import LAUNCH_TIMEOUT_LIMIT_S
+    try:
+        value = float(read_config_snapshot(rd / "config.snapshot.json").max_launch_timeout_s)
+    except (OSError, ValueError, TypeError, KeyError, AttributeError):
+        return LAUNCH_TIMEOUT_LIMIT_S
+    return value if math.isfinite(value) and value > 0 else LAUNCH_TIMEOUT_LIMIT_S
 
 
 def _request_auto_resume(rd: Path, store, events, state, *,
@@ -886,9 +931,10 @@ def _request_auto_resume(rd: Path, store, events, state, *,
             return False
     except (RunResetStorageError, RunDeletionStorageError, OSError):
         return False
-    last_alive = _last_alive_ts(rd, events, state)
+    now = time.time() if now is None else now
+    last_alive = _last_alive_ts(rd, events, state, now=now)
     max_age_s = _auto_resume_bound(AUTO_RESUME_MAX_AGE_ENV, _AUTO_RESUME_MAX_AGE_H) * 3600.0
-    if last_alive is None or ((time.time() if now is None else now) - last_alive) > max_age_s:
+    if last_alive is None or (now - last_alive) > max_age_s:
         return False
     if _spawn_liveness(rd) is not False or not _resolve_task_file(rd):
         return False
@@ -980,7 +1026,10 @@ def install_resume_reconcile_hooks(
             run_dirs = list(root.iterdir()) if root.exists() else []
         except OSError:
             return
-        auto_left = [int(_auto_resume_bound(AUTO_RESUME_MAX_RUNS_ENV, _AUTO_RESUME_MAX_RUNS))]
+        # Read only when auto-resume is ON: the bound means nothing otherwise, and a value it
+        # cannot parse must never cost the server its startup (`_auto_resume_bound`).
+        auto_left = [int(_auto_resume_bound(AUTO_RESUME_MAX_RUNS_ENV, _AUTO_RESUME_MAX_RUNS,
+                                            integer=True)) if auto else 0]
 
         def _scan_run(rd: Path) -> None:
             if not (rd / "events.jsonl").is_file():
