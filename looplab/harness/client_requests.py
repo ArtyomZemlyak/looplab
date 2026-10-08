@@ -15,13 +15,22 @@ from pathlib import Path
 from urllib.parse import quote, urlsplit
 
 from looplab.core.atomicio import strict_atomic_write_bytes
+from looplab.core.redact import secret_env_values
 from looplab.core.node_evidence import read_bounded_regular_file
 from looplab.events.eventstore import interprocess_lock
-from looplab.serve.command_identity import command_identity
 
 MAX_RECORD_BYTES = 1100 * 1024
 MAX_RECORDS = 2000
-_HEX = r"[0-9a-f]{64}"
+# The server accepts `^[0-9a-fA-F]{64}$` and compares `.lower()`; the client stores the
+# lower-case spelling so both spellings of one generation share one directory.
+_GENERATION = r"[0-9a-fA-F]{64}"
+# Routes whose server scopes `action_id` NARROWER than (route, run): the identity must carry
+# the scoping body field too, or the client refuses a reuse the server accepts.
+# `harness/checkpoints.py::respond` keys an answer on `checkpoint_id` alone (its `action_id` is a
+# recorded field), so "answer" may be reused across checkpoints. Every other route keys on
+# (run, action_id) or wider (upstream's one namespace), so its identity is unchanged and records
+# already saved still read back.
+ACTION_SCOPE_FIELDS = {"harness-checkpoints": ("checkpoint_id",)}
 ACTION_ROUTES = frozenset({
     "harness-decisions", "harness-reviews", "harness-checkpoints", "harness-hypotheses",
     "harness-selection/verify", "harness-selection/values", "lessons", "skill-candidates",
@@ -43,6 +52,32 @@ def _normal(path, *, directory=False):
     if ((not stat.S_ISDIR(info.st_mode) if directory else not stat.S_ISREG(info.st_mode))
             or getattr(info, "st_file_attributes", 0) & 0x400):
         raise ValueError("client request source is not a regular directory/file")
+
+
+class ClientRequestRefused(ValueError):
+    """The AUTHORED request was refused before saving; storage itself did not fail.
+
+    A `ValueError` so every existing handler still contains it as not_sent; `code` and
+    `message` are fixed strings (never the caller's text) so `HarnessAPI.request` can say
+    what happened instead of reporting a durability failure."""
+
+    def __init__(self, code, message):
+        super().__init__(message)
+        self.code, self.message = code, message
+
+
+def _generation(value):
+    if not isinstance(value, str) or not re.fullmatch(_GENERATION, value):
+        raise ValueError("invalid client request run/generation")
+    return value.lower()
+
+
+def _bounded_id(value, what):
+    # One spelling for every authored ID that enters an identity hash.
+    if (not isinstance(value, str) or not value or len(value) > 160
+            or value != value.strip() or any(ord(c) < 32 or ord(c) == 127 for c in value)):
+        raise ClientRequestRefused("client_request_invalid", f"The request has no valid {what}; "
+                                   "nothing was saved and no HTTP request was made.")
 
 
 def _unique(pairs):
@@ -70,10 +105,9 @@ class ClientRequests:
 
     def _directory(self, run_id, generation):
         if (not isinstance(run_id, str) or not run_id or run_id in (".", "..")
-                or any(c in run_id for c in "/\\")
-                or not isinstance(generation, str) or not re.fullmatch(_HEX, generation)):
+                or any(c in run_id for c in "/\\")):
             raise ValueError("invalid client request run/generation")
-        return self.scope / _hash(_bytes([run_id, generation]))
+        return self.scope / _hash(_bytes([run_id, _generation(generation)]))
 
     def _check_directory(self, directory, *, create=False):
         for path in (self.root, self.scope, directory):
@@ -101,12 +135,17 @@ class ClientRequests:
                     or set(request) != {"method", "path", "body", "idempotency_key"}
                     or request["method"] != "POST"
                     or not isinstance(request["body"], dict)
-                    or request["body"].get("expected_generation") != generation
+                    or not isinstance(request["body"].get("expected_generation"), str)
+                    or request["body"]["expected_generation"].lower() != generation
                     or row[self.identity_field] != self._identity(request, run_id)
                     or path.name != row[self.identity_field] + ".json"
                     or row["request_sha256"] != _hash(_bytes(request))):
                 raise ValueError("client request identity/content invalid")
             return row
+        except ClientRequestRefused as exc:
+            # A SAVED record failing the authoring rules is damage, not the caller's request:
+            # never let it read as "your request has no valid action_id".
+            raise ValueError("client request identity/content invalid") from exc
         except (TypeError, RecursionError) as exc:
             raise ValueError("client request structure invalid") from exc
 
@@ -114,12 +153,17 @@ class ClientRequests:
     def _key(key, *, required=True):
         if (not isinstance(key, str) or (required and not key) or len(key) > 512
                 or any(ord(c) < 32 or ord(c) > 126 for c in key)):
-            raise ValueError("invalid request idempotency key")
+            raise ClientRequestRefused("client_request_invalid",
+                ("A command POST needs a non-empty Idempotency-Key" if required and not key
+                 else "The Idempotency-Key must be printable ASCII of at most 512 characters")
+                + "; nothing was saved and no HTTP request was made.")
 
     def _identity(self, request, run_id):
         self._key(request["idempotency_key"])
         if request["path"] != f"/api/runs/{quote(run_id, safe='')}/commands":
             raise ValueError("invalid command path")
+        # Deferred: `harness` reaches `serve` only inside a call (tests/test_package_layering.py).
+        from looplab.serve.command_identity import command_identity
         return command_identity(request["idempotency_key"])[0]
 
     def save(self, run_id, generation, body, key, *, credential=""):
@@ -129,8 +173,10 @@ class ClientRequests:
 
     def _save_request(self, run_id, generation, request, *, credential=""):
         directory = self._directory(run_id, generation)
+        generation = _generation(generation)
         body = request["body"]
-        if not isinstance(body, dict) or body.get("expected_generation") != generation:
+        if (not isinstance(body, dict) or not isinstance(body.get("expected_generation"), str)
+                or body["expected_generation"].lower() != generation):
             raise ValueError("client request body generation invalid")
         request = json.loads(_bytes(request))  # Frozen, independent of the caller's mutable dict.
         identity = self._identity(request, run_id)
@@ -140,8 +186,15 @@ class ClientRequests:
         raw = _bytes(row)
         if len(raw) > MAX_RECORD_BYTES:
             raise ValueError("client request exceeds storage limit")
-        if credential and json.dumps(credential, ensure_ascii=False)[1:-1].encode() in raw:
-            raise ValueError("client request contains the transport credential")
+        # Only a credential the redactor would treat as one is screened: the SAME public rule
+        # (`core/redact.py::secret_env_values`, its value floor and `is_secret_env`) every write
+        # boundary masks by. A short token such as "agent" is a substring of ordinary bodies,
+        # and refusing on it made those requests permanently not_sent.
+        screened = bool(credential) and bool(secret_env_values({"LOOPLAB_HARNESS_TOKEN": credential}))
+        if screened and json.dumps(credential, ensure_ascii=False)[1:-1].encode() in raw:
+            raise ClientRequestRefused("client_request_contains_credential",
+                "The request body contains the transport credential, which is never saved to "
+                "disk; remove it from the body. Nothing was saved and no HTTP request was made.")
         self._check_directory(directory, create=True)
         lock = directory / ".lock"
         if lock.exists() or lock.is_symlink():
@@ -151,7 +204,11 @@ class ClientRequests:
             if path.exists() or path.is_symlink():
                 old = self._read(path, run_id, generation)
                 if old != row:
-                    raise ValueError("original request identity already has different content")
+                    raise ClientRequestRefused("client_request_conflict",
+                        "A different request body is already saved under this identity (the "
+                        "Idempotency-Key, or the action_id in its server scope). Nothing was "
+                        "saved or sent: read saved_commands/saved_actions and resend the original "
+                        "exact body, or author a new key/action_id for a new intent.")
             else:
                 if len(self._paths(directory)) >= MAX_RECORDS:
                     raise ValueError("client request store is full")
@@ -172,6 +229,7 @@ class ClientRequests:
         if type(offset) is not int or offset < 0 or type(limit) is not int or not 1 <= limit <= 100:
             raise ValueError("invalid client request page")
         directory = self._directory(run_id, generation)
+        generation = _generation(generation)
         exists = True
         try:
             self._check_directory(directory)
@@ -202,6 +260,7 @@ class ClientRequests:
                 or (offset > 0 and expected_request_hash is None)):
             raise ValueError("invalid client request page identity")
         directory = self._directory(run_id, generation)
+        generation = _generation(generation)
         self._check_directory(directory)
         row = self._read(directory / (command_id + ".json"), run_id, generation)
         if expected_request_hash is not None and expected_request_hash != row["request_sha256"]:
@@ -231,13 +290,16 @@ class ClientActions(ClientRequests):
         if not isinstance(path, str) or not path.startswith(prefix) or path[len(prefix):] not in ACTION_ROUTES:
             raise ValueError("invalid action path")
         action_id = request["body"].get("action_id")
-        if (not isinstance(action_id, str) or not action_id or len(action_id) > 160
-                or action_id != action_id.strip() or any(ord(c) < 32 or ord(c) == 127 for c in action_id)):
-            raise ValueError("invalid action id")
+        _bounded_id(action_id, "action_id")
         suffix = path[len(prefix):]
         # Upstream uses one server-side action namespace across all operations.
         namespace = "upstream" if suffix.startswith("upstream/") else suffix
-        return "act_" + _hash(_bytes([namespace, action_id]))
+        scope = ACTION_SCOPE_FIELDS.get(suffix, ())
+        for field in scope:
+            _bounded_id(request["body"].get(field), field)
+        # An unscoped route keeps its original two-item identity byte for byte.
+        return "act_" + _hash(_bytes([namespace, action_id,
+                                      *(request["body"][field] for field in scope)]))
 
     def save_action(self, run_id, generation, path, body, key="", *, credential=""):
         return self._save_request(run_id, generation,

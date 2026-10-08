@@ -1157,8 +1157,13 @@ in separate catalogs. Reads are bounded and paged.
 If a required lock or durable save fails, `api_request` returns
 `client_request_unavailable`, `outcome=not_sent`, before that invocation's HTTP
 request. Earlier attempts can still have effects; inspect their original receipts.
-Two different bodies under one original key conflict locally. Exact retries keep
-the same saved body/key, but remain explicit actions governed by server evidence.
+Two different bodies under one original key conflict locally
+(`client_request_conflict`, also `not_sent`); a missing or invalid key, action id or
+checkpoint id is `client_request_invalid`, and a body holding the transport credential is
+`client_request_contains_credential`. A checkpoint answer's identity includes its
+`checkpoint_id`, as on the server, so one action id may answer several checkpoints.
+Exact retries keep the same saved body/key, but remain explicit actions governed by
+server evidence.
 **Recover a semantic action too.** The same private store retains original POSTs
 to `harness-decisions`, `harness-reviews`, `harness-checkpoints`,
 `harness-hypotheses`, `harness-selection/verify`, `harness-selection/values`,

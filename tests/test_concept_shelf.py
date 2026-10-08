@@ -19,6 +19,7 @@ from looplab.engine.concept_shelf import (
     bounded_row_concepts, build_shelf, run_concept_index, shelf_coverage, shelf_tree, state_concepts,
 )
 from looplab.events.digest import concept_rollup, folded_concepts, theme_rollup
+from looplab.search.concept_effects import concept_rollup_with_effects
 
 
 def _state(direction="min", **kwargs):
@@ -48,7 +49,8 @@ def test_concept_rollup_keys_whole_ids_where_theme_rollup_keys_axes():
     # the metric follows the run's direction, per-concept
     row = concept_rollup(state)["retrieval/dense"]
     assert (row["count"], row["best_metric"]) == (1, 0.5)
-    assert row["effect"]["estimate"] is None
+    assert "effect" not in row, "events/ may not run the search-side estimator"
+    assert concept_rollup_with_effects(state)["retrieval/dense"]["effect"]["estimate"] is None
     assert concept_rollup(state)["loss/contrastive/in-batch"]["count"] == 1
 
 

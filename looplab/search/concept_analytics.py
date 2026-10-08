@@ -24,7 +24,7 @@ from looplab.core.models import RunState
 # the suite still uses (`tests/test_retro_tag_persist.py` forces a CAS race through it). Same
 # hazard CLAUDE.md records for `serve/scope_actions.py` importing store names by value. Types and
 # the pure `_normalize_concept_id` wrapper are exempt: nothing patches those.
-from looplab.search import concept_tagging, concept_effects
+from looplab.search import concept_tagging, concept_effects, concept_projection
 from looplab.search.concept_graph import ConceptGraph
 
 
@@ -245,8 +245,24 @@ def concept_metrics(state: RunState, graph: ConceptGraph,
 
     # Legacy delta_* fields remain descriptive offsets, NOT attribution. All effect consumers
     # use the same evidence-bound with/without estimator, including path-subtree union semantics.
+    #
+    # The estimator reads the RECORDED membership (`current_concept_projection`), never `tags`. When
+    # `tags` is something else — the heuristic default, a CLI's unpersisted LLM map, a caller's own
+    # map — a row would count N experiments while its effect said `n_with=0` (review 2026-10-07):
+    # two populations under one concept id. Every effect is then `unavailable`, with the reason
+    # said, rather than published beside a row it does not describe. Compared per experiment node,
+    # as sets: a node absent from either side is the empty set on that side.
+    recorded = concept_projection.current_concept_projection(state).memberships
+    tags_are_recorded = all(
+        frozenset(str(c) for c in (tags.get(node.id) or ()))
+        == frozenset(recorded.get(node.id) or ()) for node in nodes)
     for bucket, subtree in ((rows, False), (rollup, True)):
-        effects = concept_effects.concept_effects(state, bucket, subtree=subtree)
+        if tags_are_recorded:
+            effects = concept_effects.concept_effects(state, bucket, subtree=subtree)
+        else:
+            effects = {cid: concept_effects.empty_effect("membership_not_recorded",
+                                                         status="unavailable")
+                       for cid in bucket}
         for cid, row in bucket.items():
             row["effect"] = effects[cid]
             row["effect_delta"] = effects[cid]["estimate"]

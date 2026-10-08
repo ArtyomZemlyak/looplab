@@ -84,7 +84,13 @@ def _pattern(key):
     return re.compile(pattern, re.DOTALL)
 
 
-_PATTERNS = [(_pattern(key), value) for key, value in _RU.items() if "{0}" in key]
+# MOST SPECIFIC FIRST: the lazy `{0}` capture of a generic template ("run {0} to reach {1}") also
+# fullmatches its longer siblings ("run {0} experiment {1} to reach {2}"), so in dictionary order the
+# specific translations were unreachable and a mixed-language sentence came out. More literal text
+# is the more specific template; ties keep dictionary order (`sorted` is stable).
+_PATTERNS = [(_pattern(key), value) for key, value in sorted(
+    ((key, value) for key, value in _RU.items() if "{0}" in key),
+    key=lambda item: -len(re.sub(r"\{\d+\}", "", item[0])))]
 
 
 def authored_text(value, language):

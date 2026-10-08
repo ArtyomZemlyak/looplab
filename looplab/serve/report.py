@@ -24,7 +24,7 @@ from looplab.engine.champion_caveats import (CHAMPION_CAVEAT_MERGED_COORDINATES,
                                              CHAMPION_CAVEAT_SALVAGED,
                                              CHAMPION_CAVEAT_TRUST_FLAGGED,
                                              champion_metric_caveats)
-from looplab.events.digest import (concept_rollup, experiments_digest, metric_scored_invalid, node_metric,
+from looplab.events.digest import (experiments_digest, metric_scored_invalid, node_metric,
                                    node_theme)
 from looplab.core.models import NodeStatus, RunState, activation_unverified
 
@@ -106,7 +106,8 @@ def _report_context(state: RunState) -> str:
     else:
         lines.append("Champion: none yet (no feasible evaluated node).")
     lines.extend(_parent_score_evidence(state))
-    concepts = concept_rollup(state)
+    from looplab.search.concept_effects import concept_rollup_with_effects
+    concepts = concept_rollup_with_effects(state)
     if concepts:
         lines.append("Concept contrasts: matched complete other-concept sets and evaluation rulers; "
                      "observational with/without evidence, not causal ablations. Positive gain "
@@ -204,9 +205,8 @@ def _parent_score_evidence(state: RunState) -> list[str]:
     """Use the completion receipt's authority, including creation-bound parent attempts."""
     from collections import Counter
 
-    from looplab.engine.comparability import comparability_status, record_of
     from looplab.events.replay import flagged_node_ids
-    from looplab.serve.node_comparison import completion_score_comparison
+    from looplab.serve.node_comparison import completion_parents, completion_score_comparison
     from looplab.serve.run_result_summary import current_trust_signals
 
     flagged = set(flagged_node_ids(state))
@@ -216,14 +216,7 @@ def _parent_score_evidence(state: RunState) -> list[str]:
     for node in sorted(state.nodes.values(), key=lambda n: n.id):
         if node.tombstoned or node.status != NodeStatus.evaluated:
             continue
-        parents = []
-        for pid in node.parent_ids[:8]:
-            parent = state.nodes.get(pid)
-            if (parent is not None and not parent.tombstoned
-                    and parent.status == NodeStatus.evaluated and pid not in state.aborted_nodes
-                    and node.parent_generations.get(str(pid)) == parent.attempt):
-                parents.append({"node_id": pid, "attempt": parent.attempt,
-                                "comparability": comparability_status(record_of(node), record_of(parent))})
+        parents = completion_parents(node, state)
         status = completion_score_comparison(node, parents, state, flagged)["status"]
         counts[status] += 1
         if status == "same":

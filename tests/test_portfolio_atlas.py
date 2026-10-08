@@ -15,9 +15,16 @@ from looplab.engine.claims import portfolio_atlas
 from looplab.engine.memory import build_concept_capsule
 
 
-def _cap(run_id, concepts, outcomes, direction="max"):
+def _cap(run_id, concepts, outcomes, direction="max", effects=None):
     return build_concept_capsule(run_id=run_id, fingerprint=["kind:dataset"], direction=direction,
-                                 concepts=concepts, concept_outcomes=outcomes)
+                                 concepts=concepts, concept_outcomes=outcomes, concept_effects=effects)
+
+
+def _matched_effect(gain):
+    """A real matched with/without receipt (`search/concept_effects.py`): since d171030 helps/hurts
+    count matched effects, never a ranked outcome, so a capsule without one has no tendency."""
+    from tests.test_concept_effects import effect, run
+    return effect(run([([], 0.5, []), (["c"], 0.5 + gain, [0])]))
 
 
 def _lesson(statement, outcome, evidence, run_id="r1"):
@@ -66,6 +73,7 @@ def test_atlas_derived_sections_use_full_rows_before_overview_cap():
         caps.append(_cap(
             f"tendency-{repeat}", ["zz/target", "zz/baseline"],
             {"zz/target": 0.9, "zz/baseline": 0.1},
+            effects={"zz/target": _matched_effect(0.3), "zz/baseline": _matched_effect(-0.3)},
         ))
     caps.append(_cap("thin", ["zz/thin"], {}))
 

@@ -22,6 +22,22 @@ test('contribution is unknown for missing, corrupted or inconsistent evidence', 
     assert.equal(conceptEffectValue(bad), null)
   }
 })
+test('a one-ulp float mean outside its range is rounding noise, not a different number', () => {
+  // Twin of `search/concept_effects.py::valid_effect`: the producer's mean of seven deltas of
+  // -0.21987892246138063 was recorded as -0.21987892246138066, one ulp below its own range.
+  const d = -0.21987892246138063, estimate = -0.21987892246138066
+  assert.ok(estimate < d)
+  const ulp = { ...effect, estimate, mean: estimate, low: d, high: d, pairs: [{ ...effect.pairs[0], delta: d }] }
+  assert.equal(validConceptEffect(ulp), true)
+  assert.equal(conceptEffectValue(ulp), estimate)
+  // Everything else stays strict: a real excursion, an inverted range, any slack around [0, 0].
+  assert.equal(validConceptEffect({ ...ulp, estimate: d * (1 + 1e-9) }), false)
+  assert.equal(validConceptEffect({ ...ulp, estimate: d * (1 - 1e-9) }), false)
+  assert.equal(validConceptEffect({ ...effect, low: 0.3, high: 0.1, estimate: 0.2 }), false)
+  const zero = { ...effect, estimate: 0, mean: 0, low: 0, high: 0, positive: 0, neutral: 1 }
+  assert.equal(validConceptEffect({ ...zero, estimate: Number.MIN_VALUE }), false)
+  assert.equal(validConceptEffect({ ...zero, estimate: -Number.MIN_VALUE }), false)
+})
 test('a measured zero remains a real comparison', () => {
   const zero = { ...effect, estimate: 0, mean: 0, low: 0, high: 0, positive: 0, neutral: 1 }
   assert.equal(conceptEffectValue(zero), 0)
@@ -43,6 +59,16 @@ test('global subtree effect comes from union receipt, never summed leaf contribu
     canonical: { 'loss/a': null }, split_sources: [],
   }).runs
   assert.equal(buildConceptForest(purged).nodes.loss.effects.size, 0)
+})
+test('an ungoverned spelling merge voids the run\'s effects like a governed rename does', () => {
+  const run = { run_id: 'r', source_integrity: { complete: true }, concepts: {
+    'Loss/A': { count: 1, effect, subtree_effects: { loss: effect, 'loss/a': effect } },
+    'loss/a': { count: 1 },
+  } }
+  const forest = buildConceptForest([run])
+  assert.equal(forest.nodes['loss/a'].directExperiments, 2)
+  assert.equal(forest.nodes['loss/a'].effects.size, 0)
+  assert.equal(forest.nodes.loss.effects.size, 0)
 })
 test('operator sees pair evidence and single-comparison caveat, not a causal promise', async () => {
   const vite = await sharedVite()

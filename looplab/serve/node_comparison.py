@@ -34,6 +34,26 @@ def public_parent_edit(node, state):
             "base_revision": (parent.metric_provenance or {}).get("base_revision")}
 
 
+def completion_parents(node, state) -> list[dict]:
+    """The parents a completion receipt may compare against: the first 8, each still evaluated,
+    live, not aborted, and at the attempt the child was created from (a reset parent cannot
+    rewrite the child's historical comparison). The ONE eligibility rule shared by the result
+    notice and the run report, so the two can never disagree about which parent counts.
+    """
+    from looplab.engine.comparability import comparability_status, record_of
+
+    parents = []
+    for pid in node.parent_ids[:8]:
+        parent = state.nodes.get(pid)
+        if (parent is None or parent.tombstoned or parent.status != "evaluated"
+                or pid in state.aborted_nodes
+                or node.parent_generations.get(str(pid)) != parent.attempt):
+            continue
+        parents.append({"node_id": pid, "attempt": parent.attempt,
+                        "comparability": comparability_status(record_of(node), record_of(parent))})
+    return parents
+
+
 def completion_score_comparison(node, parents, state, flagged):
     """Describe whether primary scores support a single-parent comparison.
 

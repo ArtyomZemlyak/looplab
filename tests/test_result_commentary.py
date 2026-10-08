@@ -280,8 +280,18 @@ def test_exhausted_existing_run_budget_blocks_provider_and_does_not_duplicate_pr
     terminal(events)
     service.process_run(rd)
     assert not model.calls
-    assert rows(service, rd, gen)[0]["commentary_status"] == "failed"
+    # Nothing was billed, so the claim is released rather than failed forever...
+    assert rows(service, rd, gen)[0]["commentary_status"] != "failed"
     assert service.srv.state(rd).llm_cost["cost"] == pytest.approx(0.02)
+    service.process_run(rd)
+    assert not model.calls, "an unchanged run is not retried on every tick"
+    # ...and the explanation is bought once the operator gives the run headroom again.
+    model.accountant = CostAccountant()
+    (rd / "config.snapshot.json").write_text(
+        Settings(backend="llm", output_language="ru", llm_budget_usd=1.0).model_dump_json())
+    service.process_run(rd)
+    assert len(model.calls) == 1
+    assert rows(service, rd, gen)[0]["commentary_status"] == "published"
 
 
 def test_durable_reply_restores_missing_presentation_journal_without_payment(tmp_path, monkeypatch):
@@ -339,3 +349,14 @@ def test_completion_arriving_during_idle_scan_is_not_marked_as_already_handled(t
     assert not model.calls
     service.process_run(rd)
     assert len(model.calls) == 1
+
+
+def test_a_store_from_another_generation_does_not_buy_explanations_of_history(tmp_path, monkeypatch):
+    from looplab.serve.result_commentary import _Store, _save
+    rd, events, _, gen, service, model = setup_run(tmp_path, monkeypatch)
+    terminal(events)
+    _save(rd, _Store(generation="0" * 64, after_seq=-1))   # left by a replaced/restored run
+    service.started_at = time.time() + 1
+    service.process_run(rd)
+    assert not model.calls
+    assert _load(rd).generation != "0" * 64

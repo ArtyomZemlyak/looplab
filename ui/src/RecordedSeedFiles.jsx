@@ -3,7 +3,7 @@ import React, { useEffect, useRef, useState } from 'react'
 import { deadlineGet, runNodeApiPath } from './api.js'
 import CodeViewer from './CodeViewer.jsx'
 import { recordedFileOverlay } from './nodeCodeModel.js'
-import { seedReadError } from './seedReadError.js'
+import { seedReadError, seedTextSha256 } from './seedReadError.js'
 import './RecordedSeedFiles.css'
 
 const digest = value => typeof value === 'string' && /^[0-9a-f]{64}$/.test(value)
@@ -77,12 +77,8 @@ export default function RecordedSeedFiles({ runId, node, generation, baseDigest,
       const result = await read.promise
       if (ticket !== serial.current) return
       if (!validSeedFilesPage(result, { generation, nodeId: node.id, attempt: node.attempt, baseDigest }, offset, path)) throw { code: 'seed_page_invalid' }
-      if (result.file?.text_status === 'utf8') {
-        const bytes = new TextEncoder().encode(result.file.text)
-        const hash = [...new Uint8Array(await crypto.subtle.digest('SHA-256', bytes))]
-          .map(byte => byte.toString(16).padStart(2, '0')).join('')
-        if (hash !== result.file.sha256) throw { code: 'seed_page_invalid' }
-      }
+      if (result.file?.text_status === 'utf8'
+          && await seedTextSha256(result.file.text) !== result.file.sha256) throw { code: 'seed_page_invalid' }
       if (ticket !== serial.current) return
       setPage(result); setFile(result.file)
     } catch (failure) {

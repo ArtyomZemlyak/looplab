@@ -1389,7 +1389,9 @@ class CrossRunTools:
             lines.append(f"  {track_label}: {row['n_runs']} {run_label} — "
                          f"matched better {row['n_helped']} / unchanged {row['n_neutral']} / "
                          f"matched worse {row['n_hurt']}")
-            _sym = {1: "ranked-better", 0: "middle", -1: "ranked-worse"}
+            # `sign` is the run's matched with/without effect (`concept_capsules.py::
+            # portfolio_concept_overview_data`), not a rank half: each line speaks the header's words.
+            _sym = {1: "matched-better", 0: "unchanged", -1: "matched-worse"}
             for r in row["runs"][:6]:
                 m = r.get("metric")
                 lines.append(f"    - run {_safe_text(r.get('run_id'), 60)!r} "

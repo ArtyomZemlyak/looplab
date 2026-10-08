@@ -1314,6 +1314,10 @@ def test_concept_card_tendency_uses_only_the_bound_task_family(tmp_path):
     out = _bind(CrossRunTools(tmp_path)).execute(
         "concept_card", {"slug": "regularization/r-drop"})
     assert "matched better 2" in out and "matched worse 0" in out
+    # Each per-run line speaks the header's vocabulary: `sign` is a matched with/without effect,
+    # so a line may not call it a rank half (`ranked-better` / `middle` / `ranked-worse`).
+    assert out.count("[matched-better]") == 2
+    assert "ranked-better" not in out and "[middle]" not in out and "ranked-worse" not in out
     assert "consistently RANKED BETTER" in out
     assert "consistently RANKED WORSE" not in out
     assert "globally used in 5 prior run(s)" in out

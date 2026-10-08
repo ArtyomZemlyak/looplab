@@ -112,7 +112,7 @@ def test_neither_module_is_a_god_module_again():
     extraction happened (`normalize_task` -> `adapters/task_schema.py`) and the cap FOLLOWED the
     file down. A cap is only a decision if it can move either way for a stated reason.
     """
-    for rel, cap in (("adapters/tasks.py", 233), ("agents/factory.py", 402),
+    for rel, cap in (("adapters/tasks.py", 233), ("agents/factory.py", 406),
                      ("agents/developer_backends.py", 203),
                      ("adapters/task_schema.py", 231)):
     #
@@ -241,6 +241,12 @@ def test_neither_module_is_a_god_module_again():
     # isinstance guard with its assignment right after `task.llm_roles`, which the unified facade
     # reaches too because `build_unified_agent` builds through `make_roles`. 398 -> 401 measured;
     # the raise pays for those three lines and keeps one line of headroom.
+    #
+    # 402 -> 406, 2026-10-07, review of 24cbec2 (the toy Researcher's Russian rationale): the
+    # offline branch of `make_roles` sets `output_language` on the `ToyResearcher` it builds — the
+    # function-local import, the isinstance guard and the assignment, with the build bound first.
+    # 401 -> 405 measured (the commit landed them without the raise, and this test went red); the
+    # raise pays for those four lines and keeps one line of headroom.
         lines = len((_PKG / rel).read_text(encoding="utf-8").splitlines())
         assert lines < cap, f"{rel} is back to {lines} lines"
 

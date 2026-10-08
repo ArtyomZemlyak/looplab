@@ -535,6 +535,17 @@ def make_app(run_root: str | os.PathLike, *, bind_host: Optional[str] = None) ->
                 supplied = _origin_tuple(origin)
                 if supplied is None or (supplied != target and supplied not in allowed_origins):
                     return JSONResponse({"detail": "cross-origin mutation rejected"}, status_code=403)
+        elif (request.method in ("POST", "PUT", "PATCH", "DELETE") and route_path.startswith("/api/")
+              and request.headers.get("sec-fetch-site", "").lower() == "cross-site"
+              and _origin_tuple(request.headers.get("origin") or "") not in allowed_origins):
+            # THE CONFIGURATION-FREE FLOOR UNDER THE OPEN QUICK START. With the opt-in guard off,
+            # any page the operator visits could send a no-preflight `text/plain` POST to
+            # `/api/start` and launch shell-executing experiments. The BROWSER's own
+            # `Sec-Fetch-Site: cross-site` (unforgeable by page script) names exactly that request
+            # and needs no proxied-URL setup: a proxied same-origin SPA reads `same-origin` whatever
+            # Host the proxy forwards, CLI/TUI clients send no such header, and the configured
+            # cross-origin dev readers (LOOPLAB_UI_CORS) stay allowed.
+            return JSONResponse({"detail": "cross-site mutation rejected"}, status_code=403)
         return await call_next(request)
     # Owner auth: when a token is resolved, default-deny every owner API request unless it carries
     # a matching X-LoopLab-Token; only the explicit zero-model/status and review-share

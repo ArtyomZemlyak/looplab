@@ -198,18 +198,8 @@ def concept_rollup(state: RunState) -> dict:
             e["count"] += 1
             if m is not None and (e["best_metric"] is None or better(m, e["best_metric"])):
                 e["best_metric"] = m
-    from looplab.search.concept_effects import concept_effects
-    effects = concept_effects(state, out)
-    # Ancestor effects need union presence, never a sum of descendants' contributions.
-    ancestors = {"/".join(cid.split("/")[:i]) for cid in out
-                 for i in range(1, len(cid.split("/")) + 1)}
-    subtree_effects = concept_effects(state, ancestors, subtree=True)
-    emitted = set()
-    for cid, row in out.items():
-        row["effect"] = effects[cid]
-        row["subtree_effects"] = {parent: subtree_effects[parent] for parent in sorted(ancestors)
-                                  if parent not in emitted and (cid == parent or cid.startswith(parent + "/"))}
-        emitted.update(row["subtree_effects"])
+    # Effects are attached by `search/concept_effects.py::concept_rollup_with_effects`: the
+    # estimator needs `search`/`engine`, which `events` may not import.
     return out
 
 

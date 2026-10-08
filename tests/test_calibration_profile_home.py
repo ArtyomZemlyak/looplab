@@ -430,11 +430,11 @@ from looplab.search.speculation_calibration import (SPECULATION_CALIBRATION_PROF
 #               field False.
 # 2026-10-05: output_language adds one field, none removed; removing it re-derives
 # 742355ff. auto preserves previous prompts, but the full settings envelope legitimately grows.
-# 2026-10-07: two server-level Assistant switches, none removed — assistant_result_commentary
-# (b2e5caea, which left this pin red) and assistant_inject_tool (doc 73 §1.4). INERT for a
-# calibration replicate: neither is read by the engine.
-# 2026-10-07: upstream_board_brief (doc 73 §2.3), none removed (removing it re-derives 33bc49b6).
-# INERT for a calibration replicate: the toy workload has no upstream lane and no repo Developer.
+# 2026-10-07: assistant_result_commentary (b2e5cae) adds one field, none removed; the pre-change
+# tree re-derives 853eacae. INERT for a calibration replicate: the server-side commentary worker
+# reads it, and only on `backend=llm` runs; the engine never does.
+# 2026-10-07: assistant_inject_tool (doc 73 §1.4) and upstream_board_brief (doc 73 §2.3), none
+# removed. INERT for a calibration replicate: neither is read by the toy engine workload.
 _EXPECTED_DIGEST = "sha256:e7bea4923b77b4a63611a5ea84e474f1282b2a9f2993278072040976e8f16b1b"
 #   2026-09-06  + endgame_reserve_frac (doc 52 row 18: the plan's endgame reserve the dispatcher
 #               honours). The 'field set changed too' branch: 220 -> 221, both pins re-set. A
@@ -954,9 +954,9 @@ _EXPECTED_DIGEST = "sha256:e7bea4923b77b4a63611a5ea84e474f1282b2a9f2993278072040
 #   2026-10-01  + activation_check, activation_unverified_gate: 281 -> 283; see the digest history.
 #   2026-10-05  + concept_tag_hygiene: 283 -> 284; see the digest history.
 # 2026-10-05: output_language joins the merged concept hygiene schema: 284 -> 285.
-# 2026-10-05: assistant_result_commentary (b2e5caea) landed without moving this pin: 285 -> 286.
-# 2026-10-07: assistant_inject_tool (doc 73 §1.4, the Assistant's inject_experiment tool): 286 -> 287.
-# 2026-10-07: upstream_board_brief (doc 73 §2.3, the Developer's promoted-capabilities note): 287 -> 288.
+# 2026-10-07: + assistant_result_commentary (b2e5cae, re-pinned in review): 285 -> 286.
+# 2026-10-07: assistant_inject_tool (doc 73 §1.4): 286 -> 287.
+# 2026-10-07: upstream_board_brief (doc 73 §2.3): 287 -> 288.
 _EXPECTED_FIELD_COUNT = 288
 
 

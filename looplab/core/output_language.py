@@ -38,6 +38,10 @@ def language_messages(messages, language):
         return messages
     rows = list(messages)
     if rows and rows[0].get("role") == "system" and isinstance(rows[0].get("content"), str):
+        if directive in rows[0]["content"]:
+            # Idempotent: a caller that already applied it, then a `LanguageClient` that applies
+            # it again, would otherwise send the ~600-char directive twice on every request.
+            return rows
         rows[0] = {**rows[0], "content": rows[0]["content"] + directive}
     else:
         rows.insert(0, {"role": "system", "content": directive})

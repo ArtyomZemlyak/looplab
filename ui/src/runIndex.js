@@ -184,11 +184,12 @@ export function pendingFinalizeIntent(run = {}) {
 // that describe this state name ONE remedy. `<runs>` stays a placeholder because the browser does
 // not know the server's runs root; the run directory is the run id and that part is exact.
 // A run id that is not a plain directory name degrades to `<run_dir>` rather than printing a command
-// the operator would paste into a shell.
+// the operator would paste into a shell. A command is never localized: it is what the operator
+// pastes, and the Russian catalogue once turned it into `Завершить процесс <unes>/…`.
 const RUN_DIR_NAME_RE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/
 export function finalizeRecoveryCommand(runId = '') {
   const name = String(runId || '').trim()
-  return uiMessage("looplab finalize <runs>/{0}", [RUN_DIR_NAME_RE.test(name) ? name : '<run_dir>'])
+  return `looplab finalize <runs>/${RUN_DIR_NAME_RE.test(name) ? name : '<run_dir>'}`
 }
 
 /** The whole remedy for a stalled finalization no client control can perform, or null when the

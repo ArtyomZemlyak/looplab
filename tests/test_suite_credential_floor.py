@@ -38,6 +38,7 @@ PROBE_ENV = "LOOPLAB_TEST_CREDENTIAL_PROBE"
 REMOVED_PER_TEST = {
     "LOOPLAB_UI_TOKEN": "conftest.py::_isolate_shared_origin_detection",
     "JUPYTERHUB_API_TOKEN": "conftest.py::_isolate_shared_origin_detection",
+    "LOOPLAB_UI_REQUIRE_AUTH": "conftest.py::_isolate_shared_origin_detection",
 }
 
 # What the driven half exports into the child: the floor's names, one profile-convention key with

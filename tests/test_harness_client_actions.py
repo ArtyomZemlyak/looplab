@@ -11,7 +11,7 @@ import anyio
 import httpx
 import pytest
 
-from looplab.harness.client_requests import ACTION_ROUTES
+from looplab.harness.client_requests import ACTION_ROUTES, ACTION_SCOPE_FIELDS
 from looplab.harness.mcp_server import HarnessAPI, build_server
 from tests.test_harness_client_requests import GEN, TOKEN, URL, api
 
@@ -35,7 +35,9 @@ def restore(client, request_id, generation=GEN, size=53):
 @pytest.mark.parametrize("suffix", sorted(ACTION_ROUTES))
 def test_every_supported_action_saved_before_http_and_recovered_after_lost_reply(tmp_path, suffix):
     body = {"expected_generation": GEN, "action_id": "original",
-            "reason": "Исходное решение", "expected_evidence_revision": "b" * 64}
+            "reason": "Исходное решение", "expected_evidence_revision": "b" * 64,
+            # A narrower server scope is part of the identity (a checkpoint answer).
+            **{field: "c" * 32 for field in ACTION_SCOPE_FIELDS.get(suffix, ())}}
     path = "/api/runs/demo/" + suffix
     def lost(request):
         row, = list(tmp_path.rglob("act_*.json"))
@@ -342,3 +344,74 @@ api.client.close()
     recovered = subprocess.run([sys.executable, "-c", code, str(tmp_path), URL], capture_output=True, text=True, timeout=20)
     assert recovered.returncode == 0, recovered.stderr
     assert json.loads(recovered.stdout)["body"] == body
+
+
+def test_checkpoint_identity_follows_the_servers_per_checkpoint_scope(tmp_path):
+    """The server keys a checkpoint answer on `checkpoint_id` (`harness/checkpoints.py::respond`),
+    so "answer" is a legal action_id for every checkpoint. The client identity carries the
+    checkpoint too, or it refused locally (not_sent, no HTTP) what the server accepts."""
+    from tests.test_external_checkpoints import seeded
+    from looplab.harness.checkpoints import answer_for, ask
+    from looplab.serve.run_commands import run_generation_token
+    rd, store, server = seeded(tmp_path / "server")
+    generation = run_generation_token(store.read_all())
+    first = ask(rd, 0, 0, "asha_live", observation="objective=0.4", kill_enabled=False)
+    second = ask(rd, 0, 0, "train_monitor", observation="loss=1", kill_enabled=False)
+    assert first["checkpoint_id"] != second["checkpoint_id"]
+    def forward(request):  # The client's real request, answered by the real route.
+        reply = server.request(request.method, request.url.path, content=request.content,
+                               headers={"content-type": "application/json"})
+        return httpx.Response(reply.status_code, content=reply.content,
+                              headers={"content-type": reply.headers.get("content-type", "")})
+    client = HarnessAPI("http://testserver/", TOKEN, request_dir=tmp_path / "client",
+                        transport=httpx.MockTransport(forward))
+    path = "/api/runs/demo/harness-checkpoints"
+    body = {"expected_generation": generation, "action_id": "answer", "verdict": "watch",
+            "reason": "keep watching"}
+    one = client.request("POST", path, {**body, "checkpoint_id": first["checkpoint_id"]})
+    two = client.request("POST", path, {**body, "checkpoint_id": second["checkpoint_id"]})
+    assert one["status"] == two["status"] == 200, (one, two)
+    assert one["client_request"]["request_id"] != two["client_request"]["request_id"]
+    assert answer_for(rd, first["checkpoint_id"])["action_id"] == "answer"
+    assert answer_for(rd, second["checkpoint_id"])["action_id"] == "answer"
+    assert client.saved_actions("demo", generation)["total"] == 2
+    # Same checkpoint + action_id with changed content conflicts on BOTH sides; the client
+    # says so in its own words, before HTTP.
+    client.client = httpx.Client(base_url="http://testserver/", transport=httpx.MockTransport(
+        lambda _: pytest.fail("conflicting answer sent")))
+    changed = client.request("POST", path, {**body, "checkpoint_id": first["checkpoint_id"],
+                                            "reason": "changed my mind"})
+    assert changed["outcome"] == "not_sent" and changed["code"] == "client_request_conflict"
+    assert "durably saved" not in changed["message"]
+
+
+def test_checkpoint_answer_without_checkpoint_id_is_invalid_not_unavailable(tmp_path):
+    client = api(tmp_path, lambda _: pytest.fail("invalid original sent"))
+    result = client.request("POST", "/api/runs/demo/harness-checkpoints",
+                            {"expected_generation": GEN, "action_id": "answer"})
+    assert result["outcome"] == "not_sent" and result["code"] == "client_request_invalid"
+    assert "checkpoint_id" in result["message"] and "durably saved" not in result["message"]
+    assert not list(tmp_path.rglob("act_*.json"))
+
+
+@pytest.mark.parametrize("suffix,namespace", [("harness-reviews", "harness-reviews"),
+                                              ("upstream/check", "upstream"),
+                                              ("result-notices", "result-notices")])
+def test_unscoped_route_identity_is_byte_for_byte_unchanged(tmp_path, suffix, namespace):
+    # Records saved before the checkpoint scope landed must still read back.
+    client = api(tmp_path, lambda _: httpx.Response(200, json={}))
+    result = client.request("POST", "/api/runs/demo/" + suffix,
+                            {"expected_generation": GEN, "action_id": "original"})
+    legacy = json.dumps([namespace, "original"], sort_keys=True, separators=(",", ":"),
+                        ensure_ascii=False).encode()
+    assert result["client_request"]["request_id"] == "act_" + hashlib.sha256(legacy).hexdigest()
+
+
+def test_reused_action_id_with_changed_body_names_the_conflict(tmp_path):
+    seen = []
+    client = api(tmp_path, lambda r: (seen.append(r), httpx.Response(200, json={}))[1])
+    path, body = "/api/runs/demo/harness-reviews", {"expected_generation": GEN, "action_id": "one"}
+    assert client.request("POST", path, body)["status"] == 200
+    refused = client.request("POST", path, {**body, "reason": "other"})
+    assert refused["outcome"] == "not_sent" and refused["code"] == "client_request_conflict"
+    assert "durably saved" not in refused["message"] and len(seen) == 1

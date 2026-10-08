@@ -75,7 +75,13 @@ def llm_settings(store: SettingsStore, rd: Optional[Path] = None) -> "Settings":
         settings = store.resolve_snapshot_settings(cfg)
         # Human prose is an owner display preference, independent of the run's
         # frozen experiment and routing contract. Never alter historical content.
-        language = global_settings(store).output_language
+        # Only the DISPLAY preference is read from the global settings, so damaged UI settings or
+        # a bad `LOOPLAB_*` variable must not take down every run-scoped paid path (chat, report
+        # refresh, lens, commentary) whose contract is the run's own snapshot: keep its language.
+        try:
+            language = global_settings(store).output_language
+        except (ValueError, OSError):
+            language = "auto"
         if language != "auto":
             settings = settings.model_copy(update={"output_language": language})
         return settings

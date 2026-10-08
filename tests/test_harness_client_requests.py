@@ -461,3 +461,57 @@ def test_mcp_local_read_tools_are_read_only_and_need_no_server(tmp_path):
                                                        "command_id": result["client_request"]["command_id"]})
         assert not getattr(page, "isError", False) and "chunk_sha256" in str(page)
     anyio.run(reads)
+
+
+def test_mixed_case_generation_is_one_lowercase_store_and_keeps_the_exact_body(tmp_path):
+    # The server accepts `^[0-9a-fA-F]{64}$` and compares `.lower()`: so does the client store.
+    upper = "ABCDEF" + "0" * 58
+    seen = []
+    client = api(tmp_path, lambda r: (seen.append(r), httpx.Response(200, json={}))[1])
+    body = {**BODY, "expected_generation": upper}
+    result = client.request("POST", "/api/runs/demo/commands", body, "mixed")
+    assert result["status"] == 200 and len(seen) == 1
+    for spelling in (upper, upper.lower()):
+        page = client.saved_commands("demo", spelling)
+        assert page["total"] == 1 and page["generation"] == upper.lower()
+        assert restore(client, page["items"][0]["command_id"], generation=spelling)["body"] == body
+    # An exact retry under either spelling of the read side is the same record.
+    assert client.request("POST", "/api/runs/demo/commands", body, "mixed")["client_request"] \
+        == result["client_request"]
+
+
+def test_short_transport_token_does_not_block_ordinary_bodies(tmp_path):
+    """A token below the redactor's secret floor is a substring of ordinary text, not a secret
+    shape: screening it made every body containing "agent" permanently not_sent."""
+    seen = []
+    client = HarnessAPI(URL, "agent", request_dir=tmp_path,
+                        transport=httpx.MockTransport(
+                            lambda r: (seen.append(r), httpx.Response(200, json={}))[1]))
+    body = {**BODY, "data": {"code": "print('agent')\n"}}
+    assert client.request("POST", "/api/runs/demo/commands", body, "short")["status"] == 200
+    assert len(seen) == 1 and len(list(tmp_path.rglob("cmd_*.json"))) == 1
+
+
+def test_credential_in_body_is_refused_in_its_own_words(tmp_path):
+    client = api(tmp_path, lambda _: pytest.fail("credential sent"))
+    result = client.request("POST", "/api/runs/demo/commands",
+                            {**BODY, "data": {"code": TOKEN}}, "key")
+    assert result["outcome"] == "not_sent" and result["code"] == "client_request_contains_credential"
+    assert TOKEN not in str(result) and "durably saved" not in result["message"]
+    assert not list(tmp_path.rglob("cmd_*.json"))
+
+
+@pytest.mark.parametrize("key", [None, ""])
+def test_missing_idempotency_key_is_named_not_a_storage_failure(tmp_path, key):
+    client = api(tmp_path, lambda _: pytest.fail("keyless command sent"))
+    result = client.request("POST", "/api/runs/demo/commands", BODY, key)
+    assert result["outcome"] == "not_sent" and result["code"] == "client_request_invalid"
+    assert "Idempotency-Key" in result["message"] and "durably saved" not in result["message"]
+
+
+def test_changed_body_under_one_key_names_the_conflict(tmp_path):
+    client = api(tmp_path, lambda _: httpx.Response(200, json={}))
+    client.request("POST", "/api/runs/demo/commands", BODY, "same")
+    refused = client.request("POST", "/api/runs/demo/commands", {**BODY, "data": {}}, "same")
+    assert refused["outcome"] == "not_sent" and refused["code"] == "client_request_conflict"
+    assert "durably saved" not in refused["message"]

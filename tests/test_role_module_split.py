@@ -321,9 +321,13 @@ def test_roles_is_no_longer_a_god_module():
     is one nested `_row`, and the new block's header and single instruction sit beside the old
     block's. What the board SAYS is this module's whole job, so nothing moves out; `roles.py` re-
     exports no new name. The cap moves to measured + 1.
+
+    `toy_roles.py` 127 -> 132 on 2026-10-07 (24cbec2, landed without the raise): the offline
+    Researcher writes its two rationales in Russian when `output_language` is `ru` — prose only, the
+    optimizer, its RNG and the evaluation are untouched. The cap moves to measured + 1.
     """
     caps = {"agents/roles.py": 876, "agents/role_prompts.py": 344, "agents/state_brief.py": 646,
-            "agents/role_wrappers.py": 467, "agents/toy_roles.py": 128}
+            "agents/role_wrappers.py": 467, "agents/toy_roles.py": 133}
     sizes = {rel: len((_PKG / rel).read_text(encoding="utf-8").splitlines()) for rel in caps}
     over = {rel: (n, caps[rel]) for rel, n in sizes.items() if n >= caps[rel]}
     assert not over, f"module(s) past their cap (measured, cap): {over}"

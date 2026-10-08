@@ -32,7 +32,7 @@ from looplab.engine.champion_caveats import champion_metric_caveats, mislead_gap
 from looplab.engine.comparability import record_of
 from looplab.events.trajectory import running_best
 from looplab.engine.finalize import incomplete_finalize_scope
-from looplab.events.digest import concept_rollup as _concept_rollup, theme_rollup as _theme_rollup
+from looplab.events.digest import theme_rollup as _theme_rollup
 from looplab.events.eventstore import integrity_wire
 from looplab.events.replay import fold
 from looplab.serve.deletion_transaction import (
@@ -204,6 +204,8 @@ def _run_row(srv, rd, fence_names: set, *, cache_key: str):
             # all" — and it is NOT cached, so the next list retries the read.
             return _unreadable_log_row(rd, stt)
         st = fold(events)
+        # Deferred: `serve` reaches the concept cluster per request (tests/test_package_layering.py).
+        from looplab.search.concept_effects import concept_rollup_with_effects
         first_ts = events[0].ts if events else 0.0
         finalize_incomplete = (
             incomplete_finalize_scope(events) is not None or st.finalization_pending())
@@ -312,7 +314,7 @@ def _run_row(srv, rd, fence_names: set, *, cache_key: str):
             # the cross-run concept surfaces need — the memory shelf attributes an old lesson to a
             # concept through its `run_id`, and it may only do so when the run really is tagged.
             # Empty dict = untagged, and every reader must show that as untagged rather than absent.
-            "concepts": _concept_rollup(st),
+            "concepts": concept_rollup_with_effects(st),
             "mtime": stt.st_mtime,    # last activity (events.jsonl mtime) — time sort + "updated"
             # The run's true START, from the log itself. `st_ctime` is NOT creation time on
             # POSIX — it is the inode-CHANGE time, which every append to events.jsonl

@@ -1872,9 +1872,9 @@ def build_router(srv) -> APIRouter:
             turn_id = secrets.token_hex(8)
             res = _assistant_run_turn(
                 client, root, history, instruction, mode,
-                response_language=_response_language(
-                    s.output_language if s.output_language != "auto"
-                    else sess["meta"].get("response_language", "auto")),
+                # The chat's EXPLICIT choice wins over the owner default, exactly as on an
+                # interactive turn (`output_language.py`: an explicit Assistant choice overrides).
+                response_language=_watch_language(record, settings=s, session=sess),
                 alive_fn=_engine_alive, settings=s, approver=approver,
                 # THE PARTY THAT ARMED THE WATCH, pinned on the record at arming (like its mode): a
                 # wake-up has no request, and a legacy record with no pin runs as `anonymous`.
@@ -1907,15 +1907,18 @@ def build_router(srv) -> APIRouter:
         # conditional append exists to drop a cancelled turn's stale reply; a watch has no such twin.
         _asst.append(session, turn)
 
-    def _watch_language(record) -> str:
-        language = _llm_settings().output_language
-        if language != "auto":
-            return language
-        session = _asst.get(record.get("session"))
+    def _watch_language(record, *, settings=None, session=None) -> str:
+        # Same precedence as an interactive turn: the chat's explicit en/ru choice first, then the
+        # owner default. Wake-ups used to put the default first, so a chat set to Russian under an
+        # English default got its monitor replies and stop notices in English.
+        if session is None:
+            session = _asst.get(record.get("session"))
         meta = session.get("meta") if isinstance(session, dict) else None
         language = meta.get("response_language") if isinstance(meta, dict) else None
         # Old or damaged optional chat metadata must not suppress a stopped-watch notice.
-        return language if language in ("auto", "en", "ru") else "auto"
+        if language in ("en", "ru"):
+            return language
+        return (settings if settings is not None else _llm_settings()).output_language
 
     def _watch_session_exists(sid) -> Optional[bool]:
         return watch_session_exists(_asst, sid)
