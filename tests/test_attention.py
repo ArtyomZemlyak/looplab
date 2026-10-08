@@ -544,3 +544,27 @@ def test_asha_underperform_surfaces_a_soft_node_keyed_inbox_item(tmp_path):
     store.append(EV_NODE_EVALUATED, {"node_id": 0, "generation": 0, "metric": 0.3, "eval_seconds": 1.0})
     done = project_run_attention("demo", store.read_all(), engine_running=True)
     assert "asha" not in _kinds(done)
+
+
+@pytest.mark.parametrize("reason,title", [
+    ("infra_unavailable", "Run paused: the box did not answer"),
+    ("engine_error", "Run paused after an engine error"),
+])
+def test_an_engine_box_fault_pause_alerts_the_owner(tmp_path, reason, title):
+    """Incident 2026-10-06: a dead data mount paused the run with no alert anywhere — the
+    developer-crash item needs a node owner, and a paused run is excluded from 'engine stopped'."""
+    store = _store(tmp_path)
+    _node(store, 0, metric=1.0)
+    store.append("pause", {"reason": reason, "detail": "mount /data/x: ENOTCONN (secret path)"})
+    items = project_run_attention("demo", store.read_all(), engine_running=False)
+    hits = [i for i in items if i["kind"] == "run_failed"]
+    assert len(hits) == 1 and hits[0]["title"] == title and hits[0]["browser"] is True
+    assert "/data/x" not in hits[0]["detail"], "the pause row's own text never reaches the feed"
+
+
+def test_an_operator_pause_stays_quiet(tmp_path):
+    store = _store(tmp_path)
+    _node(store, 0, metric=1.0)
+    store.append("pause", {"reason": "operator"})
+    assert "run_failed" not in _kinds(project_run_attention("demo", store.read_all(),
+                                                            engine_running=False))

@@ -234,7 +234,7 @@ def plateau_nodes(state, *, floor: int = 0) -> tuple[Optional[int], int]:
     count. A node still pending has not answered yet, and one that ended for a reason that says
     nothing about the experiment (`core/models.py::BENIGN_TERMINAL_REASONS`: superseded, a dropped
     Card, an operator abort) was not an attempt."""
-    from looplab.core.models import BENIGN_TERMINAL_REASONS, NodeStatus
+    from looplab.core.models import NodeStatus
     plan = getattr(state, "plan", None)
     if not isinstance(plan, dict):
         return None, 0
@@ -255,10 +255,25 @@ def plateau_nodes(state, *, floor: int = 0) -> tuple[Optional[int], int]:
             continue
         if node.status is NodeStatus.pending or node.tombstoned or node.id in aborted:
             continue
-        if str(getattr(node, "error_reason", "") or "") in BENIGN_TERMINAL_REASONS:
+        if str(getattr(node, "error_reason", "") or "") in _PLATEAU_SILENT_REASONS:
             continue
+        if getattr(node, "kind", None) == "artifact":
+            continue                  # doc 73 §1.4: a preparation step, not an attempt at the goal
         count += 1
     return leader, count
+
+
+# What `plateau_nodes` does not count: the benign terminals, plus `engine_error` — said HERE, at
+# the one reader that needs it, as `core/models.py::BENIGN_TERMINAL_REASONS` asks. An engine error is
+# evidence about the BOX (a full disk, a read-only run dir; the run is paused beside it), so it is
+# not BENIGN for the owner alert — but it is no attempt at the experiment either, and counting it let
+# a box fault end the search as a plateau (incident 2026-10-06).
+def _plateau_silent_reasons() -> frozenset:
+    from looplab.core.models import BENIGN_TERMINAL_REASONS
+    return BENIGN_TERMINAL_REASONS | {"engine_error"}
+
+
+_PLATEAU_SILENT_REASONS = _plateau_silent_reasons()
 
 
 def plateau_stop_due(state, stop_nodes: int, *, floor: int = 0) -> Optional[str]:

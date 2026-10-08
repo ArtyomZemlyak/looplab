@@ -760,6 +760,39 @@ _ESCAPED_NAME_CHAR = re.compile(rb"\\u00(?:5[fF]|6[1-9a-fA-F]|7[0-9aA])")
 _RESUME_SCAN_CHUNK_BYTES = 1 << 20
 
 
+AUTO_RESUME_ENV = "LOOPLAB_UI_AUTO_RESUME"
+
+
+def auto_resume_enabled() -> bool:
+    """`LOOPLAB_UI_AUTO_RESUME=1`: on startup, resume every run a dead engine left in progress."""
+    return str(os.environ.get(AUTO_RESUME_ENV, "")).strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _request_auto_resume(rd: Path, store, state) -> bool:
+    """Append a durable `resume_requested{mode: resume, auto_resume: true}` for a run a dead engine
+    left IN PROGRESS, so the ordinary pending-resume path below spawns it (incident 2026-10-06: a
+    container restart killed every engine and each run waited for a human to press resume).
+
+    In progress means: it started, it is not finished, not halted (an operator's pause, a stop, and
+    every engine auto-pause — `infra_unavailable` included, which is the operator's box to fix — are
+    all left alone), owes no finalization and no resume already, and its `engine.lock` is provably
+    FREE (`_spawn_liveness` False; an inconclusive probe is never permission). The append is a
+    compare-and-swap on the tail, so a CLI that resumed it meanwhile wins. True when appended."""
+    from looplab.events.eventstore import EventStoreConcurrencyError
+    if (not state.task_id or state.finished or state.halted or state.resume_pending()
+            or state.finalization_pending()):
+        return False
+    if _spawn_liveness(rd) is not False or not _resolve_task_file(rd):
+        return False
+    events = store.read_all()
+    try:
+        store.append(EV_RESUME_REQUESTED, {"mode": "resume", "auto_resume": True},
+                     expected_last_seq=events[-1].seq if events else -1)
+    except (EventStoreConcurrencyError, OSError):
+        return False
+    return True
+
+
 def _log_may_hold_resume_intent(path: Path) -> bool:
     """False only when `path`'s bytes PROVE its fold cannot have `resume_pending()`.
 
@@ -818,6 +851,7 @@ def install_resume_reconcile_hooks(
         from looplab.events.eventstore import EventStore
         from looplab.events.replay import fold
         now = time.time()
+        auto = auto_resume_enabled()
         try:
             run_dirs = list(root.iterdir()) if root.exists() else []
         except OSError:
@@ -825,7 +859,9 @@ def install_resume_reconcile_hooks(
         for rd in run_dirs:
             if not (rd / "events.jsonl").is_file():
                 continue
-            if not _log_may_hold_resume_intent(rd / "events.jsonl"):
+            # The byte filter proves "no pending request" only; an opted-in auto-resume must fold
+            # every run, because the runs it is FOR hold no request yet.
+            if not auto and not _log_may_hold_resume_intent(rd / "events.jsonl"):
                 continue          # no event in it can raise the request seq: provably not pending
             try:
                 store = EventStore(rd / "events.jsonl")
@@ -835,7 +871,9 @@ def install_resume_reconcile_hooks(
             except Exception:  # noqa: BLE001 - one corrupt run cannot block server startup recovery
                 continue
             if not state.resume_pending():
-                continue
+                if not (auto and _request_auto_resume(rd, store, state)):
+                    continue
+                state = fold(store.read_all())
             task_file = _resolve_task_file(rd)
             if not task_file:
                 continue

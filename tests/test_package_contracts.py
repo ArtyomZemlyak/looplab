@@ -71,6 +71,12 @@ def test_runtime_holds_only_process_execution_modules():
                      # nothing above `core`. It decides one thing — did the stage satisfy its own
                      # declared bound — which is a property of the launch's output, not a policy.
                      "numeric_contract",
+                     # `infra_probe` (2026-10-07) asks of the BOX what the launch is about to need:
+                     # can the declared mounts, the run directory and the eval interpreter be reached
+                     # at all — the precondition of every launch, measured with a `stat` the engine
+                     # makes itself, importing nothing above `core`. What a fault CAUSES (a pause, a
+                     # withheld attempt) is policy and lives in `engine/evaluate.py`.
+                     "infra_probe",
                      # `metric_inputs` (2026-08-20) is `metric_subject`'s MIRROR and belongs here by
                      # the same clause: it is a stat and a digest the eval path takes at the metric
                      # read, over the operator's declared `eval.inputs`, and it imports nothing above

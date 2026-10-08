@@ -891,6 +891,11 @@ def test_a_run_attempt_that_never_returned_carries_no_result_from_the_attempt_be
         _eval_canary = False                      # the opt-in canary (d1b4611c) stays off here
         external_harness = False                  # master's external-agent mode stays off here
         _eval_canary_due = Engine._eval_canary_due
+        # The pre-launch box probe (`runtime/infra_probe.py`) runs for real: this host declares no
+        # run dir, mount or interpreter, so it has nothing to probe and launches as before.
+        _eval_infra_pause = Engine._eval_infra_pause
+        _infra_probe_targets = Engine._infra_probe_targets
+        _declared_eval_env = Engine._declared_eval_env
         store = types.SimpleNamespace(read_all=lambda: [])
 
         async def _watch_for_intervention(self, *_a):

@@ -408,3 +408,44 @@ export function unfiledExperiments(cards, { order } = {}) {
     .filter(card => !cardParentId(card))
     .sort(sort)
 }
+
+// FILING BY CONCEPTS (2026-10-07). An experiment the operator INJECTED — or one a Researcher
+// proposed without naming a direction — carries no `parent_card_id`, so the ladder drew it under
+// "not filed under any question"; on `minionerec-backbones-v11` most of the board was such cards,
+// because every operator-injected env (`ll_inject.py`) and every re-injection after a restart
+// names none. Its concept tags DO say what it touches, and the questions say what they ask.
+//
+// So an unfiled experiment with tags is drawn under the question its concepts overlap MOST
+// (`conceptSet`: the question's authored tags and the union its filed children carry). A tie goes
+// to the NARROWER question (fewer concepts: the shared ones are a larger share of what it asks); a
+// tie that survives that is AMBIGUOUS and the card stays unfiled — picking would make the board
+// depend on iteration order, the rule this module refuses for twice-placed questions.
+//
+// DISPLAY ONLY, and marked. The card gains `question_inferred: {shared}` beside the edge so the
+// view can say "filed by concepts" — the run's record is untouched, and `latticeRollups` keeps
+// reading the AUTHORED cards, so no question's "best" is claimed by an experiment nobody filed.
+export function inferQuestionFiling(cards) {
+  const rows = Array.isArray(cards) ? cards : []
+  const questions = rows.filter(card => isRecord(card) && card.id && cardIsDirection(card))
+    .map(card => ({ id: String(card.id), tags: conceptSet(card) }))
+    .filter(q => q.tags.length > 0)
+  if (!questions.length) return rows
+  return rows.map(card => {
+    if (!isRecord(card) || !card.id || cardIsDirection(card) || cardParentId(card)) return card
+    const own = new Set((Array.isArray(card.concept_tags) ? card.concept_tags : [])
+      .filter(tag => typeof tag === 'string' && tag.trim()).map(tag => tag.trim()))
+    if (!own.size) return card
+    let best = null
+    let tied = false
+    for (const q of questions) {
+      const shared = q.tags.filter(tag => own.has(tag))
+      if (!shared.length) continue
+      const better = !best || shared.length > best.shared.length
+        || (shared.length === best.shared.length && q.tags.length < best.size)
+      const same = best && shared.length === best.shared.length && q.tags.length === best.size
+      if (better) { best = { id: q.id, shared, size: q.tags.length }; tied = false } else if (same) tied = true
+    }
+    if (!best || tied) return card
+    return { ...card, parent_card_id: best.id, question_inferred: { shared: best.shared } }
+  })
+}

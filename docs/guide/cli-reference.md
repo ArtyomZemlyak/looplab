@@ -61,6 +61,8 @@ looplab atlas           Capped Atlas summary: explored / thin / contradictory (P
 looplab repair-candidates Which files this run's nodes had to fix, ranked by DISTINCT nodes
 looplab backfill-applied-params Repair the record where a node's PROPOSED params are not what RAN (offline, append-only)
 looplab backfill-score-metrics Recover the objectives a score stage measured and the record kept one of (offline, append-only)
+looplab import-metrics  Import metrics measured AFTER the run beside each node's live ones (offline, append-only)
+looplab evaluate-track  Run a declared eval.tracks evaluator over settled nodes' workdirs (offline, append-only)
 looplab smoke           Ping the configured LLM endpoint (self-test)
 looplab approve         Ratify a paused run (HITL / onboarding)
 looplab bench           Capability self-benchmark across tasks
@@ -2053,6 +2055,51 @@ looplab cross-run-concepts MEMORY_DIR [--top 20] [--json]
 | `--json` | off | Emit the bounded overview, per-run cards, and capsule source-completeness/omission receipts as JSON |
 
 ---
+
+## `evaluate-track`
+
+**Runs a declared evaluation track over settled nodes' preserved workdirs** (doc 73 §1.4): the
+@200 of nodes the search scored @20, drift weeks, any second ruler. The task declares it:
+
+```json
+"eval": {"tracks": {"at200": {"command": ["python", "score_service.py", "--beams", "200",
+                                          "--ckpt", "{workdir}/out/final"],
+                              "keys": ["InCart_FilteredUnseenRecall@200"], "timeout": 3600}}}
+```
+
+```bash
+looplab evaluate-track runs/v12 at200                     # DRY RUN — prints each argv
+looplab evaluate-track runs/v12 at200 --nodes 3,5 --apply # run and record
+```
+
+The command's LAST stdout JSON object holds the numbers (`keys` filters, `key_prefix` renames).
+A node is measured only when it is evaluated in its current lifecycle AND its workdir's
+`.looplab-manifest` stamp matches its code — a reset or rebuilt workdir is refused, never measured.
+Results land beside the live metrics through the same row `import-metrics` writes
+(`extra_metrics_imported`, `source: track <name>`, reconstructed key by key); a recorded key can be the
+objective (`metric_retarget`). `--apply` holds `engine.lock`; output goes to `<run>/track_<name>.log`.
+
+## `import-metrics`
+
+**Imports metrics an operator measured after the run, beside each node's live ones.** The case it was
+built for (2026-10-06): a run's nodes were scored at @20; a scoring service later re-scored their
+checkpoints at @200, and the run was to be ranked by @200 (`metric_retarget`). `backfill-score-metrics`
+could not carry those numbers — it recovers only what the run's own `score.log` printed, and only into
+an EMPTY map.
+
+```bash
+looplab import-metrics runs/v11 at200.json --source "scoring service, 200 beams"          # DRY RUN
+looplab import-metrics runs/v11 at200.json --source "scoring service, 200 beams" --apply  # write
+looplab inspect runs/v11      # after a retarget: "N of M evaluated node(s) carry it; UNRANKED: …"
+```
+
+`at200.json` is `{"<node_id>": {"<metric>": value}}` (or the same under `"nodes"`). One folded
+`extra_metrics_imported` row per node, bound to its current lifecycle, carrying only the keys the node
+does not already have: a live value is never overwritten, so a second `--apply` writes nothing. The
+values ride the `declared` channel with NO direction, and the reconstruction marker names each
+imported key (`extra_metrics_backfill.keys`), so the UI labels exactly those keys `reconstructed`.
+`--source` is required and kept on every row; `--precision N` records how coarse the values are.
+`--apply` holds the run's `engine.lock` and refuses a live run.
 
 ## `backfill-score-metrics`
 

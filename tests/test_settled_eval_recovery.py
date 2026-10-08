@@ -301,3 +301,20 @@ def test_the_proxy_kill_never_predicts_a_result_already_measured(tmp_path):
     assert (terminal.type, terminal.data.get("metric")) == ("node_evaluated", metric)
     assert len(_rows(resumed, "eval_invocation_recovered")) == 1
     assert _rows(resumed, "proxy_scored") == []
+
+
+def test_a_recovered_terminal_starts_the_operators_copy_out(tmp_path, monkeypatch):
+    """`eval.artifact_sync` (doc 73) runs after EVERY evaluated terminal: the dead process settled
+    `ok` and never reached its own copy-out, so the recovering process starts it."""
+    from looplab.engine import artifact_sync
+    run_dir = tmp_path / "run"
+    _die_before_the_terminal(run_dir)
+    calls: list = []
+    resumed = _resumed(run_dir, calls)
+    started: list = []
+    monkeypatch.setattr(artifact_sync, "start_artifact_sync",
+                        lambda _eng, nid, gen: started.append((nid, gen)))
+    _drive(resumed)
+    assert calls == [], "the settled evaluation is finalized, never re-run"
+    assert [e.type for e in _terminals(resumed)] == ["node_evaluated"]
+    assert started == [(0, 0)]

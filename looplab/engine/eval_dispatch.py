@@ -10,6 +10,7 @@ through their source modules keeps working."""
 from __future__ import annotations
 
 import logging
+import os
 import time
 from pathlib import Path
 from typing import Optional
@@ -333,9 +334,20 @@ class EvalDispatchMixin:
             # skip it — don't re-install deps on every resume. The in-memory flag above still guards
             # the concurrent case within one process; this closes the cross-process/resume gap.
             from looplab.core.models import run_setup_key
-            if run_setup_key(cmd) in fold(self.store.read_all()).run_setup_done:
-                self._run_setup_done = True
-                return
+            events = self.store.read_all()
+            reverified_missing: list = []
+            if run_setup_key(cmd) in fold(events).run_setup_done:
+                # …UNLESS THE ENVIRONMENT THAT RECORD VOUCHES FOR IS GONE (incident 2026-10-06: a
+                # container restart wiped the env under a run whose log still said "installed"). The
+                # durable row is evidence the command SUCCEEDED once, not that its effects survive.
+                reverified_missing = self._run_setup_effects_lost(cmd, events)
+                if not reverified_missing:
+                    self._run_setup_done = True
+                    return
+                _LOG.warning("run_setup %r succeeded in an earlier process, but %d declared "
+                             "distribution(s) are absent from the eval interpreter now (%s): "
+                             "re-running it", cmd, len(reverified_missing),
+                             ", ".join(reverified_missing[:8]))
             # Set the in-memory guard only AFTER the install SUCCEEDS. The install runs while THIS lock
             # is held, so a concurrent worker that reached the lock-free fast path (top) still sees the
             # flag False mid-install and blocks on `_run_setup_lock` here — waiting for the install to
@@ -348,11 +360,55 @@ class EvalDispatchMixin:
             try:
                 self._do_run_setup(cmd, declared=(self._declared_deps()
                                                   if getattr(self, "_deps_setup_derived", False)
-                                                  else None))
+                                                  else None),
+                                   # Only when non-empty: an override of `_do_run_setup` written
+                                   # before the keyword existed keeps working for every first run.
+                                   **({"reverified_missing": reverified_missing}
+                                      if reverified_missing else {}))
             except RunSetupRefusal as exc:
                 self._run_setup_refusal = exc
                 raise
             self._run_setup_done = True
+
+    def _run_setup_effects_lost(self, cmd: list, events) -> list:
+        """The DECLARED distributions a previously successful `run_setup` installed that the eval
+        interpreter no longer has — `[]` when they are all there, or when nothing can be checked.
+
+        Checkable only where LoopLab knows what the command was FOR: the repo's own dependency
+        declaration (`_declared_deps().pins`), minus the lines that run's install DROPPED as
+        unresolvable (`run_setup_finished.dropped_requirements`) — those were never installed, and
+        counting them would re-run the install on every resume. An operator's arbitrary command
+        states no effects and stays exactly-once. A probe that cannot run answers `[]`
+        (`deps.absent_distributions` -> None): a vanished interpreter is the infra probe's to report
+        (`runtime/infra_probe.py`), and re-running pip into it could only fail."""
+        from looplab.core.models import run_setup_key
+        from looplab.runtime import deps
+        # ONLY THE INSTALL LOOPLAB DERIVED (`_settle_declared_deps`): it installs the declaration
+        # into the eval interpreter (`deps.declaration_argv(python=sandbox.python)`), so the probe
+        # asks the interpreter the install wrote to. An operator's own `run_setup` may install
+        # elsewhere (another env, a container) and may not be idempotent — it stays exactly-once.
+        if not getattr(self, "_deps_setup_derived", False):
+            return []
+        try:
+            decl = self._declared_deps()
+        except (OSError, ValueError, TypeError):
+            return []
+        if not getattr(decl, "found", False) or not decl.pins:
+            return []
+        key = run_setup_key(cmd)
+        dropped: set = set()
+        for e in events:
+            if e.type != EV_RUN_SETUP_FINISHED or not isinstance(e.data, dict):
+                continue
+            command = e.data.get("command")
+            if not isinstance(command, (list, tuple)) or not command or run_setup_key(command) != key:
+                continue
+            for rec in e.data.get("dropped_requirements") or []:
+                if isinstance(rec, dict) and isinstance(rec.get("name"), str):
+                    dropped.add(rec["name"])
+        absent = deps.absent_distributions([n for n in decl.pins if n not in dropped],
+                                           python=getattr(self.sandbox, "python", None))
+        return absent or []
 
     def _raise_latched_run_setup_refusal(self) -> None:
         """Stop on this process's failed run-level setup, if it failed — never run it again.
@@ -649,7 +705,7 @@ class EvalDispatchMixin:
         assert EV_DEPS_DECLARED in DIAGNOSTIC_EVENTS
         self.store.append(EV_DEPS_DECLARED, data)
 
-    def _do_run_setup(self, cmd: list, declared=None) -> None:
+    def _do_run_setup(self, cmd: list, declared=None, *, reverified_missing=()) -> None:
         from looplab.core.models import run_setup_key
         from looplab.runtime import deps
         from looplab.runtime.sandbox import _run_argv
@@ -677,8 +733,12 @@ class EvalDispatchMixin:
         # pins DIAGNOSTIC_EVENTS, and tests/test_setup_thread_appendable.py guards both ends.
         assert EV_RUN_SETUP_STARTED in SETUP_THREAD_APPENDABLE
         assert EV_RUN_SETUP_FINISHED in SETUP_THREAD_APPENDABLE
+        # `reverified_missing` (ADDITIVE, present only when non-empty): this command already SUCCEEDED
+        # in an earlier process and is re-run because the distributions named here vanished since.
         self.store.append(EV_RUN_SETUP_STARTED,
-                          {"command": cmd, "cwd": cwd, "after_interrupted_attempt": interrupted})
+                          {"command": cmd, "cwd": cwd, "after_interrupted_attempt": interrupted,
+                           **({"reverified_missing": sorted(reverified_missing)[:64]}
+                              if reverified_missing else {})})
         log = str(Path(self.run_dir) / "run_setup.log")
         # What the environment held for the DECLARED distributions before this command ran. The
         # `-r` install honours the repo's pins, and on the live testbed honouring them DOWNGRADES a
@@ -853,6 +913,43 @@ class EvalDispatchMixin:
             return env
         return {**(env or {}), **declared}
 
+    PARENT_WORKDIRS_ENV = "LOOPLAB_PARENT_WORKDIRS"
+
+    def _parent_workdirs_env(self, node) -> dict:
+        """`{LOOPLAB_PARENT_WORKDIRS: <abs workdirs>}` when the task's eval asks for it
+        (`EvalSpec.parent_workdirs_env`) and the node has a parent whose workdir exists; `{}`
+        otherwise, so an eval that did not ask carries nothing new."""
+        es = getattr(self, "_eval_spec", None) or {}
+        if not es.get("parent_workdirs_env"):
+            return {}
+        run_dir = getattr(self, "run_dir", None)
+        if run_dir is None:
+            return {}
+        paths = []
+        for pid in getattr(node, "parent_ids", None) or []:
+            if isinstance(pid, bool) or not isinstance(pid, int):
+                continue
+            wd = Path(run_dir) / "nodes" / f"node_{pid}"
+            if wd.is_dir() and not wd.is_symlink():
+                paths.append(str(wd.resolve()))
+        return {self.PARENT_WORKDIRS_ENV: os.pathsep.join(paths)} if paths else {}
+
+    USES_WORKDIRS_ENV = "LOOPLAB_USES_WORKDIRS"
+
+    def _uses_workdirs_env(self, node) -> dict:
+        """`{LOOPLAB_USES_WORKDIRS: <abs workdirs>}` for the artifact nodes `node.uses` names whose
+        workdir exists, `os.pathsep`-joined in declaration order; `{}` for every other node."""
+        run_dir = getattr(self, "run_dir", None)
+        uses = getattr(node, "uses", None) or []
+        if run_dir is None or not uses:
+            return {}
+        paths = []
+        for nid in uses:
+            wd = Path(run_dir) / "nodes" / f"node_{nid}"
+            if type(nid) is int and wd.is_dir() and not wd.is_symlink():
+                paths.append(str(wd.resolve()))
+        return {self.USES_WORKDIRS_ENV: os.pathsep.join(paths)} if paths else {}
+
     def _run_eval(self, node, workdir, env=None, profile=None, cancel=None, start_stage=_UNSET,
                   canary=None):
         """Eval dispatcher: RepoTask runs the operator's command + reads its metric;
@@ -889,6 +986,16 @@ class EvalDispatchMixin:
         # the read-fence marker), which is safe because `validate_env_map` refuses every name the
         # engine owns, so a declaration can never overwrite one.
         env = self._declared_eval_env(env, self._eval_spec)
+        # The parents' workdirs, when the task asks (`EvalSpec.parent_workdirs_env`), on top of the
+        # declared layers — the engine owns the name — and under the canary's layer below.
+        parents = self._parent_workdirs_env(node)
+        if parents:
+            env = {**(env or {}), **parents}
+        # …and the ARTIFACT nodes this node declares it uses (doc 73 §1.4), unconditionally: `uses`
+        # exists only on a node an operator injected naming them, so nothing else carries it.
+        used = self._uses_workdirs_env(node)
+        if used:
+            env = {**(env or {}), **used}
         if canary is not None:
             # The canary's env (`LOOPLAB_CANARY=1` + the task's `eval.canary.env`) wins over every
             # declared layer: it is what makes this run tiny.

@@ -942,6 +942,20 @@ EV_EVAL_INVOCATION_RECOVERED = "eval_invocation_recovered"
 # through the attempt's ordinary repair rows and the node's one terminal.
 EV_EVAL_CANARY_STARTED = "eval_canary_started"
 EV_EVAL_CANARY_FINISHED = "eval_canary_finished"
+# THE OPERATOR'S COPY-OUT RAN (`eval.artifact_sync`, `engine/artifact_sync.py`; incident 2026-10-06:
+# a 10-hour training's checkpoint lived only on a mount that went away). After a node's terminal the
+# engine runs the operator's own command (`mc cp`, `rsync`…) over the node's workdir in a background
+# thread; this row is its receipt. DIAGNOSTIC: appended from that thread, after the terminal, and read
+# by nothing that decides — a copy that failed is reported, never a reason to fail the node.
+EV_ARTIFACT_SYNCED = "artifact_synced"
+# AN OPERATOR IMPORT OF METRICS MEASURED AFTER THE RUN (`maintenance/import_metrics.py`, `looplab
+# import-metrics`; incident 2026-10-06: nodes scored at @20 were re-scored at @200 by a service, and
+# `metric_retarget` to @200 would have unranked every one of them). FOLDED
+# (`events/replay.py::_on_extra_metrics_imported`): each key the node does NOT already carry is added
+# on the `declared` channel and named in the reconstruction marker's `keys`; a key the node already
+# carries is a LIVE record and is never overwritten. Written by a CLI holding `engine.lock`, so never
+# beside an engine (invariant #1).
+EV_EXTRA_METRICS_IMPORTED = "extra_metrics_imported"
 # A PAUSE (or a stop) WITHHELD THIS LIFECYCLE'S EVALUATION WORK, and what it had already spent
 # (doc 69 69.12a). A withheld attempt returns with NO terminal — the node stays pending, and the
 # re-dispatch after the pause lifts continues the chain — so the seconds it had consumed (a passed
@@ -951,13 +965,15 @@ EV_EVAL_CANARY_FINISHED = "eval_canary_finished"
 # no other row carries; the next terminal of the same lifecycle sums it
 # (`engine/evaluate.py::_durable_withheld_seconds`), and the occupancy closes the busy interval at
 # it. `at` names the withhold point (`EVAL_WITHHELD_POINTS`), `reason` whether the run was paused or
-# stopping.
+# stopping — or `infra_unavailable`: the attempt failed and the engine's own probe of the declared
+# paths found the BOX broken (`runtime/infra_probe.py`), so the engine paused the run itself and the
+# failure was charged to nobody (`engine/evaluate.py::EvaluateMixin._eval_infra_pause`).
 #
 # DIAGNOSTIC for `eval_canary_*`'s reason: appended from the eval child, per attempt. The fold never
 # reads it; the charge reaches the run through the lifecycle's one terminal.
 EV_EVAL_ATTEMPT_WITHHELD = "eval_attempt_withheld"
 EVAL_WITHHELD_POINTS = ("admit", "before_launch", "after_canary", "decide_repair")
-EVAL_WITHHELD_REASONS = ("paused", "stopping")
+EVAL_WITHHELD_REASONS = ("paused", "stopping", "infra_unavailable")
 EV_WORKSPACE_SEEDED = "workspace_seeded"
 # FOLDED (moved out of DIAGNOSTIC_EVENTS): the start of an arbitrary operator `run_setup` command is
 # the only evidence that its side effects may have been applied. Without folding it, a kill between
@@ -1248,7 +1264,7 @@ DIAGNOSTIC_EVENTS: frozenset[str] = frozenset({
     EV_PRIOR_INJECTED, EV_MEMORY_READ,
     EV_EVAL_INVOCATION_CLAIMED, EV_EVAL_INVOCATION_SETTLED, EV_EVAL_INVOCATION_RECOVERED,
     EV_EVAL_CANARY_STARTED, EV_EVAL_CANARY_FINISHED, EV_EVAL_ATTEMPT_WITHHELD,
-    EV_TASK_CHANGED,
+    EV_TASK_CHANGED, EV_ARTIFACT_SYNCED,
 })
 
 # ROWS THAT CANNOT MOVE A DECISION FENCE — one named predicate, because each fence spelling its own
@@ -1725,9 +1741,20 @@ EVENT_PAYLOAD_KEYS: dict[str, PayloadContract] = {
         optional=(),
     ),
     "eval_attempt_withheld": PayloadContract(
-        "A pause (or a stop) withheld a lifecycle's evaluation work; the seconds it had already spent, for its next terminal.",
+        "A pause, a stop or an infra_unavailable pause withheld a lifecycle's evaluation; its seconds, for its next terminal.",
         required=("at", "attempt", "eval_seconds", "generation", "node_id", "reason"),
         optional=(),
+    ),
+    "artifact_synced": PayloadContract(
+        "The operator's eval.artifact_sync command ran over a node's workdir after its terminal.",
+        required=("command", "exit_code", "generation", "node_id", "seconds", "stderr_tail",
+                  "timed_out"),
+        optional=(),
+    ),
+    "extra_metrics_imported": PayloadContract(
+        "An operator imported metrics measured after the run for one node, beside its live ones.",
+        required=("extra_metrics", "generation", "imported_at", "node_id", "source"),
+        optional=("attempt", "precision_decimals"),   # `attempt`: read by `_generation_matches`
     ),
     "eval_canary_finished": PayloadContract(
         "The eval canary's result: whether the node's stage chain survived the task's tiny slice.",
@@ -1918,8 +1945,8 @@ EVENT_PAYLOAD_KEYS: dict[str, PayloadContract] = {
         # were declared from the request allow-list, the same misreading as the comment rows
         # (review 2026-09-22, EVT-05).
         optional=(
-            "code", "deleted", "files", "forked_from", "idea", "origin", "parent_generations",
-            "parent_id", "parent_ids"
+            "code", "deleted", "files", "forked_from", "idea", "node_kind", "origin",
+            "parent_generations", "parent_id", "parent_ids", "uses"
         ),
         stored_whole=True,
     ),
@@ -2031,8 +2058,8 @@ EVENT_PAYLOAD_KEYS: dict[str, PayloadContract] = {
         optional=(
             "attempt", "card_build_generation", "deleted", "eval_start_boundary",
             "footprint_finalized", "forked_from", "generation", "materialize_aborted_intent",
-            "model_arm", "origin", "parent_generations", "research_origin", "seed",
-            "simplified", "speculative"
+            "model_arm", "node_kind", "origin", "parent_generations", "research_origin", "seed",
+            "simplified", "speculative", "uses"
         ),
     ),
     "node_eval_started": PayloadContract(
@@ -2254,7 +2281,7 @@ EVENT_PAYLOAD_KEYS: dict[str, PayloadContract] = {
     "resume_requested": PayloadContract(
         "A durable resume intent, appended before the engine is spawned.",
         required=("mode",),
-        optional=("launch_claim", "request_seq"),
+        optional=("auto_resume", "launch_claim", "request_seq"),
     ),
     "resume_served": PayloadContract(
         "The replacement owner acquired the singleton lock and served the resume.",
@@ -2306,7 +2333,7 @@ EVENT_PAYLOAD_KEYS: dict[str, PayloadContract] = {
     "run_setup_started": PayloadContract(
         "The task's setup command started, in a named working directory.",
         required=("after_interrupted_attempt", "command", "cwd"),
-        optional=(),
+        optional=("reverified_missing",),
     ),
     "run_started": PayloadContract(
         "The run's launch record: task, goal, direction, and the settings pinned at launch (invariant #6).",

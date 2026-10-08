@@ -116,8 +116,12 @@ class RunControlTools:
                  command_service=None, command_key_namespace: str = "",
                  mutation_journal_path=None, mutation_recovery: bool = False,
                  lifecycle: "Optional[RunLifecycleFns]" = None,
-                 trace_rewrite: "Optional[TraceRewriteFns]" = None):
+                 trace_rewrite: "Optional[TraceRewriteFns]" = None,
+                 allow_inject: bool = False):
         self.run_root = Path(run_root)
+        # `inject_experiment` (doc 73 §1.4): OFF at this constructor, as a tool the model may call
+        # is a prompt; the Assistant wires `Settings.assistant_inject_tool`.
+        self.allow_inject = bool(allow_inject)
         self.alive_fn = alive_fn
         self.mode = mode
         self.approver = approver
@@ -248,7 +252,19 @@ class RunControlTools:
                 {"run_id": {"type": "string"},
                  "trust_gate": {"type": "string", "enum": ["audit", "gate", "block"]}},
                 ["run_id", "trust_gate"]),
-        ]
+        ] + ([fn_spec("inject_experiment",
+                "Add ONE node to a run, built by its Developer from your idea. kind='artifact' makes it "
+                "a PREPARATION node (e.g. build a dataset the next experiments train on): it succeeds "
+                "on a clean pipeline with no metric and is never ranked. uses=[node ids] makes a node "
+                "that READS already-produced artifact nodes (their workdirs arrive in "
+                "LOOPLAB_USES_WORKDIRS). Inject the consumers only after the artifact is evaluated.",
+                {"run_id": {"type": "string"},
+                 "rationale": {"type": "string", "description": "what the node does and why"},
+                 "kind": {"type": "string", "enum": ["experiment", "artifact"]},
+                 "uses": {"type": "array", "items": {"type": "integer"}},
+                 "parent_id": {"type": "integer",
+                               "description": "optional: the node this one builds on"}},
+                ["run_id", "rationale"])] if self.allow_inject else [])
 
     # ------------------------------------------------------------------ helpers
     def _rd(self, run_id) -> Optional[Path]:
@@ -358,6 +374,8 @@ class RunControlTools:
             # a single `_settings`, which then re-dispatched on the same name it was just given.
             if name in ("extend_budget", "set_directive", "set_trust_gate"):
                 return getattr(self, f"_tool_{name}")(name, rid, rd, args)
+            if name == "inject_experiment" and self.allow_inject:
+                return self._tool_inject_experiment(name, rid, rd, args)
             if name == "delete_node":
                 return self._delete_node(rid, rd, args)
             if name == "delete_run":
@@ -440,6 +458,62 @@ class RunControlTools:
                 expected_generation=generation)
         return _render_command_result(
             record, name=name, run_id=rid, completed=f"budget extended for {rid}: {data}")
+
+    def _tool_inject_experiment(self, name: str, rid: str, rd: Path, args: dict) -> str:
+        """Submit the same `inject_node` the UI and an external agent write (doc 73 §1.4): an
+        experiment, an ARTIFACT (`node_kind`), or a node that `uses` produced artifacts. The server's
+        validation is the authority (`serve/control_validation.py::_normalize_artifact_fields`); this
+        only shapes the payload and gates it like every other run mutation."""
+        from looplab.events.types import EV_INJECT_NODE
+
+        rationale = " ".join(str(args.get("rationale") or "").split())[:2000]
+        if not rationale:
+            return "(inject_experiment needs a rationale: what the node does and why)"
+        data: dict = {"idea": {"operator": "inject", "rationale": rationale}}
+        kind = args.get("kind")
+        if kind not in (None, "", "experiment", "artifact"):
+            return "(kind must be 'experiment' or 'artifact')"
+        if kind == "artifact":
+            data["node_kind"] = "artifact"
+        uses = args.get("uses")
+        if uses not in (None, []):
+            if (not isinstance(uses, list)
+                    or any(isinstance(x, bool) or not isinstance(x, int) for x in uses)):
+                return "(uses must be a list of node ids)"
+            data["uses"] = list(uses)
+        parent = args.get("parent_id")
+        if parent is not None:
+            if isinstance(parent, bool) or not isinstance(parent, int):
+                return "(parent_id must be a node id)"
+            # The parent's CURRENT lifecycle, read where the tool decides, and sent as the
+            # `parent_generations` fence the server's CAS checks: without it a parent that was ever
+            # reset is refused outright ("parent generation is required after node reset"), and a
+            # reset between this read and the submit is a 409, never a child of the new bytes.
+            from looplab.events.eventstore import EventStore
+            from looplab.events.replay import fold
+            parent_node = fold(EventStore(rd / "events.jsonl").read_all()).nodes.get(parent)
+            if parent_node is None:
+                return f"(no node #{parent} in {rid})"
+            data["parent_id"] = parent
+            data["parent_generations"] = {str(parent): parent_node.attempt}
+        blocked, formed_generation = self._gate(
+            name, rid, rd, f"inject {'an artifact' if kind == 'artifact' else 'a node'} into {rid}: "
+                           f"{rationale[:60]}",
+            scope={"run_id": rid, "node_kind": data.get("node_kind", "experiment"),
+                   "uses": data.get("uses", []), "parent_id": parent,
+                   "parent_generations": data.get("parent_generations", {}),
+                   "rationale_digest": hashlib.sha256(rationale.encode("utf-8")).hexdigest()})
+        if blocked:
+            return blocked
+        with self._mutation_intent(
+                name, rid, rd, {"event_type": EV_INJECT_NODE, "data": data},
+                command_backed=True,
+                expected_generation=formed_generation) as (key, generation):
+            record = self._commands.submit(
+                rd, EV_INJECT_NODE, data, idempotency_key=key, expected_generation=generation)
+        return _render_command_result(
+            record, name=name, run_id=rid,
+            completed=f"{'artifact' if kind == 'artifact' else 'node'} injected into {rid}")
 
     def _tool_set_directive(self, name: str, rid: str, rd: Path, args: dict) -> str:
         """Record a standing directive for a LIVE run (EV_HINT), gated like every other mutation."""

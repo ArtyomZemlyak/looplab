@@ -692,7 +692,8 @@ class NodeBuildMixin:
                            footprint_finalized=_OMIT, speculative=_OMIT,
                            card_build_generation=_OMIT, eval_start_boundary=_OMIT,
                            materialize_aborted_intent=_OMIT, model_arm=_OMIT,
-                           simplified=_OMIT, expected_last_seq=_OMIT) -> None:
+                           simplified=_OMIT, node_kind=_OMIT, uses=_OMIT,
+                           expected_last_seq=_OMIT) -> None:
         """The single `node_created` emitter for every creation site (`_create_node`,
         `_create_injected_node`, `_ablate`, `_ablate_code`, and doc 67 67.5's `_simplify` and
         `_rebuild_simplification` — the two that pass `simplified`). Optional keys default to the
@@ -718,7 +719,9 @@ class NodeBuildMixin:
                      ("eval_start_boundary", eval_start_boundary),
                      ("materialize_aborted_intent", materialize_aborted_intent),
                      # doc 67 67.5: `AblationMixin._simplify`'s receipt, and nobody else's.
-                     ("simplified", simplified)):
+                     ("simplified", simplified),
+                     # doc 73 §1.4: an operator inject's artifact kind and the artifacts it reads.
+                     ("node_kind", node_kind), ("uses", uses)):
             if v is not _OMIT:
                 data[k] = v
         append_kwargs = (
@@ -2141,6 +2144,13 @@ class NodeBuildMixin:
                     # The original work item survives a rerun; only a re-proposal that MINTED a
                     # replacement card may close the one it superseded (`replacement_card`).
                     drop_card=replacement_card,
+                    # …and so does what the node IS (doc 73 §1.4): a rebuilt artifact is still an
+                    # artifact, a rebuilt consumer still reads its producers. The fold builds a fresh
+                    # Node from this row, so a key left out here would silently make it a ranked
+                    # experiment. Absent on every other node, as on its first creation.
+                    **({"node_kind": "artifact"} if getattr(node, "kind", None) == "artifact"
+                       else {}),
+                    **({"uses": list(node.uses)} if getattr(node, "uses", None) else {}),
             ):
                 return
             if is_developer_stuck(code):
@@ -2429,6 +2439,10 @@ class NodeBuildMixin:
                     # leave the inject gate re-creating the SAME id forever.
                     **({"forked_from": req["forked_from"]}
                        if isinstance(req.get("forked_from"), dict) else {}),
+                    # doc 73 §1.4, validated by `_normalize_artifact_fields`; OMITTED when absent.
+                    **({"node_kind": "artifact"} if req.get("node_kind") == "artifact" else {}),
+                    **({"uses": [x for x in req["uses"] if type(x) is int]}
+                       if isinstance(req.get("uses"), list) and req["uses"] else {}),
             ):
                 return
             # Mirror _create_node / _rerun_node: a Developer session that CRASHED returns the

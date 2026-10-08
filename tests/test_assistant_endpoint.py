@@ -1137,7 +1137,8 @@ def test_turn_progress_is_live_while_a_turn_runs_and_empty_after(tmp_path, monke
     monkeypatch.setattr("looplab.serve.routers.assistant._assistant_run_turn", fake_run_turn)
     client = TestClient(make_app(tmp_path))
     sid = client.post("/api/assistant/sessions", json={"mode": "plan"}).json()["id"]
-    idle = {"steps": [], "todos": [], "text": "", "active": False}
+    idle = {"steps": [], "todos": [], "text": "", "activity": [], "last_event": None,
+            "active": False}
     assert client.get("/api/assistant/progress", params={"session": sid}).json() == idle
 
     started = client.post(f"/api/assistant/sessions/{sid}/message",
@@ -1145,6 +1146,7 @@ def test_turn_progress_is_live_while_a_turn_runs_and_empty_after(tmp_path, monke
     assert started.get("status") == "running" and entered.wait(timeout=5)
     live = client.get("/api/assistant/progress", params={"session": sid})
     assert live.status_code == 200 and live.json()["active"] is True
+    assert isinstance(live.json()["last_event"], float), "a live turn says when it last moved"
     release.set()
     deadline = time.monotonic() + 10
     while client.get("/api/assistant/progress", params={"session": sid}).json()["active"]:

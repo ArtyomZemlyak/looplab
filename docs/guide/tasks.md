@@ -411,6 +411,26 @@ Developer's own time-budget note tells it they exist. A value you declare yourse
 entry, a stage `env`) wins over the derived one, and a deadline-grace extension the judge may grant
 at the wall is NOT in the number — plan on the declared ceiling.
 
+**A parent's workdir, on request (`eval.parent_workdirs_env: true`, off by default).** Every stage of
+a node's eval then gets `LOOPLAB_PARENT_WORKDIRS`: the absolute workdirs of the node's parents that
+exist, joined by `os.pathsep`, in `parent_ids` order. It is how an operator's runner warm-starts or
+fine-tunes from a parent's final weights ("a second epoch of node 43") without an absolute path
+copied into an idea. Host tiers only — a Docker tier binds no other node's workdir. The run
+directory is already readable to an eval and never writable, so the parent's files can be read,
+not changed. Off, the variable is absent and the task snapshot's `eval` dump is byte-identical.
+
+**Further evaluations on demand (`eval.tracks`, none by default).** `{"tracks": {"at200": {"command": [...], "keys": [...], "key_prefix": "", "timeout": 3600}}}` declares evaluators that never run during the search: `looplab evaluate-track RUN at200 --nodes all --apply` runs one over each settled node's preserved workdir (refusing a node whose workdir is not its evaluated code) and records the numbers beside the live metrics — see the [CLI reference](cli-reference.md#evaluate-track).
+
+**Copying a finished node's workdir to durable storage (`eval.artifact_sync`, off by default).**
+`{"artifact_sync": {"command": ["mc", "cp", "-r", "{workdir}", "minio/bucket/{run_id}/node_{node_id}/"], "timeout": 1800}}`
+runs YOUR argv (no shell) after each node's terminal, with the host environment `run_setup` gets
+so the tool finds its own credentials. Placeholders: `{workdir}`, `{run_dir}`, `{run_id}`,
+`{node_id}`, `{generation}`; any other brace stays literal. It runs in a background thread, so the
+eval slot (and its GPU lease) is free during the upload; the interpreter waits for an in-flight copy
+at exit, up to its `timeout`. Its receipt is the diagnostic `artifact_synced` row, its output
+`<run>/artifact_sync.log`; a failed copy is reported there and never fails, pauses or re-runs the
+node. Absent, nothing runs and the snapshot's `eval` dump is unchanged.
+
 A host launch also sizes the BLAS/OpenMP pools: `OMP_NUM_THREADS`, `OPENBLAS_NUM_THREADS`,
 `MKL_NUM_THREADS` and `VECLIB_MAXIMUM_THREADS` default to the CPUs the engine's process may actually
 use — its affinity mask bounded by its cgroup CFS quota (`cpu.max`, or v1 `cpu.cfs_quota_us`),

@@ -23,7 +23,7 @@ The event type itself is the contract's identity and is never renamed or reused;
 
 <!-- generated: event types -->
 
-173 event types — 122 folded into `RunState`, 51 diagnostic; 1140 declared payload keys; 30 types whose whole payload is stored by the fold.
+175 event types — 123 folded into `RunState`, 52 diagnostic; 1160 declared payload keys; 30 types whose whole payload is stored by the fold.
 
 | type | fold | records | required keys | optional keys |
 |---|---|---|---|---|
@@ -37,6 +37,7 @@ The event type itself is the contract's identity and is never renamed or reused;
 | `applied_params_backfilled` | folded | What the configuration that actually RAN assigned to the declared params, read back off the workdir. | `applied_params`, `generation`, `node_id`, `read_at`, `unrecoverable`, `workdir_digest` | `attempt` |
 | `approval_granted` | folded | The operator ratified the node the run paused on (HITL). | `generation`, `node_id` | `attempt` |
 | `approval_requested` | folded | The run paused for a human decision about one node, at a named log position. | `after_seq`, `generation`, `metric`, `node_id` | `attempt` |
+| `artifact_synced` | diagnostic | The operator's eval.artifact_sync command ran over a node's workdir after its terminal. | `command`, `exit_code`, `generation`, `node_id`, `seconds`, `stderr_tail`, `timed_out` | — |
 | `asha_rank` | diagnostic | One ASHA tick's ranking of a running node against its comparable population. | `comparable_population`, `direction`, `endpoint_underperforming`, `generation`, `intermediate`, `kill_comparable`, `node_id`, `population`, `quantile`, `resource_underperforming`, `underperforming` | `checkpoint_id`, `resource`, `resource_key`, `source`, `stop_refusal` |
 | `asha_verdict` | diagnostic | The ASHA judge's call on a persistently underperforming node: stop or spare, with confidence. | `comparable_population`, `confidence`, `direction`, `generation`, `intermediate`, `kill`, `node_id`, `quantile`, `reason`, `status`, `stop_decided`, `under_streak` | `confidence_valid`, `kill_superseded_by`, `resource`, `resource_key`, `train_monitor_status` |
 | `base_advanced` | folded · whole | Explicit stopped-engine CAS: only future lifecycles adopt the verified base. | `action_id`, `evidence_token`, `flag`, `from_revision`, `gate_seq`, `hunk_hashes`, `proposal_id`, `request_hash`, `selector`, `source_node_id`, `summary` | — |
@@ -84,7 +85,7 @@ The event type itself is the contract's identity and is never renamed or reused;
 | `drift_unavailable` | diagnostic | Why the run could not compare its environment against the one it started in. | `reason` | — |
 | `effective_train_batch` | diagnostic | What the training process itself recorded as the batch it ran at, read off the node's own workdir at the metric read. | `disagree`, `generation`, `node_id`, `read_at`, `readings`, `train_batch_size` | `files_seen`, `truncated` |
 | `env_changed` | folded | A resume observed that the Python/library environment differs from the one the run started in. | `now`, `was` | — |
-| `eval_attempt_withheld` | diagnostic | A pause (or a stop) withheld a lifecycle's evaluation work; the seconds it had already spent, for its next terminal. | `at`, `attempt`, `eval_seconds`, `generation`, `node_id`, `reason` | — |
+| `eval_attempt_withheld` | diagnostic | A pause, a stop or an infra_unavailable pause withheld a lifecycle's evaluation; its seconds, for its next terminal. | `at`, `attempt`, `eval_seconds`, `generation`, `node_id`, `reason` | — |
 | `eval_canary_finished` | diagnostic | The eval canary's result: whether the node's stage chain survived the task's tiny slice. | `attempt`, `code_digest`, `eval_seconds`, `generation`, `node_id`, `passed` | `error`, `exit_code`, `failed_stage`, `log_dir`, `near_cap`, `retry`, `timed_out` |
 | `eval_canary_started` | diagnostic | An eval canary is about to run the node's stage chain on the task's tiny slice. | `attempt`, `code_digest`, `generation`, `node_id`, `timeout` | `retry` |
 | `eval_invocation_claimed` | diagnostic | One paid evaluation attempt is about to invoke the evaluator, under a reconciliable id. | `attempt`, `generation`, `invocation_id`, `node_id` | `after_interrupted_attempt`, `canary_ran` |
@@ -92,6 +93,7 @@ The event type itself is the contract's identity and is never renamed or reused;
 | `eval_invocation_settled` | diagnostic | That evaluator invocation returned, with the outcome and the seconds it charged. | `attempt`, `eval_seconds`, `generation`, `invocation_id`, `node_id`, `outcome` | `result` |
 | `eval_noise_floor` | folded | The repeated-seed spread of ONE candidate's metric: the run's own evaluation noise floor. | `generation`, `mean`, `metrics`, `n`, `node_id`, `profile`, `search_metric`, `seeds`, `sem`, `spread`, `std` | `mid_search`, `protocol_mixed`, `protocol_profile`, `reason` |
 | `eval_noise_seed` | folded | One repeat of that candidate's evaluation, with its seed, metric and eval seconds. | `eval_seconds`, `generation`, `metric`, `node_id`, `seed` | `protocol_profile`, `superseded` |
+| `extra_metrics_imported` | folded | An operator imported metrics measured after the run for one node, beside its live ones. | `extra_metrics`, `generation`, `imported_at`, `node_id`, `source` | `attempt`, `precision_decimals` |
 | `finalization_finished` | folded | The wrap-up for one finish (keyed by that finish's seq) completed. | `finish_seq` | — |
 | `finalize_step` | diagnostic | One replay-safe step gate inside a single logical finalization. | — | `after_seq`, `finish_data`, `finish_report_planned`, `outcome`, `scope`, `step` |
 | `force_ablate` | folded | The operator asked for an ablation of one node. | `node_id` | `attempt`, `generation` |
@@ -112,7 +114,7 @@ The event type itself is the contract's identity and is never renamed or reused;
 | `hypothesis_updated` | folded | One hypothesis's status moved. | `id` | `status` |
 | `inject_done` | folded | The fulfillment receipt for one `inject_node` request. | `idx` | — |
 | `inject_failed` | diagnostic | An `inject_node` request that could not be materialized, with the reason. | `error`, `idx`, `reason` | — |
-| `inject_node` | folded · whole | An operator-authored node: its idea and code, or a branch of an existing (possibly foreign) node. | — | `code`, `deleted`, `files`, `forked_from`, `idea`, `origin`, `parent_generations`, `parent_id`, `parent_ids` |
+| `inject_node` | folded · whole | An operator-authored node: its idea and code, or a branch of an existing (possibly foreign) node. | — | `code`, `deleted`, `files`, `forked_from`, `idea`, `node_kind`, `origin`, `parent_generations`, `parent_id`, `parent_ids`, `uses` |
 | `lessons_distilled` | folded · whole | The lessons one distillation pass drew from this run's node pairs. | `at_node`, `count`, `lessons`, `pairs`, `trigger` | — |
 | `lessons_reconciled` | diagnostic | A re-evaluation changed an outcome; this run's lessons citing it were retired and re-derived (`reason`: why none were). | `at_node`, `derivation`, `lessons`, `n_added`, `n_retired`, `pairs`, `reflect` | `reason` |
 | `lessons_refreshed` | folded · whole | The cross-run lesson store was re-read at a node, and whether it changed. | `at_node` | `changed`, `chars`, `error`, `skipped` |
@@ -128,7 +130,7 @@ The event type itself is the contract's identity and is never renamed or reused;
 | `node_building` | folded | A node id was reserved and its build started; `node_created` clears the marker. | `node_id`, `operator`, `parent_ids` | `attempt`, `card_build_generation`, `card_id`, `generation`, `speculative` |
 | `node_concepts` | folded | The concept ids one node was tagged with, by which mode, against a named vocabulary. | `at_vocab`, `concepts`, `generation`, `mode`, `node_id` | `at_pending`, `attempt` |
 | `node_confirmed` | folded | A node's confirmation statistics over its seeds (mean, std). | `generation`, `mean`, `node_id`, `seeds`, `std` | `attempt`, `objective_key`, `protocol_mixed`, `protocol_profile` |
-| `node_created` | folded | A node exists: its idea, the code and files the Developer wrote, and its parents. | `code`, `files`, `idea`, `node_id`, `operator`, `parent_ids` | `attempt`, `card_build_generation`, `deleted`, `eval_start_boundary`, `footprint_finalized`, `forked_from`, `generation`, `materialize_aborted_intent`, `model_arm`, `origin`, `parent_generations`, `research_origin`, `seed`, `simplified`, `speculative` |
+| `node_created` | folded | A node exists: its idea, the code and files the Developer wrote, and its parents. | `code`, `files`, `idea`, `node_id`, `operator`, `parent_ids` | `attempt`, `card_build_generation`, `deleted`, `eval_start_boundary`, `footprint_finalized`, `forked_from`, `generation`, `materialize_aborted_intent`, `model_arm`, `node_kind`, `origin`, `parent_generations`, `research_origin`, `seed`, `simplified`, `speculative`, `uses` |
 | `node_eval_started` | folded | A node's evaluation was dispatched — the promise `node_created`'s eval-start boundary made. | `generation`, `node_id` | `attempt` |
 | `node_evaluated` | folded | A node's terminal: its metric, the trials behind it, its secondary metrics and any trust violations. | `eval_seconds`, `extra_metrics`, `generation`, `metric`, `node_id`, `stdout_tail`, `trials`, `violations` | `activation`, `attempt`, `extra_metrics_direction`, `extra_metrics_provenance`, `metric_provenance`, `resource_curve`, `self_metric`, `stderr_tail` |
 | `node_failed` | folded | A node's other terminal: why the evaluation produced no number, and who said so. | — | `attempt`, `card_id`, `engine_reason`, `error`, `error_evidence`, `eval_seconds`, `failed_stage`, `failure_signature`, `finish_data`, `finish_report_planned`, `generation`, `never_evaluated`, `node_id`, `reason`, `reason_evidence`, `reason_evidence_resolved`, `reason_evidence_root`, `reason_findings`, `reason_hypotheses`, `reason_override_refused`, `reason_source`, `reason_summary`, `repair_stop`, `scope`, `step`, `triage_action`, `triage_rationale`, `withheld_metric` |
@@ -158,7 +160,7 @@ The event type itself is the contract's identity and is never renamed or reused;
 | `research_completed` | folded | One deep-research memo: its claims with evidence bindings, plan, literature and verifier verdicts. | `at_node`, `memo`, `served_manual`, `trigger` | `attempt_id`, `converged_skips`, `memo_id` |
 | `restart` | folded | The operator handed a paused run to a replacement owner. | — | — |
 | `resume` | folded | The operator resumed a paused run. | — | — |
-| `resume_requested` | folded | A durable resume intent, appended before the engine is spawned. | `mode` | `launch_claim`, `request_seq` |
+| `resume_requested` | folded | A durable resume intent, appended before the engine is spawned. | `mode` | `auto_resume`, `launch_claim`, `request_seq` |
 | `resume_served` | folded | The replacement owner acquired the singleton lock and served the resume. | — | `activity_recovery`, `engine_owner_boundary` |
 | `reward_hack_suspected` | folded | The reward-hack scan's signals about one node's code, over a named code digest. | `code_digest`, `evidence_version`, `generation`, `node_id`, `signals` | `attempt` |
 | `run_abort` | folded | The run was aborted, with the reason. | `reason` | — |
@@ -167,7 +169,7 @@ The event type itself is the contract's identity and is never renamed or reused;
 | `run_loop_exited` | diagnostic | Why the engine's outer loop exited (one of `RUN_EXIT_REASONS`). | `reason` | — |
 | `run_reopened` | folded | A finished run was reopened for more work. | — | — |
 | `run_setup_finished` | folded | The task's setup command finished: exit code, environment delta, stderr tail. | `command`, `dropped_requirements`, `env_delta`, `exit_code`, `stderr_tail`, `timed_out` | — |
-| `run_setup_started` | folded | The task's setup command started, in a named working directory. | `after_interrupted_attempt`, `command`, `cwd` | — |
+| `run_setup_started` | folded | The task's setup command started, in a named working directory. | `after_interrupted_attempt`, `command`, `cwd` | `reverified_missing` |
 | `run_started` | folded | The run's launch record: task, goal, direction, and the settings pinned at launch (invariant #6). | — | `card_driven_selection`, `config_hash`, `direction`, `dirty_inputs`, `env`, `eval_env`, `eval_env_absent_from_task`, `eval_parallel`, `explicit_settings`, `goal`, `holdout_fraction`, `holdout_select`, `llm_parallel`, `reference_score`, `require_approval`, `run_id`, `run_uid`, `seed_base`, `select_verifier`, `select_verifier_contract`, `select_verifier_samples`, `speculation_calibration_gpu_inventory`, `speculation_calibration_profile_digest`, `speculation_calibration_seed`, `speculation_depth`, `speculation_depth_auto`, `speculation_gate_receipt_digest`, `speculation_implementation_digest`, `speculation_policy_scope`, `speculation_runtime_scope_sha256`, `split_salt`, `task_id`, `task_identity`, `trust_gate`, `upstream`, `verifier_ci_tie`, `workspace` |
 | `run_width_settled` | folded | The run's live width was re-pinned, with the evidence behind the new value. | — | `evidence`, `finish_data`, `finish_report_planned`, `previous`, `reason`, `scope`, `step` |
 | `rung_promoted` | folded | The successive-halving rung that promoted a named set of survivors. | — | `finish_data`, `finish_report_planned`, `rung`, `scope`, `step`, `survivors` |

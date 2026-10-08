@@ -43,6 +43,7 @@ import {
   completedAssistantReply, danglingAssistantTurn,
   unavailableAssistantRecovery,
 } from './assistantRecovery.js'
+import { progressActivity, progressHasNews, progressPatch } from './assistantProgressModel.js'
 import {
   finalReplyText, restoredComposerInput, sendAbandonReason, sendTurnBlock, terminalTurnOutcome,
 } from './assistantTurnModel.js'
@@ -1103,10 +1104,10 @@ export default function AssistantBar({ runId, hidden = false, onReady }) {
         const reattachAttempt = {}
         activeReplyAttemptRef.current = reattachAttempt
         setBusy(true); runningRef.current = true
-        const act = (prog.steps || []).length ? [{ type: 'tools', labels: prog.steps }] : []
+        const act = progressActivity(prog, [])
         setMsgs(m => (m[m.length - 1] && m[m.length - 1].role === 'assistant' && m[m.length - 1].streaming)
           ? m : [...m, { role: 'assistant', content: '', streaming: true, activity: act,
-            recoveryNeeded: !!dangling }])
+            recoveryNeeded: !!dangling, lastEventAt: progressPatch(prog).lastEventAt }])
         let polling = true
         let exactFailure = null
         let recoveryCtrl = null
@@ -1182,10 +1183,9 @@ export default function AssistantBar({ runId, hidden = false, onReady }) {
                 if (!dangling) break
                 continue
               }
-              if (replyAttemptCurrent(reattachAttempt, id) && ((pp.steps || []).length || pp.text))
+              if (replyAttemptCurrent(reattachAttempt, id) && progressHasNews(pp))
                 patchLast(prev => prev && prev.role === 'assistant' && prev.streaming   // only the live placeholder
-                  ? { ...(pp.text ? { content: pp.text } : {}),
-                      activity: (pp.steps || []).length ? [{ type: 'tools', labels: pp.steps }] : prev.activity } : prev)
+                  ? progressPatch(pp, prev) : prev)
               // A reattached turn may be PARKED on a HITL confirm — surface its card too (the send
               // path polls permissions; without this a reload hides the card until the 900s deny).
               const permissionSnapshot = await readPermissionSnapshot(id)
@@ -2439,10 +2439,12 @@ export default function AssistantBar({ runId, hidden = false, onReady }) {
       onPermissions: pending => setPending(pending),
       readProgress: () => assistantProgress(id),
       streamedText: () => acc,
-      onProgress: pp => patchLast(prev => (prev && prev.role === 'assistant' && prev.streaming)
-        ? { content: assistantErrorInfo(pp.text) ? normalizedFailureText(pp.text) : (pp.text || prev.content),
-            activity: (pp.steps || []).length ? [{ type: 'tools', labels: pp.steps }] : prev.activity }
-        : prev),
+      onProgress: pp => patchLast(prev => {
+        if (!(prev && prev.role === 'assistant' && prev.streaming)) return prev
+        const patch = progressPatch(pp, prev)
+        return { ...patch,
+          content: assistantErrorInfo(pp.text) ? normalizedFailureText(pp.text) : (patch.content || prev.content) }
+      }),
       sleep,
     })
     const safeAttempt = (fn) => (...a) => { if (replyAttemptCurrent(localAttempt, id)) fn(...a) }
@@ -2451,14 +2453,16 @@ export default function AssistantBar({ runId, hidden = false, onReady }) {
       const res = await assistantMessageStream(id, fullInstruction, effectiveMode, {
         onToken: safeAttempt((tok) => {
           acc += tokText(tok)
-          patchLast({ content: assistantErrorInfo(acc) ? normalizedFailureText(acc) : acc })
+          patchLast({ content: assistantErrorInfo(acc) ? normalizedFailureText(acc) : acc,
+            lastEventAt: Date.now() })
         }),
-        onText: safeAttempt((txt) => patchLast(prev => ({ activity: [...(prev.activity || []), { type: 'text', content: txt }] }))),
+        onText: safeAttempt((txt) => patchLast(prev => ({ activity: [...(prev.activity || []), { type: 'text', content: txt }],
+          lastEventAt: Date.now() }))),
         onStep: safeAttempt((s) => patchLast(prev => {
           const a = prev.activity || []; const last = a[a.length - 1]
           return last && last.type === 'tools'
-            ? { activity: [...a.slice(0, -1), { ...last, labels: [...last.labels, s] }] }
-            : { activity: [...a, { type: 'tools', labels: [s] }] }
+            ? { activity: [...a.slice(0, -1), { ...last, labels: [...last.labels, s] }], lastEventAt: Date.now() }
+            : { activity: [...a, { type: 'tools', labels: [s] }], lastEventAt: Date.now() }
         })),
         onTodos: safeAttempt((items) => patchLast({ todos: items })),
         onError: safeAttempt((e) => {

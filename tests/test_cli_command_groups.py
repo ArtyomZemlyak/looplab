@@ -147,7 +147,12 @@ GROUPS = {
     # holds the 36 the stage measured. Same append-only shape, same "a live record always wins"
     # fold rule, same refusal to guess — so it belongs beside its sibling and not in a group of its
     # own.
-    "maintenance_cmds": {"backfill-applied-params", "backfill-score-metrics"},
+    # `import-metrics` and `evaluate-track` (doc 73, 2026-10-07) are the same contract a third and
+    # fourth way: one run's record gains numbers measured AFTER it ran — an operator's file, or a
+    # declared `eval.tracks` argv over each node's preserved workdir — appended beside the live
+    # values under `engine.lock`, never over them.
+    "maintenance_cmds": {"backfill-applied-params", "backfill-score-metrics", "import-metrics",
+                         "evaluate-track"},
 }
 
 

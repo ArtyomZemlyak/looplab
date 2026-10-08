@@ -628,6 +628,14 @@ def phase_context_enabled(settings) -> bool:
     return bool(getattr(settings, "developer_phase_context", False))
 
 
+def upstream_board_enabled(settings) -> bool:
+    """`Settings.upstream_board_brief` as `LLMRepoDeveloper(upstream_board=)` — the ONE reader. It
+    adds the promoted-capabilities paragraph (`core/upstream_board.py::developer_base_note`) to the
+    build prompts; absent means OFF, the historical prompts byte for byte, which is also what a
+    pre-field snapshot reads through its `LEGACY_CONFIG_SNAPSHOT_DEFAULTS` row."""
+    return getattr(settings, "upstream_board_brief", False) is True
+
+
 def scorer_status_enabled(settings) -> bool:
     """`Settings.developer_scorer_status` as the constructor argument `LLMRepoDeveloper` takes.
 
@@ -1159,6 +1167,9 @@ class LLMRepoDeveloper:
     # Whether the STAGES turn states if the scorer is frozen (`Settings.developer_scorer_status`,
     # doc 69 69.5). A CLASS default for the same `__new__` reason: OFF is the historical turn.
     _scorer_status = False
+    # Whether the build prompts state the run's PROMOTED capabilities (`Settings.upstream_board_brief`,
+    # doc 73 §2.3). A CLASS default for the same `__new__` reason: OFF is the historical prompt.
+    _upstream_board = False
 
     def __init__(self, client: LLMClient, task, *, parser: str = "tool_call",
                  loop_opts: Optional[dict] = None, plan_decompose: bool = True,
@@ -1171,7 +1182,8 @@ class LLMRepoDeveloper:
                  step_feedback_command: str = "", established=None,
                  evidence_envelope: bool = False, prompt_truths: bool = False,
                  phase_context: bool = False, scorer_status: bool = False,
-                 claim_decisions: bool = False, activation_graded: bool = False):
+                 claim_decisions: bool = False, activation_graded: bool = False,
+                 upstream_board: bool = False):
         self.client = client
         self.task = task
         self.parser = parser
@@ -1196,6 +1208,13 @@ class LLMRepoDeveloper:
         # `scorer_frozen` / `scorer_status_note`. OFF at the constructor because it changes a
         # prompt; `agents/developer_backends.py` passes `scorer_status_enabled(settings)`.
         self._scorer_status = bool(scorer_status)
+        # THE RUN'S PROMOTED CAPABILITIES (doc 73 §2.3): ON, every build turn that states the budget
+        # also states what the upstream lane promoted into the base, with each capability's flag, so
+        # the role that writes the code switches a flag on instead of re-implementing it. Read off
+        # the fold the engine binds (`bind_state`), the channel `_time_budget_s` already uses. OFF at
+        # the constructor because it changes prompts; `agents/developer_backends.py` passes
+        # `upstream_board_enabled(settings)`.
+        self._upstream_board = bool(upstream_board)
         # THE FENCE ON WHAT EVERY PHASE'S TOOLS RETURN (`core/evidence.py`; review 2026-09-22,
         # TAT-02): the task repository and this node's staged files through the scouts, the
         # environment, the operator's dev commands run over candidate code, the probe — text the
@@ -2519,6 +2538,15 @@ class LLMRepoDeveloper:
                 f"have already been paid for. Size every `--num_processes` / `--nproc_per_node` / "
                 f"`--gpus` to {gpus} or fewer, and put the per-device batch size where it fits.")
 
+    def _upstream_base_note(self) -> str:
+        """What the upstream lane promoted into this run's base (`core/upstream_board.py`), or ""
+        — when `upstream_board_brief` is off, when no state is bound, and on every run that never
+        promoted anything, so all of those render the historical bytes."""
+        if not getattr(self, "_upstream_board", False):
+            return ""
+        from looplab.core.upstream_board import developer_base_note
+        return developer_base_note(getattr(self, "_memory_state", None))
+
     def _time_budget_note(self) -> str:
         """The operator's per-eval WALL-CLOCK budget, for the role that actually spends it (docs/29 F1h).
 
@@ -2818,7 +2846,7 @@ class LLMRepoDeveloper:
             # The device count, at the SAME splice position and for the same reason one axis over:
             # this is the phase that authors the launcher command, so it is the phase that has to
             # know how many devices exist.
-            + self._gpu_footprint_note(idea) + "\n\n"
+            + self._gpu_footprint_note(idea) + self._upstream_base_note() + "\n\n"
             "GIVE EVERY STAGE ITS `needs` — the workdir-relative files it READS and cannot run without: "
             "what an earlier stage produces, plus whatever the seeded workdir must already contain. The "
             "engine checks them BEFORE the stage starts, so a pipeline whose stages disagree about where "
@@ -3154,7 +3182,10 @@ class LLMRepoDeveloper:
                 + self._time_budget_note()
                 # A repair session skips the stages phase entirely and reaches ONLY this path, which
                 # is exactly where v6's launcher bug had to be fixed — so the count rides here too.
-                + self._gpu_footprint_note(idea))
+                + self._gpu_footprint_note(idea)
+                # …and the promoted capabilities, for the same reason: a repair reaches only this
+                # path, and a failure a promoted fix cured is exactly what it must not re-solve.
+                + self._upstream_base_note())
         if base:
             cap_each, cap_total, used = 8000, 24000, 0
             parts = []
@@ -3563,6 +3594,7 @@ class LLMRepoDeveloper:
         if not getattr(self, "_phase_context", False):
             return "", ""
         decision = (self._time_budget_note() + self._gpu_footprint_note(idea)
+                    + self._upstream_base_note()
                     + (co_parent_block(co_parents, base or {}) if co_parents else ""))
         working = _REPO_DEV_PLAN_WORKING_SET.format(files=", ".join(write.files) or "(none yet)")
         return stage_note + working + decision, decision

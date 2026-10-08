@@ -68,6 +68,10 @@ the diff that justified it:
   The snapshot missed the three additive defaults: null, false and [] for this legacy log
   without upstream events. All 146 existing root entries, including every nested value,
   were compared unchanged before regeneration; the diff adds 3 lines with no deletions.
+* 2026-10-07 — `Node.kind` + `Node.uses` (`core/models.py`, doc 73 §1.4: an artifact node and the
+  artifacts a node reads). The diff was 16 insertions and 0 deletions — one `"kind": null` and one
+  `"uses": []` per node, what a `node_created` row with neither key folds to — and no shared leaf
+  changed.
 """
 from __future__ import annotations
 

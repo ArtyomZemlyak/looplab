@@ -1990,6 +1990,11 @@ pre.code.event-json { max-height: 220px; }
    to see before they read the idea itself. */
 .node-card .origin-chip.fork { color: var(--fg); cursor: default; font-weight: 600; }
 .node-card .origin-chip.fork:hover { border-color: var(--line); }
+/* doc 73 §1.4: an artifact node (prepares data, never ranked) and a node that uses artifacts. */
+.node-card .origin-chip.artifact,
+.node-card .origin-chip.uses { color: var(--fg-dim); cursor: default; }
+.node-card .origin-chip.artifact:hover,
+.node-card .origin-chip.uses:hover { border-color: var(--line); }
 .node-card .origin-chip.compact { flex: none; max-width: none; margin-top: 0; padding: 0 3px;
   line-height: 16px; text-align: center; }
 .node-card.dim { opacity: .28; filter: saturate(.5); }
@@ -2443,6 +2448,8 @@ pre.code.event-json { max-height: 220px; }
 .asst-status-ic { color: var(--working); }
 .asst-status.thinking { color: var(--fg-mut); }
 .asst-status.thinking .asst-status-ic { animation: asstBlink 1.1s step-end infinite; }
+.asst-status.recovering { color: var(--fg); border-left: 2px solid var(--working); padding-left: 6px; margin: 2px 0; }
+.asst-status.live { font-variant-numeric: tabular-nums; }
 /* human-in-the-loop confirm card */
 .asst-perm-region { display: flex; flex-direction: column; gap: 8px; align-items: flex-start; }
 .asst-perm { border: 1px solid var(--accent-dim); border-radius: 10px; background: var(--bg-1); padding: 10px 12px;
@@ -3578,3 +3585,6 @@ body.asst-side-open .app-shell-main { margin-right: var(--asst-side-w, 440px); }
    detail rather than one screen away. */
 .pc-memory-group { margin-bottom: 10px; }
 .pc-memory-group .pc-detail-runs li { display: block; margin-bottom: 6px; line-height: 1.4; }
+
+.research-inferred { display: flex; flex-direction: column; gap: 2px; }
+.research-inferred-chip { align-self: flex-start; }

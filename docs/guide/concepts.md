@@ -460,7 +460,7 @@ metric — one an `eval.metrics` reader recorded, never a number the candidate p
 objective every node is ranked by, and `"key": null` ranks by the task's own metric again. It is a
 folded intent: no engine is needed, a stopped run is re-ranked the moment it lands and a live one at
 its next fold (`events/replay.py::_on_metric_retarget`). Each node keeps its task metric beside the
-objective's; a node that never recorded the key is unranked; everything MEASURED on the old objective
+objective's; a node that never recorded the key is unranked (`looplab inspect` names them, and `looplab import-metrics` carries values measured after the run in beside the live ones); everything MEASURED on the old objective
 stops standing — confirmation means and their per-seed memo, verifier scores, the completion
 certificate — so the confirm phase measures again, on the new key, and stamps every row with the key
 it measured (`objective_key`). A `goal` restates `RunState.goal` (the launch goal stays in
@@ -752,6 +752,36 @@ but its run-generation lease and cost events share the same destructive boundary
 Standalone legacy CLI `stop`, `finalize`, `resume`, and `approve` commands are not yet participants in
 the server sequencer and must not be run concurrently with an active server-owned command. Migrating
 those direct CLI paths is an explicit compatibility boundary.
+
+### Artifact nodes: preparation other nodes use (doc 73 §1.4)
+
+Not every node is an experiment. An `inject_node` carrying `"node_kind": "artifact"` is a node whose
+pipeline **produces** something other nodes read — a prepared dataset for the next ten experiments:
+
+```jsonc
+{"type": "inject_node", "data": {"idea": {"operator": "inject", "rationale": "build the shards"},
+                                 "node_kind": "artifact"}}
+// once it is evaluated:
+{"type": "inject_node", "data": {"idea": {"operator": "inject", "rationale": "train on them"},
+                                 "uses": [17]}}
+```
+
+An artifact is built and repaired like any node, and it SUCCEEDS on a clean pipeline with no metric:
+the engine's own classifier says the run exited 0, broke no stage contract and printed no number.
+Its metric is always None, even when the runner prints one, so it is never feasible, never the
+champion, not killed by the proxy or ASHA, and not an attempt the plateau counts. A node that names it
+in `uses` gets `LOOPLAB_USES_WORKDIRS` — the artifacts' absolute workdirs, `os.pathsep`-joined —
+which its eval may read (the run directory is readable, never writable, to an eval). `uses` must name
+artifact nodes that are ALREADY produced; the command refuses `inject_uses_not_produced` /
+`inject_uses_not_artifact` otherwise, so a consumer never races its producer. Both keys land on
+`node_created` only when set, so every other node keeps its payload shape.
+
+It stays what it is: a retargeted objective never ranks it (even when an import left it the key),
+a failed artifact is never metric-salvaged, and a rebuild (`node_reset` from implement) carries
+`node_kind`/`uses` forward. The run graph marks an artifact with ▣ and a consumer with ⇠; the
+Assistant creates either through its `inject_experiment` tool (`Settings.assistant_inject_tool`).
+The producer's workdir is read as it stands when the consumer runs — resetting an artifact while
+consumers wait is not fenced yet (doc 73, status table).
 
 ### Branching from a snapshot (fork-to-branch)
 

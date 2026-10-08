@@ -526,6 +526,17 @@ _LAYOUT = {
     "seed_base": "engine",  # immutable initial selection of a recorded run/bundle seed
     "bundle_bases": "engine",  # evidence-bound copied bases in reviewer bundles
     "write_tools": "tools",
+    # Joined 2026-10-07 — seven of these landed without a row (the guard was red on master):
+    "result_commentary": "serve",
+    "concept_effects": "search",
+    "seed_files": "serve",
+    "output_language": "core",
+    "prose_locale": "core",
+    "assistant_monitor": "serve",
+    "upstream_requests": "engine",
+    "infra_probe": "runtime",  # the box before the candidate (incident 2026-10-06)
+    "artifact_sync": "engine",  # the operator's copy-out of a finished node's workdir
+    "upstream_board": "core",  # the one reading of the upstream lane's folded history (doc 73)
 }
 
 

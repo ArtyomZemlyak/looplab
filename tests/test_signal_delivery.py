@@ -129,6 +129,19 @@ def _probe_run_states():
     return _attention_states(st), "PAUSED"
 
 
+def _probe_upstream_promotions():
+    """Through the REAL Developer method, over a fold the engine would bind: the promotion's flag
+    reaches the build prompt's paragraph."""
+    from looplab.adapters.repo_developer import LLMRepoDeveloper
+    st = RunState(direction="min", goal="g")
+    st.upstream_history = [{"seq": 7, "type": "base_advanced", "proposal_id": "p1",
+                            "source_node_id": 4, "summary": "bf16 attention kernel",
+                            "flag": {"name": "fast_attn", "default": "0", "enabled": "1"}}]
+    dev = LLMRepoDeveloper.__new__(LLMRepoDeveloper)
+    dev._upstream_board, dev._memory_state = True, st
+    return dev._upstream_base_note(), "flag `fast_attn`"
+
+
 _PROBES = {
     "trust_flags": _probe_trust_flags,
     "watchdog_signals": _probe_watchdog_signals,
@@ -140,6 +153,7 @@ _PROBES = {
     "operator_yields": _probe_operator_yields,
     "operator_directives": _probe_operator_directives,
     "run_states": _probe_run_states,
+    "upstream_promotions": _probe_upstream_promotions,
 }
 
 

@@ -1357,6 +1357,12 @@ def _workdir_manifest_digest(node) -> str:
         option=orjson.OPT_SORT_KEYS)).hexdigest()
 
 
+# The PUBLIC name of the same function, for the readers outside `engine/` that must agree with the
+# stamp byte for byte — `maintenance/evaluate_track.py::track_refusal` measures a workdir only when
+# its stamp is this digest. The private name stays: tests and in-package callers spell it.
+workdir_manifest_digest = _workdir_manifest_digest
+
+
 def _canary_code_digest(node) -> str:
     """The eval canary's `code_digest`: `_workdir_manifest_digest` less the activation manifest.
 
@@ -3272,14 +3278,47 @@ class EvaluateMixin:
         """
         from looplab.engine.speculation import auto_pause_is_redundant
         from looplab.events.types import EV_PAUSE
+        from looplab.runtime.infra_probe import describe, probe
 
         detail = self._crash_detail(exc)
         try:
             with anyio.CancelScope(shield=True):
+                # AN OSError ON A BROKEN BOX IS NOT THIS NODE'S END (incident 2026-10-06). A dead data
+                # mount under `_materialize`'s seed copy raises ENOTCONN here, and `engine_error` closed
+                # the node for good: after the operator remounted and resumed, the idea was gone. When
+                # the engine's own probe of the declared paths (`runtime/infra_probe.py`) finds the box
+                # broken, NO terminal is written — the node stays pending and is re-dispatched on the
+                # resume, like an attempt a pause withheld — and the pause names the fault. Asked only
+                # for an OSError: a KeyError on a hand-edited node is not about the box, whatever its
+                # mounts say. The attempt the raise cut short goes uncharged, as below.
+                faults: list = []
+                if isinstance(exc, OSError):
+                    try:
+                        targets = self._infra_probe_targets()
+                        if targets:
+                            faults = await anyio.to_thread.run_sync(
+                                functools.partial(probe, targets))
+                    except (OSError, RuntimeError):   # no thread to probe in: engine_error stands
+                        faults = []
                 async with self._write_lock:
                     events = self.store.read_all()
                     state = fold(events)
                     node = state.nodes.get(node_id)
+                    # …EXCEPT ON A RUN THAT IS STOPPING. A finalize drains in-flight evaluation and
+                    # finishes; leaving this node pending would end the run with a node that has no
+                    # terminal (`_pause_withholds_attempt`'s stop clause, the same defect). The stop is
+                    # final, so the box fault closes the node as `engine_error` below, as it always did.
+                    if faults and not (state.finished or state.stop_requested):
+                        if not auto_pause_is_redundant(state):
+                            self.store.append(EV_PAUSE, {
+                                "reason": "infra_unavailable",
+                                "detail": self._redact(
+                                    f"evaluation of node {node_id} raised {detail} and the box did "
+                                    f"not answer: {describe(faults)}")[:400]})
+                        _LOG.warning("evaluation of node %s raised on a broken box (%s); the node "
+                                     "stays pending and the run is paused", node_id,
+                                     describe(faults))
+                        return
                     # Only if this lifecycle is still open. A body that already wrote its own
                     # terminal and then raised on the way out (a tracer teardown, a span export) must
                     # not get a second one — the fold is idempotent on duplicates, but the second row
@@ -3415,6 +3454,10 @@ class EvaluateMixin:
                             break
                         # loop -> re-run the eval with the corrected code (reusing earlier stages when safe)
                     await self._eval_write_terminal(a)
+                    # The operator's copy-out of this workdir (`eval.artifact_sync`), AFTER the
+                    # terminal and in its own thread: it never holds this slot or moves the node.
+                    from looplab.engine.artifact_sync import start_artifact_sync
+                    start_artifact_sync(self, a.node_id, a.generation)
         except (anyio.get_cancelled_exc_class(), *_EVAL_DELIBERATE_STOPS) as exc:
             # A deliberate stop is not a node failure. Cancellation is how a reset, an operator abort
             # and a run stop reach this worker; answering one with a `node_failed` would invent a
@@ -3590,6 +3633,50 @@ class EvaluateMixin:
             _LOG.warning("node %s: could not record its withheld attempt (%s); the lifecycle stays "
                          "pending and those seconds are charged nowhere", a.node_id, at,
                          exc_info=True)
+
+    def _infra_probe_targets(self) -> list:
+        """What the infra probe asks about (`runtime/infra_probe.py::declared_targets`): the run
+        directory, the operator's declared editables / data / reference mounts, the eval interpreter
+        the sandbox names, and the absolute paths in the DECLARED eval environment. `getattr`
+        throughout: test doubles and non-repo tasks reach the failure path without a repo spec."""
+        from looplab.runtime.infra_probe import declared_targets
+        try:
+            env = self._declared_eval_env({}, getattr(self, "_eval_spec", None)) or {}
+        except (TypeError, ValueError, AttributeError):   # a malformed declaration probes no env path
+            env = {}
+        return declared_targets(run_dir=getattr(self, "run_dir", None),
+                                repo_spec=getattr(self, "_repo_spec", None),
+                                interpreter=getattr(getattr(self, "sandbox", None), "python", None),
+                                env=env)
+
+    async def _eval_infra_pause(self, a: "EvalAttempt", *, failed: bool = True) -> bool:
+        """Probe the box — after a failed attempt (`failed`), or before a launch — and on a fault
+        PAUSE the run and answer True.
+
+        The probe runs in a worker thread (a dead mount can block a `stat` for its whole timeout,
+        and the loop must keep its heartbeats). The pause is node-less, `reason: "infra_unavailable"`
+        with the faults in `detail`, so `RunState.pause_reason` and `looplab inspect` name the path
+        that went away; it is skipped when an auto-pause would change nothing
+        (`speculation.py::auto_pause_is_redundant`). No terminal is written: the caller withholds
+        the attempt and the node stays pending, so the resume re-runs it on a healthy box. A failure
+        whose probe finds nothing proceeds to the ordinary repair path, unchanged."""
+        from looplab.engine.speculation import auto_pause_is_redundant
+        from looplab.runtime.infra_probe import describe, probe
+        targets = self._infra_probe_targets()
+        if not targets:
+            return False
+        faults = await anyio.to_thread.run_sync(functools.partial(probe, targets))
+        if not faults:
+            return False
+        what = "failed" if failed else "was about to launch"
+        detail = self._redact(f"evaluation of node {a.node_id} {what} and the box did not answer: "
+                              f"{describe(faults)}")[:400]
+        _LOG.warning("node %s: %s — pausing the run; the attempt is withheld, not charged to the "
+                     "candidate. Fix the box and resume.", a.node_id, detail)
+        async with self._write_lock:
+            if not auto_pause_is_redundant(fold(self.store.read_all())):
+                self.store.append(EV_PAUSE, {"reason": "infra_unavailable", "detail": detail})
+        return True
 
     def _eval_canary_due(self, a: "EvalAttempt") -> bool:
         """Does THIS attempt owe an eval canary before its full eval (`engine/eval_canary.py`)?
@@ -3934,7 +4021,9 @@ class EvaluateMixin:
         # record in the next phase (RECOVER_SETTLED), and predicting it wrote `proxy_skipped` over a
         # real result (crit_v46, driven). The GPU-pin exit above keeps its order on purpose — the
         # recovery may still decide to re-run, and a re-run must never launch unpinned.
+        # An ARTIFACT node (doc 73 §1.4) predicts no metric and is never killed for one.
         if (self.proxy_scorer is not None and self.proxy_kill_fraction > 0
+                and getattr(a.node, "kind", None) != "artifact"
                 and settled_ok_awaiting_terminal(a.events_at_start, a.node_id, a.generation) is None):
             # The pair, not the point estimate (doc 52 row 17): the kill abstains on a candidate
             # whose nearest evaluated neighbour is beyond the explored region's own radius, and
@@ -4054,6 +4143,11 @@ class EvaluateMixin:
                     self.store.append(EV_STAGE_FINISHED,
                                       {"node_id": a.node_id, **_st, "generation": a.generation})
         await self._eval_write_terminal(a)
+        # …and the operator's copy-out, as the driver starts it after a live terminal: the dead
+        # process settled `ok` and never reached its own `start_artifact_sync`, so without this a
+        # recovered node's workdir is the one evaluated workdir `eval.artifact_sync` never copies.
+        from looplab.engine.artifact_sync import start_artifact_sync
+        start_artifact_sync(self, a.node_id, a.generation)
         return PHASE_RETURN
 
     def _settled_workdir_evidence(self, a: "EvalAttempt", claim_ts, settle_seq: int):
@@ -4298,13 +4392,22 @@ class EvaluateMixin:
         a.res = None
         a.canary_failed = False
         a.canary_ran = False
+        # THE BOX BEFORE THE LAUNCH (`runtime/infra_probe.py`, incident 2026-10-06). A launch on a dead
+        # data mount or a vanished interpreter is hours of GPU spent to learn what a `stat` answers in
+        # milliseconds — and, on a resume after a container restart, it is the FIRST thing the run does.
+        # A fault pauses the run here, and the one pause decision below withholds this attempt exactly
+        # as it withholds one under an operator pause: no terminal, the node stays pending.
+        infra_paused = (not fold(self.store.read_all()).halted
+                        and await self._eval_infra_pause(a, failed=False))
         # ONE pause decision, and the devices follow it (critic 2026-09-29, MEDIUM-1): a withheld
         # attempt takes nothing back — on a busy pool the reclaim WAITS, and a paused engine sat on
         # the pool for devices it would never use — and a launching one is re-pinned before it
         # launches. The rule is asked again only when the reclaim took devices back, because that
         # take may have waited: a pause landing during the wait withholds the attempt, and the
         # devices it took go back when the lane settles (`_settle_eval_resource_reservation`).
-        if ((a.launches and self._pause_withholds_attempt(a))
+        # The FIRST launch is asked too when the probe just paused the run: ADMIT asked before it, on a
+        # run that was not paused yet.
+        if (((a.launches or infra_paused) and self._pause_withholds_attempt(a))
                 or (await self._reclaim_devices_for_attempt(a)
                     and self._pause_withholds_attempt(a))):
             a.sp.set("eval_withheld", "paused_before_launch")
@@ -4312,7 +4415,8 @@ class EvaluateMixin:
                       a.node_id, a.attempt)
             # Nothing of THIS attempt ran: the one before it is on its `node_repaired` /
             # `deps_installed` row. The row closes the busy interval (doc 69 69.12a).
-            await self._record_eval_withheld(a, "before_launch", 0.0)
+            await self._record_eval_withheld(
+                a, "before_launch", 0.0, reason="infra_unavailable" if infra_paused else "paused")
             return PHASE_RETURN
         a.launches += 1
         a._t0 = time.time()
@@ -4432,6 +4536,7 @@ class EvaluateMixin:
             # log's latest INTERMEDIATE metric and ranks it against finished siblings; advisory
             # unless asha_live_kill. Same command-eval gate (needs a live log + the metric spec).
             if (not self.external_harness and getattr(self, "_asha_live", False)
+                    and getattr(a.node, "kind", None) != "artifact"   # no metric curve to rank
                     and isinstance(getattr(self, "_eval_spec", None), dict)):
                 _mspec = self._eval_spec.get("metric") or {}
                 _tg.start_soon(self._monitor_asha, a.node_id, a.generation, a.workdir, cancel,
@@ -4553,6 +4658,18 @@ class EvaluateMixin:
         # before the silence. NOT for a real deadline timeout (that is still mid-training).
         a.ok = (a.res.metric is not None and not a.res.timed_out
               and (a.res.exit_code == 0 or getattr(a.res, "stalled", False)))
+        # AN ARTIFACT NODE (doc 73 §1.4) succeeds on a CLEAN pipeline with no metric: the engine's own
+        # classifier says the run exited 0, broke no stage contract and only printed no number
+        # (`triage._failure_reason == "no_metric"`). Any other reason — a crash, a timeout, a missing
+        # declared output — is still a failure and takes the ordinary repair path.
+        #
+        # …AND AN ARTIFACT IS NEVER RANKED, even when its pipeline prints a number: an operator's
+        # runner prints its metric on every mode, and a recorded one would make the preparation step
+        # feasible — a candidate for champion. The printed line stays in the stage log; the node's
+        # metric is None (`feasible_nodes` then excludes it).
+        if getattr(a.node, "kind", None) == "artifact":
+            a.res.metric = None
+            a.ok = _failure_reason(a.res) == "no_metric"
         # THE NODE'S OWN ACTIVATION CONTRACT (`engine/activation.py`). Asked of a SUCCESS, before the
         # invocation settles, because a success is exactly what it can overturn: a declared marker
         # that nothing printed means the number measured the path this node meant to replace. The
@@ -4719,6 +4836,12 @@ class EvaluateMixin:
             # (`engine/eval_canary.py`). The node's workdir holds nothing from this attempt either.
             a.salvaged = None
             return PHASE_NEXT
+        if getattr(a.node, "kind", None) == "artifact":
+            # AN ARTIFACT IS NEVER SALVAGED (doc 73 §1.4): it has no metric to recover, and a
+            # recovered number would settle a FAILED preparation step as evaluated — every
+            # consumer would then read a half-written workdir. Its failure goes to repair.
+            a.salvaged = None
+            return PHASE_NEXT
         if a.watchdog_reason:
             # The diagnosis FIRST: it is the only part of this text that says what to
             # change, and the killed process's own tail says only that it was killed.
@@ -4853,6 +4976,19 @@ class EvaluateMixin:
             a.triage_outcome = ("abandon", "the run is stopping (a finalize was requested): no further "
                                 "repair of this node")
             return PHASE_SETTLED
+        # THE BOX, BEFORE THE CANDIDATE (incident 2026-10-06, `runtime/infra_probe.py`). Everything
+        # below treats this failure as the CANDIDATE's — a dependency round, a paid triage, a Developer
+        # repair, a `reject_idea` that closes the lineage. When the engine's own probe of the paths the
+        # operator declared finds the box broken (a dead data mount, a full or read-only run directory,
+        # a vanished interpreter), none of that can help: the run is paused HERE and the attempt is
+        # withheld exactly as the paused branch below withholds one, so the node stays pending and its
+        # chain resumes, uncharged, once the operator fixes the box and resumes. AFTER the stop check
+        # (a stop is final and the finish waits on this worker), BEFORE the pause check (that branch is
+        # what withholds the attempt, and it must name why).
+        withheld_reason = "paused"
+        if not halted.paused and await self._eval_infra_pause(a):
+            withheld_reason = "infra_unavailable"
+            halted = fold(self.store.read_all())
         if halted.paused:
             # AN INTERVENTION RECORDED AFTER THIS ATTEMPT'S WATCHER CLOSED owns the terminal, as at
             # `_pause_withholds_attempt`'s third clause: a withheld return left a reset's old
@@ -4865,7 +5001,8 @@ class EvaluateMixin:
                 return PHASE_RETURN
             # The attempt that just failed has no `node_repaired` row (no repair was bought), so its
             # seconds ride on the withheld row to the chain's next terminal (doc 69 69.12a).
-            await self._record_eval_withheld(a, "decide_repair", a.attempt_eval_seconds)
+            await self._record_eval_withheld(a, "decide_repair", a.attempt_eval_seconds,
+                                             reason=withheld_reason)
             return PHASE_RETURN
         if self.external_harness:
             # The external session reads the terminal failure and decides whether to submit a

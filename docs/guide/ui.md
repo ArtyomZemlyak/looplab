@@ -606,7 +606,12 @@ node workspaces.
   rather than hiding it, exactly as a champion that won a mixed field does: blanking it would leave
   the questions that got the most work showing nothing. Absent keys are silence, not disagreement.
   A question with no experiment yet keeps its row and says so — it is the most actionable row on the
-  view. Below the ladder, **Not filed under any question** holds the experiments no question claims:
+  view. An experiment no question names but whose concept tags overlap one (every operator-injected
+  env is such a card) is drawn under the question it overlaps MOST — a tie goes to the narrower
+  question, an unbroken tie stays unfiled — and marked **filed by concepts: …**; it is display only
+  (`questionLattice.js::inferQuestionFiling`): the run's record is untouched and the question's
+  `best` keeps counting only the experiments filed under it on purpose. Below the ladder, **Not
+  filed under any question** holds the experiments no question claims and no concept matches:
   they have no position in a concept lattice, so they are a section beside it rather than a row
   inside it, and the section is rendered only when occupied. Between the ladder and that section
   every card the wire carried is drawn somewhere — the property on which the **Directions** tab was
