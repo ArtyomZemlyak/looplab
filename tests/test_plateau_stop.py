@@ -104,6 +104,19 @@ def test_an_engine_error_is_the_box_not_an_attempt():
     assert plateau_stop_due(st, 3) is None
 
 
+def test_the_silent_reasons_are_the_vocabulary_as_it_is_now(monkeypatch):
+    """Review 2026-10-08: the silent set was frozen into a module constant at import, so a benign
+    reason the vocabulary gained later was counted here as an attempt while every other reader of
+    `core/models.py::BENIGN_TERMINAL_REASONS` skipped it. MUTATION: freeze it again -> 2."""
+    import looplab.core.models as models
+    st = _state(leader=3, settled=(6, 7), statuses={7: NodeStatus.failed})
+    st.nodes[7].error_reason = "a_new_benign_reason"
+    assert plateau_nodes(st) == (3, 2)
+    monkeypatch.setattr(models, "BENIGN_TERMINAL_REASONS",
+                        models.BENIGN_TERMINAL_REASONS | {"a_new_benign_reason"})
+    assert plateau_nodes(st) == (3, 1)
+
+
 def test_a_bounded_episode_counts_only_while_its_row_is_current():
     plan = build_plan(max_nodes=100, n_seeds=2, reserve_frac=0.2, at_node=0)
     episode = replan(plan, max_nodes=100, n_seeds=2, reserve_frac=0.2, at_node=5, stall_rung=2,

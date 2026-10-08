@@ -67,6 +67,7 @@ from looplab.agents.roles import DeveloperResult
 import orjson
 
 from looplab.core.atomicio import atomic_write_text
+from looplab.core.containment import contain
 from looplab.core.errors import (BudgetExceeded, RunSetupRefusal, budget_stop_leaf,
                                  exception_leaves)
 # The fence a host refusal's account rides in, and the cut that keeps it well formed in every
@@ -1738,6 +1739,11 @@ class EvalAttempt:
     # row as `fault` + `occupant` so the NEXT meeting of the same lifecycle reads a full run
     # directory back (`run_dir_full_met`).
     infra_verdict: Any = None
+    # What this lifecycle's own workdir held and the run directory's filesystem had in use when THIS
+    # attempt launched (`infra_probe.FillBaseline`), measured only for a lifecycle that already met
+    # a full run directory (`run_dir_full_met`) — the "before" of the growth clause that may then
+    # blame it (`infra_probe.run_dir_full_blames`). Reset and bound by RUN_ATTEMPT; None otherwise.
+    fill_baseline: Any = None
 
     def charged_eval_seconds(self, extra: float = 0.0) -> float:
         """What this lifecycle's TERMINAL charges the run's eval budget: the attempts a DEAD process
@@ -3351,11 +3357,13 @@ class EvaluateMixin:
         pause withholds is the lifecycle's NEXT launch; that point carries no settle, so an
         invocation settled before the raise stays charged to the next terminal) that records the
         fault class. Two things it used to do differently: a MISSING mount or interpreter before the
-        box was seen working is a fault here (`seen_working=True`: `_materialize` runs before
-        `_ensure_run_setup`, so "a run setup may still create it" cannot apply, and filtering it
-        ended the node `engine_error` AND paused — one node per resume); and a FULL run directory is
-        tied to this lifecycle only on the evidence `_infra_verdict` reads (`a.launches`: something
-        of it ran in this process) — then the terminal is `crash` carrying that evidence and the run
+        box was seen working is a fault here when the raise NAMED it (`related_paths`: `_materialize`
+        runs before `_ensure_run_setup`, so "a run setup may still create it" cannot apply to what
+        the materialization failed to read, and filtering it ended the node `engine_error` AND
+        paused — one node per resume; an unrelated raise does not pause over it); and a FULL run
+        directory is tied to this lifecycle only on the evidence `_infra_verdict` reads
+        (`a.launches`: something of it ran in this process; `a.fill_baseline`: what it held at its
+        launch) — then the terminal is `crash` carrying that evidence and the run
         is NOT paused as a box fault (a candidate that refilled the disk after every resume looped
         pause → resume → refill forever); otherwise the full disk is the box's, once per lifecycle.
         """
@@ -3380,14 +3388,21 @@ class EvaluateMixin:
                 # an `ExceptionGroup`, so a stage-log write hitting ENOTCONN mid-eval reached this
                 # handler as a group and closed the node `engine_error` — the very end this branch
                 # exists to prevent. Only `_eval_prepare_workdir`, outside the group, arrived bare.
+                #
+                # The paths the raise NAMED ride along (review 2026-10-08): before the box was seen
+                # working, an absent declared mount counts only when the OSError was about it
+                # (`infra_probe.admissible_faults`) — an unrelated raise on a box whose `run_setup`
+                # has yet to create a mount used to pause over that mount, and the resume met the
+                # same raise before the setup ever ran. `_infra_verdict` is TOTAL: a probe that
+                # itself fails answers "no verdict" and the terminal path below runs.
                 verdict = InfraVerdict()
-                if any(isinstance(leaf, OSError) for leaf in exception_leaves(exc)):
-                    try:
-                        verdict = await self._infra_verdict(
-                            node_id, generation, ran=bool(a is not None and a.launches > 0),
-                            seen_working=True)
-                    except (OSError, RuntimeError):   # no thread to probe in: engine_error stands
-                        verdict = InfraVerdict()
+                os_leaves = [leaf for leaf in exception_leaves(exc) if isinstance(leaf, OSError)]
+                if os_leaves:
+                    verdict = await self._infra_verdict(
+                        node_id, generation, ran=bool(a is not None and a.launches > 0),
+                        related_paths=[p for leaf in os_leaves
+                                       for p in (leaf.filename, leaf.filename2) if p],
+                        baseline=a.fill_baseline if a is not None else None)
                 async with self._write_lock:
                     events = self.store.read_all()
                     state = fold(events)
@@ -3665,7 +3680,8 @@ class EvaluateMixin:
         canary itself and the crash triage that reads its evidence (`_eval_decide_repair`)."""
         return self.run_dir / "canary" / f"node_{node_id}"
 
-    def _pause_withholds_attempt(self, a: "EvalAttempt", *, box_fault: bool = False) -> bool:
+    def _pause_withholds_attempt(self, a: "EvalAttempt", *, box_fault: bool = False,
+                                 run=None) -> bool:
         """Does a PAUSE withhold the evaluation work this attempt is about to START (doc 69 69.12)?
 
         Asked where an attempt begins heavy work with no phase in front of it that re-read the run:
@@ -3712,7 +3728,12 @@ class EvaluateMixin:
         `stat`) and then fails into the same pause. The re-dispatch after the operator fixes the box
         re-runs the pipeline from its first stage; that is the cost, and it is the one the operator
         sees. The other two clauses stand: a stop still drains, an intervention still owns its
-        terminal."""
+        terminal.
+
+        `run` — a fold of the log the caller took with NO await since — spares the rule its own
+        fold (review 2026-10-08: RUN_ATTEMPT folded before every launch and the rule folded again).
+        A caller that awaited anything after its fold (the box probe, the device reclaim) passes
+        nothing: a pause landing in that await must be read."""
         if (not box_fault and a.next_start is not _UNSET and a.next_start is not None):
             # TOTAL (`[]` on a resolution hiccup): an unreadable manifest names no first stage, so the
             # reuse point stands and the attempt runs on.
@@ -3720,7 +3741,8 @@ class EvaluateMixin:
             first = stages[0].get("name") if stages and isinstance(stages[0], dict) else None
             if a.next_start != first:
                 return False
-        run = fold(self.store.read_all())
+        if run is None:
+            run = fold(self.store.read_all())
         if not run.paused or run.stop_requested or run.finished:
             return False
         card_id = getattr(getattr(a.node, "idea", None), "card_id", None)
@@ -3789,15 +3811,38 @@ class EvaluateMixin:
         return targets
 
     async def _infra_verdict(self, node_id: int, generation: int, *, ran: bool,
-                             seen_working: Optional[bool] = None) -> InfraVerdict:
+                             seen_working: Optional[bool] = None, related_paths=(),
+                             baseline=None) -> InfraVerdict:
         """Probe the box for ONE lifecycle and apply the full-run-directory rule
         (`runtime/infra_probe.py`'s module docstring) — the one answer all three sites act on.
 
         The probe and the workdir measurement run in worker threads (a dead mount can block a `stat`
         for its whole timeout, a large tree takes seconds to walk, and the loop must keep its
-        heartbeats). `seen_working` None asks `box_seen_working`; the containment passes True.
-        `ran` — something of this lifecycle ran — is the precondition for any blame: the probe
-        before a launch passes False, so it never blames. Writes nothing."""
+        heartbeats). `seen_working` None asks `box_seen_working`; `related_paths` are the paths the
+        containment's OSError named (`infra_probe.admissible_faults`). `ran` — something of this
+        lifecycle ran — is the precondition for any blame: the probe before a launch passes False,
+        so it never blames. `baseline` is the attempt's `EvalAttempt.fill_baseline`. Writes nothing.
+
+        TOTAL (review 2026-10-08): it answers "no verdict" (an empty `InfraVerdict`) on anything
+        unexpected rather than raise. Its caller in the containment sits inside that handler's
+        last-resort swallow, so an error here — a malformed `_repo_spec` making `declared_targets`
+        raise `AttributeError`, no worker thread to probe in — lost BOTH the terminal and the pause,
+        leaving the node pending with nothing said; without a verdict the ordinary terminal path
+        runs, as on a healthy box."""
+        try:
+            return await self._infra_verdict_unguarded(
+                node_id, generation, ran=ran, seen_working=seen_working,
+                related_paths=related_paths, baseline=baseline)
+        except Exception as exc:  # noqa: BLE001 — a box probe, no provider call; "no verdict" keeps each caller's own path
+            contain("infra_verdict", exc)
+            _LOG.warning("node %s: the box probe itself failed (%s: %s); treated as no verdict",
+                         node_id, type(exc).__name__, exc)
+            return InfraVerdict()
+
+    async def _infra_verdict_unguarded(self, node_id: int, generation: int, *, ran: bool,
+                                       seen_working: Optional[bool], related_paths,
+                                       baseline) -> InfraVerdict:
+        """`_infra_verdict`'s body, which may raise; only `_infra_verdict` calls it."""
         from looplab.runtime import infra_probe as _ip
         targets = self._infra_probe_targets()
         if not targets:
@@ -3808,7 +3853,8 @@ class EvaluateMixin:
         events = self.store.read_all()
         if seen_working is None:
             seen_working = box_seen_working(fold(events), events)
-        faults = _ip.admissible_faults(faults, seen_working=seen_working)
+        faults = _ip.admissible_faults(faults, seen_working=seen_working,
+                                       related_paths=related_paths)
         if not faults:
             return InfraVerdict()
         if not _ip.candidate_may_have_caused(faults):
@@ -3823,11 +3869,15 @@ class EvaluateMixin:
 
         usage, fs_used = await anyio.to_thread.run_sync(_measure)
         met = run_dir_full_met(events, node_id, generation)
-        blamed = ran and _ip.run_dir_full_blames(node_id, usage, fs_used=fs_used, met_before=met)
+        # Which clause ties it, asked separately so the evidence named is the one that HOLDS: the
+        # dominant share first (it needs no history), then the second meeting with its own growth.
+        dominant = _ip.run_dir_full_blames(node_id, usage, fs_used=fs_used, met_before=False)
+        blamed = ran and (dominant or _ip.run_dir_full_blames(
+            node_id, usage, fs_used=fs_used, met_before=met, baseline=baseline))
         top = _ip.largest_workdir(usage)
         return InfraVerdict(
             tuple(faults), _ip.RUN_DIR_FULL, blamed,
-            ("met_before" if met else "dominant") if blamed else "",
+            ("dominant" if dominant else "met_before") if blamed else "",
             {"node_id": top.node_id, "bytes": top.bytes} if top is not None else None,
             _ip.occupancy_sentence(usage))
 
@@ -3896,7 +3946,8 @@ class EvaluateMixin:
         from looplab.runtime.infra_probe import RUN_DIR_FULL
         generation = getattr(a, "generation", -1)
         v = verdict if verdict is not None else await self._infra_verdict(
-            a.node_id, generation, ran=failed)
+            a.node_id, generation, ran=failed,
+            baseline=getattr(a, "fill_baseline", None) if failed else None)
         if not v.faults:
             return False
         if v.blamed:
@@ -4714,12 +4765,15 @@ class EvaluateMixin:
         a.canary_ran = False
         a.infra_note = ""
         a.infra_verdict = None
+        a.fill_baseline = None
         # THE BOX BEFORE THE LAUNCH (`runtime/infra_probe.py`, incident 2026-10-06). A launch on a dead
         # data mount or a vanished interpreter is hours of GPU spent to learn what a `stat` answers in
         # milliseconds — and, on a resume after a container restart, it is the FIRST thing the run does.
         # A fault pauses the run here, and the one pause decision below withholds this attempt exactly
         # as it withholds one under an operator pause: no terminal, the node stays pending.
-        infra_paused = (not fold(self.store.read_all()).halted
+        _events_now = self.store.read_all()
+        _run_now = fold(_events_now)
+        infra_paused = (not _run_now.halted
                         and await self._eval_infra_pause(a, failed=False))
         # ONE pause decision, and the devices follow it (critic 2026-09-29, MEDIUM-1): a withheld
         # attempt takes nothing back — on a busy pool the reclaim WAITS, and a paused engine sat on
@@ -4728,11 +4782,19 @@ class EvaluateMixin:
         # take may have waited: a pause landing during the wait withholds the attempt, and the
         # devices it took go back when the lane settles (`_settle_eval_resource_reservation`).
         # The FIRST launch is asked too when the probe just paused the run: ADMIT asked before it, on a
-        # run that was not paused yet.
-        # `box_fault=` only when the probe paused: a one-argument stand-in for the rule (tests
-        # replace it per instance) keeps answering every other launch.
-        if (((a.launches or infra_paused)
+        # run that was not paused yet. …AND WHEN THE RUN WAS ALREADY HALTED HERE (review 2026-10-08):
+        # with `eval_parallel > 1` a sibling's probe pauses the run over a dead mount while this
+        # lifecycle is between ADMIT and its first launch (PREPARE_WORKDIR runs in a worker and can
+        # take minutes), and the halted run skipped this probe — so the first launch asked neither
+        # the probe nor the pause rule, the reclaim (nothing given back) answered False, and the
+        # node launched onto the box its sibling had just found dead. The rule then reads the fold
+        # taken above (`run=`: no await since); the probe is not asked again on a halted run, whose
+        # pause already says the box was found broken.
+        # `box_fault=` only when the probe paused, `run=` only on the halted branch: every other
+        # launch asks the rule with the argument alone.
+        if (((a.launches or infra_paused or _run_now.halted)
              and (self._pause_withholds_attempt(a, box_fault=True) if infra_paused
+                  else self._pause_withholds_attempt(a, run=_run_now) if _run_now.halted
                   else self._pause_withholds_attempt(a)))
                 or (await self._reclaim_devices_for_attempt(a)
                     and self._pause_withholds_attempt(a))):
@@ -4749,6 +4811,16 @@ class EvaluateMixin:
         # because a producer reset during a repair is as real as one before the first.
         if await self._refuse_unusable_artifacts(a):
             return PHASE_RETURN
+        # THE "BEFORE" OF A SECOND FULL-DISK MEETING (review 2026-10-08, `infra_probe.FillBaseline`):
+        # a lifecycle that already met a full run directory is blamed at its next meeting only on
+        # its OWN growth during that attempt, measured against this. Only for such a lifecycle —
+        # the walk is bounded but not free, and every other launch owes it nothing. In a worker:
+        # the run directory may be the slow filesystem the probe exists for.
+        if (getattr(a, "workdir", None) is not None
+                and run_dir_full_met(_events_now, a.node_id, a.generation)):
+            from looplab.runtime.infra_probe import fill_baseline
+            a.fill_baseline = await anyio.to_thread.run_sync(
+                fill_baseline, a.workdir, getattr(self, "run_dir", None))
         a.launches += 1
         a._t0 = time.time()
         # repair/retry attempts reuse the workdir and sandbox stage logs append.
@@ -5334,7 +5406,8 @@ class EvaluateMixin:
         # BLAMED on the evidence (`_infra_verdict`) and settles on its failure below; a bystander's
         # full disk is the box's, recorded on its withheld row, and never reaches a triage.
         withheld_reason = "paused"
-        _verdict = await self._infra_verdict(a.node_id, a.generation, ran=True)
+        _verdict = await self._infra_verdict(a.node_id, a.generation, ran=True,
+                                             baseline=a.fill_baseline)
         if _verdict.blamed:
             a.infra_note = self._infra_blame_note(_verdict)
             _LOG.warning("node %s: the run directory is full and the evidence (%s) ties it to this "

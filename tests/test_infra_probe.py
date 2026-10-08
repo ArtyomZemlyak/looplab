@@ -419,3 +419,175 @@ def test_a_run_whose_nodes_all_failed_has_still_seen_its_box_work():
                   data={"command": ["x"], "exit_code": 0, "timed_out": False})
     assert box_seen_working(st, [stage]) and box_seen_working(st, [setup])
     assert not box_seen_working(st, [failed]) and not box_seen_working(st, [])
+
+
+# ------------------------------------------------------------------ review 2026-10-08, round 4
+
+def test_a_first_launch_on_a_run_a_sibling_already_paused_launches_nothing(tmp_path, monkeypatch):
+    """`eval_parallel > 1`: a sibling's probe paused the run over a dead mount while THIS lifecycle
+    was between ADMIT and its first launch (PREPARE_WORKDIR runs in a worker). The halted run
+    skipped the probe, the first launch skipped the pause rule, the reclaim answered False — and
+    the node launched onto the box its sibling had just found dead.
+    MUTATION: ask the rule on a halted run only for `a.launches` -> one eval launched."""
+    engine, _data, evals = _engine_with_mount(tmp_path)
+    real_prep = engine._eval_prepare_workdir
+
+    def prep_while_a_sibling_pauses(a):
+        out = real_prep(a)
+        engine.store.append("pause", {"reason": "infra_unavailable",
+                                      "detail": "evaluation of node 5 failed and the box did not "
+                                                "answer: mount /mnt/x: ENOTCONN"})
+        return out
+
+    monkeypatch.setattr(engine, "_eval_prepare_workdir", prep_while_a_sibling_pauses)
+    anyio.run(engine._evaluate, 0, anyio.CapacityLimiter(1), None)
+    events = engine.store.read_all()
+    st = fold(events)
+    assert evals == [], "the first launch went out on a run its sibling had paused"
+    assert st.nodes[0].status.value == "pending"
+    assert [(e.data["at"], e.data["reason"]) for e in events
+            if e.type == "eval_attempt_withheld"] == [("before_launch", "paused")]
+    assert len([e for e in events if e.type == "pause"]) == 1, "no second pause row"
+
+
+def test_the_write_probe_does_not_fault_a_run_dir_whose_cleanup_is_refused(tmp_path, monkeypatch):
+    """Windows: an antivirus holding the fresh probe file fails its unlink with a sharing violation
+    (`PermissionError`, WinError 32). The create and the write already proved the directory
+    writable, so that is no `run_dir` fault — while a failed WRITE still is, unlink refused or not.
+    MUTATION: tolerate only `FileNotFoundError` on the unlink -> a `run_dir` fault."""
+    def refused(path, *a, **k):
+        raise PermissionError(13, "The process cannot access the file because it is being used "
+                                  "by another process", path)
+
+    monkeypatch.setattr(infra_probe.os, "unlink", refused)
+    assert infra_probe.probe([("run_dir", str(tmp_path))]) == []
+
+    def full(fd, data):
+        raise OSError(errno.ENOSPC, "No space left on device")
+
+    monkeypatch.setattr(infra_probe.os, "write", full)
+    assert [(f.role, f.cause) for f in infra_probe.probe([("run_dir", str(tmp_path))])] == [
+        ("run_dir", "ENOSPC")]
+
+
+def test_concurrent_callers_share_one_probe_of_a_hanging_path(tmp_path, monkeypatch):
+    """The per-path cap was read off the hung memo, which exists only once a probe TIMED OUT — so N
+    eval slots failing on the same dead mount at once each started a thread, N stuck threads past
+    the cap. A probe in flight is now joined, not duplicated.
+    MUTATION: drop the in-flight registry -> one stuck `stat` per caller."""
+    release = threading.Event()
+    real_stat = os.stat
+    hang = str(tmp_path / "nfs")
+    calls = []
+
+    def _stat(path, *a, **k):
+        if os.fspath(path) == hang:
+            calls.append(path)
+            release.wait(5)
+        return real_stat(path, *a, **k)
+
+    monkeypatch.setattr(infra_probe.os, "stat", _stat)
+    monkeypatch.setattr(infra_probe, "MAX_STUCK_PER_PATH", 2)
+    n = 6
+    barrier = threading.Barrier(n)
+    answers: list = []
+
+    def _ask():
+        barrier.wait()
+        answers.append(infra_probe.probe_target("mount", hang, timeout=0.3))
+
+    try:
+        callers = [threading.Thread(target=_ask) for _ in range(n)]
+        for t in callers:
+            t.start()
+        for t in callers:
+            t.join(5)
+        assert len(calls) == 1, f"{len(calls)} probe threads started for one hanging path"
+        assert len(answers) == n and all(f is not None and f.cause in ("timeout", "hung")
+                                         for f in answers), answers
+    finally:
+        release.set()
+        infra_probe._HUNG.clear()
+        infra_probe._IN_FLIGHT.clear()
+
+
+def test_concurrent_callers_on_a_slow_but_healthy_path_all_get_its_answer(tmp_path, monkeypatch):
+    """The control: a busy box asks the run directory from every slot at once. Joining the probe in
+    flight must answer each caller the path's own answer — never a false `hung` past the cap."""
+    healthy = tmp_path / "data"
+    healthy.mkdir()
+    real_stat = os.stat
+
+    def _slow(path, *a, **k):
+        if os.fspath(path) == str(healthy):
+            threading.Event().wait(0.05)
+        return real_stat(path, *a, **k)
+
+    monkeypatch.setattr(infra_probe.os, "stat", _slow)
+    monkeypatch.setattr(infra_probe, "MAX_STUCK_PER_PATH", 1)
+    n = 8
+    barrier = threading.Barrier(n)
+    answers: list = []
+
+    def _ask():
+        barrier.wait()
+        answers.append(infra_probe.probe_target("mount", str(healthy), timeout=5))
+
+    callers = [threading.Thread(target=_ask) for _ in range(n)]
+    for t in callers:
+        t.start()
+    for t in callers:
+        t.join(10)
+    assert answers == [None] * n, answers
+    assert not infra_probe._IN_FLIGHT, "a finished probe left its flight registered"
+
+
+def test_an_unrelated_oserror_does_not_pause_over_a_mount_the_setup_has_yet_to_create(
+        tmp_path, monkeypatch):
+    """The containment admitted EVERY absent declared path before the box was seen working, so an
+    unrelated raise (an EACCES on some other file) on a box whose `run_setup` has yet to create the
+    declared mount paused over that mount — and the resume met the same raise before the setup
+    ever ran: a pause loop. Only a path the raise NAMED is admitted there now; this one ends as the
+    engine's own error. MUTATION: admit every absent path in the containment -> pending + paused."""
+    engine, data, _evals = _engine_with_mount(tmp_path, seen_working=False)
+    shutil.rmtree(data)                 # a run_setup would download it, inside the launch
+
+    def broken(a):
+        raise OSError(errno.EACCES, "Permission denied", str(tmp_path / "somewhere" / "else"))
+
+    monkeypatch.setattr(engine, "_eval_prepare_workdir", broken)
+    anyio.run(engine._evaluate, 0, anyio.CapacityLimiter(1), None)
+    st = fold(engine.store.read_all())
+    assert st.nodes[0].status.value == "failed" and st.nodes[0].error_reason == "engine_error", (
+        st.nodes[0].status, st.pause_reason)
+    assert st.pause_reason == "engine_error"
+
+
+def test_a_raise_naming_a_path_under_the_mount_is_related_to_it():
+    """The relation `admissible_faults` reads: the fault's own path or one under it, never a
+    sibling that merely shares a prefix."""
+    gone = infra_probe.InfraFault("mount", "/mnt/corpus", "ENOENT")
+    keep = infra_probe.admissible_faults
+    assert keep([gone], seen_working=False, related_paths=["/mnt/corpus/a/b.csv"]) == [gone]
+    assert keep([gone], seen_working=False, related_paths=["/mnt/corpus"]) == [gone]
+    assert keep([gone], seen_working=False, related_paths=["/mnt/corpus2/x"]) == []
+    assert keep([gone], seen_working=False, related_paths=["/elsewhere"]) == []
+
+
+def test_a_probe_that_itself_fails_leaves_the_containment_its_terminal(tmp_path, monkeypatch):
+    """`_infra_verdict` sat inside the containment's last-resort swallow, and only OSError and
+    RuntimeError were caught around it: a malformed `_repo_spec` (`data:` a list, so
+    `declared_targets` raises AttributeError) lost BOTH the terminal and the pause — the node
+    pending with nothing said. The probe is total: no verdict, and the terminal path runs.
+    MUTATION: let `_infra_verdict` raise -> no terminal, no pause."""
+    engine, _data, _evals = _engine_with_mount(tmp_path)
+    engine._repo_spec = {"data": ["not", "a", "mapping"]}
+
+    def broken(a):
+        raise OSError(errno.EACCES, "Permission denied", "/somewhere/else")
+
+    monkeypatch.setattr(engine, "_eval_prepare_workdir", broken)
+    anyio.run(engine._evaluate, 0, anyio.CapacityLimiter(1), None)
+    st = fold(engine.store.read_all())
+    assert st.nodes[0].status.value == "failed" and st.nodes[0].error_reason == "engine_error"
+    assert st.paused and st.pause_reason == "engine_error"
