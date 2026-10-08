@@ -78,7 +78,7 @@ from looplab.core.models import (DEVELOPER_ERROR_PREFIX, DEVELOPER_STUCK_PREFIX,
                                  EXTRA_METRIC_DECLARED, authenticated_extra_metrics_only,
                                  normalize_extra_metric_directions,
                                  normalize_extra_metric_channels, normalize_extra_metrics)
-from looplab.core.node_evidence import begin_metrics_attempt
+from looplab.core.node_evidence import begin_metrics_attempt, read_bounded_regular_file
 from looplab.core.run_identity import run_ref
 from looplab.engine.asha_monitor import extract_resource_curve
 from looplab.engine.comparability import comparability_record, protocol_record
@@ -1550,6 +1550,36 @@ def box_seen_working(state, events) -> bool:
                for e in events)
 
 
+def run_dir_full_met(events, node_id: int, generation: int) -> bool:
+    """Has THIS lifecycle already met a full run directory — a durable `eval_attempt_withheld` row of
+    it carrying `fault: run_dir_full` (`runtime/infra_probe.py::RUN_DIR_FULL`)? The second clause of
+    the blame rule (`infra_probe.run_dir_full_blames`), read from the LOG so a resume keeps it: the
+    first meeting withheld the attempt and paused, the resume's fresh workdir freed the space, and a
+    second meeting by the same lifecycle is its own doing (the once-per-lifecycle rule dcf4f73 wrote
+    and a merge dropped, now on the row itself)."""
+    from looplab.runtime.infra_probe import RUN_DIR_FULL
+    return any(e.type == EV_EVAL_ATTEMPT_WITHHELD and isinstance(e.data, Mapping)
+               and e.data.get("fault") == RUN_DIR_FULL
+               and _durable_row_belongs(e.data, node_id, generation)
+               for e in events or [])
+
+
+@dataclass(frozen=True)
+class InfraVerdict:
+    """What the engine's own probe of the box says about ONE lifecycle (`EvaluateMixin._infra_verdict`)
+    — the one answer the containment, the probe after a failed attempt and the probe before a launch
+    all act on. Empty `faults`: the box answered. `fault` is `infra_probe.RUN_DIR_FULL` when the
+    faults are exactly a full run directory; `blamed` when the evidence ties that to this lifecycle
+    (`evidence` says which clause: `dominant` or `met_before`); `occupant`/`attribution` name the
+    largest node workdir measured — the operator's lead on any full-disk pause."""
+    faults: tuple = ()
+    fault: Optional[str] = None
+    blamed: bool = False
+    evidence: str = ""
+    occupant: Optional[dict] = None
+    attribution: str = ""
+
+
 @dataclass(slots=True)
 class EvalAttempt:
     """One node lifecycle's evaluation, as the record the `_eval_*` phases read and write.
@@ -1699,6 +1729,11 @@ class EvalAttempt:
     # `_eval_infra_pause`, reset by RUN_ATTEMPT, and appended to the triage's engine facts and the
     # repair's error context. "" on every other attempt, so no prompt gains a byte.
     infra_note: str = ""
+    # The box fault (`InfraVerdict`) that withholds THIS attempt, or None for every other withhold:
+    # bound by `_eval_infra_pause` and DECIDE_REPAIR, reset by RUN_ATTEMPT, written onto the withheld
+    # row as `fault` + `occupant` so the NEXT meeting of the same lifecycle reads a full run
+    # directory back (`run_dir_full_met`).
+    infra_verdict: Any = None
 
     def charged_eval_seconds(self, extra: float = 0.0) -> float:
         """What this lifecycle's TERMINAL charges the run's eval budget: the attempts a DEAD process
@@ -1732,9 +1767,16 @@ class EvalAttempt:
             pass          # unstamped => the next reuse check fails closed and rematerializes
 
     def workdir_matches(self, n) -> bool:
+        # Through THE reader of a file a candidate can write (review 2026-10-08, round 3): the stamp
+        # sits in the candidate's own cwd, and `read_text` on a FIFO planted in its place blocked a
+        # worker thread of settled recovery forever. `None` (absent, a link, not regular, swapped)
+        # is "no match", which fails closed into a re-run, as an unreadable stamp always did.
+        raw = read_bounded_regular_file(self._manifest_stamp, 256)
+        if raw is None:
+            return False
         try:
-            return self._manifest_stamp.read_text(encoding="ascii").strip() == _workdir_manifest_digest(n)
-        except (OSError, ValueError):
+            return raw.decode("ascii").strip() == _workdir_manifest_digest(n)
+        except (UnicodeDecodeError, ValueError):
             return False
 
 
@@ -3261,7 +3303,8 @@ class EvaluateMixin:
             named.append(f"{type(leaf).__name__}: {leaf}")
         return " | ".join(named) or f"{type(exc).__name__}: {exc}"
 
-    async def _contain_eval_crash(self, node_id: int, generation: int, exc: BaseException) -> None:
+    async def _contain_eval_crash(self, node_id: int, generation: int, exc: BaseException,
+                                  a: "Optional[EvalAttempt]" = None) -> None:
         """Close ONE node on an unexpected exception, instead of letting it cancel every sibling.
 
         `_evaluate` runs as a child of the RUN-SCOPED eval task group and its three callers are
@@ -3297,10 +3340,24 @@ class EvaluateMixin:
         A LAST-RESORT append that itself fails is swallowed, and that is not laxity: this handler
         exists on the path where the event log may be exactly what is broken, and raising here would
         re-enter the failure mode it was written to contain, one frame further out.
+
+        A BOX FAULT IS ANSWERED BY THE ONE RULE (`runtime/infra_probe.py`, round 3), not by its own.
+        An OSError whose probe finds the box broken keeps the node PENDING and pauses
+        `infra_unavailable`, with an `eval_attempt_withheld` row (`at: before_launch` — what the
+        pause withholds is the lifecycle's NEXT launch; that point carries no settle, so an
+        invocation settled before the raise stays charged to the next terminal) that records the
+        fault class. Two things it used to do differently: a MISSING mount or interpreter before the
+        box was seen working is a fault here (`seen_working=True`: `_materialize` runs before
+        `_ensure_run_setup`, so "a run setup may still create it" cannot apply, and filtering it
+        ended the node `engine_error` AND paused — one node per resume); and a FULL run directory is
+        tied to this lifecycle only on the evidence `_infra_verdict` reads (`a.launches`: something
+        of it ran in this process) — then the terminal is `crash` carrying that evidence and the run
+        is NOT paused as a box fault (a candidate that refilled the disk after every resume looped
+        pause → resume → refill forever); otherwise the full disk is the box's, once per lifecycle.
         """
         from looplab.engine.speculation import auto_pause_is_redundant
         from looplab.events.types import EV_PAUSE
-        from looplab.runtime.infra_probe import describe, probe
+        from looplab.runtime.infra_probe import describe
 
         detail = self._crash_detail(exc)
         try:
@@ -3319,42 +3376,63 @@ class EvaluateMixin:
                 # an `ExceptionGroup`, so a stage-log write hitting ENOTCONN mid-eval reached this
                 # handler as a group and closed the node `engine_error` — the very end this branch
                 # exists to prevent. Only `_eval_prepare_workdir`, outside the group, arrived bare.
-                faults: list = []
+                verdict = InfraVerdict()
                 if any(isinstance(leaf, OSError) for leaf in exception_leaves(exc)):
                     try:
-                        targets = self._infra_probe_targets()
-                        if targets:
-                            faults = await anyio.to_thread.run_sync(
-                                functools.partial(probe, targets))
+                        verdict = await self._infra_verdict(
+                            node_id, generation, ran=bool(a is not None and a.launches > 0),
+                            seen_working=True)
                     except (OSError, RuntimeError):   # no thread to probe in: engine_error stands
-                        faults = []
+                        verdict = InfraVerdict()
                 async with self._write_lock:
                     events = self.store.read_all()
                     state = fold(events)
                     node = state.nodes.get(node_id)
+                    _open = (node is not None and node.status is NodeStatus.pending
+                             and generation >= 0 and node.attempt == generation)
                     # …EXCEPT ON A RUN THAT IS STOPPING. A finalize drains in-flight evaluation and
                     # finishes; leaving this node pending would end the run with a node that has no
                     # terminal (`_pause_withholds_attempt`'s stop clause, the same defect). The stop is
                     # final, so the box fault closes the node as `engine_error` below, as it always did.
-                    from looplab.runtime.infra_probe import admissible_faults
-                    faults = admissible_faults(faults, seen_working=box_seen_working(state, events))
-                    if faults and not (state.finished or state.stop_requested):
+                    if verdict.faults and not (state.finished or state.stop_requested):
+                        if verdict.blamed and _open:
+                            # THE CANDIDATE FILLED THE RUN DIRECTORY and the engine's own write
+                            # failed on it. No attempt result survives the raise, so there is nothing
+                            # to triage or repair: the terminal is the candidate's `crash`, carrying
+                            # the evidence, and no box pause — the next launch's probe still sees the
+                            # disk full and pauses naming whose workdir holds it.
+                            self.store.append(EV_NODE_FAILED, {
+                                "node_id": node_id, "generation": generation,
+                                "error": self._redact(
+                                    f"{self._infra_blame_note(verdict, 'raised')} — the engine's "
+                                    f"own write then raised {detail}")[:400],
+                                "reason": "crash",
+                                "eval_seconds": _durable_prior_seconds(events, node_id, generation)})
+                            _LOG.warning("evaluation of node %s raised on a run directory its own "
+                                         "writes filled (%s); the node ends `crash`", node_id,
+                                         verdict.attribution)
+                            return
                         if not auto_pause_is_redundant(state):
-                            self.store.append(EV_PAUSE, {
-                                "reason": "infra_unavailable",
-                                "detail": self._redact(
-                                    f"evaluation of node {node_id} raised {detail} and the box did "
-                                    f"not answer: {describe(faults)}")[:400]})
+                            self.store.append(EV_PAUSE, self._infra_pause_row(
+                                f"evaluation of node {node_id} raised {detail}", verdict))
+                        if _open:
+                            self.store.append(EV_EVAL_ATTEMPT_WITHHELD, {
+                                "node_id": node_id, "generation": generation,
+                                "attempt": int(a.attempt) if a is not None else 0,
+                                "at": "before_launch", "reason": "infra_unavailable",
+                                "eval_seconds": 0.0,
+                                **({"fault": verdict.fault} if verdict.fault else {}),
+                                **({"occupant": dict(verdict.occupant)}
+                                   if verdict.occupant else {})})
                         _LOG.warning("evaluation of node %s raised on a broken box (%s); the node "
                                      "stays pending and the run is paused", node_id,
-                                     describe(faults))
+                                     describe(verdict.faults))
                         return
                     # Only if this lifecycle is still open. A body that already wrote its own
                     # terminal and then raised on the way out (a tracer teardown, a span export) must
                     # not get a second one — the fold is idempotent on duplicates, but the second row
                     # would carry a reason that contradicts the first.
-                    if (node is not None and node.status is NodeStatus.pending
-                            and generation >= 0 and node.attempt == generation):
+                    if _open:
                         # The lifecycle's DURABLE spend, like every other zero-compute terminal
                         # (`_durable_prior_seconds`): this one wrote none, so the repairs, dependency
                         # rounds, withheld attempts and settled invocations before the crash reached
@@ -3550,7 +3628,7 @@ class EvaluateMixin:
                 # WRAPPED, so this is the branch a real one takes on the measured path.
                 await self._land_terminal_before_ceiling(a, exc)
                 raise
-            await self._contain_eval_crash(node_id, a.generation, exc)
+            await self._contain_eval_crash(node_id, a.generation, exc, a=a)
 
     def _yield_devices_for_repair(self, a: "EvalAttempt") -> None:
         """Give this lifecycle's GPUs back while its repair talks to an LLM (`resources.py::
@@ -3645,7 +3723,8 @@ class EvaluateMixin:
         return self._eval_intervention_seen(a.node_id, a.generation, a.start_seq, card_id) is None
 
     async def _record_eval_withheld(self, a: "EvalAttempt", at: str, seconds: float, *,
-                                    reason: str = "paused") -> None:
+                                    reason: str = "paused",
+                                    verdict: "Optional[InfraVerdict]" = None) -> None:
         """The durable record of a withheld attempt (doc 69 69.12a): WHERE the pause (or a stop)
         held it (`EVAL_WITHHELD_POINTS`) and the eval seconds it had spent that NO other row carries
         — the lifecycle's next terminal charges them (`_durable_withheld_seconds`), or the
@@ -3653,7 +3732,10 @@ class EvaluateMixin:
         `events/eval_occupancy.py` closes the busy interval at the row, so a paused run no longer
         reads as one evaluating straight through its pause. Diagnostic, from the eval child under
         `_write_lock` like `deps_installed`; the seconds are clamped to a finite non-negative
-        number, because a clock that stepped back must not refund the chain."""
+        number, because a clock that stepped back must not refund the chain. `verdict` — the box
+        fault that withheld it — adds its class and the largest workdir (`_infra_fault_keys`), which
+        is how the lifecycle's next meeting of a full run directory is read back
+        (`run_dir_full_met`)."""
         assert at in EVAL_WITHHELD_POINTS and reason in EVAL_WITHHELD_REASONS, (at, reason)
         try:
             spent = float(seconds)
@@ -3664,7 +3746,11 @@ class EvaluateMixin:
             async with self._write_lock:
                 self.store.append(EV_EVAL_ATTEMPT_WITHHELD, {
                     "node_id": a.node_id, "generation": a.generation, "attempt": a.attempt,
-                    "at": at, "reason": reason, "eval_seconds": spent})
+                    "at": at, "reason": reason, "eval_seconds": spent,
+                    # literal spreads, so the payload contract's writer scan sees both keys
+                    **({"fault": verdict.fault} if verdict is not None and verdict.fault else {}),
+                    **({"occupant": dict(verdict.occupant)}
+                       if verdict is not None and verdict.occupant else {})})
         except OSError:
             # A DIAGNOSTIC row: failing to write it loses the seconds' record, as before 69.12a,
             # and must not end the lifecycle — raised, `_evaluate`'s containment turned a withheld
@@ -3698,54 +3784,140 @@ class EvaluateMixin:
             targets.append(("interpreter", task_python))
         return targets
 
-    async def _eval_infra_pause(self, a: "EvalAttempt", *, failed: bool = True):
+    async def _infra_verdict(self, node_id: int, generation: int, *, ran: bool,
+                             seen_working: Optional[bool] = None) -> InfraVerdict:
+        """Probe the box for ONE lifecycle and apply the full-run-directory rule
+        (`runtime/infra_probe.py`'s module docstring) — the one answer all three sites act on.
+
+        The probe and the workdir measurement run in worker threads (a dead mount can block a `stat`
+        for its whole timeout, a large tree takes seconds to walk, and the loop must keep its
+        heartbeats). `seen_working` None asks `box_seen_working`; the containment passes True.
+        `ran` — something of this lifecycle ran — is the precondition for any blame: the probe
+        before a launch passes False, so it never blames. Writes nothing."""
+        from looplab.runtime import infra_probe as _ip
+        targets = self._infra_probe_targets()
+        if not targets:
+            return InfraVerdict()
+        faults = await anyio.to_thread.run_sync(functools.partial(_ip.probe, targets))
+        if not faults:
+            return InfraVerdict()
+        events = self.store.read_all()
+        if seen_working is None:
+            seen_working = box_seen_working(fold(events), events)
+        faults = _ip.admissible_faults(faults, seen_working=seen_working)
+        if not faults:
+            return InfraVerdict()
+        if not _ip.candidate_may_have_caused(faults):
+            return InfraVerdict(tuple(faults))
+        run_dir = getattr(self, "run_dir", None)
+
+        def _measure():
+            if run_dir is None:
+                return [], None
+            return (_ip.node_workdir_usage(os.path.join(os.fspath(run_dir), "nodes")),
+                    _ip.filesystem_used_bytes(run_dir))
+
+        usage, fs_used = await anyio.to_thread.run_sync(_measure)
+        met = run_dir_full_met(events, node_id, generation)
+        blamed = ran and _ip.run_dir_full_blames(node_id, usage, fs_used=fs_used, met_before=met)
+        top = _ip.largest_workdir(usage)
+        return InfraVerdict(
+            tuple(faults), _ip.RUN_DIR_FULL, blamed,
+            ("met_before" if met else "dominant") if blamed else "",
+            {"node_id": top.node_id, "bytes": top.bytes} if top is not None else None,
+            _ip.occupancy_sentence(usage))
+
+    @staticmethod
+    def _infra_fault_keys(verdict: "Optional[InfraVerdict]") -> dict:
+        """The optional keys a box-fault PAUSE row carries: `fault` (the class) and `occupant` (the
+        largest node workdir), each LEFT OUT when absent, so every other row is byte-identical. (The
+        two withheld-row writers spell the same spread as literals, for the payload writer scan.)"""
+        if verdict is None:
+            return {}
+        return {**({"fault": verdict.fault} if verdict.fault else {}),
+                **({"occupant": dict(verdict.occupant)} if verdict.occupant else {})}
+
+    def _infra_pause_row(self, head: str, verdict: InfraVerdict) -> dict:
+        """The `infra_unavailable` pause row: `head` + "and the box did not answer: <faults>", with
+        the full-disk attribution IN FRONT of the faults (the 400-character cut must not take the
+        one thing the operator acts on)."""
+        from looplab.runtime.infra_probe import describe
+        lead = (f"the run directory is full — {verdict.attribution}; "
+                if verdict.fault and verdict.attribution else "")
+        return {"reason": "infra_unavailable",
+                "detail": self._redact(f"{head} and the box did not answer: {lead}"
+                                       f"{describe(verdict.faults)}")[:400],
+                **self._infra_fault_keys(verdict)}
+
+    def _infra_blame_note(self, verdict: InfraVerdict, what: str = "failed") -> str:
+        """The ENGINE-observed sentence a blamed lifecycle carries — to the triage's engine facts and
+        the repair's error context (`EvalAttempt.infra_note`), or onto the containment's `crash`
+        terminal. Names the measurement and WHICH clause of the evidence tied it to this node."""
+        from looplab.runtime.infra_probe import describe
+        why = ("this same evaluation already filled it once, before the run was resumed"
+               if verdict.evidence == "met_before" else
+               "this node's workdir holds at least half of the bytes in use on that filesystem")
+        # The evidence FIRST and the probe's own sentence (which quotes paths and an OSError) LAST,
+        # so the 400-character cut can only ever take the least informative part.
+        return self._redact(
+            f"Engine check after this evaluation {what}: the run directory (where this node's "
+            f"workdir lives) is full, and the evidence ties it to this node's own writes — {why}; "
+            f"{verdict.attribution}. Probe: {describe(verdict.faults)}")[:400]
+
+    async def _eval_infra_pause(self, a: "EvalAttempt", *, failed: bool = True,
+                                verdict: Optional[InfraVerdict] = None):
         """Probe the box — after a failed attempt (`failed`), or before a launch — and on a fault
         PAUSE the run and answer True.
 
-        The probe runs in a worker thread (a dead mount can block a `stat` for its whole timeout,
-        and the loop must keep its heartbeats). The pause is node-less, `reason: "infra_unavailable"`
-        with the faults in `detail`, so `RunState.pause_reason` and `looplab inspect` name the path
-        that went away; it is skipped when an auto-pause would change nothing
-        (`speculation.py::auto_pause_is_redundant`). No terminal is written: the caller withholds
-        the attempt and the node stays pending, so the resume re-runs it on a healthy box. A failure
-        whose probe finds nothing proceeds to the ordinary repair path, unchanged."""
+        The pause is node-less, `reason: "infra_unavailable"` with the faults in `detail` (and, for
+        a full run directory, `fault` + `occupant`: the largest node workdir), so
+        `RunState.pause_reason`, `looplab inspect` and the attention item name what went away; it is
+        skipped when an auto-pause would change nothing (`speculation.py::auto_pause_is_redundant`).
+        No terminal is written: the caller withholds the attempt, recording `a.infra_verdict`, and the
+        node stays pending, so the resume re-runs it on a healthy box. A failure whose probe finds
+        nothing proceeds to the ordinary repair path, unchanged; so does one the full-run-directory
+        rule BLAMES (`_infra_verdict`), with the evidence on `a.infra_note`. `verdict` is one
+        DECIDE_REPAIR already holds.
+
+        BEFORE A RE-LAUNCH (`not failed`, `a.launches`): a full run directory is not called the box's
+        over files this lifecycle's own earlier attempts left in the workdir it reuses — the
+        contradiction the old rule shipped, which blamed the candidate at DECIDE_REPAIR and then
+        paused the whole run as a box fault for the same bytes. The workdir is re-materialized
+        (PREPARE_WORKDIR again, so the repaired code is what it holds) and the box asked once more;
+        only that second answer may pause. The re-launch then runs the whole pipeline
+        (`a.next_start = None`): a later-stage reuse point is what a box pause would have dropped too
+        (`_pause_withholds_attempt`'s `box_fault`), and the retrain cap is not charged for it — the
+        repair budget still bounds the chain."""
         from looplab.engine.speculation import auto_pause_is_redundant
-        from looplab.runtime.infra_probe import (admissible_faults, candidate_may_have_caused,
-                                                 describe, probe)
-        targets = self._infra_probe_targets()
-        if not targets:
+        from looplab.runtime.infra_probe import RUN_DIR_FULL
+        generation = getattr(a, "generation", -1)
+        v = verdict if verdict is not None else await self._infra_verdict(
+            a.node_id, generation, ran=failed)
+        if not v.faults:
             return False
-        faults = await anyio.to_thread.run_sync(functools.partial(probe, targets))
-        if not faults:
+        if v.blamed:
+            a.infra_note = self._infra_blame_note(v)
+            _LOG.warning("node %s: the run directory is full and the evidence (%s) ties it to this "
+                         "node's own writes — %s; the failure is the candidate's", a.node_id,
+                         v.evidence, v.attribution)
             return False
-        events = self.store.read_all()
-        faults = admissible_faults(faults, seen_working=box_seen_working(fold(events), events))
-        if not faults:
-            return False
-        if failed and candidate_may_have_caused(faults):
-            # THE CANDIDATE MAY HAVE FILLED THE DISK ITSELF (review 2026-10-08, driven): its workdir
-            # is under the run directory, so checkpoints written until ENOSPC/EDQUOT make this probe
-            # answer exactly that. Withheld as the box's fault, the resume freed the space with a
-            # fresh workdir and the same code filled it again — a pause loop, the node pending
-            # forever and the Developer never told. So this failure takes the ordinary path, and the
-            # probe's sentence rides to the triage and the repair as an ENGINE-observed fact. Only
-            # when that is the ONLY fault (`infra_probe.candidate_may_have_caused`): a dead mount
-            # beside it is still the box's. The probe before a launch never takes this branch.
-            a.infra_note = self._redact(
-                "Engine check after this failure: the run directory (where this node's workdir "
-                f"lives) is full — {describe(faults)}. The evaluation's own writes may have filled "
-                "it.")[:400]
-            _LOG.warning("node %s: the run directory is full after its eval failed (%s); treated "
-                         "as the candidate's failure, not a box fault", a.node_id, describe(faults))
-            return False
+        if (not failed and v.fault == RUN_DIR_FULL and getattr(a, "launches", 0)
+                and getattr(a, "workdir", None) is not None):
+            _LOG.info("node %s: the run directory is full before a re-launch; re-materializing its "
+                      "own workdir (its earlier attempts' files) and asking the box again", a.node_id)
+            await anyio.to_thread.run_sync(self._eval_prepare_workdir, a)
+            a.next_start = None
+            v = await self._infra_verdict(a.node_id, generation, ran=False)
+            if not v.faults:
+                return False
+        a.infra_verdict = v
         what = "failed" if failed else "was about to launch"
-        detail = self._redact(f"evaluation of node {a.node_id} {what} and the box did not answer: "
-                              f"{describe(faults)}")[:400]
+        row = self._infra_pause_row(f"evaluation of node {a.node_id} {what}", v)
         _LOG.warning("node %s: %s — pausing the run; the attempt is withheld, not charged to the "
-                     "candidate. Fix the box and resume.", a.node_id, detail)
+                     "candidate. Fix the box and resume.", a.node_id, row["detail"])
         async with self._write_lock:
             if not auto_pause_is_redundant(fold(self.store.read_all())):
-                self.store.append(EV_PAUSE, {"reason": "infra_unavailable", "detail": detail})
+                self.store.append(EV_PAUSE, row)
         return True
 
     def _eval_canary_due(self, a: "EvalAttempt") -> bool:
@@ -4496,6 +4668,7 @@ class EvaluateMixin:
         a.canary_failed = False
         a.canary_ran = False
         a.infra_note = ""
+        a.infra_verdict = None
         # THE BOX BEFORE THE LAUNCH (`runtime/infra_probe.py`, incident 2026-10-06). A launch on a dead
         # data mount or a vanished interpreter is hours of GPU spent to learn what a `stat` answers in
         # milliseconds — and, on a resume after a container restart, it is the FIRST thing the run does.
@@ -4524,7 +4697,8 @@ class EvaluateMixin:
             # Nothing of THIS attempt ran: the one before it is on its `node_repaired` /
             # `deps_installed` row. The row closes the busy interval (doc 69 69.12a).
             await self._record_eval_withheld(
-                a, "before_launch", 0.0, reason="infra_unavailable" if infra_paused else "paused")
+                a, "before_launch", 0.0, reason="infra_unavailable" if infra_paused else "paused",
+                verdict=a.infra_verdict if infra_paused else None)
             return PHASE_RETURN
         # A PINNED ARTIFACT THIS NODE USES IS GONE (doc 73 §1.4, round 3): asked before EVERY launch,
         # because a producer reset during a repair is as real as one before the first.
@@ -5097,10 +5271,26 @@ class EvaluateMixin:
         # chain resumes, uncharged, once the operator fixes the box and resumes. AFTER the stop check
         # (a stop is final and the finish waits on this worker), BEFORE the pause check (that branch is
         # what withholds the attempt, and it must name why).
+        #
+        # ASKED ON A PAUSED RUN TOO (round 3): with `max_parallel > 1` one node fills the shared run
+        # directory and a sibling that died ENOSPC usually reaches this point first and pauses, so
+        # the filler's own failure always met a paused run here, was withheld unasked, and after
+        # every resume refilled the disk — the bystander paused again, forever. Asked, the filler is
+        # BLAMED on the evidence (`_infra_verdict`) and settles on its failure below; a bystander's
+        # full disk is the box's, recorded on its withheld row, and never reaches a triage.
         withheld_reason = "paused"
-        if not halted.paused and await self._eval_infra_pause(a):
+        _verdict = await self._infra_verdict(a.node_id, a.generation, ran=True)
+        if _verdict.blamed:
+            a.infra_note = self._infra_blame_note(_verdict)
+            _LOG.warning("node %s: the run directory is full and the evidence (%s) ties it to this "
+                         "node's own writes — %s; the failure is the candidate's", a.node_id,
+                         _verdict.evidence, _verdict.attribution)
+        elif _verdict.faults:
             withheld_reason = "infra_unavailable"
-            halted = fold(self.store.read_all())
+            a.infra_verdict = _verdict
+            if not halted.paused:
+                await self._eval_infra_pause(a, verdict=_verdict)
+                halted = fold(self.store.read_all())
         if halted.paused:
             # AN INTERVENTION RECORDED AFTER THIS ATTEMPT'S WATCHER CLOSED owns the terminal, as at
             # `_pause_withholds_attempt`'s third clause: a withheld return left a reset's old
@@ -5111,10 +5301,19 @@ class EvaluateMixin:
                     a, self._eval_intervention_seen(a.node_id, a.generation, a.start_seq, _card_id),
                     "after its attempt failed, on a paused run"):
                 return PHASE_RETURN
+            if _verdict.blamed:
+                # THE CANDIDATE FILLED THE DISK and the run is paused (most often by the sibling that
+                # met the full disk first): a pause buys no repair, and withholding would re-run the
+                # same code into the same wall after the resume. The failure settles here, on its own
+                # account plus the engine's evidence (`a.infra_note` rides the terminal's rationale).
+                a.triage_outcome = ("abandon", a.infra_note + " The run is paused, so no repair is "
+                                    "bought: the node ends on this failure rather than refill the "
+                                    "disk after the resume.")
+                return PHASE_SETTLED
             # The attempt that just failed has no `node_repaired` row (no repair was bought), so its
             # seconds ride on the withheld row to the chain's next terminal (doc 69 69.12a).
             await self._record_eval_withheld(a, "decide_repair", a.attempt_eval_seconds,
-                                             reason=withheld_reason)
+                                             reason=withheld_reason, verdict=a.infra_verdict)
             return PHASE_RETURN
         if self.external_harness:
             # The external session reads the terminal failure and decides whether to submit a

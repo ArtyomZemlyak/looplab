@@ -663,7 +663,7 @@ class _CeilingEvalHost:
         self.rows.append(types.SimpleNamespace(
             type="node_evaluated", data={"node_id": a.node_id, "generation": a.generation}))
 
-    async def _contain_eval_crash(self, node_id, generation, exc):
+    async def _contain_eval_crash(self, node_id, generation, exc, a=None):
         self.contained.append(exc)
 
 
@@ -894,6 +894,7 @@ def test_a_run_attempt_that_never_returned_carries_no_result_from_the_attempt_be
         # The pre-launch box probe (`runtime/infra_probe.py`) runs for real: this host declares no
         # run dir, mount or interpreter, so it has nothing to probe and launches as before.
         _eval_infra_pause = Engine._eval_infra_pause
+        _infra_verdict = Engine._infra_verdict
         _infra_probe_targets = Engine._infra_probe_targets
         # The pre-launch artifact-use check runs for real: this host's node pins no artifact use,
         # so it refuses nothing and launches as before.

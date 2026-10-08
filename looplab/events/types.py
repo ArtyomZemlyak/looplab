@@ -1748,7 +1748,10 @@ EVENT_PAYLOAD_KEYS: dict[str, PayloadContract] = {
     "eval_attempt_withheld": PayloadContract(
         "A pause, a stop or an infra_unavailable pause withheld a lifecycle's evaluation; its seconds, for its next terminal.",
         required=("at", "attempt", "eval_seconds", "generation", "node_id", "reason"),
-        optional=(),
+        # `fault` + `occupant`: the box fault that withheld it, when it was a FULL run directory
+        # (`runtime/infra_probe.py::RUN_DIR_FULL`) — read back as "this lifecycle already met one"
+        # (`engine/evaluate.py::run_dir_full_met`) — and the largest node workdir measured then.
+        optional=("fault", "occupant"),
     ),
     "artifact_synced": PayloadContract(
         "The operator's eval.artifact_sync command ran over a node's workdir after its terminal.",
@@ -2166,8 +2169,11 @@ EVENT_PAYLOAD_KEYS: dict[str, PayloadContract] = {
         # `terminal_reason` + `due`: an external harness's finish held back by its unmet obligations
         # (`orchestrator.py`, reason `external_finish_obligations_due`) — the finish that was asked
         # for and what is still owed.
-        optional=("attempt", "detail", "drain_builds", "drain_only", "due", "generation", "node_id",
-                  "reason", "terminal_reason"),
+        # `fault` + `occupant`: an `infra_unavailable` pause over a FULL run directory and the
+        # largest node workdir then (`engine/evaluate.py::_infra_pause_row`) — what the attention
+        # item names; the fold reads neither.
+        optional=("attempt", "detail", "drain_builds", "drain_only", "due", "fault", "generation",
+                  "node_id", "occupant", "reason", "terminal_reason"),
     ),
     "phase_progress": PayloadContract(
         "One build/eval phase started or finished — the live activity feed's row.",

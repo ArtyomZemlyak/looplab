@@ -23,7 +23,7 @@ The event type itself is the contract's identity and is never renamed or reused;
 
 <!-- generated: event types -->
 
-176 event types — 123 folded into `RunState`, 53 diagnostic; 1167 declared payload keys; 30 types whose whole payload is stored by the fold.
+176 event types — 123 folded into `RunState`, 53 diagnostic; 1171 declared payload keys; 30 types whose whole payload is stored by the fold.
 
 | type | fold | records | required keys | optional keys |
 |---|---|---|---|---|
@@ -86,7 +86,7 @@ The event type itself is the contract's identity and is never renamed or reused;
 | `drift_unavailable` | diagnostic | Why the run could not compare its environment against the one it started in. | `reason` | — |
 | `effective_train_batch` | diagnostic | What the training process itself recorded as the batch it ran at, read off the node's own workdir at the metric read. | `disagree`, `generation`, `node_id`, `read_at`, `readings`, `train_batch_size` | `files_seen`, `truncated` |
 | `env_changed` | folded | A resume observed that the Python/library environment differs from the one the run started in. | `now`, `was` | — |
-| `eval_attempt_withheld` | diagnostic | A pause, a stop or an infra_unavailable pause withheld a lifecycle's evaluation; its seconds, for its next terminal. | `at`, `attempt`, `eval_seconds`, `generation`, `node_id`, `reason` | — |
+| `eval_attempt_withheld` | diagnostic | A pause, a stop or an infra_unavailable pause withheld a lifecycle's evaluation; its seconds, for its next terminal. | `at`, `attempt`, `eval_seconds`, `generation`, `node_id`, `reason` | `fault`, `occupant` |
 | `eval_canary_finished` | diagnostic | The eval canary's result: whether the node's stage chain survived the task's tiny slice. | `attempt`, `code_digest`, `eval_seconds`, `generation`, `node_id`, `passed` | `error`, `exit_code`, `failed_stage`, `log_dir`, `near_cap`, `retry`, `timed_out` |
 | `eval_canary_started` | diagnostic | An eval canary is about to run the node's stage chain on the task's tiny slice. | `attempt`, `code_digest`, `generation`, `node_id`, `timeout` | `retry` |
 | `eval_invocation_claimed` | diagnostic | One paid evaluation attempt is about to invoke the evaluator, under a reconciliable id. | `attempt`, `generation`, `invocation_id`, `node_id` | `after_interrupted_attempt`, `canary_ran` |
@@ -144,7 +144,7 @@ The event type itself is the contract's identity and is never renamed or reused;
 | `novelty_graded` | folded · whole | The graded-novelty verdict on a proposal the flat gate would have rejected. | — | `grade`, `level`, `literature`, `rationale`, `recommendation`, `shared_concepts`, `stance` |
 | `novelty_rejected` | folded · whole | A near-duplicate proposal the novelty gate nudged off, with the distance that decided it. | — | `action`, `distance`, `generation`, `kind`, `literature`, `node_id`, `nudged`, `original`, `reason`, `stance` |
 | `operator_request_parked` | diagnostic | A queued fork / inject / forced ablation waits for a node slot: the node budget is spent; add_nodes admits it. | `detail`, `held_by_card_requests`, `limit`, `reason`, `request`, `reserved` | `generation`, `idx`, `node_id` |
-| `pause` | folded | The run paused — by an operator, or by the engine with a stated reason. | — | `attempt`, `detail`, `drain_builds`, `drain_only`, `due`, `generation`, `node_id`, `reason`, `terminal_reason` |
+| `pause` | folded | The run paused — by an operator, or by the engine with a stated reason. | — | `attempt`, `detail`, `drain_builds`, `drain_only`, `due`, `fault`, `generation`, `node_id`, `occupant`, `reason`, `terminal_reason` |
 | `phase_progress` | diagnostic | One build/eval phase started or finished — the live activity feed's row. | `phase`, `stage`, `status` | — |
 | `plan` | folded · whole | The run's PLAN artifact: how `max_nodes` was cut into seed, search and endgame reserve. | — | `at_node`, `champion`, `endgame_end`, `endgame_start`, `injected`, `max_nodes`, `phases`, `reason`, `reopen_cause`, `reserve`, `reserve_frac`, `source`, `stall_champions` |
 | `policy_decision` | folded | The search policy's pick among the legal actions, with the scores behind it. | `chosen`, `reason`, `scores` | — |

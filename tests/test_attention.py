@@ -568,3 +568,24 @@ def test_an_operator_pause_stays_quiet(tmp_path):
     store.append("pause", {"reason": "operator"})
     assert "run_failed" not in _kinds(project_run_attention("demo", store.read_all(),
                                                             engine_running=False))
+
+
+def test_a_full_run_dir_pause_names_whose_workdir_holds_it(tmp_path):
+    """Round 3: the full-disk pause row carries the largest node workdir (`occupant`), and the
+    owner's alert names it — built from the two integers, never from the row's own text."""
+    store = _store(tmp_path)
+    _node(store, 0, metric=1.0)
+    store.append("pause", {"reason": "infra_unavailable", "fault": "run_dir_full",
+                           "occupant": {"node_id": 7, "bytes": 412_000_000_000},
+                           "detail": "run_dir /secret/path: ENOSPC"})
+    hits = [i for i in project_run_attention("demo", store.read_all(), engine_running=False)
+            if i["kind"] == "run_failed"]
+    assert len(hits) == 1 and hits[0]["title"] == "Run paused: the run directory is full"
+    assert "experiment #7's workdir holds 412.0 GB" in hits[0]["detail"], hits[0]["detail"]
+    assert "/secret/path" not in hits[0]["detail"]
+    store.append("resume", {})
+    store.append("pause", {"reason": "infra_unavailable", "fault": "run_dir_full",
+                           "occupant": {"node_id": "7; rm -rf /", "bytes": True}})
+    hits = [i for i in project_run_attention("demo", store.read_all(), engine_running=False)
+            if i["kind"] == "run_failed"]
+    assert len(hits) == 1 and "#" not in hits[0]["detail"], "a forged occupant is not quoted"

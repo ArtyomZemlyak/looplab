@@ -100,6 +100,47 @@ def test_a_hanging_mount_is_a_timeout_and_then_hung_without_a_second_thread(tmp_
         release.set()
 
 
+def test_the_hung_memo_expires_and_never_stacks_past_its_cap(tmp_path, monkeypatch):
+    """Review 2026-10-08, round 3: the memo lived as long as the stuck thread, and a thread in
+    D-state on a replaced hard NFS mount lives as long as the process — an in-process resume
+    answered `hung` forever over a path that had long been healthy. A hung path is asked afresh
+    after `HUNG_RETRY_S`, with at most `MAX_STUCK_PER_PATH` of its own threads alive, and a fresh
+    answer clears it."""
+    release = threading.Event()
+    state = {"healthy": False}
+    real_stat = os.stat
+    hang = str(tmp_path / "nfs")
+    os.mkdir(hang)
+    calls = []
+
+    def _stat(path, *a, **k):
+        if os.fspath(path) == hang:
+            calls.append(path)
+            if not state["healthy"]:
+                release.wait(5)
+        return real_stat(path, *a, **k)
+
+    monkeypatch.setattr(infra_probe.os, "stat", _stat)
+    monkeypatch.setattr(infra_probe, "MAX_STUCK_PER_PATH", 2)
+    try:
+        assert infra_probe.probe_target("mount", hang, timeout=0.05).cause == "timeout"
+        assert infra_probe.probe_target("mount", hang, timeout=0.05).cause == "hung"
+        assert len(calls) == 1, "inside the retry window: no second stuck thread"
+        monkeypatch.setattr(infra_probe, "HUNG_RETRY_S", 0.0)       # the memo has expired
+        assert infra_probe.probe_target("mount", hang, timeout=0.05).cause == "timeout"
+        assert len(calls) == 2, "an expired memo asks the path again"
+        assert infra_probe.probe_target("mount", hang, timeout=0.05).cause == "hung"
+        assert len(calls) == 2, "at the cap (2 stuck threads alive) nothing new is started"
+        monkeypatch.setattr(infra_probe, "MAX_STUCK_PER_PATH", 3)
+        state["healthy"] = True                                     # the mount was replaced
+        assert infra_probe.probe_target("mount", hang, timeout=0.05) is None
+        assert infra_probe.probe_target("mount", hang, timeout=0.05) is None, (
+            "a path that answered is not `hung` because old threads are still stuck")
+    finally:
+        release.set()
+        infra_probe._HUNG.clear()
+
+
 def test_env_values_that_are_not_plain_absolute_paths_are_not_targets(tmp_path):
     targets = infra_probe.declared_targets(env={
         "LR": "3e-4", "NO_PROXY": "a.example,b.example", "REL": "data/x",
