@@ -413,15 +413,18 @@ at the wall is NOT in the number — plan on the declared ceiling.
 
 **A parent's workdir, on request (`eval.parent_workdirs_env: true`, off by default).** Every stage of
 a node's eval then gets `LOOPLAB_PARENT_WORKDIRS`: the absolute workdirs of the node's parents that
-are EVALUATED in their current lifecycle and whose workdir still carries that lifecycle's manifest
-stamp (a failed parent's partial checkpoint, or a workdir a reset is rebuilding, is left out),
+are EVALUATED in the lifecycle the node was BUILT from (`Node.parent_generations`; a node folded
+before that record existed takes the parent's current one) and whose workdir still carries that
+lifecycle's manifest stamp (a failed parent's partial checkpoint, a workdir a reset is rebuilding, or
+the parent's next lifecycle after a reset and re-evaluation is left out),
 joined by `os.pathsep`, in `parent_ids` order. It is how an operator's runner warm-starts or
 fine-tunes from a parent's final weights ("a second epoch of node 43") without an absolute path
-copied into an idea. Host tiers only — a Docker tier binds no other node's workdir. The run
+copied into an idea. Host tiers only — a Docker tier binds no other node's workdir, so it gets no
+variable at all. The run
 directory is already readable to an eval and never writable, so the parent's files can be read,
 not changed. Off, the variable is absent and the task snapshot's `eval` dump is byte-identical.
 
-**Further evaluations on demand (`eval.tracks`, none by default).** `{"tracks": {"at200": {"command": [...], "keys": [...], "key_prefix": "", "timeout": 3600}}}` declares evaluators that never run during the search: `looplab evaluate-track RUN at200 --nodes all --apply` runs one over each settled node's preserved workdir (refusing a node whose workdir is not its evaluated code — on a live run that stamp is read when the request is accepted and again before and after the node's command, so a node reset meanwhile is refused, never recorded; the argv takes `env_passthrough` — and the working directory it implies — exactly as `artifact_sync` does; `--live`, the Assistant's `evaluate_track` tool or a `track_requested` command queue it for the RUNNING engine instead, which leases `gpus` devices from the run's pool) and records the numbers beside the live metrics — see the [CLI reference](cli-reference.md#evaluate-track).
+**Further evaluations on demand (`eval.tracks`, none by default).** `{"tracks": {"at200": {"command": [...], "keys": [...], "key_prefix": "", "timeout": 3600}}}` declares evaluators that never run during the search: `looplab evaluate-track RUN at200 --nodes all --apply` runs one over each settled node's preserved workdir (refusing a node whose workdir is not its evaluated code, or is a link — on a live run the lifecycle is fixed when the request is accepted and the workdir's stamp is held to it before and after the node's command, so a node reset meanwhile is refused, never recorded; the argv takes `env_passthrough` — and the working directory it implies — exactly as `artifact_sync` does, its placeholders render ABSOLUTE paths, and a log that cannot be written never costs the measurement; `--live`, the Assistant's `evaluate_track` tool or a `track_requested` command queue it for the RUNNING engine instead — at most 256 node ids, or `all` — which leases `gpus` devices from the run's pool) and records the numbers beside the live metrics, the keys a node does not carry yet, within its 256-key map (the receipt counts only nodes that gained one) — see the [CLI reference](cli-reference.md#evaluate-track). A live run whose search ENDS with a request queued serves it first, before it claims its finish; a stop, an abort, a pause or the spent wall clock does not wait — the request in flight is cancelled (its command tree-killed) and the queue stays, with no receipt, for the next engine.
 
 **Copying a finished node's workdir to durable storage (`eval.artifact_sync`, off by default).**
 `{"artifact_sync": {"command": ["mc", "cp", "-r", "{workdir}", "minio/bucket/{run_id}/node_{node_id}/"], "timeout": 1800}}`
@@ -432,12 +435,23 @@ NAME — `"env_passthrough": ["AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY"]` —
 the engine's environment at copy time and never written anywhere. A command whose declaration lists
 `env_passthrough` runs from the RUN directory instead — on every host, whether or not that host holds
 the named variables (the workdir is the candidate's, and a tool started there would import
-what it left beside the key), so name the files through `{workdir}`. A receipt whose workdir was
+what it left beside the key), so name the files through `{workdir}`. The same holds WITHOUT
+credentials: a `python -m <tool>` copy-out started from the workdir imports a module the candidate
+left there before the real one, so give such a tool by its absolute path, or declare
+`env_passthrough` to run it from the run directory (always running from there broke every
+workdir-relative command, which is why the declaration decides). A copy whose workdir holds a
+symbolic link resolving OUTSIDE it — other than a declared data/reference mount still naming its
+source — is not run: the host tool would upload what the candidate's link names (a Docker-tier
+candidate can plant `ckpt -> /root/.aws/credentials` it could never read itself); its receipt says
+`skipped: "workdir_links_outside"` and names the links. A virtualenv created INSIDE a workdir links
+its interpreter out of it and so refuses the copy too — keep one outside the node's workdir. A
+receipt whose workdir was
 re-materialized during the copy (a reset of that node) carries `workdir_changed`; a copy whose node
 was reset while it waited in the queue is not run at all — the workdir stamp is taken when the copy
 is accepted and compared when it starts — and its receipt says `skipped: "workdir_changed"` with no
 exit code. Placeholders: `{workdir}`, `{run_dir}`, `{run_id}`,
-`{node_id}`, `{generation}`; any other brace stays literal. It runs on a background pool of at most
+`{node_id}`, `{generation}` — the paths always ABSOLUTE, even for a run started with a relative
+`--out`; any other brace stays literal. It runs on a background pool of at most
 two concurrent copies (`artifact_sync.py::MAX_CONCURRENT_SYNCS`; the rest queue in terminal order), so
 the eval slot (and its GPU lease) is free during the upload; the interpreter waits for in-flight
 copies at exit, each up to its `timeout`. A copy is started only while the engine that accepted it
@@ -446,7 +460,8 @@ after), so an ending engine first waits, up to 1800 s, for the copies it accepte
 (`artifact_sync.py::drain_before_release`, before its terminal barrier and the release of
 `engine.lock`) — the copies of the run's last nodes are not skipped for being queued when the search
 ended. One still queued past that bound is not started; one already running finishes and records its
-receipt. Each copy opens with a diagnostic
+receipt. A second Ctrl-C during that wait stops it at once, and the engine still closes its trace
+barrier, after which no queued copy starts. Each copy opens with a diagnostic
 `artifact_sync_started` row and closes with its `artifact_synced` receipt (same `sync_id`): a started
 row with no receipt is a copy an engine death interrupted or its end never started
 (`artifact_sync.py::unfinished_syncs`), listed by `looplab inspect` (`copy-out unfinished:`) and, once

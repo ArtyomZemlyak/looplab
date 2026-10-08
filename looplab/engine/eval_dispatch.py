@@ -26,6 +26,7 @@ from looplab.engine.evaluate import _redacted_tail, handed_admission_fold
 from looplab.engine.resources import eval_time_admission_blocked
 from looplab.engine.shared import effective_researcher_eval_timeout
 from looplab.engine.speculation_gate import engine_authored_artifacts
+from looplab.engine.track_lane import track_gpus_held
 # Through the ENGINE's fold seam, not `replay.fold` directly — see `shared.py::engine_fold`.
 from looplab.engine.shared import engine_fold as fold
 from looplab.events.types import (EV_NODE_FAILED, EV_RUN_SETUP_FINISHED, EV_RUN_SETUP_STARTED,
@@ -990,17 +991,27 @@ class EvalDispatchMixin:
         run_dir = getattr(self, "run_dir", None)
         if run_dir is None:
             return {}
-        # ONLY A PARENT EVALUATED IN ITS CURRENT LIFECYCLE whose workdir still holds that lifecycle's
-        # files (critic 2026-10-08): a failed parent's half-written checkpoint, or a workdir being
-        # re-materialized by a reset, is not what the child was built to continue from. One fold, and
+        # HOST TIERS ONLY, as documented (review 2026-10-08): a Docker tier binds no other node's
+        # workdir, so the variable named host paths that do not exist in the container.
+        if getattr(self, "trust_mode", "trusted_local") in ("untrusted", "hostile"):
+            return {}
+        # ONLY A PARENT EVALUATED IN THE LIFECYCLE THIS CHILD WAS BUILT FROM whose workdir still
+        # holds that lifecycle's files (critic 2026-10-08): a failed parent's half-written
+        # checkpoint, or a workdir being re-materialized by a reset, is not what the child was built
+        # to continue from — and nor is the parent's NEXT lifecycle after a reset and re-evaluation
+        # (review 2026-10-08): the pin is `Node.parent_generations`, the fold's lineage receipt; a
+        # node folded before that receipt existed keeps the current-lifecycle rule. One fold, and
         # only for a task that asked for this variable. The rule is `produced_workdir`'s, which the
         # used artifacts below share.
         state = fold(self.store.read_all())
+        pins = getattr(node, "parent_generations", None) or {}
         paths = []
         for pid in getattr(node, "parent_ids", None) or []:
             if isinstance(pid, bool) or not isinstance(pid, int):
                 continue
-            wd, _why = produced_workdir(state, run_dir, pid)
+            pinned = pins.get(str(pid))
+            wd, _why = produced_workdir(state, run_dir, pid,
+                                        pinned if type(pinned) is int else None)
             if wd is not None:
                 paths.append(wd)
         return {self.PARENT_WORKDIRS_ENV: os.pathsep.join(paths)} if paths else {}
@@ -1856,10 +1867,15 @@ class EvalDispatchMixin:
                             # A bypass is what ages the head; picking the head itself clears the debt.
                             if chosen_index is not None:
                                 head_bypasses = head_bypasses + 1 if chosen_index > 0 else 0
-                            elif scan is not pending and slots.value >= batch_width - 1:
+                            elif scan is not pending and slots.value >= batch_width - 1 \
+                                    and not track_gpus_held(self):
                                 # The pool was reserved for the head and drained to empty (this task
                                 # holds the only taken slot) and it STILL does not fit: it wants more
                                 # than the box has. Release the claim so the queue behind it can move.
+                                # Not while an operator's TRACK holds devices of the same pool
+                                # (`engine/track_lane.py::track_gpus_held`, review 2026-10-08): the
+                                # pool is then busy, not too small, and the sticky verdict would cost
+                                # the head its aging for the rest of its queue lifetime.
                                 head_unsatisfiable = True
                             if chosen_index is None:
                                 slots.release()

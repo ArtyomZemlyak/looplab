@@ -393,7 +393,8 @@ def normalize_extra_metric_channels(value, *, max_items: int = 256) -> dict[str,
 # metrics measured after the run (`extra_metrics_imported`, `maintenance/import_metrics.py`: an
 # @200 scored by a service for nodes the run scored at @20) is added BESIDE the live keys, never
 # over them, so that node's map is part measured, part reconstructed. The marker then names the
-# reconstructed `keys`; a marker WITHOUT `keys` keeps its historical meaning — the whole map.
+# reconstructed `keys`; a marker WITHOUT `keys` keeps its historical meaning — the whole map. A
+# score-log backfill landing after imports (`extra_metrics_are_imports_only`) names its keys too.
 #
 # …AND `sources` beside `keys` (critic 2026-10-08): `{key: what measured it}` from the import's
 # required `--source` (or `track <name>`), so a surface states WHO measured an imported value
@@ -448,6 +449,49 @@ def extra_metric_source(node, key: str) -> Optional[str]:
     sources = record.get("sources") if isinstance(record, dict) else None
     found = sources.get(key) if isinstance(sources, dict) else None
     return found if isinstance(found, str) and found else None
+
+
+def plan_extra_metrics_import(live, found, *, max_items: int = 256) -> tuple[dict, list, list]:
+    """`(added, kept, dropped)`: what an `extra_metrics_imported` row's `found` values do to a node
+    whose map is `live` — THE rule `events/replay.py::_on_extra_metrics_imported` folds by, shared
+    with every writer that reports what it recorded (`maintenance/import_metrics.py`,
+    `maintenance/evaluate_track.py`, `engine/track_lane.py`), so a report can no longer say "recorded"
+    of a key the fold drops (review 2026-10-08: past the 256-key bound, silently).
+
+    `found` is normalized as every writer of the map is (`normalize_extra_metrics`); a key `live`
+    already carries is KEPT, never overwritten; the rest join in name order while the map stays
+    inside `max_items`, and what does not fit is DROPPED."""
+    live = dict(live or {})
+    # Every number the row carries, then the first `max_items` of them — exactly what
+    # `normalize_extra_metrics(found)` keeps — so a key the ROW's own bound cut is reported too.
+    every = normalize_extra_metrics(found, max_items=len(found) if isinstance(found, dict) else 0)
+    normal = dict(list(every.items())[:max_items])
+    fresh = sorted((k, v) for k, v in normal.items() if k not in live)
+    room = max(0, max_items - len(live))
+    added = dict(fresh[:room])
+    return (added, sorted(k for k in normal if k in live),
+            sorted(k for k in every if k not in added and k not in live))
+
+
+def extra_metrics_are_imports_only(node) -> bool:
+    """True when every key of the node's NON-EMPTY `extra_metrics` is an operator IMPORT — named in
+    the reconstruction marker's `keys` AND carrying a `sources` entry (`extra_metric_source`).
+
+    The score-log backfill writes only where no LIVE record exists, and an import is not one: before
+    this, an import that happened to land first made a later backfill a no-op while the opposite
+    order kept both (review 2026-10-08). A score-log backfill names no source, so a map it already
+    reconstructed still answers False here, which keeps a second backfill a no-op by construction.
+    Shared by the fold (`events/replay.py::_on_score_metrics_backfilled`) and the writer's planner
+    (`maintenance/backfill_score_metrics.py::plan_run`), so the dry run promises what the fold does."""
+    metrics = getattr(node, "extra_metrics", None) or {}
+    record = getattr(node, "extra_metrics_backfill", None)
+    if not metrics or not isinstance(record, dict) or not record.get("backfilled"):
+        return False
+    keys, sources = record.get("keys"), record.get("sources")
+    if not isinstance(keys, list) or not isinstance(sources, dict):
+        return False
+    named = set(keys)
+    return all(k in named and isinstance(sources.get(k), str) and sources[k] for k in metrics)
 
 
 def extra_metric_is_backfilled(node) -> bool:

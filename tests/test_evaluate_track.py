@@ -82,7 +82,7 @@ def test_a_track_records_beside_the_live_metric_and_can_rank_the_run(tmp_path):
 def test_a_workdir_that_is_not_the_evaluated_code_is_refused(tmp_path):
     rd, store = _run(tmp_path, stamps=(True, False))
     out = _cli(rd, "--apply", "--nodes", "0,1")
-    assert "node 1: refused — its workdir holds another lifecycle's or code's files" in out.output
+    assert "node 1: refused — its workdir does not hold this lifecycle's files" in out.output
     st = fold(store.read_all())
     assert "FUR@200" in st.nodes[0].extra_metrics and "FUR@200" not in st.nodes[1].extra_metrics
 
@@ -130,7 +130,7 @@ def test_a_fifo_stamp_is_refused_not_waited_on(tmp_path):
     stamp.unlink()
     os.mkfifo(stamp)
     node = fold(store.read_all()).nodes[0]
-    assert track_refusal(rd, node) == "its workdir carries no readable manifest stamp"
+    assert "manifest stamp is missing" in track_refusal(rd, node)
 
 
 def test_an_imported_key_carries_what_measured_it(tmp_path):
@@ -227,3 +227,45 @@ def test_a_track_that_echoes_its_passthrough_secret_writes_it_nowhere(tmp_path, 
     assert "Zq8vR2kLp0sWx7Tn" not in out.output
     log = (rd / "track_at200.log").read_text()
     assert "***REDACTED_ENV***" in log and "Zq8vR2kLp0sWx7Tn" not in log
+
+
+def test_a_relative_run_dir_is_measured_not_resolved_twice(tmp_path, monkeypatch):
+    """review 2026-10-08, reproduced: `{workdir}` rendered relative to a command run FROM that
+    workdir named `run/nodes/node_0/run/nodes/node_0`, and every node failed."""
+    rd, store = _run(tmp_path)
+    monkeypatch.chdir(tmp_path)
+    out = CliRunner().invoke(app, ["evaluate-track", "run", "at200", "--apply"])
+    assert "recorded on 2 node(s)" in out.output, out.output
+    assert fold(store.read_all()).nodes[0].extra_metrics["FUR@200"] == 0.36
+
+
+def test_a_log_that_cannot_be_written_keeps_the_measurement(tmp_path, monkeypatch):
+    """review 2026-10-08: the log write sat in the same `try` as the run, so an OSError writing it
+    discarded a measurement the command had already made."""
+    from looplab.engine import artifact_sync
+    rd, store = _run(tmp_path)
+
+    def _full_disk(*_a, **_k):
+        raise OSError(28, "No space left on device")
+
+    monkeypatch.setattr(artifact_sync, "append_tool_log", _full_disk)
+    out = _cli(rd, "--apply", "--nodes", "0")
+    assert "recorded on 1 node(s)" in out.output, out.output
+
+
+def test_an_unreadable_run_is_a_refusal_not_a_traceback(tmp_path, monkeypatch):
+    from looplab.maintenance import evaluate_track as module
+    rd, _store = _run(tmp_path)
+
+    def _unreadable(*_a, **_k):
+        raise PermissionError(13, "Permission denied", str(rd / "events.jsonl"))
+
+    monkeypatch.setattr(module, "fold", _unreadable)
+    out = _cli(rd, "--apply")
+    assert out.exit_code == 2 and "PermissionError" in out.output, out.output
+
+
+def test_live_refuses_more_ids_than_one_request_may_name(tmp_path):
+    rd, _store = _run(tmp_path)
+    out = _cli(rd, "--live", "--nodes", ",".join(str(i) for i in range(257)))
+    assert out.exit_code == 2 and "at most 256" in out.output, out.output

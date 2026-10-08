@@ -62,7 +62,8 @@ from pathlib import Path
 from typing import Optional
 
 from looplab.events.eventstore import EventStore
-from looplab.events.replay import fold
+# The fold's own predicate, through the module that folds by it (this package reaches no `core`).
+from looplab.events.replay import extra_metrics_are_imports_only, fold
 
 # Why a node can have no answer. A closed vocabulary, for the same reason
 # `backfill_applied_params` keeps one: "unrecoverable" with no reason is the vacuous record this
@@ -195,7 +196,9 @@ def plan_run(run_dir: Path) -> list[dict]:
         row = {"node_id": node_id, "generation": generation,
                "read_at": time.time(), "extra_metrics": {}, "precision_decimals": {},
                "unrecoverable": ""}
-        if node.extra_metrics:
+        # A map of operator IMPORTS only is no live record: the fold backfills beside it, in either
+        # order (`core/models.py::extra_metrics_are_imports_only`), and the plan says the same.
+        if node.extra_metrics and not extra_metrics_are_imports_only(node):
             row["unrecoverable"] = ALREADY_RECORDED
             rows.append(row)
             continue

@@ -45,7 +45,9 @@ from looplab.events.types import (BACKGROUND_APPENDABLE, DIAGNOSTIC_EVENTS,
     EV_SPEC_APPROVAL_REQUESTED,
     EV_SPEC_APPROVED, EV_SPEC_PROPOSED, PAUSE_REASON_EXTERNAL_OBLIGATIONS)
 from looplab.engine.artifact_fence import defer_waiting_consumers
-from looplab.engine.track_lane import cancel_track_lane, drain_track_requests, serve_track_requests
+from looplab.engine.track_lane import (cancel_track_lane, drain_track_requests,
+                                       refuse_finish_over_track_queue, serve_track_requests,
+                                       track_drain_due)
 from looplab.engine.upstream_serve import serve_upstream_requests
 from looplab.engine.ablation import AblationMixin
 from looplab.engine.metric_salvage import settle_mode as settle_metric_salvage_mode
@@ -1413,6 +1415,12 @@ class Engine(ConfirmPhaseMixin, NoiseFloorMixin, AblationMixin, NoveltyGateMixin
         report or record an ambiguous attempt, but can never buy it again. The successful report event
         remains immediately before ``run_finished`` as required by replay.
         """
+        # The operator's queued evaluation TRACKS are answered BEFORE a search-ended finish claims
+        # its scope (doc 73 §1.4; `engine/track_lane.py::refuse_finish_over_track_queue`): refused
+        # here, served at the next turn's head. Draining them after the loop wrote folded rows
+        # inside the open scope and made the staged finish read as abandoned (review 2026-10-08).
+        if refuse_finish_over_track_queue(self, state, data):
+            return False
         report_planned = (not self.external_harness and self.report_writer is not None
                           and self.report_every > 0)
         if not report_planned:
@@ -1602,33 +1610,40 @@ class Engine(ConfirmPhaseMixin, NoiseFloorMixin, AblationMixin, NoveltyGateMixin
                     # exception case and let a genuine multi-failure group through as itself.
                     raise _sole_task_group_error(group) from None
         finally:
-            # A track worker never outlives the engine that started it: its subprocess is
-            # tree-killed and its request stays queued for the next engine (`engine/track_lane.py`).
-            cancel_track_lane(self)
-            # The raising exits' half of the run-loop exit receipt (see `_record_run_loop_exit`):
-            # a no-op when the fall-through already recorded it or the loop was never entered. It runs
-            # BEFORE the exporter is retired, so the receipt still reaches an open trace.
-            self._record_run_loop_exit()
-            # ONE exporter lifetime per run, and it must end before the lifecycle lock may be
-            # released: a background span that closes after that point would append behind a
-            # reset/clear instead of being rejected.  `retire_tracer` is that terminal barrier.
-            #
-            # It is DEFERRED when the caller will still trace after this coroutine returns
-            # (`defer_trace_retirement`).  `cli/run_cmds.py::_run_engine_guarded` is exactly that
-            # caller: its outer handler writes the terminal AND buys the finish report, several
-            # frames above this `finally`.  See `defer_trace_retirement` for the measurement.
-            # BOTH lookups are defensive, and the second is not paranoia: `Engine.run` is borrowed
-            # by host stubs that are not Engines at all -- `_RunHost` in
-            # `tests/test_budget_ceiling_drains_the_inflight_eval.py` -- and by
-            # `Engine.__new__(Engine)` probes that never ran `__init__`.
-            # The code this replaced was defensive for exactly that reason
-            # (`getattr(getattr(self, "tracer", None), "shutdown", None)`); moving the guard inside
-            # `retire_tracer` left the METHOD lookup itself unguarded, and those three drain tests
-            # caught it. `hasattr` rather than a local alias, so the call site keeps the literal the
-            # source pin in `tests/test_async_trace_exporter.py` reads.
-            if not getattr(self, "_trace_retirement_deferred", False) \
-                    and hasattr(self, "retire_tracer"):
-                self.retire_tracer()
+            try:
+                # A track worker never outlives the engine that started it: its subprocess is
+                # tree-killed, the worker joined (bounded), and its request stays queued for the
+                # next engine (`engine/track_lane.py::cancel_track_lane`).
+                cancel_track_lane(self)
+                # The raising exits' half of the run-loop exit receipt (see
+                # `_record_run_loop_exit`): a no-op when the fall-through already recorded it or the
+                # loop was never entered. It runs BEFORE the exporter is retired, so the receipt
+                # still reaches an open trace.
+                self._record_run_loop_exit()
+            finally:
+                # Reached WHATEVER the two steps above raise (review 2026-10-08: a Ctrl-C during the
+                # track worker's bounded join used to skip the barrier below).
+                #
+                # ONE exporter lifetime per run, and it must end before the lifecycle lock may be
+                # released: a background span that closes after that point would append behind a
+                # reset/clear instead of being rejected.  `retire_tracer` is that terminal barrier.
+                #
+                # It is DEFERRED when the caller will still trace after this coroutine returns
+                # (`defer_trace_retirement`).  `cli/run_cmds.py::_run_engine_guarded` is exactly that
+                # caller: its outer handler writes the terminal AND buys the finish report, several
+                # frames above this `finally`.  See `defer_trace_retirement` for the measurement.
+                # BOTH lookups are defensive, and the second is not paranoia: `Engine.run` is borrowed
+                # by host stubs that are not Engines at all -- `_RunHost` in
+                # `tests/test_budget_ceiling_drains_the_inflight_eval.py` -- and by
+                # `Engine.__new__(Engine)` probes that never ran `__init__`.
+                # The code this replaced was defensive for exactly that reason
+                # (`getattr(getattr(self, "tracer", None), "shutdown", None)`); moving the guard inside
+                # `retire_tracer` left the METHOD lookup itself unguarded, and those three drain tests
+                # caught it. `hasattr` rather than a local alias, so the call site keeps the literal the
+                # source pin in `tests/test_async_trace_exporter.py` reads.
+                if not getattr(self, "_trace_retirement_deferred", False) \
+                        and hasattr(self, "retire_tracer"):
+                    self.retire_tracer()
 
     def defer_trace_retirement(self) -> None:
         """Hand this run's exporter lifetime to the caller, which MUST call `retire_tracer`.
@@ -1667,22 +1682,25 @@ class Engine(ConfirmPhaseMixin, NoiseFloorMixin, AblationMixin, NoveltyGateMixin
         The copy-outs this engine accepted are waited for FIRST, bounded
         (`engine/artifact_sync.py::drain_before_release`): a queued copy is started only while its
         engine still owns the run, and this barrier is what says it no longer does
-        (`artifact_sync.py::engine_owns_run`). A no-op when it accepted none.
+        (`artifact_sync.py::engine_owns_run`). A no-op when it accepted none. The barrier is reached
+        WHATEVER the wait ends in (review 2026-10-08): a second Ctrl-C during that wait used to skip
+        it, leaving the exporter open and `engine_owns_run` true after the lock was released.
         """
         from looplab.engine.artifact_sync import drain_before_release
-        drain_before_release(self)
-        _trace_shutdown = getattr(getattr(self, "tracer", None), "shutdown", None)
-        if not callable(_trace_shutdown):
-            return
         try:
-            _stopped = bool(_trace_shutdown(
-                timeout_millis=TRACE_EXPORT_FLUSH_TIMEOUT_MILLIS))
-        except Exception:  # noqa: BLE001 - never mask cancellation/domain failure in finally
-            _stopped = False
-        if not _stopped:
-            _LOG.warning(
-                "trace exporter did not stop before lifecycle release; pending rows were "
-                "abandoned behind the trace-writer fence")
+            drain_before_release(self)
+        finally:
+            _trace_shutdown = getattr(getattr(self, "tracer", None), "shutdown", None)
+            if callable(_trace_shutdown):
+                try:
+                    _stopped = bool(_trace_shutdown(
+                        timeout_millis=TRACE_EXPORT_FLUSH_TIMEOUT_MILLIS))
+                except Exception:  # noqa: BLE001 - never mask cancellation/domain failure in finally
+                    _stopped = False
+                if not _stopped:
+                    _LOG.warning(
+                        "trace exporter did not stop before lifecycle release; pending rows were "
+                        "abandoned behind the trace-writer fence")
 
     async def _drain_inflight_evaluation(self, escaping: BaseException) -> None:
         """Let an evaluation that is ALREADY BURNING land its terminal before the spend ceiling
@@ -1841,6 +1859,11 @@ class Engine(ConfirmPhaseMixin, NoiseFloorMixin, AblationMixin, NoveltyGateMixin
             # below then reaches its CAS over a log with no evaluation in flight.
             if self._eval_drain_requested:
                 await self._drain_adopted_evals()
+            # …and a finish refused over the operator's queued TRACKS serves them here, before the
+            # decision prefix is read (`engine/track_lane.py::drain_track_requests`); a halt or the
+            # spent wall clock stops it with the rest left queued, and the gate then finishes.
+            if track_drain_due(self):
+                await drain_track_requests(self, fold, started_at=start)
             # A SPEND CEILING AN ADOPTED EVALUATION DEFERRED is paid HERE, at the head of the turn
             # and after any drain above (review 2026-09-22, ENG2-02): every sibling still burning
             # lands its terminal first, then the run stops with the accountant's own exception.
@@ -2324,13 +2347,12 @@ class Engine(ConfirmPhaseMixin, NoiseFloorMixin, AblationMixin, NoveltyGateMixin
         # clean finish: before this, the child's raise cancelled the drain and the run ended on the
         # ceiling, and it still does — after the siblings have landed, before `finalize_run`.
         await self._raise_deferred_eval_budget_stop()
-        # The operator's queued evaluation TRACKS are answered before a FINISHING run closes (doc 73
-        # §1.4) — a question asked of a running search is not dropped because the search ended
-        # first. A PAUSE only cancels the one in flight: its request stays queued for the resume.
-        if fold(self.store.read_all()).paused:
-            cancel_track_lane(self)
-        else:
-            await drain_track_requests(self, fold)
+        # The operator's queued evaluation TRACKS were answered before a search-ended finish claimed
+        # its scope (`refuse_finish_over_track_queue`); NOTHING is served here, inside that open
+        # scope (review 2026-10-08). Any other exit — a pause, a stop, an approval wait, the wall
+        # clock — cancels the one in flight, and its request stays queued for the next engine. The
+        # worker is joined by `Engine.run`'s `finally`; a cancelled command writes nothing meanwhile.
+        cancel_track_lane(self, join_s=0)
         # WHY THE LOOP STOPPED, exactly once — the receipt rule, the `finished` skip and the
         # exactly-once latch all live on `_record_run_loop_exit`. This fall-through covers every
         # `break` above; `Engine.run`'s outer `finally` calls the same helper so the RAISING

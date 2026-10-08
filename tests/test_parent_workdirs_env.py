@@ -109,3 +109,40 @@ def test_a_declaration_cannot_spoof_the_name():
     from looplab.core.envsafe import validate_env_map
     clean, reason = validate_env_map("eval_env", {"LOOPLAB_PARENT_WORKDIRS": "/etc"})
     assert clean is None and "LOOPLAB_PARENT_WORKDIRS" in reason
+
+
+def test_a_parent_reset_after_the_child_was_built_is_not_what_it_continues_from(tmp_path,
+                                                                                monkeypatch):
+    """review 2026-10-08: the variable named the parent's CURRENT lifecycle. A child built from
+    parent 3's lifecycle 0, after 3 was reset and re-evaluated, read lifecycle 1's weights. The pin
+    is the fold's lineage receipt, `Node.parent_generations`; a child with no pin keeps the old rule."""
+    from looplab.engine.evaluate import workdir_manifest_digest
+    from looplab.events.replay import fold
+    eng = _engine(tmp_path, on=True)
+    _parents(eng, tmp_path, evaluated=(3,), failed=(), stale=())
+    eng.store.append("node_reset", {"node_id": 3, "generation": 0})
+    eng.store.append("node_evaluated", {"node_id": 3, "generation": 1, "metric": 2.0,
+                                        "violations": []})
+    parent = fold(eng.store.read_all()).nodes[3]
+    assert parent.attempt == 1 and parent.status.value == "evaluated"
+    (tmp_path / "run" / "nodes" / "node_3" / ".looplab-manifest").write_text(
+        workdir_manifest_digest(parent), encoding="ascii")          # lifecycle 1's files, stamped
+    wd = tmp_path / "run" / "nodes" / "node_5"
+    wd.mkdir(parents=True)
+    pinned = _child([3])
+    pinned.parent_generations = {"3": 0}
+    assert "LOOPLAB_PARENT_WORKDIRS" not in (_captured_env(eng, monkeypatch, pinned, wd) or {})
+    current = _child([3])
+    current.parent_generations = {"3": 1}
+    assert _captured_env(eng, monkeypatch, current, wd)["LOOPLAB_PARENT_WORKDIRS"].endswith("node_3")
+    assert _captured_env(eng, monkeypatch, _child([3]), wd)["LOOPLAB_PARENT_WORKDIRS"]
+
+
+def test_a_docker_tier_gets_no_host_paths():
+    """Host tiers only, as documented: a container binds no other node's workdir."""
+    from types import SimpleNamespace
+
+    from looplab.engine.eval_dispatch import EvalDispatchMixin
+    host = SimpleNamespace(_eval_spec={"parent_workdirs_env": True}, run_dir="/nowhere",
+                           trust_mode="untrusted")
+    assert EvalDispatchMixin._parent_workdirs_env(host, _child([3])) == {}

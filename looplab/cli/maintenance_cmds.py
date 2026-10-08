@@ -96,6 +96,11 @@ def evaluate_track_cmd(
                    else evaluate_track(run_dir, track, nodes, apply=apply))
     except MetricsInputRefusal as exc:
         raise ConfigRefusal(f"evaluate-track: {exc}") from None
+    except OSError as exc:
+        # The run directory the OPERATOR named cannot be read or written (missing, unreadable, a
+        # full disk): theirs to fix, so one line at the refusal exit, as before the narrowing
+        # (review 2026-10-08) — wrapped in the refusal TYPE here, never by catching bare ValueError.
+        raise ConfigRefusal(f"evaluate-track: {type(exc).__name__}: {exc}") from None
 
 
 @app.command(name="import-metrics")
@@ -123,6 +128,8 @@ def import_metrics_cmd(
         typer.echo(import_metrics(run_dir, file, source=source, apply=apply, precision=precision))
     except MetricsInputRefusal as exc:
         raise ConfigRefusal(f"import-metrics: {exc}") from None
+    except OSError as exc:              # the operator's run directory: see `evaluate-track` above
+        raise ConfigRefusal(f"import-metrics: {type(exc).__name__}: {exc}") from None
 
 
 @app.command(name="backfill-score-metrics")
