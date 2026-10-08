@@ -1926,7 +1926,8 @@ def stop(run_dir: Path = typer.Argument(..., help="Run directory to STOP (freeze
         state = current()
         rows = store.read_all()
         commands = server_commands_restarting(
-            target, acked=command_ack_index(rows), stopped=stop_holds_queued_intents(state),
+            target, acked=command_ack_index(rows),
+            stopped=stop_holds_queued_intents(state, events=rows),
             pause_reason=standing_pause_reason(rows))
         if not why and commands["coming"]:
             why = (f"server command(s) {', '.join(commands['coming'])} will start an engine now "

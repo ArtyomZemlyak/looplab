@@ -43,7 +43,7 @@ import {
   completedAssistantReply, danglingAssistantTurn,
   unavailableAssistantRecovery,
 } from './assistantRecovery.js'
-import { progressActivity, progressHasNews, progressPatch } from './assistantProgressModel.js'
+import { progressHasNews, progressPatch, streamingProgressPatch } from './assistantProgressModel.js'
 import {
   finalReplyText, restoredComposerInput, sendAbandonReason, sendTurnBlock, terminalTurnOutcome,
 } from './assistantTurnModel.js'
@@ -1104,10 +1104,13 @@ export default function AssistantBar({ runId, hidden = false, onReady }) {
         const reattachAttempt = {}
         activeReplyAttemptRef.current = reattachAttempt
         setBusy(true); runningRef.current = true
-        const act = progressActivity(prog, [])
+        // The FIRST frame's answer too (review 2026-10-08): the placeholder showed its activity and
+        // dropped `text`, so a reattached turn already deep in its answer read as an empty bubble
+        // until the next poll.
+        const first = progressPatch(prog, { activity: [] })
         setMsgs(m => (m[m.length - 1] && m[m.length - 1].role === 'assistant' && m[m.length - 1].streaming)
-          ? m : [...m, { role: 'assistant', content: '', streaming: true, activity: act,
-            recoveryNeeded: !!dangling, lastEventAt: progressPatch(prog).lastEventAt }])
+          ? m : [...m, { role: 'assistant', content: first.content || '', streaming: true,
+            activity: first.activity, recoveryNeeded: !!dangling, lastEventAt: first.lastEventAt }])
         let polling = true
         let exactFailure = null
         let recoveryCtrl = null
@@ -1190,7 +1193,7 @@ export default function AssistantBar({ runId, hidden = false, onReady }) {
               }
               if (replyAttemptCurrent(reattachAttempt, id) && progressHasNews(pp))
                 patchLast(prev => prev && prev.role === 'assistant' && prev.streaming   // only the live placeholder
-                  ? progressPatch(pp, prev) : prev)
+                  ? streamingProgressPatch(pp, prev) : prev)
               // A reattached turn may be PARKED on a HITL confirm — surface its card too (the send
               // path polls permissions; without this a reload hides the card until the 900s deny).
               const permissionSnapshot = await readPermissionSnapshot(id)
@@ -2456,12 +2459,13 @@ export default function AssistantBar({ runId, hidden = false, onReady }) {
       onProgress: pp => patchLast(prev => {
         if (!(prev && prev.role === 'assistant' && prev.streaming)) return prev
         if (!streamEvents && Array.isArray(pp.activity) && pp.activity.length) pollActivity = true
-        const patch = progressPatch(pp, prev)
-        // The mirrored answer only when it is AHEAD of the stream: a frame surfaced for its activity
-        // must never overwrite longer streamed tokens with a shorter mirror.
-        const ahead = patch.content && patch.content.length > acc.length ? patch.content : null
+        // A live message only EXTENDS (`assistantProgressModel.js::streamingProgressPatch`): the
+        // mirrored answer only when it continues what is shown — never a shorter mirror, and never
+        // the server's last-8000 tail over the answer's head — and the activity the stream delivered
+        // is never replaced by the server's bounded window.
+        const patch = streamingProgressPatch(pp, prev, { streamed: acc, streamEvents })
         return { ...patch,
-          content: assistantErrorInfo(pp.text) ? normalizedFailureText(pp.text) : (ahead || prev.content) }
+          content: assistantErrorInfo(pp.text) ? normalizedFailureText(pp.text) : (patch.content || prev.content) }
       }),
       sleep,
     })

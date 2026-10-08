@@ -758,8 +758,8 @@ def test_a_resume_landing_after_the_pause_decision_never_launches_on_a_given_bac
     real_rule = Engine._pause_withholds_attempt
     answers: list = []
 
-    def _rule(a):
-        out = real_rule(eng, a)
+    def _rule(a, **kw):
+        out = real_rule(eng, a, **kw)
         answers.append(out)
         if race and out and len(answers) == 1:
             eng.store.append("resume", {})        # the resume lands right after the decision

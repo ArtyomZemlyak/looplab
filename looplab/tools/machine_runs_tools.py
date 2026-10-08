@@ -41,6 +41,16 @@ READ_RUN_GOAL_CHARS = 600
 READ_RUN_GOAL_PAGE_CHARS = 3200
 
 
+def _flag(value) -> bool:
+    """A boolean tool argument as providers send it: JSON `true`, or stringified — `"true"`, `"1"`,
+    `"yes"`, `"on"` (any case). Everything else, `"false"` included, is False."""
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        return value.strip().lower() in {"true", "1", "yes", "on"}
+    return isinstance(value, int) and value == 1
+
+
 # How many episodes a map prints at EACH END before the middle is elided. Both ends on purpose (the
 # same rule `tools/log_tools.py::_render_search` keeps): a node's first episodes are where a bug
 # first showed and its last are where it died, and a reader shown only one end cannot tell an
@@ -272,8 +282,13 @@ class MachineRunsTools(ForeignRunReader):
             if name == "list_runs":
                 return self._list_runs(bool(args.get("only_live")))
             if name == "read_run":
+                # `full_goal` as a provider SENDS it (review 2026-10-08): providers stringify
+                # arguments, and `is True` read `"true"` as false, so the model got the same 600-char
+                # head back and looped on it. An offset IMPLIES the whole goal — dropped silently
+                # without `full_goal`, the continuation the previous page named printed page one.
                 return self._read_run(args.get("run_id"), args.get("sort"), args.get("limit"),
-                                      full_goal=args.get("full_goal") is True,
+                                      full_goal=(_flag(args.get("full_goal"))
+                                                 or args.get("goal_offset") is not None),
                                       goal_offset=args.get("goal_offset"))
             if name == "read_run_experiment":
                 return self._read_experiment(args.get("run_id"), int(args.get("node_id")),

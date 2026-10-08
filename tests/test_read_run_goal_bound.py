@@ -65,3 +65,24 @@ def test_an_offset_that_names_no_page_is_refused_not_answered_with_page_zero(tmp
     for bad in (-5, len(goal), 10**9, "x", 3200.5):
         out = tools.execute("read_run", {"run_id": "demo", "full_goal": True, "goal_offset": bad})
         assert "names no page" in out and "goal chars 0-" not in out, (bad, out)
+
+
+def test_full_goal_reads_as_a_provider_sends_it_and_an_offset_implies_it(tmp_path):
+    """Review 2026-10-08: providers stringify arguments, and `full_goal is True` read `"true"` as
+    false — the model got the same 600-char head back and looped on it; and an offset sent WITHOUT
+    `full_goal` was dropped silently, so the continuation a page named printed the head again.
+    MUTATION: `is True` -> the stringified flag prints the head; drop the implication -> the bare
+    offset prints the head."""
+    goal = "g" * 7000
+    _run(tmp_path, goal)
+    tools = MachineRunsTools(tmp_path)
+    first = tools.execute("read_run", {"run_id": "demo", "full_goal": True})
+    second = tools.execute("read_run", {"run_id": "demo", "full_goal": True, "goal_offset": 3200})
+    assert first.startswith("run demo · goal chars 0-3200") and "goal chars 3200-" in second
+    for spelled in ("true", "True", " TRUE ", "1", "yes", "on"):
+        assert tools.execute("read_run", {"run_id": "demo", "full_goal": spelled}) == first, spelled
+    for off in ("false", "0", "", None, False, 0):
+        head = tools.execute("read_run", {"run_id": "demo", "full_goal": off})
+        assert "goal chars" not in head and "#2" in head, off
+    assert tools.execute("read_run", {"run_id": "demo", "goal_offset": 3200}) == second
+    assert tools.execute("read_run", {"run_id": "demo", "goal_offset": "3200"}) == second

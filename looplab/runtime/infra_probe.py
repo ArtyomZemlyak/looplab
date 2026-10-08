@@ -37,7 +37,9 @@ the stuck thread leaves that thread in D-state for the life of the process, and 
 resume answered `hung` forever over a path that had long been healthy. A hung path is asked
 afresh at most once per `HUNG_RETRY_S`, and never with more than `MAX_STUCK_PER_PATH` abandoned
 threads of its own alive — at that cap it answers `hung` until one of them returns, so the threads
-a flapping mount strands are bounded by the declared targets times the cap, never by time.
+a flapping mount strands are bounded by the declared targets times the cap, never by time. The cap
+holds under CONCURRENCY too: callers asking the same path at once share ONE probe in flight
+(`probe_target`'s single-flight), instead of each starting a thread before any memo exists.
 
 A FULL RUN DIRECTORY IS ONE RULE AT ALL THREE SITES (review 2026-10-08, round 3). The run directory
 is the one probed target a CANDIDATE can break by itself — its workdir lives under it — and it is
@@ -58,10 +60,13 @@ lifecycle had itself just written. The rule, `run_dir_full_blames`:
   * A lifecycle is blamed only on EVIDENCE tying the condition to it, and only after something of
     it RAN: its workdir is the LARGEST node workdir measured (strictly) AND either it holds at least
     half the bytes used on the filesystem (`DOMINANT_SHARE`), or this same lifecycle already met a
-    full run dir (a durable `run_dir_full` withheld row — read from the log, so a resume keeps it).
-    A bystander is never the largest, so it never reaches a triage over a full disk; the filler is
-    blamed at the latest on its second meeting, so pause → resume → refill is bounded at ONE pause
-    per lifecycle. Blamed, it takes the ordinary failure path with the probe's sentence as
+    full run dir (a durable `run_dir_full` withheld row — read from the log, so a resume keeps it)
+    AND its own workdir grew, during this attempt, by at least half of what the filesystem gained
+    since the launch (`FillBaseline`, measured at the launch of a lifecycle that met it before —
+    "largest" ranks only node workdirs, so a disk another run or a cache filled has a largest one
+    too). A bystander is never the largest, so it never reaches a triage over a full disk; the
+    filler is blamed at the latest on its second meeting, so pause → resume → refill is bounded at
+    ONE pause per lifecycle. Blamed, it takes the ordinary failure path with the probe's sentence as
     evidence (the containment, which has no attempt result to repair, writes a `crash` terminal).
   * Before a launch nothing of the attempt has run, so the probe there never blames; but an attempt
     re-launched in a workdir its own lifecycle already ran in re-materializes that workdir once and
@@ -108,6 +113,18 @@ MAX_STUCK_PER_PATH = 3
 
 
 @dataclass
+class _Flight:
+    thread: threading.Thread   # the ONE probe of a path running now (`probe_target`'s single-flight)
+    box: dict                  # where it leaves its answer
+
+
+# The probe of each (role, path) that is running NOW, registered before its thread starts — so a
+# concurrent caller joins it instead of starting a second thread (`probe_target`). Guarded by
+# `_HUNG_LOCK`; an entry leaves when its thread answers or its first waiter gives up on it.
+_IN_FLIGHT: dict = {}
+
+
+@dataclass
 class _Stuck:
     threads: list            # this path's abandoned probe threads (pruned as they finish)
     since: float             # monotonic time of the latest probe that did not return
@@ -148,9 +165,16 @@ def _touch_writable(path: str) -> None:
         os.write(fd, b"x")
     finally:
         os.close(fd)
+        # The unlink is CLEANUP, never part of the answer (review 2026-10-08): the create and the
+        # write are what proved the directory writable. On Windows an antivirus or indexer holding
+        # the fresh file open fails the unlink with a sharing violation (`PermissionError`, WinError
+        # 32), and raised here that was reported as a `run_dir` fault — a healthy box paused. A
+        # failed write still propagates: this handler only runs its own OSError, and `finally`
+        # re-raises the write's after it. The leftover file is one byte, named per process/thread,
+        # and the next probe from the same thread truncates and removes it.
         try:
             os.unlink(probe)
-        except FileNotFoundError:
+        except OSError:
             pass
 
 
@@ -184,44 +208,69 @@ def _probe_one(role: str, path: str) -> Optional[InfraFault]:
 
 def probe_target(role: str, path: str, *, timeout: float = DEFAULT_TIMEOUT_S) -> Optional[InfraFault]:
     """Probe one target under a deadline. A probe that does not return in `timeout` seconds is a
-    `timeout` fault, and the path is remembered as hung until a later probe of it finishes."""
+    `timeout` fault, and the path is remembered as hung until a later probe of it finishes.
+
+    SINGLE-FLIGHT per `(role, path)` (review 2026-10-08): the cap on a path's stuck threads used to
+    be read off the hung memo, which exists only once a probe has TIMED OUT — so N concurrent
+    callers (one per eval slot, all failing on the same dead mount at once) each found no memo and
+    each started a thread, N stuck threads past the cap. A probe IN FLIGHT is now registered before
+    its thread starts, and a concurrent caller JOINS it (its answer, under the caller's own deadline)
+    instead of starting another, so a path never holds more than `MAX_STUCK_PER_PATH` threads alive
+    however many slots ask. Joining rather than answering `hung` matters on a HEALTHY path: a busy
+    box asks the same run directory from every slot, and a refusal there would be a false fault.
+
+    Keyed per declared path, not per filesystem: finding the mount a path lives on means a mount
+    table read that only Linux offers, and a mount-wide key would let one hung path silence the
+    probe of every other declared path on the same filesystem — the run directory included. The
+    threads a flapping mount strands stay bounded by the declared targets times the cap."""
     assert role in PROBE_ROLES, role
     key = (role, path)
     with _HUNG_LOCK:
-        stuck = _HUNG.get(key)
-        if stuck is not None:
-            stuck.threads = [t for t in stuck.threads if t.is_alive()]
-            if not stuck.threads:
-                _HUNG.pop(key, None)       # every abandoned probe came back: the memo is spent
-            elif (len(stuck.threads) >= MAX_STUCK_PER_PATH
-                  or (stuck.blocking and time.monotonic() - stuck.since < HUNG_RETRY_S)):
-                return InfraFault(role, path, "hung", "an earlier probe of this path has not returned")
-            else:
-                # Expired (or a fresh probe already answered): ask again, ONE thread at a time —
-                # `since` moves now, so a concurrent caller still answers `hung` meanwhile.
-                stuck.since = time.monotonic()
-    box: dict = {}
-
-    def _run() -> None:
-        box["fault"] = _probe_one(role, path)
-
-    worker = threading.Thread(target=_run, name=f"looplab-infra-probe:{role}", daemon=True)
-    worker.start()
-    worker.join(timeout)
-    if worker.is_alive():
-        with _HUNG_LOCK:
+        flight = _IN_FLIGHT.get(key)
+        if flight is None:
             stuck = _HUNG.get(key)
-            if stuck is None:
-                _HUNG[key] = _Stuck([worker], time.monotonic())
-            else:
-                stuck.threads.append(worker)
-                stuck.since, stuck.blocking = time.monotonic(), True
+            if stuck is not None:
+                stuck.threads = [t for t in stuck.threads if t.is_alive()]
+                if not stuck.threads:
+                    _HUNG.pop(key, None)       # every abandoned probe came back: the memo is spent
+                elif (len(stuck.threads) >= MAX_STUCK_PER_PATH
+                      or (stuck.blocking and time.monotonic() - stuck.since < HUNG_RETRY_S)):
+                    return InfraFault(role, path, "hung",
+                                      "an earlier probe of this path has not returned")
+                else:
+                    # Expired (or a fresh probe already answered): ask again — ONE thread, the
+                    # registered flight below, which every concurrent caller joins.
+                    stuck.since = time.monotonic()
+            box: dict = {}
+
+            def _run() -> None:
+                box["fault"] = _probe_one(role, path)
+
+            flight = _Flight(threading.Thread(target=_run, name=f"looplab-infra-probe:{role}",
+                                              daemon=True), box)
+            _IN_FLIGHT[key] = flight
+            # Started under the lock: a joiner that finds the flight must never `join()` a thread
+            # that has not started yet (a `RuntimeError`).
+            flight.thread.start()
+    flight.thread.join(timeout)
+    if flight.thread.is_alive():
+        with _HUNG_LOCK:
+            if _IN_FLIGHT.get(key) is flight:   # the first caller to give up abandons it, once
+                _IN_FLIGHT.pop(key, None)
+                stuck = _HUNG.get(key)
+                if stuck is None:
+                    _HUNG[key] = _Stuck([flight.thread], time.monotonic())
+                else:
+                    stuck.threads.append(flight.thread)
+                    stuck.since, stuck.blocking = time.monotonic(), True
         return InfraFault(role, path, "timeout", f"no answer in {timeout:g}s")
     with _HUNG_LOCK:
+        if _IN_FLIGHT.get(key) is flight:
+            _IN_FLIGHT.pop(key, None)
         stuck = _HUNG.get(key)
         if stuck is not None:
             stuck.blocking = False         # the path answers now; old threads only count to the cap
-    return box.get("fault")
+    return flight.box.get("fault")
 
 
 def declared_targets(*, run_dir=None, repo_spec: Optional[dict] = None,
@@ -269,7 +318,8 @@ def declared_targets(*, run_dir=None, repo_spec: Optional[dict] = None,
 _ABSENT_CAUSES = frozenset({"ENOENT", "missing"})
 
 
-def admissible_faults(faults: Iterable[InfraFault], *, seen_working: bool) -> list[InfraFault]:
+def admissible_faults(faults: Iterable[InfraFault], *, seen_working: bool,
+                      related_paths: Iterable = ()) -> list[InfraFault]:
     """The faults that may pause a run, given whether its box was ever seen working
     (`engine/evaluate.py::box_seen_working`: a node evaluated, a stage ran `ok`, a setup finished).
 
@@ -280,12 +330,33 @@ def admissible_faults(faults: Iterable[InfraFault], *, seen_working: bool) -> li
     forever. A path that exists but does not ANSWER (ENOTCONN, EIO, a hang) is a fault either way —
     that is the incident's shape, and no setup step produces it.
 
-    The CONTAINMENT of an engine-side OSError does not apply this filter (round 3,
-    `engine/evaluate.py::_contain_eval_crash` passes `seen_working=True`): `_materialize` runs before
-    `_ensure_run_setup`, so on that path no setup step can still be about to create the path, and
-    filtering it ended the node `engine_error` AND paused the run — one node per resume."""
+    …UNLESS THE FAILURE NAMES IT (`related_paths`). The CONTAINMENT of an engine-side OSError hands
+    the paths its exception named (`OSError.filename`/`filename2`): an absent declared path the
+    raise was ABOUT is admitted before the box was seen working too — `_materialize` runs before
+    `_ensure_run_setup`, so no setup step can create what the materialization itself failed to read,
+    and filtering it ended the node `engine_error` AND paused the run, one node per resume (round 3).
+    Narrowed from "every absent path" (review 2026-10-08): an UNRELATED OSError (an `EACCES` on some
+    other file) on a box whose declared mount a `run_setup` has yet to create used to pause the run
+    over that mount, and the resume met the same raise before the setup ever ran — a pause loop.
+    A related path is the fault's own path or one under it, compared lexically after `normpath`."""
+    related = []
+    for p in related_paths or ():
+        if isinstance(p, (str, os.PathLike)):
+            try:
+                text = os.fspath(p)
+            except TypeError:
+                continue
+            if isinstance(text, str) and text and "\x00" not in text:
+                related.append(os.path.normcase(os.path.normpath(text)))
+
+    def _named(path: str) -> bool:
+        root = os.path.normcase(os.path.normpath(path))
+        prefix = root.rstrip(os.sep) + os.sep
+        return any(r == root or r.startswith(prefix) for r in related)
+
     return [f for f in faults
-            if seen_working or not (f.role in ("mount", "interpreter") and f.cause in _ABSENT_CAUSES)]
+            if seen_working or not (f.role in ("mount", "interpreter") and f.cause in _ABSENT_CAUSES)
+            or _named(f.path)]
 
 
 def probe(targets: Iterable[tuple[str, str]], *,
@@ -420,17 +491,45 @@ def node_workdir_usage(nodes_root, *, max_entries: int = USAGE_MAX_ENTRIES,
 
 
 def filesystem_used_bytes(path) -> Optional[int]:
-    """Bytes in use on the filesystem holding `path` (`statvfs`: blocks minus free blocks), or None
-    where it cannot be asked (no `statvfs`, an OSError). Raises nothing."""
+    """Bytes in use on the filesystem holding `path` (`statvfs`: blocks minus free blocks; where
+    there is no `statvfs` — Windows — `shutil.disk_usage`'s total minus free), or None where it
+    cannot be asked (an OSError). Raises nothing."""
     statvfs = getattr(os, "statvfs", None)
-    if statvfs is None:
-        return None
     try:
-        st = statvfs(os.fspath(path))
+        if statvfs is None:
+            import shutil
+            du = shutil.disk_usage(os.fspath(path))
+            used = int(du.total) - int(du.free)
+        else:
+            st = statvfs(os.fspath(path))
+            used = (int(st.f_blocks) - int(st.f_bfree)) * int(st.f_frsize)
     except (OSError, TypeError, ValueError):
         return None
-    used = (int(st.f_blocks) - int(st.f_bfree)) * int(st.f_frsize)
     return used if used > 0 else None
+
+
+@dataclass(frozen=True)
+class FillBaseline:
+    """What ONE lifecycle's own workdir held, and what the run directory's filesystem had in use,
+    the moment its attempt LAUNCHED (`fill_baseline`) — the "before" the growth clause of
+    `run_dir_full_blames` measures against. Either may be None (not measurable)."""
+    workdir_bytes: Optional[int]
+    fs_used: Optional[int]
+
+
+def fill_baseline(workdir, run_dir, *, max_entries: int = USAGE_MAX_ENTRIES,
+                  deadline_s: float = USAGE_DEADLINE_S) -> FillBaseline:
+    """`FillBaseline` for a launch: the bounded `_tree_bytes` walk of `workdir` (None when it cannot
+    be listed or the walk was cut short — a lower bound would OVERSTATE the growth measured against
+    it) and `filesystem_used_bytes(run_dir)`. Raises nothing."""
+    own: Optional[int] = None
+    try:
+        total, complete = _tree_bytes(os.fspath(workdir), int(max_entries),
+                                      time.monotonic() + max(0.0, float(deadline_s)))
+        own = total if complete else None
+    except (OSError, TypeError, ValueError):
+        own = None
+    return FillBaseline(own, filesystem_used_bytes(run_dir) if run_dir is not None else None)
 
 
 def largest_workdir(usage: Iterable[WorkdirUsage]) -> Optional[WorkdirUsage]:
@@ -443,24 +542,51 @@ def largest_workdir(usage: Iterable[WorkdirUsage]) -> Optional[WorkdirUsage]:
 
 
 def run_dir_full_blames(node_id: int, usage: Iterable[WorkdirUsage], *, fs_used: Optional[int],
-                        met_before: bool) -> bool:
+                        met_before: bool, baseline: Optional[FillBaseline] = None) -> bool:
     """Does the evidence tie a FULL run directory to node `node_id`'s lifecycle? (The module
     docstring's rule; the caller asks only after something of the lifecycle ran.)
 
     Its workdir must be the LARGEST measured — strictly: a tie, an empty workdir or an unmeasured
     one is a bystander — AND either DOMINANT (at least `DOMINANT_SHARE` of the bytes used on the
-    filesystem; a quota's `EDQUOT` rarely is, which is what the second clause is for) or
-    `met_before`: this same lifecycle already met a full run dir, the space was freed by its
-    re-materialization on the resume, and it filled it again."""
+    filesystem) or `met_before` WITH ITS OWN GROWTH EVIDENCED: this same lifecycle already met a
+    full run dir, the space was freed by its re-materialization on the resume, and during THIS
+    attempt its own workdir grew by at least `DOMINANT_SHARE` of what the filesystem gained since
+    the launch (`baseline`, measured then; a filesystem that gained nothing net while the workdir
+    grew counts — the workdir's growth is then all of what was consumed).
+
+    WHY `met_before` ALONE NO LONGER BLAMES (review 2026-10-08): "largest" ranks only this run's
+    node workdirs, and a disk filled by something OUTSIDE them — another run, a model cache, an
+    unrelated job on a shared scratch volume — still has a largest node workdir: on a run with one
+    pending node, that node, trivially. Meeting that disk twice made the bystander's failure a
+    `crash` with a repair bought on "your writes filled it", which is a broken box ending a node.
+    The growth clause is what ties the SECOND meeting to the node's own writes; without a
+    `baseline` (none was measured, or `statvfs` could not answer) there is no such evidence and the
+    full disk stays the box's. A quota's `EDQUOT`, rarely dominant on the filesystem, is still
+    reached through it: the node's own writes are what the quota counted."""
     usage = list(usage)
     own = next((u for u in usage if u.node_id == node_id), None)
     if own is None or own.bytes <= 0:
         return False
     if any(u.node_id != node_id and u.bytes >= own.bytes for u in usage):
         return False
-    if met_before:
+    if isinstance(fs_used, int) and fs_used > 0 and own.bytes >= DOMINANT_SHARE * fs_used:
         return True
-    return isinstance(fs_used, int) and fs_used > 0 and own.bytes >= DOMINANT_SHARE * fs_used
+    return met_before and grew_into_it(own.bytes, fs_used=fs_used, baseline=baseline)
+
+
+def grew_into_it(own_bytes: int, *, fs_used: Optional[int],
+                 baseline: Optional[FillBaseline]) -> bool:
+    """The growth clause of `run_dir_full_blames`: did the lifecycle's own workdir grow during the
+    attempt by at least `DOMINANT_SHARE` of what the filesystem gained since its launch? False
+    whenever either "before" or the filesystem's "after" is unknown — no evidence is no blame."""
+    if baseline is None or not isinstance(baseline.workdir_bytes, int):
+        return False
+    if not isinstance(baseline.fs_used, int) or not isinstance(fs_used, int):
+        return False
+    own_growth = int(own_bytes) - baseline.workdir_bytes
+    if own_growth <= 0:
+        return False
+    return own_growth >= DOMINANT_SHARE * max(0, fs_used - baseline.fs_used)
 
 
 def human_bytes(n: int) -> str:

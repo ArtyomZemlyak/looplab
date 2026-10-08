@@ -365,7 +365,8 @@ class CommandObservation:
         if boundary is None or boundary.type in (EV_RESUME, EV_RUN_REOPENED):
             return False, None
         state = self._owner._fold(self)
-        return stop_holds_queued_intents(state), self._standing_pause
+        return (stop_holds_queued_intents(state, events=self.events_view()),
+                self._standing_pause)
 
     def deferred_ack_observed(self, record: dict) -> bool:
         """Whether a DRAIN acked `record`'s intent WITHOUT serving it (`deferred`): the intent is

@@ -37,6 +37,7 @@ from looplab.core.atomicio import file_identity
 from looplab.engine import run_lifecycle
 from looplab.events.types import EV_RESTART, EV_RESUME_REQUESTED
 from looplab.serve.jupyter import REAP_ON_EXIT_ENV
+from looplab.serve.protocol import pending_resume_is_auto_only
 from looplab.engine.run_lifecycle import (  # noqa: F401 - re-exported for the historical import path
     RESUME_RECONCILE_GRACE_S as _RESUME_RECONCILE_GRACE_S,
     engine_alive as _engine_alive,
@@ -782,30 +783,10 @@ def auto_resume_enabled() -> bool:
     return str(os.environ.get(AUTO_RESUME_ENV, "")).strip().lower() in {"1", "true", "yes", "on"}
 
 
-def _pending_intent_is_auto_only(events, state) -> bool:
-    """True when every resume intent `state` still owes was minted by `_request_auto_resume`.
-
-    The fold keeps only the WATERMARK (`last_resume_request_seq`), not who asked, so the request rows
-    newer than the last serve are read off the same `events` the state was folded from. A launch
-    claim is transport metadata, not an intent; a `restart` and any request without
-    `auto_resume: true` are the operator's own ask. False when no auto request is pending at all."""
-    served = state.last_resume_served_seq
-    saw_auto = False
-    for event in events:
-        seq = getattr(event, "seq", None)
-        if seq is None or seq <= served:
-            continue
-        if event.type == EV_RESTART:
-            return False
-        if event.type != EV_RESUME_REQUESTED:
-            continue
-        data = event.data if isinstance(event.data, dict) else {}
-        if data.get("launch_claim"):
-            continue
-        if data.get("auto_resume") is not True:
-            return False
-        saw_auto = True
-    return saw_auto
+# The ONE reading of "only the server asked" (`serve/protocol.py::pending_resume_is_auto_only`),
+# under the name this module's spawner has always called it by — the SAME object, so the stop rule
+# the command service reads (`stop_holds_queued_intents`) can never drift from the spawner's.
+_pending_intent_is_auto_only = pending_resume_is_auto_only
 
 
 # THE TWO BOUNDS on an auto-resume (critic 2026-10-08). A crashed or killed engine writes no

@@ -31,10 +31,11 @@ from factories import make_engine
 from looplab.events.replay import fold
 from looplab.runtime import infra_probe
 from looplab.runtime.command_eval import RunResult
-from looplab.runtime.infra_probe import (InfraFault, WorkdirUsage, candidate_may_have_caused,
-                                         run_dir_full_blames)
+from looplab.runtime.infra_probe import (FillBaseline, InfraFault, WorkdirUsage,
+                                         candidate_may_have_caused, run_dir_full_blames)
 
 _HUGE_FS = 10 ** 15        # bytes in use on the (patched) filesystem: no node workdir dominates it
+_CKPT = 64 * 1024          # what the candidate's checkpoints write into its own workdir per attempt
 
 
 @pytest.mark.parametrize("faults, nominated", [
@@ -52,18 +53,27 @@ def test_only_a_full_run_dir_alone_is_nominated(faults, nominated):
     assert candidate_may_have_caused(faults) is nominated
 
 
-@pytest.mark.parametrize("usage, fs_used, met_before, blamed", [
-    ([WorkdirUsage(0, 900)], 1000, False, True),                       # dominant on its own
-    ([WorkdirUsage(0, 400)], 1000, False, False),                      # largest, not dominant…
-    ([WorkdirUsage(0, 400)], 1000, True, True),                        # …until it meets it again
-    ([WorkdirUsage(0, 400)], None, True, True),                        # no statvfs: the log decides
-    ([WorkdirUsage(0, 400), WorkdirUsage(1, 500)], 1000, True, False),  # a bystander, met or not
-    ([WorkdirUsage(0, 500), WorkdirUsage(1, 500)], 1000, True, False),  # a tie is not evidence
-    ([WorkdirUsage(0, 0)], 1, True, False),                            # an empty workdir
-    ([WorkdirUsage(1, 900)], 1000, True, False),                       # never measured
+@pytest.mark.parametrize("usage, fs_used, met_before, baseline, blamed", [
+    ([WorkdirUsage(0, 900)], 1000, False, None, True),                 # dominant on its own
+    ([WorkdirUsage(0, 400)], 1000, False, None, False),                # largest, not dominant…
+    ([WorkdirUsage(0, 400)], 1000, True, FillBaseline(0, 700), True),  # …until it fills it again
+    ([WorkdirUsage(0, 400)], 1000, True, FillBaseline(0, 1200), True),  # net shrink, own growth
+    # Review 2026-10-08: the second meeting alone is no evidence — something OUTSIDE the node
+    # workdirs (another run, a cache) filled it, or nothing measured the "before":
+    ([WorkdirUsage(0, 400)], 1000, True, FillBaseline(0, 100), False),  # fs gained 900, node 400
+    ([WorkdirUsage(0, 400)], 1000, True, FillBaseline(400, 700), False),  # the node did not grow
+    ([WorkdirUsage(0, 400)], 1000, True, None, False),                 # no baseline: the box's
+    ([WorkdirUsage(0, 400)], None, True, FillBaseline(0, 700), False),  # no statvfs: the box's
+    ([WorkdirUsage(0, 400)], 1000, True, FillBaseline(None, 700), False),  # an unmeasured before
+    ([WorkdirUsage(0, 400)], 1000, False, FillBaseline(0, 700), False),  # a first meeting
+    ([WorkdirUsage(0, 400), WorkdirUsage(1, 500)], 1000, True, FillBaseline(0, 700), False),
+    ([WorkdirUsage(0, 500), WorkdirUsage(1, 500)], 1000, True, FillBaseline(0, 700), False),  # tie
+    ([WorkdirUsage(0, 0)], 1, True, FillBaseline(0, 0), False),        # an empty workdir
+    ([WorkdirUsage(1, 900)], 1000, True, FillBaseline(0, 700), False),  # never measured
 ])
-def test_only_evidence_blames_a_lifecycle(usage, fs_used, met_before, blamed):
-    assert run_dir_full_blames(0, usage, fs_used=fs_used, met_before=met_before) is blamed
+def test_only_evidence_blames_a_lifecycle(usage, fs_used, met_before, baseline, blamed):
+    assert run_dir_full_blames(0, usage, fs_used=fs_used, met_before=met_before,
+                               baseline=baseline) is blamed
 
 
 @POSIX_ONLY_OS_CALLS
@@ -114,10 +124,12 @@ def _node(store, node_id: int, code: str) -> None:
 
 
 def _disk_filling_engine(tmp_path, monkeypatch, *, mount=None, fs_used=_HUGE_FS, fill=True,
-                         raise_in_engine=False):
+                         raise_in_engine=False, external=0):
     """One node whose eval fills the disk (`disk["full"]`) and dies; re-materializing its workdir
     (PREPARE_WORKDIR, which every lifecycle and the pre-launch re-materialization run) frees it."""
-    disk = {"full": False}
+    # `written`: what the candidate's checkpoints add to the filesystem's bytes in use, and
+    # `external`: what something OUTSIDE the node workdirs (another run, a cache) adds as it fills.
+    disk = {"full": False, "written": 0, "external": 0}
     real_touch = infra_probe._touch_writable
 
     def touch(path):
@@ -126,7 +138,8 @@ def _disk_filling_engine(tmp_path, monkeypatch, *, mount=None, fs_used=_HUGE_FS,
         return real_touch(path)
 
     monkeypatch.setattr(infra_probe, "_touch_writable", touch)
-    monkeypatch.setattr(infra_probe, "filesystem_used_bytes", lambda path: fs_used)
+    monkeypatch.setattr(infra_probe, "filesystem_used_bytes",
+                        lambda path: fs_used + disk["written"] + disk["external"])
     dev = _Dev()
     eng = make_engine(tmp_path / "run", developer=dev)
     eng._inline_repair = True
@@ -144,6 +157,7 @@ def _disk_filling_engine(tmp_path, monkeypatch, *, mount=None, fs_used=_HUGE_FS,
     def prep(a):
         preps.append(a.attempt)
         disk["full"] = False            # re-materializing the workdir frees the candidate's files
+        disk["written"] = 0
         return real_prep(a)
 
     monkeypatch.setattr(eng, "_eval_prepare_workdir", prep)
@@ -154,6 +168,12 @@ def _disk_filling_engine(tmp_path, monkeypatch, *, mount=None, fs_used=_HUGE_FS,
         runs.append(node.code)
         if fill:
             disk["full"] = True         # the CANDIDATE's checkpoints filled the disk
+            with open(os.path.join(workdir, "ckpt.bin"), "wb") as fh:
+                fh.write(b"\1" * _CKPT)
+            disk["written"] += _CKPT
+        if external:
+            disk["full"] = True         # …or something outside the node workdirs did
+            disk["external"] += external
         if mount is not None:
             shutil.rmtree(mount, ignore_errors=True)
         if raise_in_engine:
@@ -338,3 +358,23 @@ def test_a_missing_mount_met_by_the_containment_keeps_the_node_pending(tmp_path)
     assert st.nodes[0].status.value == "pending", st.nodes[0].error_reason
     assert st.paused and st.pause_reason == "infra_unavailable", st.pause_reason
     assert _withheld(events) == [("before_launch", "infra_unavailable", None)]
+
+
+def test_a_disk_filled_from_outside_the_node_workdirs_is_never_blamed_on_the_node(
+        tmp_path, monkeypatch):
+    """Review 2026-10-08: "largest" ranks only this run's node workdirs, and a disk another run or a
+    cache filled still has one — here the run's only node, trivially. Meeting that disk a second
+    time blamed it (`met_before` alone): a `crash` and a repair bought on "your writes filled it",
+    a broken box ending a node. Now its own growth must account for the space that went: 64 kB of
+    checkpoints against 10 MB written elsewhere is the box's, at every meeting.
+    MUTATION: let `met_before` blame without the growth clause -> a triage at the second meeting."""
+    eng, dev, runs, triage_facts, _p, _d = _disk_filling_engine(tmp_path, monkeypatch,
+                                                                external=10_000_000)
+    for _cycle in range(2):
+        anyio.run(eng._evaluate, 0, anyio.CapacityLimiter(1), None)
+        eng.store.append("resume", {})
+    events = eng.store.read_all()
+    assert len(runs) == 2 and not dev.errors and not triage_facts, (
+        "a node was blamed for a disk filled outside its workdir")
+    assert fold(events).nodes[0].status.value == "pending"
+    assert _withheld(events) == [("decide_repair", "infra_unavailable", "run_dir_full")] * 2

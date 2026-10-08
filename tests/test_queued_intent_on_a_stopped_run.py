@@ -71,19 +71,41 @@ def test_the_queued_set_is_exactly_the_search_served_intents():
 
 def _state(*, paused=True, finished=False, stop_requested=None, resume_pending=False):
     return SimpleNamespace(paused=paused, finished=finished, stop_requested=stop_requested,
-                           resume_pending=lambda: resume_pending)
+                           resume_pending=lambda: resume_pending, last_resume_served_seq=-1)
 
 
-@pytest.mark.parametrize("state, holds", [
-    (_state(), True),
-    (_state(paused=False), False),
-    (_state(finished=True), False),                  # a finished run is not paused away
-    (_state(stop_requested="finalized"), False),     # a pending finalize wraps the run up
-    (_state(stop_requested=""), True),               # an empty reason stops nothing (`halted`)
-    (_state(resume_pending=True), False),            # a restart's owner serves the queue
+def _request(seq, **data):
+    return Event(seq=seq, ts=0.0, type="resume_requested", data=data)
+
+
+_AUTO = _request(5, mode="resume", auto_resume=True)
+
+
+@pytest.mark.parametrize("state, events, holds", [
+    (_state(), (), True),
+    (_state(paused=False), (), False),
+    (_state(finished=True), (), False),                  # a finished run is not paused away
+    (_state(stop_requested="finalized"), (), False),     # a pending finalize wraps the run up
+    (_state(stop_requested=""), (), True),               # an empty reason stops nothing (`halted`)
+    (_state(resume_pending=True), (), False),            # a restart's owner serves the queue
+    (_state(resume_pending=True), (_request(5),), False),  # the operator's own pending resume
+    # Review 2026-10-08: a request ONLY the server's auto-resume minted lifts no halt (the spawner
+    # refuses to start it over one), so the operator's stop still holds the queue…
+    (_state(resume_pending=True), (_AUTO,), True),
+    (_state(resume_pending=True), (_AUTO, _request(6, launch_claim=True)), True),
+    # …until the operator asks too.
+    (_state(resume_pending=True), (_AUTO, _request(6, mode="resume")), False),
+    (_state(resume_pending=True), (_AUTO, Event(seq=6, ts=0.0, type="restart", data={})), False),
 ])
-def test_what_a_stop_holds_is_the_folds_truth_table(state, holds):
-    assert stop_holds_queued_intents(state) is holds
+def test_what_a_stop_holds_is_the_folds_truth_table(state, events, holds):
+    assert stop_holds_queued_intents(state, events=events) is holds
+
+
+def test_the_stop_rule_and_the_spawner_read_one_rule():
+    """The spawner's refusal to start an auto-only request over a halt and the stop rule above
+    must never disagree about who asked: one function, under both names."""
+    from looplab.serve import engine_proc, protocol
+    assert engine_proc._pending_intent_is_auto_only is protocol.pending_resume_is_auto_only
 
 
 def test_what_waits_for_the_resume_is_a_stated_rule():
@@ -154,6 +176,28 @@ def test_the_observation_folds_nothing_while_no_pause_stands(tmp_path, monkeypat
     monkeypatch.setattr(type(observation._owner), "_fold",
                         lambda *_a, **_k: pytest.fail("folded with no pause standing"))
     assert observation.stop_holds_queued_intents() is False
+
+
+def test_a_stranded_auto_resume_request_does_not_free_the_queue(tmp_path):
+    """Review 2026-10-08: the server's auto-resume minted a request (`auto_resume: true`) and its
+    child died before `resume_served`, then the operator stopped the run. The request stays pending
+    for good — the spawner refuses an auto-only request over a halt — and the stop rule read it as
+    "already asked to resume": a queued inject was left waiting on an engine that never came, or
+    spawned one that lifted the stop. It waits for the operator's resume now, and starts nothing.
+    MUTATION: read `resume_pending()` alone -> the inject is not deferred."""
+    rd = _seed(tmp_path)
+    store = _store(rd)
+    store.append("resume_requested", {"mode": "resume", "auto_resume": True})
+    store.append("pause", {"reason": "operator stop"})
+    state = fold(store.read_all())
+    assert state.paused and state.resume_pending()
+    _unused, srv = _client(tmp_path, _Driver())
+    assert srv.commands._observe(rd).stop_holds_queued_intents() is True
+    driver = _Driver()
+    driver.on_spawn = lambda: (setattr(driver, "alive", True), _ack_marked(rd))
+    client, _srv = _client(tmp_path, driver, timeout=30.0, observation=60.0)
+    record = _terminal(client, _post(client, "inject_node", _QUEUED["inject_node"]).json())
+    assert driver.calls == [] and record.get("deferred_until_resume") is True, record
 
 
 # ------------------------------------------------------------------------------------- end to end
@@ -459,7 +503,7 @@ def test_the_prefilter_folds_when_a_reset_reopened_a_stopped_finish(tmp_path):
     _stopped_finish_reopened_by_a_reset(rd)
     state = fold(_store(rd).read_all())
     assert state.paused and not state.finished and not state.stop_requested
-    assert stop_holds_queued_intents(state) is True
+    assert stop_holds_queued_intents(state, events=_store(rd).read_all()) is True
     _unused, srv = _client(tmp_path, _Driver())
     assert srv.commands._observe(rd).stop_holds_queued_intents() is True
     driver = _Driver()

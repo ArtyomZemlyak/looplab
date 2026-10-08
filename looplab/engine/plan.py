@@ -249,13 +249,14 @@ def plateau_nodes(state, *, floor: int = 0) -> tuple[Optional[int], int]:
         return None, 0
     low = max(start, leader + 1, int(floor or 0))
     aborted = set(getattr(state, "aborted_nodes", None) or [])
+    silent = _plateau_silent_reasons()
     count = 0
     for node in (getattr(state, "nodes", None) or {}).values():
         if node.id < low or (end is not None and node.id >= end):
             continue
         if node.status is NodeStatus.pending or node.tombstoned or node.id in aborted:
             continue
-        if str(getattr(node, "error_reason", "") or "") in _PLATEAU_SILENT_REASONS:
+        if str(getattr(node, "error_reason", "") or "") in silent:
             continue
         if getattr(node, "kind", None) == "artifact":
             continue                  # doc 73 §1.4: a preparation step, not an attempt at the goal
@@ -267,13 +268,13 @@ def plateau_nodes(state, *, floor: int = 0) -> tuple[Optional[int], int]:
 # the one reader that needs it, as `core/models.py::BENIGN_TERMINAL_REASONS` asks. An engine error is
 # evidence about the BOX (a full disk, a read-only run dir; the run is paused beside it), so it is
 # not BENIGN for the owner alert — but it is no attempt at the experiment either, and counting it let
-# a box fault end the search as a plateau (incident 2026-10-06).
+# a box fault end the search as a plateau (incident 2026-10-06). Asked at every count, never frozen
+# into a module constant at import: a constant computed once read whatever the vocabulary was when
+# this module was first imported, so a reason added to it later (or patched in a test) was counted
+# as an attempt here while every other reader of the vocabulary skipped it.
 def _plateau_silent_reasons() -> frozenset:
     from looplab.core.models import BENIGN_TERMINAL_REASONS
     return BENIGN_TERMINAL_REASONS | {"engine_error"}
-
-
-_PLATEAU_SILENT_REASONS = _plateau_silent_reasons()
 
 
 def plateau_stop_due(state, stop_nodes: int, *, floor: int = 0) -> Optional[str]:

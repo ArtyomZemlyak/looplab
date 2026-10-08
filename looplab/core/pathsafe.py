@@ -281,6 +281,11 @@ def resolve_settled(path) -> Path:
     return answer
 
 
+# Windows' answer to a symlink loop met by a strict resolve: `ERROR_CANT_RESOLVE_FILENAME`, carried
+# as `OSError.winerror` (its `errno` is a generic EINVAL/ENOENT translation, never ELOOP).
+_WINERROR_CANT_RESOLVE_FILENAME = 1921
+
+
 def resolve_refusing_loops(path) -> Path:
     """`Path(path).resolve()` that RAISES on a symlink loop on every Python, as 3.12 did.
 
@@ -289,16 +294,47 @@ def resolve_refusing_loops(path) -> Path:
     failure out of `.resolve()` is a refusal" — ACCEPTED a candidate's `ln -s b a; ln -s a b` as a
     path inside its workdir (`runtime/command_eval.py::_confined`, measured on 3.13.16:
     `tests/test_metric_reader_confinement.py` red). Asked strictly first, so a loop anywhere in the
-    path shows as `ELOOP` (3.13) or `RuntimeError` (3.12) and is re-raised as the `RuntimeError` the
-    callers already refuse on; a component that merely does not exist yet keeps the non-strict
-    answer every caller relied on."""
+    path shows as `ELOOP` (3.13), `RuntimeError` (3.12) or Windows' `ERROR_CANT_RESOLVE_FILENAME`
+    (`winerror` 1921) and is re-raised as the `RuntimeError` the callers already refuse on; a
+    component that merely does not exist yet keeps the non-strict answer every caller relied on.
+
+    …AND THAT ANSWER IS CHECKED (review 2026-10-08). The strict pass stops at the FIRST missing
+    component, so a loop reached THROUGH one (`missing/../a`, `a` a loop) never showed: the strict
+    pass raised `FileNotFoundError`, and 3.13's non-strict pass resolved `..` lexically and then left
+    the loop in place. A non-strict answer holds no symbolic link in its EXISTING prefix — resolving
+    is what removes them — so one that still does names a link the resolver could not follow, and
+    that is refused as a loop (`_unresolved_link_in`). Fail-closed on purpose: a link left for any
+    other reason (an unreadable target on Windows) is no safer to hand a containment test."""
     import errno
     requested = Path(path)
     try:
         return requested.resolve(strict=True)
     except FileNotFoundError:
-        return requested.resolve()
+        answer = requested.resolve()
     except OSError as exc:
-        if exc.errno == errno.ELOOP:
+        if (exc.errno == errno.ELOOP
+                or getattr(exc, "winerror", None) == _WINERROR_CANT_RESOLVE_FILENAME):
             raise RuntimeError(f"Symlink loop from {str(requested)!r}") from exc
-        return requested.resolve()
+        answer = requested.resolve()
+    if _unresolved_link_in(answer):
+        raise RuntimeError(f"Symlink loop from {str(requested)!r}")
+    return answer
+
+
+def _unresolved_link_in(resolved: Path) -> bool:
+    """Does the EXISTING prefix of a resolved path still hold a symbolic link? `lstat` from the root
+    down, stopping at the first component that cannot be `lstat`ed (it does not exist, or is not
+    reachable) — past it the answer is literal text the resolver could not look into."""
+    parts = resolved.parts
+    if not parts:
+        return False
+    current = Path(parts[0])
+    for part in parts[1:]:
+        current = current / part
+        try:
+            st = os.lstat(current)
+        except (OSError, ValueError):
+            return False
+        if stat.S_ISLNK(st.st_mode):
+            return True
+    return False
