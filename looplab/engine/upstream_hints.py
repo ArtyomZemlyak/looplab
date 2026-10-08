@@ -21,8 +21,17 @@ THE CONTRACT.
   (`core/evidence.py::fence_untrusted`). It INFORMS — the session's workspace keeps the code it
   started on — and never orders a rewrite.
 
-Without an open session (no live engine, a stub, an external CLI Developer, whose loop is not ours)
-nothing changes: the tool loop sees no scope and its message list is byte-identical.
+Without an open session (no live engine, a stub) nothing changes: the tool loop sees no scope and its
+message list is byte-identical.
+
+AN EXTERNAL CLI DEVELOPER (doc 73 §4.3, `Settings.upstream_hint_external`). Its loop runs in its own
+process, so the tool-loop boundary above never fires for it. A session opened `external=True` also
+publishes a NOTICE CHANNEL (`agents/tool_loop.py::notice_channel_scope`): the agent's wrapper OFFERS
+pending notices to the agent's own hook (`agents/cli_hook.py`, a `claude` PostToolUse hook — the one
+preset with a per-invocation channel), under the same `MAX_HINTS_PER_SESSION`, and ACKNOWLEDGES each
+once the hook emitted it — only then is the `upstream_hint_delivered {channel: cli_hook}` row written.
+Every other preset has no such channel; its NEXT call states the promotions instead
+(`agents/cli_agent.py::CliAgentDeveloper._upstream_note`).
 """
 from __future__ import annotations
 
@@ -127,22 +136,74 @@ class UpstreamHintBoard:
                     _LOG.warning("upstream hint receipt not recorded", exc_info=True)
         return out
 
+    def offer(self, sid: int) -> list[dict]:
+        """The notices this session has not been OFFERED yet, `[{"hint_id", "text"}]` — counted
+        against `MAX_HINTS_PER_SESSION` like a drain, but NOT recorded: an external agent's hook
+        delivers them, and `acknowledge` records each once it did."""
+        out = []
+        with self._lock:
+            s = self._sessions.get(sid)
+            if s is None or not s["pending"]:
+                return []
+            while s["pending"] and s["delivered"] < MAX_HINTS_PER_SESSION:
+                hint = self._hints[s["pending"].pop(0)]
+                s["delivered"] += 1
+                s.setdefault("offered", set()).add(hint["hint_id"])
+                out.append({"hint_id": hint["hint_id"], "text": hint["text"]})
+            if s["delivered"] >= MAX_HINTS_PER_SESSION:
+                s["pending"].clear()
+        return out
+
+    def acknowledge(self, sid: int, hint_id: str, *, channel: str) -> bool:
+        """Record that the session's external channel DELIVERED `hint_id` — once, and only for a
+        notice it was offered. True when a receipt row was handed to the sink."""
+        with self._lock:
+            s = self._sessions.get(sid)
+            if s is None or hint_id not in s.get("offered", ()) or hint_id in s.setdefault("acked", set()):
+                return False
+            s["acked"].add(hint_id)
+            row = {"hint_id": hint_id, "session": s["label"], "channel": str(channel)[:32],
+                   **({"node_id": s["node_id"]} if type(s["node_id"]) is int else {})}
+        if self.sink is not None:
+            try:
+                self.sink(row)
+            except Exception:  # noqa: BLE001 — a lost receipt row must never end a Developer session
+                _LOG.warning("upstream hint receipt not recorded", exc_info=True)
+                return False
+        return True
+
     @contextmanager
-    def session(self, label: str, node_id=None):
-        """One Developer session: open, scope the tool loop's interjection on it, close."""
-        from looplab.agents.tool_loop import interjection_scope
+    def session(self, label: str, node_id=None, *, external: bool = False):
+        """One Developer session: open, scope the tool loop's interjection on it — and, `external`,
+        an external agent's notice channel (`_ExternalChannel`) — then close."""
+        from looplab.agents.tool_loop import interjection_scope, notice_channel_scope
         sid = self._open(label, node_id)
         try:
-            with interjection_scope(lambda: self.drain(sid)):
+            with interjection_scope(lambda: self.drain(sid)), \
+                    notice_channel_scope(_ExternalChannel(self, sid) if external else None):
                 yield sid
         finally:
             self._close(sid)
 
 
-def developer_session(board, fn, args):
+class _ExternalChannel:
+    """One session's notice channel for an external agent (`agents/cli_hook.py::HookNotices`)."""
+
+    def __init__(self, board: UpstreamHintBoard, sid: int) -> None:
+        self._board, self._sid = board, sid
+
+    def offer(self) -> list[dict]:
+        return self._board.offer(self._sid)
+
+    def acknowledge(self, hint_id: str, *, channel: str = "cli_hook") -> bool:
+        return self._board.acknowledge(self._sid, hint_id, channel=channel)
+
+
+def developer_session(board, fn, args, *, external: bool = False):
     """The scope `node_build.py::_run_developer` wraps one Developer call in: a hint session named
     after the call (`implement_from`, `repair_from`, …) and the node a repair is for, or a no-op
-    without a board."""
+    without a board. `external` (`upstream_serve.py::external_hint_channel`) also publishes the
+    session's notice channel for an external CLI agent."""
     if board is None:
         return nullcontext()
     label = getattr(fn, "__name__", "developer")
@@ -152,4 +213,5 @@ def developer_session(board, fn, args):
         if type(nid) is int and hasattr(a, "attempt"):
             node_id = nid
             break
-    return board.session(str(label)[:40], node_id if label.startswith("repair") else None)
+    return board.session(str(label)[:40], node_id if label.startswith("repair") else None,
+                         external=external)

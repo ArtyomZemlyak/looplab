@@ -2178,6 +2178,28 @@ def approve(run_dir: Path = typer.Argument(..., help="Run dir awaiting approval.
     typer.echo(f"approved node {nid} for run {run_dir.name}")
 
 
+@app.command(name="upstream-auto")
+def upstream_auto_cmd(
+        run_dir: Path = typer.Argument(..., help="The run whose upstream automation to switch."),
+        state: str = typer.Argument(..., help="'off' stops every AUTOMATIC upstream step; 'on' resumes them."),
+        reason: Optional[str] = typer.Option(None, "--reason", help="Why (kept in the upstream history).")):
+    """The upstream automation's KILL SWITCH from a terminal (doc 73 §4.2 G2, doc 73 §4.3).
+
+    `off` stops the live engine's automatic author (fixes from repairs, the champion's capability) and
+    its automatic check and advance; operations an operator queues are still served. `on` resumes
+    them. The SAME control event `/commands` appends (`upstream_auto_set {enabled, reason}`), through
+    the same payload rule (`engine/upstream_switch.py::normalize_upstream_auto_set`); a running engine
+    reads it at its next turn, a stopped run keeps it for its next engine. `looplab inspect` shows the
+    switch, the held steps, the author's spend and the advances of the last hour."""
+    from looplab.core.errors import ConfigRefusal
+    from looplab.engine.upstream_switch import set_upstream_auto
+    choice = state.strip().lower()
+    if choice not in ("on", "off"):
+        raise ConfigRefusal(f"upstream-auto: state must be 'on' or 'off', not {state!r}")
+    _require_run_dir(run_dir, healthy=True)       # fail closed on a corrupt log before appending
+    typer.echo(set_upstream_auto(run_dir, choice == "on", reason))
+
+
 @app.command(name="repair-log")
 def repair_log_cmd(run_dir: Path = typer.Argument(..., help="Run dir whose events.jsonl to repair.")):
     """Repair a MID-FILE corrupted event log (the FUSE/NFS/S3 case `run`/`resume` fail closed on).

@@ -13,13 +13,27 @@ def normalize_request(operation, body):
         "advance": {"proposal_id", "expected_base_revision", "evidence_token"},
         "abandon": {"claim_action_id", "reason"},
     }
+    # doc 73 §4.3: a proposal whose source was measured on an OLDER base carries the source's overlay
+    # three-way merged onto the current one (`rebase {from_digest, files, deleted}`); OPTIONAL, so
+    # every body written before it normalizes, digests and retries exactly as it did.
+    optional = {"rebase"} if operation == "propose" else set()
     try:
-        if not isinstance(body, dict) or set(body) - (common | fields[operation]):
+        if not isinstance(body, dict) or set(body) - (common | fields[operation] | optional):
             raise ValueError("Unknown request fields")
         if operation == "propose":
             body = {"deleted": [], "recipe_deleted": [], **body}
-        if set(body) != common | fields[operation]:
+        if set(body) - optional != common | fields[operation]:
             raise ValueError("Incomplete request")
+        if "rebase" in body:
+            rebase = body["rebase"]
+            if (not isinstance(rebase, dict) or set(rebase) != {"from_digest", "files", "deleted"}
+                    or not isinstance(rebase["from_digest"], str)
+                    or re.fullmatch(r"[0-9a-f]{64}", rebase["from_digest"]) is None
+                    or not isinstance(rebase["files"], dict) or len(rebase["files"]) > 128
+                    or any(not isinstance(k, str) or not isinstance(v, str) for k, v in rebase["files"].items())
+                    or not isinstance(rebase["deleted"], list) or len(rebase["deleted"]) > 128
+                    or any(not isinstance(d, str) for d in rebase["deleted"])):
+                raise ValueError("Invalid rebase: name the measured base digest and the merged overlay")
         raw = json.dumps(body, ensure_ascii=False, allow_nan=False)
         if len(raw.encode()) > 2 * 1024 * 1024:
             raise ValueError("Request exceeds 2 MiB")

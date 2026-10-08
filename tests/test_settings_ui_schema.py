@@ -100,7 +100,7 @@ def test_packaged_settings_ui_schema_preserves_copy_and_only_known_unique_fields
     fields = [field for group in packaged["groups"] for field in group["fields"]]
     keys = [field["key"] for field in fields]
     assert len(keys) == len(set(keys))
-    assert len(keys) == SETTINGS_UI_SCHEMA_CATALOGUE_FIELD_COUNT == 263
+    assert len(keys) == SETTINGS_UI_SCHEMA_CATALOGUE_FIELD_COUNT == 265
     # 238 -> 239 on 2026-09-29: `foresight_alternatives` -- whether the foresight panel's
     # candidates 2..K continue candidate 1's research session. Verified by INTERSECTION: 238
     # keys common to the previous keyset plus exactly that one.
@@ -558,7 +558,9 @@ def test_packaged_settings_ui_schema_preserves_copy_and_only_known_unique_fields
     # 295 -> 297: `upstream_author_usd`, `upstream_advances_per_hour` (doc 73 §4.2 G3/G4: the author's
     # money cap and the hourly advance cap; curated rows, so both move).
     # 297 -> 298: `upstream_verify` (doc 73 §4.2 G5, the canary gate; a curated row, so both move).
-    assert len(Settings.model_fields) == SETTINGS_UI_SCHEMA_SETTINGS_FIELD_COUNT == 298
+    # 298 -> 300: `upstream_author_rebase`, `upstream_hint_external` (doc 73 §4.3: the author rebases a
+    # source the base moved past; external coding agents hear the advance notice; curated rows).
+    assert len(Settings.model_fields) == SETTINGS_UI_SCHEMA_SETTINGS_FIELD_COUNT == 300
     # 199 -> 200 Settings and 168 -> 169 catalogued rows when F8 added `repair_critic_after`
     # (2026-08-13), the cadence at which the repair critic gets its veto. It is catalogued rather
     # than left uncurated because the knob directly above it, `inline_repair_attempts`, changed

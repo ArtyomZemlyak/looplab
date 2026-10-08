@@ -3157,6 +3157,29 @@ class Settings(BaseSettings):
     # (`lane_held {op: advance}`, once per proposal) until the hour frees. Operator-asked advances are
     # never held. 0 = no cap. One reader: `engine/upstream_serve.py::advances_per_hour`.
     upstream_advances_per_hour: int = 2
+    # THE AUTHOR REBASES A SOURCE THE BASE MOVED PAST (doc 73 §4.3). A repaired node or the champion
+    # measured on an OLDER base than the run's current one used to be skipped for good (the lane admits
+    # a source measured on the current base only). ON, the author three-way merges the source's
+    # overlay onto the current base (`engine/upstream_author.py::rebase_source`, git merge-file — the
+    # merge `upstream_workspace.py::rebase_overlay` already runs for every migrating lifecycle); a clean
+    # merge is authored like any source and its gate re-measures the REBASED source on the current
+    # base (the old side); a conflict is recorded on `lane_authored {outcome: rebase_conflict}` and the
+    # source is skipped on that base. Once per source lifecycle and track: a lifecycle the author
+    # already paid for on any base is not rebased. It adds paid calls, so a pre-field snapshot resumes
+    # OFF. One reader: `engine/upstream_author.py::author_rebase_setting`.
+    upstream_author_rebase: bool = True
+    # THE UPSTREAM NOTICE FOR AN EXTERNAL CLI DEVELOPER (doc 73 §4.3; `agents/cli_agent.py`). The hint a
+    # live advance issues (`upstream_hint_issued`) reaches an in-house Developer at its tool-loop turn
+    # boundary; an external coding agent's loop is its own process. ON: a `claude` agent gets the notice
+    # through its own documented turn-boundary channel — a PostToolUse hook loaded per invocation with
+    # `--settings` that adds it as context once (`agents/cli_hook.py`), under the same 3-per-session cap
+    # and recorded as `upstream_hint_delivered {channel: cli_hook}` when the hook actually emitted it;
+    # and EVERY external agent's next call states the run's promotions in its message
+    # (`core/upstream_board.py::developer_base_note`), since its worktree is the launch checkout and is
+    # never rebound. The hook needs the live lane (only a live advance issues a notice); the paragraph
+    # needs only a promotion. It changes an agent's prompt and argv, so a
+    # pre-field snapshot resumes OFF. One reader: `agents/cli_hook.py::external_hint_setting`.
+    upstream_hint_external: bool = True
     # THE EQUIVALENCE PROFILE of every upstream gate (doc 73 §4.2 G5, `engine/upstream_gate.py::
     # gate_profile`): `canary` = ONE old/new pair under the task's declared `eval.canary` (cheap on a GPU
     # task; a task that declares no canary still gets full repeats), `full` = `upstream.repeats` paired
@@ -3862,6 +3885,12 @@ LEGACY_CONFIG_SNAPSHOT_DEFAULTS: dict[str, object] = {
     # THE AUTOMATED UPSTREAM AUTHOR, added 2026-10-08 defaulting ON (doc 73 §2.5): two paid calls per
     # source lifecycle that run's operator never chose.
     "upstream_author": False,
+    # THE AUTHOR'S REBASE OF A SOURCE THE BASE MOVED PAST, added 2026-10-08 defaulting ON (doc 73
+    # §4.3): drafts — paid calls — for sources that run's author used to skip.
+    "upstream_author_rebase": False,
+    # THE UPSTREAM NOTICE FOR AN EXTERNAL CLI DEVELOPER, added 2026-10-08 defaulting ON (doc 73 §4.3):
+    # a `--settings` hook on the agent's argv and the promotions paragraph in its message.
+    "upstream_hint_external": False,
     # A RESEARCHER THAT MAY PROPOSE ARTIFACT NODES, added 2026-10-08 defaulting OFF (doc 73 §1.4). ON
     # it changes the Researcher's emit schema and user turn, so a resumed pre-field run keeps its
     # historical request; `tests/test_researcher_artifacts.py` holds that `false` is byte for byte.

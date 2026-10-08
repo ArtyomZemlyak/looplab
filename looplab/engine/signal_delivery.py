@@ -198,10 +198,12 @@ SIGNALS: tuple[SignalRoute, ...] = (
         # above reaches only the NEXT call), so the notice rides the tool loop's turn boundary.
         channel="push",
         inject="looplab.engine.upstream_hints:UpstreamHintBoard.drain",
-        consumer="Developer build/repair sessions at work (tool-loop turn boundary)",
+        consumer="Developer build/repair sessions at work (tool-loop turn boundary; an external "
+                 "`claude` agent's own PostToolUse hook, doc 73 §4.3)",
         call_sites=(("looplab/engine/upstream_serve.py", "board.post({"),
                     ("looplab/engine/node_build.py", "developer_session(getattr(self, \"_upstream_hints\", None)"),
-                    ("looplab/agents/tool_loop.py", "_interject = _interjection_ctx.get()"))),
+                    ("looplab/agents/tool_loop.py", "_interject = _interjection_ctx.get()"),
+                    ("looplab/agents/cli_agent.py", "HookNotices.open(notice_channel(), self.spec.name)"))),
 )
 
 

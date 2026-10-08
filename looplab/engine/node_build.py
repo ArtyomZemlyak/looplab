@@ -571,7 +571,9 @@ class NodeBuildMixin:
             # doc 73 §4.2 (G1): a session the live lane can tell, at a tool-loop turn boundary, that
             # the base advanced WHILE it works (`engine/upstream_hints.py`); a no-op without a board.
             from looplab.engine.upstream_hints import developer_session
-            with developer_session(getattr(self, "_upstream_hints", None), fn, args):
+            from looplab.engine.upstream_serve import external_hint_channel
+            with developer_session(getattr(self, "_upstream_hints", None), fn, args,
+                                   external=external_hint_channel(self)):
                 code = fn(*args, **kwargs)
             return dataclasses.replace(self._capture_developer_result(developer, code),
                                        authored_base=authored)

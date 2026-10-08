@@ -301,10 +301,12 @@ class UpstreamLane:
         if source_archive is None:
             raise UpstreamRefusal("upstream_source_unavailable", "Source seed archive changed")
         active = active_base(events, self.task.seed_base)
-        if body.get("expected_base_revision") != active["revision"] or receipt["digest"] != active["selector"]["digest"]:
+        rebase = self._rebased_source(body, node, receipt, source_archive, active)
+        if body.get("expected_base_revision") != active["revision"] or (
+                rebase is None and receipt["digest"] != active["selector"]["digest"]):
             raise UpstreamRefusal("upstream_base_conflict", "Source node and proposal must refer to the current base revision")
         advice = upstream_candidates(self.rd, self.task, events, source_node_id=node.id,
-            hunk_hashes=set(body["hunk_hashes"]))["rows"]
+            hunk_hashes=set(body["hunk_hashes"]), overlay=rebase)["rows"]
         rows = [r for r in advice if r["node_id"] == node.id and r["hunk_hash"] in body.get("hunk_hashes", [])]
         if not rows or len(rows) != len(set(body.get("hunk_hashes", []))) or any(r["classification"] != "capability" for r in rows):
             raise UpstreamRefusal("upstream_nomination_invalid", "Select current reusable capability hunks; recipes and already promoted hunks cannot advance")
@@ -324,16 +326,43 @@ class UpstreamLane:
             if row["pending_trigger_nodes"] and row["origin"] == "repair":
                 if not repair_probe_covers(row, self.task.upstream["repair_probes"]):
                     raise UpstreamRefusal("upstream_trigger_required", "Declare a repair probe with the recorded failing pending recipe trigger")
-        for name in set(node.files) | set(body["recipe_files"]):
-            if name not in patch_paths | repair_recipes and node.files.get(name) != body["recipe_files"].get(name):
+        # The source the recipe must reproduce: the node's own overlay, or — rebased (doc 73 §4.3) —
+        # that overlay merged onto the current base, recomputed above.
+        source_files = rebase["files"] if rebase is not None else node.files
+        source_deleted = rebase["deleted"] if rebase is not None else node.deleted
+        for name in set(source_files) | set(body["recipe_files"]):
+            if name not in patch_paths | repair_recipes and source_files.get(name) != body["recipe_files"].get(name):
                 raise UpstreamRefusal("upstream_recipe_changed", "Keep source recipe files outside capability paths byte identical")
-        if set(body.get("recipe_deleted", [])) - patch_paths != set(node.deleted) - patch_paths:
+        if set(body.get("recipe_deleted", [])) - patch_paths != set(source_deleted) - patch_paths:
             raise UpstreamRefusal("upstream_recipe_changed", "Preserve source recipe deletions outside capability paths")
         proposal_id = "up_" + digest(body["action_id"])[:24]
         request_path = self._retain_proposal_request(body, proposal_id)
         return {"body": body, "spec": spec, "node": node, "receipt": receipt, "source_archive": source_archive,
                 "active": active, "rows": rows, "implementation": implementation, "proposal_id": proposal_id,
-                "request_hash": digest(body), "request_path": request_path}
+                "request_hash": digest(body), "request_path": request_path, "rebase": rebase}
+
+    def _rebased_source(self, body, node, receipt, source_archive, active):
+        """A proposal's `rebase` (doc 73 §4.3), RECOMPUTED, or None for a proposal without one.
+
+        The source was measured on the base `receipt` names, and the run has advanced past it. The
+        lane does not take the proposer's merge on trust: it three-way merges the node's overlay from
+        that archive onto the current base itself (`upstream_workspace.py::rebase_overlay`, the merge
+        a migrating lifecycle takes) and refuses a body whose merged overlay differs, a merge that
+        conflicts, and a `rebase` on a source that was measured on the current base."""
+        rebase = body.get("rebase")
+        if rebase is None:
+            return None
+        from looplab.engine.upstream_workspace import rebase_overlay
+        if receipt["digest"] == active["selector"]["digest"] or rebase["from_digest"] != receipt["digest"]:
+            raise UpstreamRefusal("upstream_rebase_invalid", "A rebase names the older base its source was measured on; a source measured on the current base needs none")
+        current, _ = selected_seed_base(active["selector"])
+        files, deleted, conflicts = rebase_overlay(dict(node.files), list(node.deleted), source_archive, current)
+        if conflicts:
+            raise UpstreamRefusal("upstream_rebase_conflict", "The source's overlay does not merge cleanly onto the current base; propose from a source measured on it")
+        if files != rebase["files"] or sorted(deleted) != sorted(rebase["deleted"]):
+            raise UpstreamRefusal("upstream_rebase_changed", "The supplied merged overlay is not the current three-way merge of the source onto the current base")
+        return {"files": files, "deleted": sorted(deleted), "archive": current,
+                "from_digest": receipt["digest"]}
 
     # The settling rows take the driver's `append` — the stopped lane's `_append`, the live engine's
     # store — and spell their payloads as literals at the call, where the payload-contract scan reads
@@ -362,13 +391,17 @@ class UpstreamLane:
         base = capture_seed_archive(snapshot, self.rd / "base_snapshots", on_file=capture.add)
         base["scorer_boundary"] = capture.receipt(base)
         verify_approved_candidate(active["selector"], body["files"], body["deleted"], base)
-        if verified_seed_archive(self.rd, base) is None or base["digest"] == ctx["receipt"]["digest"]:
+        if verified_seed_archive(self.rd, base) is None or base["digest"] in (
+                ctx["receipt"]["digest"], active["selector"]["digest"]):
             raise UpstreamRefusal("upstream_candidate_unavailable", "Candidate archive is unavailable or duplicates the old base")
         strict_atomic_write_bytes(work.parent / "manifest.json", json.dumps(body, ensure_ascii=False).encode())
         return {"base": base, "commit": commit}
 
     def _propose_proposed(self, ctx, built, seed_seq, append):
         body, node, rows = ctx["body"], ctx["node"], ctx["rows"]
+        rebase = ctx.get("rebase")
+        overlay_hash = (digest({"files": rebase["files"], "deleted": rebase["deleted"]})
+                        if rebase is not None else None)
         return append("upstream_proposed", {"action_id": body["action_id"], "request_hash": ctx["request_hash"], "proposal_id": ctx["proposal_id"],
             "selector": {"run_dir": str(self.rd), "event_seq": seed_seq, "digest": built["base"]["digest"]},
             "old_selector": ctx["active"]["selector"], "expected_base_revision": ctx["active"]["revision"],
@@ -381,7 +414,11 @@ class UpstreamLane:
             # `repair_gate: probes` may waive the paired repetitions for (`upstream_gate.py::
             # waives_equivalence`). One repair hunk beside idea hunks does not buy the waiver.
             "repair_only": all(r["origin"] == "repair" for r in rows),
-            "summary": body["summary"], "flag": body["flag"], "critic": body["critic"]})
+            "summary": body["summary"], "flag": body["flag"], "critic": body["critic"],
+            # doc 73 §4.3: the source was measured on an older base and REBASED onto this one — the
+            # base it was measured on and the merged overlay the gate runs as its old side.
+            **({"rebased_from": rebase["from_digest"], "source_overlay_hash": overlay_hash}
+               if rebase is not None else {})})
 
     @staticmethod
     def _propose_failed(ctx, exc, append):

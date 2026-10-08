@@ -162,8 +162,14 @@ def repair_probe_covers(row, repair_probes) -> bool:
                    for path, tokens in row["trigger_tokens"].items()) for probe in repair_probes)
 
 
-def upstream_candidates(rd, task, events=None, *, source_node_id=None, offset=0, limit=200, hunk_hashes=None):
-    """Paged advice; admission inspects the chosen source/hunks beyond any UI page."""
+def upstream_candidates(rd, task, events=None, *, source_node_id=None, offset=0, limit=200, hunk_hashes=None,
+                        overlay=None):
+    """Paged advice; admission inspects the chosen source/hunks beyond any UI page.
+
+    `overlay` (doc 73 §4.3, with `source_node_id` only): `{"files", "deleted", "archive"}` — the
+    source's overlay REBASED onto the current base and that base's archive, nominated instead of the
+    node's own overlay against the archive it was measured on. The source's eligibility (measured,
+    seed identity) is still the node's own."""
     from looplab.engine.activation import CHANGE_CAPABILITY, is_config_path
     from looplab.engine.seed_archive import verified_seed_archive
     events = events if events is not None else events_for(rd)
@@ -183,7 +189,10 @@ def upstream_candidates(rd, task, events=None, *, source_node_id=None, offset=0,
         archive = verified_seed_archive(rd, receipt)
         if archive is None:
             continue
-        for name in sorted(set(node.files) | set(node.deleted)):
+        files, deleted = node.files, node.deleted
+        if overlay is not None and source_node_id is not None:
+            files, deleted, archive = overlay["files"], overlay["deleted"], overlay["archive"]
+        for name in sorted(set(files) | set(deleted)):
             raw = read_bounded_regular_file(archive / name, 1024 * 1024 + 1)
             if raw is not None and len(raw) > 1024 * 1024:
                 continue  # bounded advice; the full archive remains authoritative
@@ -191,7 +200,7 @@ def upstream_candidates(rd, task, events=None, *, source_node_id=None, offset=0,
                 before = raw.decode("utf8") if raw is not None else ""
             except UnicodeError:
                 continue
-            after = node.files.get(name, "")
+            after = files.get(name, "")
             a, b = before.splitlines(keepends=True), after.splitlines(keepends=True)
             for group in difflib.SequenceMatcher(a=a, b=b, autojunk=False).get_grouped_opcodes(3):
                 changed = [x for x in group if x[0] != "equal"]

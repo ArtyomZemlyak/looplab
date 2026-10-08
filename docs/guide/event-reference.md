@@ -23,7 +23,7 @@ The event type itself is the contract's identity and is never renamed or reused;
 
 <!-- generated: event types -->
 
-187 event types — 130 folded into `RunState`, 57 diagnostic; 1223 declared payload keys; 32 types whose whole payload is stored by the fold.
+187 event types — 130 folded into `RunState`, 57 diagnostic; 1229 declared payload keys; 32 types whose whole payload is stored by the fold.
 
 | type | fold | records | required keys | optional keys |
 |---|---|---|---|---|
@@ -118,7 +118,7 @@ The event type itself is the contract's identity and is never renamed or reused;
 | `inject_failed` | diagnostic | An `inject_node` request that could not be materialized, with the reason. | `error`, `idx`, `reason` | — |
 | `inject_node` | folded · whole | An operator-authored node: its idea and code, or a branch of an existing (possibly foreign) node. | — | `code`, `deleted`, `files`, `forked_from`, `idea`, `node_kind`, `origin`, `parent_generations`, `parent_id`, `parent_ids`, `uses`, `uses_attempts` |
 | `lane_armed` | diagnostic | A live engine armed the upstream lane: the mode it serves until it restarts, and why. | `author`, `mode`, `reason` | — |
-| `lane_authored` | diagnostic | The automated upstream author settled one source lifecycle: drafted, declined by its critic, skipped or failed. | `action_id`, `outcome`, `source_node_id`, `track` | `code`, `cost_usd`, `hunk_hashes`, `reason` |
+| `lane_authored` | diagnostic | The upstream author settled one source lifecycle: drafted, declined, skipped, failed, or its rebase conflicted. | `action_id`, `outcome`, `source_node_id`, `track` | `code`, `conflicts`, `cost_usd`, `hunk_hashes`, `reason`, `rebased_from`, `source_action_id` |
 | `lane_held` | diagnostic | The live engine held an automatic upstream step back at a cap: an advance past the hourly limit, the author past its budget. | `op`, `reason` | `proposal_id` |
 | `lane_op_done` | folded | The live engine settled a queued upstream operation; the lane's own rows carry what it did. | `idx`, `op`, `outcome` | `action_id`, `code`, `seq` |
 | `lane_op_requested` | folded | An upstream propose/check/advance queued for the LIVE engine that serves the lane. | `action_id`, `op`, `request_hash` | `body`, `proposal_id`, `request_path` |
@@ -206,11 +206,11 @@ The event type itself is the contract's identity and is never renamed or reused;
 | `upstream_gate_abandoned` | folded · whole | Operator recovery of an interrupted claim; grants no pass. | `action_id`, `claim_action_id`, `proposal_id`, `reason`, `request_hash` | — |
 | `upstream_gate_finished` | folded · whole | Measured gate verdict bound to actual source and inputs. | `action_id`, `evidence_token`, `proposal_id`, `request_hash`, `result` | — |
 | `upstream_gate_started` | folded · whole | Claim before real equivalence/regression work; no implicit retry. | `action_id`, `input_identity`, `proposal_id`, `request_hash` | — |
-| `upstream_hint_delivered` | diagnostic | A Developer session heard an upstream notice at a tool-loop turn boundary. | `hint_id`, `session` | `node_id` |
+| `upstream_hint_delivered` | diagnostic | A Developer session heard an upstream notice at a turn boundary: its tool loop's, or an external agent's own hook (`channel`). | `hint_id`, `session` | `channel`, `node_id` |
 | `upstream_hint_issued` | folded · whole | The bounded notice the live engine issued to the Developer sessions at work after a base advance. | `advance_seq`, `hint_id`, `kind`, `proposal_id`, `sessions`, `text` | `source_node_id` |
 | `upstream_proposal_failed` | folded · whole | A proposal failed; no gate permission. | `action_id`, `code`, `proposal_id`, `request_hash` | — |
 | `upstream_proposal_started` | folded · whole | Durable claim before run-owned Maintainer work; optional pointer to the retained original request. | `action_id`, `proposal_id`, `request_hash` | `request_path` |
-| `upstream_proposed` | folded · whole | Generalized capability with immutable candidate archive and separate source recipe. | `action_id`, `base_revision`, `capability_paths`, `commit`, `critic`, `expected_base_revision`, `flag`, `hunk_hashes`, `manifest_hash`, `old_selector`, `proposal_id`, `repair_trigger_nodes`, `request_hash`, `selector`, `source_node_id`, `source_recipe`, `source_signature`, `summary` | `repair_only` |
+| `upstream_proposed` | folded · whole | Generalized capability with immutable candidate archive and separate source recipe. | `action_id`, `base_revision`, `capability_paths`, `commit`, `critic`, `expected_base_revision`, `flag`, `hunk_hashes`, `manifest_hash`, `old_selector`, `proposal_id`, `repair_trigger_nodes`, `request_hash`, `selector`, `source_node_id`, `source_recipe`, `source_signature`, `summary` | `rebased_from`, `repair_only`, `source_overlay_hash` |
 | `verifier_group_scored` | folded | One verifier round over a GROUP of nodes, keyed on the contract and evidence digests. | `contract`, `members`, `requested_samples`, `v` | `action_id`, `request_sha256` |
 | `workspace_changed` | folded | A re-entry read a workspace source unlike the last recorded reading of its kind, or a way it was never read before. | `now`, `was` | — |
 | `workspace_seeded` | diagnostic | A workspace was seeded: actual node/lifecycle, copied base bytes and materialized inputs. | `materialized`, `node_id` | `base_revision`, `generation`, `workspace_bytes` |

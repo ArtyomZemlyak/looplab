@@ -65,6 +65,7 @@ looplab import-metrics  Import metrics measured AFTER the run beside each node's
 looplab evaluate-track  Run a declared eval.tracks evaluator over settled nodes' workdirs (offline, append-only)
 looplab smoke           Ping the configured LLM endpoint (self-test)
 looplab approve         Ratify a paused run (HITL / onboarding)
+looplab upstream-auto   The upstream automation's kill switch: off|on, same control event as /commands (doc 73 §4.3)
 looplab bench           Capability self-benchmark across tasks
 looplab ui              Serve the live React UI (needs the [ui] extra)
 looplab tui             Terminal control plane: start/steer runs by chat (no browser)
@@ -2824,6 +2825,27 @@ looplab approve RUN_DIR [--node-id N]
 
 For final-result approval, omitting `--node-id` approves the exact pending approval subject recorded in
 the event log; it does not recompute the current best. `--node-id` does not apply to eval-spec approval.
+
+---
+
+## `upstream-auto`
+
+The kill switch of every AUTOMATIC upstream step of a run (doc 73 §4.2 G2; from a terminal since
+doc 73 §4.3). `off` stops the live engine's automated author (fixes from repairs, the champion's capability)
+and its automatic check and advance; operations an operator queues are still served. `on` resumes them.
+
+```bash
+looplab upstream-auto RUN_DIR off --reason "GPU budget review"
+looplab upstream-auto RUN_DIR on
+```
+
+It appends the SAME control intent the UI, the API and MCP append through `/commands`
+(`upstream_auto_set {enabled, reason}`), validated by the same payload rule
+(`engine/upstream_switch.py::normalize_upstream_auto_set`; a reason is at most 300 characters). A
+running engine reads it at its next turn; a stopped run keeps it for its next engine. A corrupt log is
+refused before anything is appended. `looplab inspect RUN_DIR` prints the switch, the steps a cap held
+back (and whether each still waits), the author's spend against `upstream_author_usd` and the
+automatic advances of the last hour against `upstream_advances_per_hour`.
 
 ---
 

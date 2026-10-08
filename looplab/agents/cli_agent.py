@@ -270,7 +270,8 @@ class CliAgentDeveloper:
                  patch_gate: bool = False, surface: Optional[list] = None,
                  seed_dir: Optional[str] = None, seed_dirs: Optional[list] = None,
                  protect: Optional[list] = None, editable_prefixes: Optional[list] = None,
-                 accountant: Optional[CostAccountant] = None, cancel_check=None):
+                 accountant: Optional[CostAccountant] = None, cancel_check=None,
+                 upstream_note: bool = False, evidence_label: str = ""):
         # seed_dir(s): seed the agent's worktree from existing repo tree(s) (RepoTask) instead
         # of a single solution.py — the agent edits real repo files; the patch gate diffs
         # against that worktree and returns the accepted in-surface edits as `last_files`.
@@ -308,6 +309,15 @@ class CliAgentDeveloper:
         # ambient request token is read, so a caller that scopes `cancel_check_scope` reaches here
         # exactly as it reaches an in-process client.
         self.cancel_check = cancel_check
+        # THE UPSTREAM NOTICE FOR AN EXTERNAL AGENT (doc 73 §4.3, `Settings.upstream_hint_external`,
+        # read once by `agents/developer_backends.py`). ON: each call's message states the run's
+        # promotions from the fold the engine binds (`bind_state`) — the agent's worktree is the
+        # launch checkout and never rebound, so this is how its NEXT call learns of an advance — and a
+        # session the engine opened with a notice channel arms the agent's own hook where its CLI has
+        # one (`agents/cli_hook.py`). OFF (the constructor default): argv and message byte for byte.
+        self.upstream_note = bool(upstream_note)
+        self.evidence_label = evidence_label or ""
+        self._memory_state = None
         # Per-invocation audit signal, read by the ValidatingDeveloper (ADR-7):
         self.last_run: Optional[AgentRun] = None  # process-level result of the last run
         self.last_seed: str = ""                  # file content handed to the last run
@@ -315,6 +325,35 @@ class CliAgentDeveloper:
         self.last_deleted: list[str] = []         # accepted in-surface DELETIONS (applied at eval)
         self.last_footprint: dict | None = None    # finalized resources for the shipped patch
         self.last_patch: Optional[dict] = None    # surface-gate verdict {ok,paths,rejected}
+
+    def bind_state(self, state, parent=None) -> None:
+        """The run fold the engine binds before each call (`node_build.py::_run_developer`) — read
+        only by `_upstream_note`."""
+        self._memory_state = state
+
+    def _upstream_note(self) -> str:
+        """The promotions paragraph for this call's message, or "" — while `upstream_note` is off,
+        with no fold bound, and on every run that never promoted anything."""
+        if not self.upstream_note:
+            return ""
+        from looplab.core.upstream_board import developer_base_note
+        note = developer_base_note(self._memory_state, label=self.evidence_label)
+        if not note:
+            return ""
+        return (note + "\nYour working copy is the run's launch checkout; LoopLab merges your edits "
+                       "onto the run's current base before it evaluates them.")
+
+    def _notice_hook(self):
+        """The session's notice channel armed on this agent's own hook (`agents/cli_hook.py`), or
+        None: off, no channel published, or a preset whose CLI has no per-invocation hook."""
+        if not self.upstream_note:
+            return None
+        from looplab.agents.cli_hook import HookNotices
+        from looplab.agents.tool_loop import notice_channel
+        try:
+            return HookNotices.open(notice_channel(), self.spec.name)
+        except OSError:
+            return None
 
     def _launch_base(self) -> list[str]:
         """The resolved argv template — launcher path first, preset tokens after."""
@@ -362,7 +401,7 @@ class CliAgentDeveloper:
                 return False
         return request_cancelled()
 
-    def _communicate(self, p):
+    def _communicate(self, p, on_tick=None):
         """Wait for the agent, honouring the CANCEL TOKEN as well as the deadline.
 
         One `communicate(timeout=self.timeout)` could only ever end on the deadline, which is why a
@@ -380,6 +419,8 @@ class CliAgentDeveloper:
             except subprocess.TimeoutExpired as e:
                 if self._cancelled():
                     raise _ExternalAgentCancelled(e.stdout, e.stderr) from None
+                if on_tick is not None:
+                    on_tick()              # the agent's notice hook: publish and record (cli_hook.py)
                 if remaining <= self.CANCEL_POLL_S:
                     raise subprocess.TimeoutExpired(p.args, self.timeout,
                                                     output=e.stdout, stderr=e.stderr) from None
@@ -445,11 +486,17 @@ class CliAgentDeveloper:
             # A lone surrogate cannot be encoded into argv or the prompt file, and `UnicodeEncodeError`
             # is not the `OSError` the launch path answers — the rule `core/llm.py::_bounded_create`
             # applies at the HTTP transport, applied at this one (critic 2026-09-26).
-            prompt = surrogate_safe((self.brief + "\n\n" + message).strip())
+            prompt = surrogate_safe((self.brief + "\n\n" + message + self._upstream_note()).strip())
             base = self._launch_base()
             argv_message, via_file = self._prompt_delivery(prompt, base)
             if via_file:                          # batch shim: keep untrusted text out of cmd.exe
                 (wd / _PROMPT_FILE).write_text(prompt, encoding="utf-8")
+            # doc 73 §4.3: the hook that carries a live advance notice into THIS session, loaded for
+            # this invocation only and placed before the message (`--settings <file>`).
+            hook = self._notice_hook()
+            if hook is not None and "{message}" in base:
+                at = base.index("{message}")
+                base = base[:at] + hook.argv() + base[at:]
             argv = self._argv(argv_message, "solution.py", base)
             # OWN process group (not the plain subprocess.run timeout): a CLI coding agent spawns its
             # OWN children — a language server, git, a nested training/eval subprocess. subprocess's
@@ -475,7 +522,8 @@ class CliAgentDeveloper:
                                           errors="replace", **group) as p:
                         from looplab.runtime.sandbox import _kill_tree
                         try:
-                            out, err = self._communicate(p)
+                            out, err = self._communicate(
+                                p, on_tick=hook.pump if hook is not None else None)
                             self.last_run = AgentRun(launched=True, exit_code=p.returncode,
                                                      stdout_tail=(out or "")[-2000:],
                                                      stderr_tail=(err or "")[-2000:])
@@ -525,6 +573,9 @@ class CliAgentDeveloper:
                     # binary missing / not executable -> leave the seed; the validator flags
                     # `agent_launched=False` and the loop's eval/debug copes.
                     self.last_run = AgentRun(launched=False, stderr_tail=str(e)[-2000:])
+                finally:
+                    if hook is not None:
+                        hook.close()       # a last pump records what the hook emitted before exit
                 # ONE record per invocation, whatever ended it, and the ledger entry that follows it.
                 self.last_run.duration_s = max(0.0, time.monotonic() - started)
                 self._account_invocation(self.last_run, gen)

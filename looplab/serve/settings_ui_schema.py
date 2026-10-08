@@ -29,7 +29,7 @@ SETTINGS_UI_SCHEMA_VERSION = 2
 # here reading as if 207 were derived while it is typed, which is the drift it warns about. The
 # unforgeable gate is `SETTINGS_UI_SCHEMA_KEYSET_REVISION` further down; this integer is the
 # human-readable half the docs sentence quotes, and `_load_schema` refuses when the two disagree.
-SETTINGS_UI_SCHEMA_CATALOGUE_FIELD_COUNT = 263
+SETTINGS_UI_SCHEMA_CATALOGUE_FIELD_COUNT = 265
 # On the KEYSET REVISION below: DERIVED, and deliberately no longer a hand-pinned review gate: a
 # bare integer is satisfied by
 # bumping the integer. That is exactly how `asha_live_kill_confidence` — the threshold that now
@@ -433,7 +433,8 @@ SETTINGS_UI_SCHEMA_SETTINGS_FIELD_COUNT = len(Settings.model_fields)
 # 259 -> 260: upstream_author (doc 73 §2.5, the automated upstream author).
 # 260 -> 262: upstream_author_usd, upstream_advances_per_hour (doc 73 §4.2 G3/G4).
 # 262 -> 263: upstream_verify (doc 73 §4.2 G5, the canary gate).
-SETTINGS_UI_SCHEMA_KEYSET_REVISION = "64c9e51fadfad0e87969704fb04506c19596466edd39da1bc9fda420fd5ab5d4"
+# 263 -> 265: upstream_author_rebase, upstream_hint_external (doc 73 §4.3).
+SETTINGS_UI_SCHEMA_KEYSET_REVISION = "f623922c0986e26b2c5814964b0336af713daa8ea7bf25d71f7fc66e2c44278e"
 _SCHEMA_PATH = Path(__file__).with_name("settings_ui_schema.json")
 _FIELD_TYPES = frozenset({"bool", "enum", "secret", "int", "float", "list", "text"})
 _OPTIONAL_TEXT = ("help", "shortHelp", "shortLabel", "placeholder", "warning", "warningTitle", "warningTone")

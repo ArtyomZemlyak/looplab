@@ -2033,6 +2033,32 @@ def interjection_scope(source):
         _interjection_ctx.reset(tok)
 
 
+# AN ENGINE NOTICE CHANNEL for an EXTERNAL agent run in this context (doc 73 §4.3): an object with
+# `offer() -> [{"hint_id", "text"}]` and `acknowledge(hint_id, channel=)`. The external agent's own
+# hook delivers what it offers (`agents/cli_hook.py`), so a notice is acknowledged — and recorded —
+# only once that hook emitted it, not when it was handed over. None outside a scope.
+_notice_channel_ctx: contextvars.ContextVar = contextvars.ContextVar(
+    "LOOPLAB_notice_channel", default=None)
+
+
+@contextlib.contextmanager
+def notice_channel_scope(channel):
+    """Publish `channel` to the external agents run in this context; None is a no-op."""
+    if channel is None:
+        yield
+        return
+    tok = _notice_channel_ctx.set(channel)
+    try:
+        yield
+    finally:
+        _notice_channel_ctx.reset(tok)
+
+
+def notice_channel():
+    """The active `notice_channel_scope` channel, or None outside one."""
+    return _notice_channel_ctx.get()
+
+
 def phase_cancel_check():
     """The active `phase_cancel_scope` predicate, or None outside one."""
     return _phase_cancel_ctx.get()

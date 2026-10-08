@@ -780,12 +780,15 @@ def _normalize_track_requested(ctx: _ControlIntake) -> dict:
 def _normalize_upstream_auto_set(ctx: _ControlIntake) -> dict:
     """`upstream_auto_set` (doc 73 §4.2 G2): the kill switch of every AUTOMATIC upstream step of a live
     run — `enabled: false` stops the authors (fix rollout, champion integrator) and the automatic
-    check/advance, `true` lets them resume. Queued operator operations are unaffected."""
-    enabled = ctx.data.get("enabled")
-    if type(enabled) is not bool:
-        raise HTTPException(400, "enabled must be true or false")
-    reason = ctx.text("reason", required=False, limit=300)
-    return {"enabled": enabled, **({"reason": reason} if reason else {})}
+    check/advance, `true` lets them resume. Queued operator operations are unaffected.
+
+    The payload rule is `engine/upstream_switch.py::normalize_upstream_auto_set` — the ONE rule, which
+    `looplab upstream-auto` applies too (doc 73 §4.3); this only turns its refusal into a 400."""
+    from looplab.engine.upstream_switch import UpstreamSwitchRefusal, normalize_upstream_auto_set
+    try:
+        return normalize_upstream_auto_set(ctx.data)
+    except UpstreamSwitchRefusal as exc:
+        raise HTTPException(400, str(exc)) from None
 
 
 # ------------------------------------------------------------------ metric_retarget
