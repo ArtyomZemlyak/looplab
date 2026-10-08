@@ -2060,7 +2060,9 @@ def build_tools(run_root, alive_fn: Optional[Callable] = None, mode: str = DEFAU
 
     providers.append(RunLauncherTools())
     from looplab.tools.upstream_tools import UpstreamTools
-    providers.append(UpstreamTools(run_root, mode=mode, approver=approver))
+    from looplab.engine.upstream_serve import upstream_mode_setting
+    providers.append(UpstreamTools(run_root, mode=mode, approver=approver,
+                                   live_lane=upstream_mode_setting(settings) != "off"))
     if portfolio_ok:
         # PART V §22.4 (Phase 2): edit the shared cross-run concept TAXONOMY (merge/rename/purge/split)
         # via the append-only, reversible governance ledger. The provider itself gates: it contributes

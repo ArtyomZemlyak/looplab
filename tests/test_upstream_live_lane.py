@@ -179,3 +179,31 @@ def test_a_halted_run_starts_nothing(tmp_path):
     before = store.path.read_bytes()
     _serve(_engine(lane, store), turns=3)
     assert store.path.read_bytes() == before
+
+
+# ------------------------------------------------------------------------------- what agents are told
+def test_the_lane_read_says_which_lane_serves_the_run(tmp_path, monkeypatch):
+    lane, store, generation, body, made = _live(tmp_path)
+    live = lane.read(generation)
+    assert live["upstream_mode"] == {"mode": "auto", "reason": ""}
+    assert "Do NOT pause" in live["instruction"] and live["live_queue"]["total"] == 0
+    lane.settings = lane.settings.model_copy(update={"upstream_mode": "off"})
+    off = lane.read(generation)
+    assert off["instruction"] == upstream.UpstreamLane._STOPPED_INSTRUCTION, "doc 72's text, byte for byte"
+    lane.settings = lane.settings.model_copy(update={"upstream_mode": "propose"})
+    monkeypatch.setattr(upstream, "engine_alive", lambda rd: True)
+    lane.check({"expected_generation": generation, "action_id": "q", "proposal_id": made["proposal_id"]})
+    queue = lane.read(generation)["live_queue"]
+    assert queue["pending"] == 1 and queue["rows"][0]["op"] == "check"
+    assert queue["rows"][0]["proposal_id"] == made["proposal_id"]
+
+
+def test_the_assistant_tools_describe_the_live_lane_only_when_wired(tmp_path):
+    from looplab.tools.upstream_tools import UpstreamTools
+
+    def text(tools):
+        return " ".join(s["function"]["description"] for s in tools.specs())
+    stopped = text(UpstreamTools(tmp_path, mode="auto"))
+    live = text(UpstreamTools(tmp_path, mode="auto", live_lane=True))
+    assert "Stopped engine required" in stopped and "QUEUES the check" not in stopped
+    assert "QUEUES the check" in live

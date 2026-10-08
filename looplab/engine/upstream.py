@@ -40,7 +40,9 @@ class UpstreamLane:
                 or type(candidate_limit) is not int or not 1 <= candidate_limit <= 200
                 or source_node_id is not None and (type(source_node_id) is not int or source_node_id < 0)):
             raise ValueError("Use nonnegative source/offsets, history limit 1..100 and candidate limit 1..200")
+        from looplab.engine.upstream_serve import live_queue, resolve_upstream_mode
         events = self._current(expected_generation)
+        mode, mode_reason = resolve_upstream_mode(self.settings, self.task.upstream)
         active = active_base(events, self.task.seed_base)
         history = [{"seq": e.seq, "type": e.type, **self._view(e.data)} for e in events
                    if e.type.startswith("upstream_") or e.type == "base_advanced"]
@@ -52,9 +54,28 @@ class UpstreamLane:
                 offset=candidate_offset, limit=candidate_limit) if self.task.upstream else
                 {"rows": [], "bounded": False, "limit": candidate_limit, "offset": candidate_offset,
                  "next_offset": None, "source_node_id": source_node_id},
-            "instruction": "Pause and wait for the engine to exit; propose, check, inspect the measured gate, advance explicitly, then resume. No automatic advancement.",
+            "instruction": self._instruction(mode),
             "maintainer_instruction": Maintainer.instruction,
-            "engine_running": engine_alive(self.rd)}
+            "engine_running": engine_alive(self.rd),
+            # doc 73 §2.5: which lane this run serves, and its live queue with each receipt.
+            "upstream_mode": {"mode": mode, "reason": mode_reason},
+            "live_queue": live_queue(events)}
+
+    # What an agent reading the lane is told to do. `off` is doc 72's text byte for byte.
+    _STOPPED_INSTRUCTION = ("Pause and wait for the engine to exit; propose, check, inspect the measured "
+                            "gate, advance explicitly, then resume. No automatic advancement.")
+
+    @classmethod
+    def _instruction(cls, mode):
+        if mode == "off":
+            return cls._STOPPED_INSTRUCTION
+        return ("Do NOT pause: on this run a propose/check/advance asked while the engine runs is QUEUED "
+                "for it and served between turns (status 'queued'; read live_queue and history for the "
+                "result). "
+                + ("It also checks each proposal against the current base once and advances each whose "
+                   "measured gate passed, on its own. " if mode == "auto" else
+                   "Inspect the measured gate and advance explicitly. ")
+                + "A stopped run takes the same actions directly.")
 
     def request(self, expected_generation, proposal_id, expected_request_hash, *, offset=0, limit=2048, expected_content_hash=None):
         from looplab.engine.upstream_requests import request_page

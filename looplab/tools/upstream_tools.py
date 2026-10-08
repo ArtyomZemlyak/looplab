@@ -11,8 +11,12 @@ REQUEST_PAGE_LIMIT = min(4096, max(1, (RESULT_CAP - 1800) * 3 // 4))
 
 
 class UpstreamTools:
-    def __init__(self, run_root, *, mode="plan", approver=None):
+    def __init__(self, run_root, *, mode="plan", approver=None, live_lane=False):
         self.run_root, self.mode, self.approver = Path(run_root).resolve(), mode, approver
+        # doc 73 §2.5: describe the LIVE lane (`engine/upstream_serve.py`) instead of the
+        # stopped-engine one. OFF here because the descriptions are part of the Assistant's prompt;
+        # `serve/assistant.py` turns it on from `upstream_mode_setting`.
+        self.live_lane = bool(live_lane)
 
     def specs(self):
         rows = [fn_spec("upstream_status", "Read active base, independently paged nominations/history and Maintainer instructions. Filter source_node_id or follow candidates.next_offset using candidate_offset; narrow candidate_limit and history limit for small replies. Starts no work.",
@@ -29,10 +33,15 @@ class UpstreamTools:
              "expected_content_hash": {"type": "string"}},
             ["run_id", "expected_generation", "proposal_id", "expected_request_hash"]))
         if self.mode != "plan":
-            for operation, purpose in (
+            stopped = (
                 ("propose", "Generalize measured source_node_id and hunk_hashes in a run-owned worktree using Maintainer. Supply files/deleted, separate recipe_files/recipe_deleted, summary, documented flag {name,default,enabled}, documentation_path, named critic {verdict:pass,reason,reviewer}, expected_base_revision."),
                 ("check", "Buy real full-source repetitions and operator regression/trigger probes for proposal_id. Stopped engine required. Read measured history before the next decision."),
-                ("advance", "Explicit CAS for future experiments using proposal_id, expected_base_revision and measured evidence_token. Pause, wait for engine exit, then advance; resume separately.")):
+                ("advance", "Explicit CAS for future experiments using proposal_id, expected_base_revision and measured evidence_token. Pause, wait for engine exit, then advance; resume separately."))
+            live = (
+                ("propose", stopped[0][1] + " Do not pause a running run whose upstream_status says the live lane serves it: the proposal is queued for its engine."),
+                ("check", "Buy real full-source repetitions and operator regression/trigger probes for proposal_id. A running run whose upstream_status says the live lane serves it QUEUES the check for its engine (status 'queued'; do not pause it); otherwise the engine must be stopped. Read measured history before the next decision."),
+                ("advance", "Explicit CAS for future experiments using proposal_id, expected_base_revision and measured evidence_token. A running run whose upstream_status says the live lane serves it QUEUES the advance for its engine (do not pause it; under auto it advances passed gates itself); otherwise pause, wait for engine exit, advance, resume separately."))
+            for operation, purpose in (live if self.live_lane else stopped):
                 rows.append(fn_spec("upstream_" + operation, purpose + " Exact body must include expected_generation and stable action_id; retain it for lost replies. No automatic retry/execution.",
                     {"run_id": {"type": "string"}, "body": {"type": "object"}}, ["run_id", "body"]))
         return rows

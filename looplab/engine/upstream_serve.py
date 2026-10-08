@@ -94,6 +94,34 @@ def run_settings(run_dir):
         return None
 
 
+LIVE_QUEUE_ROWS = 50
+
+
+def live_queue(events) -> dict:
+    """The live lane's queue as a reader sees it (API, UI, the Assistant): the last
+    `LIVE_QUEUE_ROWS` requests in order, each with its receipt once the engine settled it, and how
+    many still wait. Pure over the log; the fold's cursor rule (`_advance_request_cursor`) is what
+    pairs a receipt with its request, so this pairs by the receipt's own `idx`."""
+    requests = [e for e in events if e.type == "lane_op_requested"]
+    done = {}
+    for e in events:
+        if e.type == "lane_op_done" and type(e.data.get("idx")) is int:
+            done.setdefault(e.data["idx"], e)
+    rows = []
+    for idx, req in enumerate(requests):
+        receipt = done.get(idx)
+        rows.append({"idx": idx, "seq": req.seq, "op": req.data.get("op"),
+                     "action_id": req.data.get("action_id"),
+                     **({"proposal_id": req.data["proposal_id"]} if req.data.get("proposal_id")
+                        else {"proposal_id": (req.data.get("body") or {}).get("proposal_id")}
+                        if isinstance(req.data.get("body"), dict) else {}),
+                     "status": "pending" if receipt is None else receipt.data.get("outcome"),
+                     **({"code": receipt.data["code"]} if receipt is not None and receipt.data.get("code")
+                        else {})})
+    return {"pending": sum(1 for r in rows if r["status"] == "pending"),
+            "total": len(rows), "rows": rows[-LIVE_QUEUE_ROWS:]}
+
+
 def auto_next_op(events, seed_base) -> Optional[tuple[str, dict]]:
     """The next operation `auto` takes, or None. Pure over the log.
 
