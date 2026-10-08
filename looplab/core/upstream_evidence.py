@@ -69,9 +69,9 @@ def equivalence(row):
 def passing_checks(row):
     """A passing verdict contains all gate legs, bound to actual paired executions.
 
-    Exactly one of `equivalence` (the paired full-source repetitions) and `equivalence_waived` (doc
-    73 §2.3, track 1: a REPAIR promoted under the operator's `repair_gate: probes`, which must then
-    carry a `repair` leg — a waiver with no trigger probe proves nothing)."""
+    Exactly one of `equivalence` (the paired full-source repetitions) and `equivalence_waived`
+    (doc 73 §2.3, track 1: a REPAIR promoted under the operator's `repair_gate: probes`, which must
+    then carry a `repair` leg — a waiver with no trigger probe proves nothing)."""
     checks, executions = row["checks"], row["executions"]
     kinds = [c["kind"] for c in checks]
     waived = kinds.count("equivalence_waived")

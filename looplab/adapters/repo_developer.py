@@ -1276,6 +1276,10 @@ class LLMRepoDeveloper:
         self._protected = rs["protected_names"]
         self._editables = rs["editables"]
         self._prefixes = [e["name"] for e in self._editables if e["name"] not in (".", "")]
+        # THE BASE this Developer reads and writes against (doc 73 §2.5): the run's active upstream
+        # base when the task declares one, else None. `rebind_base` moves it after a LIVE advance
+        # (`engine/upstream_serve.py::sync_developer_base`, under the instance's call lock).
+        self.authored_base = rs.get("effective_seed_base")
         # Read-only data-mount names (a subset of protected_names, protected defensively) so the
         # write tools can explain a mount refusal honestly — see RepoWriteTools.__init__.
         self._data_mounts = [n for n, s in (rs.get("data") or {}).items()
@@ -1305,6 +1309,27 @@ class LLMRepoDeveloper:
         # rename here would not fail — it would silently mean "no rollback was ever requested", i.e.
         # the feature quietly ceasing to exist with every test still green.
         self.last_rollback_stage: str = ""
+
+    def rebind_base(self, selector=None) -> None:
+        """Point this Developer at another upstream base (doc 73 §2.5): the run's ACTIVE one when
+        `selector` is None — re-read from the task after the run's base advanced while it ran — or
+        the given one, which is how a REPAIR of a lifecycle pinned to an older base reads that base's
+        code. The editables are pinned to the base, so the next call authors on its code. Called
+        only by the engine, under this instance's `developer_call_lock`, between calls."""
+        if selector is None:
+            rs = self.task.repo_spec()
+            self._editables = rs["editables"]
+            if self._probe_repo_spec is not None:
+                self._probe_repo_spec = rs
+            self.authored_base = rs.get("effective_seed_base")
+        else:
+            from looplab.engine.seed_base import pinned_editables
+            self._editables = pinned_editables(self._editables, selector)
+            if self._probe_repo_spec is not None:
+                self._probe_repo_spec = {**self._probe_repo_spec, "editables": self._editables,
+                                         "effective_seed_base": dict(selector)}
+            self.authored_base = dict(selector)
+        self._prefixes = [e["name"] for e in self._editables if e["name"] not in (".", "")]
 
     def bind_state(self, state, parent=None) -> None:
         """Bind cross-run developer tools to the full live run identity.

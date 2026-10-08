@@ -50,8 +50,10 @@ def test_the_envelope_is_the_registry_plus_code_and_is_immutable():
     # ASSIGNS and this is a METHOD a wrapper offers. It rode the shared instance until
     # 2026-09-08, in the same unlocked window `last_report` was moved here to escape. Listing it
     # keeps the rule below exact — a future field still cannot slip in unnamed.
+    # `authored_base` is NAMED for the opposite reason: the ENGINE decides it under the call lock
+    # (the live upstream lane's rebind, doc 73 §2.5) — no Developer produces it.
     assert fields == set(DEVELOPER_OUTPUT_ATTRS) | {"code", "audit_extra",
-                                                    "last_foresight_pick"}, (
+                                                    "last_foresight_pick", "authored_base"}, (
         "a registry member with no envelope field is a side channel the engine can no longer read; "
         "an envelope field with no registry member is a channel no Developer produces")
     result = NodeBuildMixin._capture_developer_result(

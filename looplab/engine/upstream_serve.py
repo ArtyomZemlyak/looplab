@@ -204,9 +204,10 @@ def _arm(engine) -> dict:
 
 
 def base_stamp(engine) -> Optional[dict]:
-    """The base a node built in THIS engine process was authored on — the launch base its Developers
-    were bound to (`repo_spec()["effective_seed_base"]`) — or None when the live lane is off (every
-    other run's `node_created` keeps its shape)."""
+    """The base this engine's Developers build on — the launch base (`repo_spec()
+    ["effective_seed_base"]`) until a LIVE advance moves it — or None when the live lane is off
+    (every other run's `node_created` keeps its shape). A node's own Developer call names the base it
+    actually authored on (`take_authored`), which wins over this at `_emit_node_created`."""
     serve = getattr(engine, "_upstream_serve", None)
     if serve is None:
         return None
@@ -214,6 +215,81 @@ def base_stamp(engine) -> Optional[dict]:
         return _arm(engine)["stamp"]
     except Exception:  # noqa: BLE001 — a stamp nobody can compute is no stamp; materialization falls back to the creation prefix
         return None
+
+
+_AUTHORED = threading.local()
+_NO_BASE = object()
+
+
+def note_authored(base) -> None:
+    """Record, for THIS thread, the base the Developer call it just made authored on."""
+    _AUTHORED.base = base
+
+
+def take_authored():
+    """The base this thread's last Developer call authored on, consumed (`_NO_BASE` when none)."""
+    base = getattr(_AUTHORED, "base", _NO_BASE)
+    _AUTHORED.base = _NO_BASE
+    return base
+
+
+def _authoring_owners(developer):
+    """Every object in a Developer's wrapper chain that OWNS an authored base — the walk
+    `node_build.py::_reset_developer_footprint` makes, for the same `__getattr__`-proxy reason."""
+    pending, seen = [developer], set()
+    while pending:
+        current = pending.pop()
+        if current is None or id(current) in seen:
+            continue
+        seen.add(id(current))
+        if "authored_base" in getattr(current, "__dict__", {}) and callable(
+                getattr(type(current), "rebind_base", None)):
+            yield current
+        for attr in ("inner", "developer", "fallback", "base"):
+            child = getattr(current, attr, None) if attr in getattr(current, "__dict__", {}) else None
+            if child is not None and child is not current:
+                pending.append(child)
+
+
+def sync_developer_base(engine, developer, pinned=None):
+    """Rebind a Developer whose base is not the one this call must author on, and return that base
+    (None when no owner in its chain carries one). The target is the engine's current base
+    (`base_stamp`), or `pinned` — a REPAIR's lifecycle base (`lifecycle_base`), because the workdir
+    it repairs was seeded from it. Under the instance's call lock (`node_build.py::_run_developer`),
+    so a call in flight finishes on the base it started with."""
+    target = pinned if pinned is not None else base_stamp(engine)
+    authored = None
+    for owner in _authoring_owners(developer):
+        if target is not None and owner.authored_base != target:
+            try:
+                owner.rebind_base() if pinned is None else owner.rebind_base(dict(pinned))
+            except Exception as exc:  # noqa: BLE001 — a failed rebind keeps the old base; the stamp below says which
+                _LOG.warning("upstream: Developer rebind failed (%s); it keeps its base", exc)
+        authored = owner.authored_base if authored is None else authored
+    return authored
+
+
+def lifecycle_base(engine, node) -> Optional[dict]:
+    """The base node `node`'s CURRENT lifecycle was seeded on (its binding `workspace_seeded`
+    selection), while this engine serves the live lane; None otherwise, or before it was seeded."""
+    if base_stamp(engine) is None or node is None:
+        return None
+    from looplab.events.replay import event_generation_binds
+    keys = ("run_dir", "event_seq", "digest")
+    found = None
+    for e in engine.store.read_all():
+        # The same two rows `upstream_workspace.py::materialization_plan` reads the lifecycle's
+        # origin from, bound by the ONE generation rule: the seed, then a migration that re-based
+        # the pending overlay before its evaluation started.
+        if (e.type not in ("workspace_seeded", "node_overlay_rebased")
+                or e.data.get("node_id") != node.id
+                or not event_generation_binds(e.data, node.attempt)):
+            continue
+        selection = ((e.data.get("base_revision") or {}).get("selection")
+                     if e.type == "workspace_seeded" else e.data.get("selector"))
+        if isinstance(selection, dict) and all(k in selection for k in keys):
+            found = {k: selection[k] for k in keys}
+    return found
 
 
 def _lane(engine, settings):
@@ -307,6 +383,11 @@ async def _settle(engine, lane, job: UpstreamJob) -> bool:
                     receipt = {"outcome": "refused", "code": "upstream_base_conflict"}
                 else:
                     receipt = {"outcome": "succeeded", "seq": lane._advance_commit(prepared, store.append).seq}
+                    # The Developers build on the promoted base from their NEXT call
+                    # (`sync_developer_base`), and a node built by one that has not rebound yet
+                    # names its own base on `node_created`.
+                    selector = prepared["proposal"]["selector"]
+                    _arm(engine)["stamp"] = {k: selector[k] for k in ("run_dir", "event_seq", "digest")}
             else:
                 job.ctx = job.out[1]
                 if job.op == "propose":

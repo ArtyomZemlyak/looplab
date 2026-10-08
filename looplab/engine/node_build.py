@@ -18,6 +18,7 @@ Agent-facing deps (`legal_actions`, `_state_brief`, `render_hint_directives`) st
 method-local imports so monkeypatching through their source modules keeps working."""
 from __future__ import annotations
 
+import dataclasses
 import functools
 import logging
 import threading
@@ -479,7 +480,8 @@ class NodeBuildMixin:
             return self._run_developer(developer, impl_from, idea, parent, bind_to=state)
         return self._run_developer(developer, developer.implement, idea, bind_to=state)
 
-    def _run_developer(self, developer, fn, *args, bind_to=_OMIT, **kwargs) -> DeveloperResult:
+    def _run_developer(self, developer, fn, *args, bind_to=_OMIT, pinned_base=None,
+                       **kwargs) -> DeveloperResult:
         """ONE Developer call — BIND, CLEAR, call, capture — as one atomic step under the instance's lock
         (`developer_call_lock`). The lock is what makes two offloaded calls on a SHARED instance
         safe: they queue here, in a worker, instead of on the event loop.
@@ -520,8 +522,15 @@ class NodeBuildMixin:
                 if callable(bind_state):
                     bind_state(bind_to)
             self._reset_developer_footprint(developer)
+            # doc 73 §2.5: a Developer whose base the live upstream lane advanced rebinds BEFORE
+            # this call, under this lock — and the base it authors on rides the envelope and this
+            # thread's record, which `_emit_node_created` stamps on the node it builds.
+            from looplab.engine.upstream_serve import note_authored, sync_developer_base
+            authored = sync_developer_base(self, developer, pinned_base)
             code = fn(*args, **kwargs)
-            return self._capture_developer_result(developer, code)
+            note_authored(authored)
+            return dataclasses.replace(self._capture_developer_result(developer, code),
+                                       authored_base=authored)
 
     @staticmethod
     def _capture_developer_result(developer, code) -> DeveloperResult:
@@ -709,9 +718,15 @@ class NodeBuildMixin:
         idea = self._directed_idea(node.idea, state) if state is not None else node.idea
         developer = developer or self.developer
         rf = getattr(developer, "repair_from", None)
+        # A repair edits a workdir seeded from the lifecycle's OWN base: the Developer reads that
+        # base's code, whatever the live upstream lane advanced to since (doc 73 §2.5).
+        from looplab.engine.upstream_serve import lifecycle_base
+        pinned = lifecycle_base(self, node)
         if callable(rf):
-            return self._run_developer(developer, rf, idea, node, err, bind_to=state)
-        return self._run_developer(developer, developer.repair, idea, node.code, err, bind_to=state)
+            return self._run_developer(developer, rf, idea, node, err, bind_to=state,
+                                       pinned_base=pinned)
+        return self._run_developer(developer, developer.repair, idea, node.code, err, bind_to=state,
+                                   pinned_base=pinned)
 
     def _emit_node_created(self, *, node_id: int, parent_ids: list, operator: str, idea: dict,
                            code: str, files: dict, deleted=_OMIT, research_origin=_OMIT,
@@ -721,7 +736,8 @@ class NodeBuildMixin:
                            card_build_generation=_OMIT, eval_start_boundary=_OMIT,
                            materialize_aborted_intent=_OMIT, model_arm=_OMIT,
                            simplified=_OMIT, node_kind=_OMIT, uses=_OMIT,
-                           uses_attempts=_OMIT, expected_last_seq=_OMIT) -> None:
+                           uses_attempts=_OMIT, base_selector=_OMIT,
+                           expected_last_seq=_OMIT) -> None:
         """The single `node_created` emitter for every creation site (`_create_node`,
         `_create_injected_node`, `_ablate`, `_ablate_code`, and doc 67 67.5's `_simplify` and
         `_rebuild_simplification` — the two that pass `simplified`). Optional keys default to the
@@ -758,9 +774,15 @@ class NodeBuildMixin:
         # upstream lane live — an advance it makes does not rebind the Developers built at launch,
         # so `upstream_workspace.py::materialization_plan` must merge from this base, not from the
         # one active when the row landed. None (and so the historical shape) otherwise.
-        from looplab.engine.upstream_serve import base_stamp
-        stamp = base_stamp(self)
-        if stamp is not None:
+        # The base the build's OWN Developer call authored on — handed in by a site that carried it
+        # across threads (a Card build), else this thread's last call — wins over the engine's.
+        from looplab.engine.upstream_serve import _NO_BASE, base_stamp, take_authored
+        engine_base = base_stamp(self)
+        authored = take_authored()
+        stamp = (base_selector if base_selector is not _OMIT and base_selector is not None
+                 else authored if authored is not _NO_BASE and authored is not None
+                 else engine_base)
+        if stamp is not None and engine_base is not None:
             data["base_selector"] = dict(stamp)
         append_kwargs = (
             {} if expected_last_seq is _OMIT

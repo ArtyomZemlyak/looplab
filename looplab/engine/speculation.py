@@ -164,6 +164,9 @@ class SpecBuildResult:
     footprint_finalized: bool = False
     cross_run_receipt: dict[str, Any] = field(default_factory=dict)
     roles: Optional[tuple[Any, Any]] = field(default=None, compare=False, repr=False)
+    # doc 73 §2.5: the upstream base the build's Developer call authored on (`DeveloperResult.
+    # authored_base`), carried to `node_created.base_selector` from the main task. Provenance only.
+    authored_base: Optional[dict] = field(default=None, compare=False)
     error: str = ""
     # The trace id of the `card_build` span this result was produced under, carried back so the node
     # that eventually commits can NAME its own build (`_create_precoded_node`). It is diagnostic
@@ -1685,6 +1688,7 @@ class SpeculationMixin:
                 # registration, not the current producer role, owns the advisory provenance.
                 cross_run_receipt=cross_run_receipt,
                 roles=roles,
+                authored_base=getattr(built, "authored_base", None),
             )
         except Exception as exc:  # noqa: BLE001 — one producer failure must become an explicit give-up result
             self._discard_node_build_telemetry(researcher=researcher, developer=developer)
@@ -1829,6 +1833,7 @@ class SpeculationMixin:
                     deleted=list(result.deleted),
                     research_origin=self._research_origin_for_node(state, node_id),
                     cross_run_receipt=dict(result.cross_run_receipt),
+                    base_selector=getattr(result, "authored_base", None),
                     **({"parent_generations": reserved.parent_generations}
                        if reserved.parent_generations else {}),
                     **({"footprint_finalized": True}

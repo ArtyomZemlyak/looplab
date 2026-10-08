@@ -224,6 +224,11 @@ class DeveloperResult:
     # members are mirrored by `WrapsDeveloper`/`ValidatingDeveloper` and consumed on emit, and this
     # one is neither — so it is carried here and named in the field-set pin, like `audit_extra`.
     last_foresight_pick: Optional[dict] = None
+    # THE THIRD NAMED NON-REGISTRY FIELD (doc 73 §2.5): the upstream base this call AUTHORED on,
+    # decided by the ENGINE under the call lock (`engine/upstream_serve.py::sync_developer_base`),
+    # never by the Developer — so it is no output channel and no registry member. A Card build carries
+    # it across threads to its `node_created.base_selector`. None off the live upstream lane.
+    authored_base: Optional[dict] = None
 
     @classmethod
     def failed(cls, code: str) -> "DeveloperResult":

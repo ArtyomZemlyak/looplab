@@ -207,3 +207,68 @@ def test_the_assistant_tools_describe_the_live_lane_only_when_wired(tmp_path):
     live = text(UpstreamTools(tmp_path, mode="auto", live_lane=True))
     assert "Stopped engine required" in stopped and "QUEUES the check" not in stopped
     assert "QUEUES the check" in live
+
+
+# ------------------------------------------------------------------------------- the Developer moves
+def test_a_developer_built_at_launch_rebinds_to_the_advanced_base(tmp_path):
+    from looplab.adapters.repo_task import LLMRepoDeveloper
+    lane, store, generation, body, made = _live(tmp_path)
+    dev = LLMRepoDeveloper(object(), lane.task, plan_decompose=False)
+    launch = dict(dev.authored_base)
+    assert launch["digest"] == lane.task.seed_base["digest"]
+    _serve(_engine(lane, store))                        # the live engine advances the base
+    assert dev.authored_base == launch, "nothing moves under a Developer between calls by itself"
+    dev.rebind_base()
+    assert dev.authored_base["digest"] == made["selector"]["digest"]
+    assert any(made["selector"]["digest"] in str(ed) for ed in dev._editables), (
+        "the code it reads is pinned to the promoted base")
+
+
+def test_run_developer_rebinds_before_the_call_and_records_what_it_authored_on(tmp_path):
+    from factories import make_engine
+    from looplab.engine.upstream_serve import _NO_BASE, take_authored
+
+    class Dev:
+        def __init__(self):
+            self.authored_base, self.rebinds = {"digest": "a"}, 0
+
+        def rebind_base(self, selector=None):
+            self.rebinds += 1
+            self.authored_base = dict(selector) if selector is not None else {"digest": "b"}
+
+    engine = make_engine(tmp_path / "run")
+    engine._upstream_serve.armed = {"mode": "auto", "reason": "", "settings": None,
+                                    "stamp": {"digest": "b"}}
+    dev = Dev()
+    seen = []
+    result = engine._run_developer(dev, lambda: seen.append(dev.authored_base) or "code")
+    assert dev.rebinds == 1 and seen == [{"digest": "b"}], "rebound BEFORE the call"
+    assert result.authored_base == {"digest": "b"} and take_authored() == {"digest": "b"}
+    assert take_authored() is _NO_BASE, "consumed once"
+    engine._run_developer(dev, lambda: "again")
+    assert dev.rebinds == 1, "already on the engine's base: no second rebind"
+    pinned = engine._run_developer(dev, lambda: "repair", pinned_base={"digest": "a"})
+    assert dev.rebinds == 2 and pinned.authored_base == {"digest": "a"}, (
+        "a repair authors on its lifecycle's base, not the engine's current one")
+
+
+def test_a_repair_reads_the_base_its_lifecycle_was_seeded_on(tmp_path):
+    from looplab.adapters.repo_task import LLMRepoDeveloper
+    from looplab.engine.upstream_serve import lifecycle_base
+    lane, store, generation, body, made = _live(tmp_path)
+    old = active_base(store.read_all(), lane.task.seed_base)["selector"]
+    create(store, 2, {"recipe.env": "MOMENTUM=0.3\n"})
+    materialize(lane, store, 2)
+    store.append("node_eval_started", {"node_id": 2, "generation": 0})
+    engine = _engine(lane, store)
+    _serve(engine)
+    assert base_stamp(engine)["digest"] == made["selector"]["digest"], "the engine moved on"
+    node = fold(store.read_all()).nodes[2]
+    assert lifecycle_base(engine, node) == old, "the lifecycle stays on the base it was seeded from"
+    dev = LLMRepoDeveloper(object(), lane.task, plan_decompose=False)
+    dev.rebind_base()
+    assert dev.authored_base["digest"] == made["selector"]["digest"]
+    dev.rebind_base(lifecycle_base(engine, node))
+    assert dev.authored_base == old
+    assert any(old["digest"] in str(ed) for ed in dev._editables)
+    assert lifecycle_base(engine, SimpleNamespace(id=99, attempt=0)) is None, "never seeded"
