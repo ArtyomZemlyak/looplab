@@ -790,6 +790,16 @@ def _durable_monitor_verdicts(events, node_id: int, generation: int) -> list[dic
     return out
 
 
+# HOW A LANE THAT WAS HANDED A CONSUMER WAITS FOR ITS ARTIFACT (critic c3 item 2,
+# `EvaluateMixin._hold_for_pinned_producers`): the fold is re-read every `USE_HOLD_POLL_S` (gated on
+# the log's tail, so an idle wait costs a stat), and a producer that is pending but running in no lane
+# of this process gets `USE_HOLD_GRACE_S` to be admitted by another before this lane gives its slot
+# back. Module constants, like `artifact_sync.py::MAX_CONCURRENT_SYNCS`: runaway bounds, not knobs —
+# the knob is whether an operator pins a consumer to an artifact at all.
+USE_HOLD_POLL_S = 1.0
+USE_HOLD_GRACE_S = 30.0
+
+
 # THE OUTCOMES ONE EVALUATOR INVOCATION MAY SETTLE WITH — a CLOSED vocabulary, registry-style, for
 # the same reason `REPAIR_VERDICTS` and `TRIAGE_ACTIONS` are: the settle row is read by a resume
 # deciding what an earlier process's invocation did, and a typo'd outcome there reads as an unknown
@@ -801,8 +811,11 @@ def _durable_monitor_verdicts(events, node_id: int, generation: int) -> list[dic
 # evaluator command (review 2026-09-22, the ENG2-08 tail). Left unsettled, that claim read on resume
 # as an invocation a dead process had left open, and the next attempt of the same key was stamped
 # `after_interrupted_attempt` — an at-least-once repeat of an evaluator that had never been invoked.
+# `artifact_refused` is the other: `_run_eval` found a pinned artifact gone at its last instant, after
+# RUN_ATTEMPT's check, and launched nothing (critic c3 item 6, `eval_dispatch.py::artifact_refusal`).
 EVAL_INVOCATION_OUTCOMES: frozenset[str] = frozenset(
-    {"ok", "failed", "superseded", "aborted", "gpu_unpinnable", "setup_refused"})
+    {"ok", "failed", "superseded", "aborted", "gpu_unpinnable", "setup_refused",
+     "artifact_refused"})
 
 
 def eval_invocation_id(run_reference, node_id, generation, attempt) -> str:
@@ -4020,6 +4033,12 @@ class EvaluateMixin:
                 except OSError:
                     pass
             return True
+        from looplab.engine.eval_dispatch import artifact_refusal
+        if artifact_refusal(res):
+            # Nothing launched — a pinned artifact moved (critic c3 item 6). Handed back AS IS, so
+            # RUN_ATTEMPT settles it on the use verdict instead of the crash path a failed canary takes.
+            a.res = res
+            return False
         a.res = canary_failure_result(
             res, detail=detail, log_dir=str(scratch), env_names=spec["env"], expired=expired,
             account_redact=self._redact if canary_failure_account(self) else None)
@@ -4172,6 +4191,14 @@ class EvaluateMixin:
         if a.state is None:
             a.state = fold(a.events_at_start)
         a.node = a.state.nodes.get(a.node_id)
+        # AN ARTIFACT THIS NODE USES IS STILL BEING PRODUCED in the lifecycle it is pinned to (critic
+        # c3 item 2). The non-Card dispatcher holds such a node before it ever gets here
+        # (`eval_dispatch.py::_eval_admission_current`); a lane that admits without asking — a Card
+        # session, a direct call — is held HERE, before anything of this lifecycle starts, and the
+        # record above is refreshed when the wait ends, so every check below reads the run as it is
+        # then. True only when the attempt went back to the queue instead (no terminal).
+        if await self._hold_for_pinned_producers(a):
+            return PHASE_RETURN
         # The dispatcher checks this before and after resource admission, but _evaluate is also a
         # defensive public seam used by recovery/tests. An operator Card drop that predates this
         # worker must close the pending lifecycle at zero cost; the watcher below intentionally
@@ -4621,9 +4648,92 @@ class EvaluateMixin:
         a.rolled_to = _durable_rollbacks(a.events_at_start, a.node_id, a.generation)
         a.rollback_refusal = ""
 
+    def _lifecycle_in_flight(self, node_id: int, generation: int) -> bool:
+        """Whether this process is evaluating node `node_id`'s lifecycle `generation` right now: a
+        Card lane's in-memory `_eval_inflight`, or a dispatcher lane's registered resource
+        reservation. In memory only, like both registries — a lifecycle another process runs is not
+        one this engine can wait for."""
+        key = (int(node_id), int(generation))
+        if key in (getattr(self, "_eval_inflight", None) or ()):
+            return True
+        reservation = getattr(self, "_eval_resource_reservation", None)
+        return callable(reservation) and reservation(*key) is not None
+
+    async def _hold_for_pinned_producers(self, a: "EvalAttempt") -> bool:
+        """ADMIT's hold for a use whose producer is still PRODUCING its pinned lifecycle
+        (`eval_dispatch.py::awaited_producers`; critic c3 item 2). True when the attempt was sent back
+        to the queue — no terminal, the node stays pending — and False when ADMIT goes on, with
+        `a.events_at_start` / `a.state` / `a.node` refreshed if it waited.
+
+        WAIT ONLY ON A PRODUCER THAT IS RUNNING. A producer evaluating in this process settles
+        without anything this lane holds, so waiting for it is deadlock-free — and the lane gives its
+        devices back meanwhile (`_yield_eval_devices`; RUN_ATTEMPT's reclaim takes them back before
+        the launch), because the wait can be the producer's whole training. A producer that is
+        pending and NOT running may need this very slot (width 1, or a GPU-heavy producer behind a
+        CPU consumer): after `USE_HOLD_GRACE_S` the attempt is withheld (`artifact_pending`) and the
+        lane is freed for it. Nothing here decides an outcome: a producer that settles hands the
+        verdict to RUN_ATTEMPT's `_refuse_unusable_artifacts`, and anything that changes THIS node
+        (reset, abort, deletion, a pause) ends the wait and is ADMIT's to handle, as before."""
+        from looplab.engine.eval_dispatch import awaited_producers
+        node = a.node
+        if (node is None or not getattr(node, "uses_attempts", None)
+                or node.status is not NodeStatus.pending or node.tombstoned
+                or node.id in a.state.aborted_nodes or node.rerun_from is not None
+                or a.state.halted or not awaited_producers(a.state, node)):
+            return False
+        generation = node.attempt
+        yielded = False
+        grace_from = None
+        cached = None
+        waited = []
+        while True:
+            events = self.store.read_all()
+            tail = events[-1].seq if events else -1
+            if cached is None or cached[0] != tail:
+                cached = (tail, fold(events))
+            state = cached[1]
+            live = state.nodes.get(a.node_id)
+            if (live is None or live.attempt != generation
+                    or live.status is not NodeStatus.pending or live.tombstoned
+                    or live.id in state.aborted_nodes or state.halted):
+                break                       # ADMIT's own checks below own this lifecycle now
+            waits = awaited_producers(state, live)
+            if not waits:
+                break
+            waited = sorted({nid for nid, _pin in waits} | set(waited))
+            if not yielded:
+                _yield = getattr(self, "_yield_eval_devices", None)
+                yielded = bool(callable(_yield) and _yield(a.node_id, generation))
+            if all(self._lifecycle_in_flight(nid, pin) for nid, pin in waits):
+                grace_from = None
+            elif grace_from is None:
+                grace_from = time.monotonic()
+            elif time.monotonic() - grace_from >= USE_HOLD_GRACE_S:
+                # The producer is not running here: give the slot back so it can be.
+                a.sp.set("uses_awaited", waited)
+                a.events_at_start = events
+                a.state, a.node, a.generation = state, live, generation
+                self._eval_seed_ledgers(a)
+                _LOG.info("node %s: evaluation sent back to the queue — artifact(s) %s it uses are "
+                          "still being produced", a.node_id, waited)
+                if getattr(live, "eval_activity_started", False) is True:
+                    # A Card lane stamped the eval-start boundary at admission: close it, as a pause
+                    # at ADMIT does, so the node reads as queued rather than evaluating.
+                    await self._record_eval_withheld(a, "admit", 0.0, reason="artifact_pending")
+                return True
+            await anyio.sleep(USE_HOLD_POLL_S)
+        if waited:
+            a.sp.set("uses_awaited", waited)
+            a.events_at_start = events
+            a.state = state
+            a.node = state.nodes.get(a.node_id)
+        return False
+
     async def _refuse_unusable_artifacts(self, a: "EvalAttempt") -> bool:
         """Terminalize this lifecycle as `artifact_unavailable` when a use pinned to a producer
-        lifecycle is not readable in it (`eval_dispatch.py::produced_workdir`); True when it did.
+        lifecycle can never be read in it (`eval_dispatch.py::pinned_use_verdict`), or send the
+        attempt back to the queue (`artifact_pending`, no terminal) while one is still being
+        produced; True when it did either.
 
         WHY A TERMINAL, AND NOT A WAIT. A lifecycle generation only ever grows: once the producer was
         reset, deleted, or its workdir re-materialized, the lifecycle this node was pinned to can
@@ -4633,17 +4743,28 @@ class EvaluateMixin:
         pay to "fix" code that is not at fault, never see it. The operator's remedy is a rebuild of
         the consumer (`node_reset` from implement re-pins it) or a fresh inject.
 
+        A PRODUCER STILL PRODUCING IS A WAIT, NOT A TERMINAL (critic c3 item 2): ADMIT already held
+        this lifecycle for it (`_hold_for_pinned_producers`), so meeting one here means the hold
+        ended for a reason of this node's own or the lane may not wait; the attempt goes back to the
+        queue (`before_launch`, nothing spent) and the producer's terminal decides.
+
         WHAT WAS READ, on a launch that goes ahead, is the pins on `node_created` — the eval cannot
         run on anything else — and on this attempt's span as `uses_read`."""
         pins = getattr(a.node, "uses_attempts", None) or {}
         if not pins:
             return False
-        from looplab.engine.eval_dispatch import artifact_unavailable_text
+        from looplab.engine.eval_dispatch import USE_PRODUCING, artifact_unavailable_text
         _paths, refused = await anyio.to_thread.run_sync(
             self._resolve_uses, a.node, fold(self.store.read_all()))
         if not refused:
             a.sp.set("uses_read", dict(pins))
             return False
+        gone = [r for r in refused if r.get("why") != USE_PRODUCING]
+        if not gone:
+            a.sp.set("uses_awaited", [r["node_id"] for r in refused])
+            await self._record_eval_withheld(a, "before_launch", 0.0, reason="artifact_pending")
+            return True
+        refused = gone
         a.sp.set("artifact_unavailable", [r["node_id"] for r in refused])
         async with self._write_lock:
             self.store.append(EV_NODE_FAILED, {
@@ -4651,6 +4772,24 @@ class EvaluateMixin:
                 "error": artifact_unavailable_text(refused), "reason": "artifact_unavailable",
                 "eval_seconds": a.charged_eval_seconds()})
             self._maybe_crash()
+        return True
+
+    async def _settle_artifact_refusal(self, a: "EvalAttempt") -> bool:
+        """RUN_ATTEMPT's half of the race refusal (critic c3 item 6): when `_run_eval` launched
+        nothing because a pinned use moved after `_refuse_unusable_artifacts` passed
+        (`eval_dispatch.py::artifact_refusal`), close the invocation as `artifact_refused` and settle
+        the lifecycle on the SAME use verdict — `artifact_unavailable`, or back to the queue while
+        the producer is producing — instead of handing an exit-2 result to SETTLE_OUTCOME, where it
+        read as the candidate's crash and bought a triage and a repair. True when it settled."""
+        from looplab.engine.eval_dispatch import artifact_refusal
+        if not artifact_refusal(a.res):
+            return False
+        await self._settle_eval_invocation(a, "artifact_refused", 0.0)
+        a.sp.set("artifact_refused_at_launch", [r.get("node_id") for r in artifact_refusal(a.res)])
+        if not await self._refuse_unusable_artifacts(a):
+            # The verdict reads clean again (a stamp read mid-rewrite): nothing ran, so the attempt
+            # goes back to the queue and the next dispatch asks afresh.
+            await self._record_eval_withheld(a, "before_launch", 0.0, reason="artifact_pending")
         return True
 
     async def _eval_run_attempt(self, a: "EvalAttempt") -> str:
@@ -4781,6 +4920,12 @@ class EvaluateMixin:
                 if not await self._eval_run_canary(a, cancel):
                     cancel.set()
                     _tg.cancel_scope.cancel()
+                    # A canary that never launched because a pinned artifact moved is no failed
+                    # canary (critic c3 item 6): shielded, like the GPU-pin terminal, because the
+                    # scope was just cancelled.
+                    with anyio.CancelScope(shield=True):
+                        if await self._settle_artifact_refusal(a):
+                            return PHASE_RETURN
                     return PHASE_NEXT
                 a.canary_ran = True
                 if self._pause_withholds_attempt(a):
@@ -4902,6 +5047,10 @@ class EvaluateMixin:
                 return PHASE_RETURN
             cancel.set()                  # eval finished on its own …
             _tg.cancel_scope.cancel()     # … stop the watcher now (no poll-interval latency)
+        # NOTHING LAUNCHED: a pinned artifact moved after the check above (critic c3 item 6). An
+        # engine outcome on the same verdict, never this attempt's crash.
+        if await self._settle_artifact_refusal(a):
+            return PHASE_RETURN
         if self.external_harness and getattr(self, "_eval_spec", None) and not a._seen.get("kind"):
             # A short command evaluation can finish before the first live-monitor tick.
             # Inspect its final attributed log once so enabled monitoring cannot vanish merely

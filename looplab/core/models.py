@@ -1612,8 +1612,9 @@ ENGINE_TERMINAL_REASONS: tuple[str, ...] = (
     # A USED ARTIFACT IS NOT THERE IN THE LIFECYCLE THE NODE WAS PINNED TO (doc 73 §1.4, round 3;
     # `engine/evaluate.py::EvaluateMixin._refuse_unusable_artifacts`): reset, deleted, failed or
     # its workdir re-materialized. Nothing of the candidate ran, so it is not a `FAILURE_REASONS`
-    # word — a triage would pay to "fix" code that is not at fault. Not BENIGN: the operator must
-    # re-inject the consumer against the artifact as it now is, and the owner alert says so.
+    # word — a triage would pay to "fix" code that is not at fault. BENIGN since critic c3 item 6
+    # (below): the operator must re-inject the consumer against the artifact as it now is, and the
+    # owner alert that says so is its own item (`serve/attention.py`), not the failure spike.
     "artifact_unavailable",
 )
 
@@ -1625,6 +1626,12 @@ ENGINE_TERMINAL_REASONS: tuple[str, ...] = (
 # `{"superseded"}` had drifted (review 2026-09-22, ENG1-08).
 BENIGN_TERMINAL_REASONS: frozenset[str] = frozenset({
     "aborted", "card_dropped", "proxy_skipped", "superseded", "frozen",
+    # NOTHING OF THE CANDIDATE RAN (critic c3 items 4 and 6): the consumer's pinned artifact
+    # lifecycle can never be produced, which says nothing about its experiment — counted as a
+    # failure it fed the Strategist's failure rate, the stall signals and the failure spike with
+    # the operator's own artifact resets. Folds differently only on a log holding this terminal,
+    # minted since f943dbc (2026-10-08).
+    "artifact_unavailable",
 })
 
 

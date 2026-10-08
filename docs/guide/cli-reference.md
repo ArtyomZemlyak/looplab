@@ -761,6 +761,13 @@ fact is a `request_parked` item in the UI's attention inbox. An `inject_node` co
 `succeeded` as soon as the engine has *observed* it, so this is where "observed but waiting" shows
 (doc 68, item 68.8).
 
+A **`copy-out unfinished:`** line names every `eval.artifact_sync` copy whose
+`artifact_sync_started` row has no `artifact_synced` receipt — node, lifecycle and `sync_id`
+(`looplab/engine/artifact_sync.py::unfinished_syncs`). While an engine runs that is a copy queued or
+uploading; once none does, it was interrupted or its engine ended before starting it, and nothing
+retries it: run your copy command for it again. With no engine running the same fact is an
+`artifact_sync_unfinished` item in the attention feed.
+
 ### The stop account
 
 `run`, `resume` and `inspect` all print a **`stop:`** line, and `inspect` adds a

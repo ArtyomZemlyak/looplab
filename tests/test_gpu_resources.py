@@ -448,6 +448,9 @@ class _EvalResetHost(_Pool):
     # is `_eval_admit`; the probe below is raised INSIDE it (`_resource_eval_env`), so it is the one
     # phase this double has to carry — borrowed real, for the same reason as the invariant above.
     _eval_admit = EvaluateMixin._eval_admit
+    # …and the hold ADMIT asks first for a consumer whose artifact is still being produced (critic c3
+    # item 2): a no-op for these unpinned nodes, borrowed real like the phase that calls it.
+    _hold_for_pinned_producers = EvaluateMixin._hold_for_pinned_producers
 
     async def _contain_eval_crash(self, node_id, generation, exc, a=None):
         """OPT OUT of the crash containment, because this double's exception is a PROBE.

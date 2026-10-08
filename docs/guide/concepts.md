@@ -786,17 +786,33 @@ own path. The canary (`eval_canary`) runs for an artifact under the artifact's o
 exit on the slice passes, and a number it prints is ignored (`eval_canary.py::canary_passed`).
 
 A consumer reads its artifact in the LIFECYCLE it was accepted against. The command stamps each
-used artifact's lifecycle (`uses_attempts`, server-derived and refused from a caller), `node_created`
-carries it, and a node built from the consumer inherits it with `uses`. Before every launch the
-consumer's eval checks each pinned artifact through the same rule `LOOPLAB_PARENT_WORKDIRS` uses
-(`eval_dispatch.py::produced_workdir`): evaluated in exactly that lifecycle, not deleted, and its
-workdir's `.looplab-manifest` stamp intact. If one is not — the artifact was reset, rebuilt, deleted
-or its directory re-materialized after the inject was queued — the consumer ends
-`artifact_unavailable` without running, the error naming the artifact, its lifecycle and why. That
-is an engine terminal, not an evaluation failure: no triage or repair is bought for a candidate
-that is not at fault, and the owner alert shows it. A lifecycle never comes back, so the remedy is
-the operator's: rebuild the consumer (`node_reset` from implement re-pins it to each artifact as it
-is now) or inject a new one. A log written before the pin keeps the old existence-only rule.
+used artifact's lifecycle (`uses_attempts`, server-derived and refused from a caller) and
+`node_created` carries it. A node built FROM a consumer (an improve, a merge, an ablation) carries
+its own pins on its `node_created` too, written when it is built: each used artifact's current
+lifecycle when that one is evaluated, else the parent's pin (`node_build.py::inherited_use_pins`),
+so a child built after the artifact was re-produced reads it as it now is; a child row from before
+this rule inherits the parent's pin in the fold. Before every launch the consumer's eval checks each
+pinned artifact (`eval_dispatch.py::pinned_use_verdict`, over the same rule `LOOPLAB_PARENT_WORKDIRS`
+uses, `produced_workdir`): evaluated in exactly that lifecycle, not deleted, and its workdir's
+`.looplab-manifest` stamp intact.
+
+An artifact still being PRODUCED in the pinned lifecycle (pending or running in exactly that attempt)
+is waited for, not refused: the dispatcher holds the consumer at admission
+(`eval_dispatch.py::_eval_admission_current`) so the producer runs first, and a lane that admits
+without asking (a Card session) holds it at ADMIT while the producer runs in this process, its
+devices handed back meanwhile, or sends it back to the queue (`eval_attempt_withheld`,
+`artifact_pending`) after 30 s when the producer runs nowhere — never occupying the slot the
+producer needs. A run that stops first leaves both pending, owed, as a ceiling leaves any node it
+never started. Only a lifecycle that can NEVER be produced — the artifact was reset past it, failed
+in it, was deleted or its directory re-materialized — ends the consumer `artifact_unavailable`
+without running, the error naming the artifact, its lifecycle and why, including when the artifact
+moves between that check and the launch (`_run_eval` launches nothing and the attempt settles on the
+same verdict, never as the candidate's crash). That is an engine terminal, not an evaluation
+failure: no triage or repair is bought for a candidate that is not at fault, it counts in none of
+the search's failure statistics (`core/models.py::BENIGN_TERMINAL_REASONS`), and the attention feed
+names it per node. A lifecycle never comes back, so the remedy is the operator's: rebuild the
+consumer (`node_reset` from implement re-pins it to each artifact as it is now) or inject a new
+one. A log written before the pin keeps the old existence-only rule.
 
 ### Branching from a snapshot (fork-to-branch)
 

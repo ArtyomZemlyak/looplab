@@ -433,17 +433,25 @@ the engine's environment at copy time and never written anywhere. A command whos
 `env_passthrough` runs from the RUN directory instead — on every host, whether or not that host holds
 the named variables (the workdir is the candidate's, and a tool started there would import
 what it left beside the key), so name the files through `{workdir}`. A receipt whose workdir was
-re-materialized during the copy (a reset of that node) carries `workdir_changed`. Placeholders: `{workdir}`, `{run_dir}`, `{run_id}`,
+re-materialized during the copy (a reset of that node) carries `workdir_changed`; a copy whose node
+was reset while it waited in the queue is not run at all — the workdir stamp is taken when the copy
+is accepted and compared when it starts — and its receipt says `skipped: "workdir_changed"` with no
+exit code. Placeholders: `{workdir}`, `{run_dir}`, `{run_id}`,
 `{node_id}`, `{generation}`; any other brace stays literal. It runs on a background pool of at most
 two concurrent copies (`artifact_sync.py::MAX_CONCURRENT_SYNCS`; the rest queue in terminal order), so
-the eval slot (and its GPU lease) is free during the upload; the interpreter waits for queued and
-in-flight copies at exit, each up to its `timeout`. Each copy opens with a diagnostic
+the eval slot (and its GPU lease) is free during the upload; the interpreter waits for in-flight
+copies at exit, each up to its `timeout`. A copy still QUEUED when its engine's run has ended is not
+started (`artifact_sync.py::engine_owns_run`: another engine may own the run directory by then); one
+already running finishes and records its receipt. Each copy opens with a diagnostic
 `artifact_sync_started` row and closes with its `artifact_synced` receipt (same `sync_id`): a started
-row with no receipt is a copy an engine death interrupted (`artifact_sync.py::unfinished_syncs`), and
-it is not retried on resume — your command is not known to be idempotent, so run it again yourself.
-Its output goes to `<run>/artifact_sync.log`, written once the command exits and MASKED — the
-`env_passthrough` values and every known secret shape — so a tool that echoes its environment or a
-keyed URL leaves no credential in a file a later eval can read; a failed copy is reported there and
+row with no receipt is a copy an engine death interrupted or its end never started
+(`artifact_sync.py::unfinished_syncs`), listed by `looplab inspect` (`copy-out unfinished:`) and, once
+no engine runs, by the attention feed; it is not retried on resume — your command is not known to be
+idempotent, so run it again yourself. Its output goes to `<run>/artifact_sync.log`, written once the
+command exits and MASKED — the `env_passthrough` values verbatim and percent-encoded, any fragment of
+one the 64 KB capture cut left at a stream's edge, and every known secret shape — so a tool that
+echoes its environment or a keyed URL leaves no credential in a file a later eval can read; a failed
+copy is reported there and
 never fails, pauses or re-runs the node. Absent, nothing runs and the snapshot's `eval` dump is
 unchanged.
 

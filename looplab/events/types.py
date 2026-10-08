@@ -952,6 +952,9 @@ EV_ARTIFACT_SYNCED = "artifact_synced"
 # engine that dies mid-copy leaves `started, never finished` on the log rather than nothing. The pair
 # is keyed by (node_id, generation, sync_id); nothing re-runs a copy off a started row (no automatic
 # retry: the operator's command is not known to be idempotent). DIAGNOSTIC for the same reasons.
+# A copy whose workdir was rebuilt while it waited in the queue is closed WITHOUT running, its
+# `artifact_synced` saying `skipped: "workdir_changed"` and `exit_code: null` (critic c3 item 1); one
+# whose engine ended first is never started and its start row stays open.
 EV_ARTIFACT_SYNC_STARTED = "artifact_sync_started"
 # AN OPERATOR IMPORT OF METRICS MEASURED AFTER THE RUN (`maintenance/import_metrics.py`, `looplab
 # import-metrics`; incident 2026-10-06: nodes scored at @20 were re-scored at @200 by a service, and
@@ -972,13 +975,17 @@ EV_EXTRA_METRICS_IMPORTED = "extra_metrics_imported"
 # it. `at` names the withhold point (`EVAL_WITHHELD_POINTS`), `reason` whether the run was paused or
 # stopping — or `infra_unavailable`: the attempt failed and the engine's own probe of the declared
 # paths found the BOX broken (`runtime/infra_probe.py`), so the engine paused the run itself and the
-# failure was charged to nobody (`engine/evaluate.py::EvaluateMixin._eval_infra_pause`).
+# failure was charged to nobody (`engine/evaluate.py::EvaluateMixin._eval_infra_pause`) — or
+# `artifact_pending` (round 3, critic c3 item 2): an artifact this node USES is still being produced in
+# the lifecycle it is pinned to, by no lane of this process, so the attempt goes back to the queue
+# instead of holding a slot the producer may need (`engine/evaluate.py::EvaluateMixin.
+# _hold_for_pinned_producers`); the producer's terminal decides, and nothing is charged.
 #
 # DIAGNOSTIC for `eval_canary_*`'s reason: appended from the eval child, per attempt. The fold never
 # reads it; the charge reaches the run through the lifecycle's one terminal.
 EV_EVAL_ATTEMPT_WITHHELD = "eval_attempt_withheld"
 EVAL_WITHHELD_POINTS = ("admit", "before_launch", "after_canary", "decide_repair")
-EVAL_WITHHELD_REASONS = ("paused", "stopping", "infra_unavailable")
+EVAL_WITHHELD_REASONS = ("paused", "stopping", "infra_unavailable", "artifact_pending")
 EV_WORKSPACE_SEEDED = "workspace_seeded"
 # FOLDED (moved out of DIAGNOSTIC_EVENTS): the start of an arbitrary operator `run_setup` command is
 # the only evidence that its side effects may have been applied. Without folding it, a kill between
@@ -1757,7 +1764,7 @@ EVENT_PAYLOAD_KEYS: dict[str, PayloadContract] = {
         "The operator's eval.artifact_sync command ran over a node's workdir after its terminal.",
         required=("command", "exit_code", "generation", "node_id", "seconds", "stderr_tail",
                   "timed_out"),
-        optional=("sync_id", "workdir_changed"),
+        optional=("skipped", "sync_id", "workdir_changed"),
     ),
     "artifact_sync_started": PayloadContract(
         "The operator's eval.artifact_sync command is about to run over a node's workdir; its "
