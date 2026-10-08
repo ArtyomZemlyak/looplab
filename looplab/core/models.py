@@ -3097,6 +3097,9 @@ class RunState(BaseModel):
     card_priority_pins: dict[str, int] = Field(default_factory=dict)
     card_operator_edits: dict[str, dict] = Field(default_factory=dict)
     card_resource_pins: dict[str, dict] = Field(default_factory=dict)
+    # `card_filed`: the operator's filing of one card under a research question (or `None` = un-filed),
+    # last write wins per card, overlaid with the maps above (`card_ledger.py::_apply_card_operator_overlays`).
+    card_filings: dict[str, dict] = Field(default_factory=dict)
     # Agent-authored run report (selection-neutral narrative; never read by best-selection).
     # The latest `report_generated` event's content is also the replay-safe regeneration-cadence receipt.
     # The UI renders deterministic node analysis and layers this narrative on top.

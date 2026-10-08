@@ -56,7 +56,7 @@ from typing import Optional
 from looplab.events.types import (
     PAUSE_REASON_EXTERNAL_OBLIGATIONS,
     EV_ANNOTATION, EV_APPROVAL_GRANTED, EV_BUDGET_EXTEND, EV_DEEP_RESEARCH,
-    EV_CARD_DROPPED, EV_CARD_EDITED, EV_CARD_REOPENED, EV_CARD_REPRIORITIZED,
+    EV_CARD_DROPPED, EV_CARD_EDITED, EV_CARD_FILED, EV_CARD_REOPENED, EV_CARD_REPRIORITIZED,
     EV_CARD_RESOURCE_PINNED, EV_COMMAND_ACK,
     EV_COMMENT_CREATED, EV_COMMENT_EDITED, EV_COMMENT_RESOLUTION_CHANGED, EV_CONCEPT_TAG_EDITED,
     EV_FORCE_ABLATE, EV_FORCE_CONFIRM, EV_FORK, EV_HINT, EV_HYPOTHESIS_ADDED,
@@ -356,6 +356,9 @@ CONTROL_EVENTS = frozenset({
     # and server-stamped like every other card control, and folded LAST-RECEIPT-WINS against the
     # drop by event index, so drop/reopen/drop is expressible and replays identically.
     EV_CARD_REOPENED,
+    # The operator files one experiment under a research question (or un-files it): the correction
+    # path for `Card.parent_card_id`, which every operator-injected card arrived without.
+    EV_CARD_FILED,
 })
 
 # Request-field metadata is also read by remote MCP clients without the UI extra.
@@ -414,6 +417,7 @@ CONTROL_DATA_FIELDS: dict[str, frozenset[str]] = {
     EV_CARD_RESOURCE_PINNED: frozenset({"id", "gpus", "gpu_mem_mib"}),
     EV_CARD_DROPPED: frozenset({"id", "reason"}),
     EV_CARD_REOPENED: frozenset({"id", "reason"}),
+    EV_CARD_FILED: frozenset({"id", "parent_card_id"}),
 }
 assert set(CONTROL_DATA_FIELDS) == set(CONTROL_EVENTS), "every control event needs a data allowlist"
 # These keys are required on the EVENT but deliberately absent from the REQUEST. The command
@@ -431,7 +435,7 @@ COLLABORATION_EVENTS = frozenset({
     EV_COMMENT_CREATED, EV_COMMENT_EDITED, EV_COMMENT_RESOLUTION_CHANGED,
     EV_CONCEPT_TAG_EDITED,
     EV_CARD_REPRIORITIZED, EV_CARD_EDITED, EV_CARD_RESOURCE_PINNED, EV_CARD_DROPPED,
-    EV_CARD_REOPENED,
+    EV_CARD_REOPENED, EV_CARD_FILED,
     # PART V (D): a base-concept edit is command-only too — force it through the generation-fenced command
     # endpoint so a write formed against an old generation can't land on a
     # post-reset replacement run, exactly like its per-node sibling EV_CONCEPT_TAG_EDITED.

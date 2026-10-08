@@ -367,6 +367,14 @@ EV_CARD_DROPPED = "card_dropped"                # explicit operator stop intent 
 # stopped a line of work and why is history a reopen must not erase — the same rule
 # `Card.discarded_nodes` keeps for nodes that never ran.
 EV_CARD_REOPENED = "card_reopened"              # explicit operator resume intent (server-stamped)
+# THE CORRECTION PATH THE RESEARCH-LINEAGE EDGE NEVER HAD (`core/cards.py::Card.parent_card_id`).
+# An experiment reaches a research question only through `parent_card_id`, which is authored at
+# proposal time — and every operator-INJECTED env names none (measured on
+# `minionerec-backbones-v11`: 3 of 45 experiments filed, 39 of them operator injects). The operator
+# files one card under one question (or un-files it with `parent_card_id: null`), server-stamped,
+# folded LAST WRITE WINS per card and overlaid with the other operator controls, so it is the
+# operator's decision on the record — never a guess the fold makes. A log without one folds as before.
+EV_CARD_FILED = "card_filed"                    # explicit operator filing intent (server-stamped)
 # Layer 5's request/done execution ledger. Both are folded and main-task-only: the request is the
 # durable selection+compute gate; done advances it after commit or an explicit producer-failure give-up.
 EV_CARD_BUILD_REQUESTED = "card_build_requested"
@@ -1595,6 +1603,11 @@ EVENT_PAYLOAD_KEYS: dict[str, PayloadContract] = {
         "The foresight rankings a staged Card's proposal made, held for the node the Card becomes.",
         required=("at_node", "card_id"),
         optional=("foresight", "hyp_priority"),
+    ),
+    "card_filed": PayloadContract(
+        "The operator filed one Card under a research question, or un-filed it (server-stamped).",
+        required=("id", "parent_card_id"),
+        optional=("source",),
     ),
     "card_reopened": PayloadContract(
         "The operator resumed a dropped Card (server-stamped).",

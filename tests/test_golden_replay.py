@@ -79,6 +79,9 @@ the diff that justified it:
 * 2026-10-08 — `RunState.lane_op_requests` + `RunState.lane_ops_done` (`core/models.py`, doc 73
   §2.5: the live upstream lane's queue and its cursor). The diff was 2 insertions and 0 deletions —
   `"lane_op_requests": []` and `"lane_ops_done": 0` — and no shared leaf changed.
+* 2026-10-08 — `RunState.card_filings` (`core/models.py`: the operator's `card_filed` journal, the
+  correction path for `Card.parent_card_id`). The diff was 1 insertion and 0 deletions —
+  `"card_filings": {}`, what a log with no filing folds to — and no shared leaf changed.
 """
 from __future__ import annotations
 

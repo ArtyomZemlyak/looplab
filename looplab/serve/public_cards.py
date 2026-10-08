@@ -27,6 +27,9 @@ INTERNAL_CARD_STATE_FIELDS = frozenset({
     # reviewer summary. A journal added on one side of a switch and not the other is precisely the
     # "future producer-only field" this set exists to keep off the wire.
     "cards_reopened",
+    # The operator filing journal (`card_filed`); its RESULT rides each Card as `parent_card_id` +
+    # `filed_by`/`filed_seq`.
+    "card_filings",
 })
 
 PUBLIC_CARD_MAX_COUNT = 256
@@ -43,6 +46,13 @@ _SKIP = object()
 _FIELDS = (
     "id", "belief_id", "retry_of", "card_kind", "parent_card_id", "child_rollup",
     "child_concept_tags",
+    # WHO filed this card under its question when the proposer did not: "operator" + the
+    # `card_filed` seq, overlaid by `card_ledger.py::_apply_card_operator_overlays`. Without it the
+    # browser could not tell an operator's filing from an authored edge, nor an operator's un-filing
+    # from a card nobody looked at — and would re-infer a concept filing over the operator's "none".
+    # No parentheses in this comment: `ui/test/questionLattice.test.js` reads this tuple up to the
+    # first closing one.
+    "filed_by", "filed_seq",
     "status", "status_nodes", "verdict", "actionable", "identity",
     "selection_provenance",
     "selection_blockers", "selection_ready", "concept_source", "statement", "statement_edit_seq",
@@ -83,12 +93,12 @@ _TEXT_LIMITS = {
 }
 _REF_FIELDS = {
     "id", "belief_id", "retry_of", "card_kind", "parent_card_id",
-    "source", "status", "verdict", "merged_into", "dropped_by", "operator",
+    "source", "status", "verdict", "merged_into", "dropped_by", "operator", "filed_by",
     "eval_profile", "research_origin", "provenance_tier",
 }
 _INT_FIELDS = {"created_at_node", "parent_id", "scored_against", "priority",
                "foresight_rank", "applied_params_node"}
-_NONNEG_INT_FIELDS = {"statement_edit_seq", "scored_against_generation"}
+_NONNEG_INT_FIELDS = {"statement_edit_seq", "scored_against_generation", "filed_seq"}
 _FLOAT_FIELDS = {"best_delta", "confidence"}
 _POSITIVE_FLOAT_FIELDS = {"eval_timeout"}
 # `child_concept_tags` rides the SAME projector as `concept_tags` — the pair is only useful side

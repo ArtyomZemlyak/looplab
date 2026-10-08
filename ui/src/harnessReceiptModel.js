@@ -3,7 +3,7 @@
 import { authoringTextRevision, COMMAND_ID_RE, COMMAND_PENDING, COMMAND_STATUSES, validRunGeneration } from './api.js'
 
 export const RECEIPT_CONTROL_EVENTS = new Set([
-  'annotation', 'approval_granted', 'budget_extend', 'card_dropped', 'card_edited',
+  'annotation', 'approval_granted', 'budget_extend', 'card_dropped', 'card_edited', 'card_filed',
   'card_reopened', 'card_reprioritized', 'card_resource_pinned', 'comment_created',
   'comment_edited', 'comment_resolution_changed', 'concept_tag_edited', 'deep_research',
   'force_ablate', 'force_confirm', 'fork', 'hint', 'hypothesis_added', 'hypothesis_updated',
