@@ -61,7 +61,8 @@ from looplab.events.types import (
     EV_COMMENT_CREATED, EV_COMMENT_EDITED, EV_COMMENT_RESOLUTION_CHANGED, EV_CONCEPT_TAG_EDITED,
     EV_FORCE_ABLATE, EV_FORCE_CONFIRM, EV_FORK, EV_HINT, EV_HYPOTHESIS_ADDED,
     EV_HYPOTHESIS_UPDATED, EV_INJECT_NODE, EV_METRIC_RETARGET, EV_NODE_ABORT, EV_NODE_RESET,
-    EV_PAUSE, EV_PROMOTE, EV_RESTART, EV_RESUME, EV_RUN_ABORT, EV_RUN_CONCEPTS, EV_RUN_FINISHED,
+    EV_PAUSE, EV_PROMOTE, EV_RESTART, EV_RESUME, EV_RESUME_REQUESTED, EV_RUN_ABORT,
+    EV_RUN_CONCEPTS, EV_RUN_FINISHED,
     EV_RUN_REOPENED, EV_SET_STRATEGY, EV_SPEC_APPROVED, EV_RESEARCH_COMPLETED, EV_REPORT_GENERATED,
     EV_TRACK_REQUESTED, EV_UPSTREAM_AUTO_SET)
 
@@ -258,15 +259,58 @@ QUEUED_WHILE_STOPPED: frozenset[str] = frozenset({
     EV_BUDGET_EXTEND, EV_APPROVAL_GRANTED, EV_SPEC_APPROVED})
 
 
-def stop_holds_queued_intents(state) -> bool:
+def pending_resume_is_auto_only(events, state) -> bool:
+    """True when every resume intent `state` still owes was minted by the server's auto-resume
+    (`serve/engine_proc.py::_request_auto_resume`, `auto_resume: true`).
+
+    The fold keeps only the WATERMARK (`last_resume_request_seq`), not who asked, so the request rows
+    newer than the last serve are read off the same `events` the state was folded from. A launch
+    claim is transport metadata, not an intent; a `restart` and any request without
+    `auto_resume: true` are the operator's own ask. False when no auto request is pending at all.
+
+    The ONE reading of "only the server asked", shared by the spawner that refuses to start such a
+    request over a halt (`engine_proc.py`) and by `stop_holds_queued_intents` — two spellings of it
+    disagreed (review 2026-10-08)."""
+    served = state.last_resume_served_seq
+    saw_auto = False
+    for event in events or ():
+        seq = getattr(event, "seq", None)
+        if seq is None or seq <= served:
+            continue
+        if event.type == EV_RESTART:
+            return False
+        if event.type != EV_RESUME_REQUESTED:
+            continue
+        data = event.data if isinstance(event.data, dict) else {}
+        if data.get("launch_claim"):
+            continue
+        if data.get("auto_resume") is not True:
+            return False
+        saw_auto = True
+    return saw_auto
+
+
+def stop_holds_queued_intents(state, *, events) -> bool:
     """Does the folded run `state` sit on a stop only the operator's resume lifts? Paused — by the
     operator, a drain or the engine itself — and none of: finished (a finished run is not paused
     away; an inject there reopens it as it always did), stopping (a pending finalize wraps the run
     up, and its command refuses engine-driving work meanwhile) or already asked to resume (a
     restart's replacement owner, or a pending resume request, lifts the pause and serves the queue —
-    such a command waits for that engine's acknowledgement)."""
-    return bool(state.paused and not state.finished and not state.stop_requested
-                and not state.resume_pending())
+    such a command waits for that engine's acknowledgement).
+
+    …BY SOMEONE WHO MAY LIFT IT (review 2026-10-08). A pending request the server's AUTO-resume
+    minted (`pending_resume_is_auto_only` over `events`, the rows `state` was folded from) lifts no
+    halt — the spawner refuses to start it over one (`engine_proc.py`), so once its child died before
+    `resume_served` it stays pending for good. Read as "already asked to resume", it released the
+    queued fork/inject/strategy commands from the operator's stop: they waited on an engine that
+    never came, or were spawned and lifted the stop doc 69 69.30 holds them for. `events` is
+    required so no caller can ask the old question by omission; it is read only when a request is
+    pending."""
+    if not (state.paused and not state.finished and not state.stop_requested):
+        return False
+    if not state.resume_pending():
+        return True
+    return pending_resume_is_auto_only(events, state)
 
 
 # The rows that move a run between PAUSED and not: the latest of them says which side of a pause the
