@@ -89,6 +89,11 @@ def test_open_quick_start_still_refuses_a_browser_cross_site_mutation(tmp_path):
         attack = {'Origin': 'https://evil.example', 'Sec-Fetch-Site': 'cross-site',
                   'Content-Type': 'text/plain'}
         assert client.post('/api/quick-start-test', headers=attack).status_code == 403
+        # Another port on this host is `same-site` under Fetch Metadata: the same attack.
+        for origin in ('http://localhost:3000', 'http://127.0.0.1:9999'):
+            assert client.post('/api/quick-start-test', headers={
+                'Origin': origin, 'Sec-Fetch-Site': 'same-site',
+                'Content-Type': 'text/plain'}).status_code == 403
         assert writes == []
         assert client.post('/api/quick-start-test', headers={
             'Origin': 'https://public.proxy.example', 'Sec-Fetch-Site': 'same-origin'}).status_code == 200

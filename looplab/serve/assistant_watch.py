@@ -867,8 +867,17 @@ class WatchStore:
             fields = {}
             if "every_s" in changes:
                 trigger = {**record["trigger"], "every_s": changes["every_s"]}
+                next_due = (time.time() if now is None else now) + changes["every_s"]
+                expires_at = record.get("expires_at")
+                if isinstance(expires_at, (int, float)) and next_due > expires_at:
+                    # The lifetime is a budget the edit preserves, so it is not stretched: but a
+                    # due time past it would retire the monitor `expired` without its turn ever
+                    # running, after the edit answered "updated".
+                    raise WatchRefusal(
+                        "the new interval would first fire after this monitor's lifetime ends; "
+                        "use a shorter interval, or stop it and arm a new one")
                 fields.update(trigger=trigger, waiting_for=describe_trigger(trigger),
-                              next_due=(time.time() if now is None else now) + changes["every_s"])
+                              next_due=next_due)
             if "instruction" in changes:
                 fields["instruction"] = changes["instruction"]
             return self._write({**record, **fields})

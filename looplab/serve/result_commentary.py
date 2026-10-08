@@ -177,7 +177,7 @@ class ResultCommentaryService:
             self.idle[rd] = after
 
     def process_run(self, rd: Path):
-        from looplab.serve.result_notices import _comments, _receipts, publish_internal
+        from looplab.serve.result_notices import _comments, _receipts, ledger_has_room, publish_internal
 
         before = _stamp(rd)
         if self.idle.get(rd) == before:
@@ -201,7 +201,10 @@ class ResultCommentaryService:
                     if store is None or store.generation != generation:
                         events = self.srv.events(rd)
                         recent = any(e.type == "run_started" and e.ts >= self.started_at for e in events)
-                        if (store is None and self.srv.state(rd).finished and not recent
+                        # Absent OR another generation's store: either way nothing here has been
+                        # explained yet, and a run that finished before this server started must
+                        # not buy its run-level receipt (the node receipts are cut by `after_seq`).
+                        if (self.srv.state(rd).finished and not recent
                                 and not any(r["completed_at"] is not None
                                             and r["completed_at"] >= self.started_at for r in receipts)):
                             self._remember_idle(rd, before)
@@ -239,7 +242,8 @@ class ResultCommentaryService:
                         if job and job.status != "ready":
                             continue
                         if job is None:
-                            if len(store.jobs) >= _MAX_JOBS:
+                            if len(store.jobs) >= _MAX_JOBS or not ledger_has_room(rd):
+                                # Never buy a reply that cannot be published.
                                 self._remember_idle(rd, before)
                                 return
                             job = _Job(receipt_id=row["id"], evidence_token=token, status="generating")
@@ -302,6 +306,13 @@ class ResultCommentaryService:
                             if exc.status_code == 409:
                                 job.status = "superseded"
                                 _save(rd, store)
+                            elif exc.status_code == 413:
+                                # A full ledger is permanent for this generation: left `ready`, the
+                                # job was retried on every tick and stalled every later result.
+                                job.status = "failed"
+                                job.summary = ""
+                                _save(rd, store)
+                                self._remember_idle(rd, before)
                             return
                         job.status = "published"
                         _save(rd, store)

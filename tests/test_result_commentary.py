@@ -360,3 +360,55 @@ def test_a_store_from_another_generation_does_not_buy_explanations_of_history(tm
     service.process_run(rd)
     assert not model.calls
     assert _load(rd).generation != "0" * 64
+
+
+def test_a_store_from_another_generation_does_not_buy_a_finished_runs_explanation(tmp_path, monkeypatch):
+    from looplab.serve.result_commentary import _Store, _save
+    rd, events, _, gen, service, model = setup_run(tmp_path, monkeypatch)
+    terminal(events)
+    events.append("run_finished", {"reason": "done"})
+    monkeypatch.setattr("looplab.serve.result_notices._engine_liveness", lambda rd: False)
+    _save(rd, _Store(generation="0" * 64, after_seq=-1))
+    service.started_at = time.time() + 1
+    service.process_run(rd)
+    assert not model.calls, "the run-level receipt of a run finished before this server is history"
+
+
+def _fill_presentation_ledger(rd):
+    """Valid rows of another generation, as close to the 2 MiB cap as rows allow (< 300 bytes
+    left): too little for any reply row, so `_publish` answers 413."""
+    cap, rows, size, n = 2 * 1024 * 1024, [], 0, 0
+    while True:
+        row = {"generation": "0" * 64, "action_id": f"x{n}", "receipt_id": "run",
+               "evidence_token": "1" * 64, "summary": ""}
+        base = len(json.dumps(row)) + 1
+        if size + base > cap:
+            break
+        row["summary"] = "s" * min(700, cap - size - base)
+        rows.append(json.dumps(row) + "\n")
+        size += len(rows[-1])
+        n += 1
+    assert cap - size < 300
+    (rd / "result_commentary.jsonl").write_text("".join(rows))
+
+
+def test_a_full_presentation_ledger_buys_no_reply_it_could_never_publish(tmp_path, monkeypatch):
+    rd, events, _, gen, service, model = setup_run(tmp_path, monkeypatch)
+    _fill_presentation_ledger(rd)
+    terminal(events)
+    for _ in range(3):
+        service.process_run(rd)
+    assert not model.calls
+    assert rd in service.idle, "a full ledger is not re-read on every tick"
+
+
+def test_a_publish_refused_for_a_full_ledger_fails_the_job_instead_of_stalling(tmp_path, monkeypatch):
+    rd, events, _, gen, service, model = setup_run(tmp_path, monkeypatch)
+    monkeypatch.setattr("looplab.serve.result_notices.ledger_has_room", lambda rd: True)
+    _fill_presentation_ledger(rd)
+    terminal(events)
+    service.process_run(rd)
+    service.process_run(rd)
+    assert len(model.calls) == 1
+    assert _load(rd).jobs and all(job.status == "failed" for job in _load(rd).jobs.values())
+    assert rd in service.idle
