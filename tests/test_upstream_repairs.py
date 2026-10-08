@@ -10,12 +10,13 @@ from looplab.events.replay import fold
 from tests.test_upstream_lane import fixture, GENERAL
 
 
-def repair_fixture(tmp_path):
+def repair_fixture(tmp_path, **policy_extra):
     original = GENERAL.replace('w, velocity =', 'assert MOMENTUM >= 0, "negative momentum unsupported"\nw, velocity =')
     trigger = {"recipe.env": "MOMENTUM=-2\nALLOW_SENTINEL=1\n"}
     policy = {"repeats": 2, "tests": [{"name": "syntax", "command": [sys.executable, "-m", "py_compile", "train.py"]}],
         "regressions": [{"name": "prior_recipe", "command": [sys.executable, "train.py"], "artifacts": ["predictions.json"]}],
-        "repair_probes": [{"name": "negative_recipe", "command": [sys.executable, "train.py"], "files": trigger, "artifacts": ["predictions.json"]}]}
+        "repair_probes": [{"name": "negative_recipe", "command": [sys.executable, "train.py"], "files": trigger, "artifacts": ["predictions.json"]}],
+        **policy_extra}
     lane, store, generation, proposal = fixture(tmp_path, base_train=original,
         source_files={"recipe.env": "MOMENTUM=0.2\n"}, repair_from={"recipe.env": "MOMENTUM=-2\n"}, upstream_policy=policy)
     store.append("node_created", {"node_id": 1, "operator": "improve", "parent_ids": [0],

@@ -964,14 +964,25 @@ upstream:
       artifacts: [predictions.json]
       timeout: 10
   repair_probes: []             # when needed: actual failing recipe, old fail/new pass
+  repair_gate: full             # or `probes`: a FIX's gate skips the source repetitions (below)
 ```
 
 The Assistant or external agent authors a Maintainer proposal: generalized runner,
 separate source recipe, documented flag with the old default, and a named critic.
-The proposal alone changes no base. Pause and wait for engine exit; explicitly buy
-the tests, full repeated source evaluations and regression/repair checks. Inspect
-their measured result, then advance with the current base revision and evidence
-token. Resume separately. Gate work is charged separately from experiment scores.
+The proposal alone changes no base. Under `upstream_mode: off` pause and wait for engine
+exit; explicitly buy the tests, full repeated source evaluations and regression/repair
+checks. Inspect their measured result, then advance with the current base revision and
+evidence token. Resume separately. Under `propose` / `auto` (the default) the same actions
+asked of a running run are queued for its engine and served between turns, and `auto`
+checks and advances on its own (`engine/upstream_serve.py`, doc 73 §2.5). Gate work is
+charged separately from experiment scores.
+
+`repair_gate: probes` is the lighter gate for a FIX (doc 73 §2.3, track 1): a proposal that
+promotes what a repair changed had no metric before the fix, so its gate is the tests, both
+regression sides, the repair probe (old fails, new passes) and the unchanged scorer bytes —
+the paired source repetitions are waived and recorded as an `equivalence_waived` check.
+Every other proposal keeps the full gate, and the CAS recomputes the waiver from this
+declaration, never from the gate's own row.
 
 This declaration is fixed at launch; changing it requires another task/run.
 Repair probes must exercise the original failing trigger, and cannot replace the

@@ -67,19 +67,25 @@ def equivalence(row):
 
 
 def passing_checks(row):
-    """A passing verdict contains all gate legs, bound to actual paired executions."""
+    """A passing verdict contains all gate legs, bound to actual paired executions.
+
+    Exactly one of `equivalence` (the paired full-source repetitions) and `equivalence_waived` (doc
+    73 §2.3, track 1: a REPAIR promoted under the operator's `repair_gate: probes`, which must then
+    carry a `repair` leg — a waiver with no trigger probe proves nothing)."""
     checks, executions = row["checks"], row["executions"]
     kinds = [c["kind"] for c in checks]
-    if (kinds.count("equivalence") != 1 or "test" not in kinds or "regression" not in kinds
+    waived = kinds.count("equivalence_waived")
+    if (kinds.count("equivalence") + waived != 1 or "test" not in kinds or "regression" not in kinds
+        or (waived and "repair" not in kinds)
         or row.get("inputs_unchanged") is not True or not all(c["passed"] for c in checks)):
         return False
-    eq = next(c for c in checks if c["kind"] == "equivalence")
-    repeats = len(eq["values"][0])
+    eq = next((c for c in checks if c["kind"] == "equivalence"), None)
+    repeats = len(eq["values"][0]) if eq is not None else 0
     if len(executions) != kinds.count("test") + 2 * (kinds.count("regression") + kinds.count("repair") + repeats):
         return False
     offset = 0
     for check in checks:
-        if check["kind"] == "equivalence":
+        if check["kind"] in ("equivalence", "equivalence_waived"):
             continue
         name = check.get("name")
         count = 1 if check["kind"] == "test" else 2
@@ -95,7 +101,7 @@ def passing_checks(row):
                   else rows[0]["exit_code"] != 0 or not rows[0]["artifacts"]
                   or rows[0]["artifacts"] != rows[1]["artifacts"])):
             return False
-    for i, execution_row in enumerate(executions[-2 * repeats:]):
+    for i, execution_row in enumerate(executions[-2 * repeats:] if repeats else []):
         side, repeat = i % 2, i // 2
         if (execution_row["label"] != ("old-source" if side == 0 else "new-source") + str(repeat)
             or not execution_row["valid"] or execution_row["timed_out"] or execution_row["exit_code"] != 0
@@ -110,14 +116,25 @@ def gate(row):
         and isinstance(row.get("executions"), list) and len(row["executions"]) <= 116
         and all(execution(r) for r in row["executions"])
         and all(isinstance(r, dict) and type(r.get("passed")) is bool
-                and r.get("kind") in ("test", "regression", "repair", "equivalence")
-                and (r["kind"] != "equivalence" or equivalence(r)) for r in row["checks"])
+                and r.get("kind") in ("test", "regression", "repair", "equivalence",
+                                      "equivalence_waived")
+                and (r["kind"] != "equivalence" or equivalence(r))
+                and (r["kind"] != "equivalence_waived" or r["passed"] is True)
+                for r in row["checks"])
         and number(row.get("eval_seconds")) and row["eval_seconds"] >= 0
         # Individually finite JSON numbers can overflow when combined. Reject
         # their aggregate before converting it inside math.isclose.
         and number(total_seconds := sum(r["seconds"] for r in row["executions"]))
         and math.isclose(row["eval_seconds"], total_seconds, rel_tol=1e-9, abs_tol=1e-9)
         and (not row["passed"] or passing_checks(row)))
+
+
+def _probe_rows(probes, executions):
+    offset = 0
+    for kind, probe in probes:
+        count = 1 if kind == "test" else 2
+        yield (kind, probe), executions[offset:offset + count]
+        offset += count
 
 
 def gate_matches_policy(row, declaration, source_metric, *, repair_required=False):
@@ -132,11 +149,20 @@ def gate_matches_policy(row, declaration, source_metric, *, repair_required=Fals
         return False
     probes = [(kind, probe) for kind, field in (("test", "tests"), ("regression", "regressions"),
         ("repair", "repair_probes")) if kind != "repair" or repair_required for probe in declaration[field]]
-    if [(c["kind"], c.get("name")) for c in row["checks"] if c["kind"] != "equivalence"] != [
+    if [(c["kind"], c.get("name")) for c in row["checks"]
+            if c["kind"] not in ("equivalence", "equivalence_waived")] != [
             (kind, probe["name"]) for kind, probe in probes]:
         return False
-    eq = next(c for c in row["checks"] if c["kind"] == "equivalence")
-    if len(eq["values"][0]) != declaration["repeats"]:
+    # The waiver is granted by the DECLARATION and the proposal, recomputed here, never by the row:
+    # `repair_gate: probes` and a repair proposal (doc 73 §2.3, track 1).
+    waived = declaration.get("repair_gate") == "probes" and repair_required
+    eq = next((c for c in row["checks"] if c["kind"] == "equivalence"), None)
+    if waived:
+        return eq is None and any(c["kind"] == "equivalence_waived" for c in row["checks"]) and all(
+            set(r["artifacts"]) == set(probe["artifacts"])
+            for (kind, probe), rows in _probe_rows(probes, row["executions"])
+            for r in (rows[1:] if kind == "repair" else rows))
+    if eq is None or len(eq["values"][0]) != declaration["repeats"]:
         return False
     offset = 0
     for kind, probe in probes:

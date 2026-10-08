@@ -39,9 +39,21 @@ def normalize_request(operation, body):
 def normalize_upstream(raw):
     if raw is None:
         return None
-    if not isinstance(raw, dict) or set(raw) - {"tests", "regressions", "repair_probes", "repeats", "atol", "rtol", "sigma"}:
-        raise ValueError("upstream accepts tests, regressions, repair_probes, repeats, atol, rtol and sigma")
+    if not isinstance(raw, dict) or set(raw) - {"tests", "regressions", "repair_probes", "repeats", "atol", "rtol", "sigma", "repair_gate"}:
+        raise ValueError("upstream accepts tests, regressions, repair_probes, repeats, atol, rtol, sigma and repair_gate")
     out = {"tests": [], "regressions": [], "repair_probes": [], "repeats": raw.get("repeats", 3)}
+    # THE LIGHTER GATE FOR A FIX (doc 73 §2.3, track 1), the operator's to declare: a proposal
+    # promoting what a REPAIR changed (`repair_trigger_nodes`) had no metric before the fix, so the
+    # paired full-source repetitions compare a recipe that crashed with one that runs — they cost
+    # hours and decide nothing. `probes` waives them for such a proposal only: its tests, both
+    # regression sides, its repair probe (old fails, new passes) and the unchanged scorer bytes still
+    # decide. Left OUT of the declaration when `full` (the default), so every pinned `run_started`
+    # declaration written before the key compares equal.
+    gate_mode = raw.get("repair_gate", "full")
+    if gate_mode not in ("full", "probes"):
+        raise ValueError("upstream.repair_gate must be 'full' or 'probes'")
+    if gate_mode == "probes":
+        out["repair_gate"] = "probes"
     if type(out["repeats"]) is not int or not 2 <= out["repeats"] <= 10:
         raise ValueError("upstream.repeats must be an integer between 2 and 10")
     for field, default in (("atol", 0.0), ("rtol", 0.0), ("sigma", 2.0)):

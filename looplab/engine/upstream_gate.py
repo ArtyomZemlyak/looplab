@@ -132,6 +132,12 @@ def evaluation_context(task, settings, events):
     return context
 
 
+def waives_equivalence(declaration, proposal) -> bool:
+    """The operator declared `repair_gate: probes` AND this proposal promotes a repair."""
+    return (declaration.get("repair_gate") == "probes"
+            and bool(proposal.get("repair_trigger_nodes")))
+
+
 def execute_gate(rd, task, settings, source, proposal, manifest, action_id, charge, *, extra_env=None):
     from looplab.engine.shared import effective_eval_spec, effective_max_eval_timeout
     spec, declaration = task.repo_spec(), task.upstream
@@ -230,6 +236,17 @@ def execute_gate(rd, task, settings, source, proposal, manifest, action_id, char
         checks.append({"kind": kind, "name": probe["name"], "passed": bool(passed)})
     if proposal["repair_trigger_nodes"] and not declaration["repair_probes"]:
         checks.append({"kind": "repair", "passed": False, "reason": "Declare a real old-fail/new-pass trigger probe"})
+    if waives_equivalence(declaration, proposal):
+        # doc 73 §2.3 (track 1): the operator declared `repair_gate: probes`, and this proposal
+        # promotes a REPAIR — no source metric existed before it to reproduce. The waiver is a check
+        # row of its own, never an `equivalence` row claiming samples that were not taken.
+        checks.append({"kind": "equivalence_waived", "passed": True,
+                       "reason": "repair_gate=probes: the source recipe had no metric before the fix"})
+        after = input_identity(task, settings, source, proposal)
+        return {"passed": before == after and all(c["passed"] for c in checks),
+                "input_identity": before, "inputs_unchanged": before == after, "checks": checks,
+                "executions": executions, "eval_seconds": sum(r["seconds"] for r in executions),
+                "scope": "declared scorer, old recipes and trigger probes (repair_gate=probes)"}
     values = [[], []]
     for repeat in range(declaration["repeats"]):
         for side, selector, files, deleted in (
