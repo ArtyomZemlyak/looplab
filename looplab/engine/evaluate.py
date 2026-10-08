@@ -1579,6 +1579,7 @@ class EvalAttempt:
     # --- bound by PREPARE_WORKDIR
     workdir: Any = None
     base_revision: Any = None                 # copied seed receipt, bound by PREPARE_WORKDIR
+    uses_receipt: Any = None                  # the artifacts ADMIT admitted it with (artifact_fence)
     _superseded_marker: Any = None
     _manifest_stamp: Any = None
     # --- seeded by SEED_LEDGERS from the durable rows; carried across attempts
@@ -4031,6 +4032,16 @@ class EvaluateMixin:
                     a, "admit", 0.0, reason=("paused" if a.state.paused and not a.state.finished
                                              and not a.state.stop_requested else "stopping"))
             return PHASE_RETURN
+        # THE ARTIFACT CONSUMER FENCE (doc 73 §1.4, `engine/artifact_fence.py`): a producer this
+        # node `uses` is being produced again, so there is nothing whole to read yet. No terminal:
+        # the node stays pending and the dispatcher admits it once the producer settles (the turn's
+        # selection defers it meanwhile). An UNAVAILABLE producer closed it in `prestart_stop` above.
+        # What it IS admitted with is its receipt, written on its `node_evaluated`.
+        if getattr(a.node, "uses", None):
+            from looplab.engine.artifact_fence import uses_receipt, uses_waiting
+            if uses_waiting(a.state, a.node):
+                return PHASE_RETURN
+            a.uses_receipt = uses_receipt(a.state, a.node) or None
         # The one gate that keeps a speculative miss provably free: no unconfirmed prediction may
         # cross into the sandbox. See `_assert_speculative_selection_confirmed`.
         self._assert_speculative_selection_confirmed(a.state, a.node)
@@ -6450,6 +6461,11 @@ class EvaluateMixin:
                     _eval_payload["metric_provenance"] = _terminal.metric_provenance
                 if a.base_revision is not None:
                     _eval_payload.setdefault("metric_provenance", {})["base_revision"] = a.base_revision
+                # …and WHICH ARTIFACTS the number was measured on (`engine/artifact_fence.py`): per
+                # producer, the lifecycle and code ADMIT admitted it with. Absent on every node that
+                # uses nothing, so those rows are byte-identical.
+                if a.uses_receipt:
+                    _eval_payload.setdefault("metric_provenance", {})["uses"] = a.uses_receipt
                 # THE GRADED ACTIVATION RECORD (`_apply_activation_verdict`): its grade, and on a WARN
                 # what could not be verified and the gate decision made for it. NOT a `violations`
                 # row -- `feasible = not violations` would exclude a node whose metric stands

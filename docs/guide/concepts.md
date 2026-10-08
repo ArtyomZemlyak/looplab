@@ -783,8 +783,17 @@ Assistant creates either through its `inject_experiment` tool (`Settings.assista
 A node built FROM a consumer (an improve, a merge, an ablation) inherits its parents' `uses`, so
 the copied code still finds its data. On a Docker tier each used workdir is bound read-only at its
 own path. The canary (`eval_canary`) is skipped for an artifact: it passes only on a metric.
-The producer's workdir is read as it stands when the consumer runs — resetting an artifact while
-consumers wait is not fenced yet (doc 73, status table).
+
+**The consumer fence** (`engine/artifact_fence.py`). A consumer reads exactly the artifact it was
+admitted with, or does not run. While a producer is being produced again (an operator `node_reset`
+put it back to pending) its consumers WAIT — their evaluation is not dispatched until it settles. A
+producer that is gone, deleted, aborted or failed in its current lifecycle closes each pending
+consumer at zero cost with the benign engine terminal `artifact_unavailable`, before anything runs:
+the candidate would crash on a missing input and buy a repair no code edit can make.
+`LOOPLAB_USES_WORKDIRS` names only a producer evaluated in its current lifecycle whose workdir's
+manifest stamp is that lifecycle's code. A consumer's `node_evaluated.metric_provenance.uses` records,
+per producer, the `generation` and `code` it was measured on; when the champion's receipt no longer
+matches its producer's current lifecycle, the run carries the champion caveat `stale_artifact`.
 
 ### Branching from a snapshot (fork-to-branch)
 

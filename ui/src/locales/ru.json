@@ -1,7 +1,7 @@
 {
   "schema": 1,
   "language": "ru",
-  "count": 7699,
+  "count": 7702,
   "messages": {
     "# LoopLab run report — {0}": "# Отчёт запуска LoopLab — {0}",
     "## Agent narrative (advisory)": "## Пояснения агента (рекомендации)",
@@ -7701,6 +7701,9 @@
     "Assistant can run evaluation tracks": "Ассистент может запускать треки оценки",
     "Gives the Assistant an evaluate_track tool: it can queue one of the task's declared evaluation tracks (an @200 re-score, a drift week) over a run's settled nodes, behind a confirm card. The live engine runs it on the run's own GPUs and records the numbers beside each node's metrics. Off removes the tool from the Assistant.": "Даёт Ассистенту инструмент evaluate_track: он может поставить в очередь один из объявленных в задаче треков оценки (переоценку @200, неделю дрейфа) по завершённым узлам запуска — через карточку подтверждения. Живой движок выполняет его на GPU самого запуска и записывает числа рядом с метриками каждого узла. Выключено — инструмент у Ассистента убирается.",
     "Assistant runs tracks": "Ассистент запускает треки",
-    "Lets the Assistant queue a declared evaluation track on a live run, behind a confirm card.": "Позволяет Ассистенту ставить объявленный трек оценки в очередь живого запуска через карточку подтверждения."
+    "Lets the Assistant queue a declared evaluation track on a live run, behind a confirm card.": "Позволяет Ассистенту ставить объявленный трек оценки в очередь живого запуска через карточку подтверждения.",
+    "stale artifact": "устаревший артефакт",
+    "The node this number comes from read an artifact node (a prepared dataset) that has been re-produced, failed or deleted since it was measured: the metric was measured normally, but on data this run no longer holds.": "Узел, давший это число, читал узел-артефакт (подготовленный датасет), который с тех пор пересобран, упал или удалён: метрика измерена штатно, но на данных, которых в этом запуске больше нет.",
+    "measured on an artifact that has been re-produced since": "измерено на артефакте, который с тех пор пересобран"
   }
 }

@@ -38,6 +38,7 @@ const CAVEAT_TEXT = {
   mixed_comparability: ['evaluation conditions differ; rankings may not be comparable', 'условия оценки отличаются; порядок результатов может быть несопоставим'],
   merged_coordinates: ['weights were averaged; declared parameters were not trained as a separate configuration', 'веса усреднены; указанные параметры не обучались как отдельная конфигурация'],
   retargeted_objective: ['the target metric was changed', 'целевая метрика изменена'],
+  stale_artifact: ['measured on an artifact that has been re-produced since', 'измерено на артефакте, который с тех пор пересобран'],
 }
 export function resultCaveatText(code, language = 'en') {
   return CAVEAT_TEXT[code]?.[language === 'ru' ? 1 : 0]

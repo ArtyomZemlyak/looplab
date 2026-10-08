@@ -1609,6 +1609,11 @@ ENGINE_TERMINAL_REASONS: tuple[str, ...] = (
     # of needing a fourth list to keep in sync. Not BENIGN either: it is evidence about the BOX, the
     # run is paused beside it, and the owner alert must show it.
     "engine_error",
+    # AN ARTIFACT THIS NODE `uses` CAN NEVER BE READ (doc 73 §1.4, `engine/artifact_fence.py`): the
+    # producer was deleted, aborted or failed in its current lifecycle. Closed before anything ran,
+    # at zero cost — no candidate code is at fault, so it is not a repairable `crash`, and BENIGN:
+    # nothing about the experiment was measured.
+    "artifact_unavailable",
 )
 
 # The subset that is BENIGN — a node that ended for a reason saying nothing about the experiment.
@@ -1618,7 +1623,7 @@ ENGINE_TERMINAL_REASONS: tuple[str, ...] = (
 # `engine/orchestrator.py::systemic_failure_stop_reason`, adds nothing either — its hand-spelled
 # `{"superseded"}` had drifted (review 2026-09-22, ENG1-08).
 BENIGN_TERMINAL_REASONS: frozenset[str] = frozenset({
-    "aborted", "card_dropped", "proxy_skipped", "superseded", "frozen",
+    "aborted", "card_dropped", "proxy_skipped", "superseded", "frozen", "artifact_unavailable",
 })
 
 

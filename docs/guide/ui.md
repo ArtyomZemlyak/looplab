@@ -1417,7 +1417,9 @@ portfolio cannot read it as a plain measurement. There are FOUR in
 `engine/champion_caveats.py::CHAMPION_CAVEATS` — this page said "exactly three" and omitted
 `mixed_comparability`, which says the run's own evaluated nodes were not all measured against the same
 data, on the same source tree, or with the same evaluation protocol, so the champion won a mixed
-field. They come from the server
+field. `stale artifact` (doc 73 §1.4, `engine/artifact_fence.py`) says the champion read an
+artifact node that was re-produced, failed or deleted after its number was measured. They come from
+the server
 (`best_metric_caveats` on each `/api/runs` row, `engine/champion_caveats.py`), and each names a rung the
 operator set or a fact the engine derived — none of them a bug report. The first two qualify **how** the
 number was measured; the third qualifies **what it is a number for**:

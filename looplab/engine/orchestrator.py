@@ -44,6 +44,7 @@ from looplab.events.types import (BACKGROUND_APPENDABLE, DIAGNOSTIC_EVENTS,
     EV_RUNG_PROMOTED,
     EV_SPEC_APPROVAL_REQUESTED,
     EV_SPEC_APPROVED, EV_SPEC_PROPOSED, PAUSE_REASON_EXTERNAL_OBLIGATIONS)
+from looplab.engine.artifact_fence import defer_waiting_consumers
 from looplab.engine.track_lane import drain_track_requests, serve_track_requests
 from looplab.engine.ablation import AblationMixin
 from looplab.engine.metric_salvage import settle_mode as settle_metric_salvage_mode
@@ -2190,6 +2191,14 @@ class Engine(ConfirmPhaseMixin, NoiseFloorMixin, AblationMixin, NoveltyGateMixin
                 state = fold(self.store.read_all())
             actions = self._select_actions(state)
             actions = self._plan_gate(state, actions)
+            # THE ARTIFACT CONSUMER FENCE (doc 73 §1.4): a node whose producer is being produced
+            # again waits for it (`engine/artifact_fence.py`). When that leaves nothing to do, the
+            # turn sleeps instead of reading as "no actions", which would walk the finish ladder over
+            # a run whose producer is still evaluating.
+            actions, _deferred = defer_waiting_consumers(state, actions)
+            if _deferred and not actions:
+                await anyio.sleep(0.5)
+                continue
             # A NODE-CREATING OPERATOR REQUEST PARKED ON THE NODE BUDGET reaches this line only
             # because other work was waiting beside it (`forced_requests.py::_park_for_node_budget`,
             # doc 68 68.8): this turn EVALUATES what already exists — node 18 on v10, which sat

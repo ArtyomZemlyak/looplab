@@ -103,6 +103,9 @@ export const CHAMPION_CAVEAT_MERGED_COORDINATES = 'merged_coordinates'
 // An operator `metric_retarget` (doc 68 68.2) made a declared extra metric the objective: the number is
 // that metric's (`objective_key` on the row names it), not the task's own — a different ruler.
 export const CHAMPION_CAVEAT_RETARGETED_OBJECTIVE = 'retargeted_objective'
+// The champion read an ARTIFACT node whose current lifecycle is not the one its number was measured
+// on (doc 73 §1.4, `looplab/engine/artifact_fence.py::stale_uses`): the data was re-produced since.
+export const CHAMPION_CAVEAT_STALE_ARTIFACT = 'stale_artifact'
 
 // ABSENT is `[]`, deliberately, and for the same reason `sourceIncomplete` defaults to false: a
 // legacy server that does not send the field must not paint every run with a caveat. And an EMPTY
@@ -126,6 +129,7 @@ const CAVEAT_LABEL = {
   [CHAMPION_CAVEAT_MIXED_COMPARABILITY]: 'mixed comparability',
   [CHAMPION_CAVEAT_MERGED_COORDINATES]: 'merged coordinates',
   [CHAMPION_CAVEAT_RETARGETED_OBJECTIVE]: 'retargeted objective',
+  [CHAMPION_CAVEAT_STALE_ARTIFACT]: 'stale artifact',
 }
 export const bestMetricCaveatLabel = slug => CAVEAT_LABEL[slug] || String(slug || '')
 
@@ -140,7 +144,7 @@ export function bestMetricCaveatNotice(run = {}) {
     (slug === CHAMPION_CAVEAT_SALVAGED ? uiMessage("This run’s best metric was NOT measured: its evaluation failed and the run recovered the number with its own declared reader. metric_salvage is set to “select”, so it competes for champion like a measured result.", []) : (slug === CHAMPION_CAVEAT_TRUST_FLAGGED ? uiMessage("The node this number comes from carries a high-precision reward-hacking or leakage signal. trust_gate is not enforcing, so it was selected as this run’s best anyway.", []) : (slug === CHAMPION_CAVEAT_PARAMS_OVERRIDDEN ? uiMessage("The node this number comes from ships code — or ran under a resolved configuration — that assigns a different value to a parameter its own experiment record declares, or two of its own carriers disagree, so the declared configuration is not the one this result was produced under. The run selected on it anyway — the metric itself was measured normally; what is in question is what it is a measurement of.", []) : (slug === CHAMPION_CAVEAT_MIXED_COMPARABILITY ? uiMessage("This run’s own nodes were not all measured against the same evaluation — their recorded comparability keys, the source trees they ran on, or the evaluation protocols they ran under (profile, scorer, fingerprint) provably differ — so this number won a mixed field. The values are each true of their own measurement; the ordering between them is not.", []) : (slug === CHAMPION_CAVEAT_MERGED_COORDINATES ? uiMessage("This number comes from a MEAN-MERGE node: its parameters are the arithmetic average of its two parents’ declarations, and it trained nothing of its own — it averaged their weights and scored the average. Nobody chose the configuration this result is filed under, so it sits at coordinates no run ever occupied. The metric itself was measured normally, and the run selected on it.", []) : (slug === CHAMPION_CAVEAT_RETARGETED_OBJECTIVE ? uiText(`An operator retarget made a declared extra metric${runObjective(run)
                   ? ` (“${runObjective(run)}”)` : ''} this run’s objective: its best metric is `
                   + 'that metric’s value, not the task’s own, and every node was ranked by it. It '
-                  + 'is a different ruler from any run ranked by the task’s own metric.') : uiMessage("The server reports a caveat this view has no sentence for: “{0}”.", [slug])))))))))
+                  + 'is a different ruler from any run ranked by the task’s own metric.') : (slug === CHAMPION_CAVEAT_STALE_ARTIFACT ? uiMessage("The node this number comes from read an artifact node (a prepared dataset) that has been re-produced, failed or deleted since it was measured: the metric was measured normally, but on data this run no longer holds.", []) : uiMessage("The server reports a caveat this view has no sentence for: “{0}”.", [slug]))))))))))
   return sentences.join(' ')
 }
 
