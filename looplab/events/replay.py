@@ -1347,7 +1347,12 @@ def _on_extra_metrics_imported(st: RunState, e: Event, d: dict, ctx: "_FoldCtx")
         return
     found = normalize_extra_metrics(d.get("extra_metrics"))
     live = dict(node.extra_metrics or {})
-    added = {k: v for k, v in found.items() if k not in live}
+    # The map stays inside the SAME 256-key bound every other writer of it is held to
+    # (`normalize_extra_metrics`), and the marker names every reconstructed key within it: an
+    # unbounded merge let a late-sorting imported key fall off the marker's capped `keys` and read
+    # as a LIVE measurement (critic 2026-10-08). Keys past the bound are dropped, in name order.
+    room = max(0, 256 - len(live))
+    added = dict(sorted((k, v) for k, v in found.items() if k not in live)[:room])
     if not added:
         return
     marker = dict(node.extra_metrics_backfill or {})

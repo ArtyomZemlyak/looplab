@@ -157,3 +157,25 @@ def test_a_workdir_relative_track_script_runs(tmp_path):
             "import json,sys; print(json.dumps({'FUR@200': float(open(sys.argv[2]).read())}))")
     out = _cli(rd, "--apply")
     assert "recorded on 2 node(s)" in out.output, out.output
+
+
+def test_an_import_stays_inside_the_map_bound_and_every_added_key_is_marked():
+    """critic 2026-10-08: an unbounded merge let a late-sorting imported key fall off the marker's
+    capped `keys` and read as a live measurement. The map keeps the 256-key bound."""
+    from looplab.events.eventstore import Event
+    live = {f"k{i:03d}": 1.0 for i in range(250)}
+    rows = [Event(seq=0, ts=0.0, type="run_started", data={"run_id": "r", "direction": "max"}),
+            Event(seq=1, ts=0.0, type="node_created",
+                  data={"node_id": 0, "parent_ids": [], "operator": "draft",
+                        "idea": {"operator": "draft"}, "code": "x"}),
+            Event(seq=2, ts=0.0, type="node_evaluated",
+                  data={"node_id": 0, "generation": 0, "metric": 0.5, "violations": [],
+                        "extra_metrics": live,
+                        "extra_metrics_provenance": {k: "declared" for k in live}}),
+            Event(seq=3, ts=0.0, type="extra_metrics_imported",
+                  data={"node_id": 0, "generation": 0, "source": "svc", "imported_at": 1.0,
+                        "extra_metrics": {f"z{i}": 2.0 for i in range(10)}})]
+    node = fold(rows).nodes[0]
+    assert len(node.extra_metrics) == 256
+    added = set(node.extra_metrics) - set(live)
+    assert len(added) == 6 and all(extra_metric_key_is_backfilled(node, k) for k in added)

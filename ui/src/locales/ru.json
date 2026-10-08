@@ -1,7 +1,7 @@
 {
   "schema": 1,
   "language": "ru",
-  "count": 7693,
+  "count": 7695,
   "messages": {
     "# LoopLab run report — {0}": "# Отчёт запуска LoopLab — {0}",
     "## Agent narrative (advisory)": "## Пояснения агента (рекомендации)",
@@ -3410,7 +3410,7 @@
     "failed ·": "не удалось;",
     "failed)": "ошибок)",
     "failed.": "Ошибка.",
-    "failure reason {0}": "причина неисправности {0}",
+    "failure reason {0}": "причина сбоя {0}",
     "feasible": "ограничения соблюдены",
     "fell back to template": "отошли обратно в шаблон",
     "fidelity": "Верность",
@@ -3798,7 +3798,7 @@
     "prefetch depth {0} → {1}{2}": "Предварительная глубина {0} → {1}{2}",
     "previous": "Предыдущий",
     "primary": "начальное",
-    "primary concept axis {0}": "первичная концептуальная ось {0}",
+    "primary concept axis {0}": "основная ось концептов {0}",
     "primary concept axis {0} and {1}": "первичная концептуальная ось {0} и {1}",
     "process environment": "окружение процесса",
     "profile": "профиль",
@@ -5933,7 +5933,7 @@
     "See the attached file(s).": "См. прилагаемый файл (прилагаемые файлы).",
     "Seed luck has not been ruled out; the selected winner is not a robust result yet.": "Семенной удача не исключается; выбранный победитель пока не является надежным результатом.",
     "Select an experiment to branch from.": "Выберите эксперимент для ветки.",
-    "Select to inspect": "Выберите для проверки",
+    "Select to inspect": "Выберите, чтобы открыть",
     "Server state is still unavailable:": "Состояние сервера по-прежнему недоступно:",
     "Server state refreshed. The uncertain save was not replayed.": "Серверное состояние освежалось. Неопределённое сохранение не было воспроизведено повторно.",
     "Server state refreshed; saved credential status is up to date": "Освежено состояние сервера; сохраненный статус удостоверения обновлен",
@@ -6732,8 +6732,8 @@
     "cross-run memory row": "Сверхпромышленная строка памяти",
     "cross-run tools": "Сверхпромышленные инструменты",
     "ctx-chip ctx-chip-action": "ctx-chip ctx-chip-action",
-    "current champion": "чемпион текущего года",
-    "currently working": "работающая в настоящее время",
+    "current champion": "текущий чемпион",
+    "currently working": "сейчас в работе",
     "customized value": "Стоимость, индивидуализированная",
     "cv-badge btn xs": "cv-badge btn xs",
     "cv-name cv-nomatch": "cv-name cv-nomatch",
@@ -7135,7 +7135,7 @@
     "prompt tokens": "- быстродействующие жетоны",
     "propose an idea, then build the solution": "Предложить идею, а затем построить решение",
     "propose the next idea": "Предложить следующую идею",
-    "proposed from deep research directions": "которые предлагается провести в рамках глубоких исследований",
+    "proposed from deep research directions": "предложен по направлениям глубокого исследования",
     "proposed this card": "предложил эту карточку",
     "provenance could not be read": "Происхождение не может быть считано",
     "provider priced, so the figure may be a floor. Open the run to see the split.": "По цене провайдера, значит, цифра может быть этажом. Откройте пробежку, чтобы увидеть раскол.",
@@ -7695,6 +7695,8 @@
     "were added to the record after the run, not recorded while the run was evaluating — recovered from the preserved score log, imported by the operator, or measured afterwards by an evaluation track. Their precision may be coarser than the objective's, so two nodes equal on a reconstructed row are not known to be equal.": "— эти значения добавлены в запись после запуска, а не записаны во время его оценки: они восстановлены из сохранённого журнала оценивания, импортированы оператором или измерены позже треком оценки. Их точность может быть грубее, чем у цели, поэтому равенство двух узлов в такой строке не означает, что они действительно равны.",
     "Added to the record after the run, not recorded while the run was evaluating.": "Добавлено в запись после запуска, а не записано во время его оценки.",
     "It was recovered from the preserved score log, imported by the operator, or measured afterwards by an evaluation track; the record does not say which.": "Значение восстановлено из сохранённого журнала оценивания, импортировано оператором или измерено позже треком оценки; из записи не видно, каким из этих способов.",
-    "Its precision may be coarser than the objective's, so two nodes equal here are not known to be equal.": "Его точность может быть грубее, чем у цели, поэтому равенство двух узлов здесь не означает, что они действительно равны."
+    "Its precision may be coarser than the objective's, so two nodes equal here are not known to be equal.": "Его точность может быть грубее, чем у цели, поэтому равенство двух узлов здесь не означает, что они действительно равны.",
+    "Experiment #{0}": "Эксперимент №{0}",
+    "metric {0}": "метрика {0}"
   }
 }
