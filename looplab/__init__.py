@@ -543,6 +543,8 @@ _LAYOUT = {
     "artifact_ideas": "agents",  # Settings.researcher_artifacts: the Researcher's artifact schema
     "upstream_serve": "engine",  # the upstream lane served by a live engine (doc 73 §2.5)
     "upstream_hints": "engine",  # the advance notice to Developer sessions at work (doc 73 §4.2)
+    "upstream_switch": "engine",  # the kill switch and its operator view outside /commands (doc 73 §4.3)
+    "cli_hook": "agents",  # an external `claude` agent's notice hook (doc 73 §4.3)
     "upstream_author": "engine",  # the automated upstream author (doc 73 §2.5)
 }
 

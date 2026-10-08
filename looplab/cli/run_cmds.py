@@ -2180,46 +2180,25 @@ def approve(run_dir: Path = typer.Argument(..., help="Run dir awaiting approval.
 
 
 @app.command(name="upstream-auto")
-def upstream_auto(run_dir: Path = typer.Argument(..., help="Run whose upstream automation to switch."),
-                  enabled: bool = typer.Option(..., "--on/--off",
-                                               help="--off holds every AUTOMATIC upstream step"),
-                  reason: str = typer.Option("", "--reason", help="why, kept on the record (<=300 chars)")):
-    """The upstream automation's KILL SWITCH (doc 73 §4.2 G2), the CLI half of the `upstream_auto_set`
-    control the UI, the API and MCP send through `/commands`. `--off` stops the automated author (fix
-    rollout, champion integrator) and the engine's own checks and advances on its next turn; an
-    operation the operator queued is still served. `--on` lets them resume. Appended as the control
-    intent itself — the engine reads it, the fold keeps the last one (`RunState.upstream_auto_paused`)
-    — so it works on a live or a stopped run alike.
+def upstream_auto_cmd(
+        run_dir: Path = typer.Argument(..., help="The run whose upstream automation to switch."),
+        state: str = typer.Argument(..., help="'off' stops every AUTOMATIC upstream step; 'on' resumes them."),
+        reason: Optional[str] = typer.Option(None, "--reason", help="Why (kept in the upstream history).")):
+    """The upstream automation's KILL SWITCH from a terminal (doc 73 §4.2 G2, doc 73 §4.3).
 
-    The reason is normalized exactly as the control intake does
-    (`serve/control_validation.py::_normalize_upstream_auto_set`): stripped, and left out when blank,
-    so the two writers of one row never disagree. A refusal — the run moved, or a Replay or a
-    deletion fences its log — is one line on stderr at exit 2."""
-    from looplab.core.run_deletion import RunDeletionFenceError, RunDeletionStorageError
-    from looplab.core.run_reset import RunResetFenceError, RunResetStorageError
-    from looplab.events.types import EV_UPSTREAM_AUTO_SET
-    reason = reason.strip()
-    if len(reason) > 300:
-        raise typer.BadParameter("--reason is at most 300 characters")
-    store = _require_run_dir(run_dir, healthy=True)
-    events = store.read_all()
-    if fold(events).upstream_auto_paused == (not enabled):
-        typer.echo(f"run {run_dir.name}: upstream automation already {'on' if enabled else 'off'}")
-        return
-    try:
-        store.append(EV_UPSTREAM_AUTO_SET, {"enabled": enabled, **({"reason": reason} if reason else {})},
-                     expected_last_seq=events[-1].seq if events else -1)
-    except EventStoreConcurrencyError:
-        typer.echo(f"run {run_dir.name} changed while the switch was being set; retry", err=True)
-        raise typer.Exit(2)
-    except (RunResetFenceError, RunResetStorageError, RunDeletionFenceError,
-            RunDeletionStorageError) as exc:
-        # A fence that cannot be read is not an absent fence (the `inspect --readmodel` rule): both
-        # the proven and the unprovable case refuse, as one line rather than a traceback.
-        typer.echo(f"refusing to switch the upstream automation of {run_dir.name}: {exc}", err=True)
-        raise typer.Exit(2)
-    typer.echo(f"run {run_dir.name}: upstream automation {'on' if enabled else 'OFF'}"
-               + (f" ({reason})" if reason else ""))
+    `off` stops the live engine's automatic author (fixes from repairs, the champion's capability) and
+    its automatic check and advance; operations an operator queues are still served. `on` resumes
+    them. The SAME control event `/commands` appends (`upstream_auto_set {enabled, reason}`), through
+    the same payload rule (`engine/upstream_switch.py::normalize_upstream_auto_set`); a running engine
+    reads it at its next turn, a stopped run keeps it for its next engine. `looplab inspect` shows the
+    switch, the held steps, the author's spend and the advances of the last hour."""
+    from looplab.core.errors import ConfigRefusal
+    from looplab.engine.upstream_switch import set_upstream_auto
+    choice = state.strip().lower()
+    if choice not in ("on", "off"):
+        raise ConfigRefusal(f"upstream-auto: state must be 'on' or 'off', not {state!r}")
+    _require_run_dir(run_dir, healthy=True)       # fail closed on a corrupt log before appending
+    typer.echo(set_upstream_auto(run_dir, choice == "on", reason))
 
 
 @app.command(name="repair-log")

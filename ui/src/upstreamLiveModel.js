@@ -20,6 +20,11 @@ const heldRow = row => row && typeof row === 'object' && typeof row.op === 'stri
 // `engineRunning` is the payload's present-time `engine_running` (the projection itself caches with
 // the log, so it cannot know): `false` with an engine-armed mode means nobody serves the lane NOW —
 // the mode shown is what the last engine served, not a promise (`idle`).
+// `rebased` (doc 73 §4.3): the author drafted from a source the base had moved past, merged onto the
+// current base; `waiting` on a held step: it has not gone through since. Only an explicit bool counts.
+const withFlags = row => ({ ...row, rebased: row.rebased === true,
+  ...(typeof row.waiting === 'boolean' ? { waiting: row.waiting } : {}) })
+
 export function upstreamLiveSummary(live, engineRunning) {
   if (!live || typeof live !== 'object' || !MODES.has(live.mode)) return null
   const queue = live.queue && typeof live.queue === 'object' ? live.queue : {}
@@ -36,13 +41,19 @@ export function upstreamLiveSummary(live, engineRunning) {
     pending: count(queue.pending, rows.filter(row => row.status === 'pending').length),
     total: count(queue.total, rows.length),
     recent: rows.slice(-RECENT).reverse(),
-    authored: authored.slice(-RECENT).reverse(),
+    authored: authored.slice(-RECENT).reverse().map(withFlags),
     authoredTotal: count(live.authored_total, authored.length),
     // The operator's kill switch (`upstream_auto_set`), the caps that held a step back, and what
     // the author spent — doc 73 §4.2 G2-G4. Absent on an older payload: not stopped, nothing held.
     autoPaused: live.auto_paused === true,
-    held: (Array.isArray(live.held) ? live.held : []).filter(heldRow).slice(-RECENT).reverse(),
+    held: (Array.isArray(live.held) ? live.held : []).filter(heldRow).slice(-RECENT).reverse().map(withFlags),
     authorSpentUsd: Number.isFinite(live.author_spent_usd) && live.author_spent_usd >= 0 ? live.author_spent_usd : 0,
+    // The caps the engine reads (doc 73 §4.3): the author's USD budget and the automatic advances per
+    // rolling hour, each 0 = no cap, and the advances of the last hour. Absent on an older payload:
+    // null, and the panel then says nothing about a cap rather than inventing one.
+    authorUsdCap: Number.isFinite(live.author_usd_cap) && live.author_usd_cap >= 0 ? live.author_usd_cap : null,
+    advancesPerHour: Number.isSafeInteger(live.advances_per_hour) && live.advances_per_hour >= 0 ? live.advances_per_hour : null,
+    advancesLastHour: Number.isSafeInteger(live.advances_last_hour) && live.advances_last_hour >= 0 ? live.advances_last_hour : null,
   }
 }
 
@@ -60,12 +71,15 @@ const LABELS = {
   outcome: {
     drafted: 'drafted → proposal', declined: 'declined by its critic', skipped: 'not drafted', failed: 'drafting failed',
     rejected: 'the draft could not be absorbed', refused: 'refused by the lane',
+    // doc 73 §4.3: a source the base moved past whose edits do not merge onto the current base.
+    rebase_conflict: 'its code conflicts with the newer base — skipped',
   },
   track: { repair: 'fix from a repair', champion: 'champion' },
   held: { advance: 'advance held at the hourly cap', author: 'author stopped at its budget' },
   // `lane_held {reason: "refused:<code>"}`: the lane refused an automatic step for a reason about the
   // proposal itself, so the engine never asks it again (`upstream_serve.py::refused_for_good`).
   refused: { check: 'automatic check refused by the lane, not asked again', advance: 'automatic advance refused by the lane, not asked again' },
+  heldState: { true: 'still waiting', false: 'released' },
 }
 
 export function upstreamLiveLabel(kind, value, op) {

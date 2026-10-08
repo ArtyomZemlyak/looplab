@@ -1521,6 +1521,24 @@
           "shortHelp": "Cap on automatic base advances per rolling hour; 0 = none."
         },
         {
+          "key": "upstream_author_rebase",
+          "label": "Rebase upstream sources the base moved past",
+          "type": "bool",
+          "default": true,
+          "help": "Only when the engine drafts upstream proposals itself (upstream mode auto). A repaired experiment or the champion measured on an older base than the run's current one is merged onto the current base (a three-way merge of its edits). A clean merge is drafted like any source and its check measures the merged code on the current base; a conflict is recorded and that source is skipped. Off: such sources are skipped, as before.",
+          "shortLabel": "Rebase stale sources",
+          "shortHelp": "Merge a source measured on an older base onto the current one before drafting."
+        },
+        {
+          "key": "upstream_hint_external",
+          "label": "Upstream notices for external coding agents",
+          "type": "bool",
+          "default": true,
+          "help": "When the live engine advances the base, a Claude Code developer agent already at work hears the notice through its own after-tool hook (once, at most three per session, recorded when the hook delivered it). Every external coding agent's next call also lists the capabilities promoted so far. Off: external agents are told nothing.",
+          "shortLabel": "Notices for external agents",
+          "shortHelp": "Tell external coding agents about base advances, mid-session where their CLI allows."
+        },
+        {
           "key": "upstream_verify",
           "label": "Upstream check profile",
           "type": "enum",

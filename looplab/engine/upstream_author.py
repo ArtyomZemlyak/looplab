@@ -30,6 +30,21 @@ claim re-proposes it unpaid; a propose the lane refuses is recorded (`refused`).
 `AUTHOR_MAX_PER_RUN` bounds the spend of a run whose every proposal fails. Nothing is drafted while
 a lane claim is unresolved — the lane would refuse the proposal it bought.
 
+A SOURCE THE BASE MOVED PAST (doc 73 §4.3, `Settings.upstream_author_rebase`). The lane admits a
+source measured on the CURRENT base only, so a repaired node or the champion seeded before the last
+advance used to be skipped for good. With rebasing on, `author_next` hands such a source to the worker
+as a REBASE pick: `rebase_source` three-way merges its overlay (the base it was measured on → the
+current base, git merge-file — `upstream_workspace.py::rebase_overlay`, the merge every migrating
+lifecycle already takes) and nominates its capability hunks against the CURRENT base. A conflict (or a
+source too large to merge in bounds) is recorded — `lane_authored {outcome: rebase_conflict, code,
+conflicts}` — and the source is skipped on that base; a clean merge is drafted like any source, and its
+body carries the merged overlay (`rebase`), which the lane recomputes before it admits it
+(`UpstreamLane._propose_admit`) and the gate runs as its OLD side on the current base. The comparison
+stays honest: under `full` the rebased source must still reproduce the score the source measured, under
+`canary` both sides run the current base's slice, and a repair's trigger probe still runs the current
+base as its failing old side. The action id names the base it rebases onto (`author_rebase_action_id`);
+a lifecycle the author already paid for on any base is never rebased (`_paid_lifecycles`).
+
 What the author is NOT: evidence. Its prose and the critic's verdict only admit a proposal to the
 gate; the base moves on measurements alone.
 """
@@ -52,6 +67,12 @@ def upstream_author_setting(settings) -> bool:
     """THE ONE READER of `Settings.upstream_author`. A duck-typed or absent settings object reads
     OFF — no paid authoring call."""
     return getattr(settings, "upstream_author", False) is True
+
+
+def author_rebase_setting(settings) -> bool:
+    """THE ONE READER of `Settings.upstream_author_rebase` (doc 73 §4.3). Absent or duck-typed reads
+    OFF — the historical skip."""
+    return getattr(settings, "upstream_author_rebase", False) is True
 
 
 def author_usd_cap(settings) -> float:
@@ -85,6 +106,19 @@ def author_action_id(node, track: str) -> str:
                                     "signature": node_signature(node), "track": track})[:24]
 
 
+def author_rebase_action_id(node, track: str, onto_revision: str) -> str:
+    """The deterministic action id of one source lifecycle on one track REBASED onto one base
+    revision (`active_base(...)["revision"]`): a conflict on one base does not close the next one."""
+    from looplab.engine.upstream_state import digest, node_signature
+    return "auto-rebase-" + digest({"node_id": node.id, "generation": int(node.attempt or 0),
+                                    "signature": node_signature(node), "track": track,
+                                    "onto": onto_revision})[:24]
+
+
+# Bounds of the rebase path: a source overlay with more paths than this is not merged automatically.
+REBASE_MAX_PATHS = 32
+
+
 # Outcomes that cost the two paid calls — what `AUTHOR_MAX_PER_RUN` counts. `skipped` made none, and
 # `refused` is the lane's later answer to a draft already counted as `drafted`.
 PAID_OUTCOMES = ("drafted", "declined", "rejected", "failed")
@@ -98,6 +132,23 @@ def _attempted(events) -> tuple[set, int]:
     ids |= {e.data.get("action_id") for e in events if e.type.startswith("upstream_proposal")
             or e.type == "upstream_proposed"}
     return ids, sum(1 for e in authored if e.data.get("outcome") in PAID_OUTCOMES)
+
+
+def _paid_lifecycles(events) -> set:
+    """The NATIVE action ids (`author_action_id`) of every source lifecycle the author already paid
+    for on some base — its own row, or a rebased row naming it (`source_action_id`). Such a lifecycle
+    is never rebased: its draft already had its answer."""
+    out = set()
+    for e in events:
+        if e.type == "lane_authored" and e.data.get("outcome") in PAID_OUTCOMES + ("refused",):
+            out.add(e.data.get("source_action_id") or e.data.get("action_id"))
+    return out
+
+
+def _proposed_lifecycles(events) -> set:
+    """`(source_node_id, source_signature)` of every lifecycle the lane holds a proposal from."""
+    return {(e.data.get("source_node_id"), e.data.get("source_signature"))
+            for e in events if e.type == "upstream_proposed"}
 
 
 def _repaired_ids(state, events) -> set:
@@ -183,20 +234,23 @@ def unproposed_draft(rd, events) -> Optional[tuple[dict, dict]]:
     return None
 
 
-def author_next(rd, task, state, events, *, skipped=None, active=None) -> Optional[dict]:
+def author_next(rd, task, state, events, *, skipped=None, active=None,
+                rebase=False) -> Optional[dict]:
     """The next source to author from, or None. `{"action_id", "track", "node", "rows", "archive",
-    "revision"}`.
+    "revision"}` — plus, for a REBASE pick (`rebase=True`, a source measured on an older base),
+    `"rebase": {"from_digest", "onto"}`, `"source_action_id"` and `"pending"`, with `rows` None: the
+    worker merges and nominates (`rebase_source`), off the main task.
 
     `skipped` is the caller's per-process memo, `{action_id: signature}`, ADDED TO here when it is a
-    dict. A source the lane can never take (unmeasured, built on an older base — the base only
-    advances — or with no readable archive) is memoized for good (`None`); one with no eligible
-    capability hunk is memoized against what could make one appear (`_nomination_key`), because a
-    repair hunk whose trigger nodes are still pending becomes nominable once they settle.
+    dict. A source the lane can never take (unmeasured, built on an older base with rebasing off —
+    the base only advances — or with no readable archive) is memoized for good (`None`); one with no
+    eligible capability hunk is memoized against what could make one appear (`_nomination_key`),
+    because a repair hunk whose trigger nodes are still pending becomes nominable once they settle.
     `active` is the caller's `active_base` of exactly these events (the live engine caches it)."""
     from looplab.core.errors import UpstreamRefusal
     from looplab.engine.seed_archive import verified_seed_archive
-    from looplab.engine.upstream_state import (_source_receipt, active_base, repair_probe_covers,
-                                               upstream_candidates)
+    from looplab.engine.upstream_state import (_source_receipt, active_base, node_signature,
+                                               repair_probe_covers, upstream_candidates)
     upstream = task.upstream
     if not upstream:
         return None
@@ -223,8 +277,25 @@ def author_next(rd, task, state, events, *, skipped=None, active=None) -> Option
             memo[action_id] = None
             continue
         if receipt.get("digest") != active["selector"]["digest"]:
-            memo[action_id] = None        # built on an older base: the lane refuses it as a source
-            continue
+            if not rebase or action_id in _paid_lifecycles(events) or (
+                    node.id, node_signature(node)) in _proposed_lifecycles(events):
+                # Built on an older base: the lane refuses it as a source. Rebased (doc 73 §4.3) only
+                # while nobody has proposed this lifecycle yet — a source whose capability already
+                # had its proposal (whoever wrote it, advanced or not) had its answer.
+                memo[action_id] = None
+                continue
+            # doc 73 §4.3: rebase it onto the current base — in the worker, which merges with Git.
+            rebase_id = author_rebase_action_id(node, track, active["revision"])
+            if rebase_id in ids or (rebase_id in memo and memo[rebase_id] in (None, key)):
+                continue
+            archive = verified_seed_archive(rd, receipt)
+            if archive is None:
+                memo[rebase_id] = None
+                continue
+            return {"action_id": rebase_id, "track": track, "node": node, "rows": None,
+                    "archive": archive, "revision": active["revision"], "source_action_id": action_id,
+                    "rebase": {"from_digest": receipt["digest"], "onto": dict(active["selector"])},
+                    "pending": key, "events": events}
         archive = verified_seed_archive(rd, receipt)
         if archive is None:
             memo[action_id] = None
@@ -241,6 +312,64 @@ def author_next(rd, task, state, events, *, skipped=None, active=None) -> Option
         return {"action_id": action_id, "track": track, "node": node, "rows": rows,
                 "archive": archive, "revision": active["revision"]}
     return None
+
+
+def rebase_source(rd, task, pick) -> dict:
+    """The WORKER's half of a rebase pick (doc 73 §4.3): merge the source's overlay from the base it
+    was measured on onto the current base, then nominate its capability hunks against the current
+    base. Mutates `pick` in place (`archive` becomes the current base's, `source_files` /
+    `source_deleted` the merged overlay, `rows` the nomination) and returns `{"outcome": "ready"}`, or
+    `{"outcome": "rebase_conflict", "code", "conflicts", "reason"}`, or `{"outcome": "nothing"}` when
+    the merged source nominates no capability. Appends nothing; makes no paid call."""
+    from looplab.engine.seed_base import selected_seed_base
+    from looplab.engine.upstream_state import repair_probe_covers, upstream_candidates
+    from looplab.engine.upstream_workspace import rebase_overlay
+    node = pick["node"]
+    paths = sorted(set(node.files) | set(node.deleted))
+    if len(paths) > REBASE_MAX_PATHS:
+        return {"outcome": "rebase_conflict", "code": "upstream_rebase_too_large", "conflicts": [],
+                "reason": f"the source overlay names {len(paths)} paths; at most {REBASE_MAX_PATHS} "
+                          "are merged automatically"}
+    from looplab.core.errors import ConfigRefusal
+    try:
+        new_archive, _ = selected_seed_base(pick["rebase"]["onto"])
+        files, deleted, conflicts = rebase_overlay(dict(node.files), list(node.deleted),
+                                                   pick["archive"], new_archive)
+    except (ConfigRefusal, OSError) as exc:
+        # The current base's archive or Git itself is unavailable: no merge was made and no call
+        # paid for — recorded as this base's answer (`UpstreamRefusal` is a `ConfigRefusal`).
+        return {"outcome": "rebase_conflict", "code": str(getattr(exc, "code", "") or
+                                                          "upstream_rebase_unavailable")[:80],
+                "conflicts": [], "reason": "the merge could not run: the current base's archive or "
+                                           "Git was unavailable"}
+    if conflicts:
+        return {"outcome": "rebase_conflict", "code": "upstream_rebase_conflict",
+                "conflicts": sorted(conflicts)[:AUTHOR_MAX_PATHS * 4],
+                "reason": ("a three-way merge of the source's edits (the base it was measured on → "
+                           "the run's current base) did not apply cleanly in "
+                           + ", ".join(sorted(conflicts)[:8]))[:500]}
+    pick.update(archive=new_archive, source_files=files, source_deleted=sorted(deleted))
+    overlay = {"files": files, "deleted": sorted(deleted), "archive": new_archive}
+    upstream = task.upstream or {}
+    rows = [r for r in upstream_candidates(rd, task, pick["events"], source_node_id=node.id,
+                                           overlay=overlay)["rows"]
+            if r["classification"] == "capability"
+            and (pick["track"] == "champion" or r["origin"] == "repair")
+            and not (r["origin"] == "repair" and r["pending_trigger_nodes"]
+                     and not repair_probe_covers(r, upstream.get("repair_probes", [])))]
+    if not rows:
+        return {"outcome": "nothing"}
+    pick["rows"] = rows
+    return {"outcome": "ready"}
+
+
+def _source_files(pick) -> tuple[dict, list]:
+    """The source overlay the author drafts from and the recipe copies: the merged one for a rebase
+    pick, the node's own otherwise."""
+    node = pick["node"]
+    if pick.get("rebase") is not None and "source_files" in pick:
+        return pick["source_files"], list(pick["source_deleted"])
+    return node.files, list(node.deleted)
 
 
 def _read(archive, path) -> Optional[str]:
@@ -274,6 +403,11 @@ def author_context(task, pick) -> Optional[str]:
         return None
     parts = [f"SOURCE: node #{node.id} ({pick['track']}).",
              "RATIONALE: " + " ".join(str(getattr(node.idea, "rationale", "") or "").split())[:600]]
+    files, _deleted = _source_files(pick)
+    if pick.get("rebase") is not None:
+        parts.append("REBASED: the source was measured on an older base; its edits were three-way "
+                     "merged onto the run's CURRENT base cleanly. BASE CONTENTS below are the current "
+                     "base, and the source contents are the merged ones.")
     for r in pick["rows"]:
         if r.get("repair_reason"):
             parts.append(f"REPAIR ({r['path']}): {str(r['repair_reason'])[:400]}")
@@ -281,12 +415,12 @@ def author_context(task, pick) -> Optional[str]:
                               else v for k, v in (task.upstream or {}).items()}, ensure_ascii=False)
     parts.append("UPSTREAM DECLARATION (the gate the proposal must pass): "
                  + declaration[:AUTHOR_DECLARATION_CHARS])
-    recipe = sorted(set(node.files) - set(paths))
+    recipe = sorted(set(files) - set(paths))
     if recipe:
         parts.append("SOURCE RECIPE FILES (stay with the node, copied unchanged): " + ", ".join(recipe))
     for path in paths:
         before = _read(pick["archive"], path)
-        after = node.files.get(path, "")
+        after = files.get(path, "")
         if before is None or len(before) > AUTHOR_FILE_CHARS or len(after) > AUTHOR_FILE_CHARS:
             return None
         diff = "".join(difflib.unified_diff(before.splitlines(keepends=True),
@@ -303,18 +437,23 @@ def build_body(pick, draft, critique, *, generation: str) -> dict:
     from looplab.agents.maintainer import AUTHOR_CRITIC_REVIEWER
     from looplab.engine.activation import is_config_path
     node = pick["node"]
+    files, deleted = _source_files(pick)
     patch = set(draft.files) | set(draft.deleted)
     # The SHARED implementation is the base's alone: a recipe may not carry a code path the patch
     # writes (`UpstreamLane._validate_shared_patch`). A configuration path the patch also changes
     # stays the node's, unless the draft says what the recipe needs there to turn the flag on.
     shared = {p for p in patch if not is_config_path(p)}
-    recipe = {p: t for p, t in node.files.items() if p not in shared}
+    recipe = {p: t for p, t in files.items() if p not in shared}
     recipe.update({p: t for p, t in draft.recipe_overrides.items() if p in patch and p not in shared})
-    return {"expected_generation": generation, "action_id": pick["action_id"],
+    # doc 73 §4.3: a rebased source travels with its merged overlay — what the lane recomputes before
+    # it admits the proposal and what the gate runs as the OLD side on the current base.
+    rebased = ({"rebase": {"from_digest": pick["rebase"]["from_digest"], "files": dict(files),
+                           "deleted": sorted(deleted)}} if pick.get("rebase") is not None else {})
+    return {**rebased,"expected_generation": generation, "action_id": pick["action_id"],
             "source_node_id": node.id, "expected_base_revision": pick["revision"],
             "hunk_hashes": sorted({r["hunk_hash"] for r in pick["rows"]}),
             "files": dict(draft.files), "deleted": sorted(set(draft.deleted)),
-            "recipe_files": recipe, "recipe_deleted": sorted(set(node.deleted) - shared),
+            "recipe_files": recipe, "recipe_deleted": sorted(set(deleted) - shared),
             "summary": draft.summary, "flag": draft.flag.model_dump(),
             "documentation_path": draft.documentation_path,
             "critic": {"verdict": critique.verdict, "reason": critique.reason,

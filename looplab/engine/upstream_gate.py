@@ -167,9 +167,30 @@ def waives_equivalence(declaration, proposal) -> bool:
             and proposal.get("repair_only") is True)
 
 
+def old_side_overlay(source, proposal, manifest):
+    """The SOURCE the gate's old side runs on the current base: the node's own overlay, or — for a
+    proposal whose source was measured on an older base and REBASED (doc 73 §4.3) — the merged overlay
+    the manifest carries, bound to the proposal row by its hash. A manifest whose merged overlay does
+    not match that hash refuses: the old side would not be the source the lane admitted."""
+    rebase = manifest.get("rebase") if isinstance(manifest, dict) else None
+    if not proposal.get("rebased_from"):
+        return source.files, source.deleted
+    if (not isinstance(rebase, dict) or rebase.get("from_digest") != proposal["rebased_from"]
+            or digest({"files": rebase.get("files"), "deleted": rebase.get("deleted")})
+            != proposal.get("source_overlay_hash")):
+        raise UpstreamRefusal("upstream_rebase_changed", "The proposal's merged source overlay changed; propose again")
+    return rebase["files"], rebase["deleted"]
+
+
 def execute_gate(rd, task, settings, source, proposal, manifest, action_id, charge, *, extra_env=None):
     from looplab.engine.shared import effective_eval_spec, effective_max_eval_timeout
     spec, declaration = task.repo_spec(), task.upstream
+    # THE OLD SIDE (doc 73 §4.3): the source as the lane admitted it — rebased onto the current base
+    # when the base moved past its measurement. Under `full` it must still reproduce the source's own
+    # measured score, so a merge that changed the source's behaviour fails the gate rather than
+    # comparing two things the source never measured.
+    source_files, source_deleted = old_side_overlay(source, proposal, manifest)
+    rebased = bool(proposal.get("rebased_from"))
     before = input_identity(task, settings, source, proposal)
     old_archive, _ = selected_seed_base(proposal["old_selector"])
     baseline_boundary = boundary_at(old_archive, spec["scorer_boundary"])
@@ -290,7 +311,7 @@ def execute_gate(rd, task, settings, source, proposal, manifest, action_id, char
         declared = canary_spec(task.eval_spec())
         values = [[], []]
         for side, selector, files, deleted in (
-            (0, proposal["old_selector"], source.files, source.deleted),
+            (0, proposal["old_selector"], source_files, source_deleted),
             (1, proposal["selector"], manifest["recipe_files"], manifest.get("recipe_deleted", []))):
             r = run(("old-canary" if side == 0 else "new-canary") + "0", selector, files, deleted,
                     canary=declared)
@@ -307,11 +328,12 @@ def execute_gate(rd, task, settings, source, proposal, manifest, action_id, char
         return {"passed": before == after and all(c["passed"] for c in checks),
                 "input_identity": before, "inputs_unchanged": before == after, "checks": checks,
                 "executions": executions, "eval_seconds": sum(r["seconds"] for r in executions),
-                "scope": "declared scorer, old recipes, trigger probes and one canary pair"}
+                "scope": "declared scorer, old recipes, trigger probes and one canary pair"
+                         + (" (source rebased onto the current base)" if rebased else "")}
     values = [[], []]
     for repeat in range(declaration["repeats"]):
         for side, selector, files, deleted in (
-            (0, proposal["old_selector"], source.files, source.deleted),
+            (0, proposal["old_selector"], source_files, source_deleted),
             (1, proposal["selector"], manifest["recipe_files"], manifest.get("recipe_deleted", []))):
             r = run(("old-source" if side == 0 else "new-source") + str(repeat), selector, files, deleted)
             if r["valid"] and r["exit_code"] == 0:
@@ -331,4 +353,5 @@ def execute_gate(rd, task, settings, source, proposal, manifest, action_id, char
     return {"passed": before == after and all(c["passed"] for c in checks),
             "input_identity": before, "inputs_unchanged": before == after, "checks": checks,
             "executions": executions, "eval_seconds": sum(r["seconds"] for r in executions),
-            "scope": "declared scorer, old recipes, trigger probes and full source repetitions"}
+            "scope": "declared scorer, old recipes, trigger probes and full source repetitions"
+                     + (" (source rebased onto the current base)" if rebased else "")}

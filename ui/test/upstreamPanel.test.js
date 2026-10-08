@@ -226,3 +226,45 @@ test('an off lane says why and shows no queue', () => {
     upstream_live: { ...live, configured: true } } }), /as configured; no engine has confirmed it yet/)
   assert.doesNotMatch(markup, /queued operations waiting/)
 })
+
+// ------------------------------------------------------- the automation's hold (doc 73 §4.2 G2-G4, §4.3)
+test('the switch, the caps, the held steps and a rebased draft are stated, never invented', () => {
+  const markup = harness.render(UpstreamPanel, { state: { nodes: {}, upstream_enabled: true,
+    upstream_history: [], upstream_live: { ...live, auto_paused: true, author_spent_usd: 0.42,
+      author_usd_cap: 2, advances_per_hour: 2, advances_last_hour: 1,
+      held: [{ seq: 50, op: 'advance', reason: 'rate_cap:2/h', proposal_id: 'up_x', waiting: true },
+        { seq: 51, op: 'author', reason: 'cost_cap:2usd', waiting: false }],
+      authored: [...live.authored, { seq: 42, action_id: 'auto-rebase-c', track: 'champion',
+        source_node_id: 7, outcome: 'drafted', rebased: true },
+      { seq: 43, action_id: 'auto-rebase-d', track: 'repair', source_node_id: 8,
+        outcome: 'rebase_conflict', rebased: true }] } } })
+  assert.match(markup, /Automation stopped by the operator/)
+  assert.match(markup, /Author spend: \$0\.42 of \$2\.00/)
+  assert.match(markup, /Automatic advances in the last hour: 1 of 2/)
+  assert.match(markup, /rate_cap:2\/h<\/code>.*still waiting/)
+  assert.match(markup, /cost_cap:2usd<\/code>.*released/)
+  assert.match(markup, /#7 · champion · drafted → proposal.*rebased onto the newer base/)
+  assert.match(markup, /its code conflicts with the newer base — skipped/)
+  const older = harness.render(UpstreamPanel, { state: { nodes: {}, upstream_enabled: true,
+    upstream_history: [], upstream_live: { ...live, author_spent_usd: 0.42 } } })
+  assert.match(older, /Author spend so far: \$0\.42/, 'an older payload names no cap')
+  assert.doesNotMatch(older, /in the last hour|rebased onto|still waiting/)
+  assert.deepEqual(harness.fetch.calls, [])
+})
+
+test('the hold reads in Russian from the same projection', async () => {
+  window.localStorage.setItem('looplab.language', 'ru')
+  const mounted = await harness.mount(UpstreamPanel, { state: { nodes: {}, upstream_enabled: true,
+    upstream_history: [], upstream_live: { ...live, author_spent_usd: 0.5, author_usd_cap: 2,
+      advances_per_hour: 2, advances_last_hour: 0,
+      authored: [{ seq: 44, action_id: 'auto-rebase-e', track: 'champion', source_node_id: 9,
+        outcome: 'rebase_conflict', rebased: true }],
+      held: [{ seq: 52, op: 'advance', reason: 'rate_cap:2/h', waiting: true }] } } })
+  try {
+    await until(() => /Расход автора: \$0\.50 из \$2\.00/.test(mounted.container.textContent))
+    const text = mounted.container.textContent
+    assert.match(text, /Автоматических продвижений за последний час: 0 из 2/)
+    assert.match(text, /перенесён на новую базу/)
+    assert.doesNotMatch(text, /its code conflicts|still waiting|rebased onto/)
+  } finally { await mounted.unmount() }
+})

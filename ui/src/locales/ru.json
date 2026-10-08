@@ -1,7 +1,7 @@
 {
   "schema": 1,
   "language": "ru",
-  "count": 7710,
+  "count": 7723,
   "messages": {
     "# LoopLab run report — {0}": "# Отчёт запуска LoopLab — {0}",
     "## Agent narrative (advisory)": "## Пояснения агента (рекомендации)",
@@ -7712,7 +7712,20 @@
     "advance failed": "обновление базы не удалось",
     "automatic check refused by the lane, not asked again": "автоматическая проверка отклонена полосой и больше не запрашивается",
     "automatic advance refused by the lane, not asked again": "автоматическое обновление базы отклонено полосой и больше не запрашивается",
-    "no engine is serving this run now; this is the mode it last served": "сейчас движок не обслуживает запуск; так он работал в последний раз"
+    "no engine is serving this run now; this is the mode it last served": "сейчас движок не обслуживает запуск; так он работал в последний раз",
+    "Author spend: ${0} of ${1}": "Расход автора: ${0} из ${1}",
+    "Automatic advances in the last hour: {0} of {1}": "Автоматических продвижений за последний час: {0} из {1}",
+    "rebased onto the newer base": "перенесён на новую базу",
+    "its code conflicts with the newer base — skipped": "его код конфликтует с новой базой — пропущен",
+    "still waiting": "ещё ждёт",
+    "Rebase upstream sources the base moved past": "Переносить на новую базу источники, измеренные на старой",
+    "Only when the engine drafts upstream proposals itself (upstream mode auto). A repaired experiment or the champion measured on an older base than the run's current one is merged onto the current base (a three-way merge of its edits). A clean merge is drafted like any source and its check measures the merged code on the current base; a conflict is recorded and that source is skipped. Off: such sources are skipped, as before.": "Только когда движок сам пишет предложения upstream (режим auto). Отремонтированный эксперимент или чемпион, измеренный на более старой базе, чем текущая база запуска, переносится на текущую базу (трёхстороннее слияние его правок). Чистое слияние идёт в черновик как обычный источник, и проверка измеряет слитый код на текущей базе; конфликт записывается, и этот источник пропускается. Выключено: такие источники пропускаются, как раньше.",
+    "Rebase stale sources": "Переносить устаревшие источники",
+    "Merge a source measured on an older base onto the current one before drafting.": "Слить источник, измеренный на старой базе, с текущей базой перед черновиком.",
+    "Upstream notices for external coding agents": "Уведомления upstream для внешних агентов-программистов",
+    "When the live engine advances the base, a Claude Code developer agent already at work hears the notice through its own after-tool hook (once, at most three per session, recorded when the hook delivered it). Every external coding agent's next call also lists the capabilities promoted so far. Off: external agents are told nothing.": "Когда живой движок продвигает базу, уже работающий агент-разработчик Claude Code получает уведомление через собственный хук после вызова инструмента (один раз, не более трёх за сессию; доставка записывается, когда хук её выполнил). Следующий вызов любого внешнего агента также перечисляет уже продвинутые возможности. Выключено: внешним агентам ничего не сообщается.",
+    "Notices for external agents": "Уведомления для внешних агентов",
+    "Tell external coding agents about base advances, mid-session where their CLI allows.": "Сообщать внешним агентам о продвижениях базы — посреди сессии, где это позволяет их CLI."
   },
   "plurals": {
     "({0} paraphrases folded)": {

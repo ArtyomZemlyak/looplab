@@ -10,7 +10,6 @@ looplab resume          Resume/continue a run (crash, stopped, or finished) by r
 looplab stop            Stop a run: freeze it, NO wrap-up (resumable)
 looplab finalize        Finalize a run: stop AND wrap up (report/lessons/cost)
 looplab repair-log      Repair a mid-file-corrupted event log (FUSE/NFS/S3)
-looplab upstream-auto   Switch a run's upstream automation off/on (the kill switch)
 looplab inspect         Show the raw launch snapshot + current folded best result
 looplab comparability   What each run's number may be RANKED against — refuses across evaluations
 looplab replay          Pure fold of the event log → state (read-only)
@@ -66,6 +65,7 @@ looplab import-metrics  Import metrics measured AFTER the run beside each node's
 looplab evaluate-track  Run a declared eval.tracks evaluator over settled nodes' workdirs (offline, append-only)
 looplab smoke           Ping the configured LLM endpoint (self-test)
 looplab approve         Ratify a paused run (HITL / onboarding)
+looplab upstream-auto   The upstream automation's kill switch: off|on, same control event as /commands (doc 73 §4.3)
 looplab bench           Capability self-benchmark across tasks
 looplab ui              Serve the live React UI (needs the [ui] extra)
 looplab tui             Terminal control plane: start/steer runs by chat (no browser)
@@ -686,21 +686,6 @@ deletion path takes `engine.lock` itself before it touches anything, so a live e
 with `engine_running` whatever state its finalization is in.
 
 ---
-
-## `upstream-auto`
-
-The kill switch of a run's **automatic** upstream steps (doc 73 §4.2 G2): the automated author's
-drafts and the engine's own checks and base advances. It appends the same `upstream_auto_set` control
-the UI, the API and MCP send through `/commands`; the fold keeps the last one
-(`RunState.upstream_auto_paused`), so it works on a live run (the engine stops on its next turn) or a
-stopped one (it stays off after `resume`). An operation the operator queued is still served, and an
-automatic step already running finishes. `looplab inspect` prints the switch beside the lane's mode,
-queue, the author's drafts and spend, and any step a cap held back.
-
-```bash
-looplab upstream-auto RUN_DIR --off --reason "reviewing the last promotion"
-looplab upstream-auto RUN_DIR --on
-```
 
 ## `repair-log`
 
@@ -2851,6 +2836,27 @@ looplab approve RUN_DIR [--node-id N]
 
 For final-result approval, omitting `--node-id` approves the exact pending approval subject recorded in
 the event log; it does not recompute the current best. `--node-id` does not apply to eval-spec approval.
+
+---
+
+## `upstream-auto`
+
+The kill switch of every AUTOMATIC upstream step of a run (doc 73 §4.2 G2; from a terminal since
+doc 73 §4.3). `off` stops the live engine's automated author (fixes from repairs, the champion's capability)
+and its automatic check and advance; operations an operator queues are still served. `on` resumes them.
+
+```bash
+looplab upstream-auto RUN_DIR off --reason "GPU budget review"
+looplab upstream-auto RUN_DIR on
+```
+
+It appends the SAME control intent the UI, the API and MCP append through `/commands`
+(`upstream_auto_set {enabled, reason}`), validated by the same payload rule
+(`engine/upstream_switch.py::normalize_upstream_auto_set`; a reason is at most 300 characters). A
+running engine reads it at its next turn; a stopped run keeps it for its next engine. A corrupt log is
+refused before anything is appended. `looplab inspect RUN_DIR` prints the switch, the steps a cap held
+back (and whether each still waits), the author's spend against `upstream_author_usd` and the
+automatic advances of the last hour against `upstream_advances_per_hour`.
 
 ---
 

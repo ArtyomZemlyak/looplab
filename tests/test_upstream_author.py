@@ -325,22 +325,19 @@ def test_the_kill_switch_from_the_cli_and_the_inspect_lines(tmp_path, monkeypatc
     from looplab.cli import app
     lane, store, generation, body = fixture(tmp_path)
     runner = CliRunner()
-    off = runner.invoke(app, ["upstream-auto", str(lane.rd), "--off", "--reason", "reviewing"])
+    off = runner.invoke(app, ["upstream-auto", str(lane.rd), "off", "--reason", "  reviewing "])
     assert off.exit_code == 0, off.output
     row, = [e.data for e in store.read_all() if e.type == "upstream_auto_set"]
-    assert row == {"enabled": False, "reason": "reviewing"}
+    assert row == {"enabled": False, "reason": "reviewing"}, "stripped, as the control intake does"
     assert fold(store.read_all()).upstream_auto_paused is True
-    again = runner.invoke(app, ["upstream-auto", str(lane.rd), "--off"])
-    assert "already off" in again.output and len([e for e in store.read_all()
-                                                   if e.type == "upstream_auto_set"]) == 1
     calls = []
     _model(monkeypatch, _champion_draft(), calls=calls)
     _serve(_live_engine(lane, store), turns=3)
     assert calls == [], "the switch holds the author"
     shown = runner.invoke(app, ["inspect", str(lane.rd)])
-    assert "upstream lane: auto" in shown.output and "automation OFF" in shown.output, shown.output
+    assert "upstream automation: mode auto" in shown.output and "switch: OFF" in shown.output, shown.output
     assert "no engine serving it now" in shown.output, "the armed mode of an engine that is gone"
-    assert runner.invoke(app, ["upstream-auto", str(lane.rd), "--on"]).exit_code == 0
+    assert runner.invoke(app, ["upstream-auto", str(lane.rd), "on"]).exit_code == 0
     assert fold(store.read_all()).upstream_auto_paused is False
 
 
@@ -354,15 +351,15 @@ def test_the_cli_reason_is_normalized_like_the_control_intake_and_refusals_go_to
     from looplab.events.eventstore import EventStore
     lane, store, generation, body = fixture(tmp_path)
     runner = CliRunner()
-    assert runner.invoke(app, ["upstream-auto", str(lane.rd), "--off", "--reason", "   "]).exit_code == 0
-    assert runner.invoke(app, ["upstream-auto", str(lane.rd), "--on", "--reason", "  back  "]).exit_code == 0
+    assert runner.invoke(app, ["upstream-auto", str(lane.rd), "off", "--reason", "   "]).exit_code == 0
+    assert runner.invoke(app, ["upstream-auto", str(lane.rd), "on", "--reason", "  back  "]).exit_code == 0
     rows = [e.data for e in store.read_all() if e.type == "upstream_auto_set"]
     assert rows == [{"enabled": False}, {"enabled": True, "reason": "back"}]
 
     def fenced(self, *a, **k):
         raise RunResetFenceError("Replay op_123 is unresolved")
     monkeypatch.setattr(EventStore, "append", fenced)
-    refused = runner.invoke(app, ["upstream-auto", str(lane.rd), "--off"])
+    refused = runner.invoke(app, ["upstream-auto", str(lane.rd), "off"])
     assert refused.exit_code == 2, refused.output
     assert "Replay op_123 is unresolved" in refused.stderr and "Traceback" not in refused.output
 

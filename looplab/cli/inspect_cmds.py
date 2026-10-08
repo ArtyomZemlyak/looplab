@@ -519,9 +519,9 @@ def inspect(run_dir: Path = typer.Argument(...)):
                        f"{len(_carrying)} of {len(_carrying) + len(_unranked)} evaluated node(s) "
                        "carry it on the declared channel"
                        + (f"; UNRANKED: {_shown}" if _unranked else ""))
-        # THE UPSTREAM BOARD (doc 73 §2.3), then copy-outs left open (critic c3 item 7); [] if none.
-        from looplab.engine.upstream_serve import upstream_board_lines
-        for _line in [*upstream_board_lines(run_dir, state, all_events), *unfinished_sync_lines(all_events)]:
+        # THE UPSTREAM BOARD (doc 73 §2.3) and its automation (doc 73 §4.3), then copy-outs left open.
+        from looplab.engine.upstream_switch import upstream_inspect_lines
+        for _line in [*upstream_inspect_lines(run_dir, state, all_events), *unfinished_sync_lines(all_events)]:
             typer.echo(_line)
         _best = state.best()
         _record = comparability_record_of(_best) if _best is not None else None
