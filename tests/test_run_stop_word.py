@@ -34,6 +34,9 @@ READERS = {
     "events/finalize_scope.py",
     "serve/run_commands.py", "serve/appstate.py", "serve/command_observation.py",
     "serve/control_validation.py",
+    # `engine/track_lane.py::_search_ended` (review 2026-10-08): which finishes a queued track (and
+    # the live upstream lane's operation in flight) hold back — a guarded abort is never one of them.
+    "engine/track_lane.py",
     # `events/finalize_scope.py` is BOTH the helper's home and a reader (its two fold-scope
     # clauses ask the same question), so unlike `core/models.py` it stays in the set.
     "events/finalize_scope.py",

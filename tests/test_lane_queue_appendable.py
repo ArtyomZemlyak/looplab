@@ -24,6 +24,7 @@ from looplab.events.types import (ALL_EVENT_TYPES, ASSISTANT_APPENDABLE, BACKGRO
                                    DIAGNOSTIC_EVENTS, EV_LANE_OP_REQUESTED, LANE_QUEUE_APPENDABLE,
                                    NON_CARD_SELECTION_BACKGROUND_APPENDABLE, SETUP_THREAD_APPENDABLE)
 from looplab.serve.protocol import CONTROL_EVENTS
+from _source_scan import iter_trees
 
 PKG = Path(__file__).resolve().parents[1] / "looplab"
 
@@ -41,8 +42,7 @@ def _writers() -> set[str]:
     """`<module>::<function>` of every call whose first argument names the queue row — the
     `EV_LANE_OP_REQUESTED` constant or its literal — by AST, so a comment can satisfy nothing."""
     found = set()
-    for path in PKG.rglob("*.py"):
-        tree = ast.parse(path.read_text(encoding="utf-8-sig"))
+    for path, tree in iter_trees(PKG):
         for fn in ast.walk(tree):
             if not isinstance(fn, (ast.FunctionDef, ast.AsyncFunctionDef)):
                 continue
