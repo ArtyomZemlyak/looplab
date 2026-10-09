@@ -256,12 +256,27 @@ def live_queue(events, cursor: Optional[int] = None) -> dict:
 
 
 LIVE_AUTHORED_ROWS = 20
+# The engine's own automatic advances whose TIMESTAMPS the cached live body carries, newest last, so
+# the serve layer can count the last hour against ITS clock (`live_view_at`). Well above any hourly
+# cap an operator sets (default 2); past it the count is a floor, never an invention.
+LIVE_ADVANCE_TS_ROWS = 64
+LIVE_ADVANCE_TS_KEY = "auto_advance_ts"
 
 
-def upstream_live_view(run_dir, events, *, cursor: Optional[int] = None,
-                       now: Optional[float] = None) -> Optional[dict]:
-    """What the UI shows of the live lane (`serve/appstate.py`'s state payload, `upstream_live`): the
-    mode this run serves and why, its queue with receipts, and the automated author's last rows.
+def _armed_cap(data: dict, key: str, kind):
+    """One cap off the `lane_armed` row, or None when that engine did not record it (a row written
+    before the caps rode on it) — unknown, never a guessed 0 that would read as "no cap"."""
+    value = data.get(key)
+    if kind is int:
+        return value if type(value) is int and value >= 0 else None
+    return float(value) if type(value) in (int, float) and 0 <= value < float("inf") else None
+
+
+def upstream_live_body(run_dir, events, *, cursor: Optional[int] = None) -> Optional[dict]:
+    """What the UI shows of the live lane (`serve/appstate.py`'s state payload, `upstream_live`), as
+    a PURE function of `events` — the server caches it with the log's identity (`/state`, the SSE
+    `state_delta` frames), so nothing in it may read the wall clock or a file the log does not pin:
+    the mode this run serves and why, its queue with receipts, and the automated author's last rows.
     None for a run that declares no upstream block and queued nothing — the payload keeps its shape.
 
     THE MODE IS THE ENGINE'S, not the snapshot's: an engine records what it armed with on the
@@ -271,27 +286,33 @@ def upstream_live_view(run_dir, events, *, cursor: Optional[int] = None,
     engine never armed falls back to its launched settings and the `run_started` declaration, marked
     `configured: true`.
 
-    THE CAPS (doc 73 §4.3) are the launched settings' — the snapshot every engine of this run arms
-    with (`run_settings`): `author_usd_cap` and `advances_per_hour` (0 = no cap) beside what they
-    bound, `author_spent_usd` and `advances_last_hour` (the engine's own advances in the hour before
-    `now`, wall clock by default). Each held step says whether it still `waiting`; `switch` is the
-    row that last set the kill switch."""
+    THE CAPS (doc 73 §4.3) are the ones that engine ARMED with, off the same row: `author_usd_cap`
+    and `advances_per_hour` (0 = no cap; None on a row written before they rode on it) beside what
+    they bound, `author_spent_usd` and the engine's own automatic advances. Those are carried as
+    their raw timestamps (`auto_advance_ts`): "the last hour" is a fact of the moment a reader asks,
+    so `live_view_at` counts it at SERVE time, exactly as `engine_running` is stamped. Each held
+    step says whether it still `waiting`; `switch` is the row that last set the kill switch."""
     started = next((e for e in events if e.type == "run_started"), None)
     upstream = started.data.get("upstream") if started is not None else None
     upstream = upstream if isinstance(upstream, dict) and upstream else None
     if upstream is None and not any(e.type == "lane_op_requested" for e in events):
         return None
     armed = armed_row(events)
-    settings = run_settings(run_dir)
     if armed is not None:
         mode = armed.data.get("mode") if armed.data.get("mode") in UPSTREAM_MODES else "off"
         reason, author, configured = str(armed.data.get("reason") or ""), armed.data.get("author") is True, False
+        cap_usd = _armed_cap(armed.data, "author_usd_cap", float)
+        per_hour = _armed_cap(armed.data, "advances_per_hour", int)
     else:
-        from looplab.engine.upstream_author import upstream_author_setting
+        # No engine armed yet: what the launched settings SAY (`configured: true`), caps included.
+        from looplab.engine.upstream_author import author_usd_cap, upstream_author_setting
+        settings = run_settings(run_dir)
         mode, reason = (resolve_upstream_mode(settings, upstream) if settings is not None
                         else ("off", "no readable config snapshot"))
         author, configured = mode == "auto" and upstream_author_setting(settings), True
-    from looplab.engine.upstream_author import author_spent_usd, author_usd_cap
+        cap_usd = author_usd_cap(settings) if settings is not None else 0.0
+        per_hour = advances_per_hour(settings) if settings is not None else 0
+    from looplab.engine.upstream_author import author_spent_usd
     authored = [{"seq": e.seq, "action_id": e.data.get("action_id"), "track": e.data.get("track"),
                  "source_node_id": e.data.get("source_node_id"), "outcome": e.data.get("outcome"),
                  # doc 73 §4.3: drafted from a source the base had moved past (merged onto it).
@@ -303,23 +324,32 @@ def upstream_live_view(run_dir, events, *, cursor: Optional[int] = None,
     # (this body caches with it): the UI reads it beside, off the payload's `engine_running`.
     switch = next((e for e in reversed(events) if e.type == "upstream_auto_set"
                    and type(e.data.get("enabled")) is bool), None)
-    advanced = {e.data.get("proposal_id") for e in events if e.type == "base_advanced"}
+    advances = [e for e in events if e.type == "base_advanced"]
+    advanced = {e.data.get("proposal_id") for e in advances}
+    last_advance_seq = max((e.seq for e in advances), default=None)
+    refused = refused_for_good(events)
     spent = author_spent_usd(events)
-    cap_usd = author_usd_cap(settings) if settings is not None else 0.0
-    per_hour = advances_per_hour(settings) if settings is not None else 0
 
     def _waiting(e) -> bool:
         # A held advance waits until its proposal advanced; the author until its budget grows. A
-        # proposal the lane refused FOR GOOD (`refused:<code>`) waits for nothing: it is passed over.
-        if str(e.data.get("reason") or "").startswith(REFUSED_PREFIX):
+        # proposal the lane refused FOR GOOD (`refused:<code>`) waits for nothing: it is passed
+        # over — and so does an earlier cap row of a proposal refused since.
+        op, pid = e.data.get("op"), e.data.get("proposal_id")
+        if str(e.data.get("reason") or "").startswith(REFUSED_PREFIX) or (op, pid) in refused:
             return False
-        if e.data.get("op") == "advance":
-            return e.data.get("proposal_id") not in advanced
+        if op == "advance":
+            # SUPERSEDED: `auto_next_op` nominated it against the base current at the hold, and a
+            # base revision names its advance's seq (`upstream_state.py::active_base`), so ANY later
+            # advance — another proposal's, or the operator's — moved the base past this proposal's
+            # `expected_base_revision`; `auto` never asks it again, so it waits for nothing.
+            return pid not in advanced and (last_advance_seq is None or last_advance_seq < e.seq)
         return bool(cap_usd) and spent >= cap_usd
     held = [{"seq": e.seq, "op": e.data.get("op"), "reason": e.data.get("reason"),
              **({"proposal_id": e.data["proposal_id"]} if e.data.get("proposal_id") else {}),
              "waiting": _waiting(e)}
             for e in events if e.type == "lane_held"]
+    auto_ts = [float(e.ts or 0.0) for e in advances if e.data.get("in_engine") is True
+               and str(e.data.get("action_id") or "").startswith("auto-advance-")]
     return {"mode": mode, "reason": reason, "author": author, "configured": configured,
             "queue": live_queue(events, cursor), "authored": authored[-LIVE_AUTHORED_ROWS:],
             "authored_total": len(authored),
@@ -330,7 +360,31 @@ def upstream_live_view(run_dir, events, *, cursor: Optional[int] = None,
                        if switch is not None else None),
             "held": held[-LIVE_AUTHORED_ROWS:], "author_spent_usd": round(spent, 6),
             "author_usd_cap": cap_usd, "advances_per_hour": per_hour,
-            "advances_last_hour": auto_advances_in_window(events, time.time() if now is None else now)}
+            LIVE_ADVANCE_TS_KEY: auto_ts[-LIVE_ADVANCE_TS_ROWS:]}
+
+
+def live_view_at(body: Optional[dict], now: Optional[float]) -> Optional[dict]:
+    """`upstream_live_body` as served at `now`: a COPY whose raw advance timestamps are replaced by
+    `advances_last_hour`, the engine's own automatic advances in the hour before `now` (the same
+    window `auto_advances_in_window` holds the engine to). `now=None` — a historical `upto_seq`
+    read, which is neither then nor now — answers None, and the UI says nothing about the hour."""
+    if body is None:
+        return None
+    out = {key: value for key, value in body.items() if key != LIVE_ADVANCE_TS_KEY}
+    stamps = body.get(LIVE_ADVANCE_TS_KEY)
+    out["advances_last_hour"] = (None if now is None or not isinstance(stamps, list)
+                                 else sum(1 for ts in stamps if ts >= now - 3600.0))
+    return out
+
+
+def upstream_live_view(run_dir, events, *, cursor: Optional[int] = None,
+                       now: Optional[float] = None) -> Optional[dict]:
+    """The live lane at `now` (wall clock by default) — `upstream_live_body` then `live_view_at`,
+    for a reader that asks once and caches nothing (`looplab inspect`). The server builds the body
+    with the cached payload and stamps the hour per serve instead
+    (`serve/appstate.py::state_payload`)."""
+    return live_view_at(upstream_live_body(run_dir, events, cursor=cursor),
+                        time.time() if now is None else now)
 
 
 def claims_unresolved(events) -> bool:
@@ -955,9 +1009,15 @@ async def serve_upstream_requests(engine, state) -> bool:
         from looplab.engine.upstream_author import upstream_author_setting
         serve.announced = True
         async with engine._write_lock:
+            # The caps ride on the row (doc 73 §4.3) because they are what THIS engine enforces
+            # until it restarts: a reader showing them beside the hour's count reads them here,
+            # never off the snapshot a `PUT /config` may have edited since (`upstream_live_body`).
+            from looplab.engine.upstream_author import author_usd_cap
             engine.store.append("lane_armed", {
                 "mode": armed["mode"], "reason": armed["reason"],
-                "author": armed["mode"] == "auto" and upstream_author_setting(armed["settings"])})
+                "author": armed["mode"] == "auto" and upstream_author_setting(armed["settings"]),
+                "author_usd_cap": author_usd_cap(armed["settings"]),
+                "advances_per_hour": advances_per_hour(armed["settings"])})
     if done < len(requests):
         request = requests[done]
         if armed["mode"] == "off":

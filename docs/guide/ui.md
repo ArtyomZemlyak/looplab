@@ -1403,11 +1403,17 @@ with no invented original identity. Measured base provenance tolerates unreadabl
 its existing separate recorded-base fallback must still match the measured digest.
 This is a diagnostic hint: read current upstream evidence before retrying or advancing the base.
 The panel also shows the LIVE lane (doc 73 §2.5) from the state payload's `upstream_live`
-(`engine/upstream_serve.py::upstream_live_view`, absent on a run with no upstream block): the mode
-the run serves and why (`off` / `propose` / `auto`, from its launched settings), the queued
-propose/check/advance operations with each receipt (`lane_op_requested` / `lane_op_done`), and the
-automated author's rows (`lane_authored`: source node, fix or champion, drafted / declined /
-skipped / failed). `ui/src/upstreamLiveModel.js` drops a malformed row rather than show it.
+(`engine/upstream_serve.py::upstream_live_body`, absent on a run with no upstream block): the mode
+the run serves and why (`off` / `propose` / `auto`, as the last engine armed it on its `lane_armed`
+row; launched settings only before any engine armed), the queued propose/check/advance operations
+with each receipt (`lane_op_requested` / `lane_op_done`), and the automated author's rows
+(`lane_authored`: source node, fix or champion, drafted / declined / skipped / failed). The body is
+a pure function of the log and caches with it: the caps (`author_usd_cap`, `advances_per_hour`)
+are the ones the engine armed with, and `advances_last_hour` is counted per serve
+(`live_view_at`, `null` on a historical read), like `engine_running`. A held step reads "still
+waiting" only while the engine may still take it — a held advance the base moved past, or one the
+lane refused (`refused:<code>`), does not, and a refused row shows no held state at all.
+`ui/src/upstreamLiveModel.js` drops a malformed row rather than show it.
 Assistant command suggestions use
 `AssistantBar.jsx::suggestionPop` and `.cmdbar-pop`, not the retired `.cmd-suggest` styles.
 Run `npm run check:bundle` after building: passing a route budget does not imply the

@@ -1393,6 +1393,7 @@ def build_router(srv) -> APIRouter:
         async def gen():
             last_sent = -2
             last_alive = None
+            last_lane_hour = None
             last_generation = None
             last_event_count = None
             last_beat = time.monotonic()
@@ -1409,7 +1410,10 @@ def build_router(srv) -> APIRouter:
             KEEPALIVE = 15.0
             # engine_running is a post-fold liveness probe with no seq of its own: a run that dies
             # AFTER its last event (a zombie) never advances seq, so also re-emit when liveness flips,
-            # else the stalled/zombie UI never updates over a live stream.
+            # else the stalled/zombie UI never updates over a live stream. The live upstream lane's
+            # "advances in the last hour" is the other serve-time stamp with no seq of its own
+            # (`upstream_serve.py::live_view_at`): an advance AGING OUT of the hour changes the
+            # payload with nothing appended, so a change of it re-emits too.
             # Initial snapshot so a fresh/reconnecting client is immediately correct.
             while True:
                 if await request.is_disconnected():
@@ -1421,13 +1425,17 @@ def build_router(srv) -> APIRouter:
                 if not await anyio.to_thread.run_sync(_same_stream_run):
                     break
                 alive = payload["state"].get("engine_running")
+                lane = payload["state"].get("upstream_live")
+                lane_hour = lane.get("advances_last_hour") if isinstance(lane, dict) else None
                 generation = payload.get(RUN_GENERATION_FIELD)
                 event_count = payload.get("event_count")
                 if (payload["seq"] != last_sent or alive != last_alive
+                        or lane_hour != last_lane_hour
                         or generation != last_generation or event_count != last_event_count):
                     same_generation = generation == last_generation
                     last_sent = payload["seq"]
                     last_alive = alive
+                    last_lane_hour = lane_hour
                     last_generation = generation
                     last_event_count = event_count
                     last_beat = time.monotonic()

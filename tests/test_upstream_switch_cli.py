@@ -67,7 +67,10 @@ def test_one_rule_answers_both_doors(data):
 
 def test_inspect_prints_the_switch_the_held_steps_the_spend_and_the_hourly_advances(tmp_path):
     lane, store, generation, body = fixture(tmp_path)
-    store.append("lane_armed", {"mode": "auto", "reason": "", "author": True})
+    # The row a live engine writes since the caps rode on it (review 2026-10-09): the view reads
+    # the caps that engine ENFORCES here, never off a snapshot edited since.
+    store.append("lane_armed", {"mode": "auto", "reason": "", "author": True,
+                                "author_usd_cap": 2.0, "advances_per_hour": 2})
     store.append("lane_authored", {"action_id": "auto-author-a", "track": "champion", "source_node_id": 0,
                                    "outcome": "declined", "cost_usd": 0.25})
     store.append("base_advanced", {"action_id": "auto-advance-up_1", "proposal_id": "up_1", "in_engine": True,

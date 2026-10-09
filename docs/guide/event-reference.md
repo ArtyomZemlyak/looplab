@@ -23,7 +23,7 @@ The event type itself is the contract's identity and is never renamed or reused;
 
 <!-- generated: event types -->
 
-187 event types — 130 folded into `RunState`, 57 diagnostic; 1229 declared payload keys; 32 types whose whole payload is stored by the fold.
+187 event types — 130 folded into `RunState`, 57 diagnostic; 1231 declared payload keys; 32 types whose whole payload is stored by the fold.
 
 | type | fold | records | required keys | optional keys |
 |---|---|---|---|---|
@@ -117,7 +117,7 @@ The event type itself is the contract's identity and is never renamed or reused;
 | `inject_done` | folded | The fulfillment receipt for one `inject_node` request. | `idx` | — |
 | `inject_failed` | diagnostic | An `inject_node` request that could not be materialized, with the reason. | `error`, `idx`, `reason` | — |
 | `inject_node` | folded · whole | An operator-authored node: its idea and code, or a branch of an existing (possibly foreign) node. | — | `code`, `deleted`, `files`, `forked_from`, `idea`, `node_kind`, `origin`, `parent_generations`, `parent_id`, `parent_ids`, `uses`, `uses_attempts` |
-| `lane_armed` | diagnostic | A live engine armed the upstream lane: the mode it serves until it restarts, and why. | `author`, `mode`, `reason` | — |
+| `lane_armed` | diagnostic | A live engine armed the upstream lane: the mode it serves until it restarts, and why, with the caps it enforces. | `author`, `mode`, `reason` | `advances_per_hour`, `author_usd_cap` |
 | `lane_authored` | diagnostic | The upstream author settled one source lifecycle: drafted, declined, skipped, failed, or its rebase conflicted. | `action_id`, `outcome`, `source_node_id`, `track` | `code`, `conflicts`, `cost_usd`, `hunk_hashes`, `reason`, `rebased_from`, `source_action_id` |
 | `lane_held` | diagnostic | An automatic upstream step held back: at a cap (hourly advances, the author's budget) or for good (`refused:<code>`). | `op`, `reason` | `proposal_id` |
 | `lane_op_done` | folded | The live engine settled a queued upstream operation; the lane's own rows carry what it did. | `idx`, `op`, `outcome` | `action_id`, `code`, `seq` |
