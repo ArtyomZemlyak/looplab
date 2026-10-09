@@ -6,6 +6,17 @@ readable; malformed passing evidence never supplies a verdict to the agent.
 import re
 
 from looplab.core.upstream_evidence import execution, gate, sha
+from looplab.events.types import (EV_UPSTREAM_AUTO_SET, EV_UPSTREAM_HINT_DELIVERED,
+                                  EV_UPSTREAM_HINT_ISSUED)
+
+# The lane's history page (`engine/upstream.py::UpstreamLane.read`) carries EVERY `upstream_`-prefixed
+# row, and three of them are CONTEXT, not receipts: the operator's kill switch (`upstream_auto_set`)
+# and the live engine's notice to its Developers (`upstream_hint_issued`, `upstream_hint_delivered`).
+# None is the answer to an agent's write (no request hash binds one), so `event` refuses each — and
+# before this set ONE switch pulled from the CLI or the UI made every later status page
+# `invalid_upstream_page` (review 2026-10-09). A context row is read for its position only: a dict
+# with an integer seq, held to the page's ordering, never a verdict and never an advance.
+CONTEXT_ROWS = frozenset({EV_UPSTREAM_AUTO_SET, EV_UPSTREAM_HINT_ISSUED, EV_UPSTREAM_HINT_DELIVERED})
 
 
 def integer(value):
@@ -55,6 +66,15 @@ def event(row, kind):
     return False
 
 
+def history_row(row):
+    """One row of a status page's history: a receipt `event` accepts, or a CONTEXT row (above)."""
+    if not isinstance(row, dict):
+        return False
+    if row.get("type") in CONTEXT_ROWS:
+        return integer(row.get("seq"))
+    return event(row, row.get("type"))
+
+
 def page_detail(page):
     from looplab.engine.upstream_state import digest
     active, candidates, history = page["active_base"], page["candidates"], page["history"]
@@ -72,7 +92,7 @@ def page_detail(page):
         return False
     if candidates["bounded"] and len(candidates["rows"]) != candidates["limit"]:
         return False
-    if len(candidates["rows"]) > candidates["limit"] or not all(isinstance(r, dict) and event(r, r.get("type")) for r in history):
+    if len(candidates["rows"]) > candidates["limit"] or not all(history_row(r) for r in history):
         return False
     pagination = {"offset", "next_offset", "source_node_id"}
     if pagination & set(candidates):

@@ -96,3 +96,98 @@ def test_a_run_without_the_lane_prints_nothing(tmp_path):
     store = EventStore(tmp_path / "events.jsonl")
     store.append("run_started", {"run_id": "p", "task_id": "t", "goal": "g", "direction": "min"})
     assert upstream_operator_lines(tmp_path, store.read_all()) == []
+
+
+def test_a_switch_already_in_place_appends_nothing_and_says_so(tmp_path):
+    """review 2026-10-09: the merge with master dropped the branch's no-op — `off` twice wrote two
+    identical rows into the upstream history every reader pages through."""
+    lane, store, generation, body = fixture(tmp_path)
+    before = store.path.read_bytes()
+    never = CliRunner().invoke(app, ["upstream-auto", str(lane.rd), "on"])
+    assert never.exit_code == 0 and "already ON (the switch was never set)" in never.output
+    assert store.path.read_bytes() == before, "a never-set switch is already on"
+    assert CliRunner().invoke(app, ["upstream-auto", str(lane.rd), "off"]).exit_code == 0
+    seq = store.read_all()[-1].seq
+    again = CliRunner().invoke(app, ["upstream-auto", str(lane.rd), "OFF", "--reason", "still"])
+    assert again.exit_code == 0, again.output
+    assert f"already OFF (seq {seq}) — nothing appended; the reason was not recorded" in again.output
+    assert [e.seq for e in store.read_all() if e.type == "upstream_auto_set"] == [seq]
+
+
+class _RacingStore:
+    """The run's store, with ANOTHER writer's row landing between the switch's read and its append —
+    the window the compare-and-swap closes."""
+
+    def __init__(self, store, rival):
+        self._store, self._rival = store, rival
+
+    def read_all(self):
+        events = self._store.read_all()
+        self._rival()
+        return events
+
+    def __getattr__(self, name):
+        return getattr(self._store, name)
+
+
+def test_a_write_between_the_read_and_the_append_refuses_the_switch(tmp_path):
+    """review 2026-10-09: the merge dropped the branch's `expected_last_seq` — a UI switch that landed
+    between the CLI's read and its append was silently overwritten by an intent raised on a view that
+    no longer held. Now the append refuses (a `ConfigRefusal`: one line, exit 2) and writes nothing."""
+    from looplab.core.errors import ConfigRefusal
+    from looplab.engine.upstream_switch import set_upstream_auto
+    from looplab.events.eventstore import EventStore
+    lane, store, generation, body = fixture(tmp_path)
+    rival = EventStore(store.path)
+    racing = _RacingStore(store, lambda: rival.append("upstream_auto_set", {"enabled": False,
+                                                                            "reason": "from the UI"}))
+    with pytest.raises(ConfigRefusal, match="changed while the switch was being set"):
+        set_upstream_auto(lane.rd, False, "from the CLI", store=racing)
+    rows = [e.data for e in store.read_all() if e.type == "upstream_auto_set"]
+    assert rows == [{"enabled": False, "reason": "from the UI"}], "only the rival's row landed"
+
+
+def test_the_switch_refusal_is_an_operator_refusal_the_cli_prints_as_one_line(tmp_path, monkeypatch):
+    """review 2026-10-09: `UpstreamSwitchRefusal` was a bare `ValueError`, so one that escaped the
+    CLI's wrap printed the whole traceback at exit 1. It is a `ConfigRefusal` now — still the
+    `ValueError` the server answers 400 (`test_one_rule_answers_both_doors`)."""
+    from looplab.core.errors import ConfigRefusal, OperatorRefusal
+    from looplab.engine import upstream_switch
+    assert issubclass(UpstreamSwitchRefusal, ConfigRefusal)
+    assert issubclass(UpstreamSwitchRefusal, OperatorRefusal) and issubclass(UpstreamSwitchRefusal, ValueError)
+    lane, store, generation, body = fixture(tmp_path)
+
+    def _escapes(*_a, **_k):
+        raise UpstreamSwitchRefusal("enabled must be true or false")
+    monkeypatch.setattr(upstream_switch, "set_upstream_auto", _escapes)
+    out = CliRunner().invoke(app, ["upstream-auto", str(lane.rd), "off"])
+    assert out.exit_code == 2, out.output
+    assert "enabled must be true or false" in out.output and "Traceback" not in out.output
+
+
+def test_inspect_prints_the_queue_and_the_author_outcomes(tmp_path):
+    """review 2026-10-09: the merge dropped the branch's queue line and its per-outcome author count —
+    `inspect` showed the switch but not that operations still waited, nor what the drafts became."""
+    from looplab.engine.upstream_switch import upstream_inspect_lines
+    lane, store, generation, body = fixture(tmp_path)
+    store.append("lane_armed", {"mode": "auto", "reason": "", "author": True})
+    for n, outcome in enumerate(("declined", "proposed", "declined")):
+        store.append("lane_authored", {"action_id": f"auto-author-{n}", "track": "champion",
+                                       "source_node_id": 0, "outcome": outcome, "cost_usd": 0.1})
+    for n in range(3):
+        store.append("lane_op_requested", {"action_id": f"op-{n}", "op": "check",
+                                           "request_hash": "a" * 64, "proposal_id": f"up_{n:024x}"})
+    store.append("lane_op_done", {"idx": 0, "op": "check", "outcome": "succeeded", "action_id": "op-0"})
+    events = store.read_all()
+    text = "\n".join(upstream_operator_lines(lane.rd, events))
+    assert "queue: 2 waiting of 3" in text
+    assert "author outcomes: declined 2, proposed 1" in text
+    assert "drafts recorded: 3" in text
+    state = fold(events)
+    assert state.lane_ops_done == 1
+    # `inspect`'s path hands the FOLD's cursor through — the reader the queue's waiting count is.
+    assert "queue: 2 waiting of 3" in "\n".join(upstream_inspect_lines(lane.rd, state, events))
+    assert "queue: 0 waiting of 3" in "\n".join(upstream_operator_lines(lane.rd, events, cursor=3))
+    shown = CliRunner().invoke(app, ["inspect", str(lane.rd)])
+    assert shown.exit_code == 0, shown.output
+    assert "queue: 2 waiting of 3" in shown.output and "author outcomes: declined 2" in shown.output

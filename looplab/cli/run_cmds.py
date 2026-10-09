@@ -2190,15 +2190,20 @@ def upstream_auto_cmd(
     its automatic check and advance; operations an operator queues are still served. `on` resumes
     them. The SAME control event `/commands` appends (`upstream_auto_set {enabled, reason}`), through
     the same payload rule (`engine/upstream_switch.py::normalize_upstream_auto_set`); a running engine
-    reads it at its next turn, a stopped run keeps it for its next engine. `looplab inspect` shows the
-    switch, the held steps, the author's spend and the advances of the last hour."""
+    reads it at its next turn, a stopped run keeps it for its next engine. A switch already in the
+    requested position appends nothing and says so; a write that lands between this command's read
+    and its append refuses it (exit 2, nothing appended — re-run). `looplab inspect` shows the
+    switch, the queue, the held steps, the author's spend and outcomes, and the advances of the last
+    hour."""
     from looplab.core.errors import ConfigRefusal
     from looplab.engine.upstream_switch import set_upstream_auto
     choice = state.strip().lower()
     if choice not in ("on", "off"):
         raise ConfigRefusal(f"upstream-auto: state must be 'on' or 'off', not {state!r}")
-    _require_run_dir(run_dir, healthy=True)       # fail closed on a corrupt log before appending
-    typer.echo(set_upstream_auto(run_dir, choice == "on", reason))
+    # Fail closed on a corrupt log before appending, and append through THAT store: the switch's
+    # compare-and-swap reads and writes the one log this check vetted (review 2026-10-09).
+    store = _require_run_dir(run_dir, healthy=True)
+    typer.echo(set_upstream_auto(run_dir, choice == "on", reason, store=store))
 
 
 @app.command(name="repair-log")

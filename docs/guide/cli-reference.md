@@ -2854,9 +2854,13 @@ It appends the SAME control intent the UI, the API and MCP append through `/comm
 (`upstream_auto_set {enabled, reason}`), validated by the same payload rule
 (`engine/upstream_switch.py::normalize_upstream_auto_set`; a reason is at most 300 characters). A
 running engine reads it at its next turn; a stopped run keeps it for its next engine. A corrupt log is
-refused before anything is appended. `looplab inspect RUN_DIR` prints the switch, the steps a cap held
-back (and whether each still waits), the author's spend against `upstream_author_usd` and the
-automatic advances of the last hour against `upstream_advances_per_hour`.
+refused before anything is appended. A switch already in the requested position appends nothing and
+says so (exit 0). The append is a compare-and-swap on the log tail the command read: a write that
+lands in between (the UI's switch, the engine's own rows) refuses it at exit 2 with nothing appended —
+re-run it against the new state. `looplab inspect RUN_DIR` prints the switch, the operator queue
+(`queue: N waiting of M`), the steps a cap held back (and whether each still waits), the author's
+spend against `upstream_author_usd` and a count per draft outcome, and the automatic advances of the
+last hour against `upstream_advances_per_hour`.
 
 ---
 
