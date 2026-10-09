@@ -389,7 +389,8 @@ def _fill_presentation_ledger(rd):
         size += len(rows[-1])
         n += 1
     assert cap - size < 300
-    (rd / "result_commentary.jsonl").write_text("".join(rows))
+    # BYTES: `write_text` adds a `\r` per row on Windows, which put the ledger OVER the cap (a 503).
+    (rd / "result_commentary.jsonl").write_bytes("".join(rows).encode())
 
 
 def test_a_full_presentation_ledger_buys_no_reply_it_could_never_publish(tmp_path, monkeypatch):

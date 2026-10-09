@@ -63,6 +63,15 @@ def test_an_infra_errno_on_an_env_path_is_a_fault(tmp_path, monkeypatch):
     assert "Transport endpoint" in infra_probe.describe(faults)
 
 
+def test_a_winsock_errno_name_reports_its_posix_spelling(monkeypatch):
+    """Windows names `errno.ENOTCONN` (the Winsock code) `WSAENOTCONN` in `errno.errorcode`; the
+    Windows leg reported that spelling. Driven here on every platform through the same table."""
+    monkeypatch.setitem(errno.errorcode, errno.ENOTCONN, "WSAENOTCONN")
+    assert infra_probe._errno_name(OSError(errno.ENOTCONN, "x")) == "ENOTCONN"
+    monkeypatch.setitem(errno.errorcode, 10999, "WSAENOALIAS")   # a Winsock name with no POSIX twin
+    assert infra_probe._errno_name(OSError(10999, "x")) == "WSAENOALIAS"
+
+
 def test_a_missing_interpreter_is_a_fault(tmp_path):
     faults = infra_probe.probe([("interpreter", str(tmp_path / "envs" / "py" / "bin" / "python"))])
     assert [f.cause for f in faults] == ["missing"]

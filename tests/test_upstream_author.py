@@ -401,7 +401,7 @@ def test_an_unreadable_base_file_skips_the_source_never_reads_as_empty(tmp_path)
     from looplab.engine.upstream_author import _read
     archive = tmp_path / "archive"
     (archive / "pkg").mkdir(parents=True)
-    (archive / "train.py").write_text("x = 1\n", encoding="utf8")
+    (archive / "train.py").write_bytes(b"x = 1\n")    # bytes: `write_text` is CRLF on Windows
     (archive / "link.py").symlink_to(archive / "train.py")
     assert _read(archive, "train.py") == "x = 1\n"
     assert _read(archive, "added.py") == "", "a file the source ADDED has no base text"

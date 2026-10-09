@@ -19,6 +19,11 @@ _DOC_CITATION = re.compile(r"\bdoc \d+|§|\bPART [IVX]+\b")
 # Rich FORCES colour when `GITHUB_ACTIONS` is set, so CI's `--help` carries ANSI escapes that a
 # terminal-free local run does not (master run 2213: the panel regex found nothing). Read the text.
 _ANSI = re.compile(r"\x1b\[[0-9;]*m")
+# Rich swaps its box for the console it draws on: rounded (`╭─`/`│`) here, SQUARE (`┌─`) under the
+# legacy Windows console, ASCII (`+-`/`|`) under a non-UTF encoding — the Windows leg found the
+# rounded-only pattern matching nothing. Read the panel structure, not one box style.
+_PANEL_TITLE = re.compile(r"^[╭┌+][─-] (.+?) [─-]", flags=re.M)
+_ROW_NAME = re.compile(r"^[│|] ([a-z][a-z0-9-]*) ", flags=re.M)
 
 
 def _help(*args):
@@ -50,9 +55,9 @@ def test_help_opens_with_the_start_here_panel_in_table_order():
     out = _help()
     first_panel, first_rows = HELP_PANELS[0]
     assert first_panel == "Start here"
-    panels = re.findall(r"╭─ (.+?) ─", out)
+    panels = _PANEL_TITLE.findall(out)
     assert panels[1:] == [panel for panel, _ in HELP_PANELS], panels  # [0] is the Options box
-    listed = re.findall(r"^│ ([a-z][a-z0-9-]*) ", out, flags=re.M)
+    listed = _ROW_NAME.findall(out)
     assert listed[:len(first_rows)] == [name for name, _ in first_rows]
     assert listed.index("run") < 3 and listed.index("ui") < 3
     assert not _DOC_CITATION.search(out), "the command list must not cite internal documents"

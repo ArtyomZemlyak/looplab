@@ -148,7 +148,14 @@ class InfraFault:
 
 def _errno_name(exc: OSError) -> str:
     code = getattr(exc, "errno", None)
-    return errno.errorcode.get(code, f"errno {code}") if isinstance(code, int) else type(exc).__name__
+    if not isinstance(code, int):
+        return type(exc).__name__
+    name = errno.errorcode.get(code, f"errno {code}")
+    # Windows: `errno.ENOTCONN` IS the Winsock code, and `errorcode` names it `WSAENOTCONN`. The POSIX
+    # spelling is the one `INFRA_ERRNOS` and every reader of a fault use, so an alias reports as it.
+    if name.startswith("WSAE") and getattr(errno, name[3:], None) == code:
+        return name[3:]
+    return name
 
 
 def _touch_dir(path: str) -> None:

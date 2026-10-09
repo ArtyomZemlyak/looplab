@@ -443,8 +443,9 @@ def test_a_secret_cut_by_the_capture_boundary_leaves_no_fragment(tmp_path):
     7-character suffix was written to the tool log on f943dbc."""
     from looplab.runtime.sandbox import run_argv
     env = {"MC_SECRET_minio": _SECRET}
+    # BYTES to stderr: a text-mode write is `\r\n` on Windows, which moved the cut two bytes off the secret.
     code = ("import os,sys; s=os.environ['MC_SECRET_minio']; "
-            "sys.stderr.write('auth failed for key='+s+'\\n'+'x'*(64000-9)+'\\n')")
+            "sys.stderr.buffer.write(('auth failed for key='+s+'\\n'+'x'*(64000-9)+'\\n').encode())")
     _rc, out, err, _t = run_argv([sys.executable, "-c", code], str(tmp_path), 30, env=env)
     assert err.startswith(_SECRET[-7:]), "the fixture still cuts inside the secret"
     artifact_sync.append_tool_log(tmp_path / "artifact_sync.log", ["tool"], out, err, env)

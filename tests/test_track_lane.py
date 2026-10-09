@@ -276,8 +276,8 @@ def test_start_reads_no_workdir_on_the_main_task(tmp_path, monkeypatch):
 def test_a_cancelled_worker_is_joined_its_command_killed_and_nothing_logged(tmp_path):
     """review 2026-10-08: the worker was a daemon, cancelled and never joined, so its command could
     outlive the engine and its log land after `engine.lock` was released."""
-    import os
     import time
+    from looplab.serve.run_commands import _process_alive
     pidfile = tmp_path / "child.pid"
     slow = (f"import os, time; open({str(pidfile)!r}, 'w').write(str(os.getpid())); "
             "time.sleep(60); print('{\"v\": 1}')")
@@ -291,14 +291,11 @@ def test_a_cancelled_worker_is_joined_its_command_killed_and_nothing_logged(tmp_
             break
         time.sleep(0.01)
     pid = int(pidfile.read_text())
+    assert _process_alive(pid) is True, "the probe sees the command running before the cancel"
     track_lane.cancel_track_lane(eng)
     assert not job.thread.is_alive(), "joined before the engine lets go of its run"
-    try:
-        os.kill(pid, 0)
-        alive = True
-    except ProcessLookupError:
-        alive = False
-    assert not alive, "the cancel tree-killed the command"
+    # Never `os.kill(pid, 0)`: on Windows signal 0 is CTRL_C_EVENT, not a probe (WinError 87 here).
+    assert _process_alive(pid) is False, "the cancel tree-killed the command"
     assert not (tmp_path / "run" / "track_slow.log").exists()
     assert not _done(eng)
 

@@ -33,7 +33,7 @@ def fixture(tmp_path, *, base_train=TRAIN, source_files=None, upstream_policy=No
     for p in (src, origin, rd):
         p.mkdir()
     for name, text in {"train.py": base_train, "score.py": SCORE, "recipe.env": "MOMENTUM=0.0\n", "README.md": "Runner\n", **(base_files or {})}.items():
-        (src / name).write_text(text, encoding="utf8")
+        (src / name).write_bytes(text.encode("utf8"))  # not `write_text`: CRLF on Windows
     base = capture_seed_archive(src, origin / "base_snapshots")
     origin_store = EventStore(origin / "events.jsonl")
     origin_store.append("run_started", {"run_id": "origin", "task_id": "repo", "goal": "SGD", "direction": "min"})

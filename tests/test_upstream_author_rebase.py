@@ -35,7 +35,7 @@ def _advance_base(lane, store, tmp_path, *, train=None, readme="Runner, base v2\
     from benchmarks._upstream_sgd import SCORE
     for name, text in {"train.py": train or TRAIN, "score.py": SCORE, "recipe.env": "MOMENTUM=0.0\n",
                        "README.md": readme}.items():
-        (tree / name).write_text(text, encoding="utf8")
+        (tree / name).write_bytes(text.encode("utf8"))  # not `write_text`: CRLF on Windows
     base = capture_seed_archive(tree, lane.rd / "base_snapshots")
     seeded = store.append("workspace_seeded", {"node_id": None, "materialized": [], "base_revision": base})
     events = store.read_all()

@@ -9,6 +9,7 @@ after each "tool call" runs the PostToolUse hook command through a shell, adding
 """
 from __future__ import annotations
 
+import inspect
 import json
 import sys
 import threading
@@ -22,11 +23,32 @@ from looplab.core.config import LEGACY_CONFIG_SNAPSHOT_DEFAULTS, Settings
 from looplab.core.models import Idea
 from looplab.engine.upstream_hints import MAX_HINTS_PER_SESSION, UpstreamHintBoard, developer_session
 
+# The shell Claude Code runs a hook's `command` through: POSIX `sh` here — what `shell=True` already
+# was — and on Windows the Git Bash the CLI requires (`agents/cli_hook.py::_command`). `shell=True`
+# there is cmd.exe, a shell no hook ever meets, which read the single quotes as part of the path (the
+# Windows leg). `bash` on PATH is not it either: on a Windows runner that is the WSL launcher stub
+# (`tests/_posix_gates.py`), so Git Bash is found beside `git` itself.
+def git_bash_beside(git):
+    """Git Bash for a `git` at Git/cmd/git.exe, Git/bin/git.exe or Git/mingw64/bin/git.exe."""
+    from pathlib import Path
+    found = [p / "bin" / "bash.exe" for p in Path(git).resolve().parents[1:3]]
+    return next((str(p) for p in found if p.is_file()), None)
+
+
+def posix_shell_argv(command):
+    import os, shutil
+    if os.name != "nt":
+        return ["/bin/sh", "-c", command]
+    git = shutil.which("git")
+    bash = git and git_bash_beside(git)
+    assert bash, f"Claude Code on Windows requires Git Bash; none beside git={git!r}"
+    return [bash, "-c", command]
+
 # The stand-in `claude`: after each of up to 60 "tool calls" (50 ms apart) it runs every PostToolUse
-# hook its `--settings` declares, through a shell, with a JSON event on stdin — as the CLI does — and
-# keeps the `additionalContext` it got. It stops once it heard `want` notices (argv[1]) and writes what
-# it saw into solution.py, which the Developer returns as its code.
-_FAKE_CLAUDE = r'''
+# hook its `--settings` declares, through that shell, with a JSON event on stdin — as the CLI does —
+# and keeps the `additionalContext` it got. It stops once it heard `want` notices (argv[1]) and writes
+# what it saw into solution.py, which the Developer returns as its code.
+_FAKE_CLAUDE = inspect.getsource(git_bash_beside) + inspect.getsource(posix_shell_argv) + r'''
 import json, subprocess, sys, time
 want = int(sys.argv[1]); args = sys.argv[2:]
 hooks = []
@@ -37,7 +59,7 @@ heard = []
 for _ in range(60):
     time.sleep(0.05)
     for command in hooks:
-        out = subprocess.run(command, shell=True, input=json.dumps({"hook_event_name": "PostToolUse",
+        out = subprocess.run(posix_shell_argv(command), input=json.dumps({"hook_event_name": "PostToolUse",
                              "tool_name": "Write"}), capture_output=True, text=True).stdout
         if out.strip():
             heard.append(json.loads(out)["hookSpecificOutput"]["additionalContext"])
@@ -364,7 +386,7 @@ def test_the_hook_command_is_quoted_for_the_shell_that_runs_it(tmp_path, monkeyp
     hook.pump()
     settings = json.loads((hook.root / "settings.json").read_text())
     line = settings["hooks"]["PostToolUse"][0]["hooks"][0]["command"]
-    out = subprocess.run(line, shell=True, input="{}", capture_output=True, text=True, timeout=30)
+    out = subprocess.run(posix_shell_argv(line), input="{}", capture_output=True, text=True, timeout=30)
     assert out.returncode == 0, out.stderr
     assert json.loads(out.stdout)["hookSpecificOutput"]["additionalContext"] == "heard through the shell"
     hook.close()
