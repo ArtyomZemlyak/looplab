@@ -866,7 +866,7 @@ def test_the_clause_correction_can_only_ever_withdraw_an_accusation(monkeypatch)
 
 def test_the_exception_rule_leaves_a_real_corpus_row_convicted():
     """The regression floor for the widening, and it is a REAL row rather than a fixture written to
-    pass: `rubertlite-dense-retrieval` n40's rationale (verbatim from `bench-out/cand.durable.jsonl`,
+    pass: `rubertlite-dense-retrieval` n40's rationale (verbatim from `tests/data/bench-out/cand.durable.jsonl`,
     the durable-arm replay of this rung's own inputs — the repair rationale IS the triage rationale)
     names `FileNotFoundError` AND `model_soup.py`, and the repair edited the eval harness instead.
 
@@ -895,7 +895,7 @@ def test_the_exception_rule_leaves_a_real_corpus_row_convicted():
 # three rows' own rationales went with it, so a refusal argued in prose is a refusal nobody can
 # re-run, which is the thing this module keeps having to correct.
 #
-# Two rows verbatim from `bench-out/cand.durable.jsonl`, the triage bench's durable arm over these
+# Two rows verbatim from `tests/data/bench-out/cand.durable.jsonl`, the triage bench's durable arm over these
 # same runs: the repair rationale IS the triage rationale (`engine/evaluate.py` hands
 # `verify_repair` exactly this field), and each carries the slice of the FAILURE OUTPUT the triage
 # quoted back at it (`evidence.source == "error"` — a transcription of the stderr the engine handed

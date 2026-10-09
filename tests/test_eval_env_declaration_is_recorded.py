@@ -1,6 +1,6 @@
 """A run's declared environment travels on TWO carriers, and only one survives a copied task file.
 
-The incident this records (master's `NEXT_RUN.md`, 2026-09-04): `eval_env` is a `Settings` field,
+The incident this records (master's `NEXT_RUN.md`, 2026-09-04; now `benchmarks/NEXT_RUN.md`): `eval_env` is a `Settings` field,
 so it rides `config.snapshot.json`; `EvalSpec.env` is a task field, so it rides
 `task.snapshot.json`. `engine/eval_dispatch.py::_declared_eval_env` merges them, and three runs in
 a row got their corpus root from the SETTING. The next run was launched the ordinary way — by

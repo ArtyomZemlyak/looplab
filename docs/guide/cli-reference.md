@@ -10,7 +10,7 @@ looplab resume          Resume/continue a run (crash, stopped, or finished) by r
 looplab stop            Stop a run: freeze it, NO wrap-up (resumable)
 looplab finalize        Finalize a run: stop AND wrap up (report/lessons/cost)
 looplab repair-log      Repair a mid-file-corrupted event log (FUSE/NFS/S3)
-looplab inspect         Show the raw launch snapshot + current folded best result
+looplab inspect         Show the best result, stop reason, trust and comparability (--config: + raw launch snapshot)
 looplab comparability   What each run's number may be RANKED against — refuses across evaluations
 looplab replay          Pure fold of the event log → state (read-only)
 looplab readmodel       Rebuild/check readmodel.sqlite — works on a live or crashed run (--check exits 1 if stale)
@@ -741,13 +741,21 @@ is derived from the readable prefix, and a prefix is **not** evidence that the r
 
 ## `inspect`
 
-Print the raw on-disk launch config snapshot and the run's current folded best result. This is a diagnostic
-view, not the effective per-run config API: the latter overlays the seven `run_started`-pinned fields and the
-event-sourced trust gate.
+Print what a run got: its current folded best result, why it stopped, its trust scans and the
+comparability key of its best number. `--config` also prints the raw on-disk launch config snapshot
+first (before 2026-10-09 every `inspect` did, and its 10 KB scrolled the result off-screen, doc 74
+EB-10). The snapshot is a diagnostic view, not the effective per-run config API: the latter overlays
+the seven `run_started`-pinned fields and the event-sourced trust gate. A run with a snapshot and no
+event log yet prints the snapshot, since that is all there is.
 
 ```bash
-looplab inspect RUN_DIR
+looplab inspect RUN_DIR            # the result
+looplab inspect RUN_DIR --config   # the raw launch snapshot, then the result
 ```
+
+On a run launched with `backend=toy` whose best experiment tuned nothing (a `dataset` or `repo` task
+has no model-free optimizer, so its offline roles run the task's fixed baseline), `run`, `resume`
+and `inspect` add a **`note: backend=toy`** line saying the score is that baseline, not a tuned result.
 
 It closes with the run's **trust-scan summary** — how many evaluated nodes carry a `trust_scan`
 receipt, and what each bucket means. The unknown bucket is stated first and deliberately: a log

@@ -1,0 +1,62 @@
+"""The pages a newcomer reads first stay short enough to be read (doc 74 EB-01/EB-02/EB-11).
+
+Measured 2026-10-09 before the rewrite: README 3,110 words, Quickstart 1,764 (its step 5 alone
+810), Installation 698 — and the user guide behind them 246,000. Every change to the product used
+to add a paragraph to whichever page it touched, and the entry pages are where that cost a reader
+most. The budgets below are the post-rewrite sizes with room for a few sentences; a page that needs
+more should link to the reference page that holds the detail (`ui.md` holds the Quickstart's former
+step 5, `cli-reference.md` every flag), the same rule `CLAUDE.md`'s own byte budget applies to it.
+
+Words, not bytes: the pages mix code blocks and prose, and a reader's cost is the words.
+"""
+from __future__ import annotations
+
+import re
+from pathlib import Path
+
+import pytest
+
+ROOT = Path(__file__).resolve().parents[1]
+
+BUDGETS = {
+    "README.md": 1000,
+    "docs/index.md": 1000,
+    "docs/guide/index.md": 550,
+    "docs/guide/installation.md": 500,
+    "docs/guide/quickstart.md": 750,
+    "docs/guide/cli-walkthrough.md": 900,
+    "examples/README.md": 600,
+    "tests/README.md": 400,
+}
+
+
+def _words(path: Path) -> int:
+    return len(path.read_text(encoding="utf-8").split())
+
+
+@pytest.mark.parametrize("rel, budget", sorted(BUDGETS.items()))
+def test_entry_page_stays_within_its_word_budget(rel, budget):
+    words = _words(ROOT / rel)
+    assert words <= budget, (
+        f"{rel} is {words} words, over its {budget}-word budget: move the detail to the reference "
+        "page that owns it and link there, rather than raising the budget")
+
+
+def test_agents_md_opens_with_a_short_first_run_sequence():
+    """`AGENTS.md` is what a coding agent reads first; its first section is the five-step run."""
+    text = (ROOT / "AGENTS.md").read_text(encoding="utf-8")
+    first = re.split(r"^## ", text, flags=re.M)[1]
+    assert first.startswith("First run in five steps")
+    assert len(first.split()) <= 200
+    for step in ("looplab ui", "external_harness=true", "harness-mcp", "connection_check",
+                 "result_notices"):
+        assert step in first, step
+
+
+def test_entry_pages_point_at_the_offline_demo_rather_than_a_flag_footnote():
+    """doc 74 EB-03: the demo file sets `backend: toy` itself, so the entry pages need neither the
+    `--backend toy` footnote nor the date the default changed."""
+    for rel in ("README.md", "docs/guide/installation.md", "docs/guide/cli-walkthrough.md"):
+        text = (ROOT / rel).read_text(encoding="utf-8")
+        assert "examples/demo.yaml" in text, rel
+        assert "2026-08-04" not in text, rel

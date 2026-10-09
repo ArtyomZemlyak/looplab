@@ -81,25 +81,43 @@ Diagnostic and cross-run boxes also use their documented sidecars.
 
     ---
 
-    Requirements, install extras, and the optional backends. Core is small — eight direct dependencies.
+    One install command for the engine, CLI and web UI, on Linux, macOS or Windows.
 
 -   :material-rocket-launch: **[Quickstart](guide/quickstart.md)**
 
     ---
 
-    Your first run — offline in one command, then driven by a live LLM. Read and verify the result.
+    Five steps in the web UI: connect a model, describe the goal, review, start, read the result.
 
--   :material-console: **[CLI reference](guide/cli-reference.md)**
+-   :material-console: **[CLI walkthrough](guide/cli-walkthrough.md)**
 
     ---
 
-    Every command: `run`, `resume`, `replay`, `inspect`, `smoke`, `bench`, `ui`, `export-*`.
+    `looplab run examples/demo.yaml` — the whole loop offline in seconds, then inspection and replay.
+
+-   :material-monitor-dashboard: **[Web UI](guide/ui.md)**
+
+    ---
+
+    Assistant, the run workspace, Report, and how results are compared.
+
+</div>
+
+## Reference
+
+<div class="grid cards" markdown>
+
+-   :material-console-line: **[CLI reference](guide/cli-reference.md)**
+
+    ---
+
+    Every command and flag. `looplab --help` lists them grouped, starting with the everyday ones.
 
 -   :material-tune-variant: **[Configuration](guide/configuration.md)**
 
     ---
 
-    Every `LOOPLAB_*` setting, grouped by topic, with its default — and what's on out of the box.
+    Every `LOOPLAB_*` setting with its default. Most runs need only the model, budget and limits.
 
 </div>
 
@@ -148,12 +166,6 @@ Diagnostic and cross-run boxes also use their documented sidecars.
     ---
 
     All nine task adapters — from a toy objective to real Kaggle competitions — and their JSON fields.
-
--   :material-monitor-dashboard: **[Web UI](guide/ui.md)**
-
-    ---
-
-    The live React control plane: the full execution trace, the lineage DAG, and steering by chat.
 
 -   :material-server: **[Deployment](guide/deployment.md)**
 

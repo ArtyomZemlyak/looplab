@@ -8,7 +8,7 @@ out what it holds:
   1. ES2-05. A `not_learning` / `diverged` the DIAGNOSTICIAN named over a `check_failed` stage was
      handed "LoopLab's live training watchdog KILLED this stage … check the specific thing the
      watchdog named above" — nothing was killed, and the account at the head of the text is the
-     diagnostician's. 14 of the 122 rows of the triage corpus (`bench-out/cand.durable.jsonl`) are
+     diagnostician's. 14 of the 122 rows of the triage corpus (`tests/data/bench-out/cand.durable.jsonl`) are
      exactly this case: triage-sourced `not_learning` over `check_failed`, every one a `repair`.
   2. A process that exited non-zero with nothing on stderr (a SIGKILL, -9) or hit its deadline was
      described as "the command ran cleanly (exit 0) but printed NO parseable metric" — one line above

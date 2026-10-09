@@ -252,6 +252,27 @@ def test_readme_and_guide_name_only_real_cli_commands_and_cover_the_registry():
         f"registered command(s) missing from README/user guide: {sorted(registered - documented)}")
 
 
+def test_the_examples_map_names_every_example_and_the_demo_runs_offline(tmp_path, monkeypatch):
+    """doc 74 EB-07/EB-03: `examples/README.md` is the one place that says which example needs a
+    model, so every runnable file in `examples/` must have its row; and `examples/demo.yaml` is the
+    offline demo every entry page points at, so it must finish with NO flag and NO model."""
+    readme = (ROOT / "examples" / "README.md").read_text(encoding="utf-8")
+    files = sorted(p.name for p in (ROOT / "examples").iterdir()
+                   if p.is_file() and p.suffix in {".json", ".yaml", ".yml"})
+    seeds = [name for name in files if name.startswith("speculation_gate_seed_")]
+    missing = [name for name in files if f"`{name}`" not in readme and name not in seeds]
+    assert not missing, f"examples/README.md has no row for: {missing}"
+    assert seeds and "`speculation_gate_seed_0.json`" in readme
+    from typer.testing import CliRunner
+    from looplab.cli import app
+    import shutil
+    shutil.copy(ROOT / "examples" / "demo.yaml", tmp_path / "demo.yaml")
+    monkeypatch.chdir(tmp_path)            # the file's `out: runs/demo` is relative to the cwd
+    result = CliRunner().invoke(app, ["run", "demo.yaml"])
+    assert result.exit_code == 0, result.output
+    assert "finished=True" in result.output and "nodes=6 evaluated=6" in result.output
+
+
 def test_core_task_examples_load_and_optional_real_examples_are_explicit():
     from looplab.adapters.tasks import load_task
 

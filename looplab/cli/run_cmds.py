@@ -60,7 +60,8 @@ from looplab.cli import (_BACKENDS, _DEV_BACKENDS, _TASK_KINDS, _choice, _engine
                          _apply_speculation_calibration_profile,
                          _assert_run_deletion_namespace_available,
                          _exit_nonzero_if_the_run_produced_nothing, _load_task, _print_result,
-                         _require_healthy_log, _require_run_dir, app, load_run_settings)
+                         _require_healthy_log, _require_run_dir, app, load_run_settings,
+                         offline_baseline_note)
 
 
 # How long `resume` waits for a stopped run's previous owner to release engine.lock, and how often
@@ -1045,12 +1046,13 @@ def run(
     Any non-credential engine setting can be overridden with `-s/--set key=value` (parity with the
     non-secret settings block and LOOPLAB_* env fields). Runtime credentials are refused so they do
     not enter shell history. Run `looplab init` to scaffold a documented config file.
-
-    Maintainer note: the typed `--flag` surface below is FROZEN. `-s/--set` already reaches every
-    non-credential `Settings` field, so a NEW ordinary engine knob needs only a `Settings` field — do
-    NOT add a new typer.Option here (each one also has to be threaded into the settings dict at the
-    `# 3. Merge engine settings` block below, doubling the edit and the drift risk). Credentials keep
-    their dedicated environment/UI boundary. The existing flags stay for back-compat and ergonomics."""
+    Offline demo, no model needed: `looplab run examples/demo.yaml`."""
+    # Maintainer note: the typed `--flag` surface above is FROZEN. `-s/--set` already reaches every
+    # non-credential `Settings` field, so a NEW ordinary engine knob needs only a `Settings` field — do
+    # NOT add a new typer.Option here (each one also has to be threaded into the settings dict at the
+    # `# 3. Merge engine settings` block below, doubling the edit and the drift risk). Credentials keep
+    # their dedicated environment/UI boundary. The existing flags stay for back-compat and ergonomics.
+    # (It lived in the docstring until doc 74 EB-09, where every `looplab run --help` printed it.)
     if backend is not None:
         _choice(backend, _BACKENDS, "--backend")
     if developer_backend is not None:
@@ -1223,6 +1225,9 @@ def run(
         return
     state, eng, prior_kind = driven
     _print_result(state)
+    _offline = offline_baseline_note(state, settings.backend)
+    if _offline:
+        typer.echo(_offline)
     _note = wrap_up_degradation_note(eng)
     if _note:
         typer.echo(_note, err=True)
@@ -1415,6 +1420,9 @@ def resume(
                        f"({_handoff_deadline - now:.0f}s left) — the previous owner is finishing up")
         time.sleep(0.05)
     _print_result(state)
+    _offline = offline_baseline_note(state, settings.backend)
+    if _offline:
+        typer.echo(_offline)
     _note = wrap_up_degradation_note(eng)
     if _note:
         typer.echo(_note, err=True)

@@ -352,7 +352,15 @@ def render_template(kind: str = "dataset") -> str:
     # Discoverable but non-overriding: these knobs default ON to a real path, so we show them COMMENTED —
     # documenting the knob without emitting an active value that would replace the default (esp. a `null`
     # that silently turns the feature off). Uncomment + edit to point elsewhere, or set `null` to disable.
-    _COMMENTED_KNOBS = {"knowledge_dir", "memory_dir"}
+    #
+    # The endpoint, model, profile, policy, developer backend and wall-clock cap are commented for the
+    # SAME reason with a sharper edge (doc 74 EB-17): an ACTIVE value in this file outranks
+    # `LOOPLAB_*`/.env, so an active `llm_base_url: http://localhost:11434/v1` silently replaced the
+    # endpoint every getting-started page tells the reader to export — the scaffold undid the setup
+    # step before it. Active stay only the two values a run's file should own: the backend (its
+    # default depends on the KIND, which is this file's task) and the experiment budget.
+    _COMMENTED_KNOBS = {"knowledge_dir", "memory_dir", "profile", "max_seconds", "policy",
+                        "llm_model", "llm_base_url", "developer_backend"}
     # Credentials and their endpoint binding are runtime-only. The generated run config must not
     # advertise either as a normal persisted knob.
     shown = {k for k, _, _ in common} | {"llm_api_key", "llm_api_key_base_url"}
@@ -371,6 +379,8 @@ def render_template(kind: str = "dataset") -> str:
         "",
         "settings:",
         "  # ── Common knobs ──────────────────────────────────────────────────────────────────────",
+        "  # An active value here outranks LOOPLAB_* env vars, so the endpoint and model stay",
+        "  # commented: uncomment one only to pin it to this run.",
     ]
     for key, val, comment in common:
         decl = f"  {'# ' if key in _COMMENTED_KNOBS else ''}{key}: {val}"

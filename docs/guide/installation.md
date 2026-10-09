@@ -2,16 +2,15 @@
 
 ## Requirements
 
-- **Python ≥ 3.11**
-- A POSIX or Windows shell. The local engine needs **no Docker**. It needs **no network either — but
-  only with `--backend toy`**: since 2026-08-04 `backend` defaults to `llm` (operator decision,
-  `core/config.py::Settings.backend`), so a plain `looplab run` expects a reachable LLM endpoint.
-- A source checkout needs Node and npm for the first UI build. `ui/package.json` accepts Node
-  `^20.19.0`, `^22.13.0`, or `>=24.0.0`. The UI server builds a missing/stale bundle on launch.
+- **Python ≥ 3.11** on Linux, macOS or Windows. No Docker and no network are needed for local runs.
+- **Node and npm** for a source checkout's first UI build: `ui/package.json` accepts Node `^20.19.0`,
+  `^22.13.0` or `>=24.0.0`. `looplab ui` builds a missing or stale bundle when it starts.
+- **A model** for real work: any OpenAI-compatible endpoint (Ollama, vLLM, SGLang, OpenAI). The
+  offline demo needs none.
 
 ## Source install for the web UI
 
-Clone the repository and run these commands from its root. On Linux/macOS:
+The recommended install: the engine, the CLI and the web UI. On Linux/macOS:
 
 ```bash
 git clone https://github.com/ArtyomZemlyak/looplab.git
@@ -31,82 +30,41 @@ py -3.11 -m venv .venv
 .\.venv\Scripts\looplab.exe ui
 ```
 
-Use any installed Python version ≥3.11 for the venv; `py -3.11` selects one common
-Windows installation. Open `http://127.0.0.1:8765`. The server uses `./runs` by default.
-For the first model-backed chat, open **LoopLab → Settings → Essential → Model** in the UI,
-save the endpoint/model and explicitly test the active connection. The test makes one
-provider request and may be billed. Then follow the [Assistant quickstart](quickstart.md#assistant-in-the-web-ui).
-If you have no model yet, the [offline CLI walkthrough](cli-walkthrough.md)
-can verify evaluation without a provider.
+Open `http://127.0.0.1:8765`; runs are stored under `./runs`. Then follow the
+[Quickstart](quickstart.md#assistant-in-the-web-ui). If `looplab` is not on `PATH`, the same CLI is
+`python -m looplab.cli`.
 
-## Install
-
-From a clone of the repository:
+## Check the install
 
 ```bash
-pip install -e .
+looplab run examples/demo.yaml     # offline: six experiments in a few seconds
+looplab inspect runs/demo          # the best result and why the run stopped
+looplab smoke                      # once a model is configured: one request to check it
 ```
-
-This installs the engine and the `looplab` command. The core dependency set is intentionally small:
-
-| Package | Why |
-|---|---|
-| `pydantic` / `pydantic-settings` | Typed domain models + layered settings |
-| `orjson` | Fast JSON for the event log |
-| `anyio` | The async control loop |
-| `typer` | The CLI |
-| `PyYAML` | YAML configuration input |
-| `openai` / `httpx` | OpenAI-compatible live transport (import-safe for offline replay) |
-
-`orjson` and transitive packages such as `pydantic-core` use prebuilt native wheels on common
-platforms, so the dependency set should not be described as pure Python.
 
 ## Optional extras
 
-Install only what you need:
+Combine extras as needed, e.g. `pip install -e ".[ui,harness]"`.
 
-```bash
-pip install -e ".[ui]"      # live React web UI       → adds fastapi, uvicorn
-pip install -e ".[ui,harness]" # web UI + stdio MCP for an external coding agent
-pip install -e ".[otel]"    # OpenTelemetry export      → adds opentelemetry-*
-pip install -e ".[proc]"    # robust process tree-kill  → adds psutil
-pip install -e ".[jupyterhub]" # JupyterHub app tile      → adds UI + jupyter-server-proxy + psutil
-pip install -e ".[dev]"     # test dependencies         → adds pytest, pytest-split, httpx, fastapi, uvicorn, ruff, numpy
-```
-
-You can combine them: `pip install -e ".[ui,otel,dev]"`.
-
-| Extra | Unlocks | Without it |
+| Extra | Adds | Without it |
 |---|---|---|
-| `ui` | `looplab ui` and local auto-start for `looplab tui` — the live control planes | Core CLI + static `tree.html` still work; TUI can target an existing server with `--server URL` |
-| `harness` | `looplab harness-mcp` for Codex, Claude Code and other MCP clients | Use the UI/CLI without external agent control |
-| `otel` | Sends spans to any OTLP collector (Jaeger/Tempo/Honeycomb) | Spans still written to `spans.jsonl` (files-as-truth) |
-| `proc` | Cross-platform process-tree termination on timeout | Falls back to best-effort kill |
-| `jupyterhub` | JupyterHub launcher tile and proxied UI server | Run the CLI/UI directly instead |
-| `dev` | Runs the test suite | — |
+| `ui` | `looplab ui` and local auto-start for `looplab tui` (FastAPI, uvicorn) | The CLI and the static `tree.html` still work |
+| `harness` | `looplab harness-mcp` for Codex, Claude Code and other MCP clients | No external-agent control |
+| `jupyterhub` | A JupyterHub launcher tile and proxied UI | Start `looplab ui` yourself |
+| `otel` | Span export to an OTLP collector (Jaeger, Tempo, Honeycomb) | Spans still go to `spans.jsonl` |
+| `proc` | Reliable process-tree termination (psutil) | Best-effort kill on timeout |
+| `docs` | `mkdocs serve` for this site | — |
+| `dev` | The test suite (pytest, pytest-split, ruff, MCP SDK) | — |
 
-## Optional runtime components
+A plain `pip install -e .` installs only the engine and CLI. Its dependencies are small:
+`pydantic`, `pydantic-settings`, `orjson`, `anyio`, `typer`, `PyYAML`, and `openai` + `httpx` for the
+live model transport.
 
-These are **not Python extras** — they're external tools you point LoopLab at:
+## Optional external tools
 
-- **A live LLM endpoint** (Ollama / vLLM / SGLang / OpenAI) for `--backend llm`. See
-  [LLM & coding agents](llm-and-agents.md).
-- **An external coding agent** (`opencode` / `aider` / `goose` / `continue`) to delegate the
-  Developer role. See [LLM & coding agents](llm-and-agents.md).
-- **Docker** with the NVIDIA runtime, only for the `untrusted` sandbox tier or the Compose stack.
-  See [Deployment](deployment.md).
-- **MLflow** (`pip install mlflow`) only for `looplab export-mlflow` and for the live mirror
-  (`mlflow_tracking_uri`); without it both degrade to doing nothing, never to an error.
-
-## Verify the install
-
-```bash
-python -c "import looplab; print(looplab.__version__)"   # 0.1.0
-looplab --help                                            # CLI is on PATH
-looplab run examples/toy_task.json --out runs/check --max-nodes 4 --backend toy
-```
-
-If `looplab` is not found after install, the same CLI is always reachable as
-`python -m looplab.cli`.
-
-Next: the [Quickstart](quickstart.md).
+- **Docker** with the NVIDIA runtime, only for the `untrusted` sandbox tier or the Compose stack —
+  [Deployment](deployment.md).
+- **An external coding agent** (`opencode`, `aider`, `goose`, `continue`) to delegate the Developer
+  role — [LLM & coding agents](llm-and-agents.md).
+- **MLflow** (`pip install mlflow`) for `looplab export-mlflow` and the live mirror; without it both
+  do nothing.

@@ -1,11 +1,11 @@
 """A fact that lives only in the launch line is lost by the one operation between runs.
 
-MEASURED: `eval.env` is null on EVERY task file on this box — e5small_v12.json, e5small_v13.json,
+MEASURED: `eval.env` is null on EVERY task file on this box — benchmarks/tasks/e5small_v12.json, e5small_v13.json,
 and the task snapshots of v11, v12 and v13. The corpus root reaches a run only as
 `-s eval_env=VS_LOCAL_DATA_ROOT=...`.
 
 WHY THAT IS A TRAP RATHER THAN A STYLE POINT. A SETTING rides `config.snapshot.json`, so a RESUME
-reproduces it (engine invariant #6). It does NOT ride `task.snapshot.json` — and `NEXT_RUN.md`
+reproduces it (engine invariant #6). It does NOT ride `task.snapshot.json` — and `benchmarks/NEXT_RUN.md`
 documents starting the next run by COPYING that snapshot. So the value survives every resume and is
 lost by the one operation an operator actually performs between runs.
 

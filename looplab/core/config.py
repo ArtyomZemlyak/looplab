@@ -1187,7 +1187,7 @@ class Settings(BaseSettings):
     #   * a `not_learning` / `diverged` the DIAGNOSTICIAN named on a `check_failed` stage was handed
     #     "LoopLab's live training watchdog KILLED this stage" — nothing was killed, and the account
     #     at the head of the text is the diagnostician's (14 of the 122 rows of the triage corpus,
-    #     `bench-out/cand.durable.jsonl`, are exactly this: triage-sourced `not_learning` over
+    #     `tests/data/bench-out/cand.durable.jsonl`, are exactly this: triage-sourced `not_learning` over
     #     `check_failed`, every one a `repair`);
     #   * a process that exited non-zero (a SIGKILL, -9) or hit its deadline with nothing on stderr was
     #     described as "the command ran cleanly (exit 0) but printed NO parseable metric";
@@ -1979,7 +1979,7 @@ class Settings(BaseSettings):
     # operator `inject_node` whose `origin` receipt is marked `seed_from_run` and carries a verdict
     # (`engine/seed_from_run.py::seed_verdict`: same, different — naming the facet — or unknown). The
     # seed is evaluated under THIS run's protocol; the source's number rides the receipt as
-    # provenance only. WHY: rounds were chained by hand (`NEXT_RUN.md`) and each started from
+    # provenance only. WHY: rounds were chained by hand (`benchmarks/NEXT_RUN.md`) and each started from
     # scratch, node 0's median 27 against a prior champion of 169 (doc 60 item 2.3). Empty = off.
     # Recorded in `config.snapshot.json` as the canonical `<run dir>#<node>` it resolved to. Inert on
     # an existing run directory, so a resume never re-seeds; the engine never reads it (a CLI-side

@@ -1,6 +1,6 @@
 """"THE CHECK ITSELF WAS WRONG" — the answer the diagnostician kept reaching and could not give.
 
-THE MEASUREMENT (`bench-out/cand.durable.jsonl`, 2026-08-21)
+THE MEASUREMENT (`tests/data/bench-out/cand.durable.jsonl`, 2026-08-21)
 ------------------------------------------------------------
 22 rows carry `engine_reason=check_failed`. **14 become `not_learning`** — the win the ownership
 split was built for, because the checker's prose was hiding "the loss never moved". Three become

@@ -1,0 +1,38 @@
+# The offline demo: no model, no network, no Docker. Run it with
+#
+#     looplab run examples/demo.yaml
+#
+# then open runs/demo/tree.html, or `looplab ui` and the `demo` run. Six experiments take a few
+# seconds. `backend: toy` is set HERE, in the file, because the engine's default backend is `llm`
+# (a real run wants a live model) — so this file needs no flags.
+out: runs/demo
+task:
+  kind: quadratic
+  id: toy_quadratic
+  goal: "minimize (x-3)^2 + (y+1)^2 ; optimum at x=3, y=-1, loss=0"
+  direction: min
+  bounds: {x: [-10.0, 10.0], y: [-10.0, 10.0]}
+  seed: 7
+  step: 1.5
+  # Every experiment here is scored by the same built-in objective on the same bounds, so the run
+  # DECLARES that its numbers are comparable. Without a declaration LoopLab never assumes two scores
+  # share a scale, and the Report would say "comparison not established" for every experiment.
+  comparison_contract:
+    schema: 1
+    dataset_lineage: "none: closed-form objective, no data"
+    split_or_candidate_pool_lineage: "none: every candidate is a point in the declared bounds"
+    evaluator_uid: "looplab.adapters.toytask.ToyTask"
+    evaluator_version: "1"
+    population: "the point (x, y) a candidate proposes"
+    filter: "none"
+    metric_uid: "quadratic_loss"
+    unit: "squared distance to (3, -1)"
+    direction: min
+    aggregation: "single deterministic evaluation"
+    cutoff: "none"
+    measurement_phase: search
+    uncertainty_protocol: "none: deterministic objective"
+    constraints_digest: "bounds x,y in [-10, 10]"
+settings:
+  backend: toy
+  max_nodes: 6

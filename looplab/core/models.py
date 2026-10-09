@@ -1585,7 +1585,7 @@ DEVELOPER_ERROR_PREFIX = "(developer error:"
 # produces: it is answer-only, like `oom` and `not_learning`, and only the failure DIAGNOSTICIAN can
 # ever emit it. It exists because `check_failed` names the stage that REFUSED and says nothing about
 # why, so "the stage really did fail, here is the cause" and "the stage did not fail, the check was
-# wrong" collapsed into one word. Measured on `bench-out/cand.durable.jsonl`: of 22 `check_failed`
+# wrong" collapsed into one word. Measured on `tests/data/bench-out/cand.durable.jsonl`: of 22 `check_failed`
 # rows, 14 become `not_learning` and FIVE are answered back as `check_failed` — and reading those
 # five's rationales, the diagnostician is refuting the checker with validation numbers from the same
 # log ("the run actually reached val recall@100=0.8114 … yet the verifier flagged"). It was right

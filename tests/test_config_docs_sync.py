@@ -100,8 +100,10 @@ def test_cli_docs_expose_recovery_and_raw_snapshot_boundaries():
     readme = (root / "README.md").read_text(encoding="utf-8")
     assert "looplab finalize RUN_DIR [--task-file TASK.json]" in cli
     assert "inclusive range `1..64`" in cli
-    assert "raw launch snapshot + current folded best result" in cli
-    assert "raw launch snapshot + current folded best result" in readme
+    # doc 74 EB-10: `inspect` leads with the result; the raw snapshot is `--config`. Both surfaces
+    # must still say where the raw snapshot is, since that is the boundary this test exists for.
+    assert "--config: + raw launch snapshot" in cli and "raw on-disk launch config snapshot" in cli
+    assert "--config adds the raw launch snapshot" in readme
 
 
 # --------------------------------------------------------------------- the DEFAULT column, compared

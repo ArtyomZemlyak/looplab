@@ -264,7 +264,7 @@ DIAGNOSABLE_ENGINE_REASONS: tuple[str, ...] = ("crash", "no_metric", "check_fail
 # power to suppress a metric — the direction `docs/36` refuses outright.
 #
 # `check_false_positive` IS THE ONE THIS VOCABULARY WAS MISSING, and the corpus says so. Of the 22
-# `check_failed` rows in `bench-out/cand.durable.jsonl`, 14 become `not_learning` — the win this
+# `check_failed` rows in `tests/data/bench-out/cand.durable.jsonl`, 14 become `not_learning` — the win this
 # split was built for — and FIVE are answered back as `check_failed`, which reads as the
 # diagnostician restating the status it was handed. Reading those five's rationales says otherwise:
 # `rubertlite-dense-retrieval` n1 wrote *"The check_failed verdict is a false positive: the run

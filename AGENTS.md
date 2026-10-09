@@ -1,5 +1,24 @@
 # LoopLab as an external agent harness
 
+## First run in five steps
+
+1. The operator installs `pip install -e ".[ui,harness]"`, sets `LOOPLAB_UI_TOKEN` and a different
+   `LOOPLAB_HARNESS_TOKEN`, and starts `looplab ui --run-root runs`.
+2. The operator launches the run and keeps it running:
+   `looplab run task.json --out runs/my-run --backend toy -s external_harness=true`
+   (`examples/toy_task.json` works as `task.json`).
+3. Your MCP client starts `looplab harness-mcp` over stdio with only `LOOPLAB_HARNESS_TOKEN`
+   (plus `LOOPLAB_HARNESS_URL` if the UI is not on `http://127.0.0.1:8765`).
+4. Call MCP `connection_check` for `my-run`, then `run_progress`: it names the next required step.
+   Submit a ready-made candidate with a durable `inject_node` command.
+5. Read the measured result with `result_notices`, decide the next candidate, and pause or finalize
+   explicitly when done. LoopLab evaluates; never claim a score it did not measure.
+
+The rest of this file is the contract you are held to; `docs/guide/external-harness.md` is the full
+guide, including client configuration and recovery.
+
+## The contract
+
 If you are Codex or another coding agent working on a user's ML experiment, begin with
 `looplab harness` for the implemented capability contract. Use `looplab harness --settings`
 only when you need the complete settings schema. For a live run, use `looplab inspect RUN_DIR`

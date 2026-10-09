@@ -592,7 +592,7 @@ def test_the_engine_loop_records_why_its_own_word_stood():
     assert calls.index("reason_override_refused") < calls.index("diagnosed_failure_reason")
 
 
-_BENCH = Path(__file__).resolve().parents[1] / "bench-out"
+_BENCH = Path(__file__).resolve().parent / "data" / "bench-out"
 
 
 @pytest.mark.parametrize("arm, before, after, moved", [

@@ -507,7 +507,7 @@ SECTION_DOC_ALIASES: dict[str, str] = {"arch-review": "16"}
 # The shrink-only backlog of the pre-existing citations this could not correct with confidence, one
 # `SectionCitation.backlog_key` per line (`tests/test_claim_pins.py` refuses a row that names no
 # live defect). Read HERE and not only by the test because `python -m looplab.core.claimpin` is an
-# operator's pre-flight (NEXT_RUN.md: "must report 0 claim defects"), and a backlog that made it
+# operator's pre-flight (benchmarks/NEXT_RUN.md: "must report 0 claim defects"), and a backlog that made it
 # red on a clean tree would teach that operator to ignore it.
 SECTION_BACKLOG = "tests/data/section_citations_unresolved.txt"
 

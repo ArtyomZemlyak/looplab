@@ -1056,6 +1056,43 @@ def _print_result(state) -> None:
             typer.echo(headroom_line(room))
 
 
+def offline_baseline_note(state, backend) -> str:
+    """One line when an OFFLINE run's best score is the task's own baseline, or ``""``.
+
+    `backend=toy` builds the task's offline roles (`agents/factory.py::make_roles` ->
+    `task.build_roles()`). For the synthetic kinds they are a real model-free optimizer and the
+    champion carries the coordinates it tuned. For `dataset` and `repo` there is nothing to tune
+    without a model: the Developer is the adapter's fixed placeholder (`dataset_task.py`'s template
+    counts the rows of the data file), and the champion's `params` are empty. Measured 2026-10-09
+    (doc 74 EB-04): `--kind dataset --backend toy` printed `BEST node 2: metric=10 params={}` and
+    nothing else, and 10 read as a model score.
+
+    Decided from ENGINE facts only — the backend the run was launched with and the champion's own
+    `idea.params` — never from the `metric_name` the candidate's stdout carries: text a candidate
+    writes may label nothing here (CLAUDE.md, "text may nominate, never decide").
+    """
+    if str(backend or "llm") == "llm":
+        return ""
+    best = state.best()
+    if best is None or (getattr(best.idea, "params", None) or {}):
+        return ""
+    return ("note: backend=toy — no model wrote or changed code, so this score is the task's offline "
+            "baseline (a pipeline check, not a tuned result). Configure a model to search this task.")
+
+
+def snapshot_backend(snap):
+    """The `backend` a run was launched with, read off its snapshot; ``None`` when unreadable.
+
+    A read for one display line, so every failure is "unknown" rather than an error: `inspect` must
+    keep working on a run whose snapshot is damaged — that is often why someone is inspecting it."""
+    import orjson
+    try:
+        value = orjson.loads(snap.read_bytes()).get("backend")
+    except (OSError, ValueError, AttributeError):
+        return None
+    return value if isinstance(value, str) else None
+
+
 def _exit_nonzero_if_the_run_produced_nothing(state, run_dir, *, wrap_up_only: bool) -> None:
     """A run that FINISHED having evaluated nothing is a failure, and must not exit 0.
 
@@ -1105,6 +1142,11 @@ def _exit_nonzero_if_the_run_produced_nothing(state, run_dir, *, wrap_up_only: b
 from looplab.cli import (audit_cmds, concept_cmds, corpus_cmds, export_cmds,  # noqa: E402,F401
                          governance_cmds, maintenance_cmds, memory_cmds,
                          harness_cmds, inspect_cmds, run_cmds, ui_cmds)
+
+# The `--help` LIST is ordered and grouped by `help_panels.HELP_PANELS`, not by the import order
+# above (doc 74 EB-08): that order is chosen for import safety and put `run` 63rd of 74.
+from looplab.cli.help_panels import apply_help_panels  # noqa: E402
+apply_help_panels(app)
 
 # Back-compat re-exports: when `looplab/cli.py` was one flat module, every command was an attribute
 # of `looplab.cli` (tests call `cli.stop(...)`/`cli.finalize(...)` directly; tools import `app`).

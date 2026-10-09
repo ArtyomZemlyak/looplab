@@ -38,7 +38,6 @@ from looplab.events.readmodel import (
     superseded_schema_version)
 from looplab.events.replay import fold, unfinished_sync_lines
 from looplab.events.types import EV_BUDGET
-from looplab.engine.comparability import record_of as comparability_record_of
 from looplab.trust.scan_receipt import trust_scan_summary
 from looplab.events.stop_account import last_record_line
 from looplab.cli import (
@@ -50,7 +49,7 @@ from looplab.cli import (
 # rendering, so this module keeps only the command's contract.
 from looplab.cli.workspace_bytes import (DEFAULT_ENTRY_BUDGET, EntryBudget, measure_run,
                                          render_workspace_bytes, seed_claims)
-from looplab.cli.run_report import (echo_card_and_build_tables, echo_comparability,
+from looplab.cli.run_report import (echo_card_and_build_tables, echo_comparability, echo_inspect_tail,
                                     echo_containments, echo_edit_types, echo_parked_requests,
                                     echo_reconciliation, echo_run_opening, echo_section,
                                     echo_spend_around_champion, minutes, output_fingerprint,
@@ -453,13 +452,18 @@ def timings(run_dir: Path = typer.Argument(...),
 
 
 @app.command()
-def inspect(run_dir: Path = typer.Argument(...)):
-    """Show the raw launch config snapshot + the run's current folded best result.
+def inspect(
+    run_dir: Path = typer.Argument(...),
+    config: bool = typer.Option(
+        False, "--config",
+        help="Also print the raw launch settings (config.snapshot.json) verbatim, before the result."),
+):
+    """Show what a run got: its best result, why it stopped, trust and comparability.
 
-    Seven selection-treatment settings are committed by ``run_started`` and can therefore differ from
-    an old or hand-edited snapshot. The owner config API overlays those effective folded values;
-    this diagnostic deliberately prints the on-disk snapshot verbatim for inspection.
+    `--config` also prints the on-disk launch snapshot verbatim; the seven `run_started`-pinned
+    settings can differ from it (the owner config API overlays the effective folded values).
     """
+    # THE RESULT FIRST (doc 74 EB-10): the 10.8 KB snapshot used to scroll the result off-screen.
     snap = run_dir / "config.snapshot.json"
     events = run_dir / "events.jsonl"
     # Tolerate a run that crashed after writing config.snapshot.json but before its first event: still
@@ -467,7 +471,7 @@ def inspect(run_dir: Path = typer.Argument(...)):
     if not snap.exists() and not events.exists():
         typer.echo(f"no run found at {run_dir} (no config.snapshot.json or events.jsonl).")
         raise typer.Exit(2)
-    if snap.exists():
+    if snap.exists() and (config or not events.exists()):   # no log yet: the snapshot is all there is
         typer.echo(snap.read_text(encoding="utf-8"))
     if events.exists():
         # This command cannot route through `_require_run_dir` (its input may be a config snapshot
@@ -523,16 +527,7 @@ def inspect(run_dir: Path = typer.Argument(...)):
         from looplab.engine.upstream_switch import upstream_inspect_lines
         for _line in [*upstream_inspect_lines(run_dir, state, all_events), *unfinished_sync_lines(all_events)]:
             typer.echo(_line)
-        _best = state.best()
-        _record = comparability_record_of(_best) if _best is not None else None
-        if _record:
-            _keys = " ".join(f"{name}={value}" for name, value in sorted(_record["keys"].items()))
-            typer.echo(f"comparability: {_record['authority']} {_keys}")
-        else:
-            typer.echo(
-                "comparability: UNKNOWN — this run records no key for what its metric was measured "
-                "against, so its number may not be ranked against any other run's. Declare "
-                "`eval.inputs` on the task (or a `comparison_contract`) to make it decidable.")
+        echo_inspect_tail(state, run_dir, show_config_hint=snap.exists() and not config)
 
 
 @app.command()

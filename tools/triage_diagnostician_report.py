@@ -1,6 +1,6 @@
 """Read one or two `triage_diagnostician_replay.py` capture files and say what they measured.
 
-    python tools/triage_diagnostician_report.py bench-out/cand.durable.jsonl bench-out/cand.widened.jsonl
+    python tools/triage_diagnostician_report.py tests/data/bench-out/cand.durable.jsonl tests/data/bench-out/cand.widened.jsonl
 
 Offline: it makes no provider call and reads only the committed corpus plus the capture files.
 

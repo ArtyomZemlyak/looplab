@@ -134,31 +134,35 @@ validation:
 
 nav:
   - Home: index.md
-  - Architecture:
-      - Overview (infographic): guide/architecture.md
-      - Concepts: guide/concepts.md
-      - Architecture spec: 02-architecture.md
-      - Tracing: 08-tracing-architecture.md
-  - Guide:
+  # Grouped by what the reader is trying to do (doc 74 EB-13): the first group is the whole
+  # getting-started path, in reading order; reference pages are their own group.
+  - Get started:
       - Overview: guide/index.md
       - Installation: guide/installation.md
-      - JupyterHub onboarding: guide/jupyterhub-onboarding.md
       - Quickstart: guide/quickstart.md
       - CLI walkthrough: guide/cli-walkthrough.md
-      - CLI reference: guide/cli-reference.md
-      - HTTP API reference: guide/api-reference.md
-      - Event reference: guide/event-reference.md
-      - Configuration: guide/configuration.md
+  - Guide:
+      - Web UI: guide/ui.md
       - Tasks: guide/tasks.md
       - Generating code: guide/generating-code.md
       - LLM & coding agents: guide/llm-and-agents.md
       - External coding agents: guide/external-harness.md
       - Memory & knowledge: guide/memory.md
-      - Web UI: guide/ui.md
       - Deployment: guide/deployment.md
+      - JupyterHub onboarding: guide/jupyterhub-onboarding.md
+      - MLE-bench runbook: MLEBENCH.md
+  - Reference:
+      - CLI reference: guide/cli-reference.md
+      - Configuration: guide/configuration.md
+      - HTTP API reference: guide/api-reference.md
+      - Event reference: guide/event-reference.md
       - Live scenarios: guide/live-scenarios.md
       - Judge bench: guide/judge-bench.md
-      - MLE-bench runbook: MLEBENCH.md
+  - Architecture:
+      - Overview (infographic): guide/architecture.md
+      - Concepts: guide/concepts.md
+      - Architecture spec: 02-architecture.md
+      - Tracing: 08-tracing-architecture.md
   - Design records:
       - Index: 00-INDEX.md
       - "Entry-barrier inspection: README, CLI, docs, UI (2026-10-09)": 74-entry-barrier-inspection-2026-10-09.md

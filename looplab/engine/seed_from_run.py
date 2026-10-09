@@ -1,7 +1,7 @@
 """SEED A NEW RUN FROM A PRIOR ONE (doc 67 67.2, `Settings.seed_from_run`): the prior run's champion
 — or a named node — becomes the new run's first experiment, with the evaluation contract beside it.
 
-WHY. Rounds were chained by hand: `NEXT_RUN.md` walks an operator through copying the previous run's
+WHY. Rounds were chained by hand: `benchmarks/NEXT_RUN.md` walks an operator through copying the previous run's
 task snapshot, and every `e5small_v12/13/14.json` round started its search from scratch — node 0's
 median was 27 against a prior champion of 169 (doc 60 item 2.3). The server could already import a
 sibling's experiment into a LIVE run (`serve/control_validation.py::_import_cross_run_source`,

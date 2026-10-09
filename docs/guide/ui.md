@@ -11,119 +11,18 @@ With **Русский**, the launch card uses **Проверить — бесп�
 and cost warning follow the selected language. Authored task JSON, paths, metric names
 and exact server diagnostics retain their original text.
 
-The launch card shows a **Next:** instruction in the Assistant language (**Дальше:**
-in Russian). Before validation, review the goal, metric direction and code/data
-paths. After validation, review the effective limits and cost warning before
-**Start run**. Editing the plan requires validation again; changing language keeps
-the checked plan. **Detailed status / Подробный статус** contains the precise
-technical message. A lost startup reply leads to **Check startup**, which reads
-the existing launch identity; it does not send a second Start. Confirmed startup
-means the run can be opened, not that its experiments have finished.
-The run opens with its current status, and **Report** shows the measured result and caveats.
-For the attached run, Assistant chat also shows free short briefs after each completed
-evaluation and after finalization. They include the score, confirmation/constraints and
-links to the exact experiment. **Language / Язык** beside the composer offers
-**Auto**, **English** and **Русский**, even before the first run. It sets the
-language of the entire interface and all newly generated human prose. The selector is also
-available in the installation header. The browser preference is saved locally; owner
-workspaces also save `output_language` on the server for new runs and model roles. If saving
-fails, a visible retry keeps that distinction explicit. Public review pages never save owner settings.
-Completion results are ordinary Assistant messages in the conversation, placed by their
-recorded completion time between timestamped turns. A current agent interpretation is the
-main text. Until it is available, LoopLab shows a short factual conclusion and next step;
-that fallback does not claim a model analysis. **Measurements and caveats** expands the
-exact evidence and attempt links. Unknown legacy times are not invented; such receipts
-remain after the recorded conversation. **Result history** holds earlier receipts and paging.
-Reading results never calls a model, writes an owner turn, or starts an experiment.
-Auto chooses the browser language for interface copy and lets the model follow the task.
-Russian covers navigation, settings and their help/search, run/Card/concept/research views,
-results, report exports, confirmations and accessibility labels. The Russian catalogue loads
-only when needed; a failed load offers retry. Switching does not remount the workspace.
-New prose from Researcher, Developer, reviews, reports and monitors uses the saved language.
-A running engine retains its launch language until resumed; owner-side generation uses the current
-preference. A model request already submitted retains its original prompt.
-Existing model replies and external agent interpretations keep their original text.
-The catalogue is shipped as a local static asset; no translation service or extra model
-call runs in the browser. For UI changes, wrap authored captions with `uiText` or `uiMessage`,
-add their Russian text to `ui/src/locales/ru.json`, and run `npm run check:locale` in `ui/`.
-Substitution values remain verbatim; translate an owned caption explicitly before passing it
-as a substitution, and never translate user prose, code or identifiers. The build and UI tests
-check catalogue coverage, version/count and placeholder multiplicity. A counted phrase uses
-`uiPlural(count, one, other)`: its Russian one/few/many forms live in `ru.json`'s `plurals`,
-keyed by the English `other` text, and `check:locale` refuses a missing, unused or ill-formed entry.
-CLDR `one` also covers 21 and 101, so a `one` form must read right for 21; a sentence that is
-only right for exactly one (a singular pronoun, or no printed count) goes in the optional `exact1`.
-Switching language does not send a message or call a model. Retrying an interrupted
-message keeps that message's original language. Earlier results and the detailed selected-result
-comparison are expandable. These reads do not call a model or start work.
-If a result reader fails to load or render, its local error offers **Reload LoopLab /
-Перезагрузить LoopLab**. The chat composer, draft and other result reader remain
-available; a late reader failure does not move focus out of your message. You can
-close a failed comparison. Reload is explicit and reloads the whole application.
-First-run model setup, connection checks, examples and launch cards also have
-local loading errors. A failed connection-check module keeps the saved model
-status and **Model settings** available. A failed next-step hint keeps the launch
-card, its current technical status, validation and startup recovery controls.
-An explicit reload requires checking the plan again before starting it.
-Each brief separates **Comparison**, **Reliability** and **Next**. Comparison names
-the evaluation scores it uses and explains missing or incompatible evidence;
-confirmation means remain separate. Recovered metrics are labelled **Recovered**,
-not **Measured**. Caveat codes have plain-language explanations. Short **Open metrics**,
-**Open logs** and **Open Report** links retain the exact run generation and attempt.
-Stopped attempts link to logs and offer **Discuss stop in chat** without claiming a metric.
-**Explain result in chat** and **Discuss failure in chat** prepare an evidence-focused
-question about that exact attempt. They preserve an existing draft; sending is explicit.
+The launch card shows a **Next:** instruction in the Assistant language (**Дальше:** in Russian).
+Before validation, review the goal, metric direction and code/data paths. After validation, review
+the effective limits and cost warning before **Start run**. Editing the plan requires validation
+again; changing language keeps the checked plan. **Detailed status / Подробный статус** contains the
+precise technical message. A lost startup reply leads to **Check startup**, which reads the existing
+launch identity; it does not send a second Start. Confirmed startup means the run can be opened, not
+that its experiments have finished. The run opens with its current status, and **Report** shows the
+measured result and caveats. For the attached run, Assistant chat also shows free short briefs after
+each completed evaluation and after finalization. They include the score, confirmation/constraints
+and links to the exact experiment.
+
 For a complete first-run example, see the [Assistant quickstart](quickstart.md#assistant-in-the-web-ui).
-
-In an experiment's **Code** tab, **Experiment files / Файлы эксперимента** shows its
-saved file edits and explicit deletions, including repo recipes without a `solution.py`.
-**Compare edits with parent / Сравнить правки с родителем** compares the main code
-and file overlays against the first parent's recorded attempt. It distinguishes
-an explicit deletion from removing an override and returning to a base file.
-The recorded base identities are shown when available; different or unknown bases
-are explained. This is an overlay diff, not the full inherited program or a patch
-ready to apply to your repository. If the parent attempt has changed or its source
-is unavailable, the comparison is unavailable; refresh details to check again.
-Reading or comparing code makes no model request and runs no experiment.
-
-For a completed experiment with a stored base archive, **Open base files / Открыть
-файлы базы** reads its inherited source separately from its edits. Browse the paged
-file list, sizes and hashes, then select a file to read its verified UTF-8 text
-(up to 256 KiB). Binary and larger files have an explicit preview limitation.
-The browser refuses malformed Unicode text instead of hashing silently substituted
-characters. Valid Cyrillic, emoji, BOM and CRLF are preserved when copying source text.
-These are the recorded seed files **before node edits and runtime mounts/task
-assets**, not a complete runnable export. The read is bound to the current run
-generation, node attempt and base receipt; reset or unavailable/corrupt evidence
-refuses the read without substituting your live repository. The complete event
-source must fit the existing 32 MiB verified-read limit. This owner-plane browser
-is unavailable in historical and shared review views, which retain their existing
-source access limits. Opening it does not execute code or invoke a model.
-
-Each base file identifies whether a separate edit or deletion is recorded in the
-experiment. **Base version / Версия базы** and **Experiment edit / Правка опыта**
-let you read those two source versions without another request. A base recipe
-can differ from the experiment's saved recipe. A deleted file remains readable
-as an explicitly labelled archived file; it is not restored into the experiment.
-For an archived `solution.py`, **Experiment main code / Основной код опыта**
-opens separately saved main code when present, even if the file edit list is empty.
-It does not establish that a repo task's evaluation command executed this code.
-**Path spelling differs / Написание пути различается** warns when another saved
-spelling could address the same file through case, Unicode or separator handling.
-The verified base remains readable; no edit is selected across that ambiguity.
-Check the original names in the saved edits above. This warning does not prove
-that the source filesystem treats the names as identical.
-Missing overlay evidence says **Edits unavailable**, not "unchanged". These labels
-describe saved edits: protected files and task assets may override them at runtime.
-The selected preview appears above the bounded file list and receives focus after
-an explicit file read, unless you moved focus to another input while it was loading.
-**Copied / Скопировано** acknowledges the current source's latest Copy request.
-Switching source versions clears that feedback; a late reply for the previous
-version does not mark the new version copied. In a diff, Copy uses the saved
-current file text rather than the rendered diff rows.
-Code search treats the query as literal text with Unicode case-insensitive
-matching. **Matching lines / Строк с совпадением** counts rows containing a match,
-not the number of occurrences. Highlighting leaves source and copied text intact.
 
 The chat needs a configured model. Open **LoopLab → Settings → Essential → Model** to check the saved
 model and endpoint. **Test active LLM** makes one provider request and may be billed.
@@ -182,6 +81,195 @@ Select an experiment and open **Overview**. Its **Experiment result** block answ
 tabs. A root experiment is not automatically a task baseline. Repeat checks alone establish
 neither generalization nor statistical significance. Incomplete run sources suppress the
 Assistant card's numeric summary and explain why; ongoing finalization is not shown as finished.
+
+### Launch card: limits, cost and startup
+
+*Moved here from the Quickstart (doc 74 EB-11), which now keeps only the five steps.*
+
+**Run LLM budget (USD)** can be edited under **Edit proposal details**. The review
+shows its effective amount only after validation: the smaller positive value of
+`llm_budget_usd` and `llm_cost_limit` applies; zero disables that field's limit.
+Before validation, inherited limits remain unresolved. Chat, external-client models
+and experiment/upstream compute are outside this limit. Missing prices leave spend
+unknown, and calls can exceed the limit before settling.
+The card's **Next:** guidance (Russian: **Дальше:**) explains the current step in
+the Assistant language. **Detailed status / Подробный статус** retains the precise
+technical message. If the startup reply is lost, follow **Check startup / Проверить запуск** to read
+the already-submitted launch; an unknown reply does not prove that it failed.
+Chatting about a plan does not start a run. A live model or evaluator may incur cost;
+check the effective limits in the preview. Experiment and time limits alone do not cap
+model spending; set the run model budget on the card or defaults in Settings if needed.
+
+### How results are compared
+
+*Moved here from the Quickstart (doc 74 EB-11).*
+
+In an experiment's **Overview**, **Experiment result** separates its evaluation score
+from repeat checks and explains whether parent evaluation conditions match.
+An unconfirmed score remains exploratory; a confirmation mean alone does not prove reliability.
+In chat, **Earlier / Раньше**, **Newer / Новее** and **Latest results / К последним итогам**
+navigate free completion briefs and external-agent interpretations in 50-item pages.
+These reflect current evidence; changed attempts or measurements withdraw old interpretations.
+A chat brief claims a better score only against one eligible recorded parent,
+with matching evaluation conditions and code base. Otherwise it explains the
+missing comparison evidence. A changed objective or a merge with several
+parents cannot become an improvement claim against one surviving parent.
+Run cards, the selected experiment in Report, and the Assistant summary label an
+**evaluation score** separately from a **confirmation mean**. A recorded mean with
+no valid repeat count does not establish multiple successful checks. Check the spread,
+matching evaluation conditions and Trust evidence before relying on the result.
+**Report → Comparisons** shows how many evaluations could be compared with their
+recorded parent and how many had a **Better score**. **Not compared** includes first
+experiments and missing or changed comparison evidence; it does not mean failure.
+Comparisons use evaluation scores. The separately labelled numeric frontier may
+contain confirmation means and is not evidence of a comparable improvement.
+**Overview → Result interpretation** uses the same selected-result verdict as Report.
+**Read Report** opens its evidence. Trajectory and **Numeric frontier changes** label
+recorded measurement types; their arrows show numeric changes, not proven improvements.
+**View data** and **Export CSV** retain the recorded values and measurement labels.
+**Experiment result** compares primary scores only when the recorded parent attempt,
+code base, evaluation conditions and eligibility support it. A parent's current score
+alone does not establish a comparison. Reset or missing evidence explains why comparison
+is unavailable; repeat means and Trust exclusions are labelled separately.
+Chat shows the recorded parent attempt and provides **Metrics #… · attempt …**
+links to its evidence. A reset or unavailable parent never substitutes its newer
+attempt. An experiment without a parent is identified explicitly; it does not
+establish improvement. For a parent without a metric, check eligibility and source.
+Completion briefs also show advisory Trust warnings for the current attempt
+or its comparison parents. A numeric gain and repeated seeds do not clear a
+warning. Advisory warnings and exclusion from selection are stated separately.
+**Run result** shows the evaluation score beside a recorded confirmation mean.
+Chat completion briefs and the result card show recorded **Spread (std)**;
+zero is a value, while **Spread not recorded** means missing evidence.
+Repeat counts come from the recorded result, never the number of individual
+seed rows. Missing counts remain unknown, even when those rows are available.
+A better mean can coexist with a worse evaluation score. A single repeat or
+zero spread does not establish reliability or remove Trust warnings.
+**Metrics** shows the same result interpretation and code-base receipt as
+Overview. The ranked table labels evaluation scores and confirmation means
+separately for this experiment and the selected one. New confirmation results
+update from run state; cached per-seed details are used only for the same result.
+A link naming an attempt refuses details from a newer attempt. An ordinary
+current-node selection can still follow a repair that is ahead of the state stream.
+Metric curves also check the run generation and attempt. A replaced run clears
+old curves; unavailable evidence offers **Retry**, never an invented empty chart.
+Malformed series or nonnumeric points are unavailable evidence; they cannot
+become zero values or break the Metrics tab.
+Long training curves show at most 1024 recorded points, retaining endpoints
+and bucket extremes. The caption discloses this visual reduction. **View data**
+pages through exact measurements, 100 rows at a time; **Export CSV** includes
+every returned point, regardless of the current page.
+The final run brief and **Run result** card retain warnings for the selected
+attempt, including soft signals. A warning from an earlier attempt or another
+experiment is not a warning about that selected result. Read **Trust** for
+the full signal history; the short result is not a detector-coverage certificate.
+Trust warnings in the selected result, Overview, chart and workspace header
+refer to active node attempts. A signal from before a reset remains in
+**Trust → Reward-hacking signal history**, with its attempt and scope; it
+cannot quarantine the replacement attempt. Several signal records for one
+current node count as one flagged node. Enabled detector settings alone do
+not prove that every evaluation was inspected.
+
+### Language
+
+**Language / Язык** beside the composer offers **Auto**, **English** and **Русский**, even before
+the first run. It sets the language of the entire interface and all newly generated human prose. The
+selector is also available in the installation header. The browser preference is saved locally;
+owner workspaces also save `output_language` on the server for new runs and model roles. If saving
+fails, a visible retry keeps that distinction explicit. Public review pages never save owner
+settings. Auto chooses the browser language for interface copy and lets the model follow the task.
+Russian covers navigation, settings and their help/search, run/Card/concept/research views, results,
+report exports, confirmations and accessibility labels. The Russian catalogue loads only when
+needed; a failed load offers retry. Switching does not remount the workspace. New prose from
+Researcher, Developer, reviews, reports and monitors uses the saved language. A running engine
+retains its launch language until resumed; owner-side generation uses the current preference. A
+model request already submitted retains its original prompt. Existing model replies and external
+agent interpretations keep their original text. The catalogue is shipped as a local static asset; no
+translation service or extra model call runs in the browser. Switching language does not send a
+message or call a model. Retrying an interrupted message keeps that message's original language.
+
+### Completion briefs in chat
+
+Completion results are ordinary Assistant messages in the conversation, placed by their recorded
+completion time between timestamped turns. A current agent interpretation is the main text. Until it
+is available, LoopLab shows a short factual conclusion and next step; that fallback does not claim a
+model analysis. **Measurements and caveats** expands the exact evidence and attempt links. Unknown
+legacy times are not invented; such receipts remain after the recorded conversation. **Result
+history** holds earlier receipts and paging. Reading results never calls a model, writes an owner
+turn, or starts an experiment. Earlier results and the detailed selected-result comparison are
+expandable. These reads do not call a model or start work.
+
+Each brief separates **Comparison**, **Reliability** and **Next**. Comparison names the evaluation
+scores it uses and explains missing or incompatible evidence; confirmation means remain separate.
+Recovered metrics are labelled **Recovered**, not **Measured**. Caveat codes have plain-language
+explanations. Short **Open metrics**, **Open logs** and **Open Report** links retain the exact run
+generation and attempt. Stopped attempts link to logs and offer **Discuss stop in chat** without
+claiming a metric. **Explain result in chat** and **Discuss failure in chat** prepare an
+evidence-focused question about that exact attempt. They preserve an existing draft; sending is
+explicit.
+
+### Read an experiment's code
+
+In an experiment's **Code** tab, **Experiment files / Файлы эксперимента** shows its
+saved file edits and explicit deletions, including repo recipes without a `solution.py`.
+**Compare edits with parent / Сравнить правки с родителем** compares the main code
+and file overlays against the first parent's recorded attempt. It distinguishes
+an explicit deletion from removing an override and returning to a base file.
+The recorded base identities are shown when available; different or unknown bases
+are explained. This is an overlay diff, not the full inherited program or a patch
+ready to apply to your repository. If the parent attempt has changed or its source
+is unavailable, the comparison is unavailable; refresh details to check again.
+Reading or comparing code makes no model request and runs no experiment.
+
+For a completed experiment with a stored base archive, **Open base files / Открыть
+файлы базы** reads its inherited source separately from its edits. Browse the paged
+file list, sizes and hashes, then select a file to read its verified UTF-8 text
+(up to 256 KiB). Binary and larger files have an explicit preview limitation.
+The browser refuses malformed Unicode text instead of hashing silently substituted
+characters. Valid Cyrillic, emoji, BOM and CRLF are preserved when copying source text.
+These are the recorded seed files **before node edits and runtime mounts/task
+assets**, not a complete runnable export. The read is bound to the current run
+generation, node attempt and base receipt; reset or unavailable/corrupt evidence
+refuses the read without substituting your live repository. The complete event
+source must fit the existing 32 MiB verified-read limit. This owner-plane browser
+is unavailable in historical and shared review views, which retain their existing
+source access limits. Opening it does not execute code or invoke a model.
+
+Each base file identifies whether a separate edit or deletion is recorded in the
+experiment. **Base version / Версия базы** and **Experiment edit / Правка опыта**
+let you read those two source versions without another request. A base recipe
+can differ from the experiment's saved recipe. A deleted file remains readable
+as an explicitly labelled archived file; it is not restored into the experiment.
+For an archived `solution.py`, **Experiment main code / Основной код опыта**
+opens separately saved main code when present, even if the file edit list is empty.
+It does not establish that a repo task's evaluation command executed this code.
+**Path spelling differs / Написание пути различается** warns when another saved
+spelling could address the same file through case, Unicode or separator handling.
+The verified base remains readable; no edit is selected across that ambiguity.
+Check the original names in the saved edits above. This warning does not prove
+that the source filesystem treats the names as identical.
+Missing overlay evidence says **Edits unavailable**, not "unchanged". These labels
+describe saved edits: protected files and task assets may override them at runtime.
+The selected preview appears above the bounded file list and receives focus after
+an explicit file read, unless you moved focus to another input while it was loading.
+**Copied / Скопировано** acknowledges the current source's latest Copy request.
+Switching source versions clears that feedback; a late reply for the previous
+version does not mark the new version copied. In a diff, Copy uses the saved
+current file text rather than the rendered diff rows.
+Code search treats the query as literal text with Unicode case-insensitive
+matching. **Matching lines / Строк с совпадением** counts rows containing a match,
+not the number of occurrences. Highlighting leaves source and copied text intact.
+
+### When a panel fails to load
+
+If a result reader fails to load or render, its local error offers **Reload LoopLab / Перезагрузить
+LoopLab**. The chat composer, draft and other result reader remain available; a late reader failure
+does not move focus out of your message. You can close a failed comparison. Reload is explicit and
+reloads the whole application. First-run model setup, connection checks, examples and launch cards
+also have local loading errors. A failed connection-check module keeps the saved model status and
+**Model settings** available. A failed next-step hint keeps the launch card, its current technical
+status, validation and startup recovery controls. An explicit reload requires checking the plan
+again before starting it.
 
 ## How the UI runs
 
@@ -1342,6 +1430,16 @@ forwarding, start uvicorn with a matching `root_path` (set `--host`/port as usua
 `uvicorn ... --root-path /user/<name>/proxy/8765`).
 
 ## Developing the UI
+
+**Interface text and the Russian catalogue.** For UI changes, wrap authored captions with `uiText` or `uiMessage`, add their Russian text to
+`ui/src/locales/ru.json`, and run `npm run check:locale` in `ui/`. Substitution values remain
+verbatim; translate an owned caption explicitly before passing it as a substitution, and never
+translate user prose, code or identifiers. The build and UI tests check catalogue coverage,
+version/count and placeholder multiplicity. A counted phrase uses `uiPlural(count, one, other)`: its
+Russian one/few/many forms live in `ru.json`'s `plurals`, keyed by the English `other` text, and
+`check:locale` refuses a missing, unused or ill-formed entry. CLDR `one` also covers 21 and 101, so
+a `one` form must read right for 21; a sentence that is only right for exactly one (a singular
+pronoun, or no printed count) goes in the optional `exact1`.
 
 The frontend lives in `ui/` (Vite + React). The server serves the built bundle, not the source. A normal
 `looplab ui` launch verifies the default bundle's source stamp and rebuilds after JSX/CSS/config/public/script or

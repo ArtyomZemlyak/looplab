@@ -7,308 +7,119 @@
 [![License](https://img.shields.io/badge/license-MIT-green.svg)](#license)
 [![Docs](https://img.shields.io/badge/docs-mkdocs--material-0f9c8c.svg)](https://artyomzemlyak.github.io/looplab/)
 
-📖 **[Documentation site](https://artyomzemlyak.github.io/looplab/)** · 🗺️ **[Architecture infographic](https://artyomzemlyak.github.io/looplab/guide/architecture/)** — the whole agent, every component and stage, in one picture.
+📖 **[Documentation](https://artyomzemlyak.github.io/looplab/)** · 🗺️ **[Architecture](https://artyomzemlyak.github.io/looplab/guide/architecture/)**
 
-## Start with Assistant
+A **Researcher** proposes ideas, a **Developer** writes the code, a sandbox runs it, an evaluator
+scores it, and the loop refines and merges the best candidates until the budget runs out. Every
+decision is appended to an event log, so a run can be replayed and resumed after a crash.
 
-The main way to use LoopLab is to describe your ML goal in the web UI. From a checkout,
-install the UI extra and start the local server:
+## Install
+
+Python ≥ 3.11. A source checkout also needs Node ≥ 20.19 for the first UI build
+([exact versions and Windows commands](docs/guide/installation.md)).
 
 ```bash
+git clone https://github.com/ArtyomZemlyak/looplab.git && cd looplab
 python -m pip install -e ".[ui]"
-looplab ui                       # open http://127.0.0.1:8765
 ```
 
-Source checkouts need Node/npm to build the UI on first launch; see
-[Installation](docs/guide/installation.md) for the exact versions and Windows commands.
-In the UI, open **Settings → Essential → Model** to configure your model, then use **Start a new run**
-in Assistant. Describe the goal, where the code or data live, and any time or compute limit.
-**I have code** and **I have data** prepare editable examples; Assistant can help choose
-the evaluation command and metric if you do not have them yet.
-Review the proposed task, evaluation, and effective settings; **Validate** and then **Start run**.
-The Assistant can discuss a plan without starting an experiment.
-
-Want later experiments to reuse a useful code fix? Ask Assistant to prepare a reuse plan,
-or open **Code for future experiments** in Overview or Report for a run with a recorded code base. See the
-[short walkthrough](docs/guide/quickstart.md#reuse-a-useful-code-change).
-
-For a no-model demonstration, follow the [offline CLI recipe](docs/guide/cli-walkthrough.md).
-To keep working in Codex or Claude Code while LoopLab evaluates your candidates, follow the
-[external-agent quickstart](docs/guide/external-harness.md#first-external-run).
-These are different modes: the external agent proposes candidates; the built-in Assistant
-drives LoopLab's own research loop.
-
-LoopLab runs a closed research loop: a **Researcher** proposes ideas, a **Developer** writes the
-code, a sandbox runs it, an evaluator scores it, and the loop refines and **merges** the best
-candidates — repeating until the budget runs out. On a fresh repo node the Developer works in three
-phases — **stages → plan → implement** (declare the eval pipeline — skipped when the operator already
-declared `cmd.stages` — decompose into atomic steps, then write the code). Domain decisions are appended to
-an event log that is authoritative for the **replayable run state**, so the search can be reproduced and
-crash-resumed by replay. Task/config snapshots, diagnostic traces, chat and cross-run memory remain explicit
-sidecars; they are not invented by `replay.fold`.
-
-It runs **fully offline with zero external services** (no API keys, no Docker) on a local task, and
-scales up to driving a live LLM, working inside a real repo, or grading actual Kaggle competitions.
-
-## Architecture
-
-Three planes and their connections — **magenta marks where the LLM / agent is invoked**, the engine
-plane is deterministic, and the Search / Memory / Knowledge stores feed the loop over the append-only
-`events.jsonl` spine. Full walkthrough on the [documentation site](https://artyomzemlyak.github.io/looplab/guide/architecture/).
-
-![LoopLab architecture — one-pager schema](docs/infographic/architecture-one-pager.svg)
-
-## Key features
-
-- **Closed research loop** — a Researcher proposes, a Developer writes the code, a sandbox runs it, an evaluator scores it, and the loop refines and merges the best candidates. See [Concepts](docs/guide/concepts.md).
-- **Event-sourced, replayable run state** — domain decisions are appended to an append-only log and folded deterministically, so search state is reproducible and **crash-resumable by replay**. Control-plane appends share the event-store lock; task/config, traces, chat and cross-run memory keep their own documented sidecar contracts. See [Concepts](docs/guide/concepts.md).
-- **Offline, or any OpenAI-compatible LLM** — no keys or Docker for local runs; change `base_url` to drive it with Ollama, vLLM, SGLang, or OpenAI. See [LLM & coding agents](docs/guide/llm-and-agents.md).
-- **Describe the task in words** — Genesis (the LLM planner) authors the whole task from a `--goal`, including where your data lives. See [Generating code](docs/guide/generating-code.md).
-- **Nine task adapters** — from a toy objective to your own dataset, an existing repo, or real Kaggle competitions. See [Tasks](docs/guide/tasks.md).
-- **The agent writes and repairs the code** — on a fresh repo node the Developer runs three phases (**stages → plan → implement**): it declares the eval pipeline, decomposes the work into atomic steps, then writes the code. It can **run a short probe program against the real environment** instead of guessing at an API (`developer_probe`, on), and a task may grant the in-house repo Developer exact compile/test/Bash validators as **operator-pinned commands selected only by name** (`developer_commands`), executed in a disposable candidate workspace. A failure is then repaired **inside the node that failed** — there is no separate Debug node — and what stops the repair loop is a **judgment, not a count**: `inline_repair_attempts` now defaults to `0` (no count cap), and the loop ends when the crash-triage model says it no longer knows how to fix this, when the Developer itself answers *"stuck"*, or when the repair critic finds the attempts circling one cause. See [Generating code](docs/guide/generating-code.md).
-- **External agent harness** — `-s external_harness=true --backend toy` lets Codex, Claude Code or any MCP client drive research, proposals, optional stages, implementation, repair, governance and search through `looplab harness-mcp`; LoopLab accepts ready-made candidates and measures them. `phases` exposes the same entities and durable writes as the built-in roles. Alternatively, `--developer-backend codex|claude` delegates only file editing inside LoopLab's existing search loop. See [External agent harness](docs/guide/external-harness.md).
-- **Cross-run memory and knowledge** — cases, lessons, causal meta-notes, skills, and a knowledge base accumulate across runs, both injected into prompts and **agentically retrievable**. See [Memory & knowledge](docs/guide/memory.md).
-- **Adaptive search** — MCTS/ASHA policies, a novelty gate, and stagnation-driven broadening of the idea space. The **research decides the run's width** (`proposal_width`, on): the box settles it at launch, then the hardware the open proposals actually declare re-pins it. And production is paced by **occupancy**, not by a node count — while an evaluation is running and the board behind it is thin, the engine keeps proposing, so a multi-hour eval no longer stalls the pipeline behind it. See [Concepts](docs/guide/concepts.md).
-- **Trust tiers and sandbox** — a subprocess sandbox by default (no Docker), a `--network none` Docker tier for untrusted code, and reward-hack / leakage gates on scoring. Each candidate also runs in **its own copy** of your code and may only read that copy — see [What a node may read](#what-a-node-may-read). See [Deployment](docs/guide/deployment.md).
-- **Live web UI and terminal control plane** — a React control plane with a full execution trace, or steer runs by chat from the terminal. The chat can also **keep watching for you**: ask it to tell you when a run finishes, and the watch is a durable record that survives a page reload, a closed tab and a server restart. See [Web UI](docs/guide/ui.md).
-- **Verified, returnable results** — held-out grading, MLE-bench scoring, and a returnable [live-scenario suite](docs/guide/live-scenarios.md); export the champion to MLflow or a notebook. A metric can also name **what it is a claim about** (`eval.metric.subject`), which the engine binds to that artifact's content identity as the score stage starts.
-
----
-
-## Installation
+## See it work in seconds — no model needed
 
 ```bash
-pip install -e .                 # core engine + CLI
-pip install -e ".[ui]"           # + live React UI and local TUI auto-start (FastAPI/uvicorn)
-pip install -e ".[otel]"         # + OpenTelemetry span export
-pip install -e ".[dev]"          # + test deps (pytest, httpx, FastAPI/uvicorn, MCP SDK)
+looplab run examples/demo.yaml      # six experiments on a toy objective, fully offline
+looplab inspect runs/demo           # best result, why it stopped, trust checks
+looplab ui                          # open http://127.0.0.1:8765 and click the `demo` run
 ```
 
-Requires **Python ≥ 3.11**. The core dependency set is small and ships prebuilt wheels on common
-platforms (`pydantic`, `orjson`, `anyio`, `typer`). Installing exposes a `looplab` command; you can
-also run `python -m looplab.cli`.
+## Use it on your own problem
 
-## CLI quick start
+1. **Connect a model.** In the UI, open **LoopLab → Settings → Essential → Model**, set the model and
+   endpoint (any OpenAI-compatible server: Ollama, vLLM, SGLang, OpenAI), **Save**, then
+   **Test active LLM**. From a terminal, `looplab smoke` runs the same check.
+2. **Describe the goal.** Click **Start a new run** in Assistant. Say what to improve, where the code
+   or data live on the LoopLab server, and a limit such as "three experiments".
+3. **Review and start.** Assistant drafts a launch card. **Validate** it, read the task, metric and
+   limits, then **Start run**. Chatting about a plan never starts one.
+4. **Read the result.** The run's **Report** and the chat summaries show the best score, how it
+   compares with earlier experiments, and what is still unconfirmed.
 
-```bash
-# 1. Run a toy optimization task offline (no LLM, no network) — no file needed.
-#    --backend toy is required: `backend` defaults to `llm` (changed 2026-08-04).
-looplab run --no-genesis --kind quadratic --goal "minimize (x-3)^2+(y+1)^2" --direction min --out runs/demo --backend toy
+The [Quickstart](docs/guide/quickstart.md) walks through these steps.
 
-# 2. Inspect the result and verify reproducibility.
-looplab inspect runs/demo          # raw launch snapshot + current folded best result
-looplab replay  runs/demo          # rebuild full state from the event log
+**Prefer the terminal?** `looplab init` writes a documented `looplab.yaml`; edit the task and run
+`looplab run looplab.yaml`. The [CLI walkthrough](docs/guide/cli-walkthrough.md) covers inspection,
+replay, a live model and crash recovery.
 
-# 3. A real ML task: polynomial-degree + ridge selection via 5-fold CV.
-#    `backend` defaults to `llm`, so this one calls a model — add `--backend toy` to stay offline
-#    (templated regression roles), or point LOOPLAB_LLM_BASE_URL/--model at a reachable endpoint.
-looplab run examples/regression_task.json --out runs/reg --max-nodes 14
-```
+**Working in Codex or Claude Code?** Your coding agent can propose the candidates while LoopLab runs
+and scores them: see the [external-agent quickstart](docs/guide/external-harness.md#first-external-run)
+and [`AGENTS.md`](AGENTS.md).
 
-### Four ways to configure a run
+## What it can work on
 
-You don't have to hand-write JSON. Pick whichever fits:
-
-```bash
-# a) Just describe it — Genesis (the LLM) authors the whole task from your words, including where
-#    your data lives. No file, no --kind, no --data:
-looplab run --goal "predict the target column; my data is in ~/proj/data and ~/extra/feats.csv"
-
-# b) One readable YAML file — what to solve AND how. Scaffold a documented template, edit, run:
-looplab init                       # writes looplab.yaml (common settings active; full appendix commented)
-looplab run looplab.yaml
-
-# c) Pin the kind but still let Genesis fill the rest:
-looplab run --kind dataset --goal "predict target, data in data.csv" -s max_nodes=20
-
-# d) A bare task file + flags (the original style still works):
-#    `backend` defaults to `llm`, so drop `--backend toy` only if a live endpoint is reachable:
-looplab run examples/toy_task.json --max-nodes 14 --backend toy
-```
-
-When you pass `--goal`, the CLI's **Genesis** planner authors the task for you: it picks the `kind` —
-`dataset`, `repo`, `mlebench_real`, … — and reads your words for where the
-data lives (one path or several, a file or a folder), so you don't pre-format anything. `--kind`
-**pins** the kind and lets Genesis fill the rest within it; `--data` is an optional shortcut for the
-path. The Web **New run** flow reaches the same editable-launch outcome through the owner Assistant's
-`propose_run` tool, while the TUI uses the server's `/api/genesis` planner; these are compatible
-planning surfaces, not one shared planner implementation. All three use the same task-adapter
-validation and backend-default authority. Web additionally submits a reviewed `/api/start/preflight`
-token; TUI posts to `/api/start`, whose server validates before spawn but issues no reviewed receipt;
-CLI validates directly. Add `--no-genesis` to build the task from the task flags (`--kind`,
-`--goal`, `--direction`, and `--data`) without a model. `--set` only changes engine settings.
-
-`-s/--set key=value` overrides any **non-credential** engine setting (credential fields are refused
-to keep secrets out of shell history; otherwise it has parity with the `settings:` block and the
-`LOOPLAB_*` env vars). A unified `looplab.yaml` looks like:
-
-```yaml
-out: runs/demo
-task:
-  kind: dataset
-  goal: predict `target` from the features
-  direction: max
-  data_path: data.csv
-settings:
-  backend: llm
-  max_nodes: 20
-  eval_env: {DATA_ROOT: /data/local}   # env vars set for every eval stage of every node
-```
-
-`eval_env` is the run-level **declared environment**: those variables are set for every stage of
-every node's evaluation, on both sandbox tiers (`-s eval_env=NAME=VALUE` on the command line,
-comma-separated for several). Secret-shaped names are refused rather than redacted — a declared
-environment is written verbatim into the run's config snapshot, and LoopLab has no secret store to
-route one to.
-
-Open `runs/demo/tree.html` for a static lineage view of every candidate the loop tried.
-
-## Run with a real LLM
-
-The Researcher/Developer can be driven by **any OpenAI-compatible endpoint** (Ollama, vLLM, SGLang,
-OpenAI) — it's a `base_url` change, not a code change. The example below uses local Ollama:
-
-```bash
-ollama pull qwen3:8b
-looplab smoke                                                   # verify endpoint + tool-calling
-looplab run examples/code_regression_task.json --backend llm --max-nodes 6
-```
-
-With `--backend llm`, the model writes a complete solution, the loop runs it in the sandbox, and a
-self-repair operator hands failing code + stderr back to the model to fix. Point it at a hosted
-model by setting `LOOPLAB_LLM_BASE_URL` / `LOOPLAB_LLM_MODEL` / `LOOPLAB_LLM_API_KEY`.
-
-## Task types
-
-A task is a small JSON file describing what you **have** — `repo` / `dataset` / `cmd` /
-`kaggle`/`competition` / `benchmark` — and the engine infers the adapter (an explicit legacy `kind`
-still works). The fields desugar to nine adapters:
-
-| `kind` | What it optimizes | Example |
+| You have | Task kind | Example |
 |---|---|---|
-| `quadratic` | A toy numeric objective (the model-free kind; needs `--backend toy`) | `examples/toy_task.json` |
-| `regression` | Polynomial + ridge model selection via CV | `examples/regression_task.json` |
-| `classification` | Polynomial feature-map degree + classifier tuning via CV | `examples/classification_task.json` |
-| `timeseries` | Write a forecaster; scored by a shipped rolling-origin backtest | `examples/timeseries_task.json` |
-| `code_regression` | LLM **writes the code** that fits the model | `examples/code_regression_task.json` |
-| `mlebench` | Competition-shaped task with a private held-out grader | `examples/mlebench_task.json` |
-| `mlebench_real` | **Real Kaggle competitions** scored by the official grader | `examples/mlebench_real_spooky.json` |
-| `repo` | Edit/tune an **existing repo**; success = the repo's own eval | `examples/repo_task.json` |
-| `dataset` | Point at your data; LLM **writes the whole solution** + picks the metric | `examples/dataset_task.json` |
+| A dataset and a target | `dataset` — the agent writes the whole solution | `examples/dataset_task.json` |
+| An existing repo with an evaluation | `repo` — the agent edits allowed files; the repo's own eval scores it | `examples/repo_task.json` |
+| A Kaggle competition | `mlebench_real` — official split and grader | `examples/mlebench_real_spooky.json` |
+| Just curiosity | `quadratic`, `regression`, `classification`, `timeseries` — offline synthetic tasks | `examples/demo.yaml` |
 
-See the [Task reference](docs/guide/tasks.md) for every field and more examples.
+[`examples/README.md`](examples/README.md) says which examples need a model. The
+[task reference](docs/guide/tasks.md) lists every field.
 
-## CLI
+## Commands you will use
 
 ```bash
-looplab init                             # scaffold a documented looplab.yaml (config-as-docs)
-looplab run     [CONFIG|TASK] [-s k=v]   # YAML/JSON config, a bare task, or --goal/--kind (no file)
-looplab resume  RUN_DIR                  # continue a crashed/incomplete run by replay
-looplab inspect RUN_DIR                  # raw launch snapshot + current folded best result
-looplab replay  RUN_DIR                  # pure fold of the event log → state (read-only)
-looplab readmodel RUN_DIR [--check]      # build the derived read model, or report whether it is stale
-looplab smoke                            # ping the configured LLM endpoint
-looplab approve RUN_DIR                  # ratify a paused run (HITL / onboarding)
-looplab bench   TASK.json ...            # capability self-benchmark across tasks
-looplab ui                               # serve the live React UI (auto-builds the bundle; needs [ui])
-looplab tui                              # terminal control plane; local auto-start needs [ui], or `--server URL`
-looplab export-mlflow    RUN_DIR         # log the champion to MLflow
-looplab export-notebook  RUN_DIR         # export the champion as a runnable .ipynb
+looplab init                       # scaffold a documented looplab.yaml
+looplab run CONFIG|TASK [-s k=v]   # start a run; -s sets any non-secret setting
+looplab ui                         # web UI with Assistant (needs the [ui] extra)
+looplab inspect RUN_DIR            # best result first; --config adds the raw launch snapshot
+looplab resume RUN_DIR             # continue a stopped or crashed run from its event log
+looplab stop RUN_DIR               # stop without the wrap-up; resumable
+looplab smoke                      # check the configured model endpoint
 ```
 
-Full flag-by-flag reference: [CLI reference](docs/guide/cli-reference.md).
+`looplab --help` groups all commands, starting with these. Every flag is in the
+[CLI reference](docs/guide/cli-reference.md), and every setting in [Configuration](docs/guide/configuration.md).
 
-**Quick start needs no login or URL allow-list.** `looplab ui` opens without an owner token,
-including behind a JupyterHub/reverse proxy. Host/Origin checks are off by default.
-To enable protection, set `LOOPLAB_UI_REQUIRE_AUTH=1` and `LOOPLAB_UI_CHECK_ORIGIN=1`;
-for a proxy, then list its hostname in `LOOPLAB_UI_HOSTS`. A supplied `LOOPLAB_UI_TOKEN`
-always enables login; otherwise auth opt-in generates/reuses `~/.looplab/ui-token`.
-An open server grants owner access to anyone who can reach it. Use protected mode or an
-authenticated proxy for a shared/public deployment. The default bind remains `127.0.0.1`.
+## Good to know
 
-## Crash & resume (the keystone)
-
-Because the event log is authoritative for replayable run state, a run survives a hard kill and continues
-from the durable frontier. External paid calls and pre-append side effects use their own recovery handshakes;
-see [Concepts](docs/guide/concepts.md#authoritative-command-lifecycle) for the exact ambiguity boundaries:
-
-```bash
-looplab run examples/toy_task.json --out runs/c --max-nodes 12 --crash-after 3 --backend toy
-#   -> hard-exits (code 137) mid-run, like kill -9
-looplab resume runs/c --task-file examples/toy_task.json --max-nodes 12
-#   -> replays the log, continues from the frontier, finishes cleanly
-#   (`--backend toy` keeps this offline; without it the run needs a reachable LLM endpoint, which
-#    the pre-run preflight checks before a single event is written)
-```
-
-## Docker is optional
-
-The sandbox tier is chosen by **trust mode**, not your environment:
-
-- **`trusted_local`** (default) — `SubprocessSandbox`: process isolation + timeout + tree-kill +
-  output caps. No Docker, no daemon. This is the whole local CLI.
-- **`untrusted`** — `DockerSandbox` (`--network none`): a real boundary, needed only when you
-  execute untrusted code on shared infra (e.g. a hosted multi-tenant UI). Set `LOOPLAB_TRUST_MODE=untrusted`.
-
-A one-command Docker Compose stack (LLM + UI + engine) is available for the hosted scenario — see
-[Deployment](docs/guide/deployment.md).
-
-## What a node may read
-
-Every candidate runs in **its own copy** of your repo, and a node's eval may read only that copy —
-plus the run directory, the data and reference paths you declared, and the usual machine tiers
-(interpreter, site-packages, model cache, `/tmp`). Reading back into your editable **source tree** is
-refused, loudly, in the child process, with a message naming the fix.
-
-That boundary exists because "did the node produce this number?" is not the same question as "did the
-stage write its output file?". A run once trained a good model and then scored *a human's* checkpoint
-that an absolute path in an editable config still pointed at — the artifact contract passed, and the
-foreign number is what got recorded.
-
-| setting | default | what it does |
-|---|---|---|
-| `read_fence` | **`deny`** | Refuse reads of the editable source tree from inside the node's eval. `warn` logs and lets the read through (the honest setting for one run while you find out what your pipeline actually reads); `off` installs nothing. No-op for a task with no editable source |
-| `metric_subject` | **`audit`** | Record what the metric is *about*: `eval.metric.subject` names a workdir-relative artifact, bound to its content identity at the score stage's start. `audit` records and never blocks; **`require`** additionally makes an *unbound* metric unselectable — off by default because no shipped task declares a subject yet, so requiring one today would leave a run with no champion; `off` records nothing |
-| `landlock` | **`off`** | A **kernel** read allow-list applied to the eval process and everything it spawns, so a native reader (`safetensors`, a non-Python child) is covered too — the audit hook behind `read_fence` can only see reads that reach Python. Off because no real GPU eval has been completed under it yet; validate a run's derived ruleset with `looplab landlock-check RUN_DIR` before turning it on |
-
-The one real false positive is a large untracked in-tree input that a node's copy does not carry: the
-run then fails loudly, naming all three fixes — a `data:` mount, a `references:` mount, or
-`seed_mode: "all"`. Details in [Tasks](docs/guide/tasks.md) and
-[Configuration](docs/guide/configuration.md).
+- **No Docker needed locally.** Candidates run as sandboxed subprocesses, each in its own copy of
+  your code, and may not read back into your source tree. The Docker tier (`--network none`) is for
+  untrusted code on shared machines; the bundled Compose stack also serves a 30B model and needs a
+  GPU with about 24 GB. See [Deployment](docs/guide/deployment.md).
+- **The UI has no login by default** and binds to `127.0.0.1`. Before sharing it, set
+  `LOOPLAB_UI_REQUIRE_AUTH=1` and `LOOPLAB_UI_CHECK_ORIGIN=1` (and `LOOPLAB_UI_HOSTS` behind a proxy);
+  see [Web UI → Exposure & auth](docs/guide/ui.md#exposure-auth).
+- **The default backend is `llm`.** A run without a reachable model is refused before it starts, with
+  the fix named. Use `--backend toy`, or a file that sets it like `examples/demo.yaml`, to stay offline.
+- **Results are honest about evidence.** A score is called better only when the two evaluations are
+  recorded as comparable, and a single evaluation is labelled unconfirmed until repeat checks run.
 
 ## Documentation
 
-The full guide lives in **[`docs/guide/`](docs/guide/index.md)**:
-
 | Guide | Contents |
 |---|---|
-| [Installation](docs/guide/installation.md) | Requirements, extras, optional backends |
+| [Installation](docs/guide/installation.md) | Requirements, extras, Windows commands |
 | [Quickstart](docs/guide/quickstart.md) | Your first run through Assistant |
-| [CLI reference](docs/guide/cli-reference.md) | Every command and option |
-| [Configuration](docs/guide/configuration.md) | Every `LOOPLAB_*` setting, grouped |
-| [Tasks](docs/guide/tasks.md) | All nine task kinds and their fields |
-| [Generating train & test code](docs/guide/generating-code.md) | Let the agent write the code (Genesis-first); bring your own repo + data |
-| [LLM & coding agents](docs/guide/llm-and-agents.md) | Backends, external agents, per-role models, reasoning |
-| [Concepts](docs/guide/concepts.md) | Event log, replay, sandbox/trust, operators, gates, memory |
-| [Memory & knowledge](docs/guide/memory.md) | Every memory type (cases, lessons, meta-notes, skills, KB), the methodologies, and agentic retrieval |
-| [Web UI](docs/guide/ui.md) | The live React control plane |
-| [Deployment](docs/guide/deployment.md) | Docker Compose, the untrusted tier |
-| [Live scenarios](docs/guide/live-scenarios.md) | Situational end-to-end tests of the main features — a returnable collection |
-| [MLE-bench runbook](docs/MLEBENCH.md) | Running real Kaggle competitions |
+| [CLI walkthrough](docs/guide/cli-walkthrough.md) | Offline runs, inspection, replay, a live model, crash recovery |
+| [Web UI](docs/guide/ui.md) | Assistant, the run workspace, Report |
+| [Tasks](docs/guide/tasks.md) · [Generating code](docs/guide/generating-code.md) | What a task file can say; letting the agent write the code |
+| [LLM & coding agents](docs/guide/llm-and-agents.md) · [External harness](docs/guide/external-harness.md) | Models, per-role routing, external agents |
+| [Concepts](docs/guide/concepts.md) · [Memory](docs/guide/memory.md) | Event log and replay, search, trust gates, cross-run memory |
+| [CLI reference](docs/guide/cli-reference.md) · [Configuration](docs/guide/configuration.md) | Every command and every setting |
+| [Deployment](docs/guide/deployment.md) · [MLE-bench runbook](docs/MLEBENCH.md) | Docker Compose, Kaggle competitions |
 
-Design records (the *why* behind the architecture) are in [`docs/00-INDEX.md`](docs/00-INDEX.md).
+Design records — the *why* behind the architecture — are indexed in [`docs/00-INDEX.md`](docs/00-INDEX.md).
+Contributors: start with [`CLAUDE.md`](CLAUDE.md) and [`tests/README.md`](tests/README.md).
 
 ## Testing
 
 ```bash
-python -m pytest                          # ~17,000 collected tests, fully offline, ~40 min in one process
-python -m pytest --splits 4 --group 1     # one of the four shards CI runs in parallel (pytest-split)
+python -m pip install -e ".[dev,ui]"
+python -m pytest tests/test_events_replay.py   # one file: seconds
+python -m pytest                               # everything, fully offline: about 40 minutes
 ```
 
-Live-LLM and external-agent tests auto-skip when no endpoint/agent is configured, so the suite runs
-fully offline. CI runs the four Linux shards, the UI suite and a packaging check on every push
-(`.github/workflows/tests.yml`, the badge above), and the Windows leg as its own workflow
-(`tests-windows.yml`).
+CI runs the suite in four shards, the UI tests, a packaging check and a Windows leg on every push.
 
 ## License
 

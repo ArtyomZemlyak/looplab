@@ -14,14 +14,15 @@ decision records, roadmap), see [`../00-INDEX.md`](../00-INDEX.md).
 | **[Assistant quickstart](quickstart.md#assistant-in-the-web-ui)** | Set up the UI, describe a goal, review and start the run, read the result |
 | **[External-agent quickstart](external-harness.md#first-external-run)** | Let Codex or Claude Code propose candidates; LoopLab evaluates them |
 | **[Installation](installation.md)** | Requirements, source install on Windows/POSIX, optional extras |
-| **[Offline CLI walkthrough](cli-walkthrough.md)** | Prove the engine works without a model |
+| **[Offline CLI walkthrough](cli-walkthrough.md)** | `looplab run examples/demo.yaml`: the engine working without a model |
+| **[Web UI](ui.md)** | Assistant, the run workspace, Report, and how results are compared |
 | **[JupyterHub onboarding](jupyterhub-onboarding.md)** | Setup inside a hub single-user server, then work through Assistant |
 
 ## Reference
 
 | Guide | What it covers |
 |---|---|
-| **[CLI reference](cli-reference.md)** | Every command (`run`, `resume`, `replay`, `inspect`, `smoke`, `approve`, `bench`, `ui`, `export-*`) and its options |
+| **[CLI reference](cli-reference.md)** | Every command and its options; `looplab --help` groups them, everyday commands first |
 | **[Configuration](configuration.md)** | Every `LOOPLAB_*` setting, grouped by topic, with defaults |
 | **[HTTP API reference](api-reference.md)** | Every route of `looplab ui`'s server, generated from its own OpenAPI schema and pinned by a test |
 | **[Tasks](tasks.md)** | All nine task kinds and their JSON fields |
@@ -40,7 +41,6 @@ decision records, roadmap), see [`../00-INDEX.md`](../00-INDEX.md).
 
 | Guide | What it covers |
 |---|---|
-| **[Web UI](ui.md)** | Assistant, live run views and detailed controls |
 | **[Deployment](deployment.md)** | Docker Compose stack, the untrusted sandbox tier |
 | **[MLE-bench runbook](../MLEBENCH.md)** | Running real Kaggle competitions end-to-end |
 | **[Live scenarios](live-scenarios.md)** | Situational end-to-end tests of the main features (stagnation, novelty, trust gate, repair, …) — a returnable collection |

@@ -337,8 +337,13 @@ def test_init_writes_parseable_documented_template(tmp_path):
     doc = yaml.safe_load(dest.read_text())
     assert set(("task", "settings", "out")) <= set(doc)
     # The whole template must be valid YAML, incl. the comment alignment (a `#` glued to a value
-    # would corrupt e.g. llm_base_url).
-    assert doc["settings"]["llm_base_url"].endswith("/v1")
+    # would corrupt it): every ACTIVE value round-trips as written.
+    assert doc["settings"]["max_nodes"] == 8 and doc["settings"]["backend"] == "llm"
+    # doc 74 EB-17: the endpoint and model are documented but NOT active — an active value in the file
+    # outranks LOOPLAB_LLM_BASE_URL / .env, so the scaffold used to undo the endpoint the reader had
+    # just exported. They stay discoverable as commented lines.
+    assert "llm_base_url" not in doc["settings"] and "llm_model" not in doc["settings"]
+    assert "  # llm_base_url: http://localhost:11434/v1  " in dest.read_text()
     # memory_dir/knowledge_dir are ON by default (real path defaults). The scaffold must NOT emit them
     # as ACTIVE `null` lines — that would override the defaults and silently disable cross-run memory +
     # the knowledge base in every generated config. Loading the scaffolded settings must keep them set.

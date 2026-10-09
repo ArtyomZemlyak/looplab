@@ -828,3 +828,27 @@ def echo_parked_requests(events, state) -> None:
     `events/parked_requests.py::open_parked_requests`, which the attention feed reads too."""
     for parked in open_parked_requests(events, state):
         typer.echo(f"parked: {parked['detail']}")
+
+
+def echo_inspect_tail(state, run_dir: Path, *, show_config_hint: bool) -> None:
+    """The last lines of `looplab inspect`: the champion's comparability key, the offline-baseline
+    note, and where the launch settings are. Moved out of `inspect_cmds.py` VERBATIM for the
+    comparability half (its line cap, `tests/test_cli_command_groups.py`) when doc 74 EB-04/EB-10
+    added the other two."""
+    from looplab.cli import offline_baseline_note, snapshot_backend
+    from looplab.engine.comparability import record_of as comparability_record_of
+    _best = state.best()
+    _record = comparability_record_of(_best) if _best is not None else None
+    if _record:
+        _keys = " ".join(f"{name}={value}" for name, value in sorted(_record["keys"].items()))
+        typer.echo(f"comparability: {_record['authority']} {_keys}")
+    else:
+        typer.echo(
+            "comparability: UNKNOWN — this run records no key for what its metric was measured "
+            "against, so its number may not be ranked against any other run's. Declare "
+            "`eval.inputs` on the task (or a `comparison_contract`) to make it decidable.")
+    _offline = offline_baseline_note(state, snapshot_backend(Path(run_dir) / "config.snapshot.json"))
+    if _offline:
+        typer.echo(_offline)
+    if show_config_hint:
+        typer.echo(f"launch settings: looplab inspect {run_dir} --config")

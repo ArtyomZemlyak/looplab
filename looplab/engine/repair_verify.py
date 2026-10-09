@@ -239,7 +239,7 @@ a judge's history; the rule costs the accusation the rung was built to make.
 
 AND ON 2026-09-08 THAT REFUSAL WAS MEASURED INSTEAD OF REASONED, which moved it off DIRECTION and
 onto REACH — a bigger fact, and one the file exemption does not contain. The corpus that argued
-every other rule here is gone, but `bench-out/cand.durable.jsonl` (the triage bench's durable arm
+every other rule here is gone, but `tests/data/bench-out/cand.durable.jsonl` (the triage bench's durable arm
 over these same runs) still holds both halves such a rule needs: 95 verbatim triage rationales — the
 repair rationale IS the triage rationale, which is what `engine/evaluate.py` hands `verify_repair` —
 and, on 78 of them, the slice of the FAILURE OUTPUT the triage quoted back at it

@@ -4,12 +4,18 @@ The following steps run offline first, then use a real LLM when you configure on
 
 ## 1. Run a task offline
 
-No LLM and no network are required. The `toy` backend uses a deterministic optimizer, so you can see
-the full loop work in seconds. `backend` defaults to `llm` (a real run wants a live model), so ask
-for the offline one explicitly:
+No LLM and no network are required. The demo file sets the offline `toy` backend itself, so you can
+see the full loop work in seconds with no flags:
 
 ```bash
-looplab run examples/toy_task.json --out runs/demo --max-nodes 14 --backend toy
+looplab run examples/demo.yaml
+```
+
+The same task as a bare JSON file needs the backend on the command line, because `backend` defaults
+to `llm` (a real run wants a live model):
+
+```bash
+looplab run examples/toy_task.json --out runs/toy --max-nodes 14 --backend toy
 ```
 
 What just happened:
@@ -22,13 +28,13 @@ What just happened:
 ## 2. Read the result
 
 ```bash
-looplab inspect runs/demo     # raw launch config snapshot + best node/metric/params
+looplab inspect runs/demo     # best node, metric, params, stop reason, trust, comparability
 looplab replay  runs/demo     # rebuild the full run state purely from the event log
 ```
 
-`inspect` prints `config.snapshot.json` **verbatim** — the settings as launched. It does NOT overlay
-the event-effective values, so on a resumed or live-retuned run the seven `run_started`-pinned fields
-and an event-sourced `trust_gate` can differ from what it shows.
+`inspect --config` also prints `config.snapshot.json` **verbatim** — the settings as launched. It does
+NOT overlay the event-effective values, so on a resumed or live-retuned run the seven
+`run_started`-pinned fields and an event-sourced `trust_gate` can differ from what it shows.
 
 `inspect` is the quick "what did I get?"; `replay` proves the run is reproducible — it folds the
 append-only log into the same state, with no side effects.

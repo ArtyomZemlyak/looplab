@@ -885,7 +885,7 @@ class CrashRepairMixin:
         # false on both counts when the diagnostician named it over a `check_failed` stage: nothing
         # was killed, and the account at the head of `error` is the diagnostician's
         # (`failure_diagnosis.diagnosis_repair_lead`), not a watchdog's. Measured on the triage
-        # corpus (`bench-out/cand.durable.jsonl`): 14 of 122 rows are that case, every one a
+        # corpus (`tests/data/bench-out/cand.durable.jsonl`): 14 of 122 rows are that case, every one a
         # `repair`. A new opening sentence for the diagnosed case, keyed on the SOURCE the durable
         # row carries; the fix each directive asks for is the same words either way, and `false`
         # — or a caller that does not know the source — is the historical text byte for byte.

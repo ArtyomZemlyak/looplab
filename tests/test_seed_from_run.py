@@ -505,7 +505,7 @@ def test_the_champion_is_never_taken_across_the_scale(isolated):
 
 
 def test_run_level_facts_outside_the_contract_make_same_unknown(isolated):
-    """MEDIUM (critic 2026-09-26): `eval_env` — the corpus root `NEXT_RUN.md` sets — and the holdout
+    """MEDIUM (critic 2026-09-26): `eval_env` — the corpus root `benchmarks/NEXT_RUN.md` sets — and the holdout
     split are outside the task contract; a difference is named and `same` is no longer claimed."""
     runs, repo = isolated / "runs", isolated / "repo"
     repo.mkdir()
