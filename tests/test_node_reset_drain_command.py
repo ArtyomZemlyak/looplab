@@ -17,7 +17,8 @@ pytest.importorskip("fastapi")
 from factories import command_terminal as _terminal  # noqa: E402
 from factories import http_run_generation  # noqa: E402
 from test_run_command_service import (  # noqa: E402
-    _STAGED_FINISH_COMMAND_TIMEOUT_S, _ack_marked, _client, _Driver, _seed, _types)
+    _STAGED_FINISH_COMMAND_TIMEOUT_S, _SUCCESS_CEILING_S, _ack_marked, _client, _Driver, _seed,
+    _types)
 
 from looplab.events.eventstore import EventStore  # noqa: E402
 
@@ -233,7 +234,7 @@ def test_a_failed_drain_is_promoted_only_by_a_drains_own_ack(tmp_path):
     DRAIN's ack (`drain_only` on the row) may now."""
     rd = _seed(tmp_path, paused=True)
     (rd / "task.snapshot.json").unlink()     # refused before the spawner: a clean `spawn_failed`
-    client, _srv = _client(tmp_path, _Driver())
+    client, _srv = _client(tmp_path, _Driver(), observation=_SUCCESS_CEILING_S)
     failed = _terminal(client, _post(client, "node_reset", _reset(), "drain-spawn-fails",
                                      drain_only=True).json())
     assert failed["status"] == "failed" and failed["error"]["code"] == "spawn_failed", failed
@@ -258,7 +259,7 @@ def test_a_drain_a_search_served_says_so(tmp_path):
         _ack_marked(rd)
 
     driver.on_spawn = plain_engine_acks
-    client, _srv = _client(tmp_path, driver)
+    client, _srv = _client(tmp_path, driver, observation=_SUCCESS_CEILING_S)
     record = _terminal(client, _post(client, "node_reset", _reset(), "drain-superseded",
                                      drain_only=True).json())
     assert record["status"] == "succeeded" and record["drain_superseded"] is True, record

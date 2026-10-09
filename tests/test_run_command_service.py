@@ -261,6 +261,14 @@ def _ack_marked(rd, command_id=None):
 # short (`timeout`); only the ceiling on admission gets a margin a loaded runner meets.
 _ADMISSION_MARGIN_S = 1.5
 
+# THE CEILING FOR A COMMAND THAT IS MEANT TO SUCCEED. A record's absolute deadline also gates
+# ADMISSION: a worker admitted after it settles `deadline_passed_before_intent` and never appends the
+# intent, so `_wait_for_intent` cannot help however long it waits. Ceilings of 0.4-1.0 s (4x a short
+# ack `timeout`) lost that race on the Windows leg four times in a day, one test per run. A command
+# that SUCCEEDS returns the moment its ack folds, so this costs nothing there; a test whose subject IS
+# a timeout keeps its own short ceiling (or `_ADMISSION_MARGIN_S` when it needs the intent first).
+_SUCCESS_CEILING_S = 10.0
+
 
 def _wait_for_intent(rd, command_id, timeout=_WORKER_START_TIMEOUT_S):
     # The same failure-only bound as its sibling waits: 1 s missed a worker on the Windows runner.
@@ -829,7 +837,7 @@ def test_pause_waits_for_folded_pause_and_no_engine(tmp_path):
 def test_restart_waits_for_old_owner_then_requires_exact_replacement_serve(tmp_path):
     rd = _seed(tmp_path)
     driver = _Driver(alive=True)
-    client, _srv = _client(tmp_path, driver, timeout=0.30, observation=1.0)
+    client, _srv = _client(tmp_path, driver, timeout=0.30, observation=_SUCCESS_CEILING_S)
 
     command = _post(client, "restart", key="one-durable-restart").json()
     intent = _wait_for_intent(rd, command["id"])
@@ -989,7 +997,7 @@ def test_reset_normalization_on_the_command_route(tmp_path):
         _ack_marked(rd)
 
     driver.on_spawn = start_driver
-    client, _srv = _client(tmp_path, driver)
+    client, _srv = _client(tmp_path, driver, observation=_SUCCESS_CEILING_S)
     command_bad = _post(client, "node_reset", {"node_id": 99}, key="bad-reset").json()
     assert command_bad["status"] == "rejected"
 
@@ -1379,7 +1387,7 @@ def test_set_strategy_accepts_canonical_totals_lanes_and_atomic_card_scoring(tmp
 def test_set_strategy_command_persists_explicit_empty_lane_clear(tmp_path):
     rd = _seed(tmp_path)
     driver = _Driver(alive=True)
-    client, _srv = _client(tmp_path, driver)
+    client, _srv = _client(tmp_path, driver, observation=_SUCCESS_CEILING_S)
 
     record = _post(
         client,
@@ -1445,7 +1453,7 @@ def test_same_key_is_observational_new_key_conflicts_and_explicit_retry_reuses_i
     reproducible = snapshot.read_bytes()
     snapshot.unlink()
     driver = _Driver()
-    client, _srv = _client(tmp_path, driver)
+    client, _srv = _client(tmp_path, driver, observation=_SUCCESS_CEILING_S)
     body = {"add_nodes": 2}
     failed = _terminal(client, _post(client, "budget_extend", body, key="durable-budget").json())
     assert failed["status"] == "failed" and driver.calls == []
@@ -2358,7 +2366,7 @@ def test_slow_spawn_keeps_lease_past_startup_window_and_late_ack_succeeds(tmp_pa
     rd = _seed(tmp_path)
     driver = _Driver()
     client, srv = _client(
-        tmp_path, driver, startup=0.05, timeout=0.10, observation=0.50)
+        tmp_path, driver, startup=0.05, timeout=0.10, observation=_SUCCESS_CEILING_S)
     command = _post(client, "budget_extend", {"add_nodes": 1}, key="slow-child").json()
     intent = _wait_for_intent(rd, command["id"])
     time.sleep(0.14)  # well past startup_timeout; detached child has not exposed engine.lock yet
@@ -2571,7 +2579,7 @@ def test_live_but_unacknowledging_driver_has_bounded_observation_ceiling(tmp_pat
 def test_delete_is_excluded_by_active_command_then_permitted_after_terminal(tmp_path):
     rd = _seed(tmp_path)
     driver = _Driver(alive=True)
-    client, _srv = _client(tmp_path, driver, timeout=0.10)
+    client, _srv = _client(tmp_path, driver, timeout=0.10, observation=_SUCCESS_CEILING_S)
     # An `engine_ack` command, not `pause`: since 2026-08-13 a pause SUCCEEDS the moment it folds
     # (the effect the operator asked for), so it no longer holds an `executing` record open long
     # enough to be the active command a delete must be excluded by. The property under test —
@@ -2594,7 +2602,8 @@ def test_delete_is_excluded_by_active_command_then_permitted_after_terminal(tmp_
 def test_reset_active_guard_and_external_spawn_lease_prevent_second_popen(monkeypatch, tmp_path):
     rd = _seed(tmp_path, finished=True)
     driver = _Driver()
-    client, srv = _client(tmp_path, driver, startup=0.05, timeout=0.20)
+    client, srv = _client(tmp_path, driver, startup=0.05, timeout=0.20,
+                          observation=_SUCCESS_CEILING_S)
     original_start = srv.commands._start_worker
     srv.commands._start_worker = lambda *_args, **_kwargs: None
     pending = _post(client, "budget_extend", {"add_nodes": 1}, key="before-reset").json()
