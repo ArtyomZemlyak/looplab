@@ -12,6 +12,8 @@ with the flag off reproduces the barrier, so the test would fail if the flag did
 """
 from __future__ import annotations
 
+import itertools
+import threading
 import time
 
 import anyio
@@ -23,8 +25,12 @@ from looplab.engine.options import EngineOptions
 from tests.factories import TOY_TASK, make_engine
 
 
-def _timed_engine(run_dir, *, steady: bool, slow_first: float = 0.35):
-    """A 2-wide fan-out whose FIRST build is slow, recording every build's start and end."""
+def _timed_engine(run_dir, *, steady: bool, slow_first: float = 1.0):
+    """A 2-wide fan-out whose FIRST build is slow, recording every build's start and end.
+
+    Slow RELATIVE to the second: it holds until that build has ENDED, then `slow_first` more. A fixed
+    0.35 s was an absolute claim about the real build's cost, and on the Windows runner that cost
+    alone was ~0.33 s, so both ended 31 ms apart and the refill had no room to show."""
     task = ToyTask.load(TOY_TASK)
     engine = make_engine(run_dir, task=task, n_seeds=4, max_nodes=4,
                          steady_state_build=steady)
@@ -32,18 +38,23 @@ def _timed_engine(run_dir, *, steady: bool, slow_first: float = 0.35):
     engine.role_factory = task.build_roles
     timeline: list[tuple[str, float]] = []
     real = engine._create_node_guarded
+    order = itertools.count()               # `next` is atomic; a len() over the timeline raced
+    second_ended = threading.Event()
 
     def _timed(action, pair, reservation, idea, telemetry=None):
-        index = len([row for row in timeline if row[0] == "start"])
+        index = next(order)
         timeline.append(("start", time.monotonic()))
         if index == 0 and slow_first:
-            time.sleep(slow_first)          # the slowest member of the first chunk
+            second_ended.wait(timeout=30)   # the slowest member of the first chunk
+            time.sleep(slow_first)
         else:
             time.sleep(0.02)
         try:
             return real(action, pair, reservation, idea, telemetry)
         finally:
             timeline.append(("end", time.monotonic()))
+            if index == 1:
+                second_ended.set()
 
     engine._create_node_guarded = _timed
     return engine, timeline

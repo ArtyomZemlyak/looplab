@@ -262,7 +262,8 @@ def _ack_marked(rd, command_id=None):
 _ADMISSION_MARGIN_S = 1.5
 
 
-def _wait_for_intent(rd, command_id, timeout=1.0):
+def _wait_for_intent(rd, command_id, timeout=_WORKER_START_TIMEOUT_S):
+    # The same failure-only bound as its sibling waits: 1 s missed a worker on the Windows runner.
     deadline = time.time() + timeout
     while time.time() < deadline:
         for event in EventStore(rd / "events.jsonl").read_all():
