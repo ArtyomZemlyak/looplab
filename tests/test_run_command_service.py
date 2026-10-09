@@ -959,6 +959,11 @@ def test_spawn_exception_and_no_progress_startup_are_structured_failures(tmp_pat
 
     silent.pid_running = True
     silent.on_spawn = retry_driver
+    # The retry must SUCCEED, so it re-arms under a deadline it can meet: a retry takes the service's
+    # CURRENT window, and 1.5 s / 2 s (needed above to reach `timed_out`) settled it `timed_out` on the
+    # Windows runner before spawn, ack and observation finished.
+    srv.commands.command_timeout = _STAGED_FINISH_COMMAND_TIMEOUT_S
+    srv.commands.max_observation_timeout = _STAGED_FINISH_COMMAND_TIMEOUT_S
     retried = client2.post(f"/api/runs/other/commands/{record['id']}/retry").json()
     assert _terminal(client2, retried, run_id="other")["status"] == "succeeded"
     assert len(silent.calls) == 2
