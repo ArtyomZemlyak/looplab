@@ -1537,7 +1537,11 @@ def test_a_read_reconciles_a_late_ack_and_a_vanished_intent(tmp_path):
 def test_timed_out_command_reconciles_a_late_exact_ack_without_reappend(tmp_path):
     rd = _seed(tmp_path)
     driver = _Driver(alive=True)
-    client, _srv = _client(tmp_path, driver, startup=0.05, timeout=0.12)
+    # The TIMEOUT is this test's mechanism, not its subject: the intent must land before the deadline
+    # and the ack after it. At 0.12 s the Windows runner's worker missed the deadline, never appended
+    # the intent at all, and no wait for it could help. 5 s gives the worker room; the ceiling equals
+    # it so the never-acked command settles `timed_out` at 5 s, not at the default 4x.
+    client, _srv = _client(tmp_path, driver, startup=0.05, timeout=5.0, observation=5.0)
     record = _post(client, "set_strategy", {"strategy": {"policy": "asha"}}, key="late").json()
     intent = _wait_for_intent(rd, record["id"])
     timed = _terminal(client, record, timeout=_TERMINAL_SETTLE_TIMEOUT_S)
