@@ -134,6 +134,12 @@ const launchGuardState = ({
   }
 }
 
+// The one line the model screen says about the API key before its store details (doc 74 EB-18).
+export function credentialKeySummary(credential) {
+  if (!credential?.effective) return 'API key: not set. Local endpoints usually need none.'
+  return credential.active ? 'API key: saved for this base URL.' : 'API key: saved, but not for this base URL.'
+}
+
 function CredentialState({
   credential, writeError = '', onRefresh, refreshing = false, refreshDisabled = false,
 }) {
@@ -175,7 +181,13 @@ function CredentialState({
             : 'A key entered below will be stored only as a fallback and will not replace the ambient source.'}`,
         }
     : null
+  // One plain line first, the store's internals on request (doc 74 EB-18): five Yes/No chips about
+  // "stored material" and "shared key" were the first thing a new user read on the model screen,
+  // where most local endpoints need no key at all. A binding problem opens the details itself.
+  const keySummary = credentialKeySummary(credential)
   return <>
+    <details className="settings-credential-details" open={bindingProblem || undefined}>
+    <summary>{uiText(keySummary)} <span className="muted">{uiText("Key storage details")}</span></summary>
     <dl className="settings-credential-state" aria-label={uiText("Shared credential store state")}>
       {[
         ['Stored material', credential.stored],
@@ -194,6 +206,7 @@ function CredentialState({
         <dd>{uiText(CREDENTIAL_STATUS_LABELS[credential.status])}</dd>
       </div>
     </dl>
+    </details>
     {writeError && <div id="settings-credential-write-warning"
       className="settings-credential-notice is-danger" role="alert">
       <div>

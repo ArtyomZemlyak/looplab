@@ -11,11 +11,12 @@ Design docs live in `docs/` (see `docs/02-architecture.md`, ADRs in
 
 ```bash
 pip install -e ".[dev,ui]"        # offline suite deps, including UI server and MCP SDK
-python -m pytest                  # full suite (18,863 collected, ~40 min; addopts already has -q)
+python -m pytest                  # full suite (~40 min; addopts already has -q); tests/README.md
 python -m pytest tests/test_events_replay.py           # targeted run — always do this first
 python -m pytest -o addopts="" -q ...                  # if you need to override the default -q
 python -m pytest -m "not docker"  # skip Docker-daemon tests
-looplab run --no-genesis --kind quadratic --goal "min (x-3)^2" --direction min --backend toy --out runs/demo  # offline smoke
+looplab run examples/demo.yaml    # offline smoke: the file sets backend: toy, no flags needed
+looplab run --no-genesis --kind quadratic --goal "min (x-3)^2" --direction min --backend toy --out runs/demo  # same, from flags
 # (--no-genesis matters: any --goal otherwise invokes Genesis, which needs a reachable LLM.
 #  --backend toy is now REQUIRED for an offline run: the `backend` default was changed from
 #  "toy" to "llm" on 2026-08-04, so without it this command hits the LLM endpoint preflight.)
@@ -220,7 +221,8 @@ refused — is in `docs/64-agent-guide-narratives-2026-09-06.md` ("Engine invari
   `runtime/command_eval.py::READER_PATH_KEYS` + `READER_KEYS`; `core/config.py::DEVELOPER_BACKENDS` +
   `DEVELOPER_BACKEND_ALIASES`; `events/types.py::BACKGROUND_APPENDABLE` /
   `SETUP_THREAD_APPENDABLE` / `ASSISTANT_APPENDABLE` / `NON_CARD_SELECTION_BACKGROUND_APPENDABLE` / `LANE_QUEUE_APPENDABLE`;
-  `core/llm.py::OpenAICompatibleClient._RETRY_POLICY` (an ordered table);
+  `core/llm.py::OpenAICompatibleClient._RETRY_POLICY` (an ordered table); `cli/help_panels.py::HELP_PANELS`
+  (every CLI command's `--help` panel and summary — a new command without a row is red);
   `core/llm_broker.py::BACKGROUND_LANE_PRODUCERS`; `agents/loop_options.py::LOOP_OPTION_FIELDS` +
   `EXPLICIT_ONLY_LOOP_ARGS` (must PARTITION `drive_tool_loop`'s keyword-only parameters);
   `engine/orchestrator.py::Engine.FORWARDED_SUBOBJECT_MEMBERS` (a forgotten lane runs outside the

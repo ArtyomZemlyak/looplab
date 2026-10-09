@@ -194,3 +194,20 @@ def test_the_default_comparator_reads_the_tables_conventions():
     assert documented_default_matches("`audit`", "audit") and not documented_default_matches("`gate`", "audit")
     assert documented_default_matches("`-1.0` (AUTO)", -1.0) and documented_default_matches("`8`", 8.0)
 
+
+def test_the_start_here_list_is_the_uis_essential_tier():
+    """doc 74 EB-17: the configuration page opens with the settings most runs touch, and that list
+    is the UI's Essential tier (`ui/src/settingsModel.js::ESSENTIAL_SETTING_KEYS`) — two surfaces that
+    answer one question must not drift into two different answers."""
+    import re
+    root = _DOC.parents[2]
+    js = (root / "ui" / "src" / "settingsModel.js").read_text(encoding="utf-8")
+    block = js.split("export const ESSENTIAL_SETTING_KEYS = new Set([", 1)[1].split("])", 1)[0]
+    essential = set(re.findall(r"'([a-z_]+)'", block))
+    text = _DOC.read_text(encoding="utf-8")
+    lead = text.split("## Start here: the settings most runs touch", 1)[1].split("\n## ", 1)[0]
+    listed = {name for name in re.findall(r"`([a-z_]+)`", lead)} - {"llm", "toy", "init"}
+    assert len(essential) == 14 and listed >= essential, sorted(essential - listed)
+    from looplab.core.config import Settings
+    assert listed - {"profile"} <= set(Settings.model_fields), sorted(listed - set(Settings.model_fields))
+

@@ -7,6 +7,18 @@ field to a `TaskAdapter` (`looplab/adapters/tasks.py`). Pass it to `looplab run`
 looplab run path/to/task.json
 ```
 
+**Which kind do I need?** Most real work is one of three; the rest of this page is the full reference.
+
+| You have | Kind | Read |
+|---|---|---|
+| A dataset and a target to predict | `dataset` — the agent writes the whole solution | [`dataset`](#dataset) |
+| A repo with its own evaluation | `repo` — the agent edits allowed files; the repo's eval scores it | [`repo`](#repo), [the composable schema](#the-composable-schema-recommended) |
+| A Kaggle competition | `mlebench_real` — official split and grader | [`mlebench_real`](#mlebench_real) |
+
+You rarely write a task by hand: Assistant drafts one from your description, and `looplab run --goal
+"..."` asks Genesis to. Runnable examples, and which need a model, are in
+[`examples/README.md`](https://github.com/ArtyomZemlyak/looplab/blob/master/examples/README.md).
+
 ## Writing a `goal`: what belongs in it, and what is a leak
 
 A `goal` states the OBJECTIVE and the GROUND TRUTH the agents cannot reach with their own tools.

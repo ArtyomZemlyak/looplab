@@ -1,5 +1,22 @@
 # Configuration
 
+## Start here: the settings most runs touch
+
+Most runs change only these fourteen settings — the same ones **Settings → Essential** shows in the
+web UI. Everything below them is the full reference, grouped by topic.
+
+- **Model:** `backend` (`llm`, or `toy` for offline), `llm_model`, `llm_base_url`, `llm_api_key`
+  (set it in the UI or the environment, never with `--set`), `output_language`.
+- **Experiments and resources:** `max_nodes` (how many candidates), `n_seeds`, `eval_parallel`,
+  `llm_parallel`.
+- **Time and model budgets:** `max_seconds` (whole run), `max_eval_seconds` and `timeout` (one
+  evaluation), `llm_cost_limit`, `llm_token_limit`.
+
+`looplab init` writes a `looplab.yaml` with the task, `backend` and `max_nodes` active and every other
+setting commented at its default. One-word presets are `profile` (below).
+
+## How settings are resolved
+
 LoopLab is configured by a single layered `Settings` object (`looplab/core/config.py`). Every field can
 be set four ways, in increasing priority:
 

@@ -118,7 +118,7 @@ cp -r ui/{package.json,package-lock.json,vite.config.*,index.html,src,scripts,pu
 (cd $B && npm ci && npm run build) && cp -r $B/dist/. ui/dist/
 ```
 
-**Node too old** — `ui/package.json` requires Node ≥ 20; hub images commonly ship 18. conda-forge may
+**Node too old** — `ui/package.json` accepts Node `^20.19.0`, `^22.13.0` or `>=24.0.0`; hub images commonly ship 18. conda-forge may
 be blocked by a proxy while `nodejs.org` is not:
 
 ```bash
@@ -129,7 +129,7 @@ hash -r && node -v
 ```
 
 `/opt/conda` is inside the container image, so this **does not survive a pod restart** — the durable
-fix is Node ≥ 20 in the image or Spawner. Until then nobody can ship a UI change, and the bundle in
+fix is a supported Node (20.19+, 22.13+ or 24+) in the image or Spawner. Until then nobody can ship a UI change, and the bundle in
 the browser stays whatever was last built.
 
 **Publishing needs no restart** — the server reads `dist/` per request and serves `index.html`

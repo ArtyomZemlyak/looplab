@@ -457,3 +457,7 @@
     min-height: 44px;
   }
 }
+
+/* doc 74 EB-18: the key-store state sits behind one summary line. */
+.settings-credential-details > summary { cursor: pointer; font-size: 12px; margin: 6px 0; }
+.settings-credential-details > summary .muted { margin-left: 6px; font-size: 11px; }

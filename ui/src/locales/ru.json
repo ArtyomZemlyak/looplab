@@ -1,7 +1,7 @@
 {
   "schema": 1,
   "language": "ru",
-  "count": 7724,
+  "count": 7733,
   "messages": {
     "# LoopLab run report — {0}": "# Отчёт запуска LoopLab — {0}",
     "## Agent narrative (advisory)": "## Пояснения агента (рекомендации)",
@@ -1288,7 +1288,7 @@
     "It is ranked here because the run ranks it — this front shows the selection the engine is actually making, not a corrected one.": "Он стоит здесь, потому что его рейтинг: этот фронт показывает выбор движка, а не корректируемый.",
     "It stops waiting on its own in about {0}s, and then says why.": "Он перестал ждать сам по себе, {0}С, и тогда говорит почему.",
     "It will be reconciled without automatic replay.": "Восстановление будет согласовано без автоматического повтора.",
-    "Its evaluation score is {0} by {1} under matching recorded conditions.": "Его оценка {0} на {1} при одинаковых записанных условиях.",
+    "Its evaluation score is {0} by {1} than the first eligible experiment #{2}, under matching recorded conditions.": "Его оценка {0} на {1}, чем у первого подходящего эксперимента #{2}, при одинаковых записанных условиях.",
     "Its evaluation score matches the first eligible experiment.": "Его оценка совпадает с оценкой первого допустимого эксперимента.",
     "Its exact filter is still active.": "Точное количество фильтра еще активировано.",
     "Its exact filter stays active until Runs refresh succeeds.": "Точное фильтрирование остается активным, пока \"Рынок\" не освежится.",
@@ -3136,7 +3136,6 @@
     "authorship not recorded": "Авторство не регистрируется",
     "auto": "авто",
     "auto-collapse settled groups (keeps the champion, selected, and active groups open)": "автоматически сворачивать завершённые группы (группы чемпиона, выбранная и активные остаются открытыми)",
-    "autonomous R&D — live runs": "Автономные исследования — текущие запуски",
     "awaiting approval of #{0}": "Ожидает утверждения No {0}",
     "back to current": "назад к текущему",
     "balanced": "сбалансированные",
@@ -6828,7 +6827,6 @@
     "muted eval-pipeline-label": "muted eval-pipeline-label",
     "muted generation-empty": "muted generation-empty",
     "muted helper-file-label": "muted helper-file-label",
-    "muted home-subtitle": "muted home-subtitle",
     "muted hyp-empty": "muted hyp-empty",
     "muted idea-attribution": "muted idea-attribution",
     "muted lt-empty": "muted lt-empty",
@@ -7726,7 +7724,18 @@
     "Upstream notices for external coding agents": "Уведомления upstream для внешних агентов-программистов",
     "When the live engine advances the base, a Claude Code developer agent already at work hears the notice through its own after-tool hook (once, at most three per session, recorded when the hook delivered it). Every external coding agent's next call also lists the capabilities promoted so far. Off: external agents are told nothing.": "Когда живой движок продвигает базу, уже работающий агент-разработчик Claude Code получает уведомление через собственный хук после вызова инструмента (один раз, не более трёх за сессию; доставка записывается, когда хук её выполнил). Следующий вызов любого внешнего агента также перечисляет уже продвинутые возможности. Выключено: внешним агентам ничего не сообщается.",
     "Notices for external agents": "Уведомления для внешних агентов",
-    "Tell external coding agents about base advances, mid-session where their CLI allows.": "Сообщать внешним агентам о продвижениях базы — посреди сессии, где это позволяет их CLI."
+    "Tell external coding agents about base advances, mid-session where their CLI allows.": "Сообщать внешним агентам о продвижениях базы — посреди сессии, где это позволяет их CLI.",
+    "Try the offline demo — no model needed": "Офлайн-демо — без модели",
+    "Six experiments on a toy objective, offline, in a few seconds. Validate, then Start run.": "Шесть экспериментов на учебной функции, офлайн, за несколько секунд. Нажмите «Проверить», затем «Начать запуск».",
+    "offline demo": "офлайн-демо",
+    "runbar runbar-compact": "runbar runbar-compact",
+    "API key: saved for this base URL.": "API-ключ: сохранён для этого Base URL.",
+    "API key: saved, but not for this base URL.": "API-ключ: сохранён, но не для этого Base URL.",
+    "API key: not set. Local endpoints usually need none.": "API-ключ не задан. Локальным серверам он обычно не нужен.",
+    "Key storage details": "Подробнее о хранении ключа",
+    "Show filters, views and projects": "Показать фильтры, виды и проекты",
+    "Starting the run…": "Запуск начинается…",
+    "was started from this tab. It opens here as soon as its first records are written.": "запущен из этой вкладки. Он откроется здесь, как только появятся первые записи."
   },
   "plurals": {
     "({0} paraphrases folded)": {

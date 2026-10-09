@@ -1,0 +1,44 @@
+{
+  "proposal_id": "offline-demo",
+  "run_id": "offline-demo",
+  "rationale": "The offline demo from examples/demo.yaml: six experiments on a closed-form objective, no model, no network. It shows the whole loop, the Report and the lineage in a few seconds.",
+  "task": {
+    "kind": "quadratic",
+    "id": "toy_quadratic",
+    "goal": "minimize (x-3)^2 + (y+1)^2 ; optimum at x=3, y=-1, loss=0",
+    "direction": "min",
+    "bounds": {
+      "x": [
+        -10.0,
+        10.0
+      ],
+      "y": [
+        -10.0,
+        10.0
+      ]
+    },
+    "seed": 7,
+    "step": 1.5,
+    "comparison_contract": {
+      "schema": 1,
+      "dataset_lineage": "none: closed-form objective, no data",
+      "split_or_candidate_pool_lineage": "none: every candidate is a point in the declared bounds",
+      "evaluator_uid": "looplab.adapters.toytask.ToyTask",
+      "evaluator_version": "1",
+      "population": "the point (x, y) a candidate proposes",
+      "filter": "none",
+      "metric_uid": "quadratic_loss",
+      "unit": "squared distance to (3, -1)",
+      "direction": "min",
+      "aggregation": "single deterministic evaluation",
+      "cutoff": "none",
+      "measurement_phase": "search",
+      "uncertainty_protocol": "none: deterministic objective",
+      "constraints_digest": "bounds x,y in [-10, 10]"
+    }
+  },
+  "settings": {
+    "backend": "toy",
+    "max_nodes": 6
+  }
+}

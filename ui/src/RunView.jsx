@@ -1,3 +1,4 @@
+import { FRESH_LAUNCH_RETRY_MS, clearFreshLaunch, isFreshLaunch } from './freshLaunch.js'
 import { uiText, uiMessage, uiPlural, useUILanguage } from './uiLanguage.js'
 import LanguageControl from './LanguageControl.jsx'
 import React, {
@@ -297,6 +298,17 @@ export default function RunView({ runId, onBack, reviewMode = false, reviewMeta 
   const retryRunRef = useRef(retryRun)
   const serverCodeStale = serverCodeNotice(live)
   retryRunRef.current = retryRun
+  // A run this tab has just started answers 404 until its engine writes the first event
+  // (`freshLaunch.js`): keep asking once a second and say it is starting, instead of "not found".
+  const freshLaunch = !reviewMode && !live && runStatus === 'not_found' && isFreshLaunch(runId)
+  useEffect(() => {
+    if (!freshLaunch) return undefined
+    // An interval, not a timeout per status change: a retry can land on `not_found` again without the
+    // status ever leaving it, and then no dependency would change to schedule the next one.
+    const timer = setInterval(() => retryRunRef.current?.(), FRESH_LAUNCH_RETRY_MS)
+    return () => clearInterval(timer)
+  }, [freshLaunch, runId])
+  useEffect(() => { if (live) clearFreshLaunch(runId) }, [live, runId])
   // The destructive Start-over saga lives in useStartOverRecovery.js (doc 25 UI-03). Its durable
   // state is read here, at the top, because startOverMutationBlocked gates the published run
   // access, the panel allow-list and every node mutation; its coordinating effects are installed
@@ -1840,7 +1852,11 @@ export default function RunView({ runId, onBack, reviewMode = false, reviewMeta 
     onBack={onBack} onLeave={leaveRetainedPanelRoute}>
     <main className="run-resource-state" data-route-main tabIndex={-1} aria-live="polite"
       aria-labelledby="run-state">
-      {runStatus === 'not_found' ? <>
+      {freshLaunch ? <>
+        <div className="history-spinner" aria-hidden="true" />
+        <h1 id="run-state">{uiText("Starting the run…")}</h1>
+        <p><code>{runId}</code>{uiText(" was started from this tab. It opens here as soon as its first records are written.")}</p>
+      </> : runStatus === 'not_found' ? <>
         <div className="resource-state-icon" aria-hidden="true">404</div>
         <h1 id="run-state">{uiText("Run not found")}</h1>
         <p><code>{runId}</code>{uiText(" does not exist or may have been removed.")}</p>

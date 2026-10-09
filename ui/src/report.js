@@ -389,7 +389,9 @@ export function verdict(state, a) {
   if (outcome === 'baseline') headline += uiText(' This is the first eligible experiment; it does not establish improvement.')
   else if (outcome === 'uncompared') headline += uiText(' Improvement over the first eligible experiment is not established.')
   else headline += outcome === 'flat' ? uiText(' Its evaluation score matches the first eligible experiment.')
-    : uiMessage(' Its evaluation score is {0} by {1} under matching recorded conditions.', [uiText(outcome === 'improved' ? 'better' : 'worse'), fmt(Math.abs(gain))])
+    // Names WHAT it is better than (doc 74 EB-21): "better by 77.01" alone left the reader to guess
+    // the reference, which is the first eligible experiment, not the parent or the previous best.
+    : uiMessage(' Its evaluation score is {0} by {1} than the first eligible experiment #{2}, under matching recorded conditions.', [uiText(outcome === 'improved' ? 'better' : 'worse'), fmt(Math.abs(gain)), first.id])
   headline += trust === 'suspect' ? uiText(' The result is flagged, treat with caution.')
     : uiText(' Detector coverage is not fully verified.')
   const nextStep = trust === 'suspect' ? 'Review the flagged evidence in Trust before using the selected result.'

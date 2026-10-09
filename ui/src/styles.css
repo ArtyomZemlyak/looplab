@@ -1647,7 +1647,7 @@ textarea.text { min-height: 220px; font-family: ui-monospace, Consolas, monospac
 .verdict-row { display: flex; gap: 6px; align-items: center; margin-bottom: 7px; }
 .verdict-pill { font-size: 11px; font-weight: 700; text-transform: uppercase; letter-spacing: .5px;
   padding: 2px 8px; border-radius: 999px; background: transparent; border: 1px solid var(--line); }
-.verdict-headline { margin: 0; max-width: 90ch; font-size: 17px; font-weight: 650; line-height: 1.5; }
+.verdict-headline { margin: 0 0 8px; max-width: 90ch; font-size: 17px; font-weight: 650; line-height: 1.5; }
 .caveat-chips { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 10px; }
 .caveat-chip { font-size: 11px; padding: 3px 9px; border-radius: 999px; cursor: pointer;
   background: transparent; border: 1px solid var(--line); color: var(--fg); }
@@ -3046,7 +3046,7 @@ body.asst-side-open .app-shell-main { margin-right: var(--asst-side-w, 440px); }
 @media (max-width: 600px) {
   .topbar { padding-inline: 8px; }
   .home-head { gap: 4px; }
-  .home-subtitle, .home-new-hint, .home-head > .spacer,
+  .home-new-hint, .home-head > .spacer,
   .home-actions > .fx-switch { display: none; }
   /* The TRIGGER, not the mark inside it. This rule is what distributes the first row once
      `.home-head > .spacer` is hidden above, and `.brand` stopped being a direct flex child of
@@ -3593,3 +3593,9 @@ body.asst-side-open .app-shell-main { margin-right: var(--asst-side-w, 440px); }
 .research-filing:empty { display: none; }
 .research-inferred-chip, .research-operator-chip { align-self: flex-start; }
 .research-filing-select select { max-width: min(42ch, 100%); }
+
+/* The offline demo on the first-run landing (doc 74 EB-24): a secondary action under the primary
+   "Describe a goal" button, whose launch card reads left-aligned inside the centred landing. */
+.offline-demo { margin-top: 14px; }
+.offline-demo > p { margin: 10px 0 8px; }
+.offline-demo .asst-launch { text-align: left; }

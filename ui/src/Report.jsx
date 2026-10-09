@@ -77,12 +77,14 @@ function VerdictBanner({ v, onOpenPanel, canOpenPanel }) {
   const canOpen = panel => !!onOpenPanel && canOpenPanel?.(panel) !== false
   return (
     <section className={'verdict-banner ' + cls} aria-labelledby="report-verdict-heading">
+      {/* The result sentence first, its status labels after it (doc 74 EB-21): three caveat pills
+          above the sentence made a successful run read as a warning before its number was seen. */}
+      <h2 id="report-verdict-heading" className="verdict-headline">{uiText(v.headline)}</h2>
       <div className="verdict-row">
         <span className={'verdict-pill ' + (v.outcome === 'improved' ? 'ok' : v.outcome === 'regressed' ? 'fail' : '')}>{uiText(OUTCOME_LABEL[v.outcome] || v.outcome)}</span>
         {v.robustness && v.robustness !== 'n/a' && <span className="pill">{uiText(v.robustness)}</span>}
         <span className="pill verdict-trust-label">{uiText(TRUST_LABEL[v.trust] || v.trust)}</span>
       </div>
-      <h2 id="report-verdict-heading" className="verdict-headline">{uiText(v.headline)}</h2>
       <p className="report-next-step"><strong>{uiText("Next step")}</strong> {uiText(v.nextStep)}</p>
       {v.caveats.length > 0 && <div className="caveat-chips">
         {v.caveats.map((c, i) => {

@@ -1,0 +1,83 @@
+// doc 74 (the entry-barrier inspection): the first screens a new user sees, driven live.
+//
+//   * EB-24 — an empty installation offers the offline demo as an ordinary launch card over the
+//     fixed spec, and opening it makes no write (validation and start stay the user's two clicks);
+//   * EB-19 — a small portfolio keeps the run list plain, one button brings the tools back, and five
+//     runs show them unasked;
+//   * EB-18 — the model screen's one line about the API key, as a truth table.
+import test from 'node:test'
+import assert from 'node:assert/strict'
+import React from 'react'
+import { fetchStub, mountLive, until } from './_mount.js'
+
+let harness
+let RunList
+let settings
+
+test.before(async () => {
+  harness = await mountLive({ visible: true })
+  ;({ default: RunList } = await harness.load('/src/RunList.jsx'))
+  settings = await harness.load('/src/Settings.jsx')
+})
+
+test.after(async () => { await harness?.close() })
+
+const row = id => ({
+  run_id: id, label: id, task_id: 'toy_quadratic', direction: 'min', best_metric: 1.5,
+  best_confirmed: null, nodes: 6, finished: true, phase: 'finished', mtime: 1_700_000_000,
+  best_metric_caveats: [], best_metric_comparability: null,
+})
+const buttonNamed = (container, name) => [...container.querySelectorAll('button')]
+  .find(button => button.textContent.trim() === name)
+
+async function list(rows) {
+  const backend = fetchStub({
+    '/api/runs': rows,
+    '/api/projects': { projects: [], assignments: {} },
+    '/api/supertasks': { supertasks: [], assignments: {} },
+  })
+  globalThis.fetch = backend
+  sessionStorage.clear(); localStorage.clear()
+  const view = await harness.mount(RunList, { onOpen() {}, onGlobalNavigate() {} })
+  return { view, backend }
+}
+
+test('an empty installation offers the offline demo as a launch card, and opening it writes nothing', async () => {
+  const { view, backend } = await list([])
+  try {
+    await until(() => buttonNamed(view.container, 'Try the offline demo — no model needed'), 'demo button')
+    await React.act(async () => { buttonNamed(view.container, 'Try the offline demo — no model needed').click() })
+    await until(() => view.container.querySelector('.offline-demo form.asst-launch'), 'demo launch card')
+    assert.match(view.container.querySelector('.offline-demo').textContent, /offline-demo/)
+    assert.equal(backend.calls.some(call => call.method !== 'GET'), false,
+      'opening the demo validates and starts nothing on its own')
+  } finally { await view.unmount() }
+})
+
+test('a small portfolio keeps the list plain until asked; five runs show the tools unasked', async () => {
+  const small = await list([row('a'), row('b')])
+  try {
+    await until(() => buttonNamed(small.view.container, 'Show filters, views and projects'), 'compact list')
+    assert.equal(small.view.container.querySelector('select[aria-label="Saved portfolio view"]'), null)
+    assert.equal(small.view.container.querySelector('input[aria-label="Filter runs"]'), null)
+    await React.act(async () => {
+      buttonNamed(small.view.container, 'Show filters, views and projects').click()
+    })
+    await until(() => small.view.container.querySelector('input[aria-label="Filter runs"]'), 'tools shown')
+    assert.ok(small.view.container.querySelector('select[aria-label="Saved portfolio view"]'))
+  } finally { await small.view.unmount() }
+
+  const five = await list(['a', 'b', 'c', 'd', 'e'].map(row))
+  try {
+    await until(() => five.view.container.querySelector('input[aria-label="Filter runs"]'), 'full chrome at five runs')
+    assert.equal(buttonNamed(five.view.container, 'Show filters, views and projects'), undefined)
+  } finally { await five.view.unmount() }
+})
+
+test('the model screen says one plain line about the API key', () => {
+  const line = settings.credentialKeySummary
+  assert.equal(line(null), 'API key: not set. Local endpoints usually need none.')
+  assert.equal(line({ effective: false, active: false }), 'API key: not set. Local endpoints usually need none.')
+  assert.equal(line({ effective: true, active: true }), 'API key: saved for this base URL.')
+  assert.equal(line({ effective: true, active: false }), 'API key: saved, but not for this base URL.')
+})

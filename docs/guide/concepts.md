@@ -3,6 +3,11 @@
 This explains the machinery behind a run. It's the *how it works* companion to the task-oriented
 guides. For the full design rationale and decision records, see [`../00-INDEX.md`](../00-INDEX.md).
 
+**New here?** Four sections explain what you see in a run: [The loop](#the-loop),
+[Event log = canonical replay state](#event-log-canonical-replay-state),
+[Stopping & resuming a run](#stopping-resuming-a-run-three-verbs) and
+[Trust & the sandbox](#trust-the-sandbox). The rest is detail for when you need it.
+
 ## The loop
 
 A run is an `Engine` (orchestrator) driving four roles in a cycle:

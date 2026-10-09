@@ -3,7 +3,12 @@
 ## Start in Assistant
 
 Install and launch the UI using the [source-install steps](installation.md#source-install-for-the-web-ui).
-Open **Runs**; Assistant is already visible on a desktop screen. Select **Start a new run**,
+On an empty installation, **Try the offline demo — no model needed** under **Start with a goal**
+opens an ordinary launch card for the demo in `examples/demo.yaml`: **Validate**, then **Start run**,
+and six experiments on a toy objective finish in seconds with no model. With fewer than five runs
+and nothing organised yet, the run list stays plain; **Show filters, views and projects**
+brings the portfolio tools back, and they show on their own once you have five runs, a project, a
+saved view or a filter. Open **Runs**; Assistant is already visible on a desktop screen. Select **Start a new run**,
 describe your goal and where the code or data live, then review its launch card.
 **Validate** shows the effective task and settings; **Start run** begins the experiment.
 With **Русский**, the launch card uses **Проверить — бесплатно**, **Начать запуск**,
@@ -18,14 +23,17 @@ again; changing language keeps the checked plan. **Detailed status / Подро�
 precise technical message. A lost startup reply leads to **Check startup**, which reads the existing
 launch identity; it does not send a second Start. Confirmed startup means the run can be opened, not
 that its experiments have finished. The run opens with its current status, and **Report** shows the
-measured result and caveats. For the attached run, Assistant chat also shows free short briefs after
+measured result and caveats. For up to a minute after this tab started it, a run that is not readable
+yet shows **Starting the run…** and opens by itself; any other missing run reads **Run not found**. For the attached run, Assistant chat also shows free short briefs after
 each completed evaluation and after finalization. They include the score, confirmation/constraints
 and links to the exact experiment.
 
 For a complete first-run example, see the [Assistant quickstart](quickstart.md#assistant-in-the-web-ui).
 
 The chat needs a configured model. Open **LoopLab → Settings → Essential → Model** to check the saved
-model and endpoint. **Test active LLM** makes one provider request and may be billed.
+model and endpoint. **Test active LLM** makes one provider request and may be billed. The saved
+connection shows one line about the API key (most local endpoints need none); **Key storage details**
+opens the key store's full state, and opens by itself when the stored key needs attention.
 Essential also shows experiment resources and time/model budgets. **All** and search
 keep the complete settings catalogue available; **Technical details** explains each field fully.
 An offline engine demonstration is available through the
@@ -172,9 +180,10 @@ not prove that every evaluation was inspected.
 
 ### Language
 
-**Language / Язык** beside the composer offers **Auto**, **English** and **Русский**, even before
-the first run. It sets the language of the entire interface and all newly generated human prose. The
-selector is also available in the installation header. The browser preference is saved locally;
+**Language / Язык** in the header offers **Auto**, **English** and **Русский** on every screen,
+even before the first run. It sets the language of the entire interface and all newly generated human
+prose. (Until 2026-10-09 an identical selector also sat beside the composer; both drove the same
+preference, so one was removed, doc 74 EB-22.) The browser preference is saved locally;
 owner workspaces also save `output_language` on the server for new runs and model roles. If saving
 fails, a visible retry keeps that distinction explicit. Public review pages never save owner
 settings. Auto chooses the browser language for interface copy and lets the model follow the task.

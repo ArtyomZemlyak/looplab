@@ -60,3 +60,20 @@ def test_entry_pages_point_at_the_offline_demo_rather_than_a_flag_footnote():
         text = (ROOT / rel).read_text(encoding="utf-8")
         assert "examples/demo.yaml" in text, rel
         assert "2026-08-04" not in text, rel
+
+
+def test_every_stated_node_requirement_is_the_ui_packages_own_range():
+    """doc 71 found "Node ≥ 20" in the JupyterHub guide while `ui/package.json` accepts only
+    `^20.19.0 || ^22.13.0 || >=24.0.0` — so 21.x and 22.0-22.12 were promised and refused. A page that
+    states the requirement must state all three lines of the real range, and no page may say a bare
+    "Node ≥ 20"."""
+    import json
+    engines = json.loads((ROOT / "ui" / "package.json").read_text(encoding="utf-8"))["engines"]["node"]
+    assert engines == "^20.19.0 || ^22.13.0 || >=24.0.0", "update the pages below with the new range"
+    pages = [ROOT / "README.md", *sorted((ROOT / "docs" / "guide").glob("*.md"))]
+    for page in pages:
+        text = page.read_text(encoding="utf-8")
+        assert not re.search(r"Node\s*(?:≥|>=)\s*20(?![.\d])", text), f"{page.name}: bare Node >= 20"
+        if re.search(r"\bNode\b[^\n]{0,40}\b20\.19", text):
+            assert "22.13" in text and "24" in text, f"{page.name}: states only part of the Node range"
+

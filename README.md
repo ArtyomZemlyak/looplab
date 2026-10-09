@@ -15,7 +15,7 @@ decision is appended to an event log, so a run can be replayed and resumed after
 
 ## Install
 
-Python ≥ 3.11. A source checkout also needs Node ≥ 20.19 for the first UI build
+Python ≥ 3.11. A source checkout also needs Node 20.19+, 22.13+ or 24+ for the first UI build
 ([exact versions and Windows commands](docs/guide/installation.md)).
 
 ```bash

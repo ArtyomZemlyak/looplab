@@ -6,6 +6,7 @@ import { get, fmt, fmtDate, fmtAgo, listProjects, createProject, patchProject, d
   storageGet, storageSet } from './util.js'
 import { useMediaQuery, usePoll } from './hooks.js'
 import LazyBoundary from './LazyBoundary.jsx'
+import OFFLINE_DEMO_SPEC from './offlineDemo.json'
 import ThemeSwitcher from './ThemeSwitcher.jsx'
 import EnergyToggle from './EnergyToggle.jsx'
 import DensityToggle from './DensityToggle.jsx'
@@ -48,6 +49,12 @@ const PortfolioConcepts = lazy(() => import('./PortfolioConcepts.jsx'))
 // The runs inside the root's campaign folders (doc 70 70.1): read-only, so a lazy finder below
 // the list rather than rows of it — every caller of `/api/runs` opens what it lists.
 const CampaignRuns = lazy(() => import('./CampaignRuns.jsx'))
+// The offline demo (doc 74 EB-24) is an ordinary launch card over a fixed spec — the same server
+// validation and start path as an Assistant proposal, with no model call to produce the proposal.
+// `offlineDemo.json` mirrors `examples/demo.yaml` (`tests/test_offline_demo_spec.py` holds them equal).
+const LaunchCard = lazy(() => import('./LaunchCard.jsx'))
+// How many runs a portfolio holds before its organising tools are shown unasked (doc 74 EB-19).
+export const PORTFOLIO_TOOLS_AT = 5
 // App writes `looplab` when the operator leaves through the LoopLab menu; `settings` is the value
 // already persisted in older history entries and returns focus to the same control.
 const returnsToGlobalMenu = control => control === 'looplab' || control === 'settings'
@@ -1616,11 +1623,25 @@ export default function RunList({ onOpen, onGlobalNavigate,
   const metricSortAvailable = !metricSortOff
   const hasActiveFilters = !!query.trim() || taskFilterExact
     || statusFilter !== 'all' || stFilter !== ALL
+  const [demoOpen, setDemoOpen] = useState(false)
   const firstRunLanding = runsState === 'ready' && runs?.length === 0
     && projectsState === 'ready' && proj.projects.length === 0
     && superdata.supertasks.length === 0
     && savedViews.length === 0 && !activeSavedView && !hasActiveFilters
     && sel === ALL && view === 'list' && !projectsOpen && compareIds.size === 0
+    && missingStartOverRecoveries.length === 0 && missingDeletionRecoveries.length === 0
+  // A SMALL portfolio keeps the list plain (doc 74 EB-19). Measured 2026-10-09: one finished run drew
+  // Projects, Saved view, four filters, sort and four views — 33 buttons and 10 fields around one
+  // card. Below PORTFOLIO_TOOLS_AT runs, with nothing the operator organised yet (no project,
+  // super-task, saved view, filter or comparison selection), those tools wait behind one button;
+  // anything the operator has set up, and any recovery, shows the full chrome exactly as before.
+  const [portfolioToolsShown, setPortfolioToolsShown] = useState(false)
+  const compactPortfolio = !firstRunLanding && !portfolioToolsShown
+    && runsState === 'ready' && Array.isArray(runs) && runs.length > 0 && runs.length < PORTFOLIO_TOOLS_AT
+    && projectsState === 'ready' && proj.projects.length === 0
+    && superdata.supertasks.length === 0
+    && savedViews.length === 0 && !activeSavedView && !hasActiveFilters
+    && sel === ALL && view === 'list' && compareIds.size === 0
     && missingStartOverRecoveries.length === 0 && missingDeletionRecoveries.length === 0
   const listCriteriaKey = JSON.stringify([
     sel, query, taskFilter, taskFilterExact, statusFilter, stFilter, sortKey, sortDir,
@@ -2463,7 +2484,6 @@ export default function RunList({ onOpen, onGlobalNavigate,
             cross-run memory, authored knowledge and the host's GPUs once hid in a RUN's menu. */}
         <GlobalMenu current="list" disabled={navigationBusy}
           buttonRef={globalMenuButtonRef} onNavigate={openGlobal} />
-        <span className="muted home-subtitle">{uiText("autonomous R&D — live runs")}</span>
         {!firstRunLanding && <button ref={projectsToggleRef} className="btn sm ghost projects-toggle" disabled={navigationBusy} onClick={() => setProjectsOpen(true)}
                 aria-expanded={projectsOpen} aria-controls="projects-drawer">
           <OpIcon name="folder" className="t-ic" />{uiText(" Projects")}</button>}
@@ -2474,7 +2494,7 @@ export default function RunList({ onOpen, onGlobalNavigate,
             run workspace's DAG. The workspace toggle is a `role="toolbar" aria-label="Run workspace
             controls"`, so a screen reader announces its scope; this group announced a bare
             "Lineage, button" with nothing to tell the two apart. */}
-        {!firstRunLanding && <div className="seg" role="group" aria-label={uiText("Run list views")}>
+        {!firstRunLanding && !compactPortfolio && <div className="seg" role="group" aria-label={uiText("Run list views")}>
           {/* LINEAGE, not "Map", and CONCEPTS beside it — because the two answer different questions
               and calling one of them "the map" is why the second one was missing for so long. This
               view draws which run descends from which, inside which project: ancestry, i.e. lineage.
@@ -2500,9 +2520,9 @@ export default function RunList({ onOpen, onGlobalNavigate,
         </div>}
         <span className="spacer" style={{ flex: 1 }} />
         <div className="home-actions">
-          {!firstRunLanding && <DensityToggle />}
+          {!firstRunLanding && !compactPortfolio && <DensityToggle />}
           <ThemeSwitcher />
-          {!firstRunLanding && <EnergyToggle />}
+          {!firstRunLanding && !compactPortfolio && <EnergyToggle />}
         </div>
       </div>
       {missingStartOverRecoveries.map(item => <div key={item.runId}
@@ -2545,7 +2565,7 @@ export default function RunList({ onOpen, onGlobalNavigate,
         {!firstRunLanding && projectsOpen && <button className="project-backdrop" disabled={projectBusy} aria-disabled={navigationBusy || undefined}
                                  onClick={() => { if (!navigationBusy) setProjectsOpen(false) }}
                                  aria-label={uiText("Close projects")} />}
-        {!firstRunLanding && <aside ref={projectsDialogRef} className="psidebar" id="projects-drawer" aria-label={uiText("Projects")}
+        {!firstRunLanding && !(compactPortfolio && !projectsOpen) && <aside ref={projectsDialogRef} className="psidebar" id="projects-drawer" aria-label={uiText("Projects")}
                role={compactNav && projectsOpen && !projModal ? 'dialog' : undefined}
                aria-modal={compactNav && projectsOpen && !projModal ? 'true' : undefined}
                tabIndex={compactNav ? -1 : undefined}
@@ -2580,7 +2600,7 @@ export default function RunList({ onOpen, onGlobalNavigate,
             listScrollTopRef.current = event.currentTarget.scrollTop
             publishNavigationState({ persist: false })
           }}>
-          {!firstRunLanding && <div className="crumbs">
+          {!firstRunLanding && !compactPortfolio && <div className="crumbs">
             <button type="button" className="crumb" disabled={navigationBusy} onClick={() => chooseProject(ALL)}>{uiText("All runs")}</button>
             {breadcrumb.map(p => <React.Fragment key={p.id}><span className="sep">/</span>
               <button type="button" className="crumb" disabled={navigationBusy} onClick={() => chooseProject(p.id)}>{p.name}</button></React.Fragment>)}
@@ -2595,7 +2615,7 @@ export default function RunList({ onOpen, onGlobalNavigate,
                 onClick={() => setShowReport(true)}><OpIcon name="doc" size={12} />{uiText(" Report")}<span className="vt-scope"> · {uiText(scope.label)}</span></button>
             </div>}
           </div>}
-          {runs && !firstRunLanding && <div className="portfolio-viewbar">
+          {runs && !firstRunLanding && !compactPortfolio && <div className="portfolio-viewbar">
             <label>{uiText("Saved view")}<select ref={savedViewSelectRef} className="sel" aria-label={uiText("Saved portfolio view")} value={activeSavedView}
                 onChange={event => event.target.value
                   ? applySavedView(event.target.value) : commitActiveSavedViewState('')}>
@@ -2613,7 +2633,11 @@ export default function RunList({ onOpen, onGlobalNavigate,
           {viewMessage && <div className="notice resource-warning portfolio-message" role="alert">
             {viewMessage} <button className="btn xs" onClick={() => setViewMessage('')}>{uiText("Dismiss")}</button>
           </div>}
-          {runs && !firstRunLanding && !projectScopeBlocked && view !== 'compare' && <div className="runbar">
+          {compactPortfolio && <div className="runbar runbar-compact">
+            <button type="button" className="btn sm ghost" disabled={navigationBusy}
+              onClick={() => setPortfolioToolsShown(true)}>{uiText('Show filters, views and projects')}</button>
+          </div>}
+          {runs && !firstRunLanding && !compactPortfolio && !projectScopeBlocked && view !== 'compare' && <div className="runbar">
             <OpIcon name="search" className="t-ic" />
             <input ref={filterInputRef} className="text runbar-q" aria-label={uiText("Filter runs")} placeholder={uiText("filter runs…")} value={query}
                    maxLength={MAX_PORTFOLIO_QUERY_LENGTH} onChange={e => setQuery(e.target.value)} />
@@ -2733,7 +2757,22 @@ export default function RunList({ onOpen, onGlobalNavigate,
                   onClick={() => window.dispatchEvent(new CustomEvent('ll:new-run', { cancelable: true }))}>
                   {((runs.length === 0 && !hasActiveFilters ? uiText('Describe a goal in Assistant') : uiText('Start a new run')))}
                 </button>
-              : <span>{uiText("Drag a run onto this project, or use its ")}<b>{uiText("Move")}</b>{uiText(" menu.")}</span>}</div>}
+              : <span>{uiText("Drag a run onto this project, or use its ")}<b>{uiText("Move")}</b>{uiText(" menu.")}</span>}
+            {firstRunLanding && <div className="offline-demo">
+              <button type="button" className="btn sm" aria-expanded={demoOpen}
+                onClick={() => setDemoOpen(open => !open)}>
+                {uiText('Try the offline demo — no model needed')}
+              </button>
+              {demoOpen && <>
+                <p className="muted">{uiText('Six experiments on a toy objective, offline, in a few seconds. Validate, then Start run.')}</p>
+                <LazyBoundary label={"offline demo"} resetKey="offline-demo">
+                  {/* No navigation on start: the run is not listed yet at that instant, and opening
+                      it then showed "Run not found". The list refreshes, the landing gives way to the
+                      run's card, and the launch card itself says the run started. */}
+                  <LaunchCard spec={OFFLINE_DEMO_SPEC} launchIdentity="offline-demo" />
+                </LazyBoundary>
+              </>}
+            </div>}</div>}
           {runs && !!scoped.length && !visible.length
             && !taskFilterUnavailable && !superFilterUnavailable
             && <div className="notice" role="status">

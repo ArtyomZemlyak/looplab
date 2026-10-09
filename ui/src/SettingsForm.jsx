@@ -60,7 +60,6 @@ function Field({ idPrefix, f, value, onChange, changed, unsaved, error, granted,
   let input
   const storedCredential = credential ? credential.stored : !!secretSet
   const effectiveCredential = credential?.effective === true
-  const activeCredential = credential?.active === true
   const ambientCredential = credential
     && (credential.source === 'environment' || credential.source === 'dotenv')
   const ambientEffectiveCredential = ambientCredential && effectiveCredential
@@ -132,7 +131,7 @@ function Field({ idPrefix, f, value, onChange, changed, unsaved, error, granted,
     {error && <div id={errorId} className="sf-error" role="alert">{uiText(error)}</div>}
     {readOnly && <div id={readOnlyId} className="sf-help" role="note">{uiText("Fixed when this run started. Create a new run to use a different value; resume and replay keep this recorded value.")}</div>}
     {hasDescription && <div id={helpId} className="sf-help">
-      {f.type === 'secret' && (credential ? <span className="sf-secret-state">{uiText("Stored material: ")}{((storedCredential ? uiText('yes') : uiText('no')))}{uiText(" · Shared key: ")}{((effectiveCredential ? uiText('yes') : uiText('no')))}{uiText(" · Matches base URL: ")}{((activeCredential ? uiText('yes') : uiText('no')))}.{' '}
+      {f.type === 'secret' && (credential ? <span className="sf-secret-state">
         {((ambientCredential ? ambientEffectiveCredential ? uiMessage("The effective key comes from the {0} and is read-only here. A value entered above is stored only as a fallback pair while that override exists. {1}", [credentialSourceLabel(credential.source), storedCredential ? 'Existing stored material may be a complete pair or only a binding; its key is never exposed. ' : '']) : uiMessage("The {0} controls credential resolution but supplies no effective key. A value entered above is stored only as an inactive fallback pair while that ambient source remains selected. {1}", [credentialSourceLabel(credential.source), storedCredential ? 'Existing stored material may be a complete pair or only a binding; its key is never exposed. ' : '']) : (incompleteStoredCredential ? uiText('The stored pair is missing its API key. Enter a value to complete and rebind it to the saved endpoint, or use Clear now to remove the incomplete pair. ') : (storedCredential ? uiText('Enter a value only to replace the stored key. ') : uiText('No credential is stored. ')))))}
         {((storedCredential && clearableCredential ? (storedFallbackUnderAmbient ? uiText('Clear now removes only the stored fallback; the ambient source remains untouched. ') : uiText('Clear now is immediate and separate from Save. ')) : ''))}
       </span> : <span className="sf-secret-state">

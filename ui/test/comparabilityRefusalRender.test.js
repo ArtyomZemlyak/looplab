@@ -11,6 +11,7 @@
 // surfaces that take their data as props render statically, where nothing is fetched.
 import test from 'node:test'
 import assert from 'node:assert/strict'
+import React from 'react'
 
 import { fetchStub, mountLive, until } from './_mount.js'
 
@@ -232,11 +233,20 @@ test('RegistryPanel: the "listed, not ranked" note says which refusal', async ()
 })
 
 test('RunList: the metric-sort option says what differs, and only that', async () => {
+  // A list of fewer than five runs with nothing organised keeps its sort/filter tools behind one
+  // button (doc 74 EB-19); the refusal text is the same once they are shown, so open them first.
+  const sortOption = container => container.querySelector('select[aria-label="Sort runs by"] option[value="metric"]')
+  const showTools = container => [...container.querySelectorAll('button')]
+    .find(button => button.textContent === 'Show filters, views and projects')
   const option = async (rows, navigation) => {
     const view = await mountOver(RunList,
       { onOpen() {}, onGlobalNavigate() {}, initialNavigationState: navigation }, rows,
-      container => container.querySelector('select[aria-label="Sort runs by"] option[value="metric"]'),
+      container => sortOption(container) || showTools(container),
       'the run list sort control')
+    if (!sortOption(view.container)) {
+      await React.act(async () => { showTools(view.container).click() })
+      await until(() => sortOption(view.container), 'the sort control after showing the tools')
+    }
     const metric = view.container.querySelector('select[aria-label="Sort runs by"] option[value="metric"]')
     const read = { label: text(metric), disabled: metric.disabled }
     await view.unmount()

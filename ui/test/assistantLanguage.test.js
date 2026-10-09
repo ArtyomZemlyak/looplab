@@ -4,9 +4,21 @@ import React from 'react'
 import { click, fetchStub, mountLive, settle, unanswered, until } from './_mount.js'
 import { generation, node, payload } from './_resultNoticesFixtures.js'
 
+// doc 74 EB-22: the Assistant no longer carries its own language picker — it drove the same
+// `useUILanguage` preference as the header's `LanguageControl`, so every owner screen showed two
+// identical selectors. These tests now drive the HEADER control beside the bar, which is the one a
+// user has, and pin that the bar renders no second one.
+const withHeaderLanguage = (React, LanguageControl, Bar) => function Screen(props) {
+  return React.createElement(React.Fragment, null,
+    React.createElement('header', { className: 'test-header' }, React.createElement(LanguageControl)),
+    React.createElement(Bar, props))
+}
+
 test('Russian is available before any run, persists across views, and controls the streamed request and briefs', async () => {
   const harness = await mountLive()
-  const { default: Bar } = await harness.load('/src/AssistantBar.jsx')
+  const { default: AssistantBar } = await harness.load('/src/AssistantBar.jsx')
+  const { default: LanguageControl } = await harness.load('/src/LanguageControl.jsx')
+  const Bar = withHeaderLanguage(React, LanguageControl, AssistantBar)
   const backend = fetchStub({
     'GET /api/assistant/commands': { commands: [] },
     'GET /api/assistant/sessions': { sessions: [] },
@@ -25,8 +37,11 @@ test('Russian is available before any run, persists across views, and controls t
   const mounted = await harness.mount(Bar, {})
   try {
     await settle()
-    const picker = mounted.container.querySelector('.asst-language select')
-    assert.ok(picker, 'language is available before the first completed experiment')
+    await until(() => mounted.container.querySelector('.test-header .asst-language select'),
+      'language is available before the first completed experiment')
+    const picker = mounted.container.querySelector('.test-header .asst-language select')
+    assert.equal(mounted.container.querySelectorAll('.asst-language select').length, 1,
+      'one language selector on the screen, not a second one inside the Assistant')
     await React.act(async () => {
       picker.value = 'ru'; picker.dispatchEvent(new window.Event('change', { bubbles: true }))
     })
@@ -50,7 +65,10 @@ test('Russian is available before any run, persists across views, and controls t
     await until(() => /Русский итог/.test(mounted.container.textContent), 'stream reply')
     await mounted.unmount()
     const reopened = await harness.mount(Bar, {})
-    try { assert.equal(reopened.container.querySelector('.asst-language select').value, 'ru') }
+    try {
+      await until(() => reopened.container.querySelector('.asst-language select'), 'reopened picker')
+      assert.equal(reopened.container.querySelector('.asst-language select').value, 'ru')
+    }
     finally { await reopened.unmount() }
   } finally { await harness.close() }
 })
@@ -60,7 +78,9 @@ test('Auto resolves Russian UI and result drafts without overriding automatic re
   const harness = await mountLive()
   const original = Object.getOwnPropertyDescriptor(navigator, 'language')
   Object.defineProperty(navigator, 'language', { value: 'ru-RU', configurable: true })
-  const { default: Bar } = await harness.load('/src/AssistantBar.jsx')
+  const { default: AssistantBar } = await harness.load('/src/AssistantBar.jsx')
+  const { default: LanguageControl } = await harness.load('/src/LanguageControl.jsx')
+  const Bar = withHeaderLanguage(React, LanguageControl, AssistantBar)
   const { setUILanguage } = await harness.load('/src/uiLanguage.js')
   const backend = fetchStub({
     'GET /api/assistant/commands': { commands: [] },
@@ -83,6 +103,7 @@ test('Auto resolves Russian UI and result drafts without overriding automatic re
     const side = mounted.container.querySelector('.cmdbar-drawer-btn')
     if (side) await click(side)
     await until(() => mounted.container.querySelector('.asst-result-notice button'), 'auto Russian result')
+    await until(() => mounted.container.querySelector('.asst-language select'), 'header language picker')
     assert.equal(mounted.container.querySelector('.asst-language select').value, 'auto')
     assert.match(mounted.container.querySelector('.asst-result-notice').textContent, /Эксперимент #2/)
     assert.ok([...mounted.container.querySelectorAll('button')].some(button => button.textContent === 'Отправить'))

@@ -2,7 +2,6 @@ import { uiText, uiMessage, uiPlural, useUILanguage, effectiveUILanguage } from 
 import React, { useCallback, useEffect, useRef, useState } from 'react'
 import { Turn, PermCard } from './AssistantChat.jsx'
 import AssistantModePicker from './AssistantModePicker.jsx'
-import AssistantLanguagePicker from './AssistantLanguagePicker.jsx'
 import { useAssistantLanguage } from './useAssistantLanguage.js'
 import { OpIcon } from './icons.jsx'
 import { useCommandStatusPoll, useMediaQuery, usePoll } from './hooks.js'
@@ -242,7 +241,7 @@ const useLatestHandler = handler => {
 export default function AssistantBar({ runId, hidden = false, onReady }) {
   useUILanguage()
 
-  const [responseLanguage, setResponseLanguage] = useAssistantLanguage()
+  const [responseLanguage] = useAssistantLanguage()
   const uiLanguage = effectiveUILanguage(responseLanguage)
   const ru = uiLanguage === 'ru'
   const text = (en, russian) => ru ? russian : en
@@ -3666,13 +3665,14 @@ export default function AssistantBar({ runId, hidden = false, onReady }) {
   }
 
   // mode selector row — placed BELOW the input in the side + full composers.
-  const languagePicker = <AssistantLanguagePicker language={responseLanguage} onChange={setResponseLanguage}
-    disabled={busy || turnStarting || retryChecking} />
+  // No language picker here (doc 74 EB-22): it drove the same `useUILanguage` preference as the
+  // header's `LanguageControl`, so every owner screen showed two identical "Language / Язык"
+  // selectors. The header one is on every owner screen; a turn already submitted keeps its language.
   const modeRow = <><AssistantModePicker mode={mode} language={uiLanguage} disabled={historical || composerEditingPaused}
     disabledReason={historical ? readOnlyShort
       : sessionOpening ? 'Wait for the selected Assistant chat to finish opening'
         : forkingCurrentSession ? 'Wait for this chat to finish forking' : 'Wait for the current action'}
-    onChange={value => { if (!openSessionPendingRef.current) setComposerMode(value) }} />{languagePicker}</>
+    onChange={value => { if (!openSessionPendingRef.current) setComposerMode(value) }} /></>
 
   // The /command hint listbox — one definition reused by the docked bar AND the side/full composers, so
   // command discovery is identical everywhere. Only one view renders at a time, so the shared id is unique.
@@ -3894,7 +3894,6 @@ export default function AssistantBar({ runId, hidden = false, onReady }) {
         title={`${uiText(activeMode.label)} · ${uiText(activeMode.hint)}`} onClick={openSide}>
         <span className="cmdbar-mode-prefix">{uiText("Mode · ")}</span><span>{uiText(activeMode.label)}</span>
       </button>
-      {languagePicker}
       <div className="cmdbar-field">
         {(refNodes(input).length > 0 || files.length > 0) && <div className="cmdbar-ctx">
           {runId && refNodes(input).map(id => <span key={id} className="chip xs">#{id}</span>)}
