@@ -37,6 +37,7 @@ remedy table below.
 """
 from __future__ import annotations
 
+import contextlib
 import json
 import os
 import shutil
@@ -285,6 +286,26 @@ _ADMITTED = ("pause", "resume", "hint", "steer", "finalize")
 # did, is what made a pause unobservable on exactly the runs where pausing matters.
 _MUST_SUCCEED = ("pause",)
 
+# The deadline a MUST-SUCCEED control gets in the search. Its postcondition is a fold of its own intent,
+# so a landing pause returns the moment the intent folds and this costs nothing; what the search's
+# 0.12 s window bought it was a WORKER-ADMISSION race: on the Windows runner the deadline passed before
+# the intent was appended (`deadline_passed_before_intent`), three times, and read as an absorbing
+# state. Every other control keeps the short window the search needs to reach its timed-out states
+# (one second for all of them measured 108 s here against 23 s).
+_MUST_SUCCEED_DEADLINE_S = 10.0
+
+
+@contextlib.contextmanager
+def _command_deadline(commands, seconds: float):
+    """Records CREATED inside get `seconds` (the service reads both at creation)."""
+    saved = commands.command_timeout, commands.max_observation_timeout
+    commands.command_timeout = seconds
+    commands.max_observation_timeout = max(saved[1], seconds * 2)
+    try:
+        yield
+    finally:
+        commands.command_timeout, commands.max_observation_timeout = saved
+
 _LEGACY_WEDGE_ID = "cmd_" + "d1ce" * 8
 
 
@@ -514,8 +535,10 @@ def test_no_reachable_control_state_is_absorbing(tmp_path):
             signature = _signature(world, rd)
             state = world.commands.srv.state(rd)
             for action in _ADMITTED:
-                status, healed, trail = _path_forward(
-                    world, rd, action, f"{rd.name}-{checked}-{action}")
+                with (_command_deadline(world.commands, _MUST_SUCCEED_DEADLINE_S)
+                      if action in _MUST_SUCCEED else contextlib.nullcontext()):
+                    status, healed, trail = _path_forward(
+                        world, rd, action, f"{rd.name}-{checked}-{action}")
                 assert not healed.startswith("refused"), (
                     f"{action} CANNOT BE ISSUED from {rd.name} {signature} even with a healthy "
                     f"engine: {trail}. Every refusal must name a move that leads somewhere; this "
