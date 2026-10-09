@@ -1,0 +1,528 @@
+# 74. Инспекция порога входа: README, установка, CLI, документация, UI
+
+**Дата:** 2026-10-09. **База:** `origin/master`, `0fa98f4`. **Статус:** инспекция и план;
+ничего не отгружено. **Продолжает:** [doc 71](71-onboarding-and-entry-barriers-2026-09-30.md)
+(аудит 2026-09-30; его первый пакет в продукте, см. §3).
+
+Вопрос документа один: **сколько текста, команд и экранов человек должен пройти, чтобы
+(а) увидеть, что LoopLab делает, (б) запустить свою задачу, (в) понять результат,
+(г) работать с проектом дальше** — и где эта стоимость избыточна. Каждая находка
+опирается на измерение из §4 и ведёт к предложению с критерием приёмки (§5). Документ
+не журнал: что отгружено, записывается одной строкой в таблице §7, а не новым разделом (§11).
+
+## 1. Вывод и порядок работ
+
+Первый экран продукта уже правильный: пустой UI предлагает «Start with a goal», показывает модель
+и её непроверенное соединение, даёт примеры «I have code / I have data», а режимы чата спрятаны
+под «Permissions · Plan». Это результат первого пакета doc 71, и его надо сохранить.
+
+Порог входа теперь держат четыре слоя, и ни один из них не экран первого запуска:
+
+1. **Объём и порядок текста.** README — 3 110 слов, из них 1 300 — каталог возможностей и
+   четыре способа задать запуск до первой реальной задачи. Руководство пользователя —
+   246 000 слов (1,67 МБ) на 20 страниц; пять справочных страниц больше 20 000 слов каждая.
+   Пункт 5 quickstart («когда run закончился») — 810 слов оговорок о сравнении результатов.
+   Doc 71, план по порогу входа, вырос до 345 КБ и 69 разделов и сам стал нечитаемым.
+2. **Поверхность CLI.** 74 команды одним плоским списком в порядке импорта модулей: `--help`
+   начинается с `mlebench-extras` и `bait-materialize`, `run` стоит 63-й, `ui` — 72-й; текст
+   помощи — 34 КБ, 29 строк в нём ссылаются на «doc 52 row 22» и «§». `inspect` печатает
+   10,8 КБ JSON настроек и только потом шесть строк результата; `replay` — 53 КБ.
+3. **Конфигурация.** 300 настроек (135 булевых, 99 включены по умолчанию) и таблица на 298 строк
+   / 49 000 слов. В UI есть ярус Essential из 14 полей, в CLI — `profile`, но страница
+   конфигурации и `looplab init` этот ярус не ведут.
+4. **Плотность UI после первого экрана.** Один завершённый run включает весь «портфельный»
+   хром (Projects, Saved view, четыре фильтра, четыре вида); рабочее пространство run — 61
+   видимая кнопка, четыре меню на 18 назначений, 8 вкладок, 18 панелей. Заголовок отчёта
+   успешного демо — три отрицательных ярлыка («COMPARISON NOT ESTABLISHED · UNCONFIRMED ·
+   WITH CAVEATS»), а короткие итоги в чате советуют «repeat runs» трёхсекундной игрушке.
+
+Отдельно: офлайн-демо для `--kind dataset` печатает бессмысленный успех
+(`BEST node 2: metric=10 params={}`), а в корне репозитория лежат личные файлы запусков
+автора с путями `/home/jovyan/...`.
+
+**Первый пакет (одна-две недели, малые правки):** EB-01, EB-02, EB-06, EB-08, EB-10, EB-21,
+EB-24. Он не трогает движок и не меняет ни одного контракта: README и страницы входа,
+группировка `--help`, порядок вывода `inspect`, заголовок Report и кнопка офлайн-демо в UI.
+
+## 2. Метод и границы
+
+**Сделано** на чистом контейнере (Ubuntu 24.04, Python 3.13.16, Node 22.22, без GPU, без модели):
+
+- Прочитаны README, `docs/index.md`, `docs/guide/*` (20 страниц), `00-INDEX.md`, `mkdocs.yml`,
+  `AGENTS.md`, `CLAUDE.md`, `.env.example`, `docker-compose.yml`, `examples/`, корень репозитория.
+- Измерены: время установки, сборки UI, сборки документации, одного тестового файла и сбора
+  тестов; размеры всех документов, `--help`, `inspect`/`replay`; число команд, настроек, строк
+  интерфейса. Команды — в §10.
+- Пройдены сценарии: офлайн `quadratic`/`regression`/`dataset`; запуск без модели (отказ);
+  `--goal` без модели (отказ Genesis); `smoke`; `init`; `inspect`/`replay`; `ui` на пустом
+  корне и на корне с одним run. Экраны сняты Playwright/Chromium при 1600 × 1000, тема по
+  умолчанию: пустой список, список с одним run, Report, Settings, черновик нового run.
+- Сверены пункты OB-01…OB-16 doc 71 с текущими экранами и текстами (§3).
+
+**Не доказано:** ни одного вызова платной модели (launch card после ответа Assistant, Genesis,
+Developer не наблюдались); ни одного нового пользователя; Windows, JupyterHub, Docker Compose,
+внешний MCP-цикл не запускались. Экраны 2560 × 1440 и мобильная компоновка вне плана.
+Ниже **наблюдение** — это измеренное число, выполненная команда или снятый экран;
+**предложение** — продуктовая гипотеза с критерием, по которому её можно принять или отвергнуть.
+
+## 3. Сверка с doc 71
+
+| Пункт doc 71 | Состояние 2026-10-09 (наблюдение) | Что остаётся |
+|---|---|---|
+| OB-01 главный путь спрятан | README и главная сайта открываются с Assistant | README всё ещё 3 110 слов; архитектура и 13 абзацев возможностей стоят до установки (EB-01) |
+| OB-02 установка не собрана | Installation даёт clone/venv для POSIX и PowerShell, диапазон Node, extra `harness` | Две истории установки в README и две в Installation (EB-02) |
+| OB-03 готовность модели не видна | Первый экран: `qwen3:8b · Connection unverified · Model settings · Check connection…` | Закрыто |
+| OB-04/05 пустой экран и пустой запрос | «Start with a goal», «Start with three things», «I have code / I have data» | При одном run включается весь портфельный хром (EB-19) |
+| OB-06 launch card с терминов движка | Не проверено (нужна модель) | — |
+| OB-07 четыре режима чата | Свернуты под «Permissions · Plan» | Закрыто; формулировка (EB-22) |
+| OB-08 Essential как справочник движка | Essential открывается с Model, 14 полей | Ряд чипов «Stored material / Shared key / Matches base URL» (EB-18) |
+| OB-09…OB-12 внешний агент | Реализованы по журналу doc 71 §13–§64; здесь не перепроверялись | Первый шаг внешнего агента по-прежнему 41 КБ контракта и 18 000 слов guide (EB-16) |
+| OB-13 платный акцент отчёта | «Refresh report · paid» — вторичная кнопка справа | Закрыто |
+| OB-14 схема как первое действие | Главная сайта показывает цикл и два входа | README открывает большой SVG вторым разделом (EB-01) |
+| OB-15 demo / эксперимент / платный Assistant | Частично | Отчёт демо читается как провал (EB-21); UI без модели не может ничего запустить (EB-24) |
+| OB-16 проверка читаемости пути новичка | Открыто | Открыто; метрики в §8 |
+
+Строка doc 71 в `00-INDEX.md` до сих пор говорит «Изменения продукта ещё не реализованы» —
+это неверно и входит в EB-14.
+
+## 4. Измерения
+
+Все числа сняты на базе `0fa98f4`; команды — в §10.
+
+### 4.1. Время (чистый контейнер, без GPU, без модели)
+
+| Шаг | Время |
+|---|---|
+| `pip install -e ".[dev,ui]"` | 44 с |
+| `looplab build-ui` (`npm ci` + `vite build`), бандл 3,9 МБ | 23 с |
+| `looplab ui` до первого ответа `200` | ≈ 5 с |
+| `pip install -e ".[docs]"` + `mkdocs build --strict` (сайт 53 МБ) | 13 с + 19 с |
+| `pytest tests/test_events_replay.py` (193 теста) | 5,5 с |
+| `pytest --collect-only` (сбор 1 365 файлов, 24 223 теста) | 71 с |
+| Офлайн run: `quadratic` 6 узлов / `regression` 4 узла / `dataset` 3 узла | 3,0 с / 2,3 с / 2,5 с |
+
+Инструменты быстрые. Стоимость входа — не в ожидании, а в чтении и в поиске нужной команды.
+
+### 4.2. Текст
+
+| Поверхность | Объём |
+|---|---|
+| `README.md` | 315 строк, 3 110 слов; до первого блока кода 78 слов; «Key features» 643 слова; «Installation … Run with a real LLM» 659 слов |
+| `docs/guide/` | 20 файлов, 1,67 МБ, 246 207 слов |
+| configuration / cli-reference / concepts / tasks / ui / external-harness / llm-and-agents | 49 480 / 33 418 / 32 414 / 24 736 / 21 415 / 17 934 / 15 202 слов |
+| quickstart / installation / cli-walkthrough / guide index | 1 764 (пункт 5 — 810) / 698 / 795 / 463 слов |
+| `ui.md` раздел «Start in Assistant» | 1 673 слова, вперемешку шаги пользователя, спецификация просмотра файлов и инструкции по `uiText`/`ru.json` |
+| `docs/*.md` (нумерованные и прочие) | 84 файла, 8,76 МБ; doc 56 — 1,2 МБ, doc 25 — 1,0 МБ, doc 72 — 784 КБ, `BACKLOG.md` — 644 КБ |
+| doc 71 | 345 835 байт, 69 разделов; §13–§69 — журнал реализации |
+| `00-INDEX.md` | 58 КБ, 132 строки |
+| `mkdocs.yml` nav | Guide — 19 пунктов плоским списком; Design records — около 70 |
+| `CLAUDE.md` | 81 831 байт (бюджет 100 000), 10 144 слова; самая длинная строка таблицы (`looplab/engine/`) — 13 941 байт |
+| `AGENTS.md` | 1 292 слова обязанностей без последовательности первого запуска |
+
+### 4.3. CLI
+
+| Что | Значение |
+|---|---|
+| Команд в `looplab --help` | 74; текст 34 109 байт; 29 строк цитируют «doc N» / «§» |
+| Порядок | первые 15 — инструменты исследований (`mlebench-extras`, `bait-materialize`, `bait-audit`, `concept-coverage`, …); `smoke` 16-я, `replay` 47-я, `inspect` 51-я, `run` 63-я, `init` 70-я, `ui` 72-я |
+| `looplab run --help` | 142 строки, 12 488 байт, включая абзац «Maintainer note: the typed --flag surface below is FROZEN…» |
+| `looplab inspect RUN` | 10 838 байт: JSON из 300 настроек, затем 6 строк результата |
+| `looplab replay RUN` | 53 015 байт JSON состояния |
+| `looplab harness` | 41 052 байта JSON-контракта |
+| `looplab init` | 319 строк, из них 15 активных, 300 закомментированных — хороший образец |
+| Отказы | без модели — exit 2, четыре строки с названием причины и двумя исправлениями (`--backend toy`, `looplab smoke`); `--goal` без модели — exit 2, одна понятная фраза; `smoke` — «text FAILED: … Connection error.» |
+| Шум | первая строка каждого офлайн run — WARNING на 500 символов про `CAP_DAC_OVERRIDE`; последняя — «That natural completion is the one finish that names no reason.» |
+
+### 4.4. Конфигурация
+
+300 полей `Settings`, 135 булевых, из них 99 включены по умолчанию. Таблица `configuration.md` —
+298 строк: LLM endpoint 74, Search budget 36, Knowledge 36, Evaluation rigor 36, Operators 24,
+Repair 23, Policy 20, Trust 15, Strategist 14, Backend 10, External 6, Reporting 3, Profile 1.
+UI-схема — 10 групп, ярус Essential — 14 полей.
+
+### 4.5. UI
+
+| Экран | Кнопок / полей / слов | Снимок |
+|---|---|---|
+| Пустой корень | 18 / 3 / 127 | [01](assets/74-entry-barrier/01-empty-root.png) |
+| Черновик нового run | «Start with three things», «I have code / I have data» | [05](assets/74-entry-barrier/05-new-run-draft.png) |
+| Список с одним run | 33 / 10 / 186 | [02](assets/74-entry-barrier/02-one-run-list.png) |
+| Рабочее пространство run (Report) | 61 / 3 / 918; 11 ссылок | [03](assets/74-entry-barrier/03-run-report.png) |
+| Settings → Essential → Model | 25 / 9 / 361 | [04](assets/74-entry-barrier/04-settings-model.png) |
+
+Навигация run: Progress (Queue, Research, Failures, Add experiment), Trust (Trust, Pareto /
+diversity, Data quality), Analysis (Compare, Sensitivity, Importance, Cross-run), Lab (Files,
+Registry, Comments & sharing, Events, Cross-run memory, Knowledge & prompts, Host & GPU) — 18
+назначений; «Run settings»; виды Lineage / Cards / Concepts; 8 вкладок инспектора (Overview,
+Comments, Trials, Trace, Code, Metrics, Trust, Cost); 18 панелей в `panels.jsx`; 6 глобальных
+назначений. Исходники UI: 83 `.jsx` + 164 `.js`, 67 154 строки; 8 791 строка интерфейсного
+текста в `ru.json` (1,4 МБ); 301 файл тестов.
+
+### 4.6. Репозиторий
+
+Корень: `e5small_v12.json`, `e5small_v13.json`, `e5small_v14.json`, `rubert_run_0804.json`,
+`bench-out/` (три файла, 200 КБ), `NEXT_RUN.md` — личные файлы запусков с путями
+`/home/jovyan/...`. `examples/` — 30 файлов без README; по имени не видно, что `code_regression`,
+`dataset`, `repo_*`, `mlebench_real_*` требуют модели или Kaggle, а `toy`, `regression`,
+`classification`, `timeseries` работают офлайн. Тесты: 1 365 файлов, 22,5 МБ, 24 223 собранных
+теста, полный прогон около 40 минут. Docker Compose: `sglang` (30B-A3B AWQ, только GPU) + `ui` + `run`.
+
+## 5. Реестр находок
+
+Формат: приоритет P0/P1/P2 — вклад в порог входа; размер S/M/L — локальная правка /
+несколько согласованных поверхностей / изменение контракта. EB — entry barrier; нумерация
+не пересекается с OB doc 71.
+
+### A. Первые десять минут
+
+#### EB-01 · P0 · S — README читается как каталог, а не как вход
+
+**Наблюдение.** 3 110 слов. После 78 слов и одного блока установки идут: SVG архитектуры,
+13 абзацев «Key features» (643 слова), «CLI quick start» с тремя командами, «Four ways to
+configure a run» с четырьмя, YAML и абзац про `eval_env` (659 слов), затем «Run with a real
+LLM», девять видов задач, 14 команд CLI, auth, crash & resume, Docker, «What a node may read».
+**Предложение.** README ≤ 1 000 слов: что это (две фразы), один блок установки, пять строк пути
+через Assistant, одна строка офлайн-демо, таблица ссылок. Всё остальное уже есть в guide — оставить
+ссылки. **Приёмка.** README ≤ 1 000 слов; первая команда в первых 40 строках;
+`tests/test_documentation_contracts.py` зелёный (команды остаются названы в guide).
+
+#### EB-02 · P0 · S — Две истории установки
+
+**Наблюдение.** README «Start with Assistant»: `pip install -e ".[ui]"`. README «Installation»:
+четыре варианта (`.`, `[ui]`, `[otel]`, `[dev]`). Installation: «Source install for the web UI»
+(clone/venv), потом отдельный «Install» с `pip install -e .` и таблицей зависимостей, потом шесть
+extras, потом «Verify the install» через CLI-run. **Предложение.** Одна рекомендуемая команда
+везде (`pip install -e ".[ui]"`); таблица extras один раз, в Installation; «Verify» = открыть
+`looplab ui` и один офлайн run. **Приёмка.** Installation ≤ 500 слов; в README одна команда
+установки.
+
+#### EB-03 · P1 · S — Каждый пример несёт сноску про `backend=llm`
+
+**Наблюдение.** `backend` по умолчанию `llm` (решение 2026-08-04), поэтому каждый пример без
+модели требует `--backend toy`, а сноска об этом повторяется в README, Installation,
+`CLAUDE.md` и дважды в configuration. Отказ без модели сам по себе хорош (§4.3).
+**Предложение.** Не менять default. Добавить `looplab demo [--out DIR]`: офлайн `quadratic` +
+`regression` с `backend=toy`, печатает путь к `tree.html` и подсказку «следующий шаг — `looplab ui`».
+Страницы входа ссылаются на `demo`, сноска остаётся в одном месте (configuration).
+**Приёмка.** `looplab demo` завершается < 10 с без сети; на страницах входа нет даты 2026-08-04.
+
+#### EB-04 · P1 · S — Офлайн-демо для `dataset` печатает бессмысленный успех
+
+**Наблюдение.** `looplab run --no-genesis --kind dataset --data examples/dataset_example/data.csv
+--backend toy` завершается за 2,5 с с `BEST node 2: metric=10 params={}`: toy-бэкенд ничего не
+подбирает, а результат оформлен как измеренный. Новичок, повторивший «I have data» без модели,
+получает число, которому нельзя верить, и ни одного предупреждения. **Предложение.** Для kind,
+который toy-бэкенд не оптимизирует (`dataset`, `repo`, `code_regression`, `mlebench*`), отказ
+exit 2 с текстом «этот вид задачи требует модели; офлайн доступны quadratic / regression /
+classification / timeseries», либо явная метка `DEMO placeholder` в результате и в Report.
+**Приёмка.** Тест: `--kind dataset --backend toy` отказывает или метит результат.
+
+#### EB-05 · P2 · S — Шум в консоли офлайн-run
+
+**Наблюдение.** Первая строка — WARNING на 500 символов про `CAP_DAC_OVERRIDE` и read fence (для
+toy-задачи без редактируемого исходника она ничего не защищает); последняя — «stop: finished — the
+search ran out of work with a champion standing. That natural completion is the one finish that
+names no reason.» **Предложение.** WARNING → INFO, когда у задачи нет редактируемого источника
+или `backend=toy`; итог одной строкой: `finished: 6/6 evaluated · best #2 metric=8.51 (min) ·
+runs/demo/tree.html`. **Приёмка.** Офлайн run печатает ≤ 5 строк, первая — результат.
+
+#### EB-06 · P1 · S — Личные файлы запусков в корне репозитория
+
+**Наблюдение.** §4.6: три `e5small_v1N.json`, `rubert_run_0804.json`, `bench-out/`, `NEXT_RUN.md`
+с инструкциями «cd /home/jovyan/data/looplab … оба H200 должны быть свободны». Первый `ls`
+новичка показывает рабочий стол автора. **Предложение.** Перенести в `benchmarks/tasks/` и
+`docs/audit/` (или удалить); корень = `README.md`, `LICENSE`, `pyproject.toml`, `looplab/`, `ui/`,
+`docs/`, `examples/`, `tests/`, `benchmarks/`, Docker-файлы. **Приёмка.** В корне нет файлов с
+путями `/home/<user>/`.
+
+#### EB-07 · P2 · S — `examples/` без карты
+
+**Наблюдение.** 30 файлов, README нет; какие примеры офлайн, а какие требуют модели или Kaggle —
+только из README-таблицы видов задач. **Предложение.** `examples/README.md`: таблица «файл →
+нужна модель? → одна команда»; офлайн-примеры первыми. **Приёмка.** Каждый `examples/*.json`
+назван в таблице; `tests/test_documentation_contracts.py` проверяет полноту.
+
+### B. CLI
+
+#### EB-08 · P0 · M — 74 команды одним списком, инструменты впереди
+
+**Наблюдение.** §4.3. Порядок — порядок импорта модулей в `looplab/cli/__init__.py`
+(`audit_cmds` первым), поэтому `--help` открывается `mlebench-extras`, а `run` стоит 63-м. 29
+строк помощи адресованы сопровождающему («doc 52 row 22», «§»). **Предложение.** Группы Typer
+(`rich_help_panel`): «Start here» (`init`, `run`, `ui`, `tui`, `resume`, `stop`, `inspect`,
+`replay`, `smoke`), «Export», «Diagnostics», «Memory & governance», «Research instruments
+(maintainers)»; либо вынести инструменты в под-приложение `looplab lab …`. Первая строка помощи
+каждой команды — для пользователя; ссылки на документы — в docstring. **Приёмка.** Первые восемь
+команд `looplab --help` — «Start here»; `--help` ≤ 8 КБ; тест: в выводе `--help` нет «doc N»;
+регулярное выражение `_LOOPLAB_COMMAND` в `tests/test_documentation_contracts.py` учитывает
+под-приложение, если оно появится.
+
+#### EB-09 · P1 · S — `run --help` обращается к разработчику
+
+**Наблюдение.** 142 строки; абзац «Maintainer note: the typed --flag surface below is FROZEN…»
+виден каждому. **Предложение.** Абзац → комментарий в коде; три способа задать задачу остаются.
+**Приёмка.** `looplab run --help` ≤ 60 строк.
+
+#### EB-10 · P0 · S — `inspect` и `replay` начинают с дампа
+
+**Наблюдение.** `inspect` печатает 10,8 КБ снимка настроек, результат — последние шесть строк;
+`replay` — 53 КБ состояния. Сайт и README называют `inspect` ответом на «what did I get?».
+**Предложение.** `inspect`: сначала результат (лучший узел, метрика, направление, узлы, причина
+остановки, сопоставимость, путь к `tree.html`), снимок — по `--config`; `replay`: сводка и
+`--json`/`-o FILE` для состояния. **Приёмка.** `looplab inspect RUN` ≤ 20 строк по умолчанию;
+существующие тесты на снимок переведены на `--config`.
+
+### C. Документация
+
+#### EB-11 · P0 · M — Руководство пользователя — это справочник с инцидентами
+
+**Наблюдение.** §4.2: 246 000 слов; пункт 5 quickstart — 810 слов о том, как читать сравнения;
+«Start in Assistant» в `ui.md` — 1 673 слова, где шаги пользователя перемежаются инструкциями
+`uiText`/`ru.json`/`npm run check:locale` и спецификацией просмотра файлов базы. Guide пишется по
+правилу «каждое изменение — абзац в guide», и абзацы ложатся туда, где это изменение случилось,
+а не туда, где его будут искать. **Предложение.** Разделить каждую страницу на «Use» (≤ 1 500
+слов, только действия пользователя) и «Reference»; инженерные заметки (инциденты, счётчики,
+имена тестов) — в нумерованные документы и docstring, по тому же правилу, что `CLAUDE.md`
+применяет к себе. Пункт 5 quickstart → пять строк и ссылка «Как читать результат». Бюджет байт
+на пять страниц входа (README, `index.md`, Installation, Quickstart, CLI walkthrough) по образцу
+`CLAUDE_MD_MAX_BYTES`. **Приёмка.** Quickstart ≤ 700 слов, Installation ≤ 500, «Start in
+Assistant» ≤ 400 без идентификаторов кода; тест бюджета красный при превышении.
+
+#### EB-12 · P1 · S — Карточки «Start here» на главной ведут в справочник
+
+**Наблюдение.** `docs/index.md`: hero правильный, но «Start here» = Installation, Quickstart,
+CLI reference (33 000 слов), Configuration (49 000 слов); текст карточки Quickstart — «offline in
+one command, then driven by a live LLM» — устарел: quickstart теперь путь через Assistant.
+**Предложение.** «Start here» = Installation, Quickstart, CLI walkthrough, Web UI; справочник —
+отдельной группой ниже. **Приёмка.** Тексты карточек совпадают с первой фразой страниц.
+
+#### EB-13 · P1 · S — Навигация сайта плоская
+
+**Наблюдение.** Guide — 19 пунктов одним списком: «JupyterHub onboarding» выше Quickstart,
+«HTTP API reference» и «Event reference» между CLI reference и Configuration; Design records —
+около 70 строк. **Предложение.** Nav по намерению: Start (Installation, Quickstart, CLI
+walkthrough) / Use (Web UI, Tasks, Generating code, LLM & agents, External agents, Memory,
+Deployment, JupyterHub) / Reference (CLI, Configuration, API, Events, Live scenarios, Judge
+bench, MLE-bench) / Design records (свернуто; `00-INDEX` и пять последних). **Приёмка.** Nav
+Guide ≤ 4 групп; `mkdocs build --strict` зелёный.
+
+#### EB-14 · P1 · S — Doc 71 стал журналом, а не планом
+
+**Наблюдение.** 345 КБ, 69 разделов; §13–§69 — журнал реализации MCP-recovery; строка в
+`00-INDEX.md` говорит «Изменения продукта ещё не реализованы». План по порогу входа нельзя
+прочитать. **Предложение.** Заморозить doc 71 на §1–§12 и таблице §13; §14–§69 перенести в
+`docs/audit/71-onboarding-journal.md`; поправить строку индекса. Правило для всех нумерованных
+документов (§11): документ — план или анализ, журнал — git log и одна строка статуса.
+**Приёмка.** Doc 71 ≤ 80 КБ; строка индекса называет, что отгружено.
+
+#### EB-15 · P2 · S — Счётчики в текстах расходятся
+
+**Наблюдение.** README: «~17,000 collected tests»; `CLAUDE.md`: 18 863; собрано сегодня: 24 223;
+сноска о 2026-08-04 в пяти местах; `docs/04-file-layout.md` описывает не то, что отгружено (это сказано в `CLAUDE.md`).
+**Предложение.** Счётчики в пользовательских текстах либо генерируются (как `api-reference.md`),
+либо удаляются. **Приёмка.** В README нет числа тестов.
+
+#### EB-16 · P2 · M — Первый шаг внешнего агента — 41 КБ контракта
+
+**Наблюдение.** `looplab harness` печатает 41 КБ JSON; `AGENTS.md` — 1 292 слова обязанностей
+без последовательности первого запуска; guide — 18 000 слов, два токена, два терминала, две
+установки. UI-handoff из doc 71 есть. **Предложение.** `looplab harness --quickstart`: 15 строк —
+установка, запуск run, подключение MCP, первая команда, где смотреть результат; те же 15 строк
+первыми в `AGENTS.md`; обязанности — ниже. **Приёмка.** Внешний агент получает первый измеренный
+кандидат, прочитав ≤ 1 000 слов.
+
+### D. Конфигурация
+
+#### EB-17 · P1 · M — Ярусы настроек есть в UI, но не в документации и `init`
+
+**Наблюдение.** §4.4. Страница конфигурации открывается с 74 строк LLM endpoint; `looplab init`
+активирует 15 полей, среди них `policy` и `developer_backend`; UI Essential — 14 полей; `profile`
+(`default`/`fast`/`thorough`) описан на одной строке. **Предложение.** Три яруса в схеме
+(`essential` ≤ 15, `common` ≤ 40, `advanced`), объявленные один раз в `settings_ui_schema.json`;
+`configuration.md` генерируется в этом порядке (advanced свернут); `looplab init` пишет только
+essential (`--full` — приложение); профили — вторым абзацем страницы. **Приёмка.**
+`configuration.md` начинается с essential; `looplab init` ≤ 12 активных строк;
+`tests/test_config_docs_sync.py` зелёный.
+
+#### EB-18 · P2 · S — Чипы хранения ключа на экране Model
+
+**Наблюдение.** «Stored material No · Shared key No · Matches base URL No · Source None ·
+Status No shared key» — внутренности хранилища учётных данных на экране первой настройки
+([04](assets/74-entry-barrier/04-settings-model.png)). **Предложение.** Одна фраза: «API key: not
+set. Local endpoints usually need none.»; чипы — под «Technical details». **Приёмка.** На экране
+Model по умолчанию нет слов «material», «shared key».
+
+### E. UI
+
+#### EB-19 · P1 · M — Один run включает весь портфельный хром
+
+**Наблюдение.** [02](assets/74-entry-barrier/02-one-run-list.png): Projects (All runs /
+Unassigned / «No projects yet»), Saved view / Save current view / Delete, «filter runs», «all
+status», «all tasks», «all super-tasks», сортировка, List / Lineage / Concepts / Compare, Compact,
+Energy — 33 кнопки и 10 полей ради одной карточки. Doc 71 §14 убрал это при нуле run.
+**Предложение.** Порог — пять run или созданный проект; до него — карточки, «New run» и
+«Show filters». **Приёмка.** При 1–4 run ≤ 15 видимых кнопок.
+
+#### EB-20 · P1 · M — Рабочее пространство run открывается на полной мощности
+
+**Наблюдение.** 61 кнопка, 18 назначений в четырёх меню, 8 вкладок, «Copy context», «Energy»;
+для демо из шести узлов большинство панелей пусты. **Предложение.** Режим «Simple / Full»
+(по умолчанию Simple: Report, Experiments, Code, Trace; остальное под «More»), запоминается в
+браузере; «Copy context» и «Energy» — в «More». **Приёмка.** В Simple ≤ 30 кнопок; каждая
+панель остаётся достижима по прямой ссылке.
+
+#### EB-21 · P0 · S — Отчёт успешного демо читается как провал
+
+**Наблюдение.** [03](assets/74-entry-barrier/03-run-report.png): первая строка — три ярлыка
+«COMPARISON NOT ESTABLISHED · UNCONFIRMED · WITH CAVEATS»; затем «Selected #2: evaluation score
+8.51. Improvement over the first eligible experiment is not established. Detector coverage is not
+fully verified.»; «Next step: Establish matching evaluation conditions before claiming
+improvement.» Итоги в чате для худших узлов (#4: 17,18 при лучшем 8,51, направление min)
+говорят «Improvement is not established yet … check it with repeat runs». Оговорки верны; порядок
+и слова превращают трёхсекундный успешный прогон в предупреждение, а совет «repeat runs» не
+соответствует задаче без `confirm_top_k`. **Предложение.** Заголовок = достижение («Best:
+experiment #2, score 8.51 (lower is better) · 6/6 experiments completed»), ниже одна оговорка
+простыми словами («Single evaluation, not re-checked; comparisons need identical evaluation
+conditions») и «Details»; итог худшего узла — «#4: 17.18 — worse than the current best 8.51»;
+совет про повторы — только когда подтверждение настроено или предлагается кнопкой. Демо-задача
+объявляет `eval.inputs`, чтобы сопоставимость была известна, а не `UNKNOWN`. **Приёмка.** На
+`runs/demo` первая видимая фраза называет лучший результат; ряд ярлыков — ниже неё.
+
+#### EB-22 · P2 · S — Язык движка на первом экране
+
+**Наблюдение.** Два селектора «Language / Язык» (шапка и composer), слоган «autonomous R&D — live
+runs», «Next message to: No run attached», «Permissions · Plan», «all super-tasks».
+**Предложение.** Один селектор языка (шапка); слоган убрать; «No run attached» → «General chat»;
+«Permissions · Plan» → «Mode: Plan (read-only)». **Приёмка.** Один селектор языка на экране.
+
+#### EB-23 · P2 · S — Assistant занимает половину экрана
+
+**Наблюдение.** Панель Assistant в режиме `bar` — 52 % ширины при 1600 px; Report сжат до
+750 px. **Предложение.** Ширина 38 % по умолчанию, запоминается. **Приёмка.** Report при 1600 px
+не уже 900 px.
+
+#### EB-24 · P0 · S — Без модели в UI нечего нажать
+
+**Наблюдение.** Офлайн-демо существует только в CLI; открывший сначала UI видит «Start with a
+goal», но любой шаг требует модели. Чтобы увидеть Report, Lineage и Trace, нужно уйти в терминал.
+**Предложение.** Кнопка «Run the offline demo» на пустом экране: `POST /api/start` с
+`examples/toy_task.json` и `backend=toy`, run помечен `demo`. **Приёмка.** Через ≤ 2 минуты после
+`looplab ui` на чистой машине без модели есть завершённый run с открытым Report.
+
+### F. Порог входа разработчика
+
+#### EB-25 · P1 · S — `CLAUDE.md` на 82 КБ
+
+**Наблюдение.** 10 144 слова; каждый агентный ход оплачивает их до первого файла (это сказано в
+нём самом); строка `looplab/engine/` — 13 941 байт. **Предложение.** Бюджет 60 000 байт; одна
+строка на модуль; измерения — в `docs/64`. **Приёмка.** `CLAUDE_MD_MAX_BYTES = 60_000` зелёный.
+
+#### EB-26 · P1 · S — Новый документ стоит четыре согласованных правки
+
+**Наблюдение.** Файл, строка `00-INDEX.md`, строка nav в `mkdocs.yml` и литеральный счётчик в
+`tests/test_documentation_contracts.py`; комментарии теста описывают четыре случая, когда nav
+забыли. **Предложение.** Nav Design records генерировать из glob (hook mkdocs); счётчик выводить
+из таблицы индекса; тест оставить как «индекс ⊇ glob». **Приёмка.** Новый документ = файл + одна
+строка индекса.
+
+#### EB-27 · P2 · S — Где искать тест
+
+**Наблюдение.** 1 365 файлов, 22,5 МБ, 40 минут; нужный файл находится только через инциденты в
+`CLAUDE.md`; требование `--basetemp` описано только там; целевой файл выполняется за 5,5 с, но
+сбор — 71 с. **Предложение.** `tests/README.md` на 20 строк: пакет → префикс файлов, три
+команды (целевой файл, `-m "not corpus"`, шард), объяснение `--basetemp`. **Приёмка.** Файл
+есть и назван в `CLAUDE.md` одной строкой.
+
+#### EB-28 · P2 · S — Docker-стек не для ноутбука
+
+**Наблюдение.** Единственный compose поднимает SGLang с 30B-A3B AWQ на GPU; README называет это
+«one-command Docker Compose stack». **Предложение.** В README одной фразой: «нужен GPU ≥ 24 ГБ»;
+либо `docker-compose.cpu.yml` (UI + Ollama). **Приёмка.** README не обещает одну команду без
+условия.
+
+## 6. Целевые сценарии после исправлений
+
+1. **Понять, что это, за три минуты без модели.** `pip install -e ".[ui]"` → `looplab ui` →
+   «Run the offline demo» → Report: «Best: experiment #2, score 8.51» → Lineage → Trace.
+   Сегодня: терминал, `--backend toy`, `inspect` с 10 КБ JSON, Report с тремя ярлыками.
+2. **Своя задача с моделью.** Settings → Model → Test → «Start a new run» → «I have data» →
+   Validate → Start → итог в чате «#3: 0.91 — better than #1 (0.88)». Сегодня этот путь уже
+   собран; мешают EB-18, EB-21, EB-22.
+3. **Из терминала.** `looplab init` (только essential) → три строки → `looplab run looplab.yaml` →
+   `looplab inspect runs/x` (сводка). Сегодня: 15 активных полей, сводка в конце дампа.
+4. **Свой coding agent.** `looplab harness --quickstart` → 15 строк → первый измеренный
+   кандидат. Сегодня: 41 КБ контракта и 18 000 слов.
+5. **Правка проекта.** `tests/README.md` → целевой файл за 5 с → документ одной правкой.
+
+## 7. Пакеты поставки
+
+| Пакет | Пункты | Поверхности | Статус |
+|---|---|---|---|
+| 1. Тексты входа | EB-01, EB-02, EB-06, EB-07, EB-12, EB-15 | README, `docs/index.md`, Installation, `examples/README.md`, корень | не начат |
+| 2. CLI | EB-08, EB-09, EB-10, EB-03, EB-04, EB-05 | `looplab/cli/*`, тест `--help` | не начат |
+| 3. UI | EB-21, EB-24, EB-19, EB-18, EB-22, EB-20, EB-23 | `Report.jsx`, `RunList.jsx`, `Settings.jsx`, `AssistantBar.jsx`, итоги в чате | не начат |
+| 4. Конфигурация | EB-17 | `settings_ui_schema.json`, генератор `configuration.md`, `init` | не начат |
+| 5. Структура документации | EB-11, EB-13, EB-14, EB-16 | guide, `mkdocs.yml`, doc 71, `AGENTS.md` | не начат |
+| 6. Разработчик | EB-25, EB-26, EB-27, EB-28 | `CLAUDE.md`, тесты контрактов, `tests/README.md`, README | не начат |
+
+Порядок: 1 → 2 → 3; 4–6 независимы. Пакеты 1 и 2 не трогают движок и событийный лог.
+
+## 8. Метрики приёмки
+
+| Метрика | Сейчас | Цель |
+|---|---|---|
+| Слов в README | 3 110 | ≤ 1 000 |
+| Слов в Quickstart / Installation | 1 764 / 698 | ≤ 700 / ≤ 500 |
+| `looplab --help`, байт / позиция `run` | 34 109 / 63 | ≤ 8 000 / ≤ 3 |
+| `looplab inspect` по умолчанию | 10 838 байт | ≤ 20 строк |
+| Строк настроек на первом экране `configuration.md` | 298 | ≤ 15 |
+| Активных строк в `looplab init` | 15 | ≤ 12 |
+| Видимых кнопок: список с одним run / Report | 33 / 61 | ≤ 15 / ≤ 30 |
+| Первая фраза Report на демо | три ярлыка-оговорки | лучший результат |
+| Время до первого завершённого run в UI без модели | недостижимо | ≤ 2 мин |
+| Файлов с личными путями в корне | 6 | 0 |
+| Doc 71, КБ | 346 | ≤ 80 |
+| `CLAUDE.md`, КБ | 82 | ≤ 60 |
+
+Метрики текста и CLI снимаются командами §10 и могут стать тестами бюджета; метрики UI — из
+скрипта Playwright §10.
+
+## 9. Отвергнутые альтернативы
+
+- **Вернуть `backend=toy` по умолчанию.** Нет: решение 2026-08-04 защищает от «пустых» run с
+  моделью, и отказ без модели уже называет исправление. Вместо этого `looplab demo` (EB-03).
+- **Удалить справочные страницы или инструменты CLI.** Нет: `tests/test_documentation_contracts.py`
+  требует, чтобы каждая команда была названа в guide, и это правильно. Группировать и
+  переупорядочивать, не удалять (EB-08, EB-11).
+- **Прятать оговорки в Report.** Нет: честность результата — свойство продукта. Менять порядок и
+  слова, не состав (EB-21).
+- **Отдельный «простой» UI.** Нет: режим Simple внутри того же workspace (EB-20) дешевле и не
+  раздваивает тесты.
+- **Переводить документацию.** Не в этом плане: сначала сократить, потом переводить.
+
+## 10. Воспроизводимость
+
+```bash
+# время
+time python -m pip install -e ".[dev,ui]"; time looplab build-ui; time mkdocs build --strict
+time python -m pytest tests/test_events_replay.py -q --basetemp=/tmp/ll-bt
+# объём
+wc -w README.md docs/guide/*.md; cat docs/guide/*.md | wc -w; wc -c docs/*.md | sort -rn | head
+looplab --help | wc -c; looplab --help | grep -cE 'doc [0-9]+|§'
+looplab --help | grep -oE '^│ [a-z][a-z0-9-]+ ' | sed 's/│ //' | nl | grep -E ' (run|ui|init|inspect)$'
+looplab run --no-genesis --kind quadratic --goal demo --direction min --backend toy --out /tmp/ll/demo --max-nodes 6
+looplab inspect /tmp/ll/demo | wc -c; looplab replay /tmp/ll/demo | wc -c
+looplab run --no-genesis --kind dataset --goal "predict target" --direction max \
+  --data examples/dataset_example/data.csv --backend toy --out /tmp/ll/ds --max-nodes 3
+python -c "from looplab.core.config import Settings as S; f=S.model_fields; print(len(f), sum(1 for v in f.values() if v.annotation is bool and v.default is True))"
+grep -cE '^\| `[a-z_]+`' docs/guide/configuration.md
+# UI: looplab ui --run-root /tmp/ll --port 8765, затем Playwright считает видимые button/input/слова на
+# '/', '/#/run/demo', '/#/settings' (снимки в docs/assets/74-entry-barrier/)
+```
+
+## 11. Как вести этот документ
+
+Этот документ — план. Когда пункт отгружен, меняется одна ячейка «Статус» в §7 и, если нужно,
+одна строка в §8; новый раздел не добавляется. Журнал реализации — коммиты и PR. Если план
+меняется по существу, пишется новый нумерованный документ, а этот получает одну строку ссылки
+вверху. Так doc 74 не повторит судьбу doc 71 (EB-14).
