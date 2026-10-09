@@ -92,7 +92,9 @@ def test_a_live_engine_checks_and_advances_a_proposal_without_a_pause(tmp_path):
     _serve(_engine(lane, store))
     assert lane_rows() == before, "a re-entered engine only records what it armed with"
     armed = [e.data for e in store.read_all() if e.type == "lane_armed"]
-    assert armed[-1] == {"mode": "auto", "reason": "", "author": True} and len(armed) == 2
+    # The caps it enforces ride on the row too (doc 73 §4.3): the live view reads them there.
+    assert armed[-1] == {"mode": "auto", "reason": "", "author": True,
+                         "author_usd_cap": 2.0, "advances_per_hour": 2} and len(armed) == 2
 
 
 def test_a_lifecycle_whose_evaluation_started_stays_on_its_base(tmp_path):

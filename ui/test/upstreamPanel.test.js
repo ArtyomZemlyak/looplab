@@ -252,6 +252,16 @@ test('the switch, the caps, the held steps and a rebased draft are stated, never
   assert.deepEqual(harness.fetch.calls, [])
 })
 
+test('a refused held row says it was refused, never that it was released', () => {
+  const markup = harness.render(UpstreamPanel, { state: { nodes: {}, upstream_enabled: true,
+    upstream_history: [], upstream_live: { ...live,
+      held: [{ seq: 53, op: 'advance', reason: 'refused:upstream_base_conflict', proposal_id: 'up_z',
+        waiting: false }] } } })
+  assert.match(markup, /automatic advance refused by the lane, not asked again/)
+  assert.doesNotMatch(markup, /released|still waiting/)
+  assert.deepEqual(harness.fetch.calls, [])
+})
+
 test('the hold reads in Russian from the same projection', async () => {
   window.localStorage.setItem('looplab.language', 'ru')
   const mounted = await harness.mount(UpstreamPanel, { state: { nodes: {}, upstream_enabled: true,
@@ -259,12 +269,15 @@ test('the hold reads in Russian from the same projection', async () => {
       advances_per_hour: 2, advances_last_hour: 0,
       authored: [{ seq: 44, action_id: 'auto-rebase-e', track: 'champion', source_node_id: 9,
         outcome: 'rebase_conflict', rebased: true }],
-      held: [{ seq: 52, op: 'advance', reason: 'rate_cap:2/h', waiting: true }] } } })
+      held: [{ seq: 52, op: 'advance', reason: 'rate_cap:2/h', waiting: true },
+        { seq: 53, op: 'author', reason: 'cost_cap:2usd', waiting: false }] } } })
   try {
     await until(() => /Расход автора: \$0\.50 из \$2\.00/.test(mounted.container.textContent))
     const text = mounted.container.textContent
     assert.match(text, /Автоматических продвижений за последний час: 0 из 2/)
     assert.match(text, /перенесён на новую базу/)
-    assert.doesNotMatch(text, /its code conflicts|still waiting|rebased onto/)
+    assert.match(text, /ещё ждёт/)
+    assert.match(text, /больше не ждёт/)
+    assert.doesNotMatch(text, /its code conflicts|still waiting|released|rebased onto/)
   } finally { await mounted.unmount() }
 })

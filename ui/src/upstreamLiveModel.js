@@ -25,6 +25,16 @@ const heldRow = row => row && typeof row === 'object' && typeof row.op === 'stri
 const withFlags = row => ({ ...row, rebased: row.rebased === true,
   ...(typeof row.waiting === 'boolean' ? { waiting: row.waiting } : {}) })
 
+// A held row the lane REFUSED for good (`refused:<code>`) is retired, not held: it neither still
+// waits nor was released, so it carries no `waiting` at all and the panel draws no held state for
+// it (a "released" beside "refused, not asked again" said two contradictory things).
+const isRefused = row => typeof row?.reason === 'string' && row.reason.startsWith('refused:')
+const heldFlags = row => {
+  const { waiting, ...rest } = withFlags(row)
+  return isRefused(row) ? { ...rest, refused: true } : { ...rest, refused: false,
+    ...(typeof waiting === 'boolean' ? { waiting } : {}) }
+}
+
 export function upstreamLiveSummary(live, engineRunning) {
   if (!live || typeof live !== 'object' || !MODES.has(live.mode)) return null
   const queue = live.queue && typeof live.queue === 'object' ? live.queue : {}
@@ -46,11 +56,12 @@ export function upstreamLiveSummary(live, engineRunning) {
     // The operator's kill switch (`upstream_auto_set`), the caps that held a step back, and what
     // the author spent — doc 73 §4.2 G2-G4. Absent on an older payload: not stopped, nothing held.
     autoPaused: live.auto_paused === true,
-    held: (Array.isArray(live.held) ? live.held : []).filter(heldRow).slice(-RECENT).reverse().map(withFlags),
+    held: (Array.isArray(live.held) ? live.held : []).filter(heldRow).slice(-RECENT).reverse().map(heldFlags),
     authorSpentUsd: Number.isFinite(live.author_spent_usd) && live.author_spent_usd >= 0 ? live.author_spent_usd : 0,
     // The caps the engine reads (doc 73 §4.3): the author's USD budget and the automatic advances per
-    // rolling hour, each 0 = no cap, and the advances of the last hour. Absent on an older payload:
-    // null, and the panel then says nothing about a cap rather than inventing one.
+    // rolling hour, each 0 = no cap, and the advances of the last hour. Absent on an older payload
+    // (or a cap the arming engine did not record, or the hour on a historical read): null, and the
+    // panel then says nothing about a cap rather than inventing one.
     authorUsdCap: Number.isFinite(live.author_usd_cap) && live.author_usd_cap >= 0 ? live.author_usd_cap : null,
     advancesPerHour: Number.isSafeInteger(live.advances_per_hour) && live.advances_per_hour >= 0 ? live.advances_per_hour : null,
     advancesLastHour: Number.isSafeInteger(live.advances_last_hour) && live.advances_last_hour >= 0 ? live.advances_last_hour : null,
@@ -58,8 +69,10 @@ export function upstreamLiveSummary(live, engineRunning) {
 }
 
 // English labels only: the panel renders each through `uiText`, so the Russian lives in ru.json
-// alone. An unknown value reads as `unknown`, never as an empty cell.
-const LABELS = {
+// alone (`test/upstreamLiveModel.test.js` holds every label to a ru.json entry: the scanner cannot
+// see a label reached through a variable, and `released` once shipped untranslated). An unknown
+// value reads as `unknown`, never as an empty cell.
+export const UPSTREAM_LIVE_LABELS = {
   mode: {
     off: 'off — proposing, checking and promoting need a paused run',
     propose: 'propose — operations are queued and run between turns',
@@ -83,12 +96,11 @@ const LABELS = {
 }
 
 export function upstreamLiveLabel(kind, value, op) {
-  if (kind === 'status' && value === 'failed' && typeof op === 'string' && LABELS.failed[op]) return LABELS.failed[op]
-  return LABELS[kind]?.[value] ?? 'unknown'
+  if (kind === 'status' && value === 'failed' && typeof op === 'string' && UPSTREAM_LIVE_LABELS.failed[op]) return UPSTREAM_LIVE_LABELS.failed[op]
+  return UPSTREAM_LIVE_LABELS[kind]?.[value] ?? 'unknown'
 }
 
 // One held row's label: a cap that held the step back, or a refusal that retired it.
 export function upstreamHeldLabel(row) {
-  const refused = typeof row?.reason === 'string' && row.reason.startsWith('refused:')
-  return upstreamLiveLabel(refused ? 'refused' : 'held', row?.op)
+  return upstreamLiveLabel(isRefused(row) ? 'refused' : 'held', row?.op)
 }

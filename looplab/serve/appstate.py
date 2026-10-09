@@ -19,6 +19,7 @@ import contextvars
 import os
 import stat
 import threading
+import time
 from collections import OrderedDict
 from contextlib import contextmanager
 from pathlib import Path
@@ -612,6 +613,15 @@ class AppState:
         # Liveness is a present-time fact. Stamping it into an old prefix fold creates a
         # hybrid object that is neither historical nor live.
         out["engine_running"] = _engine_liveness(rd) if upto_seq is None else None
+        # The live upstream lane's "advances in the last hour" is a present-time fact for the same
+        # reason: the cached body carries only the advances' timestamps (`upstream_live_body` is a
+        # pure function of the log) and the hour is counted HERE, per serve, on a copy — counted
+        # into the cached body it froze at build time and a quiet run read "1 of 2" for ever. A
+        # historical `upto_seq` read answers None, as liveness does.
+        if "upstream_live" in out:
+            from looplab.engine.upstream_serve import live_view_at
+            out["upstream_live"] = live_view_at(out["upstream_live"],
+                                                time.time() if upto_seq is None else None)
         # MIRRORED into the projection as well as onto the envelope, and stamped on every serve
         # exactly like `engine_running`. The envelope is the canonical position (it is a
         # fact about the RECORD), but `state` is the object every browser consumer actually receives —
@@ -841,8 +851,11 @@ class AppState:
         # on a run that declares no upstream block and queued nothing, so every other payload keeps
         # its shape. The mode is the one the ENGINE recorded arming with (`lane_armed`), so it caches
         # with the body: a snapshot edit changes nothing until an engine re-arms, which appends.
-        from looplab.engine.upstream_serve import upstream_live_view
-        live = upstream_live_view(rd, evs, cursor=st.lane_ops_done)
+        # Its one present-time field, the hour's automatic advances, is stamped per serve
+        # (`state_payload`, `upstream_serve.py::live_view_at`); the caps are the ones the engine
+        # armed with, off the same `lane_armed` row.
+        from looplab.engine.upstream_serve import upstream_live_body
+        live = upstream_live_body(rd, evs, cursor=st.lane_ops_done)
         if live is not None:
             d["upstream_live"] = live
         return d, last_seq, max_seq, generation, event_count

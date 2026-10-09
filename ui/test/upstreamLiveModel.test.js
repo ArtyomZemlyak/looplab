@@ -1,6 +1,7 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { upstreamHeldLabel, upstreamLiveLabel, upstreamLiveSummary } from '../src/upstreamLiveModel.js'
+import fs from 'node:fs'
+import { UPSTREAM_LIVE_LABELS, upstreamHeldLabel, upstreamLiveLabel, upstreamLiveSummary } from '../src/upstreamLiveModel.js'
 
 test('absent or malformed projections read as no live lane', () => {
   for (const value of [undefined, null, 'auto', {}, { mode: 'later' }]) {
@@ -92,4 +93,27 @@ test('the caps and the rebase marks read only from well-formed fields (doc 73 §
   assert.equal(old.authorUsdCap, null)
   assert.equal(old.advancesPerHour, null)
   assert.equal(old.advancesLastHour, null)
+})
+
+test('a refused held row is retired: it carries no held state, so the panel says neither waiting nor released', () => {
+  const out = upstreamLiveSummary({ mode: 'auto', held: [
+    { seq: 3, op: 'advance', reason: 'rate_cap:2/h', proposal_id: 'up_x', waiting: false },
+    { seq: 4, op: 'advance', reason: 'refused:upstream_base_conflict', proposal_id: 'up_x', waiting: false },
+    { seq: 5, op: 'check', reason: 'refused:upstream_source_not_measured', proposal_id: 'up_y' }] })
+  const [checkRow, refusedRow, capRow] = out.held
+  assert.equal(refusedRow.refused, true)
+  assert.equal('waiting' in refusedRow, false, 'a refusal is not "released"')
+  assert.equal('waiting' in checkRow, false)
+  assert.equal(capRow.refused, false)
+  assert.equal(capRow.waiting, false, 'a cap row the lane let go of still reads released')
+  assert.equal(upstreamHeldLabel(refusedRow), 'automatic advance refused by the lane, not asked again')
+  assert.equal(upstreamHeldLabel(capRow), 'advance held at the hourly cap')
+})
+
+test('every label the live lane can draw has its Russian in ru.json', () => {
+  const page = JSON.parse(fs.readFileSync(new URL('../src/locales/ru.json', import.meta.url), 'utf8'))
+  const labels = Object.values(UPSTREAM_LIVE_LABELS).flatMap(group => Object.values(group))
+  const missing = [...labels, 'unknown'].filter(label => !Object.hasOwn(page.messages, label))
+  assert.deepEqual(missing, [])
+  assert.equal(page.messages[upstreamLiveLabel('heldState', 'false')], 'больше не ждёт')
 })

@@ -1194,7 +1194,8 @@ EV_LANE_HELD = "lane_held"
 EV_LANE_AUTHORED = "lane_authored"
 # The mode a live engine ARMED the upstream lane with, once per engine process
 # (`engine/upstream_serve.py::serve_upstream_requests`): what the UI reports, because an engine keeps
-# serving that mode until it restarts whatever the snapshot says since. DIAGNOSTIC.
+# serving that mode until it restarts whatever the snapshot says since. It carries the caps that
+# engine enforces (`author_usd_cap`, `advances_per_hour`) for the same reason. DIAGNOSTIC.
 EV_LANE_ARMED = "lane_armed"
 
 ALL_EVENT_TYPES: frozenset[str] = frozenset(
@@ -1441,7 +1442,7 @@ EVENT_PAYLOAD_KEYS: dict[str, PayloadContract] = {
     "upstream_gate_abandoned": PayloadContract("Operator recovery of an interrupted claim; grants no pass.", required=('action_id', 'claim_action_id', 'proposal_id', 'reason', 'request_hash'), stored_whole=True),
     "base_advanced": PayloadContract("Explicit CAS — the stopped lane's, or the live engine's (`in_engine`): only future lifecycles adopt the verified base.", required=('action_id', 'evidence_token', 'flag', 'from_revision', 'gate_seq', 'hunk_hashes', 'proposal_id', 'request_hash', 'selector', 'source_node_id', 'summary'), optional=('in_engine',), stored_whole=True),
     "lane_op_requested": PayloadContract("An upstream propose/check/advance queued for the LIVE engine that serves the lane.", required=('action_id', 'op', 'request_hash'), optional=('body', 'proposal_id', 'request_path')),
-    "lane_armed": PayloadContract("A live engine armed the upstream lane: the mode it serves until it restarts, and why.", required=('author', 'mode', 'reason'), optional=()),
+    "lane_armed": PayloadContract("A live engine armed the upstream lane: the mode it serves until it restarts, and why, with the caps it enforces.", required=('author', 'mode', 'reason'), optional=('advances_per_hour', 'author_usd_cap')),
     "lane_authored": PayloadContract("The upstream author settled one source lifecycle: drafted, declined, skipped, failed, or its rebase conflicted.", required=('action_id', 'outcome', 'source_node_id', 'track'), optional=('code', 'conflicts', 'cost_usd', 'hunk_hashes', 'reason', 'rebased_from', 'source_action_id')),
     "upstream_hint_issued": PayloadContract("The bounded notice the live engine issued to the Developer sessions at work after a base advance.", required=('advance_seq', 'hint_id', 'kind', 'proposal_id', 'sessions', 'text'), optional=('source_node_id',), stored_whole=True),
     "upstream_auto_set": PayloadContract("The operator's kill switch for every automatic upstream step of a live run.", required=('enabled',), optional=('reason',), stored_whole=True),

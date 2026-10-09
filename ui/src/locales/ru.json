@@ -1,7 +1,7 @@
 {
   "schema": 1,
   "language": "ru",
-  "count": 7723,
+  "count": 7724,
   "messages": {
     "# LoopLab run report — {0}": "# Отчёт запуска LoopLab — {0}",
     "## Agent narrative (advisory)": "## Пояснения агента (рекомендации)",
@@ -7718,6 +7718,7 @@
     "rebased onto the newer base": "перенесён на новую базу",
     "its code conflicts with the newer base — skipped": "его код конфликтует с новой базой — пропущен",
     "still waiting": "ещё ждёт",
+    "released": "больше не ждёт",
     "Rebase upstream sources the base moved past": "Переносить на новую базу источники, измеренные на старой",
     "Only when the engine drafts upstream proposals itself (upstream mode auto). A repaired experiment or the champion measured on an older base than the run's current one is merged onto the current base (a three-way merge of its edits). A clean merge is drafted like any source and its check measures the merged code on the current base; a conflict is recorded and that source is skipped. Off: such sources are skipped, as before.": "Только когда движок сам пишет предложения upstream (режим auto). Отремонтированный эксперимент или чемпион, измеренный на более старой базе, чем текущая база запуска, переносится на текущую базу (трёхстороннее слияние его правок). Чистое слияние идёт в черновик как обычный источник, и проверка измеряет слитый код на текущей базе; конфликт записывается, и этот источник пропускается. Выключено: такие источники пропускаются, как раньше.",
     "Rebase stale sources": "Переносить устаревшие источники",
