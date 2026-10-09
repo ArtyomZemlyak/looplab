@@ -273,7 +273,8 @@ class CliAgentDeveloper:
                  seed_dir: Optional[str] = None, seed_dirs: Optional[list] = None,
                  protect: Optional[list] = None, editable_prefixes: Optional[list] = None,
                  accountant: Optional[CostAccountant] = None, cancel_check=None,
-                 upstream_note: bool = False, evidence_label: str = ""):
+                 upstream_note: bool = False, evidence_label: str = "",
+                 upstream_board: bool = False, checkout_base: Optional[dict] = None):
         # seed_dir(s): seed the agent's worktree from existing repo tree(s) (RepoTask) instead
         # of a single solution.py — the agent edits real repo files; the patch gate diffs
         # against that worktree and returns the accepted in-surface edits as `last_files`.
@@ -319,6 +320,19 @@ class CliAgentDeveloper:
         # one (`agents/cli_hook.py`). OFF (the constructor default): argv and message byte for byte.
         self.upstream_note = bool(upstream_note)
         self.evidence_label = evidence_label or ""
+        # The promotions PARAGRAPH also answers to `Settings.upstream_board_brief` (review
+        # 2026-10-09), the switch the in-house repo Developer's same paragraph is gated on
+        # (`adapters/repo_developer.py::upstream_board_enabled`, read by
+        # `agents/cli_hook.py::external_notice_kwargs`): an operator who turned the Developer's
+        # promotions brief off had it turned off for every Developer but this one. OFF (the
+        # constructor default) keeps the message's bytes; the hook is `upstream_note`'s alone.
+        self.upstream_board = bool(upstream_board)
+        # The base this agent's worktree IS (`repo_spec()["effective_seed_base"]` when it was built,
+        # i.e. the engine's launch stamp, `engine/upstream_serve.py::base_stamp`) — the authored base
+        # the engine records for any chain holding this agent (`sync_developer_base` never rebinds
+        # it). A REPAIR's paragraph states only the promotions in it (`_upstream_note`). None off the
+        # upstream lane.
+        self.checkout_base = dict(checkout_base) if isinstance(checkout_base, dict) else None
         self._memory_state = None
         # Per-invocation audit signal, read by the ValidatingDeveloper (ADR-7):
         self.last_run: Optional[AgentRun] = None  # process-level result of the last run
@@ -333,17 +347,35 @@ class CliAgentDeveloper:
         only by `_upstream_note`."""
         self._memory_state = state
 
-    def _upstream_note(self) -> str:
-        """The promotions paragraph for this call's message, or "" — while `upstream_note` is off,
-        with no fold bound, and on every run that never promoted anything."""
-        if not self.upstream_note:
+    def _upstream_note(self, *, repair: bool = False) -> str:
+        """The promotions paragraph for this call's message, or "" — while `upstream_note` or
+        `upstream_board` is off, with no fold bound, and on every run that never promoted anything.
+
+        A BUILD's overlay is merged onto the run's current base by its next lifecycle, so every
+        promotion is in the code that gets evaluated and all of them are stated. A REPAIR is not: it
+        stays on the base its lifecycle was seeded on (`engine/upstream_serve.py::lifecycle_base`),
+        and its paragraph used to list every promotion and claim the merge too, so a repair of a
+        lifecycle seeded before an advance was told to switch on a flag its code does not have
+        (review 2026-10-09). It states only the promotions IN its own working copy
+        (`checkout_base`, `core/upstream_board.py::promotions_in`) — the launch base, never newer
+        than the lifecycle's, so each one named is in the repaired code — and no merge. The
+        lifecycle's own base never reaches this agent (the engine pins it for a Developer that can
+        rebind, `LLMRepoDeveloper.authored_base`); with no checkout base known nothing is stated."""
+        if not (self.upstream_note and self.upstream_board):
             return ""
         from looplab.core.upstream_board import developer_base_note
-        note = developer_base_note(self._memory_state, label=self.evidence_label)
-        if not note:
+        if not repair:
+            note = developer_base_note(self._memory_state, label=self.evidence_label)
+            if not note:
+                return ""
+            return (note + "\nYour working copy is the run's launch checkout; LoopLab merges your "
+                           "edits onto the run's current base before it evaluates them.")
+        if self.checkout_base is None:
             return ""
-        return (note + "\nYour working copy is the run's launch checkout; LoopLab merges your edits "
-                       "onto the run's current base before it evaluates them.")
+        note = developer_base_note(self._memory_state, label=self.evidence_label,
+                                   base=self.checkout_base)
+        return (note + "\nYour working copy is the run's launch checkout; a repair is evaluated "
+                       "on the base its experiment started on.") if note else ""
 
     def _notice_hook(self):
         """The session's notice channel armed on this agent's own hook (`agents/cli_hook.py`), or
@@ -455,7 +487,7 @@ class CliAgentDeveloper:
         # job and must reach the caller like it does from any other paid role.
         self.accountant.add(None, usage=run.usage)
 
-    def _run(self, message: str, seed_code: str) -> str:
+    def _run(self, message: str, seed_code: str, *, repair: bool = False) -> str:
         self.last_seed = seed_code
         self.last_run = AgentRun()
         self.last_files = {}
@@ -488,7 +520,8 @@ class CliAgentDeveloper:
             # A lone surrogate cannot be encoded into argv or the prompt file, and `UnicodeEncodeError`
             # is not the `OSError` the launch path answers — the rule `core/llm.py::_bounded_create`
             # applies at the HTTP transport, applied at this one (critic 2026-09-26).
-            prompt = surrogate_safe((self.brief + "\n\n" + message + self._upstream_note()).strip())
+            prompt = surrogate_safe(
+                (self.brief + "\n\n" + message + self._upstream_note(repair=repair)).strip())
             base = self._launch_base()
             argv_message, via_file = self._prompt_delivery(prompt, base)
             if via_file:                          # batch shim: keep untrusted text out of cmd.exe
@@ -652,13 +685,14 @@ class CliAgentDeveloper:
         extra = ("\n" + idea.rationale) if (idea is not None and getattr(idea, "rationale", "")) else ""
         if self.seed_dirs:                       # RepoTask: fix the repo edits in place
             repaired = self._run(
-                f"The eval failed with:\n{error}\nEdit the repository files to fix it.{extra}", "")
+                f"The eval failed with:\n{error}\nEdit the repository files to fix it.{extra}", "",
+                repair=True)
             self.last_footprint = developer_artifact_footprint(
                 idea.footprint, repaired, self.last_files)
             return repaired
         repaired = self._run(
             f"Rewrite solution.py completely (overwrite the whole file) to fix this "
-            f"error:\n{error}\nReturn a corrected, complete script.{extra}", code)
+            f"error:\n{error}\nReturn a corrected, complete script.{extra}", code, repair=True)
         self.last_footprint = developer_artifact_footprint(
             idea.footprint, repaired, self.last_files)
         return repaired

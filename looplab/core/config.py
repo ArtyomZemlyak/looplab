@@ -3181,8 +3181,9 @@ class Settings(BaseSettings):
     # and EVERY external agent's next call states the run's promotions in its message
     # (`core/upstream_board.py::developer_base_note`), since its worktree is the launch checkout and is
     # never rebound. The hook needs the live lane (only a live advance issues a notice); the paragraph
-    # needs only a promotion. It changes an agent's prompt and argv, so a
-    # pre-field snapshot resumes OFF. One reader: `agents/cli_hook.py::external_hint_setting`.
+    # needs a promotion and `upstream_board_brief`, and a REPAIR's names only the promotions in its
+    # launch checkout (a repair stays on its lifecycle's base). It changes an agent's prompt and argv,
+    # so a pre-field snapshot resumes OFF. One reader: `agents/cli_hook.py::external_hint_setting`.
     upstream_hint_external: bool = True
     # THE EQUIVALENCE PROFILE of every upstream gate (doc 73 §4.2 G5, `engine/upstream_gate.py::
     # gate_profile`): `canary` = ONE old/new pair under the task's declared `eval.canary` (cheap on a GPU

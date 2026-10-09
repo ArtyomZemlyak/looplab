@@ -53,7 +53,15 @@ def hint_id_for(proposal_id: str) -> str:
 
 
 def hint_text(*, kind: Optional[str], source_node_id, summary: str, flag, paths) -> str:
-    """The engine's notice, bounded. Model-written words (`summary`, flag values) sit in a fence."""
+    """The engine's notice, bounded. Model-written words (`summary`, flag values) sit in a fence.
+
+    "the next build is EVALUATED on the new base", not "STARTS from" it (review 2026-10-09): a build
+    from a parent with files is pinned to the base those files were written on
+    (`node_build.py::_implement_result`, `upstream_serve.py::files_base`), and a chain holding a CLI
+    agent is never rebound (`upstream_serve.py::sync_developer_base`) — its working copy stays the
+    launch checkout. What every such build shares is that its NEXT lifecycle merges the overlay onto
+    the run's current base before the evaluation, which is also what the CLI note says
+    (`agents/cli_agent.py::CliAgentDeveloper._upstream_note`)."""
     from looplab.core.evidence import fence_untrusted
     origin = f"experiment #{source_node_id}" if type(source_node_id) is int else "an earlier experiment"
     named = ", ".join(str(p) for p in list(paths or [])[:6])
@@ -61,7 +69,7 @@ def hint_text(*, kind: Optional[str], source_node_id, summary: str, flag, paths)
     if kind == "fix":
         head = (f"Upstream notice (engine): the run's base just took a repair's FIX from {origin}"
                 + (f" in {named}" if named else "") + ".")
-        tail = ("This session keeps the code it started on; the next build starts from the new "
+        tail = ("This session keeps the code it started on; the next build is evaluated on the new "
                 "base (a repair stays on its lifecycle's base). If you are hitting this failure, it is "
                 "fixed in the base: mirror the fix rather than work around it; otherwise carry on.")
     else:
@@ -71,9 +79,9 @@ def hint_text(*, kind: Optional[str], source_node_id, summary: str, flag, paths)
         else:
             what = "a capability"
         head = f"Upstream notice (engine): the run's base just took {what} from {origin}."
-        tail = ("This session keeps the code it started on; the next build starts from the new base, "
-                "where a recipe can switch the flag on instead of re-implementing it. No action is "
-                "required now.")
+        tail = ("This session keeps the code it started on; the next build is evaluated on the new "
+                "base, where a recipe can switch the flag on instead of re-implementing it. No action "
+                "is required now.")
     text = head + "\n" + fence_untrusted(said, "upstream summary") + "\n" + tail
     return text[:HINT_TEXT_CAP]
 
@@ -137,31 +145,48 @@ class UpstreamHintBoard:
         return out
 
     def offer(self, sid: int) -> list[dict]:
-        """The notices this session has not been OFFERED yet, `[{"hint_id", "text"}]` — counted
-        against `MAX_HINTS_PER_SESSION` like a drain, but NOT recorded: an external agent's hook
-        delivers them, and `acknowledge` records each once it did."""
-        out = []
+        """The notices this session has not HEARD yet, `[{"hint_id", "text"}]` — at most the room
+        `MAX_HINTS_PER_SESSION` leaves, oldest first — and NOT recorded: an external agent's hook
+        delivers them, and `acknowledge` records each once it did.
+
+        Offering MOVES NOTHING (review 2026-10-09). It used to pop the notice off `pending` and
+        count it against the cap as it was handed over, so a notice whose hook never ran — the agent
+        finished before its next tool call, a `notices.json` write failed, a validation retry
+        started a fresh invocation in the same session — was spent: never re-offered, and charged
+        against the cap the session was never told. Now only `acknowledge` (the hook EMITTED it) or a
+        `drain` takes a notice off `pending` and counts it; an offered notice stays at the head of
+        `pending`, so the next offer hands it over again and a later notice gets room only once an
+        earlier one was heard — the cap still bounds what the agent can be shown."""
         with self._lock:
             s = self._sessions.get(sid)
             if s is None or not s["pending"]:
                 return []
-            while s["pending"] and s["delivered"] < MAX_HINTS_PER_SESSION:
-                hint = self._hints[s["pending"].pop(0)]
-                s["delivered"] += 1
+            room = max(0, MAX_HINTS_PER_SESSION - s["delivered"])
+            out = []
+            for index in s["pending"][:room]:
+                hint = self._hints[index]
                 s.setdefault("offered", set()).add(hint["hint_id"])
                 out.append({"hint_id": hint["hint_id"], "text": hint["text"]})
-            if s["delivered"] >= MAX_HINTS_PER_SESSION:
-                s["pending"].clear()
         return out
 
     def acknowledge(self, sid: int, hint_id: str, *, channel: str) -> bool:
         """Record that the session's external channel DELIVERED `hint_id` — once, and only for a
-        notice it was offered. True when a receipt row was handed to the sink."""
+        notice it was offered — and only now count it against the cap and take it off `pending`
+        (`offer`). True when a receipt row was handed to the sink."""
         with self._lock:
             s = self._sessions.get(sid)
             if s is None or hint_id not in s.get("offered", ()) or hint_id in s.setdefault("acked", set()):
                 return False
             s["acked"].add(hint_id)
+            index = next((i for i in s["pending"] if self._hints[i]["hint_id"] == hint_id), None)
+            # Absent from `pending`: an in-house `drain` in the same session (a validation fallback's
+            # tool loop) already told it and counted it — the hook told it too, so the row is still
+            # true, but the cap is not charged twice for one notice.
+            if index is not None:
+                s["pending"].remove(index)
+                s["delivered"] += 1
+                if s["delivered"] >= MAX_HINTS_PER_SESSION:
+                    s["pending"].clear()
             row = {"hint_id": hint_id, "session": s["label"], "channel": str(channel)[:32],
                    **({"node_id": s["node_id"]} if type(s["node_id"]) is int else {})}
         if self.sink is not None:
