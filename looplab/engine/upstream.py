@@ -371,10 +371,13 @@ class UpstreamLane:
         if source_archive is None:
             raise UpstreamRefusal("upstream_source_unavailable", "Source seed archive changed")
         active = active_base(events, self.task.seed_base)
-        rebase = self._rebased_source(body, node, receipt, source_archive, active)
+        # The CAS first: a body naming a base the run has moved past is refused on a comparison,
+        # before `_rebased_source` buys a three-way Git merge per source path only to be thrown away.
+        # `body.get("rebase") is None` is exactly `_rebased_source(...) is None`.
         if body.get("expected_base_revision") != active["revision"] or (
-                rebase is None and receipt["digest"] != active["selector"]["digest"]):
+                body.get("rebase") is None and receipt["digest"] != active["selector"]["digest"]):
             raise UpstreamRefusal("upstream_base_conflict", "Source node and proposal must refer to the current base revision")
+        rebase = self._rebased_source(body, node, receipt, source_archive, active)
         advice = upstream_candidates(self.rd, self.task, events, source_node_id=node.id,
             hunk_hashes=set(body["hunk_hashes"]), overlay=rebase)["rows"]
         rows = [r for r in advice if r["node_id"] == node.id and r["hunk_hash"] in body.get("hunk_hashes", [])]

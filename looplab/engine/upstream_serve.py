@@ -904,9 +904,12 @@ async def _settle_author(engine, lane, job: UpstreamJob, *, stopping: bool = Fal
     from looplab.core.errors import budget_stop_leaf
     pick, serve = job.ctx, engine._upstream_serve
     out = job.out if job.error is None else {"outcome": "failed", "code": _code(job.error)}
-    if out.get("outcome") == "nothing":
+    from looplab.engine.upstream_author import UNRECORDED_OUTCOMES
+    if out.get("outcome") in UNRECORDED_OUTCOMES:
         # A rebased source that nominates no capability on this base: memoized like the native
-        # path's empty nomination (against the base and the pending triggers), and no row.
+        # path's empty nomination (against the base and the pending triggers), and no row. A merge
+        # that could not run (`rebase_unavailable`) is no answer either: no row, memoized until its
+        # retry time (`upstream_author.py::RebaseRetry`), so a Git timeout never closes the source.
         serve.author_skipped[job.body["action_id"]] = pick.get("pending")
         serve.job = None
         return False
