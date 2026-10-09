@@ -16,7 +16,11 @@
 и её непроверенное соединение, даёт примеры «I have code / I have data», а режимы чата спрятаны
 под «Permissions · Plan». Это результат первого пакета doc 71, и его надо сохранить.
 
-Порог входа теперь держат четыре слоя, и ни один из них не экран первого запуска:
+Состояние на 2026-10-09 после исправлений: все шесть пакетов §7 сделаны, метрики §8 сняты заново
+с дерева; открыта только проверка на новых пользователях (§12.4). Ниже — картина ДО исправлений
+(коммит `0fa98f4`), ради которой написан документ.
+
+Порог входа держали четыре слоя, и ни один из них не экран первого запуска:
 
 1. **Объём и порядок текста.** README — 3 110 слов, из них 1 300 — каталог возможностей и
    четыре способа задать запуск до первой реальной задачи. Руководство пользователя —
@@ -483,8 +487,8 @@ goal», но любой шаг требует модели. Чтобы увид�
 | 1. Тексты входа | EB-01, EB-02, EB-03, EB-06, EB-07, EB-12, EB-15, EB-28 | README, `docs/index.md`, Installation, `examples/`, корень | сделано 2026-10-09 |
 | 2. CLI | EB-08, EB-09, EB-10, EB-04 | `looplab/cli/*`, тест `--help` | сделано 2026-10-09 |
 | 3. UI | EB-21, EB-24, EB-19, EB-18, EB-22 | Report, список run, Settings, Assistant, итоги в чате | сделано 2026-10-09 |
-| 4. Конфигурация | EB-17 | `looplab init`, начало `configuration.md` | `init` сделан; начало `configuration.md` — частично (§12.4) |
-| 5. Структура документации | EB-11, EB-13, EB-14, EB-16 | guide, `mkdocs.yml`, doc 71, `AGENTS.md` | сделано для страниц входа и `ui.md`; остальные справочники — §12.4 |
+| 4. Конфигурация | EB-17 | `looplab init`, начало `configuration.md` | сделано 2026-10-09 (§12.4) |
+| 5. Структура документации | EB-11, EB-13, EB-14, EB-16 | guide, `mkdocs.yml`, doc 71, `AGENTS.md` | сделано 2026-10-09: страницы входа, `ui.md`, вводные абзацы справочников (§12.4) |
 | 6. Разработчик | EB-27 | `tests/README.md` | сделано 2026-10-09 |
 | Сняты (§12) | EB-05, EB-20, EB-23, EB-25, EB-26 | — | решение записано |
 
@@ -494,7 +498,7 @@ goal», но любой шаг требует модели. Чтобы увид�
 
 | Метрика | До (0fa98f4) | Цель | После (2026-10-09) |
 |---|---|---|---|
-| Слов в README | 3 110 | ≤ 1 000 | 896 |
+| Слов в README | 3 110 | ≤ 1 000 | 899 |
 | Слов в Quickstart / Installation | 1 764 / 698 | ≤ 700 / ≤ 500 | 651 / 417 |
 | Позиция `run` в `looplab --help`; ссылки на документы в списке | 63; 29 строк | ≤ 3; 0 | 2; 0 |
 | `looplab inspect` по умолчанию | 10 838 байт, результат в конце | ≤ 20 строк | 9 строк, результат первым |
@@ -523,8 +527,9 @@ goal», но любой шаг требует модели. Чтобы увид�
   переупорядочивать, не удалять (EB-08, EB-11).
 - **Прятать оговорки в Report.** Нет: честность результата — свойство продукта. Менять порядок и
   слова, не состав (EB-21).
-- **Отдельный «простой» UI.** Нет: режим Simple внутри того же workspace (EB-20) дешевле и не
-  раздваивает тесты.
+- **Отдельный «простой» UI.** Нет: он раздваивает маршруты и тесты. Режим Simple внутри того же
+  workspace (EB-20) был более дешёвой заменой, но тоже снят (§12): run открывается Report, и его
+  первую фразу исправил EB-21.
 - **Переводить документацию.** Не в этом плане: сначала сократить, потом переводить.
 
 ## 10. Воспроизводимость
@@ -536,7 +541,7 @@ time python -m pytest tests/test_events_replay.py -q --basetemp=/tmp/ll-bt
 # объём
 wc -w README.md docs/guide/*.md; cat docs/guide/*.md | wc -w; wc -c docs/*.md | sort -rn | head
 looplab --help | wc -c; looplab --help | grep -cE 'doc [0-9]+|§'
-looplab --help | grep -oE '^│ [a-z][a-z0-9-]+ ' | sed 's/│ //' | nl | grep -E ' (run|ui|init|inspect)$'
+looplab --help | grep -oE '^│ [a-z][a-z0-9-]+ ' | sed 's/│ //; s/ *$//' | nl | awk '$2 ~ /^(run|ui|init|inspect)$/'
 looplab run --no-genesis --kind quadratic --goal demo --direction min --backend toy --out /tmp/ll/demo --max-nodes 6
 looplab inspect /tmp/ll/demo | wc -c; looplab replay /tmp/ll/demo | wc -c
 looplab run --no-genesis --kind dataset --goal "predict target" --direction max \
@@ -600,7 +605,7 @@ grep -cE '^\| `[a-z_]+`' docs/guide/configuration.md
 
 | Пункт | Что сделано | Проверка |
 |---|---|---|
-| EB-01, EB-02, EB-12, EB-15, EB-28 | README 896 слов; Installation 417; главная и индекс ведут на страницы входа; счётчик тестов убран; условие GPU для Compose названо | `tests/test_entry_page_budgets.py`, `mkdocs build --strict` |
+| EB-01, EB-02, EB-12, EB-15, EB-28 | README 899 слов; Installation 417; главная и индекс ведут на страницы входа; счётчик тестов убран; условие GPU для Compose названо | `tests/test_entry_page_budgets.py`, `mkdocs build --strict` |
 | EB-03 | `examples/demo.yaml`: задача, `backend: toy`, объявленный `comparison_contract`; запуск без флагов | `tests/test_documentation_contracts.py` запускает файл |
 | EB-04 | Строка `note: backend=toy …` в `run`/`resume`/`inspect`, когда лучший узел ничего не настраивал | прогон `--kind dataset --backend toy` |
 | EB-06, EB-07 | Файлы стенда в `benchmarks/tasks/`, runbook в `benchmarks/NEXT_RUN.md`, фикстура в `tests/data/bench-out/`; `examples/README.md` с картой примеров | тесты, читающие фикстуру; тест карты примеров |
