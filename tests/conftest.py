@@ -32,6 +32,12 @@ cannot reintroduce the hang.
 from __future__ import annotations
 
 import os
+
+# Typer forces Rich colour when GITHUB_ACTIONS / FORCE_COLOR / PY_COLORS is set (read once, at
+# `typer.rich_utils` import), so a `--help` assertion that is green locally saw ANSI escapes inside
+# its words on CI (master run 2213). Its documented off-switch is set before anything imports typer.
+os.environ.setdefault("_TYPER_FORCE_DISABLE_TERMINAL", "1")
+
 import shutil
 from pathlib import Path
 import pathlib

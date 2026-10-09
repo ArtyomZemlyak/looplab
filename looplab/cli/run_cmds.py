@@ -10,6 +10,8 @@ import json
 import math
 import os
 from pathlib import Path
+import signal
+import threading
 import time
 from typing import Optional
 
@@ -20,10 +22,10 @@ from pydantic import ValidationError
 from looplab.core.atomicio import atomic_write_text
 from looplab.core.latebind import late_bound
 from looplab.events.eval_occupancy import withheld_lifecycles
-from looplab.events.eventstore import EventStore, EventStoreConcurrencyError
+from looplab.events.eventstore import EventStore, EventStoreConcurrencyError, retry_tail_cas
 from looplab.events.types import (EV_APPROVAL_GRANTED, EV_INJECT_NODE, EV_PAUSE, EV_RESUME,
                                   EV_RESUME_SERVED, EV_RUN_ABORT, EV_RUN_FINISHED, EV_RUN_REOPENED,
-                                  EV_SPEC_APPROVED)
+                                  EV_SPEC_APPROVED, DIAGNOSTIC_EVENTS)
 from looplab.engine.orchestrator import (
     Engine,
     SPECULATION_CALIBRATION_PROFILE_DIGEST,
@@ -162,10 +164,6 @@ def _run_engine_guarded(eng: Engine, *, mlflow_uri: str = ""):
 INTERRUPT_PAUSE_REASON = "operator interrupt (Ctrl-C in `looplab run`/`looplab resume`)"
 
 
-# How long a Ctrl-C keeps retrying its pause against rows an abandoned build thread is still appending.
-_INTERRUPT_PAUSE_DEADLINE_S = 10.0
-
-
 def _record_interrupt_pause(eng) -> bool:
     """Record an operator's Ctrl-C as the durable pause `looplab stop` writes. True when appended.
 
@@ -187,33 +185,43 @@ def _record_interrupt_pause(eng) -> bool:
     store = getattr(eng, "store", None)
     if store is None:
         return False
-    # BOUNDED BY TIME, not by a count of tries (master CI run 2213, `pytest (4)`): a build thread the
-    # cancelled loop abandoned may still be appending its own node's rows, and on a loaded runner it
-    # won all four of the old fixed CAS attempts — the interrupt then left no pause at all, which is
-    # the crash-shaped log this function exists to prevent. Each retry still re-reads and re-decides
-    # on the new tail, so the CAS guarantee (never two rows, never a pause over a halted run) holds.
-    deadline = time.monotonic() + _INTERRUPT_PAUSE_DEADLINE_S
-    attempt = 0
+    # A build thread the cancelled loop abandoned may still be appending its own node's rows, and on
+    # a loaded runner it won all four of the old fixed CAS attempts (master CI run 2213, `pytest
+    # (4)`): the interrupt then left no pause at all, the crash-shaped log this exists to prevent. So
+    # the append goes through the house CAS loop (`retry_tail_cas`, its 64 re-read-and-re-decide
+    # attempts), and exhausting it answers False like every other failure here.
+    folded = {"seq": None, "halted": False}
+
+    def plan(events, tail):
+        if not events:
+            return False
+        # Re-fold only when a FOLDED row landed since the last decision: the abandoned thread's rows
+        # are mostly diagnostic, and those cannot change `halted` (invariant 5: the fold skips them).
+        if folded["seq"] is None or any(e.type not in DIAGNOSTIC_EVENTS
+                                        for e in events if e.seq > folded["seq"]):
+            folded["halted"] = fold(events).halted
+        folded["seq"] = tail
+        if folded["halted"]:
+            return False
+        store.append(EV_PAUSE, {"reason": INTERRUPT_PAUSE_REASON}, expected_last_seq=tail)
+        return True
+
+    # A second Ctrl-C while the pause is being written would abandon it half-way and print a
+    # traceback over the first interrupt; the write is bounded, so hold SIGINT for its duration.
+    # Only the main thread may install a handler (`signal.signal` raises elsewhere).
+    held = threading.current_thread() is threading.main_thread()
+    previous = signal.signal(signal.SIGINT, signal.SIG_IGN) if held else None
     try:
-        while True:
-            events = store.read_all()
-            if not events or fold(events).halted:
-                return False
-            try:
-                store.append(EV_PAUSE, {"reason": INTERRUPT_PAUSE_REASON},
-                             expected_last_seq=events[-1].seq)
-            except EventStoreConcurrencyError:
-                attempt += 1    # a row landed since the read: re-decide on the new tail
-                if time.monotonic() >= deadline:
-                    return False
-                time.sleep(min(0.2, 0.005 * attempt))
-                continue
-            typer.echo(f"interrupted: {getattr(eng, 'run_dir', 'the run')} is paused (not finalized) "
-                       "— `looplab resume` to continue, `looplab finalize` to wrap it up", err=True)
-            return True
+        paused = retry_tail_cas(store, plan, on_exhaust=lambda: False)
     except Exception:  # noqa: BLE001 — best effort: the Ctrl-C surfaces unchanged; unpaused is the pre-fix state
         return False
-    return False
+    finally:
+        if held:    # `None` (a handler not installed from Python) is not restorable: default it
+            signal.signal(signal.SIGINT, signal.default_int_handler if previous is None else previous)
+    if paused:
+        typer.echo(f"interrupted: {getattr(eng, 'run_dir', 'the run')} is paused (not finalized) "
+                   "— `looplab resume` to continue, `looplab finalize` to wrap it up", err=True)
+    return paused
 
 
 def _drive_engine_to_terminal(eng: Engine):

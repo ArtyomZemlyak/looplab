@@ -95,7 +95,6 @@ def test_the_pause_outlasts_more_lost_races_than_the_old_four_tries(tmp_path, mo
     """Master CI run 2213 (`pytest (4)`): on a loaded runner the abandoned build thread won all four
     of the old fixed CAS attempts and the Ctrl-C left NO pause. Here the store loses the race six
     times in a row, deterministically: the pause still lands, exactly once."""
-    from looplab.cli import run_cmds
     from looplab.events.eventstore import EventStoreConcurrencyError
 
     eng = make_engine(tmp_path / "run", max_nodes=2)
@@ -111,7 +110,82 @@ def test_the_pause_outlasts_more_lost_races_than_the_old_four_tries(tmp_path, mo
         return real_append(type_, data, **kwargs)
 
     monkeypatch.setattr(eng.store, "append", racing_append)
-    monkeypatch.setattr(run_cmds.time, "sleep", lambda _s: None)
     assert _record_interrupt_pause(eng) is True
     pauses = [e.data for e in eng.store.read_all() if e.type == "pause"]
     assert lost["n"] == 6 and pauses == [{"reason": INTERRUPT_PAUSE_REASON}]
+
+
+def test_a_race_lost_every_time_ends_bounded_with_no_pause(tmp_path, monkeypatch):
+    """The other end of the same loop: a log that moves under EVERY attempt exhausts the house CAS
+    budget (`retry_tail_cas`'s 64) and answers False — no pause, no hang, the handler restored."""
+    from looplab.events.eventstore import EventStoreConcurrencyError
+
+    eng = make_engine(tmp_path / "run", max_nodes=2)
+    eng.store.append("note", {"text": "a run that has started"})
+    tries = {"n": 0}
+
+    def always_lost(type_, data, **kwargs):
+        tries["n"] += 1
+        raise EventStoreConcurrencyError(eng.store.path, kwargs.get("expected_last_seq", -1), -1)
+
+    monkeypatch.setattr(eng.store, "append", always_lost)
+    assert _record_interrupt_pause(eng) is False
+    assert tries["n"] == 64
+    assert not any(e.type == "pause" for e in eng.store.read_all())
+    assert signal.getsignal(signal.SIGINT) is signal.default_int_handler
+
+
+def test_a_second_ctrl_c_while_the_pause_is_written_does_not_abandon_it(tmp_path, monkeypatch):
+    """The operator presses Ctrl-C again while the pause is being recorded: SIGINT is held for the
+    write, so the pause still lands and no second `KeyboardInterrupt` escapes from inside it."""
+    eng = make_engine(tmp_path / "run", max_nodes=2)
+    eng.store.append("note", {"text": "a run that has started"})
+    real_append = eng.store.append
+
+    def impatient_append(type_, data, **kwargs):
+        if type_ == "pause":
+            signal.raise_signal(signal.SIGINT)
+        return real_append(type_, data, **kwargs)
+
+    monkeypatch.setattr(eng.store, "append", impatient_append)
+    try:
+        paused = _record_interrupt_pause(eng)
+    except KeyboardInterrupt:   # a regression must fail THIS test, not end the session
+        pytest.fail("the second SIGINT escaped from inside the pause write")
+    assert paused is True
+    assert [e.data for e in eng.store.read_all() if e.type == "pause"] == [
+        {"reason": INTERRUPT_PAUSE_REASON}]
+    assert signal.getsignal(signal.SIGINT) is signal.default_int_handler
+
+
+def test_diagnostic_rows_from_the_abandoned_thread_cost_no_refold(tmp_path, monkeypatch):
+    """Rows the fold skips cannot change `halted`, so a race lost to them re-decides without folding
+    the whole log again; a FOLDED row still forces the re-fold."""
+    from looplab.cli import run_cmds
+    from looplab.events.eventstore import EventStoreConcurrencyError
+    from looplab.events.types import DIAGNOSTIC_EVENTS, EV_PHASE_PROGRESS
+
+    assert EV_PHASE_PROGRESS in DIAGNOSTIC_EVENTS
+    eng = make_engine(tmp_path / "run", max_nodes=2)
+    eng.store.append("note", {"text": "a run that has started"})
+    real_append = eng.store.append
+    lost = {"n": 0}
+
+    def racing_append(type_, data, **kwargs):
+        if type_ == "pause" and lost["n"] < 3:
+            lost["n"] += 1
+            real_append(EV_PHASE_PROGRESS, {"phase": "build", "n": lost["n"]})
+            raise EventStoreConcurrencyError(eng.store.path, kwargs.get("expected_last_seq", -1), -1)
+        return real_append(type_, data, **kwargs)
+
+    folds = {"n": 0}
+    real_fold = run_cmds.fold
+
+    def counting_fold(events):
+        folds["n"] += 1
+        return real_fold(events)
+
+    monkeypatch.setattr(eng.store, "append", racing_append)
+    monkeypatch.setattr(run_cmds, "fold", counting_fold)
+    assert _record_interrupt_pause(eng) is True
+    assert lost["n"] == 3 and folds["n"] == 1
