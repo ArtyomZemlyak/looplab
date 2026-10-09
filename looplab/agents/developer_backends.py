@@ -172,7 +172,7 @@ def external_cli_developer(task: TaskAdapter, settings, developer, *, param_sear
         # that WRITES THE CODE is the one role missing from `llm_usage` and `looplab tokens`.
         # Its invocations land unpriced (`calls` without `priced_calls`), which is the honest
         # shape: the tokens are spent inside the child process.
-        accountant=run_cost_accountant(settings), **external_notice_kwargs(settings))  # doc 73 §4.3
+        accountant=run_cost_accountant(settings), **external_notice_kwargs(settings, repo_spec))  # doc 73 §4.3
     if settings.validate_agent:
         from looplab.agents.roles import ValidatingDeveloper
         return ValidatingDeveloper(

@@ -22,7 +22,8 @@ recorded the notice as impossible there. It is impossible for most presets, but 
 THE CHANNEL. A private temporary directory (outside the worktree) holds `hook.py`, `settings.json`
 and `notices.json`. The engine side (`HookNotices.pump`, called from the agent's wait loop every
 `CliAgentDeveloper.CANCEL_POLL_S`) asks the session's notice channel for new notices — at most
-`MAX_HINTS_PER_SESSION`, each once, the same cap as the in-house loop — and rewrites `notices.json`
+`MAX_HINTS_PER_SESSION` heard, each once, the same cap as the in-house loop; a notice offered but not
+yet heard is offered again, to this invocation or the session's next — and rewrites `notices.json`
 atomically. The hook emits each notice it has not emitted yet and marks it under `delivered/` with an
 exclusive create; the next pump turns each mark into the session's receipt
 (`upstream_hint_delivered {channel: cli_hook}`), so a notice is recorded as delivered only once the
@@ -36,7 +37,6 @@ import os
 import re
 import shlex
 import shutil
-import subprocess
 import sys
 import tempfile
 from pathlib import Path
@@ -86,20 +86,35 @@ def external_hint_setting(settings) -> bool:
     return getattr(settings, "upstream_hint_external", False) is True
 
 
-def external_notice_kwargs(settings) -> dict:
+def external_notice_kwargs(settings, repo_spec=None) -> dict:
     """`CliAgentDeveloper`'s notice keywords from the run's settings, for the composition root
     (`agents/developer_backends.py::external_cli_developer`): the switch, and the untrusted-evidence
-    label its promotions paragraph is fenced with while the envelope is on (`core/evidence.py`)."""
+    label its promotions paragraph is fenced with while the envelope is on (`core/evidence.py`).
+
+    Review 2026-10-09 added two: `Settings.upstream_board_brief` through its ONE reader — the switch
+    the in-house Developer's same paragraph answers to, which the external agent's ignored — and the
+    base the agent's worktree is seeded from (`repo_spec["effective_seed_base"]`: `repo_task.py` pins
+    the editables `seed_dirs` copies to it), the only promotions a REPAIR's paragraph may state
+    (`agents/cli_agent.py::CliAgentDeveloper._upstream_note`)."""
+    from looplab.adapters.repo_developer import upstream_board_enabled
     from looplab.core.evidence import EVIDENCE_LABEL, envelope_enabled
+    checkout = repo_spec.get("effective_seed_base") if isinstance(repo_spec, dict) else None
     return {"upstream_note": external_hint_setting(settings),
-            "evidence_label": EVIDENCE_LABEL if envelope_enabled(settings) else ""}
+            "evidence_label": EVIDENCE_LABEL if envelope_enabled(settings) else "",
+            "upstream_board": upstream_board_enabled(settings),
+            "checkout_base": checkout if isinstance(checkout, dict) else None}
 
 
-def _command(argv: list[str]) -> str:
-    """One shell command line for the hook (Claude Code runs a hook's `command` through a shell)."""
-    if os.name == "nt":
-        return subprocess.list2cmdline(argv)
-    return " ".join(shlex.quote(a) for a in argv)
+def _command(argv: list) -> str:
+    """One shell command line for the hook. Claude Code runs a hook's `command` through a POSIX shell
+    on EVERY host — on Windows that is the Git Bash it requires, not cmd.exe — so the line is quoted
+    for that shell everywhere (review 2026-10-09). It used to be `subprocess.list2cmdline` on Windows,
+    which is cmd.exe/CRT quoting: bash then read each backslash of `C:\\Users\\...` as an escape (the
+    path lost its separators) and a double-quoted path holding `$` or a backtick as an expansion. Each
+    path is spelled with "/" (`as_posix()`; Windows' own Python and Git Bash both open `C:/x/y`) and
+    single-quoted (`shlex.join`), so a space, a backslash or a `$` reaches the interpreter as written.
+    On POSIX `as_posix()` is the path itself, so the line is the historical one byte for byte."""
+    return shlex.join(Path(a).as_posix() for a in argv)
 
 
 class HookNotices:
@@ -114,8 +129,8 @@ class HookNotices:
         self.acked: set[str] = set()
         (self.root / "delivered").mkdir(parents=True, exist_ok=True)
         (self.root / "hook.py").write_text(_HOOK_SCRIPT, encoding="utf-8")
-        self._write_notices()
-        command = _command([sys.executable, str(self.root / "hook.py"), str(self.root)])
+        self._write_notices(self.offered)
+        command = _command([Path(sys.executable), self.root / "hook.py", self.root])
         settings = {"hooks": {"PostToolUse": [{"matcher": "*", "hooks": [
             {"type": "command", "command": command, "timeout": _HOOK_TIMEOUT_S}]}]}}
         (self.root / "settings.json").write_text(json.dumps(settings), encoding="utf-8")
@@ -131,20 +146,30 @@ class HookNotices:
         """The flags that load the hook for this invocation only."""
         return ["--settings", str(self.root / "settings.json")]
 
-    def _write_notices(self) -> None:
+    def _write_notices(self, notices: list) -> None:
         tmp = self.root / "notices.json.tmp"
-        tmp.write_text(json.dumps(self.offered, ensure_ascii=False), encoding="utf-8")
+        tmp.write_text(json.dumps(notices, ensure_ascii=False), encoding="utf-8")
         os.replace(tmp, self.root / "notices.json")
 
     def pump(self) -> None:
-        """Publish newly offered notices; record the ones the hook emitted. Never raises."""
+        """Publish newly offered notices; record the ones the hook emitted. Never raises.
+
+        A notice joins `offered` only once a `notices.json` carrying it was WRITTEN (review
+        2026-10-09): a failed write used to leave it in `offered` but not on disk, where the hook
+        could never read it, while the channel had already counted it as handed over — lost for the
+        session. The channel now re-offers every notice not yet acknowledged
+        (`engine/upstream_hints.py::UpstreamHintBoard.offer`), so one a write missed is offered again
+        at the next pump; the ones already published are skipped by id."""
         try:
+            published = {n["hint_id"] for n in self.offered}
             new = [n for n in (self.channel.offer() or [])
                    if isinstance(n, dict) and isinstance(n.get("text"), str)
-                   and isinstance(n.get("hint_id"), str) and _HINT_ID.fullmatch(n["hint_id"])]
+                   and isinstance(n.get("hint_id"), str) and _HINT_ID.fullmatch(n["hint_id"])
+                   and n["hint_id"] not in published]
             if new:
-                self.offered.extend({"hint_id": n["hint_id"], "text": n["text"]} for n in new)
-                self._write_notices()
+                notices = self.offered + [{"hint_id": n["hint_id"], "text": n["text"]} for n in new]
+                self._write_notices(notices)
+                self.offered = notices
         except Exception:  # noqa: BLE001 — a notice channel fault must never stop the agent it informs
             pass
         self._collect()
