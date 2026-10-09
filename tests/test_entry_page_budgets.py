@@ -94,3 +94,16 @@ def test_every_large_guide_page_opens_with_where_to_start():
         block = head[head.index(lead) + len(lead):].split("\n## ", 1)[0]   # the lead up to the next section
         assert "](#" in block or "`" in block, f"{page.name}: the lead names no section or setting"
 
+
+
+def test_installation_names_the_read_fence_warning_a_windows_or_root_run_prints():
+    """doc 74 §12.6 (EB-05): every Windows run, and every run as root, opens with the read fence's
+    WARNING. It stays — it names a real residual — so Installation says it is expected, quoting its
+    opening words; this keeps that quote the message's own text rather than a paraphrase that drifts."""
+    from looplab.runtime import read_fence
+    page = (ROOT / "docs/guide/installation.md").read_text(encoding="utf-8")
+    quoted = re.search(r'"(the read fence\'s KERNEL self-protection rung is ADVISORY here)"', page)
+    assert quoted, "Installation no longer names the read fence warning"
+    target = ROOT / "docs/guide/installation.md"         # a file with write bits: always reduced
+    message = read_fence.harden_guarantee(target)
+    assert message and message.startswith(quoted.group(1)), message

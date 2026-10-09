@@ -42,6 +42,10 @@ looplab inspect runs/demo          # the best result and why the run stopped
 looplab smoke                      # once a model is configured: one request to check it
 ```
 
+On Windows, or when running as root, each run starts with one WARNING:
+"the read fence's KERNEL self-protection rung is ADVISORY here". It is expected: file modes do not
+bind there, so the sandbox's file-mode protection is weaker. It does not stop the run.
+
 ## Optional extras
 
 Combine extras as needed, e.g. `pip install -e ".[ui,harness]"`.
