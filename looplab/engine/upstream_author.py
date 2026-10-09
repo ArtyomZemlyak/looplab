@@ -37,13 +37,21 @@ as a REBASE pick: `rebase_source` three-way merges its overlay (the base it was 
 current base, git merge-file — `upstream_workspace.py::rebase_overlay`, the merge every migrating
 lifecycle already takes) and nominates its capability hunks against the CURRENT base. A conflict (or a
 source too large to merge in bounds) is recorded — `lane_authored {outcome: rebase_conflict, code,
-conflicts}` — and the source is skipped on that base; a clean merge is drafted like any source, and its
-body carries the merged overlay (`rebase`), which the lane recomputes before it admits it
-(`UpstreamLane._propose_admit`) and the gate runs as its OLD side on the current base. The comparison
-stays honest: under `full` the rebased source must still reproduce the score the source measured, under
-`canary` both sides run the current base's slice, and a repair's trigger probe still runs the current
-base as its failing old side. The action id names the base it rebases onto (`author_rebase_action_id`);
-a lifecycle the author already paid for on any base is never rebased (`_paid_lifecycles`).
+conflicts}` — and the source is skipped on that base. A merge that could not RUN (Git timed out or
+would not start, an archive unreadable) is no verdict on the source: nothing is recorded and the pick
+is asked again after `REBASE_RETRY_AFTER_S` (`rebase_unavailable`); a failure nobody foresaw is
+recorded once per base as an unpaid `skipped`, never as a paid `failed`. A clean merge is drafted
+like any source, and its body carries the merged overlay (`rebase`), which the lane recomputes before
+it admits it (`UpstreamLane._propose_admit`) and the gate runs as its OLD side on the current base.
+What that comparison does and does not establish: under `full` the rebased source must still
+reproduce the score the source measured, so a merge that changed the source's behaviour fails there.
+Under `canary` both sides run the current base's slice, and under `repair_gate: probes` no
+equivalence runs at all — in those profiles NOTHING compares the merged source with the source's own
+measurement, so the merge is trusted as far as the probes and the canary pair reach (the gate's
+`scope` says so). A repair's trigger probe still runs the current base as its failing old side. The
+action id names the base it rebases onto (`author_rebase_action_id`); a lifecycle the author already
+paid for on any base is never rebased on that track (`_paid_lifecycles`), nor one the lane already
+holds a proposal from on that track (`_proposed_lifecycles`).
 
 What the author is NOT: evidence. Its prose and the critic's verdict only admit a proposal to the
 gate; the base moves on measurements alone.
@@ -52,6 +60,8 @@ from __future__ import annotations
 
 import difflib
 import json
+import subprocess
+import time
 from typing import Optional
 
 AUTHOR_TRACKS = ("repair", "champion")
@@ -117,6 +127,39 @@ def author_rebase_action_id(node, track: str, onto_revision: str) -> str:
 
 # Bounds of the rebase path: a source overlay with more paths than this is not merged automatically.
 REBASE_MAX_PATHS = 32
+# A merge that could not RUN is asked again after this long — the lane's own pause for a passing
+# refusal (`upstream_serve.py::AUTO_RETRY_AFTER_S`). What a retry costs is Git work, never money.
+REBASE_RETRY_AFTER_S = 300.0
+# Outcomes the main task settles WITHOUT a `lane_authored` row (`upstream_serve.py::_settle_author`):
+# `nothing` (a rebased source that nominates no capability, memoized against what could change that)
+# and `rebase_unavailable` (a merge that could not run, memoized until `REBASE_RETRY_AFTER_S`). Each
+# leaves its memo value in `pick["pending"]`.
+UNRECORDED_OUTCOMES = ("nothing", "rebase_unavailable")
+
+
+class RebaseRetry:
+    """The per-process memo value of a rebase pick whose merge could not run: `author_next` passes
+    it over until `deadline` (`time.monotonic()`), then asks again. Never equal to a nomination key,
+    so it can only ever DELAY a pick, never close it."""
+
+    __slots__ = ("deadline",)
+
+    def __init__(self, deadline: float) -> None:
+        self.deadline = deadline
+
+    def __repr__(self) -> str:
+        return f"RebaseRetry({self.deadline!r})"
+
+
+def _memo_holds(memo: dict, action_id: str, key) -> bool:
+    """Whether the per-process memo still passes `action_id` over: memoized for good (None), against
+    the nomination key it still has, or a retry whose time has not come (`RebaseRetry`)."""
+    if action_id not in memo:
+        return False
+    value = memo[action_id]
+    if isinstance(value, RebaseRetry):
+        return time.monotonic() < value.deadline
+    return value in (None, key)
 
 
 # Outcomes that cost the two paid calls — what `AUTHOR_MAX_PER_RUN` counts. `skipped` made none, and
@@ -146,8 +189,16 @@ def _paid_lifecycles(events) -> set:
 
 
 def _proposed_lifecycles(events) -> set:
-    """`(source_node_id, source_signature)` of every lifecycle the lane holds a proposal from."""
-    return {(e.data.get("source_node_id"), e.data.get("source_signature"))
+    """`(source_node_id, source_signature, track)` of every lifecycle the lane holds a proposal from,
+    per TRACK like the action ids that name them (`author_action_id`, `author_rebase_action_id`): the
+    repair track's proposal answers the repair's fix, not the champion's capability of the same
+    lifecycle. The author's own proposal names its track on its `lane_authored` row (same action id);
+    a proposal somebody else wrote (the Assistant, an external agent, the operator) names none and is
+    recorded with track None — the answer for EVERY track of that lifecycle, as it always was."""
+    tracks = {e.data.get("action_id"): e.data.get("track") for e in events
+              if e.type == "lane_authored" and e.data.get("track") in AUTHOR_TRACKS}
+    return {(e.data.get("source_node_id"), e.data.get("source_signature"),
+             tracks.get(e.data.get("action_id")))
             for e in events if e.type == "upstream_proposed"}
 
 
@@ -264,11 +315,13 @@ def author_next(rd, task, state, events, *, skipped=None, active=None,
             return None
     memo = skipped if isinstance(skipped, dict) else {}
     repaired = _repaired_ids(state, events)
-    by_seq = None
+    # The whole-log readings a stale source asks, made at most ONCE per call: asked per source, a
+    # turn with several sources the base moved past re-scanned the log twice for each of them.
+    by_seq = paid = proposed = None
     for track, node in _sources(state, events, repaired):
         action_id = author_action_id(node, track)
         key = _nomination_key(node, state, active["revision"], node.id in repaired)
-        if action_id in ids or (action_id in memo and memo[action_id] in (None, key)):
+        if action_id in ids or _memo_holds(memo, action_id, key):
             continue
         by_seq = {e.seq: e for e in events} if by_seq is None else by_seq
         try:
@@ -277,16 +330,22 @@ def author_next(rd, task, state, events, *, skipped=None, active=None,
             memo[action_id] = None
             continue
         if receipt.get("digest") != active["selector"]["digest"]:
-            if not rebase or action_id in _paid_lifecycles(events) or (
-                    node.id, node_signature(node)) in _proposed_lifecycles(events):
+            if rebase and paid is None:
+                paid, proposed = _paid_lifecycles(events), _proposed_lifecycles(events)
+            signature = node_signature(node)
+            if not rebase or action_id in paid or (node.id, signature, track) in proposed or (
+                    node.id, signature, None) in proposed:
                 # Built on an older base: the lane refuses it as a source. Rebased (doc 73 §4.3) only
-                # while nobody has proposed this lifecycle yet — a source whose capability already
-                # had its proposal (whoever wrote it, advanced or not) had its answer.
+                # while nobody has proposed this lifecycle ON THIS TRACK yet — a source whose
+                # capability already had its proposal (whoever wrote it, advanced or not) had its
+                # answer. Keyed per lifecycle alone, the repair track's proposal closed the champion
+                # track of the same lifecycle too; a proposal the author did not write names no
+                # track and still answers every one (`_proposed_lifecycles`).
                 memo[action_id] = None
                 continue
             # doc 73 §4.3: rebase it onto the current base — in the worker, which merges with Git.
             rebase_id = author_rebase_action_id(node, track, active["revision"])
-            if rebase_id in ids or (rebase_id in memo and memo[rebase_id] in (None, key)):
+            if rebase_id in ids or _memo_holds(memo, rebase_id, key):
                 continue
             archive = verified_seed_archive(rd, receipt)
             if archive is None:
@@ -320,7 +379,34 @@ def rebase_source(rd, task, pick) -> dict:
     base. Mutates `pick` in place (`archive` becomes the current base's, `source_files` /
     `source_deleted` the merged overlay, `rows` the nomination) and returns `{"outcome": "ready"}`, or
     `{"outcome": "rebase_conflict", "code", "conflicts", "reason"}`, or `{"outcome": "nothing"}` when
-    the merged source nominates no capability. Appends nothing; makes no paid call."""
+    the merged source nominates no capability, or `{"outcome": "rebase_unavailable", "code"}` when the
+    merge could not RUN (`pick["pending"]` becomes a `RebaseRetry`), or — for a failure nobody
+    foresaw — an unpaid `{"outcome": "skipped", "code": "upstream_rebase_failed", "reason"}`.
+    Appends nothing; makes no paid call, so nothing it returns is a PAID outcome (`PAID_OUTCOMES`):
+    before, an unforeseen exception here reached the main task as the job's error and was recorded
+    as a paid `failed` draft, counted against `AUTHOR_MAX_PER_RUN` for a call never made."""
+    from looplab.core.containment import refuse_budget_stop
+    from looplab.core.errors import ConfigRefusal
+    try:
+        return _rebase_source(rd, task, pick)
+    except (ConfigRefusal, OSError, subprocess.SubprocessError) as exc:
+        # The merge could not RUN: the current base's archive unreadable (`seed_base.py::
+        # selected_seed_base` refuses it as a `ConfigRefusal`), or Git timed out or would not start
+        # (`upstream_workspace.py::_run_git` turns both into an `UpstreamRefusal`, a `ConfigRefusal`).
+        # No merge was made, so it is no answer about this source on this base. Recorded as a
+        # `rebase_conflict` it closed the source on the base for good (the action id names the base)
+        # over a Git timeout; now nothing is recorded and the pick is asked again later.
+        pick["pending"] = RebaseRetry(time.monotonic() + REBASE_RETRY_AFTER_S)
+        return {"outcome": "rebase_unavailable",
+                "code": str(getattr(exc, "code", "") or "upstream_rebase_unavailable")[:80]}
+    except Exception as exc:  # noqa: BLE001 — the rebase makes no paid call: an unforeseen failure is an unpaid answer on this base, never a paid `failed` draft
+        refuse_budget_stop(exc)
+        return {"outcome": "skipped", "code": "upstream_rebase_failed",
+                "reason": f"the rebase failed unexpectedly ({type(exc).__name__}); no call was made"}
+
+
+def _rebase_source(rd, task, pick) -> dict:
+    """`rebase_source` without its classification of what the merge raised."""
     from looplab.engine.seed_base import selected_seed_base
     from looplab.engine.upstream_state import repair_probe_covers, upstream_candidates
     from looplab.engine.upstream_workspace import rebase_overlay
@@ -330,18 +416,9 @@ def rebase_source(rd, task, pick) -> dict:
         return {"outcome": "rebase_conflict", "code": "upstream_rebase_too_large", "conflicts": [],
                 "reason": f"the source overlay names {len(paths)} paths; at most {REBASE_MAX_PATHS} "
                           "are merged automatically"}
-    from looplab.core.errors import ConfigRefusal
-    try:
-        new_archive, _ = selected_seed_base(pick["rebase"]["onto"])
-        files, deleted, conflicts = rebase_overlay(dict(node.files), list(node.deleted),
-                                                   pick["archive"], new_archive)
-    except (ConfigRefusal, OSError) as exc:
-        # The current base's archive or Git itself is unavailable: no merge was made and no call
-        # paid for — recorded as this base's answer (`UpstreamRefusal` is a `ConfigRefusal`).
-        return {"outcome": "rebase_conflict", "code": str(getattr(exc, "code", "") or
-                                                          "upstream_rebase_unavailable")[:80],
-                "conflicts": [], "reason": "the merge could not run: the current base's archive or "
-                                           "Git was unavailable"}
+    new_archive, _ = selected_seed_base(pick["rebase"]["onto"])
+    files, deleted, conflicts = rebase_overlay(dict(node.files), list(node.deleted),
+                                               pick["archive"], new_archive)
     if conflicts:
         return {"outcome": "rebase_conflict", "code": "upstream_rebase_conflict",
                 "conflicts": sorted(conflicts)[:AUTHOR_MAX_PATHS * 4],
@@ -446,8 +523,9 @@ def build_body(pick, draft, critique, *, generation: str) -> dict:
     recipe = {p: t for p, t in files.items() if p not in shared}
     recipe.update({p: t for p, t in draft.recipe_overrides.items() if p in patch and p not in shared})
     # doc 73 §4.3: a rebased source travels with its merged overlay — what the lane recomputes before
-    # it admits the proposal and what the gate runs as the OLD side on the current base.
-    rebased = ({"rebase": {"from_digest": pick["rebase"]["from_digest"], "files": dict(files),
+    # it admits the proposal and what the gate runs as the OLD side on the current base. It repeats
+    # most of `recipe_files` by contract; `body_floor_bytes` bounds the two before the paid draft.
+    rebased =({"rebase": {"from_digest": pick["rebase"]["from_digest"], "files": dict(files),
                            "deleted": sorted(deleted)}} if pick.get("rebase") is not None else {})
     return {**rebased,"expected_generation": generation, "action_id": pick["action_id"],
             "source_node_id": node.id, "expected_base_revision": pick["revision"],
@@ -458,6 +536,25 @@ def build_body(pick, draft, critique, *, generation: str) -> dict:
             "documentation_path": draft.documentation_path,
             "critic": {"verdict": critique.verdict, "reason": critique.reason,
                        "reviewer": AUTHOR_CRITIC_REVIEWER}}
+
+
+def body_floor_bytes(pick) -> int:
+    """The encoded bytes of the part of `build_body`'s body that is known BEFORE the draft: a rebased
+    source's merged overlay (`rebase.files`/`deleted`, carried whole) and the recipe on every source
+    path the nomination does not name (`recipe_files`, the source's bytes unchanged). A rebased body
+    carries most of the overlay TWICE by contract — the lane recomputes `rebase` and compares the
+    recipe with it byte for byte (`UpstreamLane._propose_admit`), and the gate reads both from the
+    manifest — so the request bound (`normalize_request`, `RETAINED_REQUEST_MAX_BYTES`) used to be
+    met only by `precheck_draft`, after the draft was paid for. The draft only ADDS to this (its own
+    files, the flag, the summary) unless it rewrites a path it was not nominated for, so a floor over
+    the bound is refused before any call (`author_draft`)."""
+    files, deleted = _source_files(pick)
+    nominated = {r["path"] for r in pick["rows"] or []}
+    known = {"recipe_files": {p: t for p, t in files.items() if p not in nominated}}
+    if pick.get("rebase") is not None:
+        known["rebase"] = {"from_digest": pick["rebase"]["from_digest"], "files": dict(files),
+                           "deleted": sorted(deleted)}
+    return len(json.dumps(known, ensure_ascii=False).encode())
 
 
 def precheck_draft(pick, body, task) -> Optional[str]:
@@ -500,9 +597,16 @@ def author_draft(engine, pick, *, generation: str) -> dict:
                                            critic_messages)
     from looplab.core.parse import parse_structured
     from looplab.engine.shared import judge_evidence_kwargs
+    from looplab.engine.upstream_state import RETAINED_REQUEST_MAX_BYTES
     client = getattr(getattr(engine, "developer", None), "client", None)
     if client is None:
         return {"outcome": "skipped", "reason": "no model client"}
+    if body_floor_bytes(pick) > RETAINED_REQUEST_MAX_BYTES:
+        # The proposal could never be admitted (`normalize_request` bounds a body): refused BEFORE
+        # the draft, so it costs nothing — `precheck_draft` met it only after the first paid call.
+        return {"outcome": "skipped", "code": "upstream_request_too_large",
+                "reason": "the source's recipe (and a rebase's merged overlay) alone exceed the "
+                          f"{RETAINED_REQUEST_MAX_BYTES} byte request bound"}
     context = author_context(engine.task, pick)
     if context is None:
         return {"outcome": "skipped", "reason": "a nominated file is too large or not text"}

@@ -167,6 +167,13 @@ def waives_equivalence(declaration, proposal) -> bool:
             and proposal.get("repair_only") is True)
 
 
+# The scope of a gate on a REBASED source (doc 73 §4.3) under a profile that never compares the
+# merged source with the source's own measurement (`canary`, `repair_gate: probes`): said on the
+# result, so nobody reads the rebase as re-verified. Only `full` asks `source_reproduced`.
+REBASED_UNCOMPARED = (" (source rebased onto the current base; the merged source was not compared"
+                      " with the source's own measured score)")
+
+
 def old_side_overlay(source, proposal, manifest):
     """The SOURCE the gate's old side runs on the current base: the node's own overlay, or — for a
     proposal whose source was measured on an older base and REBASED (doc 73 §4.3) — the merged overlay
@@ -175,11 +182,17 @@ def old_side_overlay(source, proposal, manifest):
     rebase = manifest.get("rebase") if isinstance(manifest, dict) else None
     if not proposal.get("rebased_from"):
         return source.files, source.deleted
-    if (not isinstance(rebase, dict) or rebase.get("from_digest") != proposal["rebased_from"]
-            or digest({"files": rebase.get("files"), "deleted": rebase.get("deleted")})
+    deleted = rebase.get("deleted") if isinstance(rebase, dict) else None
+    # `deleted` is a SET: the lane admits a body's deletions in any order (`UpstreamLane.
+    # _rebased_source` compares them sorted) and hashes its own sorted merge onto the proposal row
+    # (`_propose_proposed`), while the manifest keeps the body as sent. Hashed as stored, an honest
+    # proposal that listed its deletions in another order was refused here as `changed`.
+    if (not isinstance(deleted, list) or any(not isinstance(d, str) for d in deleted)
+            or rebase.get("from_digest") != proposal["rebased_from"]
+            or digest({"files": rebase.get("files"), "deleted": sorted(deleted)})
             != proposal.get("source_overlay_hash")):
         raise UpstreamRefusal("upstream_rebase_changed", "The proposal's merged source overlay changed; propose again")
-    return rebase["files"], rebase["deleted"]
+    return rebase["files"], sorted(deleted)
 
 
 def execute_gate(rd, task, settings, source, proposal, manifest, action_id, charge, *, extra_env=None):
@@ -188,7 +201,10 @@ def execute_gate(rd, task, settings, source, proposal, manifest, action_id, char
     # THE OLD SIDE (doc 73 §4.3): the source as the lane admitted it — rebased onto the current base
     # when the base moved past its measurement. Under `full` it must still reproduce the source's own
     # measured score, so a merge that changed the source's behaviour fails the gate rather than
-    # comparing two things the source never measured.
+    # comparing two things the source never measured. ONLY under `full`: the `canary` pair runs a
+    # different slice than the source's measurement and `repair_gate: probes` runs no equivalence,
+    # so in those profiles nothing compares the merged source with what the source measured — the
+    # merge is trusted as far as the tests, probes and the canary pair reach, and `scope` says so.
     source_files, source_deleted = old_side_overlay(source, proposal, manifest)
     rebased = bool(proposal.get("rebased_from"))
     before = input_identity(task, settings, source, proposal)
@@ -302,7 +318,8 @@ def execute_gate(rd, task, settings, source, proposal, manifest, action_id, char
         return {"passed": before == after and all(c["passed"] for c in checks),
                 "input_identity": before, "inputs_unchanged": before == after, "checks": checks,
                 "executions": executions, "eval_seconds": sum(r["seconds"] for r in executions),
-                "scope": "declared scorer, old recipes and trigger probes (repair_gate=probes)"}
+                "scope": "declared scorer, old recipes and trigger probes (repair_gate=probes)"
+                         + (REBASED_UNCOMPARED if rebased else "")}
     if gate_profile(settings, task) == "canary":
         # doc 73 §4.2 G5: ONE old/new pair on the declared canary instead of the paired full
         # repetitions — hours on a GPU task become minutes. A different slice than the source's own
@@ -329,7 +346,7 @@ def execute_gate(rd, task, settings, source, proposal, manifest, action_id, char
                 "input_identity": before, "inputs_unchanged": before == after, "checks": checks,
                 "executions": executions, "eval_seconds": sum(r["seconds"] for r in executions),
                 "scope": "declared scorer, old recipes, trigger probes and one canary pair"
-                         + (" (source rebased onto the current base)" if rebased else "")}
+                         + (REBASED_UNCOMPARED if rebased else "")}
     values = [[], []]
     for repeat in range(declaration["repeats"]):
         for side, selector, files, deleted in (
