@@ -30,7 +30,10 @@ jobs:
     # 45, not 20 or 30: run 1964's group 4 was cancelled at the old 20-minute ceiling mid-suite, and
     # the triage measured this runner at 2.1-6.5 tests/s per shard (Linux: ~5-6) with single
     # `arm_power_tool` chunks of 177, 148 and 122 s — about 4,300 tests a shard needs more than 30.
-    timeout-minutes: 45
+    # 60, not 45 (2026-10-09): eight shards that day ran 24-34.5 min of pytest, and one more was
+    # cancelled at 45 having reached 89 % in 43 min — no hang, every stretch slow (the split has no
+    # stored durations, so it deals by count). 45 left no room for one slow runner.
+    timeout-minutes: 60
     strategy:
       fail-fast: false
       matrix:

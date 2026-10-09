@@ -16,7 +16,8 @@ pytest.importorskip("fastapi")
 
 from factories import command_terminal as _terminal  # noqa: E402
 from factories import http_run_generation  # noqa: E402
-from test_run_command_service import _ack_marked, _client, _Driver, _seed, _types  # noqa: E402
+from test_run_command_service import (  # noqa: E402
+    _STAGED_FINISH_COMMAND_TIMEOUT_S, _ack_marked, _client, _Driver, _seed, _types)
 
 from looplab.events.eventstore import EventStore  # noqa: E402
 
@@ -298,7 +299,9 @@ def test_a_retry_re_drives_the_drain_it_was(tmp_path):
     kept = snapshot.read_bytes()
     snapshot.unlink()
     driver = _acking_driver(rd)
-    client, _srv = _client(tmp_path, driver)
+    # The subject is the RETRY, not the deadline: at the default 0.25 s the Windows runner settled
+    # `timed_out` before the worker reached the missing snapshot's failure.
+    client, _srv = _client(tmp_path, driver, timeout=_STAGED_FINISH_COMMAND_TIMEOUT_S)
     failed = _terminal(client, _post(client, "node_reset", _reset(), "drain-retry",
                                      drain_only=True).json())
     assert failed["status"] == "failed" and failed["error"]["retryable"] is True, failed
