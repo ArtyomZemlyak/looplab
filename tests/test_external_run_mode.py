@@ -588,7 +588,9 @@ def test_external_agent_publishes_reusable_lessons_without_internal_reflection(t
                 result["state"] = await engine.run()
 
             group.start_soon(run)
-            with anyio.fail_after(10):
+            # A HANG bound, not a speed claim: setup, a real eval and two app builds overran 10 s on
+            # the Windows runner (2-6 tests/s a shard), which then read as a failure of the feature.
+            with anyio.fail_after(60):
                 while not fold(engine.store.read_all()).setup_done:
                     await anyio.sleep(0.02)
                 engine.store.append(EV_INJECT_NODE, {

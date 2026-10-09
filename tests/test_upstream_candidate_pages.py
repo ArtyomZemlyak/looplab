@@ -1,6 +1,4 @@
 """A bounded advice page must not hide later measured upstream sources."""
-import os
-
 import httpx
 from fastapi.testclient import TestClient
 
@@ -17,13 +15,14 @@ def crowded(tmp_path):
     # Both nodes execute real SGD; these diagnostic constants do not alter scores.
     old = "".join(f"OPTION_{i} = 0\n" + "".join(f"# context {i} {j}\n" for j in range(7)) for i in range(201))
     changed = old.replace(" = 0\n", " = 1\n")
-    native = lambda text: text.replace("\n", os.linesep)
+    # LF throughout: `fixture` writes the base as the bytes it is given (it used `write_text`, CRLF on
+    # Windows, which these sources once matched with `os.linesep`).
     lane, store, generation, body = fixture(tmp_path, base_train=TRAIN + old,
-        source_files={"train.py": native(SOURCE + changed), "recipe.env": "MOMENTUM=0.2\n"})
-    create(store, 1, {"train.py": native(SOURCE + old), "recipe.env": "MOMENTUM=0.2\n"})
+        source_files={"train.py": SOURCE + changed, "recipe.env": "MOMENTUM=0.2\n"})
+    create(store, 1, {"train.py": SOURCE + old, "recipe.env": "MOMENTUM=0.2\n"})
     evaluate(lane, store, 1)
     target = {**body, "source_node_id": 1, "hunk_hashes": body["hunk_hashes"][:1],
-        "files": {**body["files"], "train.py": native(GENERAL + old)}}
+        "files": {**body["files"], "train.py": GENERAL + old}}
     return lane, store, generation, target
 
 

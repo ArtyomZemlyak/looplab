@@ -354,6 +354,20 @@ def test_a_time_budget_pauses_between_evaluations(tmp_path, monkeypatch):
     _reset(store, 1)
     _reset(store, 2)
     _config(rd, max_seconds=0.000001)
+    # DRIVE the clock the budget is read on: `time.time()` ticks at 15.625 ms on Windows' Python 3.12,
+    # so the drain's start and its first check read the SAME instant there and 0 s was within budget
+    # (the Windows leg evaluated a node). Each read is one second later than the last.
+    import looplab.engine.orchestrator as orchestrator
+    real_time, ticks = orchestrator.time, iter(range(1, 10**9))
+
+    class _Clock:
+        def __getattr__(self, name):
+            return getattr(real_time, name)
+
+        def time(self):
+            return real_time.time() + next(ticks)
+
+    monkeypatch.setattr(orchestrator, "time", _Clock())
     mark = store.read_all()[-1].seq
     out = _drain(rd)
     assert out.exit_code == 0, out.output
