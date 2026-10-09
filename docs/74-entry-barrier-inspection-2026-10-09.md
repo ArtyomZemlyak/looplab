@@ -373,7 +373,8 @@ Unassigned / «No projects yet»), Saved view / Save current view / Delete, «fi
 status», «all tasks», «all super-tasks», сортировка, List / Lineage / Concepts / Compare, Compact,
 Energy — 33 кнопки и 10 полей ради одной карточки. Doc 71 §14 убрал это при нуле run.
 **Предложение.** Порог — пять run или созданный проект; до него — карточки, «New run» и
-«Show filters». **Приёмка.** При 1–4 run ≤ 15 видимых кнопок.
+«Show filters». **Приёмка (исправлено, §12.4).** При 1–4 run ≤ 15 видимых кнопок в рабочей области списка; панель
+Assistant, одинаковая на всех экранах, в счёт не входит. Выполнено: 6.
 
 #### EB-20 · снято — Рабочее пространство run открывается на полной мощности
 
