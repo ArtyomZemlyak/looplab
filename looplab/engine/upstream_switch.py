@@ -116,7 +116,7 @@ def upstream_operator_lines(run_dir, events, *, now: Optional[float] = None,
     """The operator's lines for `looplab inspect`; [] for a run with no upstream lane. `cursor` is the
     caller's folded `RunState.lane_ops_done` when it holds one (the queue's WAITING count is that
     fold's answer, `upstream_serve.py::live_queue`); derived from the log otherwise."""
-    from looplab.engine.upstream_serve import upstream_live_view
+    from looplab.engine.upstream_serve import REFUSED_PREFIX, upstream_live_view
     view = upstream_live_view(run_dir, events, now=now, cursor=cursor)
     if view is None:
         return []
@@ -141,9 +141,12 @@ def upstream_operator_lines(run_dir, events, *, now: Optional[float] = None,
     queue = view.get("queue") or {}
     if queue.get("total"):
         out.append(f"  queue: {queue['pending']} waiting of {queue['total']}")
-    cap = view.get("author_usd_cap") or 0.0
+    # A cap is what the engine ARMED with (its `lane_armed` row): None on a row written before the
+    # caps were recorded is "unknown", never "no cap" — 0 is the operator's own "off".
+    cap = view.get("author_usd_cap")
     out.append(f"  author spend: ${view['author_spent_usd']:.4f}"
-               + (f" of ${cap:g} cap" if cap else " (no money cap)")
+               + (" (cap unknown: armed before caps were recorded)" if cap is None
+                  else f" of ${cap:g} cap" if cap else " (no money cap)")
                + f"; drafts recorded: {view['authored_total']}")
     # Counted over the WHOLE log, not the view's last `LIVE_AUTHORED_ROWS` rows: it sits beside the
     # all-time total on the line above, and the two must add up.
@@ -154,14 +157,18 @@ def upstream_operator_lines(run_dir, events, *, now: Optional[float] = None,
             outcomes[key] = outcomes.get(key, 0) + 1
     if outcomes:
         out.append("  author outcomes: " + ", ".join(f"{k} {v}" for k, v in sorted(outcomes.items())))
-    per_hour = view.get("advances_per_hour") or 0
-    out.append(f"  automatic advances in the last hour: {view.get('advances_last_hour', 0)}"
-               + (f" of {per_hour}/h cap" if per_hour else " (no hourly cap)"))
+    per_hour = view.get("advances_per_hour")
+    out.append(f"  automatic advances in the last hour: {view.get('advances_last_hour') or 0}"
+               + (" (hourly cap unknown)" if per_hour is None
+                  else f" of {per_hour}/h cap" if per_hour else " (no hourly cap)"))
     held = view["held"]
     if not held:
         out.append("  held steps: none")
     for row in held:
-        state = "waiting" if row.get("waiting") else "released"
+        # A step the lane refused for good is neither waiting nor released: "released" beside a
+        # `refused:` reason was the contradiction the panel had too (review 2026-10-09).
+        state = ("refused" if str(row.get("reason") or "").startswith(REFUSED_PREFIX)
+                 else "waiting" if row.get("waiting") else "released")
         out.append(f"  held: {row['op']} {row.get('proposal_id') or ''} {row['reason']} "
                    f"(seq {row['seq']}, {state})".replace("  (", " ("))
     return out

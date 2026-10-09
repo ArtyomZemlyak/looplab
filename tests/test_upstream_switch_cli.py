@@ -194,3 +194,23 @@ def test_inspect_prints_the_queue_and_the_author_outcomes(tmp_path):
     shown = CliRunner().invoke(app, ["inspect", str(lane.rd)])
     assert shown.exit_code == 0, shown.output
     assert "queue: 2 waiting of 3" in shown.output and "author outcomes: declined 2" in shown.output
+
+
+def test_inspect_reads_an_unrecorded_cap_as_unknown_and_a_refused_hold_as_refused(monkeypatch):
+    """Review 2026-10-09: the caps now come from the ARMED row, so a row written before they were
+    recorded carries None — "unknown", not "no cap"; and a step the lane refused for good printed
+    as "released", the contradiction the panel had too."""
+    from looplab.engine import upstream_serve, upstream_switch
+    view = {"mode": "auto", "reason": "", "configured": True, "auto_paused": False,
+            "switch": None, "queue": {}, "author_usd_cap": None,
+            "author_spent_usd": 0.0, "authored_total": 0, "advances_per_hour": None,
+            "advances_last_hour": 0,
+            "held": [{"op": "advance", "proposal_id": "p1", "reason": "refused: upstream_x",
+                      "seq": 7, "waiting": False},
+                     {"op": "advance", "proposal_id": "p2", "reason": "rate_cap", "seq": 8,
+                      "waiting": False}]}
+    monkeypatch.setattr(upstream_serve, "upstream_live_view", lambda *a, **k: dict(view))
+    lines = "\n".join(upstream_switch.upstream_operator_lines("unused", []))
+    assert "cap unknown" in lines and "no money cap" not in lines
+    assert "hourly cap unknown" in lines and "no hourly cap" not in lines
+    assert "(seq 7, refused)" in lines and "(seq 8, released)" in lines
