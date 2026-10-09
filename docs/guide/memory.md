@@ -10,6 +10,11 @@ Both stores are **on by default** (a user asked for it): `~/.looplab/memory` (cr
 `~/.looplab/knowledge` (the knowledge base). Relocate with `LOOPLAB_MEMORY_DIR` /
 `LOOPLAB_KNOWLEDGE_DIR`, or set either to `""` to disable. See [Configuration](configuration.md).
 
+**Start here:** nothing needs setting up — memory is on by default and fills itself as runs finish.
+To find what you are looking at, read [Which surface am I looking at?](#which-surface-am-i-looking-at);
+to see what each kind is for, [The types](#the-types-what-each-is-for). The rest is the reference for
+how memory is written, read, cited and deleted.
+
 ## Which surface am I looking at?
 
 There are **three** UI surfaces over durable knowledge, and the thing that separates them is *who

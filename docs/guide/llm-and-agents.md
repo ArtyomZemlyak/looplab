@@ -9,6 +9,11 @@ optimizer, a live LLM over any OpenAI-compatible endpoint, or — for the Develo
 coding agent. Swapping a backend is a config change; the engine, sandbox, policy, and event log are
 unchanged.
 
+**Start here:** to connect a model for Assistant, read [Connect Assistant in the UI](#connect-assistant-in-the-ui);
+from a terminal, [Configure from the CLI](#configure-from-the-cli). If a run is refused before it
+starts, [Endpoint preflight](#endpoint-preflight-before-a-run-starts) names the cause. Everything
+after that is optional tuning.
+
 ## Backends at a glance
 
 | | Offline | Live LLM | External agent |

@@ -1,5 +1,9 @@
 # Web UI
 
+**Start here:** [Start in Assistant](#start-in-assistant) is the first-run path, and
+[Read an experiment result](#read-an-experiment-result) explains the Report. The rest of this page is
+the reference for every view, menu and recovery state.
+
 ## Start in Assistant
 
 Install and launch the UI using the [source-install steps](installation.md#source-install-for-the-web-ui).

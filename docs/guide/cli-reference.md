@@ -3,6 +3,11 @@
 Every command is available as `looplab <command>` (after `pip install -e .`) or, equivalently,
 `python -m looplab.cli <command>`.
 
+**Start here:** most work needs seven commands — [`init`](#init), [`run`](#run), [`ui`](#ui),
+[`inspect`](#inspect), [`resume`](#resume), [`stop`](#stop) and [`smoke`](#smoke). `looplab --help`
+lists them first; the rest of this page covers every command, including the maintainers' research
+instruments.
+
 ```text
 looplab init            Scaffold a documented looplab.yaml config template
 looplab run             Start (or continue) a run from a config/task file or --goal/--kind

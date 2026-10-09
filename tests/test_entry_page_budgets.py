@@ -77,3 +77,20 @@ def test_every_stated_node_requirement_is_the_ui_packages_own_range():
         if re.search(r"\bNode\b[^\n]{0,40}\b20\.19", text):
             assert "22.13" in text and "24" in text, f"{page.name}: states only part of the Node range"
 
+
+def test_every_large_guide_page_opens_with_where_to_start():
+    """doc 74 EB-11: the reference pages stay references, but a reader landing on one is told which
+    one or two sections they need. Every guide page over 10,000 words carries a "Start here" lead
+    (or the tasks/concepts/configuration variants) near its top, and it links into the page."""
+    leads = ("**Start here:**", "**New here?**", "**Which kind do I need?**",
+             "## Start here: the settings most runs touch")
+    for page in sorted((ROOT / "docs" / "guide").glob("*.md")):
+        text = page.read_text(encoding="utf-8")
+        if len(text.split()) <= 10_000:
+            continue
+        head = "\n".join(text.splitlines()[:40])
+        lead = next((marker for marker in leads if marker in head), None)
+        assert lead, f"{page.name}: no where-to-start lead in its first 40 lines"
+        block = head[head.index(lead) + len(lead):].split("\n## ", 1)[0]   # the lead up to the next section
+        assert "](#" in block or "`" in block, f"{page.name}: the lead names no section or setting"
+

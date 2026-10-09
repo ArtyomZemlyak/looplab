@@ -171,8 +171,18 @@ export const DEFAULT_BUDGETS = Object.freeze({
     // 618 KiB leaves 246 B above the measured total; old target was 617.5 KiB.
     // Doc 72 §20.16: dense metric plots + exact data paging, separated from review charts.
     // Measured total 633,746 B; 619.125 KiB leaves 238 B. Route ceilings stay fixed.
-    js: { gzip: 619.125 * KIB },
-    css: { gzip: 58.25 * KIB },
+    // 2026-10-09 doc 74 (entry barrier), and a correction. CI on master (0fa98f4, run 2212) failed
+    // this line at 669,301 B: the `ui` job was the only red one. The recorded baseline above did not
+    // reproduce — the commit that set 619.125 KiB (425bbe7) builds to 652,910 B with its own lockfile,
+    // so ~19 KiB of the "overrun" was already in the tree when the number was written. Growth since
+    // that commit, by manifest chunk: lazy ResearchMemoCard +3,648 B, InjectNodePanel +3,486 B,
+    // questionLattice +2,587 B, report-trust-polish +2,174 B, ConceptEffect +1,925 B, AssistantChat
+    // +1,740 B; shared run-support/Inspector/RunView/Dag/Dock +1.9 KiB. Doc 74 adds +1.3 KiB: the
+    // offline-demo launch card on the empty list, the fresh-launch wait in RunView, the compact
+    // portfolio, and the composer's language picker now loading lazily from the header only.
+    // Measured 670,636 B JS / 59,794 B CSS; every forbidden reachability proof and cycle check holds.
+    js: { gzip: 655.5 * KIB },
+    css: { gzip: 58.5 * KIB },
   },
   individual: {
     js: { raw: 450 * KIB, gzip: 110 * KIB },
@@ -258,7 +268,10 @@ export const DEFAULT_BUDGETS = Object.freeze({
       // 2026-10-02 doc 72: 405,898 B JS, recorded base details + comparable-score
       // arrows; full UpstreamPanel remains behind the panel hub. CSS stays bounded.
       // 2026-10-02 same Assistant labels: measured 406,596 B; 444 B headroom.
-      limits: { js: { gzip: 397.5 * KIB }, css: { gzip: 46 * KIB } },
+      // 2026-10-09: master measured 408,436 B in CI (run 2212, +1,396 B over); doc 74's fresh-launch
+      // wait and Report headline order land in RunView/Report, the dropped composer picker leaves
+      // OwnerChrome: 408,398 B. 399.25 KiB leaves 434 B; lazy boundaries unchanged.
+      limits: { js: { gzip: 399.25 * KIB }, css: { gzip: 46 * KIB } },
     },
     {
       name: 'valid review DAG route',
@@ -276,7 +289,10 @@ export const DEFAULT_BUDGETS = Object.freeze({
       // 2026-10-03 doc 72 §20.5: 267,468 -> 268,210 B (+742 B) for shared selection
       // eligibility and explicit chart measurement/coverage copy. Total grows only 325 B;
       // CSS falls 20 B. 262.25 KiB leaves 334 B; owner and cycle exclusions are unchanged.
-      limits: { js: { gzip: 262.25 * KIB }, css: { gzip: 41 * KIB } },
+      // 2026-10-09: master measured 269,911 B in CI (run 2212, +1,367 B over: shared selection and
+      // comparison readers in RunView/Dag); doc 74's fresh-launch wait adds the rest: 270,470 B.
+      // 264.5 KiB leaves 378 B; owner exclusions and cycle checks unchanged.
+      limits: { js: { gzip: 264.5 * KIB }, css: { gzip: 41 * KIB } },
     },
     {
       name: 'owner Concepts route',

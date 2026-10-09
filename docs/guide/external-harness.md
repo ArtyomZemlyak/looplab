@@ -15,6 +15,11 @@ LoopLab still owns admission, lineage, protected files, execution, measured resu
 budgets, pause/finalize, event history and replay. The agent must stay connected (or
 reconnect later) to choose further work: an idle external run waits for commands.
 
+**Start here:** [First external run](#first-external-run) is the whole getting-started path; the
+first section of [`AGENTS.md`](https://github.com/ArtyomZemlyak/looplab/blob/master/AGENTS.md) is the
+same sequence in five steps for the agent itself. The rest of this page is the contract and recovery
+reference.
+
 ## First external run
 
 Use a **separate run root and UI server for external runs**. A harness token can control
