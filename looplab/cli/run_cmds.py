@@ -162,6 +162,10 @@ def _run_engine_guarded(eng: Engine, *, mlflow_uri: str = ""):
 INTERRUPT_PAUSE_REASON = "operator interrupt (Ctrl-C in `looplab run`/`looplab resume`)"
 
 
+# How long a Ctrl-C keeps retrying its pause against rows an abandoned build thread is still appending.
+_INTERRUPT_PAUSE_DEADLINE_S = 10.0
+
+
 def _record_interrupt_pause(eng) -> bool:
     """Record an operator's Ctrl-C as the durable pause `looplab stop` writes. True when appended.
 
@@ -183,8 +187,15 @@ def _record_interrupt_pause(eng) -> bool:
     store = getattr(eng, "store", None)
     if store is None:
         return False
+    # BOUNDED BY TIME, not by a count of tries (master CI run 2213, `pytest (4)`): a build thread the
+    # cancelled loop abandoned may still be appending its own node's rows, and on a loaded runner it
+    # won all four of the old fixed CAS attempts — the interrupt then left no pause at all, which is
+    # the crash-shaped log this function exists to prevent. Each retry still re-reads and re-decides
+    # on the new tail, so the CAS guarantee (never two rows, never a pause over a halted run) holds.
+    deadline = time.monotonic() + _INTERRUPT_PAUSE_DEADLINE_S
+    attempt = 0
     try:
-        for _attempt in range(4):
+        while True:
             events = store.read_all()
             if not events or fold(events).halted:
                 return False
@@ -192,7 +203,11 @@ def _record_interrupt_pause(eng) -> bool:
                 store.append(EV_PAUSE, {"reason": INTERRUPT_PAUSE_REASON},
                              expected_last_seq=events[-1].seq)
             except EventStoreConcurrencyError:
-                continue        # a row landed since the read: re-decide on the new tail
+                attempt += 1    # a row landed since the read: re-decide on the new tail
+                if time.monotonic() >= deadline:
+                    return False
+                time.sleep(min(0.2, 0.005 * attempt))
+                continue
             typer.echo(f"interrupted: {getattr(eng, 'run_dir', 'the run')} is paused (not finalized) "
                        "— `looplab resume` to continue, `looplab finalize` to wrap it up", err=True)
             return True

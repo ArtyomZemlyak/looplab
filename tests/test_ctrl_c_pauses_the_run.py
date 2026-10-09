@@ -89,3 +89,29 @@ def test_a_failing_append_never_masks_the_interrupt(tmp_path, monkeypatch):
     monkeypatch.setattr(eng.store, "append", append, raising=False)
     events = _interrupt(eng)
     assert not any(e.type == "pause" for e in events)
+
+
+def test_the_pause_outlasts_more_lost_races_than_the_old_four_tries(tmp_path, monkeypatch):
+    """Master CI run 2213 (`pytest (4)`): on a loaded runner the abandoned build thread won all four
+    of the old fixed CAS attempts and the Ctrl-C left NO pause. Here the store loses the race six
+    times in a row, deterministically: the pause still lands, exactly once."""
+    from looplab.cli import run_cmds
+    from looplab.events.eventstore import EventStoreConcurrencyError
+
+    eng = make_engine(tmp_path / "run", max_nodes=2)
+    eng.store.append("note", {"text": "a run that has started"})
+    real_append = eng.store.append
+    lost = {"n": 0}
+
+    def racing_append(type_, data, **kwargs):
+        if type_ == "pause" and lost["n"] < 6:
+            lost["n"] += 1
+            real_append("note", {"text": f"abandoned build row {lost['n']}"})
+            raise EventStoreConcurrencyError(eng.store.path, kwargs.get("expected_last_seq", -1), -1)
+        return real_append(type_, data, **kwargs)
+
+    monkeypatch.setattr(eng.store, "append", racing_append)
+    monkeypatch.setattr(run_cmds.time, "sleep", lambda _s: None)
+    assert _record_interrupt_pause(eng) is True
+    pauses = [e.data for e in eng.store.read_all() if e.type == "pause"]
+    assert lost["n"] == 6 and pauses == [{"reason": INTERRUPT_PAUSE_REASON}]

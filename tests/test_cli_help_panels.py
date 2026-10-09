@@ -16,6 +16,13 @@ from looplab.cli import app
 from looplab.cli.help_panels import HELP_PANELS, command_name
 
 _DOC_CITATION = re.compile(r"\bdoc \d+|§|\bPART [IVX]+\b")
+# Rich FORCES colour when `GITHUB_ACTIONS` is set, so CI's `--help` carries ANSI escapes that a
+# terminal-free local run does not (master run 2213: the panel regex found nothing). Read the text.
+_ANSI = re.compile(r"\x1b\[[0-9;]*m")
+
+
+def _help(*args):
+    return _ANSI.sub("", CliRunner().invoke(app, [*args, "--help"], terminal_width=120).output)
 
 
 def _rows():
@@ -40,7 +47,7 @@ def test_summaries_are_one_short_user_facing_line():
 
 
 def test_help_opens_with_the_start_here_panel_in_table_order():
-    out = CliRunner().invoke(app, ["--help"], terminal_width=120).output
+    out = _help()
     first_panel, first_rows = HELP_PANELS[0]
     assert first_panel == "Start here"
     panels = re.findall(r"╭─ (.+?) ─", out)
@@ -53,5 +60,5 @@ def test_help_opens_with_the_start_here_panel_in_table_order():
 
 def test_a_command_still_prints_its_full_docstring():
     """Only the LIST summary comes from the table; `<command> --help` keeps the full contract."""
-    out = CliRunner().invoke(app, ["stop", "--help"], terminal_width=120).output
+    out = _help("stop")
     assert "WITHOUT finalizing" in out
