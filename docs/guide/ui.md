@@ -12,36 +12,35 @@ opens an ordinary launch card for the demo in `examples/demo.yaml`: **Validate**
 and six experiments on a toy objective finish in seconds with no model. With fewer than five runs
 and nothing organised yet, the run list stays plain; **Show filters, views and projects**
 brings the portfolio tools back, and they show on their own once you have five runs, a project, a
-saved view or a filter. Open **Runs**; Assistant is already visible on a desktop screen. Select **Start a new run**,
-describe your goal and where the code or data live, then review its launch card.
-**Validate** shows the effective task and settings; **Start run** begins the experiment.
-With **Русский**, the launch card uses **Проверить — бесплатно**, **Начать запуск**,
-**Изменить параметры плана** and **Проверить запуск**. Its labels, limit explanations
-and cost warning follow the selected language. Authored task JSON, paths, metric names
-and exact server diagnostics retain their original text.
+saved view or a filter.
 
-The launch card shows a **Next:** instruction in the Assistant language (**Дальше:** in Russian).
-Before validation, review the goal, metric direction and code/data paths. After validation, review
-the effective limits and cost warning before **Start run**. Editing the plan requires validation
-again; changing language keeps the checked plan. **Detailed status / Подробный статус** contains the
-precise technical message. A lost startup reply leads to **Check startup**, which reads the existing
-launch identity; it does not send a second Start. Confirmed startup means the run can be opened, not
-that its experiments have finished. The run opens with its current status, and **Report** shows the
-measured result and caveats. For up to a minute after this tab started it, a run that is not readable
-yet shows **Starting the run…** and opens by itself; any other missing run reads **Run not found**. For the attached run, Assistant chat also shows free short briefs after
-each completed evaluation and after finalization. They include the score, confirmation/constraints
-and links to the exact experiment.
+1. Open **Runs**; Assistant is already visible on a desktop screen.
+2. Select **Start a new run**, describe your goal and where the code or data live.
+3. Review its launch card: **Validate** shows the effective task and settings, **Start run** begins
+   the experiment ([what the card checks](#launch-card-limits-cost-and-startup)).
+4. The run opens with its current status, and **Report** shows the measured result and caveats.
+   For the attached run, Assistant chat posts free short briefs after each completed evaluation and
+   after finalization.
 
-For a complete first-run example, see the [Assistant quickstart](quickstart.md#assistant-in-the-web-ui).
+The chat needs a configured model: see [Check the model](#check-the-model). For a complete
+first-run example, see the [Assistant quickstart](quickstart.md#assistant-in-the-web-ui); for the
+engine without a model, the [CLI walkthrough](cli-walkthrough.md).
 
-The chat needs a configured model. Open **LoopLab → Settings → Essential → Model** to check the saved
+For a run controlled by Codex or Claude Code, the first experiment can wait for that
+agent's decision. The empty Lineage view links to **Agent cycle**, which lists current
+admission and finish requirements. A live UI or engine alone does not show whether an
+external agent is connected; see the [external harness guide](external-harness.md).
+
+### Check the model
+
+*Moved here from the opening of this section (doc 74 EB-11: the opening keeps the steps).*
+
+Open **LoopLab → Settings → Essential → Model** to check the saved
 model and endpoint. **Test active LLM** makes one provider request and may be billed. The saved
 connection shows one line about the API key (most local endpoints need none); **Key storage details**
 opens the key store's full state, and opens by itself when the stored key needs attention.
 Essential also shows experiment resources and time/model budgets. **All** and search
 keep the complete settings catalogue available; **Technical details** explains each field fully.
-An offline engine demonstration is available through the
-[CLI walkthrough](cli-walkthrough.md).
 
 Before the first run, **Check connection…** in Assistant opens a model check beside the
 composer. Your draft stays in place. Opening the block only reads saved settings;
@@ -51,11 +50,6 @@ mid-request, reopening offers **Check previous result**, which looks up the same
 without starting a new provider call. A terminal unknown outcome keeps a visible warning;
 a new check requires the existing explicit acknowledgment of possible repeated billing.
 Connection errors appear in the block; **Edit model settings** opens setup.
-
-For a run controlled by Codex or Claude Code, the first experiment can wait for that
-agent's decision. The empty Lineage view links to **Agent cycle**, which lists current
-admission and finish requirements. A live UI or engine alone does not show whether an
-external agent is connected; see the [external harness guide](external-harness.md).
 
 ### Read an experiment result
 
@@ -97,6 +91,17 @@ Assistant card's numeric summary and explain why; ongoing finalization is not sh
 ### Launch card: limits, cost and startup
 
 *Moved here from the Quickstart (doc 74 EB-11), which now keeps only the five steps.*
+
+The launch card shows a **Next:** instruction in the Assistant language (**Дальше:** in Russian).
+Before validation, review the goal, metric direction and code/data paths. After validation, review
+the effective limits and cost warning before **Start run**. Editing the plan requires validation
+again; changing language keeps the checked plan. **Detailed status / Подробный статус** contains the
+precise technical message. A lost startup reply leads to **Check startup**, which reads the existing
+launch identity; it does not send a second Start. Confirmed startup means the run can be opened, not
+that its experiments have finished. For up to a minute after this tab started it, a run that is not
+readable yet shows **Starting the run…** and opens by itself; any other missing run reads
+**Run not found**. The chat briefs include the score, confirmation/constraints and links to the
+exact experiment.
 
 **Run LLM budget (USD)** can be edited under **Edit proposal details**. The review
 shows its effective amount only after validation: the smaller positive value of
@@ -183,6 +188,11 @@ current node count as one flagged node. Enabled detector settings alone do
 not prove that every evaluation was inspected.
 
 ### Language
+
+With **Русский**, the launch card uses **Проверить — бесплатно**, **Начать запуск**,
+**Изменить параметры плана** and **Проверить запуск**. Its labels, limit explanations
+and cost warning follow the selected language. Authored task JSON, paths, metric names
+and exact server diagnostics retain their original text.
 
 **Language / Язык** in the header offers **Auto**, **English** and **Русский** on every screen,
 even before the first run. It sets the language of the entire interface and all newly generated human

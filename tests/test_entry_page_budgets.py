@@ -107,3 +107,15 @@ def test_installation_names_the_read_fence_warning_a_windows_or_root_run_prints(
     target = ROOT / "docs/guide/installation.md"         # a file with write bits: always reduced
     message = read_fence.harden_guarantee(target)
     assert message and message.startswith(quoted.group(1)), message
+
+
+def test_start_in_assistant_keeps_the_steps_and_names_no_code():
+    """doc 74 EB-11: the UI guide's "Start in Assistant" opening is the user's path — at most 400
+    words of its own (sub-sections hold the detail) and no developer identifiers (`uiText`,
+    `ru.json`, `npm run …`), which once sat between the user's steps."""
+    lines = (ROOT / "docs/guide/ui.md").read_text(encoding="utf-8").splitlines()
+    start = lines.index("## Start in Assistant")
+    end = next(i for i in range(start + 1, len(lines)) if re.match(r"^#{2,3} ", lines[i]))
+    own = "\n".join(lines[start + 1:end])
+    assert len(own.split()) <= 400, len(own.split())
+    assert not re.search(r"uiText|ru\.json|npm run|\.jsx?\b", own), "developer detail in the user's steps"
