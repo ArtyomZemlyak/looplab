@@ -1,5 +1,8 @@
 # 74. Инспекция порога входа: README, установка, CLI, документация, UI
 
+*EN summary: an inspection of the first ten minutes (2026-10-09) — README, install, CLI, docs, UI — with 28
+findings and acceptance checks in six packages; its audit and corrected statuses are in doc 75 §12.*
+
 **Продолжение:** [doc 75](75-functionality-usability-review-2026-10-10.md) — следующий план; аудит
 итогов этого документа и исправленные статусы — doc 75 §12 (2026-10-10).
 

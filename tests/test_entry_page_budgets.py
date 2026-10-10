@@ -123,3 +123,56 @@ def test_start_in_assistant_keeps_the_steps_and_names_no_code():
     own = "\n".join(lines[start + 1:end])
     assert len(own.split()) <= 400, len(own.split())
     assert not re.search(r"uiText|ru\.json|npm run|\.jsx?\b", own), "developer detail in the user's steps"
+
+
+# doc 75 UX-21: the large hand-written reference pages stop growing. Doc 74 gave each a "Start here"
+# opening and refused the Use/Reference rewrite; their size still went 246,207 -> 246,629 words in a
+# day. A CEILING per page, at its size when it was set, measured on PROSE: a table row that opens
+# with a backticked identifier (`| \`field\` | …`) is excluded, because every new `Settings` field owes
+# `configuration.md` exactly such a row in the same change (CLAUDE.md) and a ratchet that refused it
+# would contradict that rule. Shrink freely; lower the number when you do. Generated pages
+# (`api-reference.md`, `event-reference.md`) are written by their generators and are not held here.
+PROSE_CEILINGS = {
+    "cli-reference.md": 28776,
+    "concepts.md": 32764,
+    "configuration.md": 10447,
+    "external-harness.md": 17985,
+    "llm-and-agents.md": 14472,
+    "memory.md": 12532,
+    "tasks.md": 22381,
+    "ui.md": 23007,
+}
+_GENERATED = {"api-reference.md", "event-reference.md"}
+
+
+def _prose_words(path: Path) -> int:
+    return sum(len(line.split()) for line in path.read_text(encoding="utf-8").splitlines()
+               if not line.startswith("| `"))
+
+
+@pytest.mark.parametrize("name, ceiling", sorted(PROSE_CEILINGS.items()))
+def test_a_large_guide_page_does_not_grow(name, ceiling):
+    words = _prose_words(ROOT / "docs" / "guide" / name)
+    assert words <= ceiling, (
+        f"docs/guide/{name} has {words} words of prose, over its ceiling {ceiling}: say it in fewer "
+        "words, or move the detail to the module docstring or a numbered doc and link it")
+
+
+def test_every_large_hand_written_page_has_a_ceiling():
+    large = {path.name for path in (ROOT / "docs" / "guide").glob("*.md")
+             if len(path.read_text(encoding="utf-8").split()) > 10_000 and path.name not in _GENERATED}
+    assert large - set(PROSE_CEILINGS) == set()
+
+
+def test_the_walkthrough_says_only_what_its_runs_show():
+    """doc 75 UX-06, UX-22, UX-29: the walkthrough promised the regression run would find "the true
+    degree is 2" (it settled on 3), offered `--crash-after` as a user step without saying it is a
+    hidden test flag, listed a run directory without the `AGENTS.md` and lock files the reader sees,
+    and taught `inspect --config`'s pinned-field subtlety on the second step; the README called a
+    finished run's `stop` resumable."""
+    walk = (ROOT / "docs/guide/cli-walkthrough.md").read_text(encoding="utf-8")
+    assert "true degree" not in walk
+    assert "--crash-after is a hidden test flag" in walk
+    assert "AGENTS.md" in walk and "lock" in walk
+    assert "run_started`-pinned" not in walk
+    assert "resumable unless already finished" in (ROOT / "README.md").read_text(encoding="utf-8")

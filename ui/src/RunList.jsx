@@ -2978,7 +2978,7 @@ export default function RunList({ onOpen, onGlobalNavigate,
                   <div className="pill warn" role="status" key={slug}
                     title={uiText(bestMetricCaveatNotice({ best_metric_caveats: [slug] }))}>
                     {uiText(bestMetricCaveatLabel(slug))}</div>))}
-                <div className="muted">{uiPlural(r.nodes, '{0} nodes', '{0} nodes')}{' · '}{r.direction}</div>
+                <div className="muted">{uiPlural(r.nodes, '{0} experiment', '{0} experiments')}{' · '}{r.direction}</div>
                 {/* A NUMBER guard, not a truth test: `mtime` is epoch seconds, so the falsy value is
                     a real timestamp (1970-01-01T00:00:00Z) and `0 && <div/>` renders a bare `0` into
                     the run card instead of rendering nothing. Unreachable from a healthy run today,

@@ -1,6 +1,9 @@
 # 75. Ревью функциональности, удобства и понятности: вторая десятиминутка (2026-10-10)
 
-**Статус:** план исправлений, пересмотренный критикой (§12); статус пунктов — только в §7. **База:** `38b7a46` (ветка
+*EN summary: a usability review of the minutes after the first ten (2026-10-10) — refusal messages, verbs on a
+finished run, command help, the first run's screen, vocabulary, docs; 35 findings, revised by four critics (§12).*
+
+**Статус:** план, пересмотренный критикой (§12), и реализованный 2026-10-10; статус пунктов — только в §7. **База:** `38b7a46` (ветка
 `claude/determined-dirac-22f2s4`), чистый контейнер Ubuntu 24.04, Python 3.13.16, Node 22.22, без GPU,
 без модели. **Предшественники:** [doc 71](71-onboarding-and-entry-barriers-2026-09-30.md) — аудит
 порога входа, [doc 74](74-entry-barrier-inspection-2026-10-09.md) — инспекция первых десяти минут и
@@ -689,12 +692,12 @@ agent: connect `looplab harness-mcp` to this run (run dir runs/my-run); see `loo
 
 | Пакет | Пункты | Поверхности | Статус |
 |---|---|---|---|
-| 1. Сообщения CLI | UX-01, UX-02, UX-05, UX-07, UX-08, UX-24, UX-25, UX-26, UX-27, UX-33, UX-35 | `looplab/cli/*`, `core/errors.py`, `events/stop_account.py`, `adapters/dataset_task.py` | план |
-| 2. UI первого run | UX-13, UX-14, UX-15, UX-16, UX-17, UX-28, UX-30, UX-31 | `core/comparison.py`, `engine/comparability.py`, `ui/src/report.js`, `resultNoticeModel.js`, `RunView.jsx`, `Report.jsx`, `Settings.jsx`, `RunList.jsx` | план |
-| 3. Справка команд | UX-10, UX-11, UX-12, UX-34 | докстринги команд, `cli/help_panels.py`, `core/appconfig.py`, `tests/test_cli_help_panels.py` | план |
-| 4. Пути и примеры | UX-04, UX-06, UX-22, UX-23, UX-29, UX-32 | `adapters/*_task.py`, снимок задачи, `tasks.md`, `cli-walkthrough.md`, `llm-and-agents.md`, `examples/` | план |
-| 5. Словарь | UX-18, UX-19 | вывод `run`/`inspect`, заголовок Report, список run, `docs/guide/glossary.md` | план |
-| 6. Документация как система | UX-20, UX-21, UX-09, UX-03 | `00-INDEX.md`, `tests/test_entry_page_budgets.py`, `replay --summary`, предупреждение фенса | план |
+| 1. Сообщения CLI | UX-01, UX-02, UX-05, UX-07, UX-08, UX-24, UX-25, UX-26, UX-27, UX-33, UX-35 | `looplab/cli/*`, `core/errors.py`, `events/stop_account.py`, `adapters/dataset_task.py` | сделано 2026-10-10: `tests/test_cli_refusal_classes.py`, `test_cli_finished_run.py`, `test_cli_first_minutes.py` |
+| 2. UI первого run | UX-13, UX-14, UX-15, UX-16, UX-17, UX-28, UX-30, UX-31 | `core/comparison.py`, `engine/comparability.py`, `ui/src/report.js`, `resultNoticeModel.js`, `RunView.jsx`, `Report.jsx`, `Settings.jsx`, `RunList.jsx` | сделано 2026-10-10: `tests/test_deterministic_contract.py`, `ui/test/deterministicObjective.test.js`, `whyStripPlain.test.js`, `settingsFreshDefaults.test.js` |
+| 3. Справка команд | UX-10, UX-11, UX-12, UX-34 | докстринги команд, `cli/help_panels.py`, `core/appconfig.py`, `tests/test_cli_help_panels.py` | сделано 2026-10-10: `tests/test_cli_help_panels.py`; 37 команд сопровождающего — shrink-only `tests/data/help_citation_backlog.txt` |
+| 4. Пути и примеры | UX-04, UX-06, UX-22, UX-23, UX-29, UX-32 | `adapters/*_task.py`, снимок задачи, `tasks.md`, `cli-walkthrough.md`, `llm-and-agents.md`, `examples/` | сделано 2026-10-10: `tests/test_task_paths.py`, `test_api_key_recipes.py`, `test_entry_page_budgets.py` |
+| 5. Словарь | UX-18, UX-19 | вывод `run`/`inspect`, заголовок Report, список run, `docs/guide/glossary.md` | сделано 2026-10-10: `docs/guide/glossary.md`, `tests/test_glossary.py` |
+| 6. Документация как система | UX-20, UX-21, UX-09, UX-03 | `00-INDEX.md`, `tests/test_entry_page_budgets.py`, `replay --summary`, предупреждение фенса | сделано 2026-10-10: `tests/test_index_language_tags.py`, потолки прозы в `test_entry_page_budgets.py` |
 
 Порядок (§12): 1 (сначала UX-01/UX-02 — один тип отказа, затем функция запаса для UX-05/UX-07) →
 4 (UX-04 зависит от формата отказа UX-02) → 2 → 3 → 5 (глоссарий раньше переименования) → 6.

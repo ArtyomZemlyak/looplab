@@ -1,5 +1,8 @@
 # 72 — Из ноды во фреймворк: upstream возможностей, найденных в прогоне (2026-10-01)
 
+*EN summary: upstreaming capabilities found inside a run into the task's framework (2026-10-01) — a Maintainer
+role, a gated equivalence/regression check and a logged `base_advanced`; implemented opt-in (its §18).*
+
 > **Статус: WP1–WP3 и 72.1–72.7 реализованы в opt-in scope §18; review — §17.** Ни один
 > дефолт не переключён. Исторические свидетельства ниже:
 > каждое исходное утверждение о коде сверено с `master` @ `65551da0` (2026-10-01) и цитируется как

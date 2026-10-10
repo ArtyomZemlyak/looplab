@@ -1,5 +1,8 @@
 # 71. Снижение порога входа в LoopLab
 
+*EN summary: an audit of LoopLab's entry barrier (2026-09-30) — the onboarding path, what blocked a first run, and a
+plan in packages; partly implemented (its §13). Continued by docs 74 and 75.*
+
 **Дата:** 2026-09-30. **База:** `master` / `origin/master`, `1103ba87b22cd3c02dcae80db87473d0c8ae8374`.
 **Статус:** аудит и план; первый пакет изменений реализован частично (см. §13).
 **Как читать (2026-10-09):** §1–§12 — аудит и план, §13 — итог первого пакета, §14–§69 —

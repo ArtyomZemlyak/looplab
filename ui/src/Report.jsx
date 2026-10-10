@@ -546,7 +546,7 @@ export default function ReportView({ state, runId, onOpenPanel, canOpenPanel, on
     <div className="report-view" aria-busy={refreshing || undefined}>
       <h2 id="report-section-summary" tabIndex={-1} className="report-title">{state.label || state.run_id || state.task_id}</h2>
       <div className="report-sub muted">{state.label && state.label !== state.run_id ? `${state.run_id} · ` : ''}{state.direction} · {uiText(state.phase || (state.finished ? 'finished' : 'running'))}{state.stop_reason ? ` (${state.stop_reason})` : ''}
-        {' · '}{uiPlural(nodeCount, '{0} nodes ({1} evaluated, {2} failed)', '{0} nodes ({1} evaluated, {2} failed)', [nodeCount, a.nEval, failed.length])}{(state.llm_cost && uiPlural(state.llm_cost.total_tokens, ' · {0} tokens · {1}', ' · {0} tokens · {1}', [fmtInt(state.llm_cost.total_tokens), fmtCost(state.llm_cost)]))}</div>
+        {' · '}{uiPlural(nodeCount, '{0} experiment ({1} evaluated, {2} failed)', '{0} experiments ({1} evaluated, {2} failed)', [nodeCount, a.nEval, failed.length])}{(state.llm_cost && uiPlural(state.llm_cost.total_tokens, ' · {0} tokens · {1}', ' · {0} tokens · {1}', [fmtInt(state.llm_cost.total_tokens), fmtCost(state.llm_cost)]))}</div>
 
       <VerdictBanner v={v} onOpenPanel={onOpenPanel} canOpenPanel={canOpenPanel} />
 

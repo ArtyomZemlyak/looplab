@@ -1,5 +1,8 @@
 # 73. Узлы без обязательной оценки и автоперенос кода в базу — анализ, критика, план (2026-10-07)
 
+*EN summary: nodes that need no evaluation (evaluation tracks, artifact nodes) and automatic upstream of code
+into the base (2026-10-07) — analysis, critique, plan; operator decisions in its §2.6.*
+
 Два запроса оператора от 2026-10-06, оба из прогонов `minionerec-*`:
 
 1. **Узел не обязан быть оценкой.** Ассистент или кто угодно должен в любой момент мочь

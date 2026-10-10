@@ -141,6 +141,7 @@ nav:
       - Installation: guide/installation.md
       - Quickstart: guide/quickstart.md
       - CLI walkthrough: guide/cli-walkthrough.md
+      - Glossary: guide/glossary.md
   - Guide:
       - Web UI: guide/ui.md
       - Tasks: guide/tasks.md

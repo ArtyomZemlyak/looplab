@@ -1121,6 +1121,20 @@ arrow and nothing to open, rather than a disabled control that would advertise w
 The mark opens the menu and does **not** also navigate. `Runs` (`#/`) is the first item in the menu,
 which is where the old "click the logo to go home" behaviour lives now; one click, one meaning.
 
+## Words on the run screen
+
+The [Glossary](glossary.md) has one line for every word below and on the Report.
+
+- **The view strip**: Lineage · Cards · Concepts · Report · Overview are places; **Energy**, after them,
+  is a visual-effects switch (Off / Subtle / Full animation of the lineage) and changes nothing about the run.
+- **Card lanes** are a card's work status: Proposed (open, not started) · Building · Coded (built,
+  waiting to run) · Held · Running · Evaluated · No result · Gated (trust or breeding gates exclude its
+  evidence) · Dropped. Each lane button's tooltip says the same.
+- **Card verdicts** are separate from the lane: **supported** (an experiment improved), **tested**
+  (evaluated, no improvement), **abandoned**. The verdict chip's tooltip says which and what it means.
+- **Base unknown** appears only on a run where some experiment recorded the code base it started from;
+  a task with no code base (the offline demo) shows nothing there.
+
 ## Which graph am I looking at?
 
 LoopLab has three graph surfaces and one separate experimental portfolio summary. They answer different

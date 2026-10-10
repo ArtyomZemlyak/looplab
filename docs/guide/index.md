@@ -17,6 +17,7 @@ decision records, roadmap), see [`../00-INDEX.md`](../00-INDEX.md).
 | **[Offline CLI walkthrough](cli-walkthrough.md)** | `looplab run examples/demo.yaml`: the engine working without a model |
 | **[Web UI](ui.md)** | Assistant, the run workspace, Report, and how results are compared |
 | **[JupyterHub onboarding](jupyterhub-onboarding.md)** | Setup inside a hub single-user server, then work through Assistant |
+| **[Glossary](glossary.md)** | One line for every word the Report, the UI and `inspect` use |
 
 ## Reference
 
