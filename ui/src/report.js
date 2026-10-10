@@ -319,7 +319,12 @@ export function trustCaveats(state, best) {
     .filter(n => isEvaluated(n) && n.feasible === false)
   if (infeasible.length)
     out.push({ kind: 'infeasible', severity: 'warn', text: uiPlural(infeasible.length, '{0} evaluated node(s) violated a constraint', '{0} evaluated node(s) violated a constraint'), panel: 'trust' })
-  if (best && !(Number.isFinite(best.confirmed_mean)
+  // A task that DECLARED one evaluation the score (doc 75 UX-13) has no repeat to miss: the demo's
+  // Report said "repeat checks are not needed" beside a caveat chip saying they were not established,
+  // and WITH CAVEATS rested on that chip alone. A recorded confirmation mean is still judged below.
+  const declaredDeterministic = best && !Number.isFinite(best.confirmed_mean)
+    && nodeRepeatChecksNotApplicable(best)
+  if (best && !declaredDeterministic && !(Number.isFinite(best.confirmed_mean)
       && Number.isSafeInteger(best.confirmed_seeds) && best.confirmed_seeds >= 2))
     out.push({ kind: 'single-seed', severity: 'warn', text: 'multiple successful repeat checks are not established', panel: 'trust' })
   // WHAT THE CHAMPION'S NUMBER IS, in the aggregator every run-level claim is built from.

@@ -28,8 +28,19 @@ test('the Report verdict of a declared-deterministic run asks for no repeat', ()
   assert.doesNotMatch(v.headline, /Detector coverage/, 'doc 75 UX-17: the trust label says that')
 })
 
+test('a declared-deterministic result carries no repeat-check caveat beside "not needed"', () => {
+  const v = verdict(run(true), analyze(run(true)))
+  assert.deepEqual(v.caveats.map(caveat => caveat.kind), [])
+  assert.equal(v.trust, 'unverified', 'not "with caveats" on the strength of a repeat it does not need')
+  const confirmed = run(true)
+  confirmed.nodes[1] = { ...confirmed.nodes[1], confirmed_mean: 8.5, confirmed_seeds: 1 }
+  assert.ok(verdict(confirmed, analyze(confirmed)).caveats.some(caveat => caveat.kind === 'single-seed'),
+    'a recorded confirmation mean is still judged on its repeats')
+})
+
 test('without the record the advice stands (an undeclared task, an old log)', () => {
   const v = verdict(run(false), analyze(run(false)))
+  assert.ok(v.caveats.some(caveat => caveat.kind === 'single-seed'))
   assert.equal(v.robustness, 'unconfirmed')
   assert.match(v.nextStep, /Repeat the selected experiment with multiple seeds/)
 })
