@@ -1978,7 +1978,9 @@ def stop(run_dir: Path = typer.Argument(..., help="Run directory to STOP (freeze
                 "flag records a plain stop.")
     # NOTHING TO STOP (doc 75 UX-05): a finished run used to get a `pause` appended to its finalized
     # log and the line "stopped … (frozen, not finalized)", while `inspect` said `finished=True`.
-    if not draining:
+    # Not under `--wait`: that asks whether the stop STANDS against what the server would still
+    # drive (an unacked inject reopens a finished run), and answers it below.
+    if not draining and not waiting:
         already = fold(store.read_all())
         # Finished only: a plain stop on a PAUSED run is not a no-op — it cancels a standing
         # `--drain-builds` (`tests/test_a_stop_can_drain_its_builds.py`).

@@ -449,10 +449,11 @@ def test_run_refuses_a_disagreeing_width_before_the_snapshot_and_reopen_writes(t
     """
     out = _pinned_run(tmp_path, "pinned", 2)
     before = _run_dir_bytes(out)
+    # A raised budget: a finished run with none left is not reopened at all (doc 75 UX-05).
     result = _runner.invoke(_app, [
         "run", "--no-genesis", "--kind", "quadratic", "--goal", "min (x-3)^2", "--direction", "min",
         "--backend", "toy", "--out", str(out),
-        "-s", "eval_parallel=3", "-s", "max_nodes=2", "-s", "n_seeds=2"])
+        "-s", "eval_parallel=3", "-s", "max_nodes=4", "-s", "n_seeds=2"])
     # Identified by what the operator sees, not by `result.exception`: `SettledWidthPinError` is an
     # `OperatorRefusal`, so the CLI boundary turns it into a message + `REFUSAL_EXIT_CODE` and the
     # escaping exception is now the `SystemExit`. The property under test is the byte-clean run dir.
@@ -474,7 +475,8 @@ def test_resume_refuses_a_disagreeing_width_before_lifting_the_run(tmp_path):
     before = (out / "events.jsonl").read_bytes()
 
     for _ in range(2):                       # the FIRST attempt must already be byte-clean
-        result = _runner.invoke(_app, ["resume", str(out)])
+        # `--max-nodes 4`: a finished run with no budget left is not lifted at all (doc 75 UX-05)
+        result = _runner.invoke(_app, ["resume", str(out), "--max-nodes", "4"])
         assert result.exit_code == REFUSAL_EXIT_CODE, result.output
         assert "run_started pinned 2" in result.output
         assert (out / "events.jsonl").read_bytes() == before
@@ -516,10 +518,11 @@ def test_the_width_preflight_runs_before_every_write_its_command_owns():
         return lambda node: (isinstance(node.func, ast.Attribute) and node.func.attr == "append"
                              and any(isinstance(a, ast.Name) and a.id == event for a in node.args))
 
-    # `run`'s side is read in `_open_and_drive`, the lifecycle `run` (and `looplab bench`) delegate
-    # to since review 2026-09-22 (SCJ-05): the preflight and the snapshot publish moved there together.
+    # `run`'s side is read in `_open_and_drive_in`, the body of the lifecycle `run` (and `looplab
+    # bench`) delegate to since review 2026-09-22 (SCJ-05) — split from its cleanup wrapper by doc 75
+    # UX-33: the preflight and the snapshot publish live there together.
     for command, write_name, write_predicate in (
-            ("_open_and_drive", "_publish_run_snapshots", named("_publish_run_snapshots")),
+            ("_open_and_drive_in", "_publish_run_snapshots", named("_publish_run_snapshots")),
             ("resume", "the EV_RESUME append", appends("EV_RESUME"))):
         guards = lines_of(command, named("_preflight_settled_widths"))
         writes = lines_of(command, write_predicate)
