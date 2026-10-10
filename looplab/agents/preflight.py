@@ -213,6 +213,14 @@ _REMEDIES: dict[str, str] = {
 }
 
 
+def _failure_list(failures: list[_ProbeFailure]) -> str:
+    """The `[cause] detail; …` list, ending in exactly ONE full stop. A provider error already ends
+    in one ("…failed: Connection error."), so appending a stop printed "Connection error.." at the
+    head of every refusal a newcomer with no model meets (doc 75 UX-02)."""
+    text = "; ".join(f"[{failure.cause}] {failure.detail}" for failure in failures)
+    return text if text.endswith((".", "!", "?")) else text + "."
+
+
 def _remedy_text(failures: list[_ProbeFailure]) -> str:
     """The remedy paragraphs for the causes actually present, in `LLM_FAILURE_CAUSES` order.
 
@@ -278,9 +286,8 @@ def preflight_role_endpoints(
         settings, timeout_s=timeout_s, consumer_roles=consumer_roles)
     if failures:
         raise LLMError(
-            "LLM endpoint preflight failed: "
-            + "; ".join(f"[{failure.cause}] {failure.detail}" for failure in failures)
-            + ".\n  " + _remedy_text(failures)
+            "LLM endpoint preflight failed: " + _failure_list(failures)
+            + "\n  " + _remedy_text(failures)
             + "\n  Run offline with `--backend toy` (or -s backend=toy), or check the same "
               "endpoints without launching anything with `looplab smoke`. Refusing to start: the "
               "roles would degrade to empty fallback proposals and the run would report success on "
@@ -314,7 +321,7 @@ def preflight_in_process_developer_replacement(
 # sentence either way — and when both gates warn at once (they can) the caller prints two HEADS, not
 # two copies of this list.
 _COSTS = (
-    ".\n  This run is over, so no proposal can degrade — wrapping it up anyway. What the "
+    "\n  This run is over, so no proposal can degrade — wrapping it up anyway. What the "
     "missing model costs:\n"
     "    · end-of-run report → the placeholder \"(report unavailable)\", not the written "
     "report\n"
@@ -360,7 +367,7 @@ def wrap_up_endpoint_warning(
     # was wrong for every throttled/overloaded/mis-credentialed endpoint — all of which are up and
     # answering. The cause now travels per target, from the same classification the refusal uses.
     return ("⚠ LLM endpoint unusable while wrapping up: "
-            + "; ".join(f"[{failure.cause}] {failure.detail}" for failure in failures) + _COSTS)
+            + _failure_list(failures) + _COSTS)
 
 
 def wrap_up_credential_warning(

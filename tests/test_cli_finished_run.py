@@ -134,6 +134,23 @@ def test_a_run_refused_before_its_first_event_leaves_no_directory(tmp_path, monk
     assert not run_dir.exists()
 
 
+def test_the_preflight_refusal_ends_its_cause_with_one_full_stop(tmp_path, monkeypatch):
+    """doc 75 UX-02: the provider's own error ends in a stop ("Connection error."), and the refusal
+    appended another, so the first line a newcomer with no model read said "Connection error..".
+    Both renderings (the run refusal and the wrap-up warning) share one list builder."""
+    import looplab.agents.preflight as preflight
+    dead = "strategist (m at http://127.0.0.1:9/v1): LLM request to http://127.0.0.1:9/v1 failed: Connection error."
+    monkeypatch.setattr(preflight, "_probe_role_endpoints", lambda *a, **k: [
+        preflight._ProbeFailure("unreachable", dead)])
+    result = _invoke("run", ROOT / "examples" / "toy_task.json", "--out", tmp_path / "r")
+    assert "Connection error.\n" in result.output and ".." not in result.output, result.output
+    warning = preflight.wrap_up_endpoint_warning(None, timeout_s=0.1)
+    assert "Connection error.\n" in warning and ".." not in warning
+    monkeypatch.setattr(preflight, "_probe_role_endpoints", lambda *a, **k: [
+        preflight._ProbeFailure("unreachable", "the default target: Connection refused")])
+    assert "Connection refused.\n" in preflight.wrap_up_endpoint_warning(None, timeout_s=0.1)
+
+
 def test_a_refusal_keeps_a_directory_this_command_did_not_create(tmp_path, monkeypatch):
     import looplab.agents.preflight as preflight
     monkeypatch.setattr(preflight, "_probe_role_endpoints", lambda *a, **k: [
