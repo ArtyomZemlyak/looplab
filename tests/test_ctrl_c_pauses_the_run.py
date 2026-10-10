@@ -189,3 +189,46 @@ def test_diagnostic_rows_from_the_abandoned_thread_cost_no_refold(tmp_path, monk
     monkeypatch.setattr(run_cmds, "fold", counting_fold)
     assert _record_interrupt_pause(eng) is True
     assert lost["n"] == 3 and folds["n"] == 1
+
+
+def test_a_second_ctrl_c_during_lost_races_stops_the_retries_without_a_pause(tmp_path, monkeypatch):
+    """The operator's second Ctrl-C is a way OUT: under SIG_IGN the loop kept all 64 attempts (each
+    re-reading, often re-folding, the log) with only SIGKILL left. Now the loop stops at its next
+    attempt boundary — between appends, never inside one — and answers False."""
+    from looplab.events.eventstore import EventStoreConcurrencyError
+
+    eng = make_engine(tmp_path / "run", max_nodes=2)
+    eng.store.append("note", {"text": "a run that has started"})
+    tries = {"n": 0}
+
+    def lost_then_interrupted(type_, data, **kwargs):
+        tries["n"] += 1
+        if tries["n"] == 2:
+            signal.raise_signal(signal.SIGINT)       # the operator presses Ctrl-C again
+        raise EventStoreConcurrencyError(eng.store.path, kwargs.get("expected_last_seq", -1), -1)
+
+    monkeypatch.setattr(eng.store, "append", lost_then_interrupted)
+    try:
+        paused = _record_interrupt_pause(eng)
+    except KeyboardInterrupt:
+        pytest.fail("the second SIGINT tore the write instead of ending the retries")
+    assert paused is False and tries["n"] == 2
+    assert signal.getsignal(signal.SIGINT) is signal.default_int_handler
+
+
+def test_a_handler_that_cannot_be_installed_or_restored_never_masks_the_interrupt(tmp_path,
+                                                                                    monkeypatch):
+    """`signal.signal` can raise (an embedding that refuses it). The contract still holds: the pause
+    is attempted, and no exception escapes in place of the operator's KeyboardInterrupt."""
+    from looplab.cli import run_cmds
+
+    eng = make_engine(tmp_path / "run", max_nodes=2)
+    eng.store.append("note", {"text": "a run that has started"})
+
+    def refuse(*_args):
+        raise ValueError("signal only works in main thread of the main interpreter")
+
+    monkeypatch.setattr(run_cmds.signal, "signal", refuse)
+    assert _record_interrupt_pause(eng) is True
+    assert [e.data for e in eng.store.read_all() if e.type == "pause"] == [
+        {"reason": INTERRUPT_PAUSE_REASON}]

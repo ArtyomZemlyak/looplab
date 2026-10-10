@@ -191,9 +191,10 @@ def _record_interrupt_pause(eng) -> bool:
     # the append goes through the house CAS loop (`retry_tail_cas`, its 64 re-read-and-re-decide
     # attempts), and exhausting it answers False like every other failure here.
     folded = {"seq": None, "halted": False}
+    again = threading.Event()
 
     def plan(events, tail):
-        if not events:
+        if again.is_set() or not events:
             return False
         # Re-fold only when a FOLDED row landed since the last decision: the abandoned thread's rows
         # are mostly diagnostic, and those cannot change `halted` (invariant 5: the fold skips them).
@@ -206,18 +207,34 @@ def _record_interrupt_pause(eng) -> bool:
         store.append(EV_PAUSE, {"reason": INTERRUPT_PAUSE_REASON}, expected_last_seq=tail)
         return True
 
-    # A second Ctrl-C while the pause is being written would abandon it half-way and print a
-    # traceback over the first interrupt; the write is bounded, so hold SIGINT for its duration.
-    # Only the main thread may install a handler (`signal.signal` raises elsewhere).
-    held = threading.current_thread() is threading.main_thread()
-    previous = signal.signal(signal.SIGINT, signal.SIG_IGN) if held else None
+    # A SECOND Ctrl-C while the pause is being written is the operator saying "stop now". Raised as
+    # a KeyboardInterrupt it would tear the write mid-append and print a traceback over the first
+    # interrupt; ignored (SIG_IGN) it left 64 attempts — each re-reading, often re-folding, the log —
+    # with no way out short of SIGKILL, the crash-shaped log this exists to prevent (code review of
+    # 3fc05ba). So it is RECORDED: the loop stops at its next attempt boundary, between appends,
+    # and answers False. Installing or restoring the handler can itself raise (only the main thread
+    # may, and an embedding may refuse); both are contained, so the contract below holds.
+    def _second_interrupt(_signum, _frame):
+        again.set()
+
+    previous, installed = None, False
+    if threading.current_thread() is threading.main_thread():
+        try:
+            previous = signal.signal(signal.SIGINT, _second_interrupt)
+            installed = True
+        except Exception:  # noqa: BLE001 — no handler only means a second Ctrl-C raises as before
+            pass
     try:
         paused = retry_tail_cas(store, plan, on_exhaust=lambda: False)
     except Exception:  # noqa: BLE001 — best effort: the Ctrl-C surfaces unchanged; unpaused is the pre-fix state
-        return False
+        paused = False
     finally:
-        if held:    # `None` (a handler not installed from Python) is not restorable: default it
-            signal.signal(signal.SIGINT, signal.default_int_handler if previous is None else previous)
+        if installed:   # `None` (a handler not installed from Python) is not restorable: default it
+            try:
+                signal.signal(signal.SIGINT,
+                              signal.default_int_handler if previous is None else previous)
+            except Exception:  # noqa: BLE001 — a restore that fails must not replace the operator's interrupt
+                pass
     if paused:
         typer.echo(f"interrupted: {getattr(eng, 'run_dir', 'the run')} is paused (not finalized) "
                    "— `looplab resume` to continue, `looplab finalize` to wrap it up", err=True)
@@ -1248,7 +1265,9 @@ def run(
         return
     state, eng, prior_kind = driven
     _print_result(state)
-    _offline = offline_baseline_note(state, settings.backend)
+    _offline = offline_baseline_note(state, settings.backend,
+                                     external_harness=bool(settings.external_harness),
+                                     events=eng.store.read_all())
     if _offline:
         typer.echo(_offline)
     _note = wrap_up_degradation_note(eng)
@@ -1443,7 +1462,9 @@ def resume(
                        f"({_handoff_deadline - now:.0f}s left) — the previous owner is finishing up")
         time.sleep(0.05)
     _print_result(state)
-    _offline = offline_baseline_note(state, settings.backend)
+    _offline = offline_baseline_note(state, settings.backend,
+                                     external_harness=bool(settings.external_harness),
+                                     events=eng.store.read_all())
     if _offline:
         typer.echo(_offline)
     _note = wrap_up_degradation_note(eng)

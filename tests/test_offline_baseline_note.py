@@ -53,3 +53,18 @@ def test_the_rule_reads_engine_facts_only():
     assert offline_baseline_note(state(tuned), "toy") == ""
     assert offline_baseline_note(state(None), "toy") == ""
     assert offline_baseline_note(state(untuned), "toy").startswith(NOTE)
+
+
+def test_a_champion_written_by_an_agent_or_an_operator_is_not_called_a_baseline():
+    """`backend=toy` alone is not "no model": the external-harness launch is `--backend toy -s
+    external_harness=true` (Codex / Claude Code writes every candidate), and an operator inject is
+    hand-written code. Both champions carry no `params` (code review of the doc 74 work)."""
+    untuned = SimpleNamespace(id=3, idea=SimpleNamespace(params={}))
+    state = SimpleNamespace(best=lambda: untuned)
+    assert offline_baseline_note(state, "toy", external_harness=True) == ""
+    for source in ("manual", "operator"):
+        row = SimpleNamespace(type="node_created", data={"node_id": 3, "source": source})
+        assert offline_baseline_note(state, "toy", events=[row]) == "", source
+    other = SimpleNamespace(type="node_created", data={"node_id": 4, "source": "manual"})
+    built = SimpleNamespace(type="node_created", data={"node_id": 3})
+    assert offline_baseline_note(state, "toy", events=[other, built]).startswith(NOTE)

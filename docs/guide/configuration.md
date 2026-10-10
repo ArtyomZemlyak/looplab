@@ -76,7 +76,7 @@ Instead of a JSON task plus a wall of env vars, a single YAML (or JSON) file can
 to solve and *how* to run it. Run it with `looplab run looplab.yaml`:
 
 ```yaml
-out: runs/demo            # where the run is written
+out: runs/my-run          # where the run is written
 task:                     # WHAT to solve (the task spec; same fields as a task JSON)
   kind: dataset
   goal: predict `target` from the features

@@ -16,7 +16,7 @@ python -m pytest tests/test_events_replay.py           # targeted run — always
 python -m pytest -o addopts="" -q ...                  # if you need to override the default -q
 python -m pytest -m "not docker"  # skip Docker-daemon tests
 looplab run examples/demo.yaml    # offline smoke: the file sets backend: toy, no flags needed
-looplab run --no-genesis --kind quadratic --goal "min (x-3)^2" --direction min --backend toy --out runs/demo  # same, from flags
+looplab run --no-genesis --kind quadratic --goal "min (x-3)^2" --direction min --backend toy --out runs/demo-flags  # same, from flags
 # (--no-genesis matters: any --goal otherwise invokes Genesis, which needs a reachable LLM.
 #  --backend toy is now REQUIRED for an offline run: the `backend` default was changed from
 #  "toy" to "llm" on 2026-08-04, so without it this command hits the LLM endpoint preflight.)
@@ -44,7 +44,7 @@ tmp root is keyed by OS USER, so two concurrent runs delete each other's fixture
 `LOOPLAB_LIVE_SCENARIOS=1`). There is no formatter and ONE lint rule, and that rule is a CENSUS, not a
 style: `[tool.ruff]` selects `BLE` only (doc 52 row 14), so `python -m ruff check looplab` lists every
 blind `except Exception`/`BaseException`/bare `except` that carries no `# noqa: BLE001 — <why this is
-safe to contain>`. Containment is the house posture (784 such handlers), so the rule is not "do not
+safe to contain>`. Containment is the house posture (786 such handlers), so the rule is not "do not
 write one" but "say why"; `tests/test_containment_census.py` re-derives the same census by AST with no
 `ruff` installed, refuses a NEW blind handler that states no reason, and keeps the 86 pre-existing
 reason-less sites as a shrink-only backlog in `tests/data/containment_unreviewed.txt` (review one =

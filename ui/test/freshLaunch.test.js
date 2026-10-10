@@ -40,3 +40,16 @@ test('clearing is scoped to its run, and broken or blocked storage never throws'
   assert.doesNotThrow(() => clearFreshLaunch('demo', blocked))
   assert.equal(isFreshLaunch('demo', 1_000, null), false)
 })
+
+test('two runs started from one tab are both starting; the older one is not overwritten', () => {
+  const store = memory()
+  markFreshLaunch('first', 1_000, store)
+  markFreshLaunch('second', 2_000, store)
+  assert.equal(isFreshLaunch('first', 2_000, store), true, 'a second start used to overwrite the first')
+  assert.equal(isFreshLaunch('second', 2_000, store), true)
+  clearFreshLaunch('second', store)
+  assert.equal(isFreshLaunch('first', 2_000, store), true, 'clearing one run keeps the other')
+  markFreshLaunch('third', 1_000 + FRESH_LAUNCH_WINDOW_MS + 1, store)
+  assert.deepEqual(Object.keys(JSON.parse(store.getItem('looplab.freshLaunch'))), ['third'],
+    'expired entries are dropped on write')
+})

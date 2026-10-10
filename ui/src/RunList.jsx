@@ -2758,21 +2758,26 @@ export default function RunList({ onOpen, onGlobalNavigate,
                   {((runs.length === 0 && !hasActiveFilters ? uiText('Describe a goal in Assistant') : uiText('Start a new run')))}
                 </button>
               : <span>{uiText("Drag a run onto this project, or use its ")}<b>{uiText("Move")}</b>{uiText(" menu.")}</span>}
-            {firstRunLanding && <div className="offline-demo">
-              <button type="button" className="btn sm" aria-expanded={demoOpen}
-                onClick={() => setDemoOpen(open => !open)}>
-                {uiText('Try the offline demo — no model needed')}
-              </button>
-              {demoOpen && <>
-                <p className="muted">{uiText('Six experiments on a toy objective, offline, in a few seconds. Validate, then Start run.')}</p>
-                <LazyBoundary label={"offline demo"} resetKey="offline-demo">
-                  {/* No navigation on start: the run is not listed yet at that instant, and opening
-                      it then showed "Run not found". The list refreshes, the landing gives way to the
-                      run's card, and the launch card itself says the run started. */}
-                  <LaunchCard spec={OFFLINE_DEMO_SPEC} launchIdentity="offline-demo" />
-                </LazyBoundary>
-              </>}
-            </div>}</div>}
+            </div>}
+          {/* The offline demo (doc 74 EB-24) in its OWN slot, beside the landing rather than inside
+              it: the run is listed as soon as its directory exists — possibly before startup is
+              proven — and that ends the landing. Inside it, the card unmounted mid-start and took its
+              receipt and its "Open started run" with it (code review of the doc 74 work). Here it
+              stays while open. The card itself opens the run once startup is proven, if the page
+              has not moved meanwhile, and RunView waits for a run this tab just started. */}
+          {!projectScopeBlocked && runs && (firstRunLanding || demoOpen) && <div className="offline-demo"
+            style={firstRunLanding ? { maxWidth: 640, margin: '0 auto 12vh', textAlign: 'center' } : undefined}>
+            <button type="button" className="btn sm" aria-expanded={demoOpen}
+              onClick={() => setDemoOpen(open => !open)}>
+              {uiText('Try the offline demo — no model needed')}
+            </button>
+            {demoOpen && <>
+              <p className="muted">{uiText('Six experiments on a toy objective, offline, in a few seconds. Validate, then Start run.')}</p>
+              <LazyBoundary label={"offline demo"} resetKey="offline-demo">
+                <LaunchCard spec={OFFLINE_DEMO_SPEC} launchIdentity="offline-demo" />
+              </LazyBoundary>
+            </>}
+          </div>}
           {runs && !!scoped.length && !visible.length
             && !taskFilterUnavailable && !superFilterUnavailable
             && <div className="notice" role="status">

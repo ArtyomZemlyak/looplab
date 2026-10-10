@@ -54,6 +54,24 @@ test('an empty installation offers the offline demo as a launch card, and openin
   } finally { await view.unmount() }
 })
 
+test('the demo card outlives the landing: the started run being listed does not unmount it', async () => {
+  // The run is listed as soon as its directory exists — possibly before startup is proven — which
+  // ends the landing. The card used to live INSIDE the landing and vanished with its receipt.
+  let listed = []
+  const { view } = await list(() => listed)
+  try {
+    await until(() => buttonNamed(view.container, 'Try the offline demo — no model needed'), 'demo button')
+    await React.act(async () => { buttonNamed(view.container, 'Try the offline demo — no model needed').click() })
+    await until(() => view.container.querySelector('.offline-demo form.asst-launch'), 'demo launch card')
+    const card = view.container.querySelector('.offline-demo form.asst-launch')
+    listed = [row('offline-demo')]
+    await until(() => !view.container.textContent.includes('Start with a goal'),
+      'the next list poll ends the landing', { ceilingMs: 10_000 })
+    assert.equal(view.container.querySelector('.offline-demo form.asst-launch'), card,
+      'the same card instance is still mounted after the landing gave way')
+  } finally { await view.unmount() }
+})
+
 test('a small portfolio keeps the list plain until asked; five runs show the tools unasked', async () => {
   const small = await list([row('a'), row('b')])
   try {

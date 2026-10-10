@@ -1056,7 +1056,12 @@ def _print_result(state) -> None:
             typer.echo(headroom_line(room))
 
 
-def offline_baseline_note(state, backend) -> str:
+# `node_created.source` values that mean someone OTHER than the run's own roles authored the node: an
+# operator inject ("manual") or an operator debug injection ("operator", `engine/node_build.py`).
+_AUTHORED_SOURCES = frozenset({"manual", "operator"})
+
+
+def offline_baseline_note(state, backend, *, external_harness=False, events=()) -> str:
     """One line when an OFFLINE run's best score is the task's own baseline, or ``""``.
 
     `backend=toy` builds the task's offline roles (`agents/factory.py::make_roles` ->
@@ -1067,30 +1072,40 @@ def offline_baseline_note(state, backend) -> str:
     (doc 74 EB-04): `--kind dataset --backend toy` printed `BEST node 2: metric=10 params={}` and
     nothing else, and 10 read as a model score.
 
-    Decided from ENGINE facts only — the backend the run was launched with and the champion's own
-    `idea.params` — never from the `metric_name` the candidate's stdout carries: text a candidate
-    writes may label nothing here (CLAUDE.md, "text may nominate, never decide").
+    Decided from ENGINE facts only — the backend the run was launched with, `external_harness`, the
+    champion's own `idea.params` and the `source` its `node_created` row records — never from the
+    `metric_name` the candidate's stdout carries: text a candidate writes may label nothing here
+    (CLAUDE.md, "text may nominate, never decide"). `backend=toy` alone is not "no model": the
+    documented external-harness launch is `--backend toy -s external_harness=true`, where Codex or
+    Claude Code writes every candidate, and an operator inject is hand-written code; either champion
+    carries no `params` and read as an untuned baseline (code review of doc 74 work).
     """
-    if str(backend or "llm") == "llm":
+    if str(backend or "llm") == "llm" or external_harness:
         return ""
     best = state.best()
     if best is None or (getattr(best.idea, "params", None) or {}):
         return ""
+    from looplab.events.types import EV_NODE_CREATED
+    for event in events:
+        data = event.data or {}
+        if (event.type == EV_NODE_CREATED and data.get("node_id") == best.id
+                and data.get("source") in _AUTHORED_SOURCES):
+            return ""
     return ("note: backend=toy — no model wrote or changed code, so this score is the task's offline "
             "baseline (a pipeline check, not a tuned result). Configure a model to search this task.")
 
 
-def snapshot_backend(snap):
-    """The `backend` a run was launched with, read off its snapshot; ``None`` when unreadable.
+def snapshot_settings(snap) -> dict:
+    """The settings a run was launched with, read off its snapshot; ``{}`` when unreadable.
 
     A read for one display line, so every failure is "unknown" rather than an error: `inspect` must
     keep working on a run whose snapshot is damaged — that is often why someone is inspecting it."""
     import orjson
     try:
-        value = orjson.loads(snap.read_bytes()).get("backend")
-    except (OSError, ValueError, AttributeError):
-        return None
-    return value if isinstance(value, str) else None
+        value = orjson.loads(snap.read_bytes())
+    except (OSError, ValueError):
+        return {}
+    return value if isinstance(value, dict) else {}
 
 
 def _exit_nonzero_if_the_run_produced_nothing(state, run_dir, *, wrap_up_only: bool) -> None:

@@ -3,7 +3,7 @@
 *how* to run it (engine settings), plus CLI escape hatches so a run needs no file at all.
 
     # looplab.yaml
-    out: runs/demo
+    out: runs/my-run
     task:
       kind: dataset
       goal: predict `target` from the features
@@ -321,10 +321,13 @@ def _render_default(name: str, field) -> str:
 
 
 def render_template(kind: str = "dataset") -> str:
-    """Build a documented config template with active common settings and a commented appendix.
+    """Build a documented config template: the task, a few ACTIVE settings, and a commented appendix.
 
-    Active common values are runnable defaults for the generated file and therefore override matching
-    environment variables. Every remaining setting appears commented out at its field default.
+    Only `backend` and `max_nodes` are active (doc 74 EB-17). Everything else — endpoint, model,
+    profile, policy, developer_backend, max_seconds and every remaining field — is written commented
+    out at its default, because an ACTIVE value in a run file overrides the matching `LOOPLAB_*`
+    environment variable: an active endpoint or model silently replaced the `LOOPLAB_LLM_BASE_URL`
+    the getting-started pages tell users to export. Do not make those lines active again.
     """
     from looplab.core.task_kinds import default_backend
 
@@ -371,7 +374,10 @@ def render_template(kind: str = "dataset") -> str:
         "# (+ .env)  >  defaults. Every key under settings: is a Settings field (see the appendix",
         "# below for the complete list); on the CLI the same key is `--set key=value` or LOOPLAB_KEY.",
         "",
-        "out: runs/demo            # where the run is written (resumable from this dir alone)",
+        # Not `runs/demo`: that is `examples/demo.yaml`'s run, and the documented sequence runs the
+        # demo first — a scaffold aimed at the same directory reopened the finished demo and appended
+        # its nodes to the demo's log (or refused the different task) (code review of doc 74 work).
+        "out: runs/my-run          # where the run is written (resumable from this dir alone)",
         "",
         task_block.rstrip("\n"),
         "  # Other task shapes: re-run `looplab init --kind repo|quadratic|mlebench_real|...`,",

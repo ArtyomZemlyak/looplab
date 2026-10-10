@@ -459,10 +459,13 @@ export default function LaunchCard({
         ? `Startup is proven for ${outcome.runId}. This card is locked against another Start.`
         : `Startup is proven for ${outcome.runId}. This card is locked, but tab recovery storage could not be cleared.`
       setNotice(`${receipt}${keepNavigation ? '' : ' Open the started run from this card when ready.'}`)
-      onStarted?.(outcome.runId)
       // The run may not be readable for a second or two after startup is proven; RunView waits
       // for a run this tab just started instead of calling it "not found" (`freshLaunch.js`).
+      // Marked ONCE, here, at the moment it started — before `onStarted`, which may open it — and
+      // never again from "Open started run", which would restart the window for a run started
+      // hours ago and since deleted (code review of the doc 74 work).
       markFreshLaunch(outcome.runId)
+      onStarted?.(outcome.runId)
       if (keepNavigation) {
         location.hash = `#/run/${encodeURIComponent(outcome.runId)}`
         requestAnimationFrame(() => startedActionRef.current?.focus())
@@ -1024,7 +1027,7 @@ export default function LaunchCard({
       <button type="button" className="btn xs ghost" disabled={locked} onClick={reset}>{t('Reset proposal')}</button>
       {startedRunId
         ? <button ref={startedActionRef} type="button" className="btn xs primary"
-          onClick={() => { markFreshLaunch(startedRunId); location.hash = `#/run/${encodeURIComponent(startedRunId)}` }}>
+          onClick={() => { location.hash = `#/run/${encodeURIComponent(startedRunId)}` }}>
           {t('Open started run')}</button>
         : damagedRecovery
         ? <button type="button" className="btn xs ghost" disabled={operationBusy || !damagedRecovery.storageKey}

@@ -19,24 +19,43 @@ const storage = () => {
   try { return globalThis.sessionStorage || null } catch { return null }
 }
 
-export function markFreshLaunch(runId, now = Date.now(), store = storage()) {
+// One record PER RUN, `{ [runId]: startedAt }`: a single slot was overwritten by a second start
+// from the same tab, and the first run, opened while still starting, read "Run not found" again
+// (code review of the doc 74 work). Expired entries are dropped on every write, so the map stays
+// as small as the runs started in the last minute.
+const readAll = store => {
+  const raw = JSON.parse(store.getItem(FRESH_LAUNCH_KEY) || '{}')
+  return raw && typeof raw === 'object' && !Array.isArray(raw) ? raw : {}
+}
+
+export function markFreshLaunch(runId, now = Date.now(), store = storage(), windowMs = FRESH_LAUNCH_WINDOW_MS) {
   if (!runId || !store) return
-  try { store.setItem(FRESH_LAUNCH_KEY, JSON.stringify({ runId: String(runId), at: now })) } catch { /* best effort */ }
+  try {
+    let all = {}
+    try { all = readAll(store) } catch { all = {} }
+    const kept = Object.fromEntries(Object.entries(all).filter(([, at]) =>
+      Number.isFinite(at) && now - at >= 0 && now - at <= windowMs))
+    kept[String(runId)] = now
+    store.setItem(FRESH_LAUNCH_KEY, JSON.stringify(kept))
+  } catch { /* best effort */ }
 }
 
 export function isFreshLaunch(runId, now = Date.now(), store = storage(), windowMs = FRESH_LAUNCH_WINDOW_MS) {
   if (!runId || !store) return false
-  let record = null
-  try { record = JSON.parse(store.getItem(FRESH_LAUNCH_KEY) || 'null') } catch { return false }
-  if (!record || record.runId !== String(runId) || !Number.isFinite(record.at)) return false
-  const age = now - record.at
+  let at
+  try { at = readAll(store)[String(runId)] } catch { return false }
+  if (!Number.isFinite(at)) return false
+  const age = now - at
   return age >= 0 && age <= windowMs
 }
 
 export function clearFreshLaunch(runId, store = storage()) {
   if (!store) return
   try {
-    const record = JSON.parse(store.getItem(FRESH_LAUNCH_KEY) || 'null')
-    if (!runId || record?.runId === String(runId)) store.removeItem(FRESH_LAUNCH_KEY)
+    if (!runId) { store.removeItem(FRESH_LAUNCH_KEY); return }
+    const all = readAll(store)
+    delete all[String(runId)]
+    if (Object.keys(all).length) store.setItem(FRESH_LAUNCH_KEY, JSON.stringify(all))
+    else store.removeItem(FRESH_LAUNCH_KEY)
   } catch { /* best effort */ }
 }

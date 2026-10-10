@@ -1856,6 +1856,9 @@ export default function RunView({ runId, onBack, reviewMode = false, reviewMeta 
         <div className="history-spinner" aria-hidden="true" />
         <h1 id="run-state">{uiText("Starting the run…")}</h1>
         <p><code>{runId}</code>{uiText(" was started from this tab. It opens here as soon as its first records are written.")}</p>
+        {/* The siblings' way out (code review of the doc 74 work): an engine that died before its
+            first event would otherwise hold this spinner for the whole window with no exit. */}
+        <div className="resource-state-actions">{onBack && <button className="btn" onClick={leaveRetainedPanelRoute}>{uiText("Back to runs")}</button>}</div>
       </> : runStatus === 'not_found' ? <>
         <div className="resource-state-icon" aria-hidden="true">404</div>
         <h1 id="run-state">{uiText("Run not found")}</h1>

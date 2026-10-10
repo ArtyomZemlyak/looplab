@@ -835,7 +835,8 @@ def echo_inspect_tail(state, run_dir: Path, *, show_config_hint: bool) -> None:
     note, and where the launch settings are. Moved out of `inspect_cmds.py` VERBATIM for the
     comparability half (its line cap, `tests/test_cli_command_groups.py`) when doc 74 EB-04/EB-10
     added the other two."""
-    from looplab.cli import offline_baseline_note, snapshot_backend
+    from looplab.cli import offline_baseline_note, snapshot_settings
+    from looplab.events.eventstore import EventStore
     from looplab.engine.comparability import record_of as comparability_record_of
     _best = state.best()
     _record = comparability_record_of(_best) if _best is not None else None
@@ -847,7 +848,12 @@ def echo_inspect_tail(state, run_dir: Path, *, show_config_hint: bool) -> None:
             "comparability: UNKNOWN — this run records no key for what its metric was measured "
             "against, so its number may not be ranked against any other run's. Declare "
             "`eval.inputs` on the task (or a `comparison_contract`) to make it decidable.")
-    _offline = offline_baseline_note(state, snapshot_backend(Path(run_dir) / "config.snapshot.json"))
+    _launch = snapshot_settings(Path(run_dir) / "config.snapshot.json")
+    _backend = _launch.get("backend")
+    _offline = offline_baseline_note(
+        state, _backend if isinstance(_backend, str) else None,
+        external_harness=bool(_launch.get("external_harness")),
+        events=EventStore(Path(run_dir) / "events.jsonl").read_all())
     if _offline:
         typer.echo(_offline)
     if show_config_hint:

@@ -272,6 +272,16 @@ def test_the_examples_map_names_every_example_and_the_demo_runs_offline(tmp_path
     assert result.exit_code == 0, result.output
     assert "finished=True" in result.output and "nodes=6 evaluated=6" in result.output
 
+    # The documented NEXT step — `looplab init`, then `looplab run looplab.yaml` — must start a run of
+    # its own. The scaffold used to write `out: runs/demo`, the demo's directory: it reopened the
+    # finished demo and appended its nodes to the demo's log (code review, reproduced).
+    demo_log = (tmp_path / "runs" / "demo" / "events.jsonl").read_bytes()
+    assert CliRunner().invoke(app, ["init", "--kind", "quadratic"]).exit_code == 0
+    mine = CliRunner().invoke(app, ["run", "looplab.yaml", "--backend", "toy", "--max-nodes", "2"])
+    assert mine.exit_code == 0, mine.output
+    assert "reopening" not in mine.output, mine.output
+    assert (tmp_path / "runs" / "demo" / "events.jsonl").read_bytes() == demo_log
+
 
 def test_core_task_examples_load_and_optional_real_examples_are_explicit():
     from looplab.adapters.tasks import load_task

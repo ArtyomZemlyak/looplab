@@ -51,6 +51,9 @@ test('a run this tab just started waits for its first records instead of reading
   const view = await harness.mount(RunView, { runId: RUN, onBack() {} })
   try {
     await until(() => heading(view) === 'Starting the run…', 'the starting state')
+    assert.ok([...view.container.querySelectorAll('.resource-state-actions button')]
+      .some(button => button.textContent.trim() === 'Back to runs'),
+    'the starting screen offers the same way out as its siblings')
     await until(() => !view.container.querySelector('h1#run-state')
       && view.container.textContent.includes(RUN), 'the run opens by itself', { ceilingMs: 15_000 })
     assert.equal(fresh.isFreshLaunch(RUN), false, 'the marker is spent once the run is readable')
