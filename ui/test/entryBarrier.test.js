@@ -9,7 +9,7 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import React from 'react'
-import { fetchStub, mountLive, until } from './_mount.js'
+import { fetchStub, mountLive, settle, until } from './_mount.js'
 
 let harness
 let RunList
@@ -97,6 +97,22 @@ test('a small portfolio keeps the list plain until asked; five runs show the too
     await until(() => five.view.container.querySelector('input[aria-label="Filter runs"]'), 'full chrome at five runs')
     assert.equal(buttonNamed(five.view.container, 'Show filters, views and projects'), undefined)
   } finally { await five.view.unmount() }
+})
+
+test('tools once shown stay shown: the portfolio shrinking below five runs does not hide them', async () => {
+  let rows = ['a', 'b', 'c', 'd', 'e'].map(row)
+  const { view, backend } = await list(() => rows)
+  const listReads = () => backend.calls.filter(call => call.path === '/api/runs').length
+  try {
+    await until(() => view.container.querySelector('input[aria-label="Filter runs"]'), 'full chrome at five runs')
+    rows = rows.slice(0, 4)
+    const before = listReads()
+    await until(() => listReads() > before, 'the next list poll', { ceilingMs: 10_000 })
+    await settle()
+    assert.ok(view.container.querySelector('input[aria-label="Filter runs"]'),
+      'the filter the operator may be typing in is still mounted')
+    assert.equal(buttonNamed(view.container, 'Show filters, views and projects'), undefined)
+  } finally { await view.unmount() }
 })
 
 test('the model screen says one plain line about the API key', () => {

@@ -527,7 +527,8 @@ def inspect(
         from looplab.engine.upstream_switch import upstream_inspect_lines
         for _line in [*upstream_inspect_lines(run_dir, state, all_events), *unfinished_sync_lines(all_events)]:
             typer.echo(_line)
-        echo_inspect_tail(state, run_dir, show_config_hint=snap.exists() and not config)
+        echo_inspect_tail(state, run_dir, show_config_hint=snap.exists() and not config,
+                          events=all_events)
 
 
 @app.command()

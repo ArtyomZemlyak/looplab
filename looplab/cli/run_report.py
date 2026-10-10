@@ -830,11 +830,12 @@ def echo_parked_requests(events, state) -> None:
         typer.echo(f"parked: {parked['detail']}")
 
 
-def echo_inspect_tail(state, run_dir: Path, *, show_config_hint: bool) -> None:
+def echo_inspect_tail(state, run_dir: Path, *, show_config_hint: bool, events=None) -> None:
     """The last lines of `looplab inspect`: the champion's comparability key, the offline-baseline
     note, and where the launch settings are. Moved out of `inspect_cmds.py` VERBATIM for the
     comparability half (its line cap, `tests/test_cli_command_groups.py`) when doc 74 EB-04/EB-10
-    added the other two."""
+    added the other two. `events` is the log the caller already read and folded `state` from: a
+    second read could see a longer log than the one `state` describes (code review)."""
     from looplab.cli import offline_baseline_note, snapshot_settings
     from looplab.events.eventstore import EventStore
     from looplab.engine.comparability import record_of as comparability_record_of
@@ -853,7 +854,7 @@ def echo_inspect_tail(state, run_dir: Path, *, show_config_hint: bool) -> None:
     _offline = offline_baseline_note(
         state, _backend if isinstance(_backend, str) else None,
         external_harness=bool(_launch.get("external_harness")),
-        events=EventStore(Path(run_dir) / "events.jsonl").read_all())
+        events=events if events is not None else EventStore(Path(run_dir) / "events.jsonl").read_all())
     if _offline:
         typer.echo(_offline)
     if show_config_hint:

@@ -1643,6 +1643,13 @@ export default function RunList({ onOpen, onGlobalNavigate,
     && savedViews.length === 0 && !activeSavedView && !hasActiveFilters
     && sel === ALL && view === 'list' && compareIds.size === 0
     && missingStartOverRecoveries.length === 0 && missingDeletionRecoveries.length === 0
+  // Once the tools are on screen they stay: deleting the fifth run, removing the last project or
+  // clearing a filter must not unmount the controls the operator is using (code review of EB-19).
+  const portfolioToolsOnScreen = !firstRunLanding && !compactPortfolio
+    && runsState === 'ready' && Array.isArray(runs) && runs.length > 0
+  useEffect(() => {
+    if (portfolioToolsOnScreen) setPortfolioToolsShown(true)
+  }, [portfolioToolsOnScreen])
   const listCriteriaKey = JSON.stringify([
     sel, query, taskFilter, taskFilterExact, statusFilter, stFilter, sortKey, sortDir,
   ])
