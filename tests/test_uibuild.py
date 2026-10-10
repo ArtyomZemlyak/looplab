@@ -469,8 +469,10 @@ def test_a_build_step_is_quiet_when_it_works_and_shows_its_tail_when_it_fails(tm
 
     from looplab.serve import uibuild
 
-    noisy = [sys.executable, "-c", "import sys\nfor i in range(100): print(f'line {i}')\n"
-             "sys.exit(int(sys.argv[1]))"]
+    # ONE line: on Windows `_run` goes through cmd.exe (the `npm.cmd` shim), which ends a command at
+    # its first newline — the multi-line program ran as `import sys` alone and exited 0 there.
+    noisy = [sys.executable, "-c",
+             "import sys; [print(f'line {i}') for i in range(100)]; sys.exit(int(sys.argv[1]))"]
     logged = []
     assert uibuild._run([*noisy, "0"], cwd=tmp_path, log=logged.append) is True
     assert logged == []

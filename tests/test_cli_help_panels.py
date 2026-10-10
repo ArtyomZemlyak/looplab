@@ -79,17 +79,17 @@ def test_run_help_reads_at_80_columns_and_defines_genesis(monkeypatch):
     import re
 
     monkeypatch.setenv("COLUMNS", "80")
-    text = CliRunner().invoke(app, ["run", "--help"], terminal_width=80).output
+    text = _ANSI.sub("", CliRunner().invoke(app, ["run", "--help"], terminal_width=80).output)
     panel, indents = None, {}
-    for line in text.splitlines():
-        head = re.match(r"╭─ (.+?) ─", line)
+    for line in text.splitlines():   # every box style `_PANEL_TITLE` reads (the Windows leg's too)
+        head = _PANEL_TITLE.match(line)
         if head:
             panel = head.group(1)
             continue
-        if line.startswith("╰"):
+        if line[:1] in ("╰", "└", "+"):
             panel = None
             continue
-        wrapped = re.match(r"│(\s+)(\S.*?)\s*│\s*$", line)
+        wrapped = re.match(r"[│|](\s+)(\S.*?)\s*[│|]\s*$", line)
         if panel and panel != "Arguments" and wrapped and not wrapped.group(2).startswith("-"):
             indents.setdefault(panel, set()).add(len(wrapped.group(1)) + 1)
     widths = {name: 80 - 2 - min(found) for name, found in indents.items()}
