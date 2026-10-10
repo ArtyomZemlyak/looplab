@@ -2,9 +2,10 @@
 //
 //   * EB-24 — an empty installation offers the offline demo as an ordinary launch card over the
 //     fixed spec, and opening it makes no write (validation and start stay the user's two clicks);
-//   * EB-19 — a small portfolio keeps the run list plain, one button brings the tools back, and five
-//     runs show them unasked;
-//   * EB-18 — the model screen's one line about the API key, as a truth table.
+//   * EB-19 — a small portfolio keeps the run list plain (at most 15 visible buttons), one button
+//     brings the tools back, and five runs show them unasked;
+//   * EB-18 — the model screen's one line about the API key, as a truth table, and no store
+//     vocabulary shown until the details are opened.
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import React from 'react'
@@ -78,6 +79,12 @@ test('a small portfolio keeps the list plain until asked; five runs show the too
     await until(() => buttonNamed(small.view.container, 'Show filters, views and projects'), 'compact list')
     assert.equal(small.view.container.querySelector('select[aria-label="Saved portfolio view"]'), null)
     assert.equal(small.view.container.querySelector('input[aria-label="Filter runs"]'), null)
+    // The acceptance itself (doc 74 EB-19, as corrected in its section 12.4): at 1-4 runs the list
+    // workspace shows at most 15 buttons. A button inside a closed <details> or a hidden subtree is
+    // not shown; the measured figure when the criterion was set was 6.
+    const shown = [...small.view.container.querySelectorAll('button')]
+      .filter(button => !button.closest('[hidden], details:not([open]) > :not(summary)'))
+    assert.ok(shown.length <= 15, `${shown.length} visible buttons: ${shown.map(b => b.textContent.trim()).join(' | ')}`)
     await React.act(async () => {
       buttonNamed(small.view.container, 'Show filters, views and projects').click()
     })
@@ -98,4 +105,26 @@ test('the model screen says one plain line about the API key', () => {
   assert.equal(line({ effective: false, active: false }), 'API key: not set. Local endpoints usually need none.')
   assert.equal(line({ effective: true, active: true }), 'API key: saved for this base URL.')
   assert.equal(line({ effective: true, active: false }), 'API key: saved, but not for this base URL.')
+})
+
+test('the model screen shows no credential-store vocabulary until its details are opened', async () => {
+  // The acceptance itself (doc 74 EB-18): by default the model screen does not say "material" or
+  // "shared key". The store's Yes/No chips stay in the DOM, inside a closed <details>.
+  const shownText = container => {
+    const copy = container.cloneNode(true)
+    for (const hidden of copy.querySelectorAll('details:not([open]) > :not(summary)')) hidden.remove()
+    return copy.textContent
+  }
+  for (const credential of [
+    { stored: false, effective: false, active: false, source: 'none', status: 'missing' },
+    { stored: true, effective: true, active: true, source: 'stored', status: 'active' },
+  ]) {
+    const view = await harness.mount(settings.CredentialState, { credential })
+    try {
+      const text = shownText(view.container)
+      assert.match(text, /^API key: /)
+      assert.doesNotMatch(text, /material|shared key/i, text)
+      assert.match(view.container.textContent, /Stored material/, 'the details are still there on request')
+    } finally { await view.unmount() }
+  }
 })

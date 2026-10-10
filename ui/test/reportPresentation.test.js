@@ -157,6 +157,36 @@ test('Report uses semantic section headings and exposes an unambiguous operator/
   }
 })
 
+test('the verdict banner opens with the result sentence, its status labels after it (doc 74 EB-21)', async () => {
+  // Three caveat pills above the sentence made the successful offline demo read as a warning before
+  // its number was seen. The demo declares a comparison contract, so its nodes carry one
+  // comparability key and the sentence can name the difference from the first experiment.
+  const vite = await sharedVite()
+  try {
+    const { default: ReportView } = await vite.ssrLoadModule('/src/Report.jsx')
+    const demo = state('min', 17.18, 8.51)
+    for (const n of Object.values(demo.nodes)) {
+      n.metric_provenance = { comparability: { keys: { measured: 'demo-contract' } } }
+    }
+    const dom = new JSDOM(renderToStaticMarkup(React.createElement(ReportView, {
+      state: demo, runId: 'report-min', readOnly: true,
+    })))
+    try {
+      const banner = dom.window.document.querySelector('.verdict-banner')
+      const first = [...banner.querySelectorAll('*')].find(el => el.children.length === 0 && el.textContent.trim())
+      assert.equal(first.className, 'verdict-headline')
+      assert.match(first.textContent, /^Selected #1: evaluation score 8\.51\. Its evaluation score is better by 8\.67 than the first eligible experiment #0/)
+      const pill = banner.querySelector('.verdict-pill')
+      assert.ok(first.compareDocumentPosition(pill) & dom.window.Node.DOCUMENT_POSITION_FOLLOWING,
+        'every status label sits after the sentence')
+    } finally {
+      dom.window.close()
+    }
+  } finally {
+    await vite.close()
+  }
+})
+
 test('print CSS removes the screen-only code viewport limit', async () => {
   const css = await readFile(new URL('../src/report-trust-polish.css', import.meta.url), 'utf8')
   assert.match(css, /@media print[\s\S]*?\.report-view pre\.code\s*\{[^}]*max-height:\s*none\s*!important;[^}]*overflow:\s*visible\s*!important;/)

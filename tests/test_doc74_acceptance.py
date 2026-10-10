@@ -131,7 +131,9 @@ def eb17(tmp_path, monkeypatch):
 def eb23():
     # Dropped because the panel is resizable and keeps an explicit width (doc 74 §12.6). Read from
     # the CODE with comments removed — a guard a comment could satisfy proves nothing (CLAUDE.md).
-    source = _text("ui/src/AssistantBar.jsx").splitlines()
+    # Block comments (`/* */`, JSX's `{/* */}`) first, then line comments: either one could carry
+    # the pinned text alone (code review of the registry).
+    source = re.sub(r"/\*.*?\*/", "", _text("ui/src/AssistantBar.jsx"), flags=re.S).splitlines()
     code = "\n".join(line.split("//", 1)[0] for line in source)
     assert re.search(r'className="asst-resize" role="separator"', code)
     assert re.search(r"onKeyDown=\{resizeWithKeys\}", code)
@@ -154,8 +156,10 @@ def eb28():
 
 
 # --- the registry: every EB-NN in doc 74 → its check ----------------------------------------------
-# A string is a pointer: `tests/<file>.py::<test>` must be a test function there; `ui/test/<file>`
-# must exist (the UI suite runs it in CI). A callable is checked here.
+# A string is a pointer: `tests/<file>.py::<test>` must be a test function there, and
+# `ui/test/<file>::<title>` a `test('<title>'` there (the UI suite runs it in CI) — a bare file
+# pointer proved nothing about the criterion (code review of the registry). A tuple is several
+# pointers, all held. A callable is checked here.
 ACCEPTANCE = {
     "EB-01": eb01,
     "EB-02": eb02,
@@ -174,13 +178,15 @@ ACCEPTANCE = {
     "EB-15": eb15,
     "EB-16": eb16,
     "EB-17": eb17,
-    "EB-18": "ui/test/entryBarrier.test.js",
-    "EB-19": "ui/test/entryBarrier.test.js",
-    "EB-20": "ui/test/mountRunView.test.js",
-    "EB-21": "ui/test/comparabilityRefusalRender.test.js",
-    "EB-22": "ui/test/assistantLanguage.test.js",
+    "EB-18": "ui/test/entryBarrier.test.js::the model screen shows no credential-store vocabulary until its details are opened",
+    "EB-19": "ui/test/entryBarrier.test.js::a small portfolio keeps the list plain until asked; five runs show the tools unasked",
+    # Withdrawn; what the decision rests on — a finished run lands on its Report — is held here.
+    "EB-20": "ui/test/timelineSemantics.test.js::RunView owns one paged timeline shared by Dock and EventExplorer",
+    "EB-21": "ui/test/reportPresentation.test.js::the verdict banner opens with the result sentence, its status labels after it (doc 74 EB-21)",
+    "EB-22": "ui/test/assistantLanguage.test.js::the full-screen Assistant, which covers the header, carries the one visible language control",
     "EB-23": eb23,
-    "EB-24": "tests/test_offline_demo_spec.py::test_the_server_validates_the_ui_demo_spec",
+    "EB-24": ("tests/test_offline_demo_spec.py::test_the_server_validates_the_ui_demo_spec",
+              "ui/test/entryBarrier.test.js::an empty installation offers the offline demo as a launch card, and opening it writes nothing"),
     "EB-25": eb25,
     "EB-26": "tests/test_documentation_contracts.py::test_index_mentions_every_numbered_document",
     "EB-27": eb27,
@@ -196,15 +202,21 @@ def test_every_finding_in_doc_74_has_exactly_one_acceptance_row():
         f"stale: {sorted(set(ACCEPTANCE) - set(headings))}")
 
 
-@pytest.mark.parametrize("finding", sorted(k for k, v in ACCEPTANCE.items() if isinstance(v, str)))
+@pytest.mark.parametrize("finding", sorted(k for k, v in ACCEPTANCE.items() if not callable(v)))
 def test_a_pointer_names_a_check_that_exists(finding):
-    target = ACCEPTANCE[finding]
-    path, _, name = target.partition("::")
-    assert (ROOT / path).is_file(), target
-    if name:
-        tree = ast.parse((ROOT / path).read_text(encoding="utf-8"))
-        names = {node.name for node in ast.walk(tree) if isinstance(node, ast.FunctionDef)}
-        assert name in names, f"{finding}: {name} is not a test in {path}"
+    targets = ACCEPTANCE[finding]
+    for target in (targets,) if isinstance(targets, str) else targets:
+        path, _, name = target.partition("::")
+        assert name, f"{finding}: {target} names a file, not the check inside it"
+        assert (ROOT / path).is_file(), target
+        text = (ROOT / path).read_text(encoding="utf-8")
+        if path.endswith(".py"):
+            names = {node.name for node in ast.walk(ast.parse(text))
+                     if isinstance(node, ast.FunctionDef)}
+            assert name in names, f"{finding}: {name} is not a test in {path}"
+        else:
+            title = re.compile(r"\btest\(\s*(['\"])" + re.escape(name) + r"\1")
+            assert title.search(text), f"{finding}: no test titled {name!r} in {path}"
 
 
 @pytest.mark.parametrize("finding", sorted(k for k, v in ACCEPTANCE.items() if callable(v)))

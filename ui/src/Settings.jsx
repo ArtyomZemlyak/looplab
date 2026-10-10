@@ -140,7 +140,8 @@ export function credentialKeySummary(credential) {
   return credential.active ? 'API key: saved for this base URL.' : 'API key: saved, but not for this base URL.'
 }
 
-function CredentialState({
+// Exported for the entry-barrier test, which reads what the model screen SHOWS by default.
+export function CredentialState({
   credential, writeError = '', onRefresh, refreshing = false, refreshDisabled = false,
 }) {
   useUILanguage()
