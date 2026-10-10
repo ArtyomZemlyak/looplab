@@ -1,7 +1,7 @@
 {
   "schema": 1,
   "language": "ru",
-  "count": 7750,
+  "count": 7751,
   "messages": {
     "# LoopLab run report — {0}": "# Отчёт запуска LoopLab — {0}",
     "## Agent narrative (advisory)": "## Пояснения агента (рекомендации)",
@@ -3667,6 +3667,7 @@
     "nodes ·": "узлы ·",
     "non-dominated on measured objectives alone.": "не доминируют только в отношении измеряемых целей.",
     "none": "нет",
+    "niche": "ниша",
     "none (clear all)": "нет (очистить все)",
     "none retained (partial projection)": "не сохранено (частичное проекция)",
     "none — use Promote on a node": "Нет - использовать Продвижение на узле",

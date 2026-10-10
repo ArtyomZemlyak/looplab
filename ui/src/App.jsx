@@ -254,12 +254,15 @@ export default function App() {
     }
     if (location.hash === route.canonicalHash) setRoute(parseHash())
   }, [route.canonicalHash])
-  const routeLabel = route.view === 'run' ? `Run ${route.id}`
+  const routeName = route.view === 'run' ? `Run ${route.id}`
     : route.view === 'settings' ? 'Settings'
     : route.view === 'claims' ? 'Claims & Curation'
     : route.view === 'shared' ? 'Shared Assistant chat'
     : route.view === 'review' ? 'Read-only run review'
     : isInstallationRouteView(route.view) ? installationRouteLabel(route.view) : 'Runs'
+  // The run's label is a TEMPLATE: `uiText("Run demo")` matched no catalogue entry, so the Russian
+  // UI announced and titled every run page in English. The other labels are fixed strings.
+  const routeLabel = route.view === 'run' ? uiMessage('Run {0}', [route.id]) : uiText(routeName)
   const rememberListNavigation = useCallback((snapshot, options = null) => {
     if (snapshot && typeof snapshot === 'object' && !Array.isArray(snapshot)) {
       listNavigationRef.current = snapshot
@@ -327,14 +330,14 @@ export default function App() {
   // Everywhere else (list / run / settings) the persistent assistant and attention inbox stay available.
   let content
   const routeKey = `${route.view}:${route.id || route.token || ''}`
-  if (route.view === 'review') return <RouteFocus label={uiText(routeLabel)} routeKey={routeKey}>
+  if (route.view === 'review') return <RouteFocus label={routeLabel} routeKey={routeKey}>
     <ReviewRoute key={route.token || 'invalid-review'} token={route.token} />
   </RouteFocus>
   // The shared read-only chat is a PUBLIC surface: the backend serves /api/assistant/shared/ WITHOUT
   // the owner token (server.py::_unauth_api_ok), so it must bypass the OwnerAuth unlock gate exactly
   // like the review route. Falling through into <OwnerAuth> made a token-protected deployment show
   // recipients the "Unlock LoopLab controls" screen instead of the chat, defeating the share link.
-  if (route.view === 'shared') return <RouteFocus label={uiText(routeLabel)} routeKey={routeKey}>
+  if (route.view === 'shared') return <RouteFocus label={routeLabel} routeKey={routeKey}>
     <LazyBoundary key={routeKey} label={"shared Assistant chat"} mode="route" focusOnReady resetKey={routeKey}>
       <SharedAssistant sid={route.id} />
     </LazyBoundary>
@@ -365,7 +368,7 @@ export default function App() {
       onOpen={open} onGlobalNavigate={globalNavigate} />
   </LazyBoundary>
 
-  return <OwnerAuth label={uiText(routeLabel)}><RouteFocus label={uiText(routeLabel)} routeKey={routeKey}
+  return <OwnerAuth label={routeLabel}><RouteFocus label={routeLabel} routeKey={routeKey}
     autoFocus={!restoreListNavigation}>
     {/* OwnerWorkspace is stable across list/run/settings/claim-ledger changes. Its one Assistant instance keeps
         conversation and draft state; public review/share returns above before owner pollers mount. */}

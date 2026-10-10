@@ -909,7 +909,7 @@ export default function Dag({ state, selectedId, onSelect, groupMode = 'none', c
           </select></label>}
         <span className="muted">{uiText("group by")}</span>
         <select className="text" aria-label={uiText("Group experiments by")} value={groupMode} onChange={e => onSetMode && onSetMode(e.target.value)}>
-          {GROUP_MODES.map(([v, l]) => <option key={v} value={v}>{l}</option>)}
+          {GROUP_MODES.map(([v, l]) => <option key={v} value={v}>{uiText(l)}</option>)}
         </select>
         {groupMode !== 'none' && groupKeys.length > 0 && <>
           <select className="text grp-picker" aria-label={uiText("Choose one experiment group")}

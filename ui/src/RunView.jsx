@@ -2320,7 +2320,9 @@ export default function RunView({ runId, onBack, reviewMode = false, reviewMeta 
       {(routeNotice || attemptFenceNotice || route.issues.length > 0) && <div
         ref={routeNoticeRef} className="route-state-notice" role="status" tabIndex={-1}>
         <OpIcon name="info" size={13} />
-        <span>{[...route.issues, routeNotice, attemptFenceNotice].filter(Boolean).join(' ')}</span>
+        {/* The route's issues are catalogue strings (`runRouteState.js`); the Russian UI showed them in
+            English because this joined them raw. A dynamic one falls back to its English text. */}
+        <span>{[...route.issues.map(issue => uiText(issue)), routeNotice, attemptFenceNotice].filter(Boolean).join(' ')}</span>
         <button type="button" className="btn xs ghost" aria-label={uiText("Dismiss link-state notice")}
           onClick={() => { setRouteNotice(''); setAttemptFenceNotice(''); route.clearIssues() }}>×</button>
       </div>}
