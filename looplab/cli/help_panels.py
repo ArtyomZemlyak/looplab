@@ -25,6 +25,7 @@ HELP_PANELS: tuple[tuple[str, tuple[tuple[str, str], ...]], ...] = (
         ("init", "Write a documented looplab.yaml to edit and run."),
         ("run", "Start a run from a config/task file or from --goal."),
         ("ui", "Serve the web UI with Assistant (needs the [ui] extra)."),
+        ("tui", "Terminal control plane: start, watch and steer runs by chat."),
         ("inspect", "Show a run's best result, why it stopped, trust and comparability."),
         ("resume", "Continue a stopped or crashed run from its event log."),
         ("stop", "Stop a run without the end-of-run wrap-up; it stays resumable."),
@@ -33,11 +34,9 @@ HELP_PANELS: tuple[tuple[str, tuple[tuple[str, str], ...]], ...] = (
     ("Run control", (
         ("finalize", "Stop a run and write its end-of-run report, lessons and costs."),
         ("approve", "Approve what a paused run is waiting on (human in the loop)."),
-        ("tui", "Terminal control plane: start, watch and steer runs by chat."),
         ("replay", "Rebuild a run's state from its event log and print it (read-only)."),
         ("upstream-auto", "Turn the automatic code-upstream switch on or off."),
         ("repair-log", "Repair a corrupted line in the middle of a run's event log."),
-        ("build-ui", "Build the React UI bundle that `looplab ui` serves."),
     )),
     ("External coding agent", (
         ("harness", "Print the external-agent capability contract as JSON."),
@@ -50,7 +49,6 @@ HELP_PANELS: tuple[tuple[str, tuple[tuple[str, str], ...]], ...] = (
         ("export-git", "Export the experiment tree as a git repository, one commit per node."),
         ("export-sft", "Export the run's model turns as outcome-labelled SFT rows."),
         ("tensorboard", "Serve TensorBoard over the nodes' training logs."),
-        ("bench", "Run tasks end to end and report a capability benchmark."),
     )),
     ("Diagnostics (one run)", (
         ("timings", "Where the wall-clock time went, per node and per run."),
@@ -68,6 +66,7 @@ HELP_PANELS: tuple[tuple[str, tuple[tuple[str, str], ...]], ...] = (
         ("speculation-gate", "Run the scorer-fidelity and search-quality gates for speculation."),
     )),
     ("Maintenance", (
+        ("build-ui", "Build the React UI bundle that `looplab ui` serves."),
         ("evaluate-track", "Run a declared evaluation track over finished nodes."),
         ("import-metrics", "Import metrics measured after the run, beside the live ones."),
         ("backfill-applied-params", "Record what parameters each node actually ran with."),
@@ -94,6 +93,7 @@ HELP_PANELS: tuple[tuple[str, tuple[tuple[str, str], ...]], ...] = (
         ("prior-citations", "Whether the cross-run priors a run was shown reached its proposals."),
     )),
     ("Research instruments (maintainers)", (
+        ("bench", "Run tasks end to end and report a capability benchmark."),
         ("concept-coverage", "Concept-graph coverage and uncovered regions of a run."),
         ("asset-brief", "Prior-art and available-assets brief for a task repo."),
         ("lock-in", "Detect runs of experiments stuck on one lever."),

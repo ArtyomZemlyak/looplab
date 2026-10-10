@@ -771,6 +771,34 @@ def _ranked_by(objective) -> str:
     return "the task's own metric" if objective is None else repr(objective)
 
 
+# THE FULL CONTRACT `looplab comparability --help` printed until doc 75 UX-11, verbatim (moved here
+# for `inspect_cmds.py`'s line cap; the help now speaks to the user):
+#
+#   What each run's champion number MAY be ranked against — and a refusal when they may not.
+#
+#   THE COMMAND THIS BOX NEEDED. `runs/` holds recall@100 values of 0.8776, 0.793426, 0.792082 and
+#   0.774207 and they have been compared out loud all day. Some were measured on one test set and
+#   some on another; some against one product index and some against a bigger one, which makes
+#   recall@100 strictly harder. Nothing in any record said which, and no surface refused. This one
+#   does, and it exits NON-ZERO when it refuses so a script cannot ignore it.
+#
+#   Three answers, and the middle one is the whole point:
+#
+#     SAME      — the runs recorded the same comparability key at an authority that may certify it
+#                 (`measured`: the eval's declared inputs bound to their content digests; or
+#                 `declared`: an operator-written `ComparisonContract`). Ranking them is a fact.
+#     DIFFERENT — they recorded provably different keys, ran on different source trees, or were
+#                 measured under different evaluation protocols (profile, scorer, fingerprint) —
+#                 the pair line names which — or they rank their champions by DIFFERENT OBJECTIVES
+#                 (an operator `metric_retarget`, doc 68 68.2: each champion was chosen on its own
+#                 ruler, whatever the evaluation shared). **REFUSED**, exit 3. The values are each
+#                 true of their own measurement; the ordering between them never was.
+#     UNKNOWN   — at least one recorded no key, or they agree only at the `inferred` authority
+#                 (two task files that merely look alike, which is exactly what the four values
+#                 above are). NOT an assent. Exit 4, because a caller that wanted a ranking did not
+#                 get one, and the one thing this command may never do is let silence read as yes.
+#
+#   Read-only: it folds each log and prints. It writes nothing and touches no memory store.
 def echo_comparability(run_dirs) -> int:
     """`looplab comparability`'s rendering and pairwise walk; returns the exit code (0 / 3 / 4).
 

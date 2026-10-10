@@ -122,17 +122,26 @@ def export_mlflow(
     typer.echo(f"logged to MLflow run {rid}")
 
 
+# THE FULL CONTRACT this command's `--help` printed until doc 75 UX-11, verbatim; the help
+# now speaks to the user and the provenance lives here, beside the code it describes:
+#
+#   Package the run for a REVIEWER as an RO-Crate (doc 52 row 23): the event log and trace, the
+#   launch snapshots, the champion's code off the folded record, every memo's claims, the summary row
+#   (number, caveats, Mislead pair, seeds) and the audit sidecars, each described with its size and
+#   SHA-256 in ro-crate-metadata.json. Includes verified recorded seed bases and their availability
+#   index; the event log stays unchanged. Does not archive data/environment or certify replay.
 @app.command(name="export-bundle")
 def export_bundle_cmd(
     run_dir: Path = typer.Argument(..., help="Run dir to bundle."),
     out: Optional[Path] = typer.Option(None, help="Bundle directory (default: `<run>/bundle`)."),
     verify: bool = typer.Option(True, help="Re-check file digests and recorded base archive identities."),
 ):
-    """Package the run for a REVIEWER as an RO-Crate (doc 52 row 23): the event log and trace, the
-    launch snapshots, the champion's code off the folded record, every memo's claims, the summary row
-    (number, caveats, Mislead pair, seeds) and the audit sidecars, each described with its size and
-    SHA-256 in ro-crate-metadata.json. Includes verified recorded seed bases and their availability
-    index; the event log stays unchanged. Does not archive data/environment or certify replay."""
+    """Package the run for a reviewer as an RO-Crate.
+
+    The event log and trace, the launch snapshots, the champion's code, the research claims, the
+    summary row and the audit sidecars, each with its size and SHA-256 in ro-crate-metadata.json, plus
+    the recorded seed bases. The event log is unchanged; data and the environment are not archived,
+    and the bundle does not certify replay."""
     from looplab.engine.bundle import RO_CRATE_METADATA, export_bundle, verify_bundle
 
     _require_run_dir(run_dir)
@@ -277,23 +286,39 @@ def _export_git_target_refusal(run_dir: Path, out: Path) -> Optional[str]:
     return None
 
 
+# THE FULL CONTRACT this command's `--help` printed until doc 75 UX-11, verbatim; the help
+# now speaks to the user and the provenance lives here, beside the code it describes:
+#
+#   Export the run's node DAG as a GIT REPOSITORY: one commit per node lifecycle, its parents the
+#   exact parent lifecycles it was built from, its own files as the tree, the metric and the receipts
+#   that decide whether it counts as `Looplab-*` trailers (doc 67 67.15, `events/git_export.py`).
+#   Each node's current lifecycle is tag `node-<id>`, one a reset or the holdout epoch's requeue
+#   superseded `node-<id>.g<gen>`; branch `champion` is the fold's best and is checked out, branch
+#   `promoted` the operator's promote alias when there is one. Read-only on the run; the export is a
+#   projection of the log, never read back. A commit holds saved node edits, not the task's base,
+#   runtime inputs or environment. Scope and an available event-bound base reference ride in the
+#   message; the export performs no delivery to the task repository. Git runs hermetically —
+#   no GIT_* variable, no user or system
+#   config and no system gitattributes reach it — and the repository is built beside OUT and moved
+#   into place only once it is whole.
 @app.command(name="export-git")
 def export_git(
     run_dir: Path = typer.Argument(..., help="Run dir whose node DAG to export."),
-    out: Path = typer.Argument(..., help="Directory for the new git repository (absent or empty)."),
+    out_arg: Optional[Path] = typer.Argument(None, metavar="[OUT]", show_default=False,
+                                              help="Same as --out (kept for existing scripts)."),
+    out_opt: Optional[Path] = typer.Option(
+        None, "--out", help="Directory for the new git repository (absent or empty)."),
 ):
-    """Export the run's node DAG as a GIT REPOSITORY: one commit per node lifecycle, its parents the
-    exact parent lifecycles it was built from, its own files as the tree, the metric and the receipts
-    that decide whether it counts as `Looplab-*` trailers (doc 67 67.15, `events/git_export.py`).
-    Each node's current lifecycle is tag `node-<id>`, one a reset or the holdout epoch's requeue
-    superseded `node-<id>.g<gen>`; branch `champion` is the fold's best and is checked out, branch
-    `promoted` the operator's promote alias when there is one. Read-only on the run; the export is a
-    projection of the log, never read back. A commit holds saved node edits, not the task's base,
-    runtime inputs or environment. Scope and an available event-bound base reference ride in the
-    message; the export performs no delivery to the task repository. Git runs hermetically —
-    no GIT_* variable, no user or system
-    config and no system gitattributes reach it — and the repository is built beside OUT and moved
-    into place only once it is whole."""
+    """Export the run's experiment tree as a git repository.
+
+    One commit per experiment, its parents the experiments it was built from, its metric and receipts
+    as `Looplab-*` trailers. Tag `node-<id>` is each experiment's current version; branch `champion`
+    is the best and is checked out. Read-only on the run. Git runs with no user or system
+    configuration, and the repository is moved into OUT only once it is complete."""
+    # `--out`, like every other export (doc 75 UX-12); the positional OUT stays for existing scripts.
+    if (out_arg is None) == (out_opt is None):
+        raise typer.BadParameter("give the output directory once: --out OUT (or the positional OUT)")
+    out = out_opt if out_opt is not None else out_arg
     import shutil
     import subprocess
     import tempfile

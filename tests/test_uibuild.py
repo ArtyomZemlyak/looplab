@@ -459,3 +459,22 @@ def test_no_sources_degrades_gracefully(tmp_path, monkeypatch):
 
     assert uibuild.ensure_ui_built(log=logs.append) is False
     assert any("cannot build" in m.lower() for m in logs)
+
+
+def test_a_build_step_is_quiet_when_it_works_and_shows_its_tail_when_it_fails(tmp_path):
+    """doc 75 UX-34: a first `looplab ui` printed ~100 lines of npm/Vite output for a one-time build.
+    Driven with a real child that prints 100 lines: nothing of it on success; on failure the last
+    `_FAILED_OUTPUT_TAIL_LINES` lines, where npm and Vite put the error, then the exit line."""
+    import sys
+
+    from looplab.serve import uibuild
+
+    noisy = [sys.executable, "-c", "import sys\nfor i in range(100): print(f'line {i}')\n"
+             "sys.exit(int(sys.argv[1]))"]
+    logged = []
+    assert uibuild._run([*noisy, "0"], cwd=tmp_path, log=logged.append) is True
+    assert logged == []
+    assert uibuild._run([*noisy, "3"], cwd=tmp_path, log=logged.append) is False
+    assert logged[0] == f"[ui]   line {100 - uibuild._FAILED_OUTPUT_TAIL_LINES}"
+    assert logged[-2] == "[ui]   line 99" and logged[-1].endswith("exited 3")
+    assert len(logged) == uibuild._FAILED_OUTPUT_TAIL_LINES + 1

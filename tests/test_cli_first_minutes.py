@@ -59,3 +59,17 @@ def test_init_of_an_offline_kind_runs_with_no_model_and_says_nothing_about_one(t
     result = CliRunner().invoke(app, ["init", "--kind", "quadratic"])
     assert result.exit_code == 0 and "needs a model" not in result.output, result.output
     assert yaml.safe_load((tmp_path / "looplab.yaml").read_text())["settings"]["backend"] == "toy"
+
+
+def test_export_git_takes_out_like_every_other_export(tmp_path):
+    """doc 75 UX-12: `export-notebook`/`-bundle`/`-sft` take `--out`; `export-git` took only a
+    positional, and `--out` answered "No such option". Both forms now work; both or neither refuse."""
+    run_dir = tmp_path / "demo"
+    assert CliRunner().invoke(app, ["run", str(ROOT / "examples" / "demo.yaml"),
+                                    "--out", str(run_dir)]).exit_code == 0
+    flagged = CliRunner().invoke(app, ["export-git", str(run_dir), "--out", str(tmp_path / "g1")])
+    assert flagged.exit_code == 0 and (tmp_path / "g1" / ".git").is_dir(), flagged.output
+    positional = CliRunner().invoke(app, ["export-git", str(run_dir), str(tmp_path / "g2")])
+    assert positional.exit_code == 0 and (tmp_path / "g2" / ".git").is_dir(), positional.output
+    for args in ([], [str(tmp_path / "g3"), "--out", str(tmp_path / "g4")]):
+        assert CliRunner().invoke(app, ["export-git", str(run_dir), *args]).exit_code == 2

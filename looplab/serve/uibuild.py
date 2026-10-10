@@ -90,19 +90,33 @@ def _has_npm() -> bool:
     return shutil.which("npm") is not None
 
 
+# How much of a failed npm step's output is shown (doc 75 UX-34).
+_FAILED_OUTPUT_TAIL_LINES = 40
+
+
 def _run(args: Sequence[str], *, cwd: Path, log: Callable[[str], None]) -> bool:
-    """Run a command, streaming its output to the inherited stdio. Returns True on exit 0.
+    """Run a command with its output CAPTURED; returns True on exit 0.
+
+    QUIET ON SUCCESS (doc 75 UX-34): a first `looplab ui` printed about a hundred lines of npm and
+    Vite output for a one-time ~20 s build the user did not ask about. The `[ui] …` lines around this
+    call say what is happening; the tool's own output is shown only when the step FAILS, as its last
+    `_FAILED_OUTPUT_TAIL_LINES` lines, which is where npm and Vite put the error.
 
     On Windows `npm` is the `npm.cmd` shim, which CreateProcess can't launch directly, so we go
     through the shell there; elsewhere we exec the argv list with PATH lookup (no shell)."""
     use_shell = os.name == "nt"
     cmd: object = subprocess.list2cmdline(list(args)) if use_shell else list(args)
     try:
-        proc = subprocess.run(cmd, cwd=str(cwd), shell=use_shell)  # noqa: S603 - fixed argv, trusted
+        proc = subprocess.run(cmd, cwd=str(cwd), shell=use_shell,  # noqa: S603 - fixed argv, trusted
+                              stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                              text=True, encoding="utf-8", errors="replace")
     except OSError as e:
         log(f"[ui] failed to run `{' '.join(args)}`: {e}")
         return False
     if proc.returncode != 0:
+        tail = (proc.stdout or "").splitlines()[-_FAILED_OUTPUT_TAIL_LINES:]
+        for line in tail:
+            log(f"[ui]   {line}")
         log(f"[ui] `{' '.join(args)}` exited {proc.returncode}")
         return False
     return True
@@ -658,7 +672,7 @@ def _ensure_ui_built_locked(
         log(f"[ui] could not prepare the UI staging directory: {exc}")
         return False
 
-    log("[ui] building the React bundle (npm run build)…")
+    log("[ui] building the React bundle once (npm run build, about 20 s)…")
     try:
         # Nothing below this line can damage an existing bundle: the build writes only into `stage`,
         # and `dist` is not touched until a staged bundle has been verified AND stamped.

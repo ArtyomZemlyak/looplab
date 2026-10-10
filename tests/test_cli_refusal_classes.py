@@ -31,6 +31,7 @@ CLI = ROOT / "looplab" / "cli"
 # "Try --help" are the right answer.
 SYNTAX = {
     ("__init__", "_choice"): 1,                           # a value outside a flag's choices
+    ("export_cmds", "export_git"): 1,                     # OUT given twice, or not at all
     ("harness_cmds", "harness_mcp"): 1,                   # a ValueError that is not a refusal
     ("run_cmds", "_calibration_envelope_task_dict"): 1,   # --speculation-gate-calibration's flags
     ("run_cmds", "_pin_offline_speculation_profile"): 3,  # calibration/receipt flag combinations

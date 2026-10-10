@@ -9,6 +9,7 @@ the bottom of the list.
 from __future__ import annotations
 
 import re
+from pathlib import Path
 
 from typer.testing import CliRunner
 
@@ -67,3 +68,75 @@ def test_a_command_still_prints_its_full_docstring():
     """Only the LIST summary comes from the table; `<command> --help` keeps the full contract."""
     out = _help("stop")
     assert "WITHOUT finalizing" in out
+
+
+def test_run_help_reads_at_80_columns_and_defines_genesis(monkeypatch):
+    """doc 75 UX-10: 23 options in one panel left about 20 characters for each description at 80
+    columns, "Genesis" appeared three times undefined, and the form every example uses was called
+    "legacy". Rich lays out each `rich_help_panel` as its own table, so grouping narrows the flag
+    column; the three `--x/--no-x` pairs that set it widest are `Settings` fields `-s` reaches and
+    are hidden (they still work). Measured on a wrapped line's indent: the help column."""
+    import re
+
+    monkeypatch.setenv("COLUMNS", "80")
+    text = CliRunner().invoke(app, ["run", "--help"], terminal_width=80).output
+    panel, indents = None, {}
+    for line in text.splitlines():
+        head = re.match(r"╭─ (.+?) ─", line)
+        if head:
+            panel = head.group(1)
+            continue
+        if line.startswith("╰"):
+            panel = None
+            continue
+        wrapped = re.match(r"│(\s+)(\S.*?)\s*│\s*$", line)
+        if panel and panel != "Arguments" and wrapped and not wrapped.group(2).startswith("-"):
+            indents.setdefault(panel, set()).add(len(wrapped.group(1)) + 1)
+    widths = {name: 80 - 2 - min(found) for name, found in indents.items()}
+    assert widths and min(widths.values()) >= 40, widths
+    assert "legacy" not in text
+    assert "Genesis: a model writes the task" in " ".join(text.split())
+    for hidden in ("--validate-agent", "--agent-patch-gate", "--require-approval"):
+        assert hidden not in text
+
+
+# doc 75 UX-11: the help a USER reads. These panels hold the commands of the first hour; their
+# `--help` cites no internal document or module and fits a screen. Maintainer and research commands
+# that still cite are a SHRINK-ONLY backlog (`tests/data/help_citation_backlog.txt`).
+_USER_PANELS = ("Start here", "Run control", "External coding agent", "Export")
+_USER_EXTRA = ("comparability",)
+_CITATION = re.compile(r"doc ?\d|§|[a-z_]+\.py\b|::|ADR-")
+
+
+def _help80(command: str) -> str:
+    return _ANSI.sub("", CliRunner().invoke(app, [command, "--help"], terminal_width=80).output)
+
+
+def _all_commands():
+    return [(panel, name) for panel, rows in HELP_PANELS for name, _ in rows]
+
+
+def test_the_help_a_user_reads_cites_no_internal_document_and_fits_a_screen():
+    users = [name for panel, name in _all_commands() if panel in _USER_PANELS] + list(_USER_EXTRA)
+    offenders = {}
+    for name in users:
+        text = _help80(name)
+        cited = [line.strip() for line in text.splitlines() if _CITATION.search(line)]
+        if cited or len(text.splitlines()) > 60:
+            offenders[name] = (len(text.splitlines()), cited[:2])
+    assert offenders == {}
+
+
+def test_maintainer_help_citations_only_shrink():
+    backlog = {line.strip() for line in
+               (Path(__file__).parent / "data" / "help_citation_backlog.txt").read_text().splitlines()
+               if line.strip() and not line.startswith("#")}
+    citing = {name for _, name in _all_commands() if _CITATION.search(_help80(name))}
+    assert citing - backlog == set(), "a new --help cites an internal document; say it for the user"
+    assert backlog - citing == set(), "a backlog command no longer cites: delete its row"
+
+
+def test_tui_names_the_role_it_calls_the_assistant():
+    text = " ".join(_help80("tui").split())
+    assert "the run-chat Assistant (the agent role named `boss` in settings)" in text or \
+        "the run-chat Assistant (the agent role named boss in settings)" in text

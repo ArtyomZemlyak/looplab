@@ -15,6 +15,23 @@ import typer
 from looplab.cli import app
 
 
+# THE FULL CONTRACT this command's `--help` printed until doc 75 UX-11, verbatim; the help
+# now speaks to the user and the provenance lives here, beside the code it describes:
+#
+#   Serve the live React UI over the run dirs (needs the [ui] extra: pip install 'looplab[ui]').
+#
+#   A separate read/control process (ADR-18): tails events.jsonl -> SSE, serves the built React
+#   app, and turns UI actions into appended control events. Does not change the engine.
+#
+#   On launch the React bundle is built automatically when it's missing or stale and Node/npm are on
+#   PATH, so a fresh `pip install -e ".[ui]"` needs no manual `npm run build`. A failed build cannot
+#   damage the bundle you already had — it is staged and published only once verified — but this
+#   command still refuses to serve that older bundle under a requested build; use --no-build to
+#   accept that risk explicitly, or --rebuild to force a fresh build.
+#
+#   Under every flag, a publish an earlier process was KILLED in the middle of is repaired before
+#   anything else happens, so --no-build really does serve the last good bundle even on a box where
+#   no build can run.
 @app.command()
 def ui(run_root: Path = typer.Option(
            Path(os.environ.get("LOOPLAB_RUN_ROOT", "runs")),
@@ -38,20 +55,11 @@ def ui(run_root: Path = typer.Option(
                                         "build, not the repair of an interrupted publish."),
        rebuild: bool = typer.Option(False, "--rebuild",
                                     help="Force a fresh `npm run build` even if a bundle exists.")):
-    """Serve the live React UI over the run dirs (needs the [ui] extra: pip install 'looplab[ui]').
+    """Serve the web UI over the run directories (needs the [ui] extra: pip install 'looplab[ui]').
 
-    A separate read/control process (ADR-18): tails events.jsonl -> SSE, serves the built React
-    app, and turns UI actions into appended control events. Does not change the engine.
-
-    On launch the React bundle is built automatically when it's missing or stale and Node/npm are on
-    PATH, so a fresh `pip install -e ".[ui]"` needs no manual `npm run build`. A failed build cannot
-    damage the bundle you already had — it is staged and published only once verified — but this
-    command still refuses to serve that older bundle under a requested build; use --no-build to
-    accept that risk explicitly, or --rebuild to force a fresh build.
-
-    Under every flag, a publish an earlier process was KILLED in the middle of is repaired before
-    anything else happens, so --no-build really does serve the last good bundle even on a box where
-    no build can run."""
+    It reads each run's event log and turns UI actions into control events; it does not change the
+    engine. The UI bundle is built on first launch when Node and npm are available: --no-build serves
+    the last good bundle, --rebuild forces a fresh one."""
     from looplab.serve.uibuild import (  # no third-party imports; fine before the [ui] check
         ensure_ui_built,
         is_built,
@@ -128,10 +136,10 @@ def tui(server: Optional[str] = typer.Option(
             help="Directory of run subdirs — used only when auto-launching a server. Defaults to "
                  "$LOOPLAB_RUN_ROOT or ./runs.")):
     """Drive LoopLab from the terminal: a chat-first TUI to start runs, watch what's running, and steer
-    the boss — the most-used slice of the web UI, no browser needed.
+    the run-chat Assistant (the agent role named `boss` in settings) — no browser needed.
 
-    Describe a goal, review the boss's proposed run spec, then explicitly launch it; pick a running
-    experiment to see its status at a glance and chat with the boss to change course (its actions
+    Describe a goal, review the Assistant's proposed run spec, then explicitly launch it; pick a running
+    experiment to see its status at a glance and chat with the Assistant to change course (its actions
     apply to the live run). It is a thin
     client of the same control plane `looplab ui` serves, so a server is auto-started when none is found
     (API only — no React build); point it at a remote one with --server."""

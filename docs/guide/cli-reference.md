@@ -167,12 +167,12 @@ solve:
 ```bash
 looplab run --goal "predict target; data is in ~/proj/data"   # Genesis authors the whole task
 looplab run config.yaml                          # one file: task + settings + out
-looplab run task.json --max-nodes 20             # a bare task file + flags (legacy; needs a live endpoint)
+looplab run task.json --max-nodes 20             # a bare task file + flags (needs a live endpoint)
 looplab run --kind dataset --goal "..." -s backend=llm        # pin the kind, Genesis fills the rest
 ```
 
 A config file may be **unified** (top-level `task:` / `settings:` / `out:` keys) or a **bare task**
-(the legacy format — the whole file is the task). YAML and JSON are both accepted.
+(the whole file is the task — the form every example in `examples/` uses). YAML and JSON are both accepted.
 
 **Genesis (author the task from a plain goal).** Pass `--goal` and the LLM authors the task. This is
 the CLI planning surface; the Web **New run** flow uses the owner Assistant's `propose_run` tool and
@@ -3106,7 +3106,7 @@ The run's node DAG as a **git repository**, so `git log --graph`, `git diff node
 `git bisect` and `git blame` read it (doc 67 67.15, `events/git_export.py`).
 
 ```bash
-looplab export-git RUN_DIR OUT_DIR
+looplab export-git RUN_DIR --out OUT_DIR    # or the positional form: looplab export-git RUN_DIR OUT_DIR
 ```
 
 | Argument | Description |

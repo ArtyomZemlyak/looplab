@@ -1068,48 +1068,44 @@ def _explicit_setting_names(typed: dict, sets: dict, launcher_names) -> tuple[st
 @app.command()
 def run(
     task_file: Optional[Path] = typer.Argument(
-        None, help="Config or task file (YAML or JSON). A unified file has task:/settings:/out: keys; "
-                   "a bare task file is just the task. Omit it and build the task from --goal/--kind."),
-    goal: Optional[str] = typer.Option(None, help="Task goal in plain words (build a task with no file)."),
-    kind: Optional[str] = typer.Option(None, help=f"Task kind. With --goal it PINS the kind and "
-                                                  f"Genesis fills the rest; with --no-genesis it's used "
-                                                  f"as written. One of: {', '.join(_TASK_KINDS)}."),
-    direction: Optional[str] = typer.Option(None, help="Optimize: min | max."),
-    data: Optional[str] = typer.Option(None, help="Path to your data/repo. Optional under Genesis — "
-                                                  "you can instead just say where the data is in --goal."),
+        None, help="Config file (task:/settings:/out:) or a bare task file, YAML or JSON."),
+    goal: Optional[str] = typer.Option(None, help="Task goal in plain words.", rich_help_panel="Task"),
+    kind: Optional[str] = typer.Option(None, help=f"Task kind: {', '.join(_TASK_KINDS)}.",
+                                       rich_help_panel="Task"),
+    direction: Optional[str] = typer.Option(None, help="Optimize: min | max.", rich_help_panel="Task"),
+    data: Optional[str] = typer.Option(None, help="Path to your data or repo.", rich_help_panel="Task"),
     genesis: Optional[bool] = typer.Option(
         None, "--genesis/--no-genesis",
-        help="Genesis: a model writes the task from your --goal (--kind pins the kind; data "
-             "locations you mention are picked up). On by default with a model backend, off with "
-             "--backend toy. --no-genesis builds the task from --kind/--goal/--direction/--data."),
+        help="Genesis: a model writes the task from your --goal. On with a model backend, off with "
+             "--backend toy; --no-genesis builds it from the flags.",
+        rich_help_panel="Genesis"),
     set_: list[str] = typer.Option(
         [], "--set", "-s", metavar="KEY=VALUE",
-        help="Override any non-credential engine setting, repeatable "
-             "(e.g. -s max_nodes=20 -s policy=asha). Same non-secret keys as the settings: "
-             "block / LOOPLAB_* env; runtime credential fields are refused."),
-    out: Optional[Path] = typer.Option(None, help="Run directory (default: the file's out: or runs/run_local)."),
-    max_nodes: Optional[int] = typer.Option(None, help="Override node budget."),
-    backend: Optional[str] = typer.Option(None, help="Role backend: toy | llm."),
+        help="Any engine setting, repeatable (-s max_nodes=20 -s policy=asha); not credentials.",
+        rich_help_panel="Budget and output"),
+    out: Optional[Path] = typer.Option(None, help="Run directory (default: the file's out: or runs/run_local).", rich_help_panel="Budget and output"),
+    max_nodes: Optional[int] = typer.Option(None, help="Override node budget.", rich_help_panel="Budget and output"),
+    backend: Optional[str] = typer.Option(None, help="Role backend: toy | llm.", rich_help_panel="Model"),
     developer_backend: Optional[str] = typer.Option(
-        None, help="Developer: default | codex | claude | opencode | aider | goose | continue."),
+        None, help="Developer: default | codex | claude | opencode | aider | goose | continue.", rich_help_panel="External coding agent"),
     agent_cmd: Optional[str] = typer.Option(
-        None, help="Path/launcher override for the external coding agent."),
+        None, help="Path/launcher override for the external coding agent.", rich_help_panel="External coding agent"),
     validate_agent: Optional[bool] = typer.Option(
         None, help="Validate external-agent output; retry, then use the task's original in-process "
-                   "Developer fallback. Default on."),
+                   "Developer fallback. Default on.", rich_help_panel="External coding agent", hidden=True),
     agent_patch_gate: Optional[bool] = typer.Option(
-        None, help="Run the agent in a git worktree and surface-gate its diff. Default on."),
+        None, help="Run the agent in a git worktree and surface-gate its diff. Default on.", rich_help_panel="External coding agent", hidden=True),
     agent_surface: Optional[str] = typer.Option(
-        None, help="Comma-separated edit-surface globs for the agent (default '*.py')."),
-    model: Optional[str] = typer.Option(None, help="LLM model id (when backend=llm)."),
-    knowledge_dir: Optional[str] = typer.Option(None, help="Notes dir for agentic retrieval."),
-    memory_dir: Optional[str] = typer.Option(None, help="Cross-run case memory dir."),
-    max_seconds: Optional[float] = typer.Option(None, help="Wall-clock budget; abort when exceeded."),
-    ablate_every: Optional[int] = typer.Option(None, help="Ablation refinement every N improves (0=off)."),
+        None, help="Comma-separated edit-surface globs for the agent (default '*.py').", rich_help_panel="External coding agent"),
+    model: Optional[str] = typer.Option(None, help="LLM model id (when backend=llm).", rich_help_panel="Model"),
+    knowledge_dir: Optional[str] = typer.Option(None, help="Notes dir for agentic retrieval.", rich_help_panel="Model"),
+    memory_dir: Optional[str] = typer.Option(None, help="Cross-run case memory dir.", rich_help_panel="Model"),
+    max_seconds: Optional[float] = typer.Option(None, help="Wall-clock budget; abort when exceeded.", rich_help_panel="Budget and output"),
+    ablate_every: Optional[int] = typer.Option(None, help="Ablation refinement every N improves (0=off).", rich_help_panel="Confirmation"),
     require_approval: Optional[bool] = typer.Option(
-        None, help="HITL: pause for `approve` before finishing."),
-    confirm_top_k: Optional[int] = typer.Option(None, help="Confirm top-k under multiple seeds."),
-    confirm_seeds: Optional[int] = typer.Option(None, help="Seeds for the confirmation pass."),
+        None, help="HITL: pause for `approve` before finishing.", rich_help_panel="Confirmation", hidden=True),
+    confirm_top_k: Optional[int] = typer.Option(None, help="Confirm top-k under multiple seeds.", rich_help_panel="Confirmation"),
+    confirm_seeds: Optional[int] = typer.Option(None, help="Seeds for the confirmation pass.", rich_help_panel="Confirmation"),
     crash_after: Optional[int] = typer.Option(None, hidden=True,
                                               help="Test hook: hard-exit after N evals."),
     speculation_gate_calibration: bool = typer.Option(
@@ -1124,15 +1120,8 @@ def run(
 ):
     """Start a new run (or continue if the run dir already has events).
 
-    Three equivalent ways to say what to solve:
-
-      - looplab run config.yaml                # one file: task + settings + out
-      - looplab run task.json --max-nodes 20   # a bare task file + flags (legacy)
-      - looplab run --kind dataset --goal "predict target" --data data.csv -s backend=llm
-
-    Any non-credential engine setting can be overridden with `-s/--set key=value` (parity with the
-    non-secret settings block and LOOPLAB_* env fields). Runtime credentials are refused so they do
-    not enter shell history. Run `looplab init` to scaffold a documented config file.
+    Say what to solve with a config file (task + settings + out), a bare task file plus flags, or
+    flags alone (--kind/--goal/--data). `looplab init` writes a documented config file.
     Offline demo, no model needed: `looplab run examples/demo.yaml`."""
     # Maintainer note: the typed `--flag` surface above is FROZEN. `-s/--set` already reaches every
     # non-credential `Settings` field, so a NEW ordinary engine knob needs only a `Settings` field — do
@@ -1352,6 +1341,17 @@ def run(
     _exit_nonzero_if_the_run_produced_nothing(state, out, wrap_up_only=is_wrap_up(prior_kind))
 
 
+# THE FULL CONTRACT this command's `--help` printed until doc 75 UX-11, verbatim; the help
+# now speaks to the user and the provenance lives here, beside the code it describes:
+#
+#   Resume a crashed/incomplete run by re-entering the loop (replay-based).
+#
+#   `--drain-only` (doc 68 68.3a) finishes the OWED evaluations (`engine/run_boundary.py::
+#   drain_owed`) and pauses, so a `node_reset {from_stage: "score"}` can be rescored without resuming
+#   the search — re-running its whole pipeline while stage reuse after a reset is off (doc 68
+#   68.3e); a later plain `resume` continues it. `drain_only_refusal` decides, before anything
+#   is appended, which runs it will not drive — and the server's command worker asks it too before
+#   it spawns a drain for a `node_reset` command (doc 68 68.3b).
 @app.command()
 def resume(
     run_dir: Path = typer.Argument(..., help="Existing run directory to resume."),
@@ -1364,14 +1364,11 @@ def resume(
              "evaluation that never finished — then pause. Creates no node, dispatches no build the "
              "search made, serves no queued request, runs no cadence."),
 ):
-    """Resume a crashed/incomplete run by re-entering the loop (replay-based).
+    """Continue a stopped, crashed or finished run from its event log.
 
-    `--drain-only` (doc 68 68.3a) finishes the OWED evaluations (`engine/run_boundary.py::
-    drain_owed`) and pauses, so a `node_reset {from_stage: "score"}` can be rescored without resuming
-    the search — re-running its whole pipeline while stage reuse after a reset is off (doc 68
-    68.3e); a later plain `resume` continues it. `drain_only_refusal` decides, before anything
-    is appended, which runs it will not drive — and the server's command worker asks it too before
-    it spawns a drain for a `node_reset` command (doc 68 68.3b)."""
+    `--drain-only` evaluates only what a reset or an interruption left owed, then pauses again — for
+    example to rescore an experiment after `node_reset`; a later plain `resume` continues the search.
+    A finished run with no node budget left is not reopened: raise it with --max-nodes."""
     # Called as a plain function too (see the `max_nodes` note below): an omitted option is Typer's
     # `OptionInfo` sentinel there, which must read as "off", never as a truthy object.
     drain_only = drain_only is True
@@ -2326,22 +2323,31 @@ def approve(run_dir: Path = typer.Argument(..., help="Run dir awaiting approval.
     typer.echo(f"approved node {nid} for run {run_dir.name}")
 
 
+# THE FULL CONTRACT this command's `--help` printed until doc 75 UX-11, verbatim; the help
+# now speaks to the user and the provenance lives here, beside the code it describes:
+#
+#   The upstream automation's KILL SWITCH from a terminal (doc 73 §4.2 G2, doc 73 §4.3).
+#
+#   `off` stops the live engine's automatic author (fixes from repairs, the champion's capability) and
+#   its automatic check and advance; operations an operator queues are still served. `on` resumes
+#   them. The SAME control event `/commands` appends (`upstream_auto_set {enabled, reason}`), through
+#   the same payload rule (`engine/upstream_switch.py::normalize_upstream_auto_set`); a running engine
+#   reads it at its next turn, a stopped run keeps it for its next engine. A switch already in the
+#   requested position appends nothing and says so; a write that lands between this command's read
+#   and its append refuses it (exit 2, nothing appended — re-run). `looplab inspect` shows the
+#   switch, the queue, the held steps, the author's spend and outcomes, and the advances of the last
+#   hour.
 @app.command(name="upstream-auto")
 def upstream_auto_cmd(
         run_dir: Path = typer.Argument(..., help="The run whose upstream automation to switch."),
         state: str = typer.Argument(..., help="'off' stops every AUTOMATIC upstream step; 'on' resumes them."),
         reason: Optional[str] = typer.Option(None, "--reason", help="Why (kept in the upstream history).")):
-    """The upstream automation's KILL SWITCH from a terminal (doc 73 §4.2 G2, doc 73 §4.3).
+    """Switch a run's upstream automation off or on — its kill switch from a terminal.
 
-    `off` stops the live engine's automatic author (fixes from repairs, the champion's capability) and
-    its automatic check and advance; operations an operator queues are still served. `on` resumes
-    them. The SAME control event `/commands` appends (`upstream_auto_set {enabled, reason}`), through
-    the same payload rule (`engine/upstream_switch.py::normalize_upstream_auto_set`); a running engine
-    reads it at its next turn, a stopped run keeps it for its next engine. A switch already in the
-    requested position appends nothing and says so; a write that lands between this command's read
-    and its append refuses it (exit 2, nothing appended — re-run). `looplab inspect` shows the
-    switch, the queue, the held steps, the author's spend and outcomes, and the advances of the last
-    hour."""
+    `off` stops the automatic author (fixes from repairs, the champion's capability) and the automatic
+    check and advance; operations an operator queues are still served. `on` resumes them. A running
+    engine reads the switch at its next turn; a stopped run keeps it for its next engine. A switch
+    already in that position appends nothing. `looplab inspect` shows the switch and its queue."""
     from looplab.core.errors import ConfigRefusal
     from looplab.engine.upstream_switch import set_upstream_auto
     choice = state.strip().lower()
