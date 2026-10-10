@@ -51,6 +51,10 @@ def test_agents_md_opens_with_a_short_first_run_sequence():
     for step in ("looplab ui", "external_harness=true", "harness-mcp", "connection_check",
                  "result_notices"):
         assert step in first, step
+    # doc 75 §12 (critic 2): Codex and other clients load `AGENTS.md` as a REPOSITORY's contributor
+    # instructions, so a contributor's agent read the harness contract. The head says whose file it is.
+    head = re.split(r"^## ", text, flags=re.M)[0]
+    assert "CLAUDE.md" in head and "changing LoopLab's own code" in head
 
 
 def test_entry_pages_point_at_the_offline_demo_rather_than_a_flag_footnote():

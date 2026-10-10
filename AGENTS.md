@@ -1,5 +1,10 @@
 # LoopLab as an external agent harness
 
+> **Which guide is yours.** This file is for an agent that *drives LoopLab* — proposing candidates
+> for a run it evaluates. An agent *changing LoopLab's own code* in this repository reads
+> [`CLAUDE.md`](CLAUDE.md) (commands, package map, invariants); the contract below does not apply
+> to editing this repository.
+
 ## First run in five steps
 
 1. The operator installs `pip install -e ".[ui,harness]"`, sets `LOOPLAB_UI_TOKEN` and a different
