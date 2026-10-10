@@ -52,6 +52,22 @@ export default function ConceptChipBar({ state, onHighlight }) {
 
   const hasConcepts = useMemo(
     () => Object.values(nodeConcepts).some(v => v && v.length), [nodeConcepts])
+  // Whether the run is TAGGED at all. The withheld-row notice said "(the run is tagged)" on the
+  // offline demo, where nothing was ever tagged: its one merge experiment gets an unavailable receipt
+  // only because its parents have no membership to inherit (doc 75 UX-19). That one cause, with no row
+  // naming a concept, is the untagged case; any other cause (a cycle, a cap) is a tagged row that could
+  // not be resolved. The row stays disclosed either way — absence inside it is still not truth.
+  const taggedAnywhere = useMemo(() => {
+    const rows = state?.node_concepts || {}
+    if (Object.values(rows).some(v => Array.isArray(v) && v.length)) return true
+    const receipts = state?.node_concept_materialization_receipts
+    if (!receipts || typeof receipts !== 'object' || Array.isArray(receipts)) return true
+    return Object.keys(rows).some(key => {
+      const reasons = receipts[key]?.reasons
+      return !Array.isArray(reasons) || !reasons.length
+        || reasons.some(reason => reason !== 'delta_dependency_unknown_parent_membership')
+    })
+  }, [state?.node_concepts, state?.node_concept_materialization_receipts])
   const chips = useMemo(() => chipsAtPath(nodeConcepts, rename, path), [nodeConcepts, rename, path])
   const crumbs = useMemo(() => breadcrumb(path), [path])
 
@@ -140,8 +156,11 @@ export default function ConceptChipBar({ state, onHighlight }) {
     <div className="concept-bar" role={materialization === 'unavailable' ? 'alert' : 'status'}>
       <div className="cb-head">
         <strong>{uiText("Concepts")}</strong>
-        <span className="chip xs warn">{materialization.toUpperCase()}</span>
-        <span className="muted">{((materialization === 'unavailable' ? uiText('Membership unavailable; not empty.') : uiPlural(withheld, 'Concept tags of {0} tagged experiment are hidden here (the run is tagged); open Concepts to see why.', 'Concept tags of {0} tagged experiments are hidden here (the run is tagged); open Concepts to see why.')))}</span>
+        {(materialization === 'unavailable' || taggedAnywhere)
+          && <span className="chip xs warn">{materialization.toUpperCase()}</span>}
+        <span className="muted">{((materialization === 'unavailable' ? uiText('Membership unavailable; not empty.')
+          : taggedAnywhere ? uiPlural(withheld, 'Concept tags of {0} tagged experiment are hidden here (the run is tagged); open Concepts to see why.', 'Concept tags of {0} tagged experiments are hidden here (the run is tagged); open Concepts to see why.')
+            : uiPlural(withheld, "No concept tags are recorded in this run; {0} experiment's could not be worked out from its parents. Open Concepts for details.", "No concept tags are recorded in this run; {0} experiments' could not be worked out from their parents. Open Concepts for details.")))}</span>
       </div>
     </div>
   )

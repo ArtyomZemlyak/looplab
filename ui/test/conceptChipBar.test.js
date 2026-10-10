@@ -77,6 +77,19 @@ test('ConceptChipBar withholds the degraded row and keeps the rest of the run fi
     assert.match(allWithheld.body.textContent, /Concept tags of 1 tagged experiment are hidden here \(the run is tagged\)/)
     assert.equal(allWithheld.querySelector('.cb-chip'), null)
 
+    // doc 75 UX-19: the offline demo tags nothing, and its one merge experiment is withheld only
+    // because its parents have no membership to inherit. Still disclosed, without the false claim.
+    const untagged = render({
+      nodes: { 0: { id: 0 }, 5: { id: 5 } }, node_concepts: { 5: [] },
+      node_concept_materialization_receipts: {
+        5: { status: 'unavailable', reasons: ['delta_dependency_unknown_parent_membership'] },
+      },
+    })
+    assert.equal(untagged.querySelector('.concept-bar')?.getAttribute('role'), 'status')
+    assert.doesNotMatch(untagged.body.textContent, /the run is tagged|PARTIAL/)
+    assert.match(untagged.body.textContent,
+      /No concept tags are recorded in this run; 1 experiment's could not be worked out from its parents/)
+
     // The run-SCOPED refusal is unchanged: a degraded run base taints the whole projection.
     const unavailable = render({ nodes: {}, node_concepts: {}, run_base_concept_receipt: {
       status: 'unavailable', reasons: ['delta_dependency_cycle'],
