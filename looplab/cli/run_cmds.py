@@ -58,7 +58,8 @@ from looplab.search.speculation_calibration import canonical_speculation_toy_tas
 from looplab.core import appconfig
 from looplab.core.models import RUN_STOP_ERROR, NodeStatus
 from looplab.serve.run_files import run_config_write_lock
-from looplab.cli import (_BACKENDS, _DEV_BACKENDS, _TASK_KINDS, _choice, _engine_singleton,
+from looplab.cli import (_BACKENDS, _DEV_BACKENDS, _TASK_KINDS, CliRefusal, _choice,
+                         _engine_singleton, task_refusal_text,
                          _apply_speculation_calibration_profile,
                          _assert_run_deletion_namespace_available,
                          _exit_nonzero_if_the_run_produced_nothing, _load_task, _print_result,
@@ -506,13 +507,13 @@ def _pending_finalization_inputs(run_dir: Path, task_id: str | None):
     config_snap = run_dir / "config.snapshot.json"
     missing = [path.name for path in (task_snap, config_snap) if not path.exists()]
     if missing:
-        raise typer.BadParameter(
+        raise CliRefusal(
             "cannot complete pending finalization without the original run snapshot(s): "
             + ", ".join(missing))
 
     recovery_task = _load_task(task_snap, existing_run=True)
     if task_id and recovery_task.id != task_id:
-        raise typer.BadParameter(
+        raise CliRefusal(
             f"task.snapshot.json belongs to task {recovery_task.id!r}, but the event log belongs "
             f"to {task_id!r}; refusing to finalize with mismatched inputs")
     return recovery_task, load_run_settings(run_dir, strict=True)
@@ -638,7 +639,7 @@ def _assert_calibration_dir_is_fresh(out: Path, prior_events) -> None:
             or stale_material:
         detail = (f"; stale material: {', '.join(stale_material)}"
                   if stale_material else "")
-        raise typer.BadParameter(
+        raise CliRefusal(
             "--speculation-gate-calibration requires a fresh empty run directory "
             "with exactly zero prior events" + detail
         )
@@ -860,7 +861,43 @@ def _open_and_drive(task, task_dict: dict, settings, out: Path, *, crash_after=N
     else:
         task_dict.pop("comparison_contract", None)
     _assert_run_startable(task, out)
+    created_here = not out.exists()
     out.mkdir(parents=True, exist_ok=True)
+    try:
+        return _open_and_drive_in(
+            task, settings, out, task_dict=task_dict, crash_after=crash_after,
+            speculation_gate_calibration=speculation_gate_calibration,
+            explicit_settings=explicit_settings, seed=seed, frozen_seed=frozen_seed)
+    except BaseException:
+        # A run REFUSED before its first event (an unreachable model, a refused setting) left
+        # `runs/<name>/engine.lock` behind, and the next `run` saw a used `--out` (doc 75 UX-33).
+        # Removed only when THIS invocation created the directory and it still holds nothing but
+        # the lock files — a log, a snapshot or anything else keeps it.
+        if created_here:
+            _remove_if_only_locks(out)
+        raise
+
+
+def _remove_if_only_locks(out: Path) -> None:
+    try:
+        entries = list(out.iterdir())
+    except OSError:
+        return
+    if all(entry.is_file() and entry.name.endswith(".lock") for entry in entries):
+        for entry in entries:
+            try:
+                entry.unlink()
+            except OSError:
+                return
+        try:
+            out.rmdir()
+        except OSError:
+            pass
+
+
+def _open_and_drive_in(task, settings, out, *, task_dict, crash_after,
+                       speculation_gate_calibration, explicit_settings, seed, frozen_seed):
+    """`_open_and_drive`'s body from the existing run directory on (split for the cleanup above)."""
     store = EventStore(out / "events.jsonl")
     _require_healthy_log(store, out)   # fail closed on a mid-file corruption before appending (P0-4)
     with _engine_singleton(out) as ok:
@@ -888,6 +925,16 @@ def _open_and_drive(task, task_dict: dict, settings, out: Path, *, crash_after=N
         # a second `run` on a dir a live engine already owns must NOT clobber config.snapshot.json /
         # task.snapshot.json. A later `resume` reads them, so a stale overwrite would re-enter the run
         # with the wrong settings/task.
+        # A finished run with no node left to mint or evaluate under THESE settings is not reopened:
+        # reopening re-ran the whole finalization (paid on a model run) for no new experiment
+        # (doc 75 UX-05). Nothing is written — not even the snapshots below.
+        if prior_kind == "finished" and not speculation_gate_calibration:
+            from looplab.engine.run_capacity import nothing_left_sentence
+            sentence = nothing_left_sentence(prior, prior_events, settings.max_nodes,
+                                             run_dir=out, verb="run")
+            if sentence:
+                typer.echo(sentence)
+                return None
         if finalization_pending:
             # The exact/scoped terminal boundary belongs to the ORIGINAL task/settings. Loading the
             # old snapshots before Engine construction prevents same-id changed flags from altering a
@@ -1010,10 +1057,10 @@ def _explicit_setting_names(typed: dict, sets: dict, launcher_names) -> tuple[st
         try:
             appconfig.refuse_unknown_settings_keys({name: None}, layer="--explicit-setting")
         except ValueError as e:
-            raise typer.BadParameter(str(e))
+            raise CliRefusal(str(e))
         from looplab.core.run_proposal import LAUNCH_SECRET_FIELDS
         if name in LAUNCH_SECRET_FIELDS:
-            raise typer.BadParameter(f"{name} is runtime-only and cannot be a launch setting")
+            raise CliRefusal(f"{name} is runtime-only and cannot be a launch setting")
         names.add(name)
     return tuple(sorted(names))
 
@@ -1030,11 +1077,11 @@ def run(
     direction: Optional[str] = typer.Option(None, help="Optimize: min | max."),
     data: Optional[str] = typer.Option(None, help="Path to your data/repo. Optional under Genesis — "
                                                   "you can instead just say where the data is in --goal."),
-    genesis: bool = typer.Option(
-        True, "--genesis/--no-genesis",
-        help="With --goal, let the LLM author the task (--kind pins the kind, Genesis fills the rest, "
-             "including data locations you mention). --no-genesis builds it from the "
-             "--kind/--goal/--direction/--data flags as written."),
+    genesis: Optional[bool] = typer.Option(
+        None, "--genesis/--no-genesis",
+        help="Genesis: a model writes the task from your --goal (--kind pins the kind; data "
+             "locations you mention are picked up). On by default with a model backend, off with "
+             "--backend toy. --no-genesis builds the task from --kind/--goal/--direction/--data."),
     set_: list[str] = typer.Option(
         [], "--set", "-s", metavar="KEY=VALUE",
         help="Override any non-credential engine setting, repeatable "
@@ -1102,16 +1149,18 @@ def run(
     if task_file is not None:
         try:
             file_task, file_settings, file_out = appconfig.load_document(task_file)
+            # The file's relative paths are read against ITS directory (doc 75 UX-04).
+            file_task = appconfig.resolve_task_paths(file_task, task_file.parent)
         except FileNotFoundError:
-            raise typer.BadParameter(f"config file not found: {task_file}")
+            raise CliRefusal(f"config file not found: {task_file}") from None
         except ValueError as e:
-            raise typer.BadParameter(f"could not read {task_file}: {e}")
+            raise CliRefusal(f"could not read {task_file}: {e}")
     # 2. Overlay the task-building flags onto the (possibly empty) file task.
     try:
         task_dict = appconfig.apply_task_flags(
             file_task, kind=kind, goal=goal, direction=direction, data=data)
     except ValueError as e:
-        raise typer.BadParameter(str(e))
+        raise CliRefusal(str(e))
     # 3. Merge engine settings (file < typed flags < --set). Typed bool flags only override when set,
     # so a settings: file can still enable them.
     typed: dict = {}
@@ -1136,6 +1185,8 @@ def run(
             typed[name] = value
     if agent_surface is not None:
         typed["agent_surface"] = [g.strip() for g in agent_surface.split(",") if g.strip()]
+    # A `-s KEY=VALUE` or a typed flag value is a CALLING mistake (doc 75 UX-01's table): the usage
+    # block stays (`tests/test_cli_refusals.py::test_input_errors_click_already_owned_are_unchanged`).
     try:
         sets = appconfig.parse_sets(set_)
     except ValueError as e:
@@ -1156,6 +1207,11 @@ def run(
         # the active profile while retaining that profile's endpoint and credential binding.
         from looplab.core.llm import apply_llm_model_override
         apply_llm_model_override(settings, str(effective_model_override))
+    # Genesis asks a MODEL to write the task, so with no explicit choice it follows the backend
+    # (doc 75 UX-25): `--backend toy --goal …` meant "stay offline" and was refused for an
+    # unreachable model instead. An explicit `--genesis` still asks for one.
+    genesis_implied_off = genesis is None and settings.backend == "toy"
+    genesis = (not genesis_implied_off) if genesis is None else genesis
     _pin_offline_speculation_profile(settings, calibration=speculation_gate_calibration,
                                      genesis=genesis, goal=goal, task_kind=task_dict.get("kind"))
     # 3b. CLI Genesis: the historical CLI task author, separate from Web New run's owner Assistant
@@ -1188,15 +1244,21 @@ def run(
                                 direction=settled if settled in ("max", "min") else None)
     if genesis and goal is not None:
         from looplab.engine import genesis as _genesis
+        # The SAME probe a run takes before its first proposal (doc 75 UX-01): an unreachable model
+        # is refused here with the preflight's classified cause and its remedies (`--backend toy`,
+        # `looplab smoke`), instead of Genesis's own usage-framed sentence whose `--no-genesis`
+        # advice led straight into that preflight's refusal one command later.
+        from looplab.agents.preflight import preflight_role_endpoints
+        preflight_role_endpoints(settings, consumer_roles={"strategist"})
         try:
             from looplab.core.llm import make_llm_client_for
             client = make_llm_client_for(
                 settings, role="strategist", factory=make_llm_client)
         except Exception as e:  # noqa: BLE001 - no endpoint configured/reachable
-            raise typer.BadParameter(
+            raise CliRefusal(
                 f"Genesis needs an LLM to author the task ({e}). Point LOOPLAB_LLM_BASE_URL/--model "
                 "at a reachable model, or use --no-genesis to build the task from the explicit "
-                "--kind/--goal/--direction/--data flags.")
+                "--kind/--goal/--direction/--data flags.") from None
         # Pass the file's task: block (if any) as a draft so --goal refines it instead of discarding it.
         # `evidence_envelope`: the scout's file reads and the cross-run rows arrive fenced when the
         # run's envelope is on (review 2026-09-22, TAT-02) — through the ONE Settings reader.
@@ -1210,7 +1272,7 @@ def run(
                                       evidence_envelope=envelope_enabled(settings),
                                       claim_decisions=claim_decisions_enabled(settings))
         if result.error:    # transport/endpoint failure -> NOT a vague goal; say so plainly
-            raise typer.BadParameter(
+            raise CliRefusal(
                 f"Genesis couldn't reach the model to author the task ({result.error}). Check "
                 "LOOPLAB_LLM_BASE_URL/--model, or use --no-genesis to build it from the explicit "
                 "--kind/--goal/--direction/--data flags.")
@@ -1234,6 +1296,8 @@ def run(
     # drop --data. Make the user pin a kind or let Genesis infer it.
     if (goal is not None or data is not None) and not task_dict.get("kind"):
         raise typer.BadParameter(
+            ("no task kind: pass --kind (with --backend toy there is no model for Genesis to infer "
+             "it; one of: " + ", ".join(_TASK_KINDS) + ")") if genesis_implied_off else
             "no task kind: pass --kind, or drop --no-genesis to let Genesis infer it "
             "(a bare --data would otherwise run the quadratic toy and drop your data path).")
     # 4. Validate the resolved task, then resolve the run dir: explicit --out > file out: > default.
@@ -1241,10 +1305,13 @@ def run(
         raise typer.BadParameter(
             "no task: pass a config/task file, or build one with --goal/--kind "
             "(scaffold one with `looplab init`).")
+    # Every remaining relative path (a flag, a Genesis-authored task) is the current directory's, made
+    # absolute HERE so `task.snapshot.json` records what was used and re-entry needs no cwd.
+    task_dict = appconfig.resolve_task_paths(task_dict, None)
     try:
         task = validate_task(task_dict)
     except (ValueError, KeyError, TypeError) as e:
-        raise typer.BadParameter(f"invalid task: {e}")
+        raise CliRefusal(f"invalid task: {task_refusal_text(e)}") from None
     if speculation_gate_calibration:
         task_dict = _calibration_envelope_task_dict(task, settings)
     out = run_out
@@ -1257,6 +1324,11 @@ def run(
         check_seed_surface(seed, task, external_harness=bool(settings.external_harness))
         settings.seed_from_run = seed.canonical_spec
     _report_submit_notes(task, task_dict, out, settings, planned=genesis and goal is not None)
+    if settings.external_harness:
+        # The run waits for candidates it does not write; without this line it printed nothing for
+        # as long as nobody connected, and an operator could not tell waiting from hung (doc 75 UX-26).
+        typer.echo(f"waiting for an external agent to submit candidates to {out}: start `looplab ui`, "
+                   "then connect `looplab harness-mcp`; `looplab harness` describes the contract.")
     driven = _open_and_drive(task, task_dict, settings, out, crash_after=crash_after,
                              speculation_gate_calibration=speculation_gate_calibration,
                              explicit_settings=explicit_settings, seed=seed,
@@ -1264,7 +1336,7 @@ def run(
     if driven is None:
         return
     state, eng, prior_kind = driven
-    _print_result(state)
+    _print_result(state, run_dir=out)
     _offline = offline_baseline_note(state, settings.backend,
                                      external_harness=bool(settings.external_harness),
                                      events=eng.store.read_all())
@@ -1273,6 +1345,10 @@ def run(
     _note = wrap_up_degradation_note(eng)
     if _note:
         typer.echo(_note, err=True)
+    # WHERE TO LOOK NEXT (doc 75 UX-27): it was only in the demo file's YAML comment.
+    if state.finished and state.best() is not None:
+        typer.echo("next: looplab ui" + (f"   (or open {out / 'tree.html'})"
+                                          if (out / "tree.html").is_file() else ""))
     _exit_nonzero_if_the_run_produced_nothing(state, out, wrap_up_only=is_wrap_up(prior_kind))
 
 
@@ -1312,7 +1388,7 @@ def resume(
     snap = run_dir / "task.snapshot.json"
     if task_file is None:
         if not snap.exists():
-            raise typer.BadParameter(
+            raise CliRefusal(
                 "no --task-file given and no task.snapshot.json in the run dir")
         task_file = snap
     # `existing_run=True`: this run already has an event log, so a validation rule added since it
@@ -1375,6 +1451,16 @@ def resume(
                 prior_events = entry_store.read_all()
                 prior = fold(prior_events)
                 prior_kind = classify_prior_run(prior, prior_events)
+                # Nothing to continue: no node left to mint or evaluate under the settings this
+                # command carries (doc 75 UX-05) — said, and nothing appended, before any engine is
+                # built. A raised `--max-nodes` or an Assistant `budget_extend` is capacity.
+                if prior_kind == "finished" and not drain_only:
+                    from looplab.engine.run_capacity import nothing_left_sentence
+                    sentence = nothing_left_sentence(prior, prior_events, settings.max_nodes,
+                                                     run_dir=run_dir, verb="resume")
+                    if sentence:
+                        typer.echo(sentence)
+                        return
                 if drain_only:
                     # Refused or a no-op BEFORE the engine is built, and before `resume` could lift
                     # anything (`drain_only_refusal`).
@@ -1461,7 +1547,7 @@ def resume(
             typer.echo(f"waiting for the engine lock on {run_dir} "
                        f"({_handoff_deadline - now:.0f}s left) — the previous owner is finishing up")
         time.sleep(0.05)
-    _print_result(state)
+    _print_result(state, run_dir=run_dir)
     _offline = offline_baseline_note(state, settings.backend,
                                      external_harness=bool(settings.external_harness),
                                      events=eng.store.read_all())
@@ -1888,11 +1974,20 @@ def stop(run_dir: Path = typer.Argument(..., help="Run directory to STOP (freeze
         # will finish and commit first". Whatever halted the run decides what its builds become.
         already = fold(store.read_all())
         if already.halted:
-            raise typer.BadParameter(
+            raise CliRefusal(
                 f"--drain-builds: {run_dir} is already {_halted_as(already)}. A drain can only ride "
                 "the stop that halts a running run; the pause that already stands decides what "
                 "happens to the builds in flight. Nothing was appended — `looplab stop` without the "
                 "flag records a plain stop.")
+    # NOTHING TO STOP (doc 75 UX-05): a finished run used to get a `pause` appended to its finalized
+    # log and the line "stopped … (frozen, not finalized)", while `inspect` said `finished=True`.
+    if not draining:
+        already = fold(store.read_all())
+        # Finished only: a plain stop on a PAUSED run is not a no-op — it cancels a standing
+        # `--drain-builds` (`tests/test_a_stop_can_drain_its_builds.py`).
+        if already.finished:
+            typer.echo(f"{run_dir} already finished; nothing to stop (nothing appended).")
+            return
     # NAMED, like `finalize`'s `run_abort {reason: "finalized"}` below. The E2E sweep of 2026-09-23
     # stopped a live run with this command and the run's own exit summary then said "the `pause` row
     # names no reason — nobody can say why" (`events/stop_account.py`) — about a stop an operator
@@ -2121,9 +2216,9 @@ def finalize(
             from looplab.harness.obligations import external_finish_due
             due = external_finish_due(run_dir, settings, before, events)
             if "source_error" in due:
-                raise typer.BadParameter(f"external finish source unavailable: {due['source_error']}")
+                raise CliRefusal(f"external finish source unavailable: {due['source_error']}")
             if due["report"] or due["reviews"] or due["pending_nodes"]:
-                raise typer.BadParameter(
+                raise CliRefusal(
                     "external finish obligations remain: "
                     f"report={due['report']}, reviews={due['reviews']}, "
                     f"pending_nodes={due['pending_nodes']}; settle nodes and publish "
@@ -2311,6 +2406,16 @@ def init(
         raise typer.BadParameter(f"unknown task kind {kind!r}; choose one of: {', '.join(_TASK_KINDS)}")
     atomic_write_text(out, appconfig.render_template(kind))
     typer.echo(f"wrote {out} — edit it, then: looplab run {out}")
+    # What the file needs before it runs, said here rather than discovered as two refusals in a row
+    # (doc 75 UX-02): the default `dataset` scaffold names a `data.csv` that does not exist yet, and
+    # every kind but the toy ones needs a model.
+    from looplab.core.task_kinds import default_backend
+    if kind == "dataset":
+        typer.echo("  it reads data.csv (a table with a `target` column) next to the file — put your "
+                   "data there or edit data_path")
+    if (default_backend(kind, chosen=False) or "toy") != "toy":
+        typer.echo("  it needs a model (LOOPLAB_LLM_BASE_URL; check it with `looplab smoke`). "
+                   "To try LoopLab offline first: looplab init --kind quadratic --out quadratic.yaml")
 
 
 @app.command(name="reap-service-files")

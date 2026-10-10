@@ -228,6 +228,7 @@ _LAYOUT = {
     "errors": "core",
     "eval_dispatch": "engine",
     "eval_contract": "engine",  # what a run's numbers were measured BY (docs/BACKLOG.md §0.6)
+    "run_capacity": "engine",   # doc 75 UX-05: is there work left for a finished run under new settings
     "comparability": "engine",  # THE COMPARABILITY KEY: what two numbers must SHARE before their
     #                             values may be ordered — the composition of the measured inputs,
     #                             the declared ComparisonContract and the inferred eval contract,

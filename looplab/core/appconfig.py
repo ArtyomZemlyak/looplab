@@ -33,7 +33,7 @@ from pathlib import Path
 from typing import Any, Optional
 
 from looplab.core.errors import ConfigRefusal
-from looplab.core.config import (Settings, canonicalize_parallelism_source,
+from looplab.core.config import (DEVELOPER_BACKENDS, Settings, canonicalize_parallelism_source,
                                  flatten_parallelism_layers)
 
 _RUNTIME_CREDENTIAL_FIELDS = {"llm_api_key", "llm_api_key_base_url"}
@@ -168,6 +168,86 @@ def parse_sets(pairs: list[str]) -> dict:
 # dataset (a data file/dir). Mapping it onto any other kind would inject a field the model drops
 # silently (pydantic extra="ignore"), losing the path with no warning — so we reject it instead.
 _DATA_FIELD = {"repo": "editable_path", "dataset": "data_path"}
+
+
+def _task_path_slots(task: dict):
+    """Yield `(container, key)` for every host path a task of these kinds names (doc 75 UX-04).
+
+    The kinds whose shipped examples name data by a relative path: `dataset` (`data_path`, `data`)
+    and `repo` (`editable_path` or the composable `repo:`, `editables[].path`, `references[].path`,
+    `data`/`dataset` entries, as a bare string or a `{path: …}` spec). Every other kind and field keeps its own resolution."""
+    kind = task.get("kind")
+    if kind == "dataset":
+        yield task, "data_path"
+        if isinstance(task.get("data"), dict):
+            for name in task["data"]:
+                yield task["data"], name
+    elif kind == "repo" or isinstance(task.get("repo"), str):     # the composable `repo:` shorthand
+        yield task, "editable_path"
+        yield task, "repo"
+        for listed in ("editables", "references"):
+            for entry in task.get(listed) or ():
+                if isinstance(entry, dict):
+                    yield entry, "path"
+        for mounts in ("data", "dataset"):
+            if isinstance(task.get(mounts), dict):
+                for name, spec in task[mounts].items():
+                    if isinstance(spec, dict):
+                        yield spec, "path"
+                    else:
+                        yield task[mounts], name
+
+
+def resolve_task_paths(task: dict, task_dir: Optional[Path], *, missing: str = "task_dir") -> dict:
+    """Make the task's relative host paths ABSOLUTE, once, before the task is validated and its
+    snapshot written (doc 75 UX-04). Returns a new dict; raises `ConfigRefusal` on an ambiguity.
+
+    Two facts made relative paths a trap. A task FILE's paths were read against the directory the
+    command ran in, so `looplab run <repo>/examples/dataset_task.json` refused from anywhere but the
+    repo root; and `task.snapshot.json` kept them relative, so `resume` (and the UI server, which
+    spawns it from its own directory) depended on the current directory too.
+
+    The rule: a path in a task file named on the command line (`task_dir`) is read against that
+    file's directory; a path from a flag or a task with no file (`task_dir=None`) against the current
+    directory, as before. A file written against the current directory keeps working — when only
+    that reading exists it is the one used — and when BOTH exist and differ the run is REFUSED: two
+    real files of one name would otherwise mean silently training on the wrong data. `~` and `$VARS`
+    are expanded first; an absolute path is untouched. The snapshot then records what was used, so
+    re-entry reads the same files from anywhere.
+
+    `missing` decides a path that exists under neither reading: `"task_dir"` (the `run` command)
+    reads it against the file's directory, which is what its refusal then names; `"keep"`
+    (`adapters/tasks.py::load_task`, whose callers include old snapshots) leaves it as written, so
+    the adapter resolves it against the current directory exactly as before.
+    """
+    import copy
+    import os
+
+    task = copy.deepcopy(task)
+    cwd = Path.cwd()
+    for container, key in list(_task_path_slots(task)):
+        raw = container.get(key)
+        if not isinstance(raw, str) or not raw.strip():
+            continue
+        expanded = os.path.expanduser(os.path.expandvars(raw))
+        if os.path.isabs(expanded):
+            container[key] = os.path.normpath(expanded)
+            continue
+        here = os.path.abspath(cwd / expanded)
+        if task_dir is None:
+            container[key] = here
+            continue
+        beside = os.path.abspath(Path(task_dir) / expanded)
+        exists = {path for path in (beside, here) if os.path.exists(path)}
+        if len(exists) == 2 and os.path.realpath(beside) != os.path.realpath(here):
+            raise ConfigRefusal(
+                f"task path {raw!r} names two different things: {beside} (next to the task file) "
+                f"and {here} (in the current directory). Write it as an absolute path, or as a "
+                "path relative to the task file's directory, so the run reads the one you mean.")
+        if not exists and missing == "keep":
+            continue
+        container[key] = here if exists == {here} else beside
+    return task
 
 
 def apply_task_flags(task: dict, *, kind: Optional[str], goal: Optional[str],
@@ -343,7 +423,8 @@ def render_template(kind: str = "dataset") -> str:
         ("policy", "greedy", "search policy: greedy | evolutionary | mcts | asha | bohb"),
         ("llm_model", "qwen3:8b", "model id (only used when backend: llm)"),
         ("llm_base_url", "http://localhost:11434/v1", "any OpenAI-compatible endpoint"),
-        ("developer_backend", "default", "default | opencode | aider | goose | continue"),
+        # Rendered FROM the registry (doc 75 UX-12): the hand-written list lacked `codex` and `claude`.
+        ("developer_backend", "default", " | ".join(DEVELOPER_BACKENDS)),
         # memory_dir/knowledge_dir are ON by default with real path defaults (~/.looplab/{memory,knowledge}).
         # They are rendered COMMENTED (see _COMMENTED_KNOBS below): an ACTIVE `null` line here would OVERRIDE
         # those defaults and silently disable cross-run memory + the knowledge base in every scaffolded config.
@@ -364,6 +445,12 @@ def render_template(kind: str = "dataset") -> str:
     # default depends on the KIND, which is this file's task) and the experiment budget.
     _COMMENTED_KNOBS = {"knowledge_dir", "memory_dir", "profile", "max_seconds", "policy",
                         "llm_model", "llm_base_url", "developer_backend"}
+    # …and the backend too WHEN IT IS THE DEFAULT (doc 75 UX-02): an active `backend: llm` said
+    # nothing the default does not, and outranked `LOOPLAB_BACKEND=toy` exactly as the endpoint did.
+    # A kind whose backend differs from the default (the offline toy kinds) keeps it active — that
+    # line is what lets `looplab init --kind quadratic` run with no model and no flag.
+    if backend_default == Settings.model_fields["backend"].default:
+        _COMMENTED_KNOBS = _COMMENTED_KNOBS | {"backend"}
     # Credentials and their endpoint binding are runtime-only. The generated run config must not
     # advertise either as a normal persisted knob.
     shown = {k for k, _, _ in common} | {"llm_api_key", "llm_api_key_base_url"}

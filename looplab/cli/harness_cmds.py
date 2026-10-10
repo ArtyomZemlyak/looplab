@@ -6,6 +6,7 @@ import json
 import typer
 
 from looplab.cli import app
+from looplab.core.errors import OperatorRefusal
 # The manifest lives in the harness package (the MCP server serves it too); re-exported here as the
 # SAME object, so `looplab.cli.harness_cmds.harness_manifest` keeps working for every caller.
 from looplab.harness.manifest import harness_manifest  # noqa: F401
@@ -32,4 +33,9 @@ def harness_mcp() -> None:
     try:
         run_stdio()
     except ValueError as exc:
+        # A missing or unusable harness credential is a `ConfigRefusal` (doc 75 UX-01): it reaches
+        # the CLI boundary as one `Refused:` line, not a usage frame. Any other ValueError keeps
+        # the historical mapping.
+        if isinstance(exc, OperatorRefusal):
+            raise
         raise typer.BadParameter(str(exc)) from exc

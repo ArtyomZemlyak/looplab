@@ -37,8 +37,10 @@ from looplab.agents.roles import LLMDeveloper, LLMResearcher
 
 def _resolve(p: str) -> str:
     """Expand ~/$ENV then make ABSOLUTE: the generated solution runs in a tmp sandbox workdir, so a
-    relative path would not resolve from there. Resolved once at load time (recorded in the snapshot),
-    so — like a repo task — resuming on a different machine needs the path re-pointed."""
+    relative path would not resolve from there. A relative path reaching HERE is read against the
+    current directory; `looplab run` has already made a task file's paths absolute against the file's
+    own directory and records that in `task.snapshot.json` (`core/appconfig.py::resolve_task_paths`,
+    doc 75 UX-04), so — like a repo task — resuming on a different machine needs the path re-pointed."""
     if not isinstance(p, str) or not p:
         return p
     return os.path.abspath(os.path.expanduser(os.path.expandvars(p)))
@@ -144,10 +146,14 @@ class DatasetTask(BaseModel):
         # Fail LOUD on a missing path instead of letting the run silently score a degenerate metric
         # (the solution reads the data by absolute path; a typo / wrong-CWD relative path resolved to
         # nowhere would just read 0 rows). Use an absolute path — ~ and $VARS are expanded.
-        missing = [p for p in paths if not os.path.exists(p)]
+        # NAMED BY FIELD, and no "use an absolute path" (doc 75 UX-02): the path in the message was
+        # already absolute, relative paths work, and the reader had to guess which field was meant.
+        named = [("data_path", self.data_path)] + [(f"data.{k}", v) for k, v in self.data.items()]
+        missing = [f"{field}={p}" for field, p in named if p and not os.path.exists(p)]
         if missing:
-            raise ValueError(f"DatasetTask data path(s) not found: {', '.join(missing)} "
-                             "(use an absolute path; ~ and $VARS are expanded).")
+            raise ValueError(f"data path(s) not found: {', '.join(missing)}. A relative path in a "
+                             "task file is read against that file's directory (from a flag, against "
+                             "the current directory); ~ and $VARS are expanded.")
         return self
 
     # ------- TaskAdapter hooks -------

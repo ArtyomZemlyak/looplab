@@ -2167,7 +2167,6 @@ export default function RunView({ runId, onBack, reviewMode = false, reviewMeta 
           title={((reviewMode ? uiText('Copy this read-only capability and route context; local visual filters are not included') : uiText('Copy the run route, selected evidence and snapshot; local graph filters are not included and recipients still need owner access')))}>
           <OpIcon name="link" size={12} /> <span className="copy-view-label">{uiText("Copy context")}</span>
         </button>
-        <EnergyToggle />
         <div ref={workspaceToolbarRef} className="view-toggle" role="toolbar"
           aria-label={uiText("Run workspace controls")} aria-orientation="horizontal"
           onKeyDown={onWorkspaceToolbarKeyDown} onFocus={onWorkspaceToolbarFocus}>
@@ -2200,6 +2199,9 @@ export default function RunView({ runId, onBack, reviewMode = false, reviewMeta 
             }}
             title={uiText("at-a-glance run summary — best metric, budget, strategy, hints")}>{uiText("Overview")}</button>
         </div>
+        {/* The animation switch AFTER the views (doc 75 UX-15): as the strip's first button it read as
+            a fifth view called "Energy", and it is a visual preference, not a place to go. */}
+        <EnergyToggle />
         <span className="pill phase">{uiText(displayedPhase)}</span>
         {/* WHOSE CODE DREW THIS. Beside the phase pill because it qualifies every number on the
             page at once: a server that loaded its modules before the last merge answers 200 with an
@@ -2483,6 +2485,7 @@ export default function RunView({ runId, onBack, reviewMode = false, reviewMeta 
         ? <div className="main"><div className="report-scroll">
             <LazyBoundary label={"run report"} resetKey={`${runId}:${history.resolvedSeq ?? 'live'}`}>
               <ReportView state={state} runId={runId} onToast={showToast}
+                runBackend={configResource.status === 'ready' ? configResource.data?.backend ?? null : null}
                 readOnly={mutationReadOnlyMode} historySeq={history.resolvedSeq}
                 observedSeq={historyActive ? history.resolvedSeq : seq}
                 expectedGeneration={reportGeneration}

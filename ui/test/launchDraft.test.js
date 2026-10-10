@@ -174,3 +174,12 @@ test('unknown launch facts are called unknown before task-file validation', () =
   } }))
   assert.match(auto.find(row => row.label === 'Score').value, /direction resolved by evaluator/)
 })
+
+test('the offline demo card names the metric its contract declares (doc 75 UX-31)', async () => {
+  const { summarizeLaunchDecision } = await import('../src/launchDraft.js')
+  const { readFile } = await import('node:fs/promises')
+  const spec = JSON.parse(await readFile(new URL('../src/offlineDemo.json', import.meta.url), 'utf8'))
+  const rows = summarizeLaunchDecision({ source: 'json', task_json: JSON.stringify(spec.task) })
+  const score = rows.find(row => row.label === 'Score')
+  assert.equal(score.value, 'quadratic_loss · lower is better')
+})

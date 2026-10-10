@@ -378,6 +378,16 @@ def comparability_record(*, task=None, inputs_prov=None, substrate=None,
                   if name in PROTOCOL_FACETS and isinstance(value, str) and value}
         if facets:
             record["protocol"] = facets
+    # REPEAT CHECKS NOT APPLICABLE (doc 75 UX-13) — the task's contract DECLARED a deterministic
+    # objective, so a repeat with other seeds would measure the same number. Written HERE, beside the
+    # declared key it comes from and from the same validated contract, rather than read back out of
+    # the `task.snapshot.json` sidecar by a server (which a later `run --out` can overwrite). Outside
+    # `keys`: it decides no comparison. Absent on every log before it and every undeclared task, and
+    # absence means "repeats may matter" at every reader, which is what the UI has always assumed.
+    contract = task.get("comparison_contract") if isinstance(task, dict) else None
+    if (declared is not None and isinstance(contract, dict)
+            and contract.get("deterministic") is True):
+        record["repeat_checks"] = "not_applicable"
     return record
 
 

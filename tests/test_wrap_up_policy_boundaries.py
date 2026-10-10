@@ -206,7 +206,7 @@ def test_the_same_handoff_still_lifts_when_the_endpoint_answers(
     # of being swallowed. The value is unused here; what is under test is the handoff, not the mirror.
     monkeypatch.setattr(cmds, "_run_engine_guarded",
                         lambda eng, *, mlflow_uri="": fold(eng.store.read_all()))
-    monkeypatch.setattr(cmds, "_print_result", lambda _state: None)
+    monkeypatch.setattr(cmds, "_print_result", lambda _state, **_k: None)
 
     cmds.resume(run_dir, task_file=run_dir / "task.snapshot.json", max_nodes=None)
 

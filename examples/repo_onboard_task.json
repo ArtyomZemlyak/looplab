@@ -3,7 +3,7 @@
   "id": "repo_onboard",
   "goal": "maximize the eval metric of the existing experiment",
   "direction": "max",
-  "editable_path": "examples/repo_example",
+  "editable_path": "repo_example",
   "edit_surface": ["*.json"],
   "protect": ["ttrain.py"],
   "onboard": true,

@@ -299,6 +299,39 @@ def _main(
         raise typer.Exit(tui_main(None, os.environ.get("LOOPLAB_RUN_ROOT", "runs")))
 
 
+class CliRefusal(OperatorRefusal, typer.BadParameter):
+    """A refusal about the operator's INPUT raised inside a CLI command (doc 75 UX-01).
+
+    Click's own split is the one this follows: `UsageError` (and `BadParameter` under it) is a
+    mistake in HOW the command was called and prints the usage block and "Try --help"; anything
+    else is a plain error. A missing task file, an invalid task, an unreachable model or a run in
+    the wrong state is not a calling mistake, but every one of those used to be a `BadParameter`
+    and so printed "Usage … Try 'looplab run --help' … Invalid value:", as if the operator had
+    mistyped a flag. Carrying `OperatorRefusal` sends it through `_RefusalBoundaryGroup` instead —
+    one `Refused:` line, exit 2, the same as every engine-side refusal. It stays a `BadParameter`
+    so every caller and test that catches one keeps working. `tests/test_cli_refusal_classes.py`
+    holds the classification: each remaining bare `BadParameter` is a reviewed syntax error.
+    """
+
+
+def task_refusal_text(exc: BaseException, root: str = "task") -> str:
+    """One line per field for an invalid task (doc 75 UX-02), never pydantic's dump.
+
+    `str(ValidationError)` printed `[type=value_error, input_value={…whole task…}]` and an
+    `errors.pydantic.dev` link around the one useful sentence. `errors()` carries the field path
+    and the message separately; the "Value error, " prefix pydantic adds to a validator's own
+    `ValueError` is dropped because the sentence after it was written for the operator."""
+    from pydantic import ValidationError
+    if not isinstance(exc, ValidationError):
+        return str(exc)
+    lines = []
+    for err in exc.errors():
+        where = ".".join(str(part) for part in err.get("loc", ()) if part != "__root__")
+        msg = str(err.get("msg", "")).removeprefix("Value error, ")
+        lines.append(f"{root}.{where}: {msg}" if where else msg)
+    return "\n  ".join(lines) or str(exc)
+
+
 def _choice(value: str, choices: tuple[str, ...], param: str) -> str:
     """Validate `value` against `choices`, raising a clear BadParameter (lists the valid options)
     instead of letting an unknown value silently fall through to a degraded default."""
@@ -318,9 +351,9 @@ def _load_task(task_file: Path, *, existing_run: bool = False) -> TaskAdapter:
     try:
         return load_task(task_file, existing_run=existing_run)
     except FileNotFoundError:
-        raise typer.BadParameter(f"task file not found: {task_file}")
+        raise CliRefusal(f"task file not found: {task_file}") from None
     except (ValueError, KeyError, TypeError) as e:
-        raise typer.BadParameter(f"could not load task {task_file}: {e}")
+        raise CliRefusal(f"could not load task {task_file}: {task_refusal_text(e)}") from None
 
 
 _RUN_DIR_HINT = "Pass the run directory created by `looplab run --out <dir>`."
@@ -457,7 +490,7 @@ def load_run_settings(run_dir, *, strict: bool, require_snapshot: bool = False) 
     snap = Path(run_dir) / "config.snapshot.json" if run_dir is not None else None
     if snap is None or not snap.exists():
         if require_snapshot and snap is not None and (Path(run_dir) / "events.jsonl").exists():
-            raise typer.BadParameter(
+            raise CliRefusal(
                 f"{snap} is missing, but {run_dir} holds an events.jsonl — this run was started with "
                 "settings that are no longer on disk. Continuing would silently run it on defaults "
                 "(require_approval, trust_mode, eval_trust_mode, confirm_*, backend, ...), which can "
@@ -527,8 +560,8 @@ def _settings_from_config_snapshot(config_snap: Path, *, refuse_unknown: bool = 
     try:
         return read_config_snapshot(config_snap, refuse_unknown=refuse_unknown)
     except ConfigSnapshotUnreadableError as exc:
-        raise typer.BadParameter(
-            f"cannot load original config snapshot {config_snap}: {exc.reason}") from exc
+        raise CliRefusal(
+            f"cannot load original config snapshot {config_snap}: {exc.reason}") from None
 
 
 def _truthy_env(name: str) -> bool:
@@ -1017,7 +1050,26 @@ def _engine(run_dir: Path, task: TaskAdapter, settings: Settings,
     return engine
 
 
-def _print_result(state) -> None:
+def declared_metric_name(run_dir) -> Optional[str]:
+    """The metric's NAME as the task declared it (`comparison_contract.metric_uid` in the run's
+    `task.snapshot.json`), or None. Display only — the summary line named no metric at all, so
+    `metric=1.34289` left the reader to guess what was measured (doc 75 UX-27)."""
+    if run_dir is None:
+        return None
+    try:
+        import json
+        doc = json.loads((Path(run_dir) / "task.snapshot.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    contract = doc.get("comparison_contract") if isinstance(doc, dict) else None
+    name = contract.get("metric_uid") if isinstance(contract, dict) else None
+    return name if isinstance(name, str) and name.strip() and len(name) <= 80 else None
+
+
+_DIRECTION_WORDS = {"min": "lower is better", "max": "higher is better"}
+
+
+def _print_result(state, run_dir=None) -> None:
     """The run summary every entry point closes with, and `looplab inspect` re-prints.
 
     WHY THE STOP LINE IS HERE AND UNCONDITIONAL. `finished={state.finished}` was the whole of what
@@ -1033,9 +1085,11 @@ def _print_result(state) -> None:
     absence invisible on exactly the runs where it matters most.
     """
     best = state.best()
-    typer.echo(f"run={state.run_id} task={state.task_id} finished={state.finished}")
+    # One line for the identity and the counts (doc 75 UX-07: `inspect` of a finished demo is six
+    # lines, not nine), and the result in the reader's words below it.
+    typer.echo(f"run={state.run_id} task={state.task_id} finished={state.finished} "
+               f"nodes={len(state.nodes)} evaluated={len(state.evaluated_nodes())}")
     typer.echo(f"stop: {stop_account(state).line}")
-    typer.echo(f"nodes={len(state.nodes)} evaluated={len(state.evaluated_nodes())}")
     if best is not None:
         m = best.robust_metric
         ms = f"{m:.6g}" if m is not None else "n/a"
@@ -1044,7 +1098,12 @@ def _print_result(state) -> None:
         objective = getattr(state, "objective_key", None)
         ranked = (f" (objective: {objective!r}, an operator retarget — not the task's own metric)"
                   if objective else "")
-        typer.echo(f"BEST node {best.id}: metric={ms}{ranked} params={best.idea.params}")
+        # "experiment", the word the README, the Report and the chat use (doc 75 UX-18), the metric
+        # by its declared name when the task has one, and which way is better (doc 75 UX-27).
+        name = None if objective else declared_metric_name(run_dir)
+        way = _DIRECTION_WORDS.get(getattr(state, "direction", None))
+        typer.echo(f"BEST experiment #{best.id}: {name or 'metric'} = {ms}"
+                   + (f" ({way})" if way else "") + f"{ranked} params={best.idea.params}")
         # doc 67 67.14: only when the task declared a reference — a baseline to measure the gain
         # from, and a target to read it as a share of (`core/headroom.py`). On the TASK's scale,
         # which is the reference's (`core/models.py::task_scale_metric`).

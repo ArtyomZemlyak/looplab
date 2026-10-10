@@ -132,8 +132,10 @@ def test_the_two_shared_notices_are_owned_in_one_place():
 
 # `run`'s lifecycle — the prior-run ladder, the reopen/resume branches, the snapshot publish — lives in
 # `run_cmds._open_and_drive` since review 2026-09-22 (SCJ-05), because `looplab bench` drives it too.
-# The pins below read `run` THROUGH that helper, so they still hold of what `run` executes.
-_COMMAND_LIFECYCLE = {"run": "_open_and_drive", "resume": "resume"}
+# The pins below read `run` THROUGH that helper, so they still hold of what `run` executes. Its body
+# is `_open_and_drive_in` since doc 75 UX-33: `_open_and_drive` now only wraps it to remove a run
+# directory a refused start created and left holding nothing but its lock files.
+_COMMAND_LIFECYCLE = {"run": "_open_and_drive_in", "resume": "resume"}
 
 
 @pytest.mark.parametrize("command", ["run", "resume"])

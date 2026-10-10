@@ -94,16 +94,54 @@ def traced_seconds(intervals: list) -> float:
     return total
 
 
+# ONE unit per `looplab timings` report, chosen from the run's own wall clock (doc 75 UX-08): a
+# 3-second offline run printed "0.0 min" on 66 of its 79 lines. Per-line units would make the columns
+# incomparable, so `set_duration_unit` picks seconds for a run under 2 minutes and minutes otherwise,
+# and every row of the report is printed in it. `minutes` keeps its name for its callers.
+_DURATION_UNIT = {"seconds": 60.0, "name": "min"}
+
+
+def set_duration_unit(wall_seconds):
+    """Choose the report's unit from its wall clock (None resets to minutes); returns the input."""
+    seconds, name = (1.0, "s") if wall_seconds is not None and wall_seconds < 120 else (60.0, "min")
+    _DURATION_UNIT.update(seconds=seconds, name=name)
+    return wall_seconds
+
+
+def unit() -> str:
+    return _DURATION_UNIT["name"]
+
+
+def echo_wall_clock(wall, budget_elapsed, *, have_log: bool) -> None:
+    """`timings`' first line, and the choice of the report's unit (moved verbatim from
+    `inspect_cmds.py::timings` for that file's line cap, doc 75 UX-08)."""
+    set_duration_unit(wall)
+    if wall is not None:
+        cross = ""
+        # A pre-fix log's receipt measured the finalizing PROCESS, so it can be orders of magnitude
+        # short. Showing both is what makes that visible instead of leaving two numbers to disagree
+        # in different places. Only flagged when they actually differ by more than rounding.
+        if type(budget_elapsed) in (int, float) and math.isfinite(budget_elapsed):
+            cross = (f"   (budget.elapsed_s says {minutes(float(budget_elapsed))} {unit()})"
+                     if abs(float(budget_elapsed) - wall) > 1.0
+                     else "   (budget.elapsed_s agrees)")
+        typer.echo(f"run wall clock {minutes(wall)} {unit()} "
+                   + (f"({round(wall, 1)} s, " if unit() != "s" else "(")
+                   + "events.jsonl first -> last timestamp)" + cross)
+    elif have_log:
+        typer.echo("run wall clock unknown (no event carries a usable timestamp).")
+
+
 def minutes(seconds: float) -> float:
-    return round(seconds / 60, 1)
+    return round(seconds / _DURATION_UNIT["seconds"], 1)
 
 
 def echo_section(title: str, cats: dict, note: str = "") -> None:
     """One `node N`/`run-level` block: total, then its rows biggest-first with a share of the block."""
     total = sum(v[0] for v in cats.values()) or 1.0
-    typer.echo(f"\n{title} — {minutes(total)} min:" + (f"   {note}" if note else ""))
+    typer.echo(f"\n{title} — {minutes(total)} {unit()}:" + (f"   {note}" if note else ""))
     for cat, (secs, n) in sorted(cats.items(), key=lambda x: -x[1][0]):
-        typer.echo(f"  {cat:10} {minutes(secs):>6} min  ({n} spans, {round(100*secs/total)}%)")
+        typer.echo(f"  {cat:10} {minutes(secs):>6} {unit()}  ({n} spans, {round(100*secs/total)}%)")
 
 
 def echo_containments(spans: list) -> None:
@@ -139,12 +177,12 @@ def echo_reconciliation(*, wall, intervals: list, attributed: float, durable_eve
         return
     traced = min(traced_seconds(intervals), wall)
     untraced = max(0.0, wall - traced)
-    typer.echo(f"\nreconciliation vs {minutes(wall)} min wall clock:")
-    typer.echo(f"  attributed {minutes(attributed):>6} min  ({round(100*attributed/wall)}%)  "
+    typer.echo(f"\nreconciliation vs {minutes(wall)} {unit()} wall clock:")
+    typer.echo(f"  attributed {minutes(attributed):>6} {unit()}  ({round(100*attributed/wall)}%)  "
                f"sum of the rows above; overlaps under concurrency")
-    typer.echo(f"  traced     {minutes(traced):>6} min  ({round(100*traced/wall)}%)  "
+    typer.echo(f"  traced     {minutes(traced):>6} {unit()}  ({round(100*traced/wall)}%)  "
                f"wall clock with at least one span open")
-    typer.echo(f"  untraced   {minutes(untraced):>6} min  ({round(100*untraced/wall)}%)  "
+    typer.echo(f"  untraced   {minutes(untraced):>6} {unit()}  ({round(100*untraced/wall)}%)  "
                f"no span open — not attributable from spans.jsonl")
 
     # WAS THIS RUN STARVED? The rows above charge wall clock to WORK; this asks the complementary
@@ -166,15 +204,15 @@ def echo_reconciliation(*, wall, intervals: list, attributed: float, durable_eve
         occ = eval_occupancy(durable_events)
         if occ["span_seconds"] > 0:
             typer.echo("\neval occupancy (from events.jsonl, not spans):")
-            typer.echo(f"  bootstrap  {minutes(occ['bootstrap_seconds']):>6} min  "
+            typer.echo(f"  bootstrap  {minutes(occ['bootstrap_seconds']):>6} {unit()}  "
                        f"before the first evaluation could start — not starvation")
-            typer.echo(f"  dead       {minutes(occ['dead_seconds']):>6} min  "
-                       f"({round(100*occ['dead_share'])}% of the {minutes(occ['span_seconds'])} min "
+            typer.echo(f"  dead       {minutes(occ['dead_seconds']):>6} {unit()}  "
+                       f"({round(100*occ['dead_share'])}% of the {minutes(occ['span_seconds'])} {unit()} "
                        f"since) with NO evaluation running")
             for start, end in occ["dead_windows"]:
-                typer.echo(f"    idle {minutes(start):>6}-{minutes(end):<6} min "
-                           f"({minutes(end - start)} min)")
-            busy = ", ".join(f"{k}: {minutes(v)} min"
+                typer.echo(f"    idle {minutes(start):>6}-{minutes(end):<6} {unit()} "
+                           f"({minutes(end - start)} {unit()})")
+            busy = ", ".join(f"{k}: {minutes(v)} {unit()}"
                              for k, v in sorted(occ["concurrency"].items()))
             typer.echo(f"  concurrent evaluations — {busy}")
             if occ["open_intervals"]:
@@ -419,22 +457,22 @@ def echo_run_opening(events, spans, *, wall=None) -> None:
     # UNCONDITIONAL, because the window makes it true rather than the phases inside it: it ends at
     # the run's FIRST `node_eval_started`, so there is no earlier evaluation for it to contain.
     idle = " — no evaluation was running for any of it"
-    typer.echo(f"\nrun opening — {minutes(split['opening_seconds'])} min{share}{idle}:")
+    typer.echo(f"\nrun opening — {minutes(split['opening_seconds'])} {unit()}{share}{idle}:")
     for phase in split["phases"]:
-        typer.echo(f"  {phase['name']:<16} {minutes(phase['seconds']):>6} min  "
+        typer.echo(f"  {phase['name']:<16} {minutes(phase['seconds']):>6} {unit()}  "
                    f"{phase['boundary']} ({phase['source']})")
     residual = split["unattributed_seconds"]
     label = "unattributed" if residual >= 0 else "overlap"
-    typer.echo(f"  {label:<16} {minutes(abs(residual)):>6} min  "
+    typer.echo(f"  {label:<16} {minutes(abs(residual)):>6} {unit()}  "
                f"{'covered by no boundary above' if residual >= 0 else 'the rows above overlap'}")
     if split["to_think_seconds"] is not None:
         typer.echo(f"  run start -> the run-opening think complete: "
-                   f"{minutes(split['to_think_seconds'])} min")
+                   f"{minutes(split['to_think_seconds'])} {unit()}")
     if split["to_propose_seconds"] is not None:
-        after = (f" ({minutes(split['think_to_propose_seconds'])} min of it after the think)"
+        after = (f" ({minutes(split['think_to_propose_seconds'])} {unit()} of it after the think)"
                  if split["think_to_propose_seconds"] is not None else "")
         typer.echo(f"  run start -> the first propose complete:     "
-                   f"{minutes(split['to_propose_seconds'])} min{after}")
+                   f"{minutes(split['to_propose_seconds'])} {unit()}{after}")
     for note in split["notes"]:
         typer.echo(f"  ({note})")
 
@@ -842,8 +880,14 @@ def echo_inspect_tail(state, run_dir: Path, *, show_config_hint: bool, events=No
     _best = state.best()
     _record = comparability_record_of(_best) if _best is not None else None
     if _record:
+        # In words first (doc 75 UX-07): "declared declared=d811c074…" said the authority twice and
+        # what it MEANS not at all. The keys stay, for `looplab comparability` to be checked against.
         _keys = " ".join(f"{name}={value}" for name, value in sorted(_record["keys"].items()))
-        typer.echo(f"comparability: {_record['authority']} {_keys}")
+        _means = {"declared": "the task declared what its scores are comparable with",
+                  "measured": "the evaluation inputs were measured",
+                  "inferred": "inferred from the evaluation command"}.get(_record["authority"], "")
+        typer.echo(f"comparability: {_record['authority']}"
+                   + (f" ({_means})" if _means else "") + f" — key {_keys}")
     else:
         typer.echo(
             "comparability: UNKNOWN — this run records no key for what its metric was measured "
@@ -859,3 +903,38 @@ def echo_inspect_tail(state, run_dir: Path, *, show_config_hint: bool, events=No
         typer.echo(_offline)
     if show_config_hint:
         typer.echo(f"launch settings: looplab inspect {run_dir} --config")
+
+
+def echo_run_list(root: Path) -> int:
+    """`looplab inspect` with no run: the runs under `root`, newest first (doc 75 UX-35).
+
+    No command listed runs — `inspect` without its argument only said "Missing argument
+    'run_dir'" — so a terminal user who forgot a run's name had to `ls runs/` and guess which
+    directories were runs. One line each, from each run's own log; a directory with no
+    `events.jsonl` is not a run and is skipped. Returns the exit code."""
+    from looplab.events.eventstore import EventStore
+    from looplab.events.replay import fold
+
+    runs = sorted((d for d in (root.iterdir() if root.is_dir() else ())
+                   if (d / "events.jsonl").is_file()),
+                  key=lambda d: (d / "events.jsonl").stat().st_mtime, reverse=True)
+    if not runs:
+        typer.echo(f"no runs under {root}/ — start one with `looplab run examples/demo.yaml`, "
+                   "or pass a run directory: looplab inspect RUN_DIR")
+        return 2
+    for rd in runs[:50]:
+        try:
+            state = fold(EventStore(rd / "events.jsonl").read_all())
+        except Exception:  # noqa: BLE001 — one unreadable log must not hide the other runs listed
+            typer.echo(f"{rd}  (log unreadable)")
+            continue
+        best = state.best()
+        shown = (f"best #{best.id} = {best.robust_metric:.6g}"
+                 if best is not None and best.robust_metric is not None else "no result")
+        status = "finished" if state.finished else "paused" if state.paused else "not finished"
+        typer.echo(f"{rd}  {state.task_id or '?'}  {len(state.nodes)} experiments  {shown}  "
+                   f"{status}")
+    if len(runs) > 50:
+        typer.echo(f"… and {len(runs) - 50} older")
+    typer.echo("details: looplab inspect RUN_DIR")
+    return 0

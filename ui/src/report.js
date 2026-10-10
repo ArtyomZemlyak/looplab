@@ -12,7 +12,7 @@ import { OBJECTIVE_SOURCE_LABEL, objectiveMetricSource,
   objectiveSourceCaveated } from './trustSemantics.js'
 import { sourceIncomplete } from './runIndex.js'
 import { scoreDifference, parentScoreDifference, eligibleMeasuredResult as eligibleResult } from './scoreComparison.js'
-import { resultMeasurement } from './resultMeasurement.js'
+import { nodeRepeatChecksNotApplicable, resultMeasurement } from './resultMeasurement.js'
 
 const metricOf = (n) => (n.confirmed_mean ?? n.metric)
 const isEvaluated = (n) => n.status === 'evaluated' && metricOf(n) != null
@@ -383,7 +383,11 @@ export function verdict(state, a) {
     : gain === 0 ? 'flat' : (dir === 'min' ? gain < 0 : gain > 0) ? 'improved' : 'regressed'
   const repeated = finite(best.confirmed_mean) && Number.isSafeInteger(best.confirmed_seeds)
     && best.confirmed_seeds >= 2
-  const robustness = repeated ? 'repeat-checked' : finite(best.confirmed_mean) ? 'mean recorded' : 'unconfirmed'
+  // A task that DECLARED a deterministic objective has no repeat to ask for (doc 75 UX-13): the
+  // offline demo read UNCONFIRMED and was told to repeat itself with more seeds.
+  const deterministic = !finite(best.confirmed_mean) && nodeRepeatChecksNotApplicable(best)
+  const robustness = repeated ? 'repeat-checked' : finite(best.confirmed_mean) ? 'mean recorded'
+    : deterministic ? 'deterministic' : 'unconfirmed'
   const valueLabel = uiText(finite(best.confirmed_mean) ? 'confirmation mean' : 'evaluation score')
   let headline = uiMessage('Selected #{0}: {1} {2}.', [best.id, valueLabel, fmt(metricOf(best))])
   if (outcome === 'baseline') headline += uiText(' This is the first eligible experiment; it does not establish improvement.')
@@ -392,10 +396,12 @@ export function verdict(state, a) {
     // Names WHAT it is better than (doc 74 EB-21): "better by 77.01" alone left the reader to guess
     // the reference, which is the first eligible experiment, not the parent or the previous best.
     : uiMessage(' Its evaluation score is {0} by {1} than the first eligible experiment #{2}, under matching recorded conditions.', [uiText(outcome === 'improved' ? 'better' : 'worse'), fmt(Math.abs(gain)), first.id])
-  headline += trust === 'suspect' ? uiText(' The result is flagged, treat with caution.')
-    : uiText(' Detector coverage is not fully verified.')
+  // Only a FLAG reaches the headline (doc 75 UX-17): "Detector coverage is not fully verified." closed
+  // every result sentence, and it is the trust label's own content — the pill and the Trust tab say it.
+  if (trust === 'suspect') headline += uiText(' The result is flagged, treat with caution.')
   const nextStep = trust === 'suspect' ? 'Review the flagged evidence in Trust before using the selected result.'
     : !comparable && outcome !== 'baseline' ? 'Establish matching evaluation conditions before claiming improvement. Compare evaluation scores and confirmation means separately.'
+      : !repeated && deterministic ? "Open the selected experiment's solution, and check Trust before relying on it."
       : !repeated ? 'Repeat the selected experiment with multiple seeds and inspect Trust before relying on the result.'
         : 'Inspect the spread and evaluation conditions of repeat checks. Multiple seeds alone do not establish generalization or statistical significance.'
   return { outcome, robustness, trust, best, baseline, first, gain, gainPct: null,

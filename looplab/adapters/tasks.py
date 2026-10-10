@@ -187,8 +187,12 @@ def load_task(path: str | Path, *, existing_run: bool = False) -> TaskAdapter:
     # reader handles JSON/YAML and a BOM from Windows editors.
     # `existing_run` forwards to validate_task: pass it when `path` is (or stands in for) a run's own
     # `task.snapshot.json`, so re-entering an existing run can't be refused by a rule added later.
-    from looplab.core.appconfig import load_document
+    from looplab.core.appconfig import load_document, resolve_task_paths
     task, _settings, _out = load_document(Path(path))
+    # Relative paths read against the FILE's directory first (doc 75 UX-04), so an example loads
+    # from anywhere; a path that exists only under the current directory, or nowhere, is read as
+    # before — an old relative snapshot resumes exactly as it did.
+    task = resolve_task_paths(task, Path(path).parent, missing="keep")
     adapter = validate_task(task, existing_run=True) if existing_run else validate_task(task)
     if existing_run and isinstance(adapter, RepoTask):
         adapter.bind_run_directory(Path(path).parent)

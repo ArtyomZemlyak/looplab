@@ -845,12 +845,13 @@ def test_the_cli_result_and_the_report_name_the_objective(tmp_path, capsys):
     retargeted = fold(_rows(_retarget(), started=_REFERENCE))
     _print_result(retargeted)
     out = capsys.readouterr().out
-    assert ("BEST node 1: metric=0.45 (objective: 'filtered', an operator retarget — not the task's "
-            "own metric)") in out
+    # doc 75 UX-18/UX-27: "experiment", and which way is better, before the retarget clause.
+    assert ("BEST experiment #1: metric = 0.45 (higher is better) (objective: 'filtered', an operator "
+            "retarget — not the task's own metric)") in out
     assert "headroom: +0.1 over the baseline 0.4 (paper); 25.0% of the gap" in out, out
     _print_result(fold(_rows(started=_REFERENCE)))
     plain = capsys.readouterr().out
-    assert "BEST node 2: metric=0.7 params=" in plain and "objective:" not in plain
+    assert "BEST experiment #2: metric = 0.7 (higher is better) params=" in plain and "objective:" not in plain
     assert ("Objective: the declared extra metric 'filtered', which an operator retarget made the "
             "run's objective") in _report_context(retargeted)
     assert "Objective:" not in _report_context(fold(_rows()))

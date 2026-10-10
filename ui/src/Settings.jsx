@@ -3,7 +3,8 @@ import { setUILanguage } from './uiLanguage.js'
 import React, { useEffect, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react'
 import { createIdempotencyKey, deadlineGet, saveSettings, saveSecret } from './util.js'
 import {
-  toForm, fromForm, settingsSavePayload, settingsValidationErrors, loadSettingsSchema, sameAgentRoles,
+  differsFromDefault, toForm, fromForm, settingsSavePayload, settingsValidationErrors, loadSettingsSchema,
+  sameAgentRoles,
 } from './settingsSchema.js'
 import {
   ambientVariables, filterSettingsGroups, mismatchDetail, reconcileAcceptedRecord,
@@ -358,8 +359,7 @@ export default function Settings({ onBack, initialSection = '' }) {
     const changed = new Set()
     for (const key of Object.keys(schema.fieldByKey)) {
       if (schema.fieldByKey[key].type === 'secret') continue
-      const defaultValue = defaults[key] ?? (schema.fieldByKey[key].type === 'list' ? [] : null)
-      if (JSON.stringify(current[key]) !== JSON.stringify(defaultValue ?? null)) changed.add(key)
+      if (differsFromDefault(schema.fieldByKey[key], current[key], defaults[key])) changed.add(key)
     }
     const defaultControl = defaults.agent_control || {}
     const controlKeys = new Set([...Object.keys(agentControl || {}), ...Object.keys(defaultControl)])

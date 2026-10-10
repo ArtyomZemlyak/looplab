@@ -338,7 +338,7 @@ def test_init_writes_parseable_documented_template(tmp_path):
     assert set(("task", "settings", "out")) <= set(doc)
     # The whole template must be valid YAML, incl. the comment alignment (a `#` glued to a value
     # would corrupt it): every ACTIVE value round-trips as written.
-    assert doc["settings"]["max_nodes"] == 8 and doc["settings"]["backend"] == "llm"
+    assert doc["settings"]["max_nodes"] == 8 and "backend" not in doc["settings"]   # doc 75 UX-02
     # doc 74 EB-17: the endpoint and model are documented but NOT active — an active value in the file
     # outranks LOOPLAB_LLM_BASE_URL / .env, so the scaffold used to undo the endpoint the reader had
     # just exported. They stay discoverable as commented lines.
@@ -799,11 +799,19 @@ def test_run_no_task_errors():
 
 # --- Genesis: --goal with no --kind lets the LLM infer the task kind ------------------------------
 
+def _stub_genesis_preflight(monkeypatch):
+    """Genesis now takes the run's endpoint preflight first (doc 75 UX-01); these tests stand in a
+    model, so the probe of it is stubbed with the client."""
+    import looplab.agents.preflight as preflight
+    monkeypatch.setattr(preflight, "preflight_role_endpoints", lambda *a, **k: None)
+
+
 def _patch_genesis(monkeypatch, task):
     """Stub the LLM client construction and the authoring call so the genesis path runs offline."""
     import looplab.cli as cli
     import looplab.engine.genesis as genesis
     monkeypatch.setattr(cli, "make_llm_client", lambda settings, **k: object())
+    _stub_genesis_preflight(monkeypatch)
     monkeypatch.setattr(genesis, "author_task",
                         lambda goal, **k: genesis.GenesisResult(task=task, rationale="inferred"))
 
@@ -812,7 +820,7 @@ def test_run_goal_only_infers_kind_and_runs(tmp_path, monkeypatch):
     _patch_genesis(monkeypatch, {"kind": "quadratic", "goal": "g", "direction": "min",
                                  "bounds": {"x": [-10.0, 10.0], "y": [-10.0, 10.0]}})
     result = runner.invoke(app, [
-        "run", "--goal", "minimize (x-3)^2", "-s", "max_nodes=2", "-s", "backend=toy",
+        "run", "--genesis", "--goal", "minimize (x-3)^2", "-s", "max_nodes=2", "-s", "backend=toy",
         "--out", str(tmp_path / "g"),
     ])
     assert result.exit_code == 0, result.output
@@ -834,6 +842,7 @@ def _stub_author(monkeypatch, **task):
     import looplab.cli as cli
     import looplab.engine.genesis as genesis
     monkeypatch.setattr(cli, "make_llm_client", lambda settings, **k: object())
+    _stub_genesis_preflight(monkeypatch)
     monkeypatch.setattr(genesis, "author_task",
                         lambda goal, **k: genesis.GenesisResult(task=dict(task), rationale="r"))
 
@@ -863,7 +872,7 @@ def test_run_generative_kind_respects_explicit_backend(tmp_path, monkeypatch):
     # An explicit --backend toy must NOT be overridden by the generative-kind bump.
     _stub_author(monkeypatch, kind="code_regression", goal="write code", direction="min")
     seen = _capture_backend(monkeypatch)
-    runner.invoke(app, ["run", "--goal", "fit a model in code", "--backend", "toy",
+    runner.invoke(app, ["run", "--genesis", "--goal", "fit a model in code", "--backend", "toy",
                         "--out", str(tmp_path / "g")])
     assert seen.get("backend") == "toy"
 
@@ -872,6 +881,7 @@ def test_run_genesis_endpoint_error_is_attributed_to_the_model(tmp_path, monkeyp
     import looplab.cli as cli
     import looplab.engine.genesis as genesis
     monkeypatch.setattr(cli, "make_llm_client", lambda settings, **k: object())
+    _stub_genesis_preflight(monkeypatch)
     monkeypatch.setattr(genesis, "author_task",
                         lambda goal, **k: genesis.GenesisResult(error="connection refused"))
     result = runner.invoke(app, ["run", "--goal", "predict x", "--out", str(tmp_path / "e")])
@@ -883,6 +893,7 @@ def test_run_genesis_vague_goal_asks_for_detail(tmp_path, monkeypatch):
     import looplab.cli as cli
     import looplab.engine.genesis as genesis
     monkeypatch.setattr(cli, "make_llm_client", lambda settings, **k: object())
+    _stub_genesis_preflight(monkeypatch)
     monkeypatch.setattr(genesis, "author_task",
                         lambda goal, **k: genesis.GenesisResult(task={}, reply="What data do you have?"))
     result = runner.invoke(app, ["run", "--goal", "make it good", "--out", str(tmp_path / "v")])
@@ -976,6 +987,7 @@ def test_run_kind_pins_genesis(tmp_path, monkeypatch):
     import looplab.engine.genesis as genesis
     seen = {}
     monkeypatch.setattr(cli, "make_llm_client", lambda settings, **k: object())
+    _stub_genesis_preflight(monkeypatch)
 
     def _author(goal, **k):
         seen["kind"] = k.get("kind")                          # capture the pinned kind passed through
@@ -984,7 +996,7 @@ def test_run_kind_pins_genesis(tmp_path, monkeypatch):
                   "bounds": {"x": [-10.0, 10.0], "y": [-10.0, 10.0]}}, rationale="pinned")
     monkeypatch.setattr(genesis, "author_task", _author)
     result = runner.invoke(app, [
-        "run", "--kind", "quadratic", "--goal", "minimize x^2", "-s", "max_nodes=1",
+        "run", "--genesis", "--kind", "quadratic", "--goal", "minimize x^2", "-s", "max_nodes=1",
         "-s", "backend=toy", "--out", str(tmp_path / "k"),
     ])
     assert result.exit_code == 0, result.output

@@ -211,8 +211,13 @@ export function summarizeLaunchDecision(draft, t = text => text) {
   if (!parsed.ok) return [{ label: 'Task', value: t('Fix the task JSON before review.'), invalid: true }]
   const task = parsed.value
   const metric = task.eval?.metric || task.cmd?.metric
+  // …or the name the task's comparison contract DECLARES (doc 75 UX-31): the offline demo's card read
+  // "Metric not explicitly stated" while its spec declared `metric_uid: quadratic_loss`.
+  const contract = task.comparison_contract && typeof task.comparison_contract === 'object'
+    ? task.comparison_contract : null
   const metricName = typeof metric === 'string' ? metric
-    : metric && typeof metric === 'object' ? metric.key || metric.path || '' : ''
+    : metric && typeof metric === 'object' ? metric.key || metric.path || ''
+      : typeof contract?.metric_uid === 'string' ? contract.metric_uid : ''
   const direction = task.direction === 'max' ? t('higher is better')
     : task.direction === 'min' ? t('lower is better')
       : task.direction === 'auto' ? t('direction resolved by evaluator') : t('direction not stated')

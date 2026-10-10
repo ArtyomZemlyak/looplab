@@ -136,6 +136,7 @@ def _receipts(srv, rd: Path, expected_generation: str, source: dict | None = Non
                       "parents": [trust_signals.get(p["node_id"], []) for p in parents]}})
         # Presentation metadata must not invalidate existing commentary/retry identities.
         row["completed_at"] = terminal_time.get((node.id, node.attempt))
+        _note_repeat_checks(row, node)
         rows.append(row)
     rows.sort(key=lambda row: (row["completed_seq"], row["node_id"], row["attempt"]))
     # A trainer exit / stop request / finalization in progress is not a run result.
@@ -159,8 +160,21 @@ def _receipts(srv, rd: Path, expected_generation: str, source: dict | None = Non
         row["evidence_token"] = _digest({"receipt": row, "nodes": [r["evidence_token"] for r in rows]})
         row["completed_at"] = next((e.ts for e in reversed(events)
                                     if e.type in ("finalization_finished", "run_finished")), None)
+        _note_repeat_checks(row, best)
         rows.append(row)
     return generation, rows
+
+
+def _note_repeat_checks(row: dict, node) -> None:
+    """`repeat_checks: "not_applicable"` on a row whose node's record says the task DECLARED a
+    deterministic objective (`engine/comparability.py::comparability_record`, doc 75 UX-13), so the
+    chat brief stops advising repeat runs of it. Presentation metadata after the evidence token,
+    like `completed_at`; absent otherwise, which every reader takes as "repeats may matter"."""
+    from looplab.core.comparability_rule import record_of
+
+    record = record_of(node) if node is not None else None
+    if record and record.get("repeat_checks") == "not_applicable":
+        row["repeat_checks"] = "not_applicable"
 
 
 def _snapshot(srv, rd: Path, expected_generation: str, *, limit: int = 50, cursor: str | None = None) -> dict:

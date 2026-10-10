@@ -164,9 +164,20 @@ def stop_account(state) -> StopAccount:
             # still owes (`finalization_pending()`). A legacy markerless finish has neither.
             if (getattr(state, "finalization_marker_seq", None) is not None
                     or _finalization_pending(state)):
+                # SAID IN THE OPERATOR'S TERMS (doc 75 UX-07). The old sentence — "the search ran
+                # out of work with a champion standing. That natural completion is the one finish
+                # that names no reason." — printed at the end of every `run`, `resume` and `inspect`,
+                # and on the demo it was false: the run stopped because its node budget was spent.
+                # When the plan recorded the budget, say that with the count; otherwise say only
+                # what is known.
+                spent = _node_budget_spent(state)
+                if spent is not None:
+                    return StopAccount("finished", None,
+                                       f"finished — node budget spent ({spent[0]}/{spent[1]} "
+                                       f"experiments).")
                 return StopAccount("finished", None,
-                                   "finished — the search ran out of work with a champion standing. "
-                                   "That natural completion is the one finish that names no reason.")
+                                   "finished normally — the search stopped with a best result "
+                                   "standing (a normal finish records no stop reason).")
             return StopAccount("finished", None,
                                "finished, and the `run_finished` row names no reason — an old log, "
                                "or a finish written before reasons were recorded.")
@@ -200,6 +211,21 @@ def stop_account(state) -> StopAccount:
     if waiting is not None:
         return StopAccount("awaiting_approval", None, waiting + _unserved_finalize(state))
     return StopAccount("no_boundary", None, _NOBODY_SAID + _unserved_finalize(state))
+
+
+def _node_budget_spent(state) -> Optional[tuple[int, int]]:
+    """`(experiments, budget)` when the folded plan's node budget (plus any `budget_extend`) is
+    spent, else None — a run with no plan row cannot say what its budget was."""
+    plan = getattr(state, "plan", None)
+    if not isinstance(plan, dict):
+        return None
+    try:
+        budget = int(plan.get("max_nodes"))
+        budget += int((getattr(state, "budget_overrides", None) or {}).get("add_nodes", 0) or 0)
+    except (TypeError, ValueError, OverflowError):
+        return None
+    nodes = len(getattr(state, "nodes", None) or {})
+    return (nodes, budget) if budget > 0 and nodes >= budget else None
 
 
 def _awaiting_approval(state) -> Optional[str]:

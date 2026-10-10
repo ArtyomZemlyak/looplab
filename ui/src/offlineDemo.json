@@ -34,11 +34,13 @@
       "cutoff": "none",
       "measurement_phase": "search",
       "uncertainty_protocol": "none: deterministic objective",
+      "deterministic": true,
       "constraints_digest": "bounds x,y in [-10, 10]"
     }
   },
   "settings": {
     "backend": "toy",
-    "max_nodes": 6
+    "max_nodes": 6,
+    "memory_dir": ""
   }
 }

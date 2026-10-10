@@ -1,5 +1,6 @@
 import { uiText, uiMessage, uiPlural, useUILanguage } from './uiLanguage.js'
 import React, { useEffect, useMemo, useRef, useState } from 'react'
+import { MODEL_CHECK_EVENT, paidActionModelNote, readModelCheck } from './modelConnection.js'
 import BaseRevision from './BaseRevision.jsx'
 import UpstreamPanel from './UpstreamPanel.jsx'
 import { peekReportRefreshIntent, reportRefreshIntent, isTransientCommandReadError, deadlineGet, fmt,
@@ -17,7 +18,7 @@ import { normalizeReportNodeDetail, normalizeRunReport, reportCoverageText,
 import { nodeTheme } from './conceptId.js'
 import { nodeIsActive } from './nodeProjection.js'
 import { readOnlyLabel } from './runMode.js'
-import { resultMeasurement } from './resultMeasurement.js'
+import { nodeRepeatChecksNotApplicable, resultMeasurement } from './resultMeasurement.js'
 import './report-trust-polish.css'
 
 const TRUST_CLASS = { unverified: 'neutral', caveats: 'warn', suspect: 'alarm' }
@@ -170,7 +171,8 @@ function ChampionCard({ best, state }) {
   // here would put this card back in disagreement with the Trust tab, one vocabulary over.
   const objective = objectiveMetricSource(best)
   const objectiveCaveated = objectiveSourceCaveated(objective)
-  const measurement = resultMeasurement(best.confirmed_mean != null, best.confirmed_seeds)
+  const measurement = resultMeasurement(best.confirmed_mean != null, best.confirmed_seeds, 'en',
+    nodeRepeatChecksNotApplicable(best))
   return (
     <div className="champion-card">
       <div className="kv">
@@ -205,10 +207,18 @@ function List({ items }) {
 }
 
 export default function ReportView({ state, runId, onOpenPanel, canOpenPanel, onToast,
-  onPickNode, onPickEvidence, readOnly = false,
+  onPickNode, onPickEvidence, readOnly = false, runBackend = null,
   historySeq = null, expectedGeneration = null, observedSeq = null,
   readOnlyReason = 'history', evidenceAvailable = true }) {
   const [, , localeRevision] = useUILanguage()
+  // The model check this tab last ran (Settings → Model, or the first-run "Check connection…").
+  const [modelCheck, setModelCheck] = useState(readModelCheck)
+  useEffect(() => {
+    const onCheck = event => setModelCheck(event.detail)
+    window.addEventListener(MODEL_CHECK_EVENT, onCheck)
+    return () => window.removeEventListener(MODEL_CHECK_EVENT, onCheck)
+  }, [])
+  const needsModel = readOnly ? '' : paidActionModelNote(runBackend, modelCheck)
 
   const failed = Object.values(state.nodes).filter(n => nodeIsActive(n, state) && n.status === 'failed')
   const a = useMemo(() => analyze(state), [state])
@@ -493,9 +503,11 @@ export default function ReportView({ state, runId, onOpenPanel, canOpenPanel, on
           ? 'Paid refresh is running with the saved request. You can safely leave and resume it later.'
           : savedRefreshIntent
             ? 'Paid request saved. Resume rechecks the same request; it cannot start a second job. You can safely leave.'
+            : needsModel ? needsModel
             : 'Paid AI action: provider charges may apply. One request identity will be saved when you start, so you can safely leave and resume.'
   const refreshButtonLabel = refreshing ? 'Paid refresh running…'
-    : savedRefreshIntent ? 'Resume paid refresh' : 'Refresh report · paid'
+    : savedRefreshIntent ? 'Resume paid refresh'
+      : needsModel ? 'Refresh report · paid · needs a model' : 'Refresh report · paid'
   const refreshDisabledReason = !refreshGenerationReady
     ? 'Reload the run and wait for its verified generation before starting a paid refresh.'
     : !refreshStorageReady
@@ -504,6 +516,13 @@ export default function ReportView({ state, runId, onOpenPanel, canOpenPanel, on
         ? (refreshError || 'This paid refresh cannot be resumed safely yet.')
         : ''
   const exportContext = { generation: expectedGeneration, snapshotSeq: observedSeq }
+  const hasResearchMemo = Array.isArray(state.research) && state.research.length > 0
+  const researchBody = <>
+    <p className="report-section-intro">{uiText('Research memos explore possible explanations and future experiments. They are not evidence that an approach worked. Read sources, proposed directions and verification status in Deep Research.')}</p>
+    {onOpenPanel && canOpenPanel?.('research') !== false
+      ? <button type="button" className="btn sm" onClick={event => onOpenPanel('research', event.currentTarget)}>{uiText('Open Deep Research')}</button>
+      : <p className="muted">{uiText('Deep Research is unavailable in this view.')}</p>}
+  </>
   const modelCard = () => JSON.stringify(buildModelCard({ ...state, report: rep }, best, exportContext), null, 2)
   const reportSections = [
     ['report-section-summary', 'Summary'],
@@ -639,10 +658,10 @@ export default function ReportView({ state, runId, onOpenPanel, canOpenPanel, on
 
       <section className="report-research-link" aria-labelledby="report-section-research">
         <h2 id="report-section-research" tabIndex={-1} className="section-h">{uiText('Hypothesis search · Deep Research')}</h2>
-        <p className="report-section-intro">{uiText('Research memos explore possible explanations and future experiments. They are not evidence that an approach worked. Read sources, proposed directions and verification status in Deep Research.')}</p>
-        {onOpenPanel && canOpenPanel?.('research') !== false
-          ? <button type="button" className="btn sm" onClick={event => onOpenPanel('research', event.currentTarget)}>{uiText('Open Deep Research')}</button>
-          : <p className="muted">{uiText('Deep Research is unavailable in this view.')}</p>}
+        {/* COLLAPSED while the run has no memo (doc 75 UX-16): not hidden — it is how a user starts
+            research — but on a run with none it was a paragraph and a button about nothing. */}
+        {hasResearchMemo ? researchBody : <details className="report-research-empty">
+          <summary>{uiText('No research memo in this run · what is Deep Research?')}</summary>{researchBody}</details>}
       </section>
 
       {best && <><h2 id="report-section-solution" tabIndex={-1} className="section-h">{uiText("Reproduce — selected solution")}</h2>

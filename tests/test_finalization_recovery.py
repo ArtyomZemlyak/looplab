@@ -631,7 +631,7 @@ def test_direct_cli_resume_waits_for_finished_owner_tail(tmp_path, monkeypatch):
         cmds, "_run_engine_guarded",
         lambda _eng, **_k: guarded.append(True) or fold(_eng.store.read_all()),  # **_k: mlflow_uri=
     )
-    monkeypatch.setattr(cmds, "_print_result", lambda _state: None)
+    monkeypatch.setattr(cmds, "_print_result", lambda _state, **_k: None)
 
     cmds.resume(run_dir)
 
@@ -739,7 +739,7 @@ def test_cli_run_pending_finalize_preserves_and_uses_original_snapshots(
     monkeypatch.setattr(cli, "_engine", fake_engine)
     monkeypatch.setattr(
         cmds, "_run_engine_guarded", lambda eng, **_k: fold(eng.store.read_all()))  # **_k: mlflow_uri=
-    monkeypatch.setattr(cmds, "_print_result", lambda _state: None)
+    monkeypatch.setattr(cmds, "_print_result", lambda _state, **_k: None)
 
     result = CliRunner().invoke(
         app, ["run", str(new_task_file), "--out", str(run_dir), "--max-nodes", "9"])

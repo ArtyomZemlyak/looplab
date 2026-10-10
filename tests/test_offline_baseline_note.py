@@ -1,6 +1,6 @@
 """An offline run whose best score is the task's own baseline says so (doc 74 EB-04).
 
-`--kind dataset --backend toy` printed `BEST node 2: metric=10 params={}` and nothing else, and 10
+`--kind dataset --backend toy` printed `BEST node 2: metric=10 params={}` (now `BEST experiment #2`, doc 75 UX-18) and nothing else, and 10
 read as a model score: without a model the dataset Developer is a fixed template that counts the
 data file's rows. `cli/__init__.py::offline_baseline_note` adds one line under BEST in `run`,
 `resume` and `inspect`. Driven here through the REAL CLI on both sides of the rule: a dataset run
@@ -31,7 +31,7 @@ def test_an_offline_dataset_run_names_its_score_a_baseline_in_run_and_inspect(tm
                   "--data", str(ROOT / "examples/dataset_example/data.csv"),
                   "--out", str(run_dir), "--max-nodes", "3")
     lines = output.splitlines()
-    best = next(i for i, line in enumerate(lines) if line.startswith("BEST node"))
+    best = next(i for i, line in enumerate(lines) if line.startswith("BEST experiment"))
     assert "params={}" in lines[best]
     assert lines[best + 1].startswith(NOTE), output
     inspected = CliRunner().invoke(app, ["inspect", str(run_dir)])
@@ -41,7 +41,7 @@ def test_an_offline_dataset_run_names_its_score_a_baseline_in_run_and_inspect(tm
 def test_an_offline_run_that_tuned_its_params_gets_no_note(tmp_path):
     output = _run("--kind", "quadratic", "--goal", "min (x-3)^2", "--direction", "min",
                   "--out", str(tmp_path / "q"), "--max-nodes", "4")
-    assert "BEST node" in output and NOTE not in output, output
+    assert "BEST experiment" in output and NOTE not in output, output
 
 
 def test_the_rule_reads_engine_facts_only():

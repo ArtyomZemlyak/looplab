@@ -17,7 +17,7 @@ from looplab.core.atomicio import atomic_write_text
 from looplab.core.config import Settings
 from looplab.core.latebind import late_bound
 from looplab.events.replay import fold
-from looplab.cli import _BACKENDS, _choice, _require_run_dir, app
+from looplab.cli import _BACKENDS, CliRefusal, _choice, _require_run_dir, app
 
 
 # Late-bound so a test patching `looplab.cli.make_llm_client` (the documented seam, test_cli.py)
@@ -27,7 +27,10 @@ make_llm_client = late_bound("looplab.cli", "make_llm_client")
 
 @app.command()
 def smoke(model: Optional[str] = typer.Option(None, help="Override model id.")):
-    """Ping the configured LLM endpoint to verify it's reachable and tool-calling works."""
+    """Check the configured model endpoint: a plain text reply, then a structured (JSON) reply.
+
+    The same endpoint `looplab run` uses (LOOPLAB_LLM_BASE_URL, LOOPLAB_LLM_MODEL). Nothing is
+    launched; a failure prints its cause and the fix."""
     settings = Settings()
     if model is not None:
         from looplab.core.llm import apply_llm_model_override
@@ -41,6 +44,8 @@ def smoke(model: Optional[str] = typer.Option(None, help="Override model id.")):
         typer.echo(f"text OK: {txt.strip()[:80]!r}")
     except Exception as e:  # noqa: BLE001
         typer.echo(f"text FAILED: {e}")
+        from looplab.agents.preflight import failure_remedy
+        typer.echo(f"  {failure_remedy(e)}")
         raise typer.Exit(1)
     try:
         from looplab.core.models import Idea
@@ -60,6 +65,8 @@ def smoke(model: Optional[str] = typer.Option(None, help="Override model id.")):
         typer.echo(f"structured OK: operator={idea.operator} params={idea.params}")
     except Exception as e:  # noqa: BLE001
         typer.echo(f"structured FAILED: {e}")
+        from looplab.agents.preflight import failure_remedy
+        typer.echo(f"  {failure_remedy(e)}")
         raise typer.Exit(1)
 
 
@@ -75,7 +82,7 @@ def bench(
     _choice(backend, _BACKENDS, "--backend")
     for tf in task_files:
         if not tf.exists():
-            raise typer.BadParameter(f"task file not found: {tf}")
+            raise CliRefusal(f"task file not found: {tf}")
     from looplab.bench import run_benchmark
     settings = Settings()
     settings.backend = backend

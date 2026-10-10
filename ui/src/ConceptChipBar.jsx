@@ -141,7 +141,7 @@ export default function ConceptChipBar({ state, onHighlight }) {
       <div className="cb-head">
         <strong>{uiText("Concepts")}</strong>
         <span className="chip xs warn">{materialization.toUpperCase()}</span>
-        <span className="muted">{((materialization === 'unavailable' ? uiText('Membership unavailable; not empty.') : uiPlural(withheld, 'Membership withheld for all {0} tagged experiment; not empty.', 'Membership withheld for all {0} tagged experiments; not empty.')))}</span>
+        <span className="muted">{((materialization === 'unavailable' ? uiText('Membership unavailable; not empty.') : uiPlural(withheld, 'Concept tags of {0} tagged experiment are hidden here (the run is tagged); open Concepts to see why.', 'Concept tags of {0} tagged experiments are hidden here (the run is tagged); open Concepts to see why.')))}</span>
       </div>
     </div>
   )

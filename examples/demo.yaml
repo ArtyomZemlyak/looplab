@@ -32,7 +32,12 @@ task:
     cutoff: "none"
     measurement_phase: search
     uncertainty_protocol: "none: deterministic objective"
+    # One evaluation IS the score here, so the Report and the chat do not ask for repeat runs.
+    deterministic: true
     constraints_digest: "bounds x,y in [-10, 10]"
 settings:
   backend: toy
   max_nodes: 6
+  # The demo writes nothing outside runs/demo: no cross-run memory (~/.looplab/memory), whose
+  # lessons from a toy objective would otherwise be offered to your later real runs.
+  memory_dir: ""

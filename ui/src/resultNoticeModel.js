@@ -1,4 +1,4 @@
-import { resultMeasurement, resultSpreadText } from './resultMeasurement.js'
+import { repeatChecksNotApplicable, resultMeasurement, resultSpreadText } from './resultMeasurement.js'
 
 const token = value => typeof value === 'string' && /^[0-9a-f]{64}$/.test(value)
 const metric = value => value === null || typeof value === 'number' && Number.isFinite(value)
@@ -105,7 +105,8 @@ export function resultNoticeText(row, language = 'en') {
   const ru = language === 'ru'
   const number = value => new Intl.NumberFormat(ru ? 'ru' : 'en', { maximumSignificantDigits: 6 }).format(value)
   const score = row.confirmed_mean ?? row.score
-  const measurement = resultMeasurement(row.confirmed_mean !== null, row.confirmed_seeds, language)
+  const measurement = resultMeasurement(row.confirmed_mean !== null, row.confirmed_seeds, language,
+    repeatChecksNotApplicable(row))
   const label = measurement.label
   const direction = row.direction === 'min' ? ru ? 'меньше лучше' : 'lower is better' : ru ? 'больше лучше' : 'higher is better'
   let title, outcome, next, comparison = ''
@@ -192,7 +193,8 @@ export function resultNoticeBrief(row, language = 'en') {
   const ru = language === 'ru', text = resultNoticeText(row, language)
   if (['failed', 'aborted'].includes(row.status)) return `${text.outcome} ${text.next}`
   const score = row.confirmed_mean ?? row.score
-  const measurement = resultMeasurement(row.confirmed_mean !== null, row.confirmed_seeds, language)
+  const measurement = resultMeasurement(row.confirmed_mean !== null, row.confirmed_seeds, language,
+    repeatChecksNotApplicable(row))
   const value = score === null ? ru ? 'пригодной метрики нет' : 'no usable metric'
     : `${measurement.label} ${new Intl.NumberFormat(ru ? 'ru' : 'en', { maximumSignificantDigits: 6 }).format(score)}`
   const head = row.kind === 'run'
@@ -206,7 +208,9 @@ export function resultNoticeBrief(row, language = 'en') {
   const next = row.trust_flagged || row.trust_advisory || row.parent_trust_advisory || row.salvaged
       || row.feasible === false || row.violations > 0
     ? ru ? 'Перед продолжением нужно проверить ограничения и предупреждения оценки.' : 'Review evaluation caveats and warnings before continuing.'
-    : row.confirmed_mean === null && score !== null
+    // A declared-deterministic objective has nothing to repeat (doc 75 UX-13): "check it with
+    // repeat runs" was said of the offline demo's every experiment.
+    : row.confirmed_mean === null && score !== null && !repeatChecksNotApplicable(row)
       ? ru ? 'Результат предварительный; дальше стоит проверить его повторными запусками.' : 'This is preliminary; the next step is to check it with repeat runs.'
       : row.kind === 'run' ? text.next : ru ? 'Дальше можно обсудить следующий эксперимент.' : 'We can discuss the next experiment now.'
   return [head, comparison, next].filter(Boolean).join(' ')

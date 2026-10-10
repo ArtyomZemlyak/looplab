@@ -2,7 +2,7 @@
   "id": "repo_composable_example",
   "goal": "tune config.json to maximize the eval metric (max at x=3)",
   "direction": "max",
-  "repo": "examples/repo_example",
+  "repo": "repo_example",
   "protect": ["ttrain.py"],
   "cmd": {
     "command": ["python", "ttrain.py"],

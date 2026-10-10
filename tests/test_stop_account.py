@@ -469,7 +469,10 @@ def test_a_natural_completion_is_not_reported_as_an_old_log(tmp_path):
     account = stop_account(_fold(run_dir / "events.jsonl"))
     assert account.disposition == "finished" and account.reason is None
     assert "old log" not in account.line, account.line
-    assert "ran out of work with a champion standing" in account.line
+    # doc 75 UX-07: said in the operator's terms. This run is too small for a plan row (n_seeds=2
+    # of 3), so it cannot name its budget and says only what is known; with a plan it says
+    # "node budget spent (N/N experiments)" — driven on the demo in `test_cli_finished_run.py`.
+    assert "finished normally" in account.line and "names no reason" not in account.line
 
     legacy = tmp_path / "legacy.jsonl"
     store = EventStore(legacy)

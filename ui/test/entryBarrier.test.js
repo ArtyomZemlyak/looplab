@@ -115,6 +115,17 @@ test('tools once shown stay shown: the portfolio shrinking below five runs does 
   } finally { await view.unmount() }
 })
 
+test('after the first run the demo is still one button away, under a fresh run id (doc 75 UX-30)', async () => {
+  const { view, backend } = await list([row('offline-demo')])
+  try {
+    await until(() => buttonNamed(view.container, 'Offline demo'), 'the demo button beside New run')
+    await React.act(async () => { buttonNamed(view.container, 'Offline demo').click() })
+    await until(() => view.container.querySelector('.offline-demo form.asst-launch'), 'demo launch card')
+    assert.match(view.container.querySelector('.offline-demo').textContent, /offline-demo-2/)
+    assert.equal(backend.calls.some(call => call.method !== 'GET'), false, 'opening it writes nothing')
+  } finally { await view.unmount() }
+})
+
 test('the model screen says one plain line about the API key', () => {
   const line = settings.credentialKeySummary
   assert.equal(line(null), 'API key: not set. Local endpoints usually need none.')

@@ -3,7 +3,7 @@
   "id": "repo_drift_example",
   "goal": "tune config.json to maximize the eval metric (max at x=3), drift-checked",
   "direction": "max",
-  "editable_path": "examples/repo_example",
+  "editable_path": "repo_example",
   "edit_surface": ["*.json"],
   "protect": ["ttrain.py"],
   "eval": {

@@ -17,6 +17,7 @@ from pydantic import (
     BaseModel,
     ConfigDict,
     Field,
+    StrictBool,
     StrictInt,
     StrictStr,
     ValidationError,
@@ -72,6 +73,13 @@ class ComparisonContract(BaseModel):
     uncertainty_protocol: StrictStr = Field(min_length=1, max_length=_MAX_FIELD_CHARS)
     constraints_digest: StrictStr = Field(min_length=1, max_length=_MAX_FIELD_CHARS)
     baseline: StrictStr | None = Field(default=None, min_length=1, max_length=_MAX_FIELD_CHARS)
+    # The operator's declaration that one evaluation of a candidate IS its score — the same input
+    # always scores the same, so repeating it with other seeds measures nothing (doc 75 UX-13). The
+    # UI used to tell the deterministic offline demo to "repeat the selected experiment with multiple
+    # seeds". An EXPLICIT field, not a reading of `uncertainty_protocol`: "none" there means no
+    # protocol was declared, not that the objective is deterministic. Optional and excluded when
+    # unset, so every contract written before it keeps its `contract_id`.
+    deterministic: StrictBool | None = None
     contract_id: StrictStr | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
 
     @field_validator("schema_version", mode="before")
@@ -102,6 +110,15 @@ class ComparisonContract(BaseModel):
         if self.measurement_phase == "confirmed" and self.uncertainty_protocol == "none":
             raise ValueError(
                 "confirmed measurement_phase requires an explicit uncertainty_protocol")
+        return self
+
+    @model_validator(mode="after")
+    def _deterministic_has_nothing_to_confirm(self) -> "ComparisonContract":
+        # A confirmed measurement is a mean over repeats with its spread; declaring the objective
+        # deterministic AND asking for that is a contradiction the operator should resolve.
+        if self.deterministic and self.measurement_phase == "confirmed":
+            raise ValueError("a deterministic objective has no repeat spread to confirm: use "
+                             "measurement_phase search (or holdout), or drop deterministic")
         return self
 
     @model_validator(mode="after")

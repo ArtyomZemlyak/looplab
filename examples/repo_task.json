@@ -3,7 +3,7 @@
   "id": "repo_example",
   "goal": "tune config.json to maximize the eval metric (max at x=3)",
   "direction": "max",
-  "editable_path": "examples/repo_example",
+  "editable_path": "repo_example",
   "edit_surface": [
     "*.json"
   ],

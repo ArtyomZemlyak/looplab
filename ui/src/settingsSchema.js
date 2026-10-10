@@ -253,6 +253,16 @@ export function settingsValidationErrors(form, schema, options = {}) {
 // Turn a settings object into the form's editable shape (lists → comma string, null → '').
 // `secret` fields are write-only: the API only ever returns the masked "***", never the value, so
 // the input always starts BLANK (a non-empty edit means "set a new key" — see Settings.onSave).
+// Whether a form value differs from the engine default (doc 75 UX-28). A blank text field reads back
+// as `null`, while three defaults are the empty STRING (`seed_from_run`,
+// `developer_step_feedback_command`, `mlflow_tracking_uri`), so a fresh server reported "3 customized
+// values", marked "Seed from a prior run" as changed and enabled "Reset all". Blank is one value.
+export function differsFromDefault(field, current, defaultValue) {
+  const blank = value => (value === '' || value === undefined ? null : value)
+  const fallback = defaultValue ?? (field?.type === 'list' ? [] : null)
+  return JSON.stringify(blank(current)) !== JSON.stringify(blank(fallback))
+}
+
 export function toForm(settings, schema) {
   const out = {}
   for (const [k, f] of Object.entries(fieldsFor(schema))) {

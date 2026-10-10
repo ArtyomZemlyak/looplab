@@ -1,13 +1,18 @@
 import { uiText, uiMessage, uiPlural, useUILanguage } from './uiLanguage.js'
 import React from 'react'
 import './baseRevision.css'
-import { nodeBase, capabilityOrigin } from './baseRevision.js'
+import { nodeBase, capabilityOrigin, runRecordsBases } from './baseRevision.js'
 
 export default function BaseRevision({ node, state, compact = false }) {
   useUILanguage()
 
   const base = nodeBase(node)
-  if (!base) return <span className="muted" title={uiText("No complete recorded seed archive for this result")}>{uiText("Base unknown")}</span>
+  // "Base unknown" only where a base COULD be known (doc 75 UX-17): on a run in which no experiment
+  // recorded a code base at all — every task with no editable repo, the offline demo included — the
+  // words described the task kind, not this result, and read as a missing fact.
+  if (!base) return runRecordsBases(state)
+    ? <span className="muted" title={uiText("No complete recorded seed archive for this result")}>{uiText("Base unknown")}</span>
+    : null
   const origin = capabilityOrigin(state, base.digest)
   const selection = base.selection
   return <div className={compact ? 'base-revision compact' : 'base-revision'}>

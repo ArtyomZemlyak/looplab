@@ -1,7 +1,7 @@
 {
   "schema": 1,
   "language": "ru",
-  "count": 7733,
+  "count": 7749,
   "messages": {
     "# LoopLab run report — {0}": "# Отчёт запуска LoopLab — {0}",
     "## Agent narrative (advisory)": "## Пояснения агента (рекомендации)",
@@ -2101,6 +2101,22 @@
     "Repeat research interval (s)": "Повторить интервал (с) исследований",
     "Repeat research max calls": "Повторить звонки в рамках исследования",
     "Repeat the selected experiment with multiple seeds and inspect Trust before relying on the result.": "Повторите выбранный эксперимент с несколькими seed и проверьте надёжность, прежде чем полагаться на результат.",
+    "Open the selected experiment's solution, and check Trust before relying on it.": "Откройте решение выбранного эксперимента и проверьте надёжность, прежде чем полагаться на него.",
+    "Deterministic objective: one evaluation is the score; repeat checks are not needed.": "Детерминированная цель: одна оценка и есть результат; повторные проверки не нужны.",
+    "deterministic": "детерминировано",
+    "Offline demo": "Офлайн-демо",
+    "Needs a model: the last connection check failed. Review Settings → Model.": "Нужна модель: последняя проверка связи не прошла. Откройте «Настройки → Модель».",
+    "Needs a model: this run used none (backend=toy). Check the connection in Settings → Model first.": "Нужна модель: этот запуск обходился без неё (backend=toy). Сначала проверьте связь в «Настройки → Модель».",
+    "Refresh report · paid · needs a model": "Обновить отчёт · платно · нужна модель",
+    "No research memo in this run · what is Deep Research?": "В этом запуске нет исследовательской записки · что такое Deep Research?",
+    "Budget nearly spent: combining the best results": "Бюджет почти израсходован: объединяем лучшие результаты",
+    "Trying several directions quickly, then refining the best": "Быстро пробуем несколько направлений, затем улучшаем лучшее",
+    "Combining and varying the best results": "Комбинируем и варьируем лучшие результаты",
+    "Exploring branches of the most promising results": "Исследуем ветви самых многообещающих результатов",
+    "Refining the best result so far": "Улучшаем лучший на сейчас результат",
+    "Changing how the search proceeds": "Меняем ход поиска",
+    "choosing the next experiment": "выбираем следующий эксперимент",
+    "building on experiment #{0}": "развиваем эксперимент #{0}",
     "Replacement key not accepted": "Заменяющий ключ не принимается",
     "Replay": "Повторить запуск",
     "Replay seq": "Повторить продолжение",
@@ -3837,7 +3853,7 @@
     "research memos; older, malformed, or over-budget entries are omitted.": "исследовательских заметок; более старые, повреждённые или превышающие лимит записи опущены.",
     "research process & tool activity": "исследовательской деятельности и деятельности с использованием инструментов",
     "research question": "исследовательский вопрос",
-    "research verdict: {0} (distinct from the work status)": "вердикт по результатам исследования: {0} (отличить интегральную от рабочей нагрузки)",
+    "research verdict: {0} — {1} (distinct from the work status)": "вердикт исследования: {0} — {1} (не путать со статусом работы)",
     "research-evidence-chip node{0}": "Узел-убедитель-убедитель-чип{0}",
     "research-history-trust tone-{0}": "История, доверенность, тон...{0}",
     "research-memo-disclosure evidence {0}": "исследовательских, памятных и исследовательских данных {0}",
@@ -7911,10 +7927,10 @@
       "few": "Отметить {0} загруженных непрочитанных элемента как прочитанные{1}",
       "many": "Отметить {0} загруженных непрочитанных элементов как прочитанные{1}"
     },
-    "Membership withheld for all {0} tagged experiments; not empty.": {
-      "one": "Состав скрыт для {0} отмеченного эксперимента; группа не пуста.",
-      "few": "Состав скрыт для всех {0} отмеченных экспериментов; группа не пуста.",
-      "many": "Состав скрыт для всех {0} отмеченных экспериментов; группа не пуста."
+    "Concept tags of {0} tagged experiments are hidden here (the run is tagged); open Concepts to see why.": {
+      "one": "Теги концептов {0} отмеченного эксперимента здесь скрыты (запуск отмечен); причина — в разделе «Концепты».",
+      "few": "Теги концептов {0} отмеченных экспериментов здесь скрыты (запуск отмечен); причина — в разделе «Концепты».",
+      "many": "Теги концептов {0} отмеченных экспериментов здесь скрыты (запуск отмечен); причина — в разделе «Концепты»."
     },
     "No pair of concepts appeared together in {0} or more runs.": {
       "one": "Ни одна пара концептов не встречалась вместе в {0} запуске или более.",

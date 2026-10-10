@@ -2,12 +2,12 @@
   "id": "repo_stages_example",
   "goal": "demonstrate a declared train→score pipeline with %params% tuning and per-source data permissions",
   "direction": "max",
-  "repo": "examples/repo_example",
+  "repo": "repo_example",
   "protect": ["stage_train.py", "stage_score.py"],
   "params": {"x": [0, 6]},
   "dataset": {
     "raw": {
-      "path": "examples/repo_example",
+      "path": "repo_example",
       "mount": true,
       "edit": false,
       "copy_modify": true,

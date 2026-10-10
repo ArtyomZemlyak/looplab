@@ -626,6 +626,9 @@ def test_genesis_and_the_owner_assistant_read_the_switch(tmp_path, monkeypatch):
 
     seen = []
     monkeypatch.setattr(cli, "make_llm_client", lambda settings, **k: object())
+    # Genesis takes the endpoint preflight first (doc 75 UX-01); the model here is a stand-in.
+    import looplab.agents.preflight as preflight
+    monkeypatch.setattr(preflight, "preflight_role_endpoints", lambda *a, **k: None)
 
     def _author(goal, **k):
         seen.append(k.get("claim_decisions"))
@@ -637,7 +640,7 @@ def test_genesis_and_the_owner_assistant_read_the_switch(tmp_path, monkeypatch):
     runner = CliRunner()
     for flag, expected in (([], True), (["-s", "lesson_prior_claim_decisions=false"], False)):
         result = runner.invoke(app, [
-            "run", "--kind", "quadratic", "--goal", "minimize x^2", "-s", "max_nodes=1",
+            "run", "--genesis", "--kind", "quadratic", "--goal", "minimize x^2", "-s", "max_nodes=1",
             "-s", "backend=toy", *flag, "--out", str(tmp_path / f"cli-{expected}")])
         assert result.exit_code == 0, result.output
         assert seen[-1] is expected, seen

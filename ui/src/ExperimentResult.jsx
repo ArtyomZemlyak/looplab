@@ -5,7 +5,7 @@ import { objectiveKey } from './objectiveModel.js'
 import { nodeIsActive } from './nodeProjection.js'
 import { nodeComparabilityStatus, nodesComparabilitySplit, COMPARABILITY_REFUSAL_SHORT, sourceIncomplete } from './runIndex.js'
 import { eligibleMeasuredResult, parentScoreDifference, scoreDifference } from './scoreComparison.js'
-import { resultMeasurement } from './resultMeasurement.js'
+import { nodeRepeatChecksNotApplicable, resultMeasurement } from './resultMeasurement.js'
 import { nodeFeasibilityStatus, objectiveMetricSource, objectiveSourceCaveated,
   OBJECTIVE_SOURCE_LABEL, objectiveSourceHelp } from './trustSemantics.js'
 import { extraMetricCaveated, extraMetricSourceLabel,
@@ -46,7 +46,7 @@ export default function ExperimentResult({ node: n, state = {}, onTab }) {
   const status = !active ? 'Removed from active results'
     : !completed ? n.status === 'failed' ? 'Evaluation failed' : 'No completed evaluation yet'
       : excluded ? 'Excluded by Trust gate' : feasibility.label
-  const measurement = resultMeasurement(confirmed, n.confirmed_seeds)
+  const measurement = resultMeasurement(confirmed, n.confirmed_seeds, 'en', nodeRepeatChecksNotApplicable(n))
   const parent = parents[0]?.node
   const keys = nodeComparabilityStatus(n, parent)
   const comparison = key ? 'Objective changed; inspect its source in Metrics.'

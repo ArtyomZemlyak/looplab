@@ -2056,6 +2056,16 @@ class Settings(BaseSettings):
     # Cross-run memory (I19, ADR-10): if set, the best result of each run is stored as
     # a case here, and the cases become retrievable knowledge for future runs.
     memory_dir: str | None = Field(default_factory=lambda: str(_LL_HOME / "memory"))
+
+    @field_validator("memory_dir", mode="before")
+    @classmethod
+    def _blank_memory_dir_is_off(cls, value):
+        # A BLANK directory is OFF, spelled the one way every reader already tests (`None`) — doc 75
+        # UX-32. The offline demo writes nothing outside its run directory, and the UI launch reads
+        # a `null` setting as "no override" (`serve/launch.py`), so `""` is the spelling both the
+        # demo file and the UI demo spec can share. Left as `""`, a reader building
+        # `Path(memory_dir) / ...` would have written the stores into the current directory.
+        return None if isinstance(value, str) and not value.strip() else value
     # HITL (I21, ADR-11): pause for human approval of the final best before finishing.
     require_approval: bool = False
     # Diversity archive (I22): niche bucket width in parameter space.

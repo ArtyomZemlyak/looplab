@@ -1,6 +1,7 @@
 import { uiText, uiMessage, useUILanguage } from './uiLanguage.js'
 import React, { useId, useState } from 'react'
 import { OpIcon } from './icons.jsx'
+import { policyPlainLine, strategyPlainLine } from './whyStripModel.js'
 
 // Compact, always-visible narration of the loop's latest autonomous decisions. Keeping this pure
 // projection outside panels.jsx means the core run canvas does not download every optional panel.
@@ -17,6 +18,8 @@ export default function WhyStrip({ state, onSelect }) {
       icon: 'compass',
       label: 'strategy',
       text: (strat.strategy.rationale || uiMessage("policy -> {0}", [strat.strategy.policy])),
+      // Shown; `text` (the decision's own words) stays whole in the title and the disclosure.
+      short: strategyPlainLine(strat.strategy) && uiText(strategyPlainLine(strat.strategy)),
       at: strat.at_node,
     })
   }
@@ -36,9 +39,10 @@ export default function WhyStrip({ state, onSelect }) {
   if (state.policy_reason) {
     items.push({
       icon: 'target',
-      label: 'policy',
+      label: 'next',
       node: state.policy_chosen,
       text: `${state.policy_reason}${state.policy_chosen != null ? ` -> #${state.policy_chosen}` : ''}`,
+      short: uiMessage(...policyPlainLine(state.policy_chosen)),
     })
   }
   if (!items.length) return null
@@ -55,7 +59,7 @@ export default function WhyStrip({ state, onSelect }) {
             title={item.text || undefined}
             onClick={item.node != null ? () => onSelect?.(item.node) : undefined}>
             <OpIcon name={item.icon} size={12} className="why-ic" />
-            <b>{uiText(item.label)}</b> {item.text}
+            <b>{uiText(item.label)}</b> {item.short || item.text}
             {item.at != null ? <span className="muted"> @{item.at}</span> : null}
           </Item>
           {item.text && <button type="button" className="why-disclosure disclosure-button"

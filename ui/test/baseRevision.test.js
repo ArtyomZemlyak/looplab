@@ -1,6 +1,6 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { nodeBase, baseChoices, baseMatches, capabilityOrigin } from '../src/baseRevision.js'
+import { nodeBase, baseChoices, baseMatches, capabilityOrigin, runRecordsBases } from '../src/baseRevision.js'
 
 const digest = 'a'.repeat(64)
 const node = { id: 1, attempt: 0, metric_provenance: { base_revision: { version: 1, complete: true, digest,
@@ -33,4 +33,19 @@ test('unreadable history cannot crash measured base provenance or invent an orig
     assert.equal(capabilityOrigin({ upstream_history: history, upstream_base: origin }, 'b'.repeat(64)), null)
   }
   assert.equal(capabilityOrigin({ upstream_history: [null, origin] }, digest), origin)
+})
+
+test('"Base unknown" is news only on a run where some experiment recorded a base (doc 75 UX-17)', async () => {
+  assert.equal(runRecordsBases({ nodes: { 0: {}, 1: {} } }), false, 'the offline demo: no task with a code base')
+  assert.equal(runRecordsBases({ nodes: { 0: {}, 1: node } }), true)
+  assert.equal(runRecordsBases(null), false)
+  const { mountHarness } = await import('./_mount.js')
+  const harness = await mountHarness({ routes: {} })
+  try {
+    const { default: BaseRevision } = await harness.load('/src/BaseRevision.jsx')
+    assert.equal(harness.render(BaseRevision, { node: {}, state: { nodes: { 0: {} } } }), '')
+    assert.match(harness.render(BaseRevision, { node: {}, state: { nodes: { 0: {}, 1: node } } }), /Base unknown/)
+  } finally {
+    await harness.close()
+  }
 })

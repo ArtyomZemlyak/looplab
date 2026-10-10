@@ -187,6 +187,34 @@ test('the verdict banner opens with the result sentence, its status labels after
   }
 })
 
+test('a paid action on a run with no model says so first, and an empty research section is folded (doc 75 UX-16)', async () => {
+  const vite = await sharedVite()
+  try {
+    const { default: ReportView } = await vite.ssrLoadModule('/src/Report.jsx')
+    const render = runBackend => new JSDOM(renderToStaticMarkup(React.createElement(ReportView, {
+      state: state('min', 10, 7), runId: 'report-min', runBackend, expectedGeneration: 'a'.repeat(64),
+    })))
+    const offline = render('toy')
+    const modelRun = render('llm')
+    try {
+      const paid = dom => [...dom.window.document.querySelectorAll('button')]
+        .map(button => button.textContent).filter(text => /paid/.test(text))
+      assert.ok(paid(offline).length > 0 && paid(offline).every(text => /needs a model/.test(text)),
+        paid(offline).join(' | '))
+      assert.match(offline.window.document.querySelector('#paid-report-refresh-status').textContent,
+        /^Needs a model: this run used none/)
+      assert.ok(paid(modelRun).every(text => !/needs a model/.test(text)), 'a model run is unchanged')
+      const research = offline.window.document.querySelector('.report-research-link')
+      assert.ok(research.querySelector('details.report-research-empty'), 'no memo: folded, not hidden')
+      assert.ok(research.querySelector('h2#report-section-research'), 'the jump target stays')
+    } finally {
+      offline.window.close(); modelRun.window.close()
+    }
+  } finally {
+    await vite.close()
+  }
+})
+
 test('print CSS removes the screen-only code viewport limit', async () => {
   const css = await readFile(new URL('../src/report-trust-polish.css', import.meta.url), 'utf8')
   assert.match(css, /@media print[\s\S]*?\.report-view pre\.code\s*\{[^}]*max-height:\s*none\s*!important;[^}]*overflow:\s*visible\s*!important;/)

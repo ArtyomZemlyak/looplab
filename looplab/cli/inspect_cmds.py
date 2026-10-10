@@ -21,7 +21,6 @@ because a live or crashed run otherwise has none at all.
 """
 from __future__ import annotations
 
-import math
 from pathlib import Path
 from typing import Optional
 
@@ -40,8 +39,7 @@ from looplab.events.replay import fold, unfinished_sync_lines
 from looplab.events.types import EV_BUDGET
 from looplab.trust.scan_receipt import trust_scan_summary
 from looplab.events.stop_account import last_record_line
-from looplab.cli import (
-    _RUN_DIR_HINT, _echo_log_integrity, _print_result, _require_run_dir, app)
+from looplab.cli import _RUN_DIR_HINT, _echo_log_integrity, _print_result, _require_run_dir, app
 # The rendering half of `timings` and `tokens` (doc 25 CT-01's line cap, doc 52 row 31):
 # printing and the shared span vocabulary, extracted so a new diagnostic does not have to buy
 # its room by deleting why-comments.
@@ -49,11 +47,12 @@ from looplab.cli import (
 # rendering, so this module keeps only the command's contract.
 from looplab.cli.workspace_bytes import (DEFAULT_ENTRY_BUDGET, EntryBudget, measure_run,
                                          render_workspace_bytes, seed_claims)
-from looplab.cli.run_report import (echo_card_and_build_tables, echo_comparability, echo_inspect_tail,
-                                    echo_containments, echo_edit_types, echo_parked_requests,
-                                    echo_reconciliation, echo_run_opening, echo_section,
-                                    echo_spend_around_champion, minutes, output_fingerprint,
-                                    span_category, span_seconds, stage_identity_rows)
+from looplab.cli.run_report import (echo_card_and_build_tables, echo_comparability,
+                                    echo_inspect_tail, echo_containments, echo_edit_types,
+                                    echo_parked_requests, echo_reconciliation, echo_run_list,
+                                    echo_run_opening, echo_section, echo_spend_around_champion,
+                                    echo_wall_clock, minutes, output_fingerprint, span_category,
+                                    span_seconds, stage_identity_rows, unit)
 
 
 @app.command()
@@ -230,7 +229,10 @@ def tokens(run_dir: Path = typer.Argument(...),
                        f"span row(s) stepped over — the split is unavailable because spans.jsonl is "
                        f"unreadable, not because the run made no calls.")
         else:
-            typer.echo("no generation spans found; nothing to attribute.")
+            from looplab.cli import snapshot_settings     # doc 75 UX-08: say WHY there are none
+            offline = snapshot_settings(run_dir / "config.snapshot.json").get("backend") == "toy"
+            typer.echo("offline run (backend=toy): no model calls to attribute." if offline
+                       else "no generation spans found; nothing to attribute.")
         raise typer.Exit(2)
 
     for line in phase_table_lines(out["rows"], top):
@@ -348,19 +350,8 @@ def timings(run_dir: Path = typer.Argument(...),
         for e in events:                      # the durable receipt, for cross-check (last one wins)
             if e.type == EV_BUDGET:
                 budget_elapsed = (e.data or {}).get("elapsed_s")
-    if wall is not None:
-        cross = ""
-        # A pre-fix log's receipt measured the finalizing PROCESS, so it can be orders of magnitude
-        # short. Showing both is what makes that visible instead of leaving two numbers to disagree
-        # in different places. Only flagged when they actually differ by more than rounding.
-        if type(budget_elapsed) in (int, float) and math.isfinite(budget_elapsed):
-            cross = (f"   (budget.elapsed_s says {minutes(float(budget_elapsed))} min)"
-                     if abs(float(budget_elapsed) - wall) > 1.0
-                     else "   (budget.elapsed_s agrees)")
-        typer.echo(f"run wall clock {minutes(wall)} min "
-                   f"({round(wall, 1)} s, events.jsonl first -> last timestamp)" + cross)
-    elif ev_path.exists():
-        typer.echo("run wall clock unknown (no event carries a usable timestamp).")
+    # Sets the report's ONE duration unit from the wall clock before any row prints (doc 75 UX-08).
+    echo_wall_clock(wall, budget_elapsed, have_log=ev_path.exists())
 
     if not sp_path.exists():
         typer.echo(f"no spans.jsonl at {run_dir} (tracing off or pre-tracing run).")
@@ -453,7 +444,7 @@ def timings(run_dir: Path = typer.Argument(...),
 
 @app.command()
 def inspect(
-    run_dir: Path = typer.Argument(...),
+    run_dir: Optional[Path] = typer.Argument(None, help="A run directory; omit it to list ./runs."),
     config: bool = typer.Option(
         False, "--config",
         help="Also print the raw launch settings (config.snapshot.json) verbatim, before the result."),
@@ -463,6 +454,8 @@ def inspect(
     `--config` also prints the on-disk launch snapshot verbatim; the seven `run_started`-pinned
     settings can differ from it (the owner config API overlays the effective folded values).
     """
+    if run_dir is None:       # doc 75 UX-35: no CLI command listed runs
+        raise typer.Exit(echo_run_list(Path("runs")))
     # THE RESULT FIRST (doc 74 EB-10): the 10.8 KB snapshot used to scroll the result off-screen.
     snap = run_dir / "config.snapshot.json"
     events = run_dir / "events.jsonl"
@@ -483,7 +476,7 @@ def inspect(
         _echo_log_integrity(store, run_dir)
         all_events = store.read_all()
         state = fold(all_events)
-        _print_result(state)
+        _print_result(state, run_dir=run_dir)
         # WHAT THE RUN WAS DOING WHEN THE RECORD STOPPED — the evidence half of the `stop:` line
         # `_print_result` just printed. It lives here rather than there because it needs the EVENTS,
         # which `_print_result` is not given (and must not be: four suite tests monkeypatch it with a
@@ -494,7 +487,9 @@ def inspect(
         # names the finalize tail, which is how a reader knows the line is live rather than absent.
         # Both facts are read off rows that were already being written — no event was added, and
         # nothing had to survive the process to make this sayable.
-        _evidence = last_record_line(all_events)
+        # …except on a COMPLETE modern finish, where it only ever said "between phases" (doc 75 UX-07).
+        _evidence = (None if state.finished and state.finalization_marker_seq is not None
+                     else last_record_line(all_events))
         if _evidence:
             typer.echo(f"stop evidence: {_evidence}")
         echo_parked_requests(all_events, state)      # what waits for a node slot (doc 68 68.8)

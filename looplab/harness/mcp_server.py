@@ -16,6 +16,7 @@ from urllib.parse import quote, unquote, urlencode, urlsplit
 
 import httpx
 
+from looplab.core.errors import ConfigRefusal
 from looplab.events.eventstore import EventStoreLockError, InterprocessLockContended
 from looplab.harness.manifest import harness_manifest
 from looplab.harness.phases import phase_catalog, phase_detail
@@ -982,13 +983,13 @@ def build_server(api: HarnessAPI):
 def run_stdio(url: str | None = None, token: str | None = None) -> None:
     credential = token if token is not None else os.environ.get("LOOPLAB_HARNESS_TOKEN", "")
     if not credential or not credential.strip() or credential == "${LOOPLAB_HARNESS_TOKEN}":
-        raise ValueError("Set LOOPLAB_HARNESS_TOKEN in the MCP process environment. "
+        raise ConfigRefusal("Set LOOPLAB_HARNESS_TOKEN in the MCP process environment. "
                          "LOOPLAB_UI_TOKEN is never used by harness-mcp; ask the operator "
                          "for a distinct scoped credential.")
     if any(ord(char) < 32 or ord(char) > 126 for char in credential):
-        raise ValueError("LOOPLAB_HARNESS_TOKEN must be printable ASCII without control characters.")
+        raise ConfigRefusal("LOOPLAB_HARNESS_TOKEN must be printable ASCII without control characters.")
     if credential == os.environ.get("LOOPLAB_UI_TOKEN", ""):
-        raise ValueError("The harness credential must differ from LOOPLAB_UI_TOKEN.")
+        raise ConfigRefusal("The harness credential must differ from LOOPLAB_UI_TOKEN.")
     api = HarnessAPI(url or os.environ.get("LOOPLAB_HARNESS_URL", "http://127.0.0.1:8765"),
                      credential)
     try:

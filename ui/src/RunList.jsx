@@ -1624,6 +1624,17 @@ export default function RunList({ onOpen, onGlobalNavigate,
   const hasActiveFilters = !!query.trim() || taskFilterExact
     || statusFilter !== 'all' || stFilter !== ALL
   const [demoOpen, setDemoOpen] = useState(false)
+  // A SECOND demo gets its own run id: `offline-demo` is taken once the first one is listed.
+  const demoSpec = useMemo(() => {
+    const taken = new Set((runs || []).map(run => run?.run_id))
+    let suffix = 1
+    while (taken.has(suffix === 1 ? OFFLINE_DEMO_SPEC.run_id : `${OFFLINE_DEMO_SPEC.run_id}-${suffix}`)) suffix += 1
+    const runId = suffix === 1 ? OFFLINE_DEMO_SPEC.run_id : `${OFFLINE_DEMO_SPEC.run_id}-${suffix}`
+    return runId === OFFLINE_DEMO_SPEC.run_id ? OFFLINE_DEMO_SPEC
+      : { ...OFFLINE_DEMO_SPEC, run_id: runId, proposal_id: runId }
+  // Fixed while the card is open: a run id that moved under a started demo would orphan its receipt.
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [demoOpen])
   const firstRunLanding = runsState === 'ready' && runs?.length === 0
     && projectsState === 'ready' && proj.projects.length === 0
     && superdata.supertasks.length === 0
@@ -2496,6 +2507,10 @@ export default function RunList({ onOpen, onGlobalNavigate,
           <OpIcon name="folder" className="t-ic" />{uiText(" Projects")}</button>}
         <button className="btn sm primary new-run-cta" disabled={navigationBusy}
                 onClick={() => window.dispatchEvent(new CustomEvent('ll:new-run', { cancelable: true }))}>{uiText("＋ New run")}</button>
+        {/* The demo stays reachable after the first run (doc 75 UX-30): the landing that offered it
+            ends as soon as one run is listed, and the Assistant's starter prompts all need a model. */}
+        {!firstRunLanding && <button type="button" className="btn sm ghost" disabled={navigationBusy}
+                aria-expanded={demoOpen} onClick={() => setDemoOpen(open => !open)}>{uiText("Offline demo")}</button>}
         <span className="spacer" style={{ flex: 1 }} />
         {/* Named, because `Lineage` is now the label of TWO different surfaces — this one and the
             run workspace's DAG. The workspace toggle is a `role="toolbar" aria-label="Run workspace
@@ -2781,7 +2796,7 @@ export default function RunList({ onOpen, onGlobalNavigate,
             {demoOpen && <>
               <p className="muted">{uiText('Six experiments on a toy objective, offline, in a few seconds. Validate, then Start run.')}</p>
               <LazyBoundary label={"offline demo"} resetKey="offline-demo">
-                <LaunchCard spec={OFFLINE_DEMO_SPEC} launchIdentity="offline-demo" />
+                <LaunchCard spec={demoSpec} launchIdentity={demoSpec.run_id} />
               </LazyBoundary>
             </>}
           </div>}

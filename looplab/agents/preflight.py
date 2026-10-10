@@ -232,6 +232,17 @@ assert set(_REMEDIES) == set(LLM_FAILURE_CAUSES), (
     "every LLM_FAILURE_CAUSES member needs a remedy paragraph in preflight._REMEDIES")
 
 
+def failure_remedy(exc: BaseException) -> str:
+    """The preflight's classified cause and remedy for ONE failed request (doc 75 UX-24).
+
+    `looplab smoke` is the command people run when stuck, and it printed only the transport's own
+    sentence ("Connection error.") and exit 1, while the run preflight's refusal of the very same
+    endpoint classified it, named `LOOPLAB_LLM_BASE_URL` and offered `--backend toy`. One table,
+    `_REMEDIES`, now answers both."""
+    cause = classify_llm_failure(exc)
+    return (f"[{cause}] {_REMEDIES[cause]}\n  Run offline with `--backend toy` (or -s backend=toy).")
+
+
 def preflight_role_endpoints(
     settings, *, timeout_s: float = PREFLIGHT_TIMEOUT_S,
     consumer_roles: set[str | None] | frozenset[str | None] | None = None,

@@ -139,6 +139,8 @@ test('Card board renders the research verdict and treats an abandoned belief as 
   }))
 
   assert.match(markup, />supported</)          // the verdict renders as its own chip...
+  // ...and says what it means (doc 75 UX-17): the word alone was all a finished run showed.
+  assert.match(markup, /title="research verdict: supported — an experiment improved \(distinct from the work status\)"/)
   assert.match(markup, />abandoned</)          // ...for both the positive and the terminal outcome
   assert.match(markup, /aria-label="Display statement for card-sup"/)   // supported keeps controls
   assert.doesNotMatch(markup, /aria-label="Display statement for card-ab"/)  // abandoned is terminal

@@ -29,3 +29,7 @@ export function capabilityOrigin(state, digest) {
     || (state?.upstream_base?.selector?.digest === digest ? state.upstream_base : null)
     || null
 }
+
+// Whether ANY experiment of the run recorded a code base — the condition under which a missing one
+// is news (doc 75 UX-17).
+export const runRecordsBases = state => Object.values(state?.nodes || {}).some(node => nodeBase(node) != null)

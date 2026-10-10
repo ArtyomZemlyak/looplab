@@ -14,6 +14,19 @@ export function publishModelCheck(settingsRevision, secretRevision, outcome) {
   }))
 }
 
+// What a PAID action must say first when a model is not known to be there (doc 75 UX-16), or ''.
+// The offline demo's Report offered "Refresh report · paid" and "provider charges may apply" with no
+// model anywhere, and every such click ended `provider_unavailable`. "Connection unverified" alone is
+// NOT the condition — it is also the ordinary state of a user with a working model who never pressed
+// "Check connection" — so the note fires on a failed check, or on a run that used no model
+// (backend=toy) with no passed check in this tab.
+export function paidActionModelNote(runBackend, check) {
+  if (check?.outcome === 'failed') return 'Needs a model: the last connection check failed. Review Settings → Model.'
+  if (runBackend === 'toy' && check?.outcome !== 'passed')
+    return 'Needs a model: this run used none (backend=toy). Check the connection in Settings → Model first.'
+  return ''
+}
+
 export function modelConnectionView(snapshot, check, language = 'auto') {
   const text = (en, ru) => language === 'ru' ? ru : en
   if (snapshot === null) return { tone: '', text: text('Loading saved model settings…', 'Читаем настройки модели…') }

@@ -218,6 +218,22 @@ test('external main status is visible on the workspace and disappears in history
   }
 })
 
+test('the view strip opens with a view, and the animation switch comes after it (doc 75 UX-15)', async () => {
+  const server = runServer()
+  const view = await openWorkspace(server)
+  try {
+    await until(() => view.container.querySelector('.view-toggle'), 'the workspace toolbar')
+    const strip = view.container.querySelector('.view-toggle')
+    const energy = view.container.querySelector('.fx-switch')
+    assert.ok(energy, 'the switch is still on the screen')
+    assert.ok(strip.compareDocumentPosition(energy) & window.Node.DOCUMENT_POSITION_FOLLOWING,
+      'Energy is a visual preference, not the first place to go')
+    assert.equal(strip.contains(energy), false)
+  } finally {
+    await view.unmount()
+  }
+})
+
 test('the workspace follows a live run: the probe paints it and a delta frame moves it in place',
   async () => {
     const server = runServer({ holdProbe: true })

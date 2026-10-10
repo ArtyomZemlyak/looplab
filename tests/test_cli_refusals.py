@@ -121,9 +121,11 @@ def test_a_refused_width_re_entry_reads_as_a_refusal_and_stays_byte_clean(tmp_pa
     assert first.exit_code == 0, first.output
     before = ((out / "events.jsonl").read_bytes(), (out / "config.snapshot.json").read_bytes())
 
+    # A raised budget, so the re-entry has work to do: a finished run with none left is not reopened
+    # at all (doc 75 UX-05) and would never reach the width check this pins.
     result = runner.invoke(app, [
         "run", task, "--backend", "toy", "--out", str(out),
-        "-s", "eval_parallel=3", "-s", "max_nodes=2", "-s", "n_seeds=2"])
+        "-s", "eval_parallel=3", "-s", "max_nodes=4", "-s", "n_seeds=2"])
 
     _assert_reads_as_a_refusal(result, expected="run_started pinned 2")
     assert ((out / "events.jsonl").read_bytes(),

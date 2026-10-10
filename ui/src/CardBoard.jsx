@@ -51,6 +51,9 @@ const _HYP_COLUMNS = [
   ['tested', 'Tested', 'evaluated, no improvement'],
   ['abandoned', 'Abandoned', 'dropped'],
 ]
+// What each verdict word MEANS, for the chip's title (doc 75 UX-17): `tested` / `supported` stood
+// alone on a finished run's cards with nothing to say what they were.
+const _VERDICT_MEANING = Object.fromEntries(_HYP_COLUMNS.map(([key, , hint]) => [key, hint]))
 // Monochrome source glyphs (no emoji): who posed the hypothesis. Reuses the shared icon set.
 const _HYP_ICON = { researcher: 'search', deep_research: 'bulb', human: 'user', strategist: 'compass' }
 
@@ -340,7 +343,7 @@ function _CardKanbanCard({
           <span className="chip xs">{card.id}</span>
           {verdict && verdict !== 'open' && <span
             className={'chip xs ' + (verdict === 'supported' ? 'ok' : verdict === 'abandoned' ? 'warn' : '')}
-            title={uiMessage("research verdict: {0} (distinct from the work status)", [verdict])}>{verdict}</span>}
+            title={uiMessage("research verdict: {0} — {1} (distinct from the work status)", [verdict, uiText(_VERDICT_MEANING[verdict] || '')])}>{verdict}</span>}
           {priority != null && <span className="chip xs" title={uiText("derived priority; 1 is highest")}>#{priority + 1}</span>}
           {card.pinned === true && <span className="chip xs warn"><OpIcon name="flag" size={10} />{uiText(" pinned")}</span>}
           {roll && <span className={'chip xs' + (roll.total === 0 ? ' warn' : '')}
@@ -390,7 +393,7 @@ function _CardKanbanCard({
       {_cardText(card.retry_of) && <span className="chip xs" title={uiText("retry of work item")}>{uiText("retry of ")}{card.retry_of}</span>}
       {verdict && verdict !== 'open' && <span
         className={'chip xs ' + (verdict === 'supported' ? 'ok' : verdict === 'abandoned' ? 'warn' : '')}
-        title={uiMessage("research verdict: {0} (distinct from the work status)", [verdict])}>{verdict}</span>}
+        title={uiMessage("research verdict: {0} — {1} (distinct from the work status)", [verdict, uiText(_VERDICT_MEANING[verdict] || '')])}>{verdict}</span>}
       {priority != null && <span className="chip xs" title={uiText("derived priority; 1 is highest")}>#{priority + 1}</span>}
       {card.pinned === true && <span className="chip xs warn"><OpIcon name="flag" size={10} />{uiText(" pinned")}</span>}
       {/* THE SAME CHIP AS THE LANE CARD, and it has to be: this is the DETAIL PANE (and the whole

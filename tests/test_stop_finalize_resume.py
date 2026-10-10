@@ -171,7 +171,7 @@ def test_cli_resume_preserves_pending_finalize_after_error_finish(monkeypatch, t
     # mirror's URI, and a stub that refuses it fails before the property under test runs.
     monkeypatch.setattr(run_cmds, "_run_engine_guarded",
                         lambda eng, **_k: fold(eng.store.read_all()))
-    monkeypatch.setattr(run_cmds, "_print_result", lambda _state: None)
+    monkeypatch.setattr(run_cmds, "_print_result", lambda _state, **_k: None)
     run_cmds.resume(rd, task_file=rd / "task.snapshot.json", max_nodes=None)
 
     events = store.read_all()
@@ -208,7 +208,7 @@ def test_direct_cli_resume_marks_a_crashed_eval_as_waiting_for_readmission(monke
     # mirror's URI, and a stub that refuses it fails before the property under test runs.
     monkeypatch.setattr(run_cmds, "_run_engine_guarded",
                         lambda eng, **_k: fold(eng.store.read_all()))
-    monkeypatch.setattr(run_cmds, "_print_result", lambda _state: None)
+    monkeypatch.setattr(run_cmds, "_print_result", lambda _state, **_k: None)
     monkeypatch.setattr(run_cmds, "_exit_nonzero_if_the_run_produced_nothing", lambda *_a, **_k: None)
 
     run_cmds.resume(rd, task_file=rd / "task.snapshot.json", max_nodes=None)
