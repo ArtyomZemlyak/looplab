@@ -17,6 +17,9 @@ function infoFor(kind, status = null) {
     kind, status,
     title: 'Assistant could not reach the model provider',
     message: 'Check the connection and retry. Your message is still available.',
+    // A first-time user with no model at all met only "check the connection" here, while the one
+    // path that needs no model sat on the Runs page (doc 75 UX-16).
+    hint: 'No model yet? The Offline demo on the Runs page runs without one.',
     retryable: true, technical: status ? `HTTP ${status} · unavailable` : 'provider_unavailable',
   }
   return {

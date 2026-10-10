@@ -116,7 +116,9 @@ function AssistantErrorCard({ error, onRetry, retryLabel = 'Retry', retryBusy = 
       <span className="assistant-error-card__icon" aria-hidden="true">!</span>
       <div>
         <strong>{uiText(error.title)}</strong>
-        <p>{error.message}</p>
+        {/* Translated here: the title was, the message printed in English on the Russian UI. */}
+        <p>{uiText(error.message)}</p>
+        {error.hint && <p className="assistant-error-card__hint">{uiText(error.hint)}</p>}
       </div>
     </div>
     {error.technical && <code className="assistant-error-card__technical">{error.technical}</code>}

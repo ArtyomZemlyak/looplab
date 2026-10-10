@@ -1,7 +1,7 @@
 {
   "schema": 1,
   "language": "ru",
-  "count": 7751,
+  "count": 7752,
   "messages": {
     "# LoopLab run report — {0}": "# Отчёт запуска LoopLab — {0}",
     "## Agent narrative (advisory)": "## Пояснения агента (рекомендации)",
@@ -471,6 +471,7 @@
     "Check that the LoopLab server is reachable.": "Проверьте, чтобы сервер LoopLab был доступен.",
     "Check the active provider configuration and network access.": "Проверьте конфигурацию активного провайдера и сетевой доступ.",
     "Check the connection and retry. Your message is still available.": "Проверьте связь и перепроверьте. Ваше сообщение все еще доступно.",
+    "No model yet? The Offline demo on the Runs page runs without one.": "Модели пока нет? Офлайн-демо на странице запусков работает без неё.",
     "Check the earlier command before choosing a baseline for this next draft.": "Проверьте прежнюю команду, прежде чем выбрать исходную основу для следующего черновика.",
     "Check the exact pending fork before starting another": "Проверьте исход текущего копирования чата перед новым",
     "Check the pending re-tag before closing this draft": "Проверьте ожидающий себя повтор перед закрытием этого черновика",
