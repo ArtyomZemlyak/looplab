@@ -165,6 +165,7 @@ nav:
       - Tracing: 08-tracing-architecture.md
   - Design records:
       - Index: 00-INDEX.md
+      - "Functionality, usability and comprehension review (2026-10-10)": 75-functionality-usability-review-2026-10-10.md
       - "Entry-barrier inspection: README, CLI, docs, UI (2026-10-09)": 74-entry-barrier-inspection-2026-10-09.md
       - Node kinds and auto upstream, plan (2026-10-07): 73-node-kinds-and-auto-upstream-2026-10-07.md
       - From node to framework, upstream (2026-10-01): 72-node-to-framework-upstream-2026-10-01.md
