@@ -212,3 +212,56 @@ def test_an_inline_acceptance_holds_on_the_tree(finding, tmp_path, monkeypatch):
     check = ACCEPTANCE[finding]
     params = check.__code__.co_varnames[:check.__code__.co_argcount]
     check(**{name: {"tmp_path": tmp_path, "monkeypatch": monkeypatch}[name] for name in params})
+
+
+
+# --- doc 74 §12.2 (the critique) and doc 74 §12.1 (the corrections): their FACTUAL claims --------
+
+def _findings():
+    text = DOC.read_text(encoding="utf-8")
+    return {m.group(1): m.group(2) + m.group(3) for m in re.finditer(
+        r"^#### (EB-\d\d) ([^\n]*)\n(.*?)(?=^#### |^## )", text, re.S | re.M)}
+
+
+def test_critique_point_6_names_exactly_the_findings_section_12_marked():
+    """Point 6 lists the findings doc 74 §12 changed. Hand-counted, it went stale twice (11
+    written, 15 true); here the list in the sentence must equal the marks the findings carry."""
+    marked = sorted(eb for eb, body in _findings().items()
+                    if re.search(r"уточнено|пересмотрено|снято|исправлено|добавлена", body))
+    point = re.search(r"^6\. .*?(?=^7\. )", DOC.read_text(encoding="utf-8"), re.S | re.M).group(0)
+    stated = re.search(r"\((\d+) из 28: ([^;]+);", point)
+    assert stated and int(stated.group(1)) == len(marked), (stated and stated.group(1), marked)
+    named = set()
+    for part in re.split(r",\s*", stated.group(2).replace("EB-", "")):
+        lo, _, hi = part.replace("–", "-").partition("-")
+        named.update(f"EB-{n:02d}" for n in range(int(lo), int(hi or lo) + 1))
+    assert sorted(named) == marked, (sorted(named), marked)
+
+
+def test_critique_points_1_to_4_and_9_hold_on_the_tree():
+    # 1: the surface the first draft proposed was not added; the demo is a file
+    help_text = _help()
+    assert not re.search(r"^│ demo ", help_text, re.M) and "--quickstart" not in _help("harness")
+    assert (ROOT / "examples" / "demo.yaml").is_file()
+    # 2: the two refused proposals are explained in their own tests
+    contracts = _text("tests/test_documentation_contracts.py")
+    assert "Deliberately a literal, not a derived count" in contracts
+    assert "CLAUDE_MD_MAX_BYTES = " in contracts
+    # 4: doc 71 is navigated to, not cut — all its sections remain
+    doc71 = _text(next(str(p.relative_to(ROOT)) for p in (ROOT / "docs").glob("71-*.md")))
+    assert len(re.findall(r"^## ", doc71, re.M)) >= 69 and "Как читать" in doc71[:2000]
+    # 9: no package status in doc 74 §7 contradicts doc 74 §12.4 any more
+    packages = DOC.read_text(encoding="utf-8").split("## 7. ", 1)[1].split("## 8. ", 1)[0]
+    assert "частично" not in packages
+
+
+def test_section_12_1_corrections_hold_on_the_tree():
+    # EB-04: the offline template labels its own number (the label the fix must NOT decide by)
+    assert '"metric_name": "row_count (offline baseline)"' in _text("looplab/adapters/dataset_task.py")
+    # EB-06: the runbook is CITED (in the comments of config.py, claimpin.py, seed_from_run.py), so
+    # it moved rather than went away; that every such citation still resolves is
+    # `tests/test_claim_pins.py::test_no_source_citation_is_dead`'s job — here, that it moved.
+    assert (ROOT / "benchmarks" / "NEXT_RUN.md").is_file() and not (ROOT / "NEXT_RUN.md").exists()
+    assert (ROOT / "tests" / "data" / "bench-out").is_dir()
+    # EB-21: the demo declares the comparison the toy task cannot know by itself
+    assert "comparison_contract" in yaml.safe_load(_text("examples/demo.yaml"))["task"]
