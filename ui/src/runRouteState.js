@@ -322,14 +322,14 @@ export function parseRunRouteState(hash = '', { reviewMode = false } = {}) {
   } else {
     const sequence = integer(rawSequence, 'sequence', issues)
     if (sequence != null && !state.generation) {
-      issues.push('Historical sequence without a generation fence was ignored.')
+      issues.push("This link's point in the run history was ignored: it does not say which version of the run it belongs to.")
     } else state.sequence = sequence
     state.timelineFilter = boundedText(rawFilter, 'timeline filter', MAX_FILTER_CHARS, issues)?.trim() || ''
     state.timelineKinds = normalizeKinds(rawKinds, issues)
   }
   const sanitized = sanitizeRunRouteState(state, { reviewMode })
   if (!sanitized.generation && runRouteStateHasTarget(sanitized, { reviewMode })) {
-    issues.push('Diagnostic state without a generation fence was ignored.')
+    issues.push("This link's view settings were ignored: it does not say which version of the run they belong to.")
     return { state: emptyRunRouteState(), issues, hadState: query.length > 0 }
   }
   return { state: sanitized, issues, hadState: query.length > 0 }

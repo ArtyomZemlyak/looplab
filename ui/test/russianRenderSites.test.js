@@ -21,8 +21,11 @@ test('every group-by option has a Russian label and the select translates it', (
 })
 
 test('every fixed link-state notice has a Russian text and the notice translates it', () => {
-  const fixed = [...source('runRouteState.js').matchAll(/issues\.push\('([^']+)'\)/g)].map(match => match[1])
-  assert.ok(fixed.includes('Diagnostic state without a generation fence was ignored.'), fixed)
+  const fixed = [...source('runRouteState.js').matchAll(/issues\.push\((['"])((?:(?!\1).)+)\1\)/g)]
+    .map(match => match[2])
+  // Reworded since (doc 75 UX-19): "…without a generation fence…" named an internal mechanism.
+  assert.ok(fixed.includes("This link's view settings were ignored: it does not say which version of the run they belong to."), fixed)
+  assert.ok(!fixed.some(issue => /generation fence/.test(issue)), 'a notice a user reads names no internal mechanism')
   for (const issue of fixed) assert.ok(catalogue[issue], issue)
   assert.match(source('RunView.jsx'), /\.\.\.route\.issues\.map\(issue => uiText\(issue\)\)/)
 })

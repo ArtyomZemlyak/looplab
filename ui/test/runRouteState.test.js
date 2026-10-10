@@ -75,7 +75,7 @@ test('invalid, duplicate, unsafe, and dependent fields fail closed and canonical
 test('historical sequence requires an exact generation fence', () => {
   const missing = parseRunRouteState('#/run/demo?seq=29')
   assert.equal(missing.state.sequence, null)
-  assert.match(missing.issues.join(' '), /generation fence/)
+  assert.match(missing.issues.join(' '), /does not say which version of the run/)
   const exact = parseRunRouteState(`#/run/demo?gen=${GEN}&seq=29`)
   assert.equal(exact.state.sequence, 29)
 })
@@ -84,7 +84,7 @@ test('node, panel, view, and filters also fail closed without a generation fence
   for (const query of ['node=4', 'panel=trust', 'view=report', 'view=concepts', 'q=timeout', 'kinds=eval']) {
     const parsed = parseRunRouteState(`#/run/demo?${query}`)
     assert.deepEqual(parsed.state, emptyRunRouteState(), query)
-    assert.match(parsed.issues.join(' '), /generation fence/, query)
+    assert.match(parsed.issues.join(' '), /does not say which version of the run/, query)
   }
 })
 
