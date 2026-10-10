@@ -531,6 +531,14 @@ def export_sft(
     dest = out or (run_dir / "sft.jsonl")
     atomic_write_text(dest, "".join(json.dumps(row, ensure_ascii=False) + "\n" for row in rows))
     typer.echo(f"wrote {dest}: {len(rows)} turn(s) from {len(generations)} generation span(s)")
+    if not generations:
+        # Say WHY the corpus is empty (doc 75 UX-08, as `tokens` does): the offline demo printed
+        # "0 of 0 turn(s) are joined to a node…" and a clause about run-level turns it never had.
+        from looplab.cli import snapshot_settings
+        offline = snapshot_settings(run_dir / "config.snapshot.json").get("backend") == "toy"
+        typer.echo("  offline run (backend=toy): no model turns to export." if offline
+                   else "  the run's trace holds no model turns to export.")
+        return
     if skipped_no_output:
         typer.echo(f"  {skipped_no_output} generation(s) had no answer to learn from (budget cut, "
                    "transport failure, refusal) — not an error, and not a training example")

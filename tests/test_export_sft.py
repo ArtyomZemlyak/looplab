@@ -198,3 +198,18 @@ def test_a_retargeted_runs_rows_say_which_metric_their_outcome_is(tmp_path):
     assert unranked and unranked[0]["outcome"]["metric"] is None, unranked
     assert unranked[0]["outcome"]["task_metric"] == 0.2
     assert "2 of 2 turn(s) are joined to a node that produced a metric" in result.output
+
+
+def test_an_offline_run_says_it_has_no_model_turns(tmp_path):
+    """doc 75 UX-08: the offline demo's export printed "0 of 0 turn(s) are joined to a node that
+    produced a metric; the rest carry …" about turns that never existed. The file is still written
+    (an empty corpus is a valid one), and the summary says why it is empty."""
+    rd = _run(tmp_path, [])
+    (rd / "config.snapshot.json").write_text(json.dumps({"backend": "toy"}), encoding="utf-8")
+    result = CliRunner().invoke(app, ["export-sft", str(rd)])
+    assert result.exit_code == 0, result.output
+    assert "offline run (backend=toy): no model turns to export." in result.output
+    assert "0 of 0" not in result.output and (rd / "sft.jsonl").read_text(encoding="utf-8") == ""
+    (rd / "config.snapshot.json").write_text(json.dumps({"backend": "llm"}), encoding="utf-8")
+    said = CliRunner().invoke(app, ["export-sft", str(rd)]).output
+    assert "holds no model turns" in said and "offline run" not in said
