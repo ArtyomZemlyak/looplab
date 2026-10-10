@@ -300,7 +300,19 @@ export default function RunView({ runId, onBack, reviewMode = false, reviewMeta 
   retryRunRef.current = retryRun
   // A run this tab has just started answers 404 until its engine writes the first event
   // (`freshLaunch.js`): keep asking once a second and say it is starting, instead of "not found".
-  const freshLaunch = !reviewMode && !live && runStatus === 'not_found' && isFreshLaunch(runId)
+  // LATCHED across the retry's `loading` flips (code review of the doc 74 work, driven): each retry
+  // resets the status to `loading` before answering `not_found` again, and an unlatched value
+  // alternated "Starting the run…" / "Opening run…" once a second, re-arming the interval and
+  // moving focus to <main> each time. The latch is keyed by run id and released by any status that
+  // is neither `loading` nor `not_found`, and by a `not_found` once the window has closed.
+  const [freshWaitingFor, setFreshWaitingFor] = useState('')
+  useEffect(() => {
+    if (reviewMode || live) { setFreshWaitingFor(''); return }
+    if (runStatus === 'not_found') setFreshWaitingFor(isFreshLaunch(runId) ? runId : '')
+    else if (runStatus !== 'loading') setFreshWaitingFor('')
+  }, [reviewMode, live, runStatus, runId])
+  const freshLaunch = !reviewMode && !live && freshWaitingFor === runId
+    && (runStatus === 'not_found' || runStatus === 'loading')
   useEffect(() => {
     if (!freshLaunch) return undefined
     // An interval, not a timeout per status change: a retry can land on `not_found` again without the
@@ -1794,7 +1806,8 @@ export default function RunView({ runId, onBack, reviewMode = false, reviewMeta 
     }
   }
 
-  const routeFocusPhase = !live ? `resource:${runStatus}`
+  // One phase for the whole fresh-launch wait, so its retries never move focus (see the latch above).
+  const routeFocusPhase = !live ? `resource:${freshLaunch ? 'starting' : runStatus}`
     : routeFenceBlocked ? `fence:${generationMismatch ? 'mismatch' : 'pending'}`
     : historyActive && !hist ? `history:${history.status}` : 'ready'
   const workspaceRouteLabel = uiMessage('{0} run workspace · {1}', [live?.label || live?.run_id || runId, uiText(

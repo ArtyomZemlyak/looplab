@@ -2,6 +2,7 @@ import { uiText, uiMessage, uiPlural, useUILanguage, effectiveUILanguage } from 
 import React, { useCallback, useEffect, useRef, useState } from 'react'
 import { Turn, PermCard } from './AssistantChat.jsx'
 import AssistantModePicker from './AssistantModePicker.jsx'
+import LanguageControl from './LanguageControl.jsx'
 import { useAssistantLanguage } from './useAssistantLanguage.js'
 import { OpIcon } from './icons.jsx'
 import { useCommandStatusPoll, useMediaQuery, usePoll } from './hooks.js'
@@ -4058,6 +4059,9 @@ export default function AssistantBar({ runId, hidden = false, onReady }) {
         <div className="asst-side-h">
           {foldToBarButton('btn sm', 'fold back to the bar')}
           <span className="ttl" style={{ flex: 1 }}>{text('Assistant', 'Ассистент')}</span>
+          {/* The full view is a fixed overlay over the header, so the header's selector is hidden
+              here: this is the screen's one VISIBLE language control (code review of doc 74 EB-22). */}
+          <LanguageControl />
           {newChatButton('btn sm primary', '+ Chat', undefined)}
         </div>
         <div ref={sessionsRef} className="asst-sessions"

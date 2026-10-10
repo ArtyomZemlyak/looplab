@@ -128,3 +128,33 @@ test('Auto resolves Russian UI and result drafts without overriding automatic re
     await harness.close()
   }
 })
+
+test('the full-screen Assistant, which covers the header, carries the one visible language control', async () => {
+  // The full view is a fixed overlay over the header (`.asst-view.asst-full`), so after EB-22 removed
+  // the composer's picker a user in it had no way to change language (code review of doc 74).
+  const harness = await mountLive()
+  const { default: AssistantBar } = await harness.load('/src/AssistantBar.jsx')
+  const backend = fetchStub({
+    'GET /api/assistant/commands': { commands: [] },
+    'GET /api/assistant/sessions': { sessions: [] },
+    'GET /api/assistant/watches': { watches: [] },
+    'GET /api/runs': [],
+    'GET /api/assistant/permissions': ({ init }) => unanswered(init),
+    'GET /api/assistant/progress': ({ init }) => unanswered(init),
+  })
+  globalThis.fetch = backend
+  localStorage.clear(); sessionStorage.clear()
+  const mounted = await harness.mount(AssistantBar, {})
+  try {
+    await settle()
+    assert.equal(mounted.container.querySelectorAll('.asst-language select').length, 0,
+      'the docked bar adds no selector of its own')
+    await click(mounted.container.querySelector('button[aria-label="Open full Assistant"]'))
+    await until(() => mounted.container.querySelector('.asst-full .asst-language select'),
+      'a language control inside the full view')
+    assert.equal(mounted.container.querySelectorAll('.asst-language select').length, 1)
+  } finally {
+    await mounted.unmount()
+    await harness.close()
+  }
+})

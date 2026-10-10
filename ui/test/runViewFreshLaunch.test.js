@@ -60,6 +60,36 @@ test('a run this tab just started waits for its first records instead of reading
   } finally { await view.unmount() }
 })
 
+test('the starting screen holds still across its retries: one heading, focus kept', async () => {
+  // Each retry used to reset the status to `loading`: the heading alternated with "Opening run…"
+  // once a second and focus jumped to <main> (code review of the doc 74 work, driven).
+  sessionStorage.clear(); localStorage.clear()
+  let probes = 0
+  globalThis.fetch = fetchStub({ [`GET /api/runs/${RUN}/state`]: () => {
+    probes += 1
+    return jsonResponse({ detail: 'run not found' }, 404)
+  } })
+  fresh.markFreshLaunch(RUN)
+  const view = await harness.mount(RunView, { runId: RUN, onBack() {} })
+  try {
+    await until(() => heading(view) === 'Starting the run…', 'the starting state')
+    await new Promise(resolve => setTimeout(resolve, 300))     // the screen's own landing focus
+    const back = [...view.container.querySelectorAll('.resource-state-actions button')]
+      .find(button => button.textContent.trim() === 'Back to runs')
+    back.focus()
+    const headings = new Set()
+    const started = Date.now()
+    const before = probes
+    while (Date.now() - started < 3_500) {
+      headings.add(heading(view))
+      await new Promise(resolve => setTimeout(resolve, 10))
+    }
+    assert.ok(probes - before >= 2, `the run was asked again (${probes - before} probes)`)
+    assert.deepEqual([...headings], ['Starting the run…'])
+    assert.equal(document.activeElement, back, 'focus stays where the user put it')
+  } finally { await view.unmount() }
+})
+
 test('without the marker a 404 is still "Run not found" at once', async () => {
   sessionStorage.clear(); localStorage.clear()
   globalThis.fetch = server(Infinity)
