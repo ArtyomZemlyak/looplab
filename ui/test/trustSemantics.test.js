@@ -54,8 +54,10 @@ test('report verdict never calls missing detector coverage trustworthy', () => {
   }
   const value = verdict(state, analyze(state))
   assert.equal(value.trust, 'unverified')
-  assert.match(value.headline, /not fully verified/i)
-  assert.doesNotMatch(value.headline, /passes the trust checks/i)
+  // doc 75 UX-17: the headline no longer closes on "Detector coverage is not fully verified." — the
+  // trust LABEL beside it says "not fully verified" (Report.jsx::TRUST_LABEL), so the result is
+  // still never called trustworthy, and the result sentence stays the result.
+  assert.doesNotMatch(value.headline, /passes the trust checks|trustworthy|verified/i)
 })
 
 test('an unbound metric is not reported as a salvaged one', () => {

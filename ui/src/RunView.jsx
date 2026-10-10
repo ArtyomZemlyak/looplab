@@ -303,8 +303,9 @@ export default function RunView({ runId, onBack, reviewMode = false, reviewMeta 
   // LATCHED across the retry's `loading` flips (code review of the doc 74 work, driven): each retry
   // resets the status to `loading` before answering `not_found` again, and an unlatched value
   // alternated "Starting the run…" / "Opening run…" once a second, re-arming the interval and
-  // moving focus to <main> each time. The latch is keyed by run id and released by any status that
-  // is neither `loading` nor `not_found`, and by a `not_found` once the window has closed.
+  // moving focus to the route's main landmark each time. The latch is keyed by run id and released
+  // by any status that is neither `loading` nor `not_found`, and by a `not_found` once the window
+  // has closed.
   const [freshWaitingFor, setFreshWaitingFor] = useState('')
   useEffect(() => {
     if (reviewMode || live) { setFreshWaitingFor(''); return }

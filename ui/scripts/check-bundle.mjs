@@ -181,7 +181,12 @@ export const DEFAULT_BUDGETS = Object.freeze({
     // offline-demo launch card on the empty list, the fresh-launch wait in RunView, the compact
     // portfolio, and the composer's language picker now loading lazily from the header only.
     // Measured 670,636 B JS / 59,794 B CSS; every forbidden reachability proof and cycle check holds.
-    js: { gzip: 655.5 * KIB },
+    // 2026-10-10 doc 75 (packages 2 and 5): 670,636 -> 672,051 B (+1,415 B) buys the deterministic-
+    // objective branch of the verdict, notices and repeat-evidence row (RU/EN), the plain strategy
+    // lines beside the strategist's own rationale, the paid-action model note, the conditional
+    // "Base unknown", verdict-chip meanings, the fresh-server settings comparison and the demo's
+    // second entry. 657 KiB leaves 717 B; route, reachability and cycle proofs unchanged.
+    js: { gzip: 657 * KIB },
     css: { gzip: 58.5 * KIB },
   },
   individual: {
@@ -271,7 +276,9 @@ export const DEFAULT_BUDGETS = Object.freeze({
       // 2026-10-09: master measured 408,436 B in CI (run 2212, +1,396 B over); doc 74's fresh-launch
       // wait and Report headline order land in RunView/Report, the dropped composer picker leaves
       // OwnerChrome: 408,398 B. 399.25 KiB leaves 434 B; lazy boundaries unchanged.
-      limits: { js: { gzip: 399.25 * KIB }, css: { gzip: 46 * KIB } },
+      // 2026-10-10 doc 75: 409,405 B (+1,007 B) — the plain Why-strip lines, the deterministic
+      // verdict and the Energy switch's new place, all in RunView's closure. 400.25 KiB leaves 451 B.
+      limits: { js: { gzip: 400.25 * KIB }, css: { gzip: 46 * KIB } },
     },
     {
       name: 'valid review DAG route',
@@ -292,7 +299,9 @@ export const DEFAULT_BUDGETS = Object.freeze({
       // 2026-10-09: master measured 269,911 B in CI (run 2212, +1,367 B over: shared selection and
       // comparison readers in RunView/Dag); doc 74's fresh-launch wait adds the rest: 270,470 B.
       // 264.5 KiB leaves 378 B; owner exclusions and cycle checks unchanged.
-      limits: { js: { gzip: 264.5 * KIB }, css: { gzip: 41 * KIB } },
+      // 2026-10-10 doc 75: 271,393 B (+923 B) — the same RunView/WhyStrip/ConceptChipBar wording.
+      // 265.5 KiB leaves 479 B; owner exclusions and cycle checks unchanged.
+      limits: { js: { gzip: 265.5 * KIB }, css: { gzip: 41 * KIB } },
     },
     {
       name: 'owner Concepts route',

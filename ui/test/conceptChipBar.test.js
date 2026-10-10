@@ -73,7 +73,8 @@ test('ConceptChipBar withholds the degraded row and keeps the rest of the run fi
       },
     })
     assert.equal(allWithheld.querySelector('.concept-bar')?.getAttribute('role'), 'status')
-    assert.match(allWithheld.body.textContent, /withheld for all 1 tagged experiment.*not empty/s)
+    // In plain words since doc 75 UX-14, and still the fact that matters: the run IS tagged.
+    assert.match(allWithheld.body.textContent, /Concept tags of 1 tagged experiment are hidden here \(the run is tagged\)/)
     assert.equal(allWithheld.querySelector('.cb-chip'), null)
 
     // The run-SCOPED refusal is unchanged: a degraded run base taints the whole projection.
