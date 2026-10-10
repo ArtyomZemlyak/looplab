@@ -1,41 +1,4 @@
 # Commands whose `--help` still cites an internal document or module (doc 75 UX-11).
-# SHRINK-ONLY: a command reaches users through its help, so a new citation is red; rewrite a
-# command's help (keep the old text verbatim beside its code) and delete its row here.
-# Every row is a maintainer or research command; the user panels hold no row at all.
-parser-stats
-edit-types
-proxy-accuracy
-seed-distance
-workspace-bytes
-landlock-check
-evaluate-track
-memory-orphans
-memory-fingerprints
-reap-service-files
-cross-run-index
-cross-run-concepts
-cross-run-search
-cross-run-digest
-atlas
-claims
-claim-decide
-claim-steward
-concept-merge
-concept-split
-concept-ratify
-concept-steward
-task-facets
-task-facets-set
-prior-citations
-concept-coverage
-asset-brief
-lock-in
-board-dedup
-research-targets
-novelty-recall
-concept-authorship
-lesson-guard
-belief-key-split
-fidelity-agreement
-mlebench-extras
-bait-materialize
+# SHRINK-ONLY, and EMPTY since 2026-10-10: every maintainer command now shows a one-line summary and
+# keeps its full provenance after Click's `\f` marker, which `--help` does not print. A command
+# listed here would be one whose help cites again; rewrite it instead of adding a row.

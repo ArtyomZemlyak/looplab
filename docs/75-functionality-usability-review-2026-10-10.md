@@ -694,7 +694,7 @@ agent: connect `looplab harness-mcp` to this run (run dir runs/my-run); see `loo
 |---|---|---|---|
 | 1. Сообщения CLI | UX-01, UX-02, UX-05, UX-07, UX-08, UX-24, UX-25, UX-26, UX-27, UX-33, UX-35 | `looplab/cli/*`, `core/errors.py`, `events/stop_account.py`, `adapters/dataset_task.py` | сделано 2026-10-10: `tests/test_cli_refusal_classes.py`, `test_cli_finished_run.py`, `test_cli_first_minutes.py` |
 | 2. UI первого run | UX-13, UX-14, UX-15, UX-16, UX-17, UX-28, UX-30, UX-31 | `core/comparison.py`, `engine/comparability.py`, `ui/src/report.js`, `resultNoticeModel.js`, `RunView.jsx`, `Report.jsx`, `Settings.jsx`, `RunList.jsx` | сделано 2026-10-10: `tests/test_deterministic_contract.py`, `ui/test/deterministicObjective.test.js`, `whyStripPlain.test.js`, `settingsFreshDefaults.test.js` |
-| 3. Справка команд | UX-10, UX-11, UX-12, UX-34 | докстринги команд, `cli/help_panels.py`, `core/appconfig.py`, `tests/test_cli_help_panels.py` | сделано 2026-10-10: `tests/test_cli_help_panels.py`; 37 команд сопровождающего — shrink-only `tests/data/help_citation_backlog.txt` |
+| 3. Справка команд | UX-10, UX-11, UX-12, UX-34 | докстринги команд, `cli/help_panels.py`, `core/appconfig.py`, `tests/test_cli_help_panels.py` | сделано 2026-10-10: `tests/test_cli_help_panels.py`; у всех 74 команд `--help` без цитат — 37 команд сопровождающего показывают одну строку, а прежний текст хранят после `\f`, который `--help` не печатает; shrink-only список пуст |
 | 4. Пути и примеры | UX-04, UX-06, UX-22, UX-23, UX-29, UX-32 | `adapters/*_task.py`, снимок задачи, `tasks.md`, `cli-walkthrough.md`, `llm-and-agents.md`, `examples/` | сделано 2026-10-10: `tests/test_task_paths.py`, `test_api_key_recipes.py`, `test_entry_page_budgets.py` |
 | 5. Словарь | UX-18, UX-19 | вывод `run`/`inspect`, заголовок Report, список run, `docs/guide/glossary.md` | сделано 2026-10-10: `docs/guide/glossary.md`, `tests/test_glossary.py` |
 | 6. Документация как система | UX-20, UX-21, UX-09, UX-03 | `00-INDEX.md`, `tests/test_entry_page_budgets.py`, `replay --summary`, предупреждение фенса | сделано 2026-10-10: `tests/test_index_language_tags.py`, потолки прозы в `test_entry_page_budgets.py` |
@@ -713,7 +713,7 @@ agent: connect `looplab harness-mcp` to this run (run dir runs/my-run); see `loo
 | `raise` в `looplab/cli` без класса «синтаксис/отказ» | 34 | 0 (тест-таблица) |
 | Строк, дописанных `resume`/`stop`/`run` на завершённом прогоне без запаса | 17 / 1 / 17 | 0 / 0 / 0 |
 | Строк `inspect` на завершённом демо; фраз «names no reason», «phase beacon» | 9; 2 | ≤ 6; 0 |
-| Команд пользователя с цитатами в `--help` | 5 из 37 цитирующих | 0; прочие — shrink-only |
+| Команд с цитатами в `--help` | 37 из 74 (5 — пользовательские) | 0 из 74 |
 | Строк `run --help` / `ui --help` / `stop --help` при 80 колонках | 135 / 59 / 45 | ≤ 60 у команд пользователя |
 | Ширина столбца текста в каждой панели `run --help` при 80 колонках | ~20 | ≥ 40 |
 | Report демо: «Repeat … seeds», `UNCONFIRMED`, кнопок `paid` без условия | есть, есть, 1 | нет, нет, 0 |

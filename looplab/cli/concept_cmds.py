@@ -280,7 +280,7 @@ def concept_coverage(
                                  "not rebuild finalized capsule memory. --offline tags are display-only. "
                                  "Requires a fully finalized, non-running FINISHED run."),
 ):
-    """PART IV D5 (§21.11): the concept-graph coverage + uncovered-region diagnostic. **The LLM agent builds
+    """Concept-graph coverage and uncovered regions of a run.\fPART IV D5 (§21.11): the concept-graph coverage + uncovered-region diagnostic. **The LLM agent builds
     the map** by default — it grows the concept vocabulary from the actual experiments (reading each node's
     code/logs), computes the coverage, and derives the important-but-uncovered directions per task (universal:
     no hardcoded winning region; grounded in `--repo`'s prior-art brief when given). `--offline` forces the
@@ -432,7 +432,7 @@ def asset_brief_cmd(
                              "instead of the offline heuristic scan. Needs a reachable endpoint."),
     model: Optional[str] = typer.Option(None, help="Override model id for --llm."),
 ):
-    """PART IV D1 (§21.2): the seed-time prior-art & available-assets brief for a task repo — the
+    """Prior-art and available-assets brief for a task repo.\fPART IV D1 (§21.2): the seed-time prior-art & available-assets brief for a task repo — the
     on-disk result tables, sibling checkpoints (metrics in filenames), and reusable trainer capabilities
     the search would otherwise miss. Offline heuristic scan by default; `--llm` runs the agentic sweep."""
     from looplab.tools.asset_brief import asset_brief
@@ -461,7 +461,7 @@ def lock_in(
                                                           "agentic build (default is the LLM agent build)."),
     model: Optional[str] = typer.Option(None, help="Override model id."),
 ):
-    """PART IV D7 (§21.8): the action-space lock-in detector. Reports the longest run of CONSECUTIVE
+    """Detect runs of experiments stuck on one lever.\fPART IV D7 (§21.8): the action-space lock-in detector. Reports the longest run of CONSECUTIVE
     experiments confined to one axis-region (the 'same-lever streak' the flat coverage signal is blind to)
     and fires when it exceeds `threshold`. The LLM agent builds the concept tags by default (`--offline`
     forces the heuristic). Deterministic detection; never touches selection."""
@@ -482,7 +482,7 @@ def board_dedup(
                                                           "agentic build (default is the LLM agent build)."),
     model: Optional[str] = typer.Option(None, help="Override model id."),
 ):
-    """PART IV D4 (§21.5): taxonomy-aware hypothesis-board dedup analysis. Surfaces the dominant
+    """Hypothesis-board redundancy analysis.\fPART IV D4 (§21.5): taxonomy-aware hypothesis-board dedup analysis. Surfaces the dominant
     within-concept redundancy (merge aggressively) and cross-branch look-alikes a blind merge would wrongly
     collapse (keep distinct). Agentic tags by default (`--offline` forces the heuristic); merges nothing."""
     from looplab.search.concept_tagging import tag_text, tag_text_llm
@@ -536,7 +536,7 @@ def research_targets_cmd(
                                                           "only (no LLM-derived importance)."),
     model: Optional[str] = typer.Option(None, help="Override model id."),
 ):
-    """PART IV D2 (§21.3): axis-structured deep-research targets from the coverage map. The LLM agent
+    """Important but uncovered research directions.\fPART IV D2 (§21.3): axis-structured deep-research targets from the coverage map. The LLM agent
     derives the per-task IMPORTANT-but-uncovered directions (universal — no hardcoded winning region) as the
     top targets, then uncovered axes, failed directions re-framed as 'research a different implementation',
     and under-covered axes. `--offline` drops to deterministic axis targets only. Produces targets, runs no
@@ -564,7 +564,7 @@ def novelty_recall_cmd(
                                        "whole internal pool."),
     model: Optional[str] = typer.Option(None, help="Override model id."),
 ):
-    """PART IV E3 (§21.12): the novelty-gate RECALL diagnostic. Surfaces near-duplicate proposal pairs that
+    """Near-duplicate proposals the novelty gate let through.\fPART IV E3 (§21.12): the novelty-gate RECALL diagnostic. Surfaces near-duplicate proposal pairs that
     BOTH executed and the LLM judges TRUE paraphrases the gate should have deduplicated (the "сколько шлака"
     / wasted-compute question), and estimates the gate's recall against what it caught. Offline (`--offline`)
     only clusters candidates; the LLM adjudicates paraphrase vs legitimate variant by default."""
@@ -589,7 +589,7 @@ def concept_authorship_cmd(
     limit: int = typer.Option(30, "--limit", help="How many nodes to list, lowest node id first."),
     as_json: bool = typer.Option(False, "--json", help="Emit the whole report as JSON."),
 ):
-    """How much of what each proposer said its node was about survived the classifier's answer?
+    """How much of each proposer's own concept survived classification.\fHow much of what each proposer said its node was about survived the classifier's answer?
 
     The classifier cadence REPLACES a node's membership rather than merging into it, so the authored
     ids are invisible to every read surface once it has run. `RunState.node_concepts_authored` keeps
@@ -626,7 +626,7 @@ def lesson_guard_cmd(
     run_dir: Path = typer.Argument(..., help="Run dir whose distilled lessons to audit."),
     model: Optional[str] = typer.Option(None, help="Override model id."),
 ):
-    """PART IV D6/E4 (§21.7/§21.12): audit the run's distilled lessons. Flags lessons that OVER-GENERALIZE a
+    """Audit distilled lessons for over-generalization.\fPART IV D6/E4 (§21.7/§21.12): audit the run's distilled lessons. Flags lessons that OVER-GENERALIZE a
     single failed implementation into a whole sound direction (the node_63 pattern), and scans for
     mutually-CONTRADICTORY lesson pairs. Advisory / LLM-backed (needs a reachable endpoint)."""
     from looplab.trust.lesson_guard import contradiction_scan, guard_lessons

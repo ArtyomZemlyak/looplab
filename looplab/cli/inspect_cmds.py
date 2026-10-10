@@ -647,7 +647,7 @@ def landlock_check(run_dir: Path = typer.Argument(..., help=_RUN_DIR_HINT),
                    probe: bool = typer.Option(
                        True, help="Also fork a child, apply the ruleset, and prove that a read "
                                   "inside the allow-list succeeds and one outside it is refused.")):
-    """Print the KERNEL read allow-list this run would grant, and prove the ruleset applies.
+    """Print and test the kernel read allow-list a run would get.\fPrint the KERNEL read allow-list this run would grant, and prove the ruleset applies.
 
     THIS IS THE VALIDATION PATH FOR `Settings.landlock`, which ships `off`. The one unretired unknown
     in the design it belongs to is whether a real GPU eval survives a Landlock ruleset at all: the
@@ -930,7 +930,7 @@ def stage_dups(run_dir: Path = typer.Argument(..., help=_RUN_DIR_HINT)):
 @app.command(name="parser-stats")
 def parser_stats(run_dir: Path = typer.Argument(..., help="A run directory (holds spans.jsonl)."),
                  as_json: bool = typer.Option(False, "--json", help="Emit the tally as JSON.")):
-    """How the structured-output parser actually behaved on THIS box, per role.
+    """How the structured-output parser behaved, per role.\fHow the structured-output parser actually behaved on THIS box, per role.
 
     `core/parse.py::parse_structured` walks a fallback order (`tool_call` -> `baml`), and a failure
     of the first parser used to be silent: the caller gets a validated object either way, so a
@@ -1027,7 +1027,7 @@ def comparability(
 
 @app.command(name="edit-types")
 def edit_types(run_dir: Path = typer.Argument(..., help=_RUN_DIR_HINT)):
-    """What KIND of edit each experiment made, which kinds paid, and how much was already tried.
+    """What kind of edit each experiment made and which paid off.\fWhat KIND of edit each experiment made, which kinds paid, and how much was already tried.
 
     The search's own diagnostic, and the one the field measured rather than assumed: EvoTrace
     classified committed edits across 121 agent runs and found the gains concentrated in three of
@@ -1046,7 +1046,7 @@ def edit_types(run_dir: Path = typer.Argument(..., help=_RUN_DIR_HINT)):
 
 @app.command(name="proxy-accuracy")
 def proxy_accuracy(run_dir: Path = typer.Argument(..., help=_RUN_DIR_HINT)):
-    """Was the proxy that KILLED candidates in this run any good? (read-only, no model)
+    """How accurate the pre-evaluation kill proxy was.\fWas the proxy that KILLED candidates in this run any good? (read-only, no model)
 
     Pairwise ranking accuracy of `search/proxy.py`'s predictions against the metrics that actually
     came back — the measure the field quotes its own pre-execution judges in (predict-before-execute
@@ -1082,7 +1082,7 @@ def proxy_accuracy(run_dir: Path = typer.Argument(..., help=_RUN_DIR_HINT)):
 
 @app.command(name="seed-distance")
 def seed_distance(run_dir: Path = typer.Argument(..., help=_RUN_DIR_HINT)):
-    """How far each experiment moved from the seed program it descends from (read-only, no model).
+    """How far each experiment moved from its seed program.\fHow far each experiment moved from the seed program it descends from (read-only, no model).
 
     `edit-types` says what KIND of edit each parent->child STEP made; this says how far the whole
     walk actually got — one diff against the LINEAGE ROOT, in the same `tools/node_diff.py`
@@ -1106,7 +1106,7 @@ def workspace_bytes(
         node: Optional[str] = typer.Option(
             None, "--node", help="Spend the whole budget on ONE node (its id, or its dir name)."),
         top: int = typer.Option(3, "--top", help="How many of a node's largest subtrees to name.")):
-    """What this run's node workspaces actually WEIGH, beside what the log CLAIMED (read-only).
+    """Disk weight of the node workspaces versus what the log claims.\fWhat this run's node workspaces actually WEIGH, beside what the log CLAIMED (read-only).
 
     `workspace_seeded` is the ONLY workspace fact in the event log and it says `.[auto]:75 tracked`
     — a true sentence about 0.9 MB, printed here on the same row as the directory it describes,

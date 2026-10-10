@@ -77,7 +77,7 @@ def evaluate_track_cmd(
     live: bool = typer.Option(False, "--live",
                               help="Queue it for the run's LIVE engine instead (no stop needed)."),
 ):
-    """Run a declared evaluation TRACK over settled nodes' preserved workdirs (doc 73 §1.4).
+    """Run a declared evaluation track over finished nodes.\fRun a declared evaluation TRACK over settled nodes' preserved workdirs (doc 73 §1.4).
 
     `eval.tracks.<name>` is an operator argv (`{workdir}`, `{node_id}`, … placeholders) whose last
     stdout JSON object holds the numbers: @200 for nodes scored @20, drift weeks, a second ruler.

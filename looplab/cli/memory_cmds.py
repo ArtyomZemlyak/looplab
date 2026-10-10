@@ -47,7 +47,7 @@ def memory_orphans_cmd(
     limit: int = typer.Option(25, "--limit", help="How many contributing runs to list."),
     as_json: bool = typer.Option(False, "--json", help="Emit the survey as JSON."),
 ):
-    """Report — and only with `--apply`, remove — cross-run memory rows whose run no longer exists.
+    """Find (and with --apply remove) memory rows of deleted runs.\fReport — and only with `--apply`, remove — cross-run memory rows whose run no longer exists.
 
     NOT run automatically by anything, and deliberately so: the cascaded stores are SHARED and the
     purge is irreversible, so it shows the whole answer before it writes anything. A run's deletion
@@ -103,7 +103,7 @@ def memory_fingerprints_cmd(
                                help="Rewrite the rows in place. Without it, nothing is written."),
     as_json: bool = typer.Option(False, "--json", help="Emit the receipt as JSON."),
 ):
-    """Report — and only with `--apply`, repair in place — lesson rows the reader cannot see because
+    """Find (and with --apply repair) lesson rows readers cannot see.\fReport — and only with `--apply`, repair in place — lesson rows the reader cannot see because
     their task fingerprint is past its fence (doc 69 69.14a).
 
     A row written before the writer owned the reader's bound (more than 256 tokens, or a token over
@@ -147,7 +147,7 @@ def prior_citations_cmd(
     limit: int = typer.Option(30, "--limit", help="How many lessons to list, most-shown first."),
     as_json: bool = typer.Option(False, "--json", help="Emit the whole report as JSON."),
 ):
-    """Did the cross-run priors this run was shown reach its proposals? (doc 52 row 17)
+    """Whether the cross-run priors a run was shown reached its proposals.\fDid the cross-run priors this run was shown reach its proposals? (doc 52 row 17)
 
     A pure projection over the run's `prior_injected` + `memory_read` diagnostic rows joined to the
     `node_created` rows that followed them (`events/prior_citations.py` states the join and the

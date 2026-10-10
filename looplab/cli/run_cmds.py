@@ -2441,7 +2441,7 @@ def reap_service_files_cmd(
     show_kept: bool = typer.Option(False, "--show-kept", help="Also list what is being kept, and why."),
     as_json: bool = typer.Option(False, "--json", help="Emit the whole plan as JSON."),
 ):
-    """Report — and only with `--apply`, remove — the service files a FINISHED destructive operation
+    """Find (and with --apply remove) leftovers of finished operations.\fReport — and only with `--apply`, remove — the service files a FINISHED destructive operation
     left in the run root.
 
     Every whole-run deletion parks a receipt and an identity sidecar beside the runs and takes a

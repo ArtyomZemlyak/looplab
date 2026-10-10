@@ -232,7 +232,7 @@ def cross_run_concepts_cmd(
     top: int = typer.Option(20, help="How many most-explored concepts to show."),
     as_json: bool = typer.Option(False, "--json", help="Emit the full overview as JSON."),
 ):
-    """PART IV cross-run Step 3 (§21.20): portfolio overview over the per-run CONCEPT capsules written when
+    """Overview of concepts across runs.\fPART IV cross-run Step 3 (§21.20): portfolio overview over the per-run CONCEPT capsules written when
     `cross_run_concepts` is on. Shows which concepts have been explored across the portfolio and in which
     runs — each with its OWN outcome (raw metrics are NOT compared across tasks). Pure read; no endpoint."""
 
@@ -305,7 +305,7 @@ def cross_run_index_cmd(
                                      "(<run_root>/.cross_run_index.json); only re-fold CHANGED runs and "
                                      "report built/cached/skipped receipts."),
 ):
-    """PART IV cross-run Step 1 / CR0 (§21.20.3): build the portfolio index — each run's PASSPORT (scope)
+    """Build the portfolio index over every run.\fPART IV cross-run Step 1 / CR0 (§21.20.3): build the portfolio index — each run's PASSPORT (scope)
     + FACTS (attempts/measurements) — by folding every `<run_root>/*/events.jsonl` (the migration over
     existing runs). Pure/deterministic: rebuilding from scratch yields the same index. With `--incremental`
     an on-disk cache skips unchanged runs and torn runs surface as explicit skip receipts. No LLM/endpoint."""
@@ -360,7 +360,7 @@ def concept_merge_cmd(
     from_concept: str = typer.Argument(..., help="The concept slug to merge away (or purge)."),
     to_concept: str = typer.Argument("", help="The canonical slug it becomes. Empty = PURGE (tombstone)."),
 ):
-    """PART IV cross-run CR1a (§22.4) — the OPERATOR concept governance write: MERGE one concept slug into
+    """Merge one concept into another across runs.\fPART IV cross-run CR1a (§22.4) — the OPERATOR concept governance write: MERGE one concept slug into
     another (they become one across all cross-run views) or PURGE it (empty target → dropped from views).
     Non-destructive + reversible: append-only `concept_aliases.jsonl`, applied at READ time; the raw per-run
     tags are never rewritten. A self-link or cycle-closing edge is rejected. For the inverse (one coarse
@@ -386,7 +386,7 @@ def concept_split_cmd(
     default: str = typer.Option("", "--default", help="Fallback target when no rule matches (else the "
                                 "original slug is kept)."),
 ):
-    """PART IV cross-run (§21.20.13) — the OPERATOR concept SPLIT: declare one coarse concept really covers
+    """Split a coarse concept into finer ones.\fPART IV cross-run (§21.20.13) — the OPERATOR concept SPLIT: declare one coarse concept really covers
     several finer ones, RE-TAGGED per each run's OWN sibling concepts. Non-destructive + reversible:
     append-only `concept_splits.jsonl`, applied at READ time; raw per-run tags are never rewritten.
     Example: `concept-split MEM data/augmentation --rule 'data/hard-negative-mining:hard,negative' \\
@@ -414,7 +414,7 @@ def concept_ratify_cmd(
     limit: int = typer.Option(32, help="Max merges to apply in this pass (capped by the stage)."),
     as_json: bool = typer.Option(False, "--json", help="Emit the full result as JSON."),
 ):
-    """PART IV cross-run §22.4 — RATIFY the agentic steward's already-recorded MERGE proposals.
+    """Ratify the concept steward's recorded merge proposals.\fPART IV cross-run §22.4 — RATIFY the agentic steward's already-recorded MERGE proposals.
 
     The steward (`concept-steward`) only proposes, and its proposals are durably logged. This is the
     consumer: it applies every still-valid proposed merge through the SAME append-only, read-time,
@@ -461,7 +461,7 @@ def concept_steward_cmd(
     action_id: str = typer.Option(
         "", "--action-id", help="Required stable id for at-most-once paid-call recovery."),
 ):
-    """PART IV cross-run §21.20.13 / §22.4 — the AGENTIC taxonomy steward: an LLM reviews the cross-run
+    """Ask a model to propose a concept curation (paid).\fPART IV cross-run §21.20.13 / §22.4 — the AGENTIC taxonomy steward: an LLM reviews the cross-run
     concept graph and PROPOSES a curation (merge duplicate slugs / split conflated ones / purge noise).
     Proposal-only: review the exact output, then record selected operations through `concept-merge`,
     `concept-split`, or owner HTTP governance. The deprecated `--apply` option is rejected before any paid
@@ -532,7 +532,7 @@ def claim_decide_cmd(
     action_id: str = typer.Option(
         "", "--action-id", help="Required stable id for idempotent lost-response retry."),
 ):
-    """PART V §22.4 — the OPERATOR governance write: ratify / reject / pin the exact live cross-run claim
+    """Ratify, reject or pin one cross-run claim.\fPART V §22.4 — the OPERATOR governance write: ratify / reject / pin the exact live cross-run claim
     snapshot identified by UID, evidence digest and ledger revision. Agents can only read + cite. The
     append is idempotent by action id and rejected if the target/evidence/policy changed since review."""
     from looplab.engine.claims import ClaimTargetConflict, record_observed_claim_decision
@@ -591,7 +591,7 @@ def task_facets_cmd(
     action_id: str = typer.Option(
         "", "--action-id", help="Required stable id for at-most-once paid-call recovery."),
 ):
-    """PART IV cross-run §21.20.2 — AGENTIC task FACETING: an LLM PROPOSES a task's facets
+    """Ask a model to propose a task's facets (paid); it only proposes — record them with `looplab task-facets-set`.\fPART IV cross-run §21.20.2 — AGENTIC task FACETING: an LLM PROPOSES a task's facets
     (domain/language/modality/interaction/objective) so the system can recognize when two differently-worded
     tasks are the same KIND of problem. An advisory OVERLAY (never touches the deterministic passport
     fingerprint). PROPOSAL-ONLY, consistent with concept-steward/claim-steward (§22.4): it never changes
@@ -646,7 +646,7 @@ def task_facets_set_cmd(
     interaction: str = typer.Option("", "--interaction"),
     objective: str = typer.Option("", "--objective"),
 ):
-    """PART IV cross-run §21.20.2 / §22.4 — the OPERATOR facet write (deterministic, no LLM): record a task's
+    """Record a task's facets by hand.\fPART IV cross-run §21.20.2 / §22.4 — the OPERATOR facet write (deterministic, no LLM): record a task's
     facets by hand, the ratify half of the propose/ratify split (task-facets PROPOSES, this RECORDS).
     Append-only, last-write-wins per task_id; empty axes are dropped."""
     from looplab.engine.task_facets import record_task_facets
@@ -674,7 +674,7 @@ def claim_steward_cmd(
     action_id: str = typer.Option(
         "", "--action-id", help="Required stable id for at-most-once paid-call recovery."),
 ):
-    """PART IV cross-run §22.4 — the AGENTIC CLAIM steward: an LLM reviews the evidence-grounded claims and
+    """Ask a model to propose decisions on claims (paid).\fPART IV cross-run §22.4 — the AGENTIC CLAIM steward: an LLM reviews the evidence-grounded claims and
     PROPOSES operator decisions (ratify well-evidenced / reject contradicted-or-noise / pin load-bearing).
     Proposal-only: review the exact output, then record selected decisions through `claim-decide` or owner
     HTTP governance. The deprecated `--apply` option is rejected before any paid LLM call or mutation.
@@ -722,7 +722,7 @@ def cross_run_digest_cmd(
     memory_dir: Path = typer.Argument(..., help="Cross-run memory dir (holds concept_capsules.jsonl)."),
     as_json: bool = typer.Option(False, "--json", help="Emit the full digest as JSON."),
 ):
-    """PART IV cross-run Step 7 (§21.20.11, GATED): a recursive summary — concepts grouped by AXIS prefix
+    """Summarize cross-run concepts grouped by axis.\fPART IV cross-run Step 7 (§21.20.11, GATED): a recursive summary — concepts grouped by AXIS prefix
     into clusters with rollup counts. Deterministic inspector DATA; NOT wired into any prompt until it
     beats the flat baseline on the benchmark corpus (the hierarchy gate). Honors concept aliases. No LLM."""
 
@@ -778,7 +778,7 @@ def cross_run_search_cmd(
     k: int = typer.Option(8, min=1, max=64, help="How many results (hard range: 1-64)."),
     as_json: bool = typer.Option(False, "--json", help="Emit the full result + receipt as JSON."),
 ):
-    """PART IV cross-run CR2a (§21.20.5): relevance-ranked hybrid SEARCH over the cross-run knowledge
+    """Search the cross-run claims and concepts.\fPART IV cross-run CR2a (§21.20.5): relevance-ranked hybrid SEARCH over the cross-run knowledge
     (claims + concepts) via the shipped lexical+BM25+vector RRF retriever, with a why-recalled receipt.
     Operator-rejected claims are excluded. Pure read; no endpoint."""
     from looplab.engine.claims import cross_run_retrieve
@@ -829,7 +829,7 @@ def atlas_cmd(
     max_items: int = typer.Option(8, help="Cap per section (explored/contested/thin)."),
     as_json: bool = typer.Option(False, "--json", help="Emit the full Atlas payload as JSON."),
 ):
-    """PART IV cross-run Step 6 (§21.20): the legacy Research Atlas DATA payload — bounded concept
+    """Print the legacy Research Atlas data payload.\fPART IV cross-run Step 6 (§21.20): the legacy Research Atlas DATA payload — bounded concept
     observations, concepts observed in one returned run, and mixed-evidence claim records. It composes
     the concept overview (Step 3), claim assessments (Step 4), and bounded context pack (Step 5).
     Pure read; the owner React preview is available at ``#/claims``.
@@ -918,10 +918,10 @@ def claims_cmd(
     contested_only: bool = typer.Option(False, "--contested", help="Show only MIXED (support+oppose) claims."),
     pack: bool = typer.Option(False, "--pack", help="Render the bounded agent context pack (Step 5) instead."),
     structured: bool = typer.Option(True, "--structured", help="Accepted and INERT: claim identity is "
-                                    "always the scope+polarity-safe structured claim key (§21.20.13) — "
+                                    "always the scope+polarity-safe structured claim key — "
                                     "opposite-polarity claims contradict rather than merge and a decision in "
                                     "one task cannot reach another's. The `--lean` normalized-statement "
-                                    "projection was DELETED on 2026-09-08 (doc 25 EM-06); it emitted rows with "
+                                    "projection was DELETED on 2026-09-08; it emitted rows with "
                                     "no `claim_uid` and no `evidence_digest`, so its `--governance-receipt` "
                                     "could never satisfy `claim-decide`. An operator who scripted `--lean` gets "
                                     "a usage refusal here rather than a silently different projection."),
@@ -936,7 +936,7 @@ def claims_cmd(
         help="With --json, wrap claims with the exact claim-governance revision and reviewed scope "
              "for claim-decide."),
 ):
-    """PART IV cross-run Step 4/5 (§21.20): project distilled lessons into evidence-labelled claim
+    """Project distilled lessons into evidence-labelled claims.\f[--structured: the claim key, §21.20.13; --lean was deleted, doc 25 EM-06] PART IV cross-run Step 4/5 (§21.20): project distilled lessons into evidence-labelled claim
     records with support and opposition attempt references. Legacy wire states ``supported`` and
     ``refuted`` mean support-only and opposition-only evidence here, not proposition verdicts;
     ``mixed`` means both kinds of reference, and ``inconclusive`` means insufficient evidence.

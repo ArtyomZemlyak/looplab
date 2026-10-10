@@ -125,7 +125,7 @@ def belief_key_split_cmd(
     limit: int = typer.Option(20, "--limit", help="How many split groups to print, widest first."),
     as_json: bool = typer.Option(False, "--json", help="Emit the whole report as JSON."),
 ):
-    """Where the seed-TEXT belief key and a CONCEPT key would disagree, and what a merge would pool.
+    """Where text and concept belief keys disagree across runs.\fWhere the seed-TEXT belief key and a CONCEPT key would disagree, and what a merge would pool.
 
     The read the belief-identity backlog entry asks for and refuses to decide without: cards are
     grouped by (run, concept set, direction), the groups the text digest SPLITS are listed with the
@@ -306,7 +306,7 @@ def fidelity_agreement_cmd(
     limit: int = typer.Option(20, "--limit", help="How many runs to list."),
     as_json: bool = typer.Option(False, "--json", help="Emit the whole report as JSON."),
 ):
-    """Does the CHEAP evaluation level rank candidates the way the FULL one does? (doc 68 68.5)
+    """Whether cheap evaluations rank candidates like full ones.\fDoes the CHEAP evaluation level rank candidates the way the FULL one does? (doc 68 68.5)
 
     Over the nodes that carry BOTH levels — the search's number and the confirm phase's mean
     (`confirm_top_k` >= 2 with `confirm_seeds` >= 1) — the pairwise ordering agreement and

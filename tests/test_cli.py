@@ -204,7 +204,10 @@ def test_every_help_placeholder_survives_the_markdown_renderer():
     group = get_command(app)
     lost = {}
     for name, command in sorted(group.commands.items()):
-        texts = [command.help or ""] + [getattr(p, "help", None) or "" for p in command.params]
+        # Only what `--help` prints: Click drops everything after `\f`, where a maintainer command
+        # keeps its full provenance (doc 75 UX-11).
+        texts = [(command.help or "").split("\f")[0]] + [getattr(p, "help", None) or ""
+                                                          for p in command.params]
         spelled = {m for t in texts for m in re.findall(r"<[A-Za-z_][\w\-./]*>", t)}
         if not spelled:
             continue

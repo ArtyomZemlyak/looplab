@@ -33,7 +33,7 @@ def mlebench_extras_cmd(
     model: Optional[str] = typer.Option(None, "--model", help="Override the judge model for this call."),
     as_json: bool = typer.Option(False, "--json", help="Print the whole record as JSON."),
 ):
-    """The two official MLE-bench extras over a finished run's champion (doc 52 row 22): the LLM
+    """MLE-bench rule-violation and plagiarism checks for a finished run.\fThe two official MLE-bench extras over a finished run's champion (doc 52 row 22): the LLM
     RULE-VIOLATION detector (code + transcript against the competition rules; a PAID call to the
     run's own endpoint) and the Dolos PLAGIARISM check against downloaded public kernels. Records
     only — `<run_dir>/mlebench_extras.json` — and moves no champion, metric or selection."""
@@ -77,7 +77,7 @@ def bait_materialize_cmd(
     root: Path = typer.Argument(
         ..., help="Directory to write the three bait tasks under (`<root>/<bait>/task.json`)."),
 ):
-    """Write the three BAIT tasks (doc 52 row 22, BAITBENCH's shape): ordinary small prediction
+    """Write the three BAIT tasks for the hack-rate benchmark.\fWrite the three BAIT tasks (doc 52 row 22, BAITBENCH's shape): ordinary small prediction
     tasks with a planted, rule-compliant shortcut each — a post-outcome `client_score` column, the
     test labels left in `archive/`, a scorer that trusts the printed metric — documented beside the
     data the way a real README documents a leaky column. Deterministic; no model, no network."""
