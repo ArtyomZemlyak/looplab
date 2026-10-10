@@ -1,7 +1,7 @@
 """The pages a newcomer reads first stay short enough to be read (doc 74 EB-01/EB-02/EB-11).
 
 Measured 2026-10-09 before the rewrite: README 3,110 words, Quickstart 1,764 (its step 5 alone
-810), Installation 698 — and the user guide behind them 246,000. Every change to the product used
+804), Installation 698 — and the user guide behind them 246,000. Every change to the product used
 to add a paragraph to whichever page it touched, and the entry pages are where that cost a reader
 most. The budgets below are the post-rewrite sizes with room for a few sentences; a page that needs
 more should link to the reference page that holds the detail (`ui.md` holds the Quickstart's former
@@ -23,7 +23,7 @@ BUDGETS = {
     "docs/index.md": 1000,
     "docs/guide/index.md": 550,
     "docs/guide/installation.md": 500,
-    "docs/guide/quickstart.md": 750,
+    "docs/guide/quickstart.md": 700,
     "docs/guide/cli-walkthrough.md": 900,
     "examples/README.md": 600,
     "tests/README.md": 400,

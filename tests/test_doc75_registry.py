@@ -49,7 +49,7 @@ def test_the_summary_counts_are_the_parsers_and_the_ids_are_dense():
     text = _text()
     items = _items(text)
     by_priority = Counter(priority for priority, _, _ in items.values())
-    sentence = re.search(r"Реестр: (\d+) находк\w*, из них P0 — (\d+), P1 — (\d+), P2 — (\d+)", text)
+    sentence = re.search(r"Реестр: (\d+) наход\w*, из них P0 — (\d+), P1 — (\d+), P2 — (\d+)", text)
     assert sentence, "section 1 must carry the registry count sentence the parser checks"
     assert tuple(int(n) for n in sentence.groups()) == (
         len(items), by_priority["P0"], by_priority["P1"], by_priority["P2"])

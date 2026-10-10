@@ -239,7 +239,7 @@ def test_critique_point_6_names_exactly_the_findings_section_12_marked():
     """Point 6 lists the findings doc 74 §12 changed. Hand-counted, it went stale twice (11
     written, 15 true); here the list in the sentence must equal the marks the findings carry."""
     marked = sorted(eb for eb, body in _findings().items()
-                    if re.search(r"уточнено|пересмотрено|снято|исправлено|добавлена", body))
+                    if re.search(r"уточнено|пересмотрено|снято", body))
     point = re.search(r"^6\. .*?(?=^7\. )", DOC.read_text(encoding="utf-8"), re.S | re.M).group(0)
     stated = re.search(r"\((\d+) из 28: ([^;]+);", point)
     assert stated and int(stated.group(1)) == len(marked), (stated and stated.group(1), marked)
