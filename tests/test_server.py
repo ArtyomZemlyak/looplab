@@ -1195,17 +1195,21 @@ def test_resume_claim_popen_gap_fences_reset_and_delete(
     EventStore(rd / "events.jsonl").append("resume_requested", {"mode": "resume"})
     entered = threading.Event()
     release = threading.Event()
+    # The waits below END the moment their event happens, so their bound only matters on a loaded
+    # runner: 2.0 s timed out on CI (2026-10-10) while the same test took ~3 s whole locally. The
+    # one bound that is part of the property — the 0.1 s the mutation must stay fenced — is unchanged.
+    patience = 15.0
 
     def _blocked_spawn(*_a, **_kw):
         entered.set()
-        assert release.wait(2.0)
+        assert release.wait(patience)
 
     monkeypatch.setattr(ep, "_spawn_engine", _blocked_spawn)
     client = TestClient(make_app(tmp_path))
     args = ["resume", str(rd), "--task-file", str(rd / "task.snapshot.json")]
     with ThreadPoolExecutor(max_workers=2) as pool:
         resume = pool.submit(ep._claim_and_spawn_resume, rd, args, spawn_inflight=None)
-        assert entered.wait(2.0), "resume did not reach the claim -> Popen barrier"
+        assert entered.wait(patience), "resume did not reach the claim -> Popen barrier"
         # The delete arm goes through the deletion TRANSACTION: bodyless DELETE is a 409 stub that
         # returns instantly without taking the sequencer, so it would sail past the fence and the
         # arm would then "pass" on a 409 that means "wrong request shape", not "blocked".
@@ -1214,8 +1218,8 @@ def test_resume_claim_popen_gap_fences_reset_and_delete(
         _time.sleep(0.1)
         assert not mutate.done(), "lifecycle mutation crossed the in-flight launch fence"
         release.set()
-        assert resume.result(timeout=2.0) is True
-        assert mutate.result(timeout=2.0).status_code == 409
+        assert resume.result(timeout=patience) is True
+        assert mutate.result(timeout=patience).status_code == 409
 
 
 def test_reset_archive_failure_keeps_the_source_of_truth_and_never_spawns(tmp_path, monkeypatch):

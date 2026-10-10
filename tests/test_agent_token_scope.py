@@ -208,7 +208,9 @@ def test_no_agent_intent_spawns_an_internal_run_s_loop(tmp_path, monkeypatch, sh
     assert _no_spawn_after(client) == []
     owner = post_command(client, kind, data, key="owner", headers=OWNER).json()
     assert owner.get("status") != "rejected", owner
-    deadline = time.time() + 20
+    # Polls until the spawn lands, so the bound only matters on a loaded runner: 20 s ran out once on
+    # the Windows leg (2026-10-10) for a spawn that takes well under a second locally.
+    deadline = time.time() + 60
     while not client.spawns and time.time() < deadline:
         time.sleep(0.05)
     assert [args[0] for args in client.spawns] == ["resume"], client.spawns
