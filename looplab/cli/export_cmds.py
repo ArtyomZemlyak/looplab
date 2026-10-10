@@ -303,7 +303,7 @@ def _export_git_target_refusal(run_dir: Path, out: Path) -> Optional[str]:
 #   into place only once it is whole.
 @app.command(name="export-git")
 def export_git(
-    run_dir: Path = typer.Argument(..., help="Run dir whose node DAG to export."),
+    run_dir: Path = typer.Argument(..., help="Run dir whose experiment tree to export."),
     out_arg: Optional[Path] = typer.Argument(None, metavar="[OUT]", show_default=False,
                                               help="Same as --out (kept for existing scripts)."),
     out_opt: Optional[Path] = typer.Option(

@@ -52,8 +52,9 @@ from looplab.cli.run_report import (echo_card_and_build_tables, echo_comparabili
                                     echo_parked_requests, echo_reconciliation, echo_replay_summary,
                                     echo_run_list,
                                     echo_run_opening, echo_section, echo_spend_around_champion,
-                                    echo_wall_clock, minutes, node_section_title, output_fingerprint,
-                                    span_category, span_seconds, stage_identity_rows, unit)
+                                    echo_wall_clock, minutes, node_section_title,
+                                    output_fingerprint, span_category, span_seconds,
+                                    stage_identity_rows, unit)
 
 
 @app.command()
@@ -287,11 +288,11 @@ def tokens(run_dir: Path = typer.Argument(...),
 
 @app.command()
 def timings(run_dir: Path = typer.Argument(...),
-            node: Optional[int] = typer.Option(None, help="only this node id")):
-    """Where the wall-clock went: per node, then RUN-LEVEL, reconciled against the run's real duration.
+            node: Optional[int] = typer.Option(None, help="only this experiment (#N; -1 is the run setup)")):
+    """Where the wall-clock went: per experiment, then RUN-LEVEL, reconciled against the run's real duration.
 
     Rows are LLM generations vs eval vs repair vs tools, charged from each span's `duration_s` in
-    `spans.jsonl`. The run-level section is the work no node owns — Researcher, Strategist, lesson
+    `spans.jsonl`. The run-level section is the work no experiment owns — Researcher, Strategist, lesson
     passes, run report, Card-build producer. The reconciliation prints `attributed` (the rows above,
     which can exceed 100% under concurrency), `traced` (wall clock with any span open) and
     `untraced`, the honestly-unattributable remainder.
@@ -615,10 +616,10 @@ def tensorboard(
              "training logs (and any secret a script printed into them) must not be exposed on all "
              "interfaces by default. Pass --host 0.0.0.0 explicitly to bind all interfaces."),
 ):
-    """Serve TensorBoard over a run's per-node training logs — online curves for ALL metrics the
-    training framework logged (loss, recall@k, grad norms, lr, …), one comparable run per experiment.
-    RepoTask training scripts (e.g. PyTorch Lightning's TensorBoardLogger) write event files under each
-    node's workdir; this points TensorBoard at nodes/ so every node shows up."""
+    """Serve TensorBoard over a run's per-experiment training logs — online curves for ALL metrics
+    the training framework logged (loss, recall@k, grad norms, lr, …), one comparable run per
+    experiment. RepoTask training scripts (e.g. PyTorch Lightning's TensorBoardLogger) write event
+    files under each experiment's workdir; this points TensorBoard at nodes/ so every one shows up."""
     import importlib.util
     import shutil
     import subprocess

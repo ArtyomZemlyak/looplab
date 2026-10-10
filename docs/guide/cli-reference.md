@@ -79,7 +79,7 @@ looplab export-mlflow   Log the champion to MLflow
 looplab export-notebook Export the champion as a runnable .ipynb
 looplab export-sft      This run's model turns as execution-grounded SFT rows, each carrying its node's outcome (doc 52 row 33)
 looplab harden          Grow the reward-hack exploit ruleset (hacker–fixer–solver)
-looplab tensorboard     Serve TensorBoard over per-node training logs
+looplab tensorboard     Serve TensorBoard over per-experiment training logs
 looplab build-ui        Build the React UI bundle (ui/dist)
 looplab harness         Print the external-agent capability contract as JSON (read-only)
 looplab harness-mcp     Serve the live UI API to a coding agent over stdio MCP
@@ -3325,7 +3325,7 @@ a pipe answer — `REFUSED errno 1` is the fence. Exit `2` when the rung is unav
 
 ## `tensorboard`
 
-Serve TensorBoard over a run's per-node training logs — online curves for all metrics the training
+Serve TensorBoard over a run's per-experiment training logs — online curves for all metrics the training
 framework logged, one comparable run per experiment. Needs `tensorboard` installed.
 
 ```bash

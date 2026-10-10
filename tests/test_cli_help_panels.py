@@ -127,6 +127,21 @@ def test_the_help_a_user_reads_cites_no_internal_document_and_fits_a_screen():
     assert offenders == {}
 
 
+def test_the_command_list_says_experiment_where_the_user_reads_it():
+    """doc 75 UX-18: `run`, `inspect`, the Report and the glossary call a candidate an EXPERIMENT;
+    "node" is the event log's word. The command list's user panels, and the two everyday read
+    commands beside them, say "experiment"; literal names (`--node`, `nodes/`, tag `node-<id>`)
+    keep theirs, which is why this reads the summaries and the prose, not the whole screen."""
+    word = re.compile(r"\bnodes?\b|\bper-node\b")
+    summaries = {name: summary for panel, rows in HELP_PANELS for name, summary in rows
+                 if panel in _USER_PANELS or name in ("timings", "tensorboard")}
+    assert {name: s for name, s in summaries.items() if word.search(s)} == {}
+    for name in ("timings", "tensorboard", "export-git"):
+        prose = " ".join(line for line in _help80(name).splitlines()
+                         if not re.match(r"^\s*[│|]", line))      # the description, not option rows
+        assert not word.search(prose.replace("node-<id>", "").replace("nodes/", "")), (name, prose)
+
+
 def test_maintainer_help_citations_only_shrink():
     backlog = {line.strip() for line in
                (Path(__file__).parent / "data" / "help_citation_backlog.txt").read_text().splitlines()
