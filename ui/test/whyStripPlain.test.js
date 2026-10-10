@@ -58,6 +58,19 @@ test('the plain line follows the structured fields, never the prose', () => {
   assert.deepEqual(policyPlainLine(null), ['choosing the next experiment', []])
 })
 
+test('a finished run\'s strip names no next step and says the budget is spent', () => {
+  const strategy = { policy: 'greedy', operators: { merge_mode: 'ensemble', endgame_sweep: true },
+    rationale: 'endgame: reserve for a final ensemble' }
+  const live = { strategy_history: [{ strategy, at_node: 6 }],
+    policy_reason: 'exploit best', policy_chosen: 3 }
+  assert.match(shown(harness.render(WhyStrip, { state: live })), /Budget nearly spent.*building on experiment #3/s)
+  const text = shown(harness.render(WhyStrip, { state: { ...live, finished: true } }))
+  assert.match(text, /Budget spent: combined the best results/)
+  assert.doesNotMatch(text, /next|building on|nearly/, text)
+  assert.equal(strategyPlainLine({ policy: 'greedy' }, true), 'Refining the best result so far',
+    'only the endgame line has a tense to change')
+})
+
 test('the all-withheld Concepts badge no longer says "Membership withheld … not empty"', async () => {
   // A NEGATIVE pin, on purpose a substring: what must not come back is the text (CLAUDE.md).
   const { readFile } = await import('node:fs/promises')

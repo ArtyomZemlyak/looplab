@@ -11,6 +11,7 @@ export default function WhyStrip({ state, onSelect }) {
   const detailBaseId = useId()
   const [expandedKey, setExpandedKey] = useState(null)
   const items = []
+  const finished = state.finished === true
   const strategies = state.strategy_history || []
   const strat = strategies[strategies.length - 1]
   if (strat && (strat.strategy?.rationale || strat.strategy?.policy)) {
@@ -19,7 +20,8 @@ export default function WhyStrip({ state, onSelect }) {
       label: 'strategy',
       text: (strat.strategy.rationale || uiMessage("policy -> {0}", [strat.strategy.policy])),
       // Shown; `text` (the decision's own words) stays whole in the title and the disclosure.
-      short: strategyPlainLine(strat.strategy) && uiText(strategyPlainLine(strat.strategy)),
+      short: strategyPlainLine(strat.strategy, finished)
+        && uiText(strategyPlainLine(strat.strategy, finished)),
       at: strat.at_node,
     })
   }
@@ -36,7 +38,9 @@ export default function WhyStrip({ state, onSelect }) {
       icon: 'bolt', label: label, text: decision.rationale || '', at: decision.at_node,
     })
   }
-  if (state.policy_reason) {
+  // A FINISHED run builds nothing next: the policy's last pick read "next: building on experiment #3"
+  // on the finished demo, whose selected result was #4.
+  if (state.policy_reason && !finished) {
     items.push({
       icon: 'target',
       label: 'next',

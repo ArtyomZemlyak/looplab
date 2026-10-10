@@ -1,7 +1,7 @@
 {
   "schema": 1,
   "language": "ru",
-  "count": 7749,
+  "count": 7750,
   "messages": {
     "# LoopLab run report — {0}": "# Отчёт запуска LoopLab — {0}",
     "## Agent narrative (advisory)": "## Пояснения агента (рекомендации)",
@@ -2110,6 +2110,7 @@
     "Refresh report · paid · needs a model": "Обновить отчёт · платно · нужна модель",
     "No research memo in this run · what is Deep Research?": "В этом запуске нет исследовательской записки · что такое Deep Research?",
     "Budget nearly spent: combining the best results": "Бюджет почти израсходован: объединяем лучшие результаты",
+    "Budget spent: combined the best results": "Бюджет израсходован: лучшие результаты объединены",
     "Trying several directions quickly, then refining the best": "Быстро пробуем несколько направлений, затем улучшаем лучшее",
     "Combining and varying the best results": "Комбинируем и варьируем лучшие результаты",
     "Exploring branches of the most promising results": "Исследуем ветви самых многообещающих результатов",
