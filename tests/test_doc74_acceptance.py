@@ -257,7 +257,8 @@ def test_critique_points_1_to_4_and_9_hold_on_the_tree():
 
 def test_section_12_1_corrections_hold_on_the_tree():
     # EB-04: the offline template labels its own number (the label the fix must NOT decide by)
-    assert '"metric_name": "row_count (offline baseline)"' in _text("looplab/adapters/dataset_task.py")
+    template = _text("looplab/adapters/dataset_task.py")
+    assert '"metric_name": "row_count (offline baseline)"' in template
     # EB-06: the runbook is CITED (in the comments of config.py, claimpin.py, seed_from_run.py), so
     # it moved rather than went away; that every such citation still resolves is
     # `tests/test_claim_pins.py::test_no_source_citation_is_dead`'s job — here, that it moved.
@@ -265,3 +266,48 @@ def test_section_12_1_corrections_hold_on_the_tree():
     assert (ROOT / "tests" / "data" / "bench-out").is_dir()
     # EB-21: the demo declares the comparison the toy task cannot know by itself
     assert "comparison_contract" in yaml.safe_load(_text("examples/demo.yaml"))["task"]
+
+
+
+def test_critique_points_5_7_8_10_and_12_hold(monkeypatch):
+    doc = DOC.read_text(encoding="utf-8")
+    # 5: every test the point names as having made an acceptance machine-checked exists
+    point5 = re.search(r"^5\. .*?(?=^6\. )", doc, re.S | re.M).group(0)
+    for rel in re.findall(r"`(tests/[\w/]+\.py)`", point5):
+        assert (ROOT / rel).is_file(), rel
+    # 7: the corrected baseline holds in the findings — no 53 KB `replay` claim is left outside the
+    # review section, which quotes the old value on purpose to say it was wrong
+    findings = doc.split("## 12. ", 1)[0]
+    assert not re.search(r"replay[^\n]{0,40}53\s?(КБ|015)", findings)
+    assert "58 КБ" in findings
+    # 8: the §10 position command is the one that matches (awk on the tab `nl` emits)
+    reproduce = doc.split("## 10. ", 1)[1].split("## 11. ", 1)[0]
+    assert "| nl | awk '$2 ~ /^(run|ui|init|inspect)$/'" in reproduce
+    # 10: the premise of the EB-05 correction, DRIVEN: where there is no /proc and no effective uid
+    # (Windows), the rung reports itself advisory on every run — not only for root
+    import builtins
+    import os
+    from looplab.runtime import read_fence
+    real_open = builtins.open
+
+    def no_proc(path, *args, **kwargs):
+        if str(path).startswith("/proc/"):
+            raise OSError("no /proc here")
+        return real_open(path, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "open", no_proc)
+    monkeypatch.delattr(os, "geteuid", raising=False)
+    assert "no effective-uid check" in read_fence._dac_override()
+    # 12: §11 names its one exception, and §12 stops at the subsection that closes it
+    rules = doc.split("## 11. ", 1)[1].split("## 12. ", 1)[0]
+    assert "Одно исключение — §12" in rules
+    assert max(int(n) for n in re.findall(r"^### 12\.(\d+)\.", doc, re.M)) == 9
+
+
+def test_the_user_test_protocol_is_executable_as_written():
+    """doc 74 §12.9: the one open item cannot run inside a session, so the doc must hand over a
+    protocol a person can run unprepared — participants, tasks, measures, a pass line, a record."""
+    protocol = DOC.read_text(encoding="utf-8").split("### 12.9.", 1)[1]
+    for part in ("**Участники.**", "**Задания**", "**Измерения**", "**Порог успеха.**",
+                 "**Запись.**"):
+        assert part in protocol, part
