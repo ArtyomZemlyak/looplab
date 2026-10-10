@@ -90,6 +90,14 @@ class _Driver:
         return 4242
 
 
+# THE DEFAULT CEILING `_client` gives a test that names none. The ceiling also gates ADMISSION (see
+# `_SUCCESS_CEILING_S` below): at the old max(0.30, timeout * 4) the Windows leg settled commands
+# `timed_out` before the worker reached their real outcome — a structural `spawn_failed`, an intent —
+# in a different test each run. 3 s is past every admission measured there; tests that need a SHORT
+# ceiling for a timeout pass `observation=` themselves.
+_DEFAULT_CEILING_S = 3.0
+
+
 def _client(root, driver, *, startup=0.08, timeout=0.25, observation=None):
     app = make_app(root)
     srv = app.state.looplab
@@ -99,7 +107,7 @@ def _client(root, driver, *, startup=0.08, timeout=0.25, observation=None):
         process_identity=driver.get_process_identity,
         startup_timeout=startup, command_timeout=timeout, poll_interval=0.01,
         max_observation_timeout=(observation if observation is not None
-                                 else max(0.30, timeout * 4)))
+                                 else max(_DEFAULT_CEILING_S, timeout * 4)))
     return TestClient(app), srv
 
 
@@ -159,7 +167,7 @@ def _delete(client, run_id="demo", *, rd, op="1" * 8):
 _WORKER_START_TIMEOUT_S = 60.0
 
 # `command_timeout` for a test that lets its worker RUN and only then stages the run's finish.
-# `_client` derives `max_observation_timeout` from it as max(0.30, timeout * 4), and that is an
+# `_client` derived `max_observation_timeout` as max(0.30, timeout * 4) (now _DEFAULT_CEILING_S), an
 # ABSOLUTE ceiling: the monitor slides `deadline_at` for as long as the driver is alive, then clamps
 # it to `absolute_deadline_at`. At timeout=0.20 that ceiling is 0.80s from record creation, so the
 # staging in between — waiting for the worker (bounded by _WORKER_START_TIMEOUT_S above), an HTTP
