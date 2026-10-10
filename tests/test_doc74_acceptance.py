@@ -311,3 +311,32 @@ def test_the_user_test_protocol_is_executable_as_written():
     for part in ("**Участники.**", "**Задания**", "**Измерения**", "**Порог успеха.**",
                  "**Запись.**"):
         assert part in protocol, part
+
+
+
+# Every critique point of doc 74 §12.2 → the check that holds its factual claim. Points about HOW
+# the doc was written are held by the remedy they prescribe: point 3 (one snapshot) by EB-23's
+# check of the resize code; point 11 (done recorded by substance, not acceptance) by this file's
+# coverage test, which makes every acceptance a check.
+CRITIQUE_CHECKS = {
+    1: "test_critique_points_1_to_4_and_9_hold_on_the_tree",
+    2: "test_critique_points_1_to_4_and_9_hold_on_the_tree",
+    3: "eb23",
+    4: "test_critique_points_1_to_4_and_9_hold_on_the_tree",
+    5: "test_critique_points_5_7_8_10_and_12_hold",
+    6: "test_critique_point_6_names_exactly_the_findings_section_12_marked",
+    7: "test_critique_points_5_7_8_10_and_12_hold",
+    8: "test_critique_points_5_7_8_10_and_12_hold",
+    9: "test_critique_points_1_to_4_and_9_hold_on_the_tree",
+    10: "test_critique_points_5_7_8_10_and_12_hold",
+    11: "test_every_finding_in_doc_74_has_exactly_one_acceptance_row",
+    12: "test_critique_points_5_7_8_10_and_12_hold",
+}
+
+
+def test_every_critique_point_has_a_check():
+    critique = DOC.read_text(encoding="utf-8").split("### 12.2.", 1)[1].split("### 12.3", 1)[0]
+    points = [int(n) for n in re.findall(r"^(\d+)\. \*\*", critique, re.M)]
+    assert points == sorted(CRITIQUE_CHECKS), (points, sorted(CRITIQUE_CHECKS))
+    defined = {name for name, value in globals().items() if callable(value)}
+    assert not [name for name in CRITIQUE_CHECKS.values() if name not in defined]
