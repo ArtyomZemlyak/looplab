@@ -52,8 +52,8 @@ from looplab.cli.run_report import (echo_card_and_build_tables, echo_comparabili
                                     echo_parked_requests, echo_reconciliation, echo_replay_summary,
                                     echo_run_list,
                                     echo_run_opening, echo_section, echo_spend_around_champion,
-                                    echo_wall_clock, minutes, output_fingerprint, span_category,
-                                    span_seconds, stage_identity_rows, unit)
+                                    echo_wall_clock, minutes, node_section_title, output_fingerprint,
+                                    span_category, span_seconds, stage_identity_rows, unit)
 
 
 @app.command()
@@ -422,7 +422,7 @@ def timings(run_dir: Path = typer.Argument(...),
         cell[1] += 1
 
     for nid in sorted(per_node):
-        echo_section(f"node {nid}", per_node[nid])
+        echo_section(node_section_title(nid), per_node[nid])
     if run_level:
         echo_section("run-level", run_level,
                       note="(no node owns it: researcher / strategist / card producer / wrap-up)")

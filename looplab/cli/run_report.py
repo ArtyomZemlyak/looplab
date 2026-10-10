@@ -136,12 +136,23 @@ def minutes(seconds: float) -> float:
     return round(seconds / _DURATION_UNIT["seconds"], 1)
 
 
+def node_section_title(node_id: int) -> str:
+    """A per-node block's title in the word every other command uses (doc 75 UX-18): `run`,
+    `inspect` and the Report say "experiment #4", so `timings` did not say "node 4". Node id -1
+    is the run-setup span's (`engine/setup_phase.py`), named for what it is; the id stays beside
+    it because `--node -1` is how to ask for it alone."""
+    return f"experiment #{node_id}" if node_id >= 0 else f"run setup (node {node_id})"
+
+
 def echo_section(title: str, cats: dict, note: str = "") -> None:
-    """One `node N`/`run-level` block: total, then its rows biggest-first with a share of the block."""
+    """One per-node/`run-level` block: total, then its rows biggest-first with a share of the block.
+    The label column is as wide as the block's longest label: a fixed 10 pushed every
+    `op:materialize_node` row's numbers out of line with the rest (doc 75 UX-08)."""
     total = sum(v[0] for v in cats.values()) or 1.0
     typer.echo(f"\n{title} — {minutes(total)} {unit()}:" + (f"   {note}" if note else ""))
+    width = max([10, *(len(str(cat)) for cat in cats)])
     for cat, (secs, n) in sorted(cats.items(), key=lambda x: -x[1][0]):
-        typer.echo(f"  {cat:10} {minutes(secs):>6} {unit()}  ({n} spans, {round(100*secs/total)}%)")
+        typer.echo(f"  {cat:{width}} {minutes(secs):>6} {unit()}  ({n} spans, {round(100*secs/total)}%)")
 
 
 def echo_containments(spans: list) -> None:

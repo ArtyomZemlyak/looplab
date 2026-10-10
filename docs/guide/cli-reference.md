@@ -1008,7 +1008,7 @@ two minutes, minutes otherwise (a three-second offline run used to print `0.0 mi
 ```
 run wall clock 27.9 min (1673.8 s, events.jsonl first -> last timestamp)
 
-node 0 — 0.8 min:
+experiment #0 — 0.8 min:
   op:score      0.8 min  (1 spans, 93%)
   LLM           0.1 min  (1 spans, 7%)
   …

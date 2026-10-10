@@ -250,7 +250,7 @@ def test_run_level_work_is_reported_instead_of_dropped(tmp_path):
 
     assert result.exit_code == 0, result.output
     # The per-node view is unchanged: create_node's SELF time is 0 (its child carries it).
-    assert _row(result.output, "node 0", "LLM") == 2.0
+    assert _row(result.output, "experiment #0", "LLM") == 2.0
     # …and the 4 minutes of researcher + producer work now has a home.
     assert _row(result.output, "run-level", "LLM") == 4.0
     assert "run-level — 4.0 min" in result.output
@@ -369,8 +369,8 @@ def test_the_per_node_filter_keeps_its_node_scope(tmp_path):
     result = _timings(run_dir, "--node", "0")
 
     assert result.exit_code == 0, result.output
-    assert "node 0 — 2.0 min" in result.output
-    assert "node 1" not in result.output
+    assert "experiment #0 — 2.0 min" in result.output
+    assert "experiment #1" not in result.output
     assert "\nrun-level — " not in result.output
     assert "reconciliation vs" not in result.output
     assert "--node 0: run-level work and the reconciliation below are run-scope" in result.output
@@ -386,7 +386,7 @@ def test_a_node_id_of_minus_one_stays_its_own_node_not_the_run_bucket(tmp_path):
 
     result = _timings(run_dir)
 
-    assert "node -1 — 1.0 min" in result.output
+    assert "run setup (node -1) — 1.0 min" in result.output
     assert "run-level — 2.0 min" in result.output
 
 
@@ -689,3 +689,22 @@ def test_a_spans_only_directory_keeps_its_historical_report(tmp_path):
     result = _timings(run_dir)
     assert "run opening" not in result.output
     assert run_opening_split(None, [])["available"] is False
+
+
+def test_the_blocks_speak_of_experiments_and_line_up(tmp_path):
+    """doc 75 UX-18/UX-08: `run`, `inspect` and the Report say "experiment #N", so the per-node
+    blocks do too; and a label longer than the old fixed 10 columns (`op:materialize_node`) no
+    longer pushes its numbers out of line with the block's other rows."""
+    import re
+    run_dir = _run_with_spans(tmp_path, [
+        _span("materialize_node", "operation", 0.0, 60.0, span_id="a", node_id=2),
+        _span("score", "operation", 100.0, 120.0, span_id="b", node_id=2),
+    ])
+
+    out = _timings(run_dir).output
+
+    assert "\nexperiment #2 — " in out and "\nnode 2" not in out
+    block = out.split("experiment #2 — ", 1)[1].split("\n\n", 1)[0].splitlines()[1:]
+    rows = [line for line in block if line.startswith("  op:")]
+    assert len(rows) == 2, block
+    assert len({re.search(r"\d+\.\d+ (?:s|min)", row).start() for row in rows}) == 1, rows
