@@ -43,8 +43,12 @@ looplab smoke                      # once a model is configured: one request to 
 ```
 
 On Windows, or when running as root, each run starts with one WARNING:
-"the read fence's KERNEL self-protection rung is ADVISORY here". It is expected: file modes do not
-bind there, so the sandbox's file-mode protection is weaker. It does not stop the run.
+"running as root or on Windows: native programs that eval code starts can overwrite the sandbox read
+fence (see Installation)". It is expected: file modes do not bind there, so the sandbox's file-mode
+protection is weaker. It does not stop the run.
+
+Runs keep cross-run memory in `~/.looplab/memory` (`LOOPLAB_MEMORY_DIR` moves it; `memory_dir: ""`
+switches it off, as the demo does).
 
 ## Optional extras
 

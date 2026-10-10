@@ -49,17 +49,22 @@ from looplab.cli.workspace_bytes import (DEFAULT_ENTRY_BUDGET, EntryBudget, meas
                                          render_workspace_bytes, seed_claims)
 from looplab.cli.run_report import (echo_card_and_build_tables, echo_comparability,
                                     echo_inspect_tail, echo_containments, echo_edit_types,
-                                    echo_parked_requests, echo_reconciliation, echo_run_list,
+                                    echo_parked_requests, echo_reconciliation, echo_replay_summary,
+                                    echo_run_list,
                                     echo_run_opening, echo_section, echo_spend_around_champion,
                                     echo_wall_clock, minutes, output_fingerprint, span_category,
                                     span_seconds, stage_identity_rows, unit)
 
 
 @app.command()
-def replay(run_dir: Path = typer.Argument(...)):
-    """Pure fold of the event log -> current state (read-only)."""
+def replay(run_dir: Path = typer.Argument(...),
+           summary: bool = typer.Option(False, "--summary", help="A few lines instead of the JSON.")):
+    """Rebuild the run's state from its event log alone (read-only); prints it as JSON."""
     store = _require_run_dir(run_dir)
-    state = fold(store.read_all())
+    events = store.read_all()
+    state = fold(events)
+    if summary:      # doc 75 UX-09; the JSON default stays byte-for-byte (`| jq` relies on it)
+        raise typer.Exit(echo_replay_summary(events, state))
     typer.echo(orjson.dumps(state.model_dump(mode="json"),
                             option=orjson.OPT_INDENT_2).decode())
 

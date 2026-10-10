@@ -323,6 +323,14 @@ looplab resume RUN_DIR [OPTIONS]
 | `--max-nodes N` | from the snapshot | Override the node budget on resume |
 | `--drain-only` | off | Evaluate only what a reset or an interruption left owed, then pause (see below) |
 
+**A finished run with nothing left to do is not reopened.** When no node can be minted or evaluated
+under the settings the command carries — the engine's own ceiling, `max_nodes` plus any
+`budget_extend` — `resume` and a repeat `run` on the same `--out` print `already finished: 6/6
+experiments …` with the command that raises the budget, and append nothing (reopening re-ran the whole
+finalization, paid on a model run, for no new experiment); `stop` on a finished run prints `already
+finished; nothing to stop`. A raised `--max-nodes` or an Assistant budget extension continues as
+before (`looplab/engine/run_capacity.py`, doc 75 UX-05).
+
 **`--drain-only` finishes the owed evaluations and stops** (doc 68 68.3a). It evaluates every
 pending node a reset re-opened or whose evaluation started and never finished
 (`engine/run_boundary.py::drain_owed`) through the ordinary dispatch — its own repairs included —
@@ -756,7 +764,12 @@ event log yet prints the snapshot, since that is all there is.
 ```bash
 looplab inspect RUN_DIR            # the result
 looplab inspect RUN_DIR --config   # the raw launch snapshot, then the result
+looplab inspect                    # no run named: list the runs under ./runs, newest first
 ```
+
+On a finished run the `stop:` line names the node budget when the plan recorded one (`finished —
+node budget spent (6/6 experiments).`), and the `stop evidence:` line is left out once the run's
+finalization completed — it only ever said "between phases" there; an interrupted run keeps it.
 
 On a run launched with `backend=toy` whose best experiment tuned nothing (a `dataset` or `repo` task
 has no model-free optimizer, so its offline roles run the task's fixed baseline), `run`, `resume`
@@ -846,10 +859,13 @@ Read-only: it folds each log and prints. It writes nothing and touches no memory
 ## `replay`
 
 Read-only: fold the event log into the current state and print it as JSON. This is the
-reproducibility check — it has no side effects.
+reproducibility check — it has no side effects. `--summary` prints a few lines instead: how many
+events were folded, the experiments, and the best one. It does not claim the state "matches"
+anything — the log records no digest to compare with; the state is the fold of the log by construction.
 
 ```bash
-looplab replay RUN_DIR
+looplab replay RUN_DIR             # the full state, JSON (unchanged; safe to pipe to jq)
+looplab replay RUN_DIR --summary   # a few lines
 ```
 
 ## `readmodel`
@@ -980,6 +996,9 @@ run's duration, then exits 2.
 ```bash
 looplab timings RUN_DIR [--node N]
 ```
+
+Every row of one report uses one unit, chosen from the run's own wall clock: seconds for a run under
+two minutes, minutes otherwise (a three-second offline run used to print `0.0 min` on most lines).
 
 | Option | Default | Description |
 |---|---|---|
@@ -2831,7 +2850,8 @@ looplab smoke [--model ID]
 ```
 
 Use this before a `--backend llm` run to confirm the endpoint, model id, and tool-calling are wired
-correctly.
+correctly. A failure prints the same classified cause and fix the run's endpoint preflight does
+(`[unreachable]`, `[credential]`, … and `--backend toy` to stay offline).
 
 ---
 

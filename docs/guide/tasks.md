@@ -798,6 +798,15 @@ asymmetry is the mechanism's reason for existing — `e5small-dr-unified-v2` and
 task snapshots (same command, same reader, same editable path) and are exactly the pair that cannot be
 compared. **A weak authority may refuse a comparison; it may never certify one.**
 
+A contract may also declare **`"deterministic": true`** — one evaluation of a candidate IS its score,
+so repeating it with other seeds would measure the same number. It is optional and absent from every
+contract written before it (their `contract_id` is unchanged), it is refused beside
+`measurement_phase: confirmed` (a deterministic objective has no repeat spread to confirm), and
+`"none: …"` in `uncertainty_protocol` does NOT imply it — that only says no protocol was declared.
+The engine records the consequence on each node, `metric_provenance.comparability.repeat_checks:
+"not_applicable"`, and the Report, the chat summaries and the run list then stop advising repeat runs
+(doc 75 UX-13). The offline demo declares it.
+
 An **absent** key is `unknown`, and `unknown` vs `unknown` is `unknown` — never `same`. Two rows that
 recorded nothing have not agreed about anything. This is not a nicety: every run on this box has no key,
 so a rule that defaulted absent-to-equal would certify the whole corpus as mutually comparable.
@@ -2086,11 +2095,19 @@ baseline that just reports the dataset row count, so the engine still runs witho
 
 | Field | Description |
 |---|---|
-| `data_path` | Path to your data (file or directory). Resolved to an absolute path the solution reads directly |
+| `data_path` | Path to your data (file or directory). Resolved to an absolute path the solution reads directly (relative paths: see below) |
 | `data` | Optional extra named paths (`name → path`) for multi-file datasets |
 | `metric` | Optional metric **name** to optimize; leave empty to let the agent **choose** one (and report its `metric_name`) |
 | `direction` | `max` (default) / `min`. The agent reports the metric with that orientation (higher- or lower-is-better) |
 | `cv_k` | Cross-validation folds the brief suggests for honest evaluation |
+
+**Relative paths** in a task file are read against **that file's directory**, so an example runs from
+any directory (`looplab run ~/looplab/examples/dataset_task.json`). A path that exists only relative
+to the current directory still works, as before; if both readings name different existing files, the
+run is refused rather than guessing. A path from a flag (`--data`) is read against the current
+directory. `task.snapshot.json` records every such path absolute, so `resume` works from anywhere. This
+covers `dataset` (`data_path`, `data`) and `repo` (`editable_path` / `repo`, `editables`, `references`,
+`data`/`dataset` mounts) — `core/appconfig.py::resolve_task_paths`, doc 75 UX-04.
 
 **Self-chosen metric.** With no `metric` set, the agent picks the most appropriate one (accuracy / F1 /
 AUC / R² / …) and prints both `metric` and `metric_name`. With `direction: "max"` it reports a

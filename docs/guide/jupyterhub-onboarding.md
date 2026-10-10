@@ -53,6 +53,7 @@ is sound. `python -m looplab.cli` is always equivalent if `looplab` is not on PA
 ```bash
 export LOOPLAB_LLM_BASE_URL="http://<endpoint>:<port>/v1"
 export LOOPLAB_LLM_API_KEY="<key, or anything if the endpoint ignores it>"
+export LOOPLAB_LLM_API_KEY_BASE_URL="$LOOPLAB_LLM_BASE_URL"   # the endpoint the key belongs to
 ```
 
 The default is a localhost Ollama, which on a hub pod is rarely what you want. A wrong endpoint is

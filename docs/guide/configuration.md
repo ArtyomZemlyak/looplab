@@ -1196,7 +1196,7 @@ See [Concepts → Trust & sandbox](concepts.md#trust-the-sandbox) for what each 
 
 | Setting | Env | Default | Description |
 |---|---|---|---|
-| `memory_dir` | `LOOPLAB_MEMORY_DIR` | `~/.looplab/memory` | Cross-run memory dir (lessons, cases, meta-notes, skills). **On by default**; set blank to disable cross-run memory |
+| `memory_dir` | `LOOPLAB_MEMORY_DIR` | `~/.looplab/memory` | Cross-run memory dir (lessons, cases, meta-notes, skills). **On by default**; set blank (`""`, which reads as off) to disable cross-run memory — the offline demo does |
 | `knowledge_dir` | `LOOPLAB_KNOWLEDGE_DIR` | `~/.looplab/knowledge` | Knowledge-base dir (notes + cross-run cases); Researcher gets grep/kb_search/read. **On by default** |
 | `embed_model` | `LOOPLAB_EMBED_MODEL` | — | Embedding model for **semantic** `kb_search` / case retrieval (e.g. `nomic-embed-text`). Blank = dependency-free lexical hashing. Offline/misconfigured endpoint degrades back to lexical (never crashes) |
 | `embed_base_url` | `LOOPLAB_EMBED_BASE_URL` | — | Endpoint for embeddings if different from the chat model's (blank = reuse `llm_base_url`) |

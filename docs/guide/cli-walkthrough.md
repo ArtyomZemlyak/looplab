@@ -28,16 +28,13 @@ What just happened:
 ## 2. Read the result
 
 ```bash
-looplab inspect runs/demo     # best node, metric, params, stop reason, trust, comparability
-looplab replay  runs/demo     # rebuild the full run state purely from the event log
+looplab inspect runs/demo           # best experiment, metric, stop reason, trust, comparability
+looplab replay  runs/demo --summary # rebuild the run's state from the event log alone
 ```
 
-`inspect --config` also prints `config.snapshot.json` **verbatim** — the settings as launched. It does
-NOT overlay the event-effective values, so on a resumed or live-retuned run the seven
-`run_started`-pinned fields and an event-sourced `trust_gate` can differ from what it shows.
-
-`inspect` is the quick "what did I get?"; `replay` proves the run is reproducible — it folds the
-append-only log into the same state, with no side effects.
+`inspect` is the quick "what did I get?" (`--config` adds the launch settings,
+[CLI reference](cli-reference.md)); `replay` rebuilds the run's state from the append-only log with no
+side effects — `--summary` prints a few lines, without it the full state as JSON.
 
 Open **`runs/demo/tree.html`** in a browser for a static lineage tree of every candidate the loop
 explored and how they descend from one another.
@@ -54,8 +51,11 @@ runs/demo/
 ├── tree.html             # static lineage view
 ├── trace.json            # end-of-run trace projection
 ├── readmodel.sqlite      # derived read model (rebuildable; `looplab readmodel RUN_DIR`)
+├── AGENTS.md             # what the engine tells a coding agent about this task
 └── spans.jsonl           # diagnostic trace spans (never read by replay)
 ```
+
+Plus `*.lock` files and a `.looplab-fence/` directory you can ignore.
 
 ## 3. Run a real ML task
 
@@ -68,8 +68,8 @@ step 4). Without it the run is **refused before it starts** by the endpoint pref
 looplab run examples/regression_task.json --out runs/reg --max-nodes 14 --backend toy
 ```
 
-This selects a polynomial degree + ridge λ by 5-fold cross-validation. The loop discovers the right
-model complexity (the example's true degree is 2) from a profiled dataset.
+This searches a polynomial degree and a ridge λ for the lowest 5-fold cross-validated error on a
+profiled dataset. The degree it settles on is in the BEST line's params (applied rounded to an integer).
 
 Browse the [Task reference](tasks.md) for classification, time-series, MLE-bench, and repo tasks.
 
@@ -93,7 +93,9 @@ Configure the endpoint with environment variables (or `.env`):
 export LOOPLAB_BACKEND=llm
 export LOOPLAB_LLM_BASE_URL=http://localhost:11434/v1     # Ollama default
 export LOOPLAB_LLM_MODEL=qwen3:8b
-# export LOOPLAB_LLM_API_KEY=sk-...                       # for hosted endpoints
+# A hosted endpoint takes a key, and the key names the endpoint it belongs to (both lines):
+# export LOOPLAB_LLM_API_KEY=sk-...
+# export LOOPLAB_LLM_API_KEY_BASE_URL=$LOOPLAB_LLM_BASE_URL   # the same URL as above
 ```
 
 From here on you can drop `--backend toy`. LoopLab probes each configured endpoint once before a run
@@ -112,7 +114,7 @@ The event log makes a run resilient to a hard kill — it continues from the dur
 
 ```bash
 looplab run examples/toy_task.json --out runs/c --max-nodes 12 --crash-after 3 --backend toy
-#   -> hard-exits mid-run (like kill -9)
+#   -> hard-exits mid-run: --crash-after is a hidden test flag that simulates kill -9
 looplab resume runs/c --task-file examples/toy_task.json --max-nodes 12
 #   -> replays the complete event prefix; recorded fulfillment receipts are not served twice
 ```

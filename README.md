@@ -73,7 +73,7 @@ looplab run CONFIG|TASK [-s k=v]   # start a run; -s sets any non-secret setting
 looplab ui                         # web UI with Assistant (needs the [ui] extra)
 looplab inspect RUN_DIR            # best result first; --config adds the raw launch snapshot
 looplab resume RUN_DIR             # continue a stopped or crashed run from its event log
-looplab stop RUN_DIR               # stop without the wrap-up; resumable
+looplab stop RUN_DIR               # stop without the wrap-up; resumable unless already finished
 looplab smoke                      # check the configured model endpoint
 ```
 

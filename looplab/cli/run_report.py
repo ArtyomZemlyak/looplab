@@ -938,3 +938,25 @@ def echo_run_list(root: Path) -> int:
         typer.echo(f"… and {len(runs) - 50} older")
     typer.echo("details: looplab inspect RUN_DIR")
     return 0
+
+
+def echo_replay_summary(events, state) -> int:
+    """`looplab replay --summary` (doc 75 UX-09): what the fold of the log produced, in a few lines.
+
+    The walkthrough said `replay` "proves the run is reproducible", and its output was 60 KB of
+    JSON with nothing in it that said so. This says what was folded and what came out. It does NOT
+    say "matches": the log records no digest of the state to compare against, so there is nothing to
+    match — the claim is that the state above IS the fold of these events, by construction."""
+    best = state.best()
+    evaluated = len(state.evaluated_nodes())
+    way = {"min": "lower is better", "max": "higher is better"}.get(state.direction or "", "")
+    typer.echo(f"folded {len(events)} events -> run={state.run_id} task={state.task_id} "
+               f"finished={state.finished}")
+    typer.echo(f"experiments: {len(state.nodes)} ({evaluated} evaluated)")
+    if best is not None and best.robust_metric is not None:
+        typer.echo(f"best: experiment #{best.id} = {best.robust_metric:.6g}"
+                   + (f" ({way})" if way else ""))
+    else:
+        typer.echo("best: none selected")
+    typer.echo("the full state: looplab replay RUN_DIR (JSON); the account: looplab inspect RUN_DIR")
+    return 0

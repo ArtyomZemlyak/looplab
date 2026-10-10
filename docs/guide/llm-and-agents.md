@@ -58,7 +58,9 @@ Point LoopLab at any OpenAI-compatible `/v1` endpoint:
 export LOOPLAB_BACKEND=llm
 export LOOPLAB_LLM_BASE_URL=http://localhost:11434/v1     # Ollama
 export LOOPLAB_LLM_MODEL=qwen3:8b
-# export LOOPLAB_LLM_API_KEY=sk-...                       # hosted endpoints only
+# Hosted endpoints only — the key and the endpoint it belongs to, always together:
+# export LOOPLAB_LLM_API_KEY=sk-...
+# export LOOPLAB_LLM_API_KEY_BASE_URL=$LOOPLAB_LLM_BASE_URL   # the same URL as above
 ```
 
 Verify before a real run:
@@ -225,7 +227,7 @@ exactly that: the page cannot change the server's own environment — fix the va
 | **Ollama** | `http://localhost:11434/v1` | Native Windows; easiest local start (`ollama pull qwen3:8b`) |
 | **vLLM** | `http://host:8000/v1` | Supports constrained decoding (`llm_guided_json`) |
 | **SGLang** | `http://host:30000/v1` | Use `--tool-call-parser qwen` for Qwen tool-calls |
-| **OpenAI / compatible** | the vendor's `/v1` | Set `LOOPLAB_LLM_API_KEY` |
+| **OpenAI / compatible** | the vendor's `/v1` | Set `LOOPLAB_LLM_API_KEY` and `LOOPLAB_LLM_API_KEY_BASE_URL` (the same `/v1`) |
 
 The client (`OpenAICompatibleClient`) runs on the **openai SDK over an httpx transport** (migrated from the old stdlib-urllib transport for reliable timeouts + a streaming idle-guard); `openai`/`httpx` are declared deps but import-guarded so offline/replay still imports. A LiteLLM client is also available. Structured
 output uses tool-calling with an automatic text-parse fallback, so weaker models still work.

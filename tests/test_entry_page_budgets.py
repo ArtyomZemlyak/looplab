@@ -100,13 +100,17 @@ def test_installation_names_the_read_fence_warning_a_windows_or_root_run_prints(
     """doc 74 §12.6 (EB-05): every Windows run, and every run as root, opens with the read fence's
     WARNING. It stays — it names a real residual — so Installation says it is expected, quoting its
     opening words; this keeps that quote the message's own text rather than a paraphrase that drifts."""
+    # doc 75 UX-03: the WARNING is one line that still names the residual risk; the fence's own
+    # sentence (`harden_guarantee`, the security record) is logged at DEBUG, unchanged.
+    from looplab.engine.resources import READ_FENCE_REDUCED_WARNING
     from looplab.runtime import read_fence
-    page = (ROOT / "docs/guide/installation.md").read_text(encoding="utf-8")
-    quoted = re.search(r'"(the read fence\'s KERNEL self-protection rung is ADVISORY here)"', page)
-    assert quoted, "Installation no longer names the read fence warning"
+    page = " ".join((ROOT / "docs/guide/installation.md").read_text(encoding="utf-8").split())
+    assert f'"{READ_FENCE_REDUCED_WARNING}"' in page, "Installation no longer quotes the warning"
+    assert len(READ_FENCE_REDUCED_WARNING) <= 160 and "`" not in READ_FENCE_REDUCED_WARNING
+    assert "overwrite" in READ_FENCE_REDUCED_WARNING, "the short line still names the risk"
     target = ROOT / "docs/guide/installation.md"         # a file with write bits: always reduced
     message = read_fence.harden_guarantee(target)
-    assert message and message.startswith(quoted.group(1)), message
+    assert message and message.startswith("the read fence's KERNEL self-protection rung is ADVISORY")
 
 
 def test_start_in_assistant_keeps_the_steps_and_names_no_code():

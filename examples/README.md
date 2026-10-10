@@ -6,7 +6,8 @@ Start with the offline demo — no model, no network, no Docker, a few seconds:
 looplab run examples/demo.yaml          # then: looplab ui, and open the `demo` run
 ```
 
-Every other file here is a task file. Run one with `looplab run examples/<file> --out runs/<name>`.
+Every other file here is a task file. Run one with `looplab run examples/<file> --out runs/<name>`,
+from any directory: a task file's relative paths are read against the file's own directory.
 **Offline** means it also runs with `--backend toy` and no model: the synthetic kinds have a
 model-free optimizer, and the others run their fixed baseline so you can check the pipeline (the
 printed score is then marked as an offline baseline). **Model** means the interesting part — an

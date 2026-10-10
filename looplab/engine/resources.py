@@ -37,6 +37,11 @@ from looplab.runtime.sandbox import GpuPinUnenforceable, is_secret_env
 
 _LOG = logging.getLogger(__name__)
 
+# The fence warning as an operator reads it (doc 75 UX-03); `docs/guide/installation.md` quotes it
+# and `tests/test_entry_page_budgets.py` holds the quote to this text.
+READ_FENCE_REDUCED_WARNING = ("running as root or on Windows: native programs that eval code starts "
+                              "can overwrite the sandbox read fence (see Installation)")
+
 _CUDA_DISABLED_SELECTORS = frozenset({"-1", "none", "nodevfiles", "void"})
 
 # How often a still-blocked host-lease wait repeats its notice.  The wait itself re-polls every 0.5s
@@ -1095,7 +1100,12 @@ class ResourceSchedulingMixin:
             # run, beside the two warnings below, so a privileged deployment reads as what it is.
             reduced = read_fence.harden_guarantee(Path(resolved) / "sitecustomize.py")
             if reduced:
-                _LOG.warning("%s", reduced)
+                # ONE LINE an operator can judge, the full account at DEBUG (doc 75 UX-03): the
+                # 388-character sentence was written for the fence's author and was the first thing
+                # every run as root or on Windows printed. The short line still names the residual
+                # risk; `harden_guarantee`'s own words are untouched — they are the security record.
+                _LOG.warning("%s", READ_FENCE_REDUCED_WARNING)
+                _LOG.debug("%s", reduced)
         if dropped:
             # A dropped root is the one case where the operator's fence silently shrinks, so say so.
             _LOG.warning("read fence ignoring editable root(s) %s: fencing a path that broad would "
