@@ -99,6 +99,29 @@ test('a small portfolio keeps the list plain until asked; five runs show the too
   } finally { await five.view.unmount() }
 })
 
+test('the compact list does not depend on which request answers first', async () => {
+  // Code review of EB-19: with 1-4 runs, `/api/runs` answering before `/api/projects` rendered one
+  // frame where `projectsState` was still 'loading', `compactPortfolio` was false for that reason
+  // alone, and the "tools once shown stay shown" latch fired: the full chrome, for good.
+  let releaseProjects
+  const projectsGate = new Promise(resolve => { releaseProjects = resolve })
+  globalThis.fetch = fetchStub({
+    '/api/runs': [row('a'), row('b')],
+    '/api/projects': async () => { await projectsGate; return { projects: [], assignments: {} } },
+    '/api/supertasks': { supertasks: [], assignments: {} },
+  })
+  sessionStorage.clear(); localStorage.clear()
+  const view = await harness.mount(RunList, { onOpen() {}, onGlobalNavigate() {} })
+  try {
+    await until(() => view.container.textContent.includes('a'), 'runs listed before projects')
+    await settle()
+    releaseProjects()
+    await until(() => buttonNamed(view.container, 'Show filters, views and projects'),
+      'the compact list once every source has answered')
+    assert.equal(view.container.querySelector('input[aria-label="Filter runs"]'), null)
+  } finally { await view.unmount() }
+})
+
 test('tools once shown stay shown: the portfolio shrinking below five runs does not hide them', async () => {
   let rows = ['a', 'b', 'c', 'd', 'e'].map(row)
   const { view, backend } = await list(() => rows)
@@ -112,6 +135,30 @@ test('tools once shown stay shown: the portfolio shrinking below five runs does 
     assert.ok(view.container.querySelector('input[aria-label="Filter runs"]'),
       'the filter the operator may be typing in is still mounted')
     assert.equal(buttonNamed(view.container, 'Show filters, views and projects'), undefined)
+  } finally { await view.unmount() }
+})
+
+test('the demo button waits for the run list, so its run id is chosen against it', async () => {
+  // Code review of UX-30: the id is fixed while the card is open, and opening it before
+  // `/api/runs` answered froze `offline-demo` over an existing demo.
+  let releaseRuns
+  const runsGate = new Promise(resolve => { releaseRuns = resolve })
+  globalThis.fetch = fetchStub({
+    '/api/runs': async () => { await runsGate; return [row('offline-demo')] },
+    '/api/projects': { projects: [], assignments: {} },
+    '/api/supertasks': { supertasks: [], assignments: {} },
+  })
+  sessionStorage.clear(); localStorage.clear()
+  const view = await harness.mount(RunList, { onOpen() {}, onGlobalNavigate() {} })
+  try {
+    await settle()
+    const early = buttonNamed(view.container, 'Offline demo')
+    assert.ok(!early || early.disabled, 'no demo card before the runs are known')
+    releaseRuns()
+    await until(() => buttonNamed(view.container, 'Offline demo')?.disabled === false, 'enabled once listed')
+    await React.act(async () => { buttonNamed(view.container, 'Offline demo').click() })
+    await until(() => view.container.querySelector('.offline-demo form.asst-launch'), 'demo launch card')
+    assert.match(view.container.querySelector('.offline-demo').textContent, /offline-demo-2/)
   } finally { await view.unmount() }
 })
 

@@ -9,7 +9,7 @@ import assert from 'node:assert/strict'
 import { JSDOM } from 'jsdom'
 
 import { mountHarness } from './_mount.js'
-import { policyPlainLine, strategyPlainLine } from '../src/whyStripModel.js'
+import { planStanding, policyPlainLine, strategyPlainLine } from '../src/whyStripModel.js'
 
 const ENGINE_WORDS = /ASHA|rung|endgame|reserve|sweep/i
 let harness
@@ -61,14 +61,35 @@ test('the plain line follows the structured fields, never the prose', () => {
 test('a finished run\'s strip names no next step and says the budget is spent', () => {
   const strategy = { policy: 'greedy', operators: { merge_mode: 'ensemble', endgame_sweep: true },
     rationale: 'endgame: reserve for a final ensemble' }
-  const live = { strategy_history: [{ strategy, at_node: 6 }],
+  const nodes = Object.fromEntries([0, 1, 2, 3, 4, 5].map(id => [id, { id }]))
+  const plan = { max_nodes: 6, endgame_start: 4 }
+  const live = { strategy_history: [{ strategy, at_node: 5 }], plan,
+    nodes: Object.fromEntries([0, 1, 2, 3, 4].map(id => [id, { id }])),
     policy_reason: 'exploit best', policy_chosen: 3 }
   assert.match(shown(harness.render(WhyStrip, { state: live })), /Budget nearly spent.*building on experiment #3/s)
-  const text = shown(harness.render(WhyStrip, { state: { ...live, finished: true } }))
+  const text = shown(harness.render(WhyStrip, { state: { ...live, nodes, finished: true } }))
   assert.match(text, /Budget spent: combined the best results/)
   assert.doesNotMatch(text, /next|building on|nearly/, text)
-  assert.equal(strategyPlainLine({ policy: 'greedy' }, true), 'Refining the best result so far',
-    'only the endgame line has a tense to change')
+  assert.equal(strategyPlainLine({ policy: 'greedy' }, { finished: true, budgetSpent: true }),
+    'Refining the best result so far', 'only the endgame line has a tense to change')
+})
+
+test('the budget lines follow the plan, not the endgame switch (code review)', () => {
+  // The Strategist may turn `endgame_sweep` on at any consult; a run can finish for reasons other
+  // than its budget. The strip says "Budget …" only where the plan says it is true.
+  const sweep = { policy: 'greedy', operators: { endgame_sweep: true } }
+  const plan = { max_nodes: 20, endgame_start: 16 }
+  const at = n => ({ plan, nodes: Object.fromEntries(Array.from({ length: n }, (_, id) => [id, { id }])) })
+  assert.deepEqual(planStanding(at(2)), { inEndgame: false, budgetSpent: false })
+  assert.equal(strategyPlainLine(sweep, { ...planStanding(at(2)) }), 'Refining the best result so far',
+    'node 2 of 20 is not "budget nearly spent"')
+  assert.equal(strategyPlainLine(sweep, { ...planStanding(at(17)) }),
+    'Budget nearly spent: combining the best results')
+  assert.equal(strategyPlainLine(sweep, { ...planStanding(at(9)), finished: true }),
+    'Refining the best result so far', 'stopped at 9 of 20: no "Budget spent"')
+  assert.equal(strategyPlainLine(sweep, { ...planStanding(at(20)), finished: true }),
+    'Budget spent: combined the best results')
+  assert.deepEqual(planStanding({ nodes: {} }), { inEndgame: false, budgetSpent: false }, 'no plan row')
 })
 
 test('the all-withheld Concepts badge no longer says "Membership withheld … not empty"', async () => {

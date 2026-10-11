@@ -1656,8 +1656,12 @@ export default function RunList({ onOpen, onGlobalNavigate,
     && missingStartOverRecoveries.length === 0 && missingDeletionRecoveries.length === 0
   // Once the tools are on screen they stay: deleting the fifth run, removing the last project or
   // clearing a filter must not unmount the controls the operator is using (code review of EB-19).
+  // …and the latch waits for EVERY source the compact rule reads: while projects or super-tasks
+  // are still loading, `compactPortfolio` is false only because their state is not 'ready' yet, and
+  // latching then made the compact mode depend on which request answered first (code review).
   const portfolioToolsOnScreen = !firstRunLanding && !compactPortfolio
     && runsState === 'ready' && Array.isArray(runs) && runs.length > 0
+    && projectsState !== 'loading' && superState !== 'loading'
   useEffect(() => {
     if (portfolioToolsOnScreen) setPortfolioToolsShown(true)
   }, [portfolioToolsOnScreen])
@@ -2509,7 +2513,11 @@ export default function RunList({ onOpen, onGlobalNavigate,
                 onClick={() => window.dispatchEvent(new CustomEvent('ll:new-run', { cancelable: true }))}>{uiText("＋ New run")}</button>
         {/* The demo stays reachable after the first run (doc 75 UX-30): the landing that offered it
             ends as soon as one run is listed, and the Assistant's starter prompts all need a model. */}
-        {!firstRunLanding && <button type="button" className="btn sm ghost" disabled={navigationBusy}
+        {/* Enabled only once the list is known: the card's run id is chosen against the listed runs
+            and then held while it is open, so opening it before `/api/runs` answered froze
+            `offline-demo` over an existing demo (code review). */}
+        {!firstRunLanding && <button type="button" className="btn sm ghost"
+                disabled={navigationBusy || !Array.isArray(runs)}
                 aria-expanded={demoOpen} onClick={() => setDemoOpen(open => !open)}>{uiText("Offline demo")}</button>}
         <span className="spacer" style={{ flex: 1 }} />
         {/* Named, because `Lineage` is now the label of TWO different surfaces — this one and the

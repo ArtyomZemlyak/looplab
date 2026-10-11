@@ -1,4 +1,4 @@
-import { FRESH_LAUNCH_RETRY_MS, clearFreshLaunch, isFreshLaunch } from './freshLaunch.js'
+import { FRESH_LAUNCH_RETRY_MS, clearFreshLaunch, freshLaunchShown, isFreshLaunch } from './freshLaunch.js'
 import { uiText, uiMessage, uiPlural, useUILanguage } from './uiLanguage.js'
 import LanguageControl from './LanguageControl.jsx'
 import React, {
@@ -312,8 +312,12 @@ export default function RunView({ runId, onBack, reviewMode = false, reviewMeta 
     if (runStatus === 'not_found') setFreshWaitingFor(isFreshLaunch(runId) ? runId : '')
     else if (runStatus !== 'loading') setFreshWaitingFor('')
   }, [reviewMode, live, runStatus, runId])
-  const freshLaunch = !reviewMode && !live && freshWaitingFor === runId
-    && (runStatus === 'not_found' || runStatus === 'loading')
+  // `freshLaunch.js::freshLaunchShown`: the render that FIRST sees `not_found` reads the marker
+  // itself, because the latch above is set by an effect after that render committed.
+  const freshLaunch = freshLaunchShown({
+    reviewMode, live, runStatus, runId, latchedFor: freshWaitingFor,
+    fresh: runStatus === 'not_found' && isFreshLaunch(runId),
+  })
   useEffect(() => {
     if (!freshLaunch) return undefined
     // An interval, not a timeout per status change: a retry can land on `not_found` again without the

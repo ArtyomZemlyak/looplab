@@ -572,6 +572,8 @@ export default function ReportView({ state, runId, onOpenPanel, canOpenPanel, on
         role="status" aria-live="polite" aria-atomic="true">
         <OpIcon name={savedRefreshIntent || refreshing ? 'replay' : 'bolt'} size={14} />
         <span>{uiText(refreshStatus)}</span>
+        {/* The model note does not REPLACE the cost disclosure: the button still spends (code review). */}
+        {needsModel && refreshStatus === needsModel && <span> {uiText('Paid AI action: provider charges may apply. One request identity will be saved when you start, so you can safely leave and resume.')}</span>}
       </div>}
       {refreshError && <div className="report-inline-state error" role="alert">
         <OpIcon name="alert" size={14} /><span>{refreshError}</span>

@@ -203,6 +203,9 @@ test('a paid action on a run with no model says so first, and an empty research 
         paid(offline).join(' | '))
       assert.match(offline.window.document.querySelector('#paid-report-refresh-status').textContent,
         /^Needs a model: this run used none/)
+      // …and the button still says it SPENDS: the note used to replace the cost disclosure.
+      assert.match(offline.window.document.querySelector('#paid-report-refresh-status').textContent,
+        /provider charges may apply/)
       assert.ok(paid(modelRun).every(text => !/needs a model/.test(text)), 'a model run is unchanged')
       const research = offline.window.document.querySelector('.report-research-link')
       assert.ok(research.querySelector('details.report-research-empty'), 'no memo: folded, not hidden')

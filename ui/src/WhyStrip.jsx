@@ -1,7 +1,7 @@
 import { uiText, uiMessage, useUILanguage } from './uiLanguage.js'
 import React, { useId, useState } from 'react'
 import { OpIcon } from './icons.jsx'
-import { policyPlainLine, strategyPlainLine } from './whyStripModel.js'
+import { planStanding, policyPlainLine, strategyPlainLine } from './whyStripModel.js'
 
 // Compact, always-visible narration of the loop's latest autonomous decisions. Keeping this pure
 // projection outside panels.jsx means the core run canvas does not download every optional panel.
@@ -12,6 +12,7 @@ export default function WhyStrip({ state, onSelect }) {
   const [expandedKey, setExpandedKey] = useState(null)
   const items = []
   const finished = state.finished === true
+  const standing = { ...planStanding(state), finished }
   const strategies = state.strategy_history || []
   const strat = strategies[strategies.length - 1]
   if (strat && (strat.strategy?.rationale || strat.strategy?.policy)) {
@@ -20,8 +21,8 @@ export default function WhyStrip({ state, onSelect }) {
       label: 'strategy',
       text: (strat.strategy.rationale || uiMessage("policy -> {0}", [strat.strategy.policy])),
       // Shown; `text` (the decision's own words) stays whole in the title and the disclosure.
-      short: strategyPlainLine(strat.strategy, finished)
-        && uiText(strategyPlainLine(strat.strategy, finished)),
+      short: strategyPlainLine(strat.strategy, standing)
+        && uiText(strategyPlainLine(strat.strategy, standing)),
       at: strat.at_node,
     })
   }

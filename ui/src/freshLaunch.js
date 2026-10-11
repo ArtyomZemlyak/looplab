@@ -59,3 +59,14 @@ export function clearFreshLaunch(runId, store = storage()) {
     else store.removeItem(FRESH_LAUNCH_KEY)
   } catch { /* best effort */ }
 }
+
+// Is the "Starting the run…" screen shown instead of "Run not found"? The ONE rule RunView renders
+// by. `latchedFor` is the run id an effect latched across the retry's `loading` flips; `fresh` is
+// `isFreshLaunch(runId)` read on THIS render. The render that FIRST sees `not_found` has no latch
+// yet — the effect sets it after commit — so without `fresh` it painted "Run not found" for one
+// frame and moved focus (code review).
+export function freshLaunchShown({ reviewMode, live, runStatus, runId, latchedFor, fresh }) {
+  if (reviewMode || live) return false
+  if (runStatus === 'not_found' && fresh) return true
+  return latchedFor === runId && (runStatus === 'not_found' || runStatus === 'loading')
+}

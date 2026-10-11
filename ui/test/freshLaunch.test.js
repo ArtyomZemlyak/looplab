@@ -53,3 +53,18 @@ test('two runs started from one tab are both starting; the older one is not over
   assert.deepEqual(Object.keys(JSON.parse(store.getItem('looplab.freshLaunch'))), ['third'],
     'expired entries are dropped on write')
 })
+
+test('the first not_found of a fresh launch already shows the starting screen', async () => {
+  // Code review: the latch is set by an effect AFTER the render that first sees `not_found`, so that
+  // render must read the marker itself or it paints "Run not found" for one frame.
+  const { freshLaunchShown } = await import('../src/freshLaunch.js')
+  const base = { reviewMode: false, live: null, runStatus: 'not_found', runId: 'r', latchedFor: '' }
+  assert.equal(freshLaunchShown({ ...base, fresh: true }), true, 'first sight, no latch yet')
+  assert.equal(freshLaunchShown({ ...base, fresh: false }), false, 'not ours: "not found" is true')
+  assert.equal(freshLaunchShown({ ...base, runStatus: 'loading', latchedFor: 'r', fresh: false }), true,
+    'the latch holds across a retry')
+  assert.equal(freshLaunchShown({ ...base, runStatus: 'loading', fresh: true }), false,
+    'loading alone, unlatched, is the ordinary opening screen')
+  assert.equal(freshLaunchShown({ ...base, live: {}, fresh: true }), false)
+  assert.equal(freshLaunchShown({ ...base, reviewMode: true, fresh: true }), false)
+})

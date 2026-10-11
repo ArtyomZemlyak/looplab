@@ -2,6 +2,7 @@ import { uiText, uiMessage, uiPlural, useUILanguage } from './uiLanguage.js'
 import { setUILanguage } from './uiLanguage.js'
 import React, { useEffect, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react'
 import { createIdempotencyKey, deadlineGet, saveSettings, saveSecret } from './util.js'
+import { noteSettingsRevisions } from './modelConnection.js'
 import {
   differsFromDefault, toForm, fromForm, settingsSavePayload, settingsValidationErrors, loadSettingsSchema,
   sameAgentRoles,
@@ -277,6 +278,8 @@ export default function Settings({ onBack, initialSection = '' }) {
   const [credential, setCredential] = useState(null)
   const [credentialWriteError, setCredentialWriteError] = useState('')
   const [revisions, setRevisions] = useState({ settings: '', secret: '' })
+  // A model check made against other settings stops speaking for these (`modelConnection.js`).
+  useEffect(() => { noteSettingsRevisions(revisions.settings, revisions.secret) }, [revisions])
   const [loadError, setLoadError] = useState('')
   const [toast, show] = useToast(2500)   // shared timer discipline (doc 25 UI-13)
   const [mode, setMode] = useState('essential')

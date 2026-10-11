@@ -14,6 +14,18 @@ export function publishModelCheck(settingsRevision, secretRevision, outcome) {
   }))
 }
 
+// Settings saved new revisions: a check made against OTHER settings no longer describes them.
+// `modelConnectionView` already compares revisions; `paidActionModelNote` is handed the bare check,
+// so a failed check survived a fixed key ("the last connection check failed") and a passed one a
+// cleared key (code review). Dropping it here keeps both readers on the current settings.
+export function noteSettingsRevisions(settingsRevision, secretRevision) {
+  if (!latestCheck || !revision(settingsRevision) || !revision(secretRevision)) return
+  if (latestCheck.settingsRevision === settingsRevision
+      && latestCheck.secretRevision === secretRevision) return
+  latestCheck = null
+  window.dispatchEvent(new CustomEvent(MODEL_CHECK_EVENT, { detail: null }))
+}
+
 // What a PAID action must say first when a model is not known to be there (doc 75 UX-16), or ''.
 // The offline demo's Report offered "Refresh report · paid" and "provider charges may apply" with no
 // model anywhere, and every such click ended `provider_unavailable`. "Connection unverified" alone is

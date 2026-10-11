@@ -186,7 +186,10 @@ export const DEFAULT_BUDGETS = Object.freeze({
     // lines beside the strategist's own rationale, the paid-action model note, the conditional
     // "Base unknown", verdict-chip meanings, the fresh-server settings comparison and the demo's
     // second entry. 657 KiB leaves 717 B; route, reachability and cycle proofs unchanged.
-    js: { gzip: 657 * KIB },
+    // 2026-10-11 doc 75 follow-ups + its code review: 672,051 -> 672,804 B (+753 B) for the Russian
+    // render sites, the Assistant's no-model hint, the fresh-launch rule, the plan-read strategy
+    // strip and the model-check revision rule. 658 KiB leaves 988 B; every proof unchanged.
+    js: { gzip: 658 * KIB },
     css: { gzip: 58.5 * KIB },
   },
   individual: {
@@ -278,7 +281,9 @@ export const DEFAULT_BUDGETS = Object.freeze({
       // OwnerChrome: 408,398 B. 399.25 KiB leaves 434 B; lazy boundaries unchanged.
       // 2026-10-10 doc 75: 409,405 B (+1,007 B) — the plain Why-strip lines, the deterministic
       // verdict and the Energy switch's new place, all in RunView's closure. 400.25 KiB leaves 451 B.
-      limits: { js: { gzip: 400.25 * KIB }, css: { gzip: 46 * KIB } },
+      // 2026-10-11 code review of doc 75: 410,099 B (+694 B) — the fresh-launch rule, the strip's
+      // plan reading and the Russian render sites in the same closure. 401 KiB leaves 525 B.
+      limits: { js: { gzip: 401 * KIB }, css: { gzip: 46 * KIB } },
     },
     {
       name: 'valid review DAG route',
@@ -301,7 +306,10 @@ export const DEFAULT_BUDGETS = Object.freeze({
       // 264.5 KiB leaves 378 B; owner exclusions and cycle checks unchanged.
       // 2026-10-10 doc 75: 271,393 B (+923 B) — the same RunView/WhyStrip/ConceptChipBar wording.
       // 265.5 KiB leaves 479 B; owner exclusions and cycle checks unchanged.
-      limits: { js: { gzip: 265.5 * KIB }, css: { gzip: 41 * KIB } },
+      // 2026-10-11 code review of doc 75: 272,025 B (+153 B over) — RunView's fresh-launch rule
+      // (`freshLaunch.js::freshLaunchShown`) and the strip's plan reading (`planStanding`).
+      // 266 KiB leaves 359 B; owner exclusions and cycle checks unchanged.
+      limits: { js: { gzip: 266 * KIB }, css: { gzip: 41 * KIB } },
     },
     {
       name: 'owner Concepts route',
