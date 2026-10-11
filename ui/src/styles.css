@@ -143,6 +143,11 @@ button { font: inherit; }
 .topbar.run-head > .muted b { display: none; }
 .topbar.run-head > .spacer { flex: 1 0 0; }        /* grows to fill, never shrinks */
 .topbar.run-head .view-toggle { flex-wrap: nowrap; }
+/* …EXCEPT beside the Assistant side panel. That panel narrows the workspace (`.app-shell-main`'s
+   margin), and a single line no longer fits: at 1280px the view switcher ran under the panel and
+   Concepts, Report and Overview could not be clicked (at 1440px, Report and Overview). The
+   switcher keeps its one row of buttons; it is the header that moves it to a second line. */
+body.asst-side-open .topbar.run-head { flex-wrap: wrap; row-gap: 6px; }
 .brand { font-weight: 700; letter-spacing: .4px; font-size: 14px; }
 .brand .dot { color: var(--accent); }
 .spacer { flex: 1; }

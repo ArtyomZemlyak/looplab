@@ -29,3 +29,14 @@ test('compact header and stale-generation detail reflow without clipped truth', 
   assert.match(css, /\.run-head button, \.history-banner \.btn, \.run-resource-state \.btn \{ min-height: 44px; \}/)
   assert.match(css, /\.copy-view-btn \{ min-width: 44px;/)
 })
+
+test('the run header wraps beside the Assistant side panel instead of running under it', async () => {
+  // Measured 2026-10-11 in Chromium on the offline demo: with the side panel open the workspace is
+  // 620px wide at a 1280px window, and the single-line header pushed Concepts, Report and Overview
+  // under the panel, where no click reached them (1440px: Report and Overview).
+  const css = await source('styles.css')
+  assert.match(css, /\.topbar\.run-head \{ flex-wrap: nowrap; \}/, 'the full-width header stays one line')
+  assert.match(css, /body\.asst-side-open \.topbar\.run-head \{ flex-wrap: wrap;/)
+  assert.ok(css.indexOf('body.asst-side-open .topbar.run-head') > css.indexOf('.topbar.run-head { flex-wrap: nowrap; }'),
+    'the side-panel rule comes after the single-line rule it overrides')
+})
