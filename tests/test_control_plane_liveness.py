@@ -624,7 +624,10 @@ def test_a_legacy_timed_out_pause_record_can_be_retried_into_a_fresh_intent(tmp_
     postcondition for NEW commands does nothing for it. `/retry` must mint a FRESH intent instead of
     re-driving the consumed one — the backlog's own second floor requirement.
     """
-    world = _World(tmp_path / "runs")
+    # This test asserts SUCCESS, which ends at the fake engine's ack (polled every 10 ms), so a long
+    # deadline costs nothing; the default 0.12 s — kept for the tests that must REACH a timeout —
+    # expired once on a loaded Windows runner before the ack landed (2026-10-10).
+    world = _World(tmp_path / "runs", command_timeout=5.0)
     srv = world.srv
     rd = world.seed("wedged", alive=True)
     store = EventStore(rd / "events.jsonl")
