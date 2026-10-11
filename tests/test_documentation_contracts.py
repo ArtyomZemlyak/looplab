@@ -287,7 +287,7 @@ def test_the_examples_map_names_every_example_and_the_demo_runs_offline(tmp_path
 
 
 def test_core_task_examples_load_and_optional_real_examples_are_explicit():
-    from looplab.adapters.tasks import load_task
+    from looplab.adapters.tasks import load_task_file as load_task   # a USER's file, not a snapshot
 
     examples = sorted((ROOT / "examples").glob("*task*.json"))
     assert len(examples) >= 15, "the example inventory unexpectedly became vacuous"

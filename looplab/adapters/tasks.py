@@ -187,16 +187,24 @@ def load_task(path: str | Path, *, existing_run: bool = False) -> TaskAdapter:
     # reader handles JSON/YAML and a BOM from Windows editors.
     # `existing_run` forwards to validate_task: pass it when `path` is (or stands in for) a run's own
     # `task.snapshot.json`, so re-entering an existing run can't be refused by a rule added later.
-    from looplab.core.appconfig import load_document, resolve_task_paths
+    from looplab.core.appconfig import load_document
     task, _settings, _out = load_document(Path(path))
-    # Relative paths read against the FILE's directory first (doc 75 UX-04), so an example loads
-    # from anywhere; a path that exists only under the current directory, or nowhere, is read as
-    # before — an old relative snapshot resumes exactly as it did.
-    task = resolve_task_paths(task, Path(path).parent, missing="keep")
+    # NOT `resolve_task_paths`: every caller hands this a run's own snapshot (or a staged copy of
+    # one), whose paths are absolute when this build wrote it and cwd-relative when an older one did
+    # — re-reading those against the run directory broke resume (code review of doc 75 UX-04).
     adapter = validate_task(task, existing_run=True) if existing_run else validate_task(task)
     if existing_run and isinstance(adapter, RepoTask):
         adapter.bind_run_directory(Path(path).parent)
     return adapter
+
+
+def load_task_file(path: str | Path) -> TaskAdapter:
+    """A USER's task file (`examples/dataset_task.json`, a hand-written `task.yaml`), its relative
+    paths read against the file's own directory exactly as `looplab run` reads them (doc 75 UX-04;
+    `core/appconfig.py::resolve_task_paths`). Never a run's own snapshot — that is `load_task`."""
+    from looplab.core.appconfig import load_document, resolve_task_paths
+    task, _settings, _out = load_document(Path(path))
+    return validate_task(resolve_task_paths(task, Path(path).parent))
 
 
 # Re-export: the factory moved to its dependency-true home (core/llm.py — it only ever needed

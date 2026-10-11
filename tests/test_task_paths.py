@@ -70,8 +70,6 @@ def test_the_rule_beside_the_file_then_the_current_directory(tmp_path, monkeypat
     assert task["data_path"] == "beside.csv", "the input is not mutated"
     missing = resolve_task_paths({"kind": "dataset", "data_path": "nope.csv"}, task_dir)
     assert missing["data_path"] == str(task_dir / "nope.csv"), "the refusal names the documented base"
-    kept = resolve_task_paths({"kind": "dataset", "data_path": "nope.csv"}, task_dir, missing="keep")
-    assert kept["data_path"] == "nope.csv", "load_task leaves an unresolvable path as an old snapshot had it"
     flagged = resolve_task_paths({"kind": "dataset", "data_path": "here.csv"}, None)
     assert flagged["data_path"] == str(cwd / "here.csv")
 
@@ -85,3 +83,48 @@ def test_a_repo_task_names_its_editable_tree_the_same_way(tmp_path, monkeypatch)
         json.loads((ROOT / "examples" / "repo_stages_task.json").read_text()), ROOT / "examples")
     assert composable["repo"] == str(ROOT / "examples" / "repo_example")
     assert composable["dataset"]["raw"]["path"] == str(ROOT / "examples" / "repo_example")
+
+
+def test_a_runs_own_snapshot_is_loaded_as_written(tmp_path, monkeypatch):
+    """Code review: `load_task` re-read every `task.snapshot.json` against the run directory. An OLD
+    snapshot stored paths as written (cwd-relative), so a file of that name both in the run dir and
+    the current directory refused the resume, and any other relative path was rewritten into a
+    spurious `task_changed`. Snapshots are never re-resolved; this build writes them absolute."""
+    from looplab.adapters.tasks import load_task
+    run_dir, cwd = tmp_path / "run", tmp_path / "cwd"
+    for base, rows in ((run_dir, "a,target\n1,0\n"), (cwd, "a,target\n9,9\n")):
+        base.mkdir()
+        (base / "data.csv").write_text(rows, encoding="utf-8")
+    snapshot = run_dir / "task.snapshot.json"
+    snapshot.write_text(json.dumps({"kind": "dataset", "goal": "g", "direction": "max",
+                                    "data_path": "data.csv"}), encoding="utf-8")
+    monkeypatch.chdir(cwd)
+    task = load_task(snapshot, existing_run=True)          # no "names two different things"
+    assert Path(task.data_path).resolve() == (cwd / "data.csv").resolve(), "read as it always was"
+
+
+def test_paths_are_found_by_field_and_a_malformed_field_is_left_to_validation(tmp_path, monkeypatch):
+    """Code review: slots were chosen from the raw `kind`, so a kind-less task, a bare-string
+    `dataset:` and a `{name: {path}}` dataset spec stayed cwd-relative beside resolved siblings; and
+    `editables: 5` was iterated into a TypeError traceback instead of a one-line refusal."""
+    task_dir = tmp_path / "t"
+    task_dir.mkdir()
+    for name in ("r", "d.csv", "x.csv"):
+        (task_dir / name).touch()
+    monkeypatch.chdir(tmp_path)
+    out = resolve_task_paths({"repo": "r", "dataset": "d.csv", "data": {"x": {"path": "x.csv"}}},
+                             task_dir)
+    assert out["repo"] == str(task_dir / "r") and out["dataset"] == str(task_dir / "d.csv")
+    assert out["data"]["x"]["path"] == str(task_dir / "x.csv")
+    for bad in ({"kind": "repo", "editables": 5}, {"kind": "repo", "references": True},
+                {"kind": "dataset", "data": 7}):
+        assert resolve_task_paths(bad, task_dir) == bad
+    result = _invoke("run", _write(tmp_path / "bad.json", {"kind": "repo", "editable_path": "t",
+                                                            "editables": 5, "goal": "g"}),
+                     "--backend", "toy", "--out", tmp_path / "out")
+    assert result.exit_code == 2 and "Traceback" not in result.output, result.output
+
+
+def _write(path: Path, task: dict) -> Path:
+    path.write_text(json.dumps(task), encoding="utf-8")
+    return path

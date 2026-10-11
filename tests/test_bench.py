@@ -121,3 +121,19 @@ def test_the_bench_command_exits_nonzero_when_a_task_errors(tmp_path):
     assert "bad_task: ERROR" in failed.output
     passed = runner.invoke(app, ["bench", toy, "--out", str(tmp_path / "b2"), "--max-nodes", "2"])
     assert passed.exit_code == 0, passed.output
+
+
+def test_a_shipped_example_benches_from_any_directory_and_a_rerun_reports_it(tmp_path, monkeypatch):
+    """Code review of doc 75 UX-04/UX-05. The examples name their data relative to the file, and
+    `bench` read the raw document against the current directory: `examples/dataset_task.json` failed
+    with "data path(s) not found". And a re-run into the same --out recorded every finished task as
+    "another engine is already running" — `_open_and_drive` returns None for a finished run too."""
+    elsewhere = tmp_path / "cwd"
+    elsewhere.mkdir()
+    monkeypatch.chdir(elsewhere)
+    settings = Settings(backend="toy", max_nodes=2)
+    first = run_benchmark([ROOT / "examples" / "dataset_task.json"], settings, tmp_path / "b")
+    assert "error" not in first[0], first
+    again = run_benchmark([ROOT / "examples" / "dataset_task.json"], settings, tmp_path / "b")
+    assert "error" not in again[0], again
+    assert again[0]["finished"] and again[0]["best_metric"] == first[0]["best_metric"]

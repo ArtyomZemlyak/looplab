@@ -338,7 +338,7 @@ def test_one_reader_and_every_default_off_path_reads_off():
 def test_the_run_settings_reach_both_developers_through_the_factory(monkeypatch, flag):
     """Settings -> `make_roles` -> the repo Developer AND the dataset brief. MUTATION: drop either
     factory keyword -> red."""
-    from looplab.adapters.tasks import load_task, make_roles
+    from looplab.adapters.tasks import load_task_file as load_task, make_roles
     import looplab.agents.factory as factory
     monkeypatch.setattr(factory, "make_llm_client", lambda *a, **k: object())
     settings = Settings(backend="llm", unified_agent=False, researcher_tools=False,

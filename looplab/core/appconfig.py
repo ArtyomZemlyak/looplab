@@ -171,34 +171,37 @@ _DATA_FIELD = {"repo": "editable_path", "dataset": "data_path"}
 
 
 def _task_path_slots(task: dict):
-    """Yield `(container, key)` for every host path a task of these kinds names (doc 75 UX-04).
+    """Yield `(container, key)` for every host path a task names (doc 75 UX-04).
 
-    The kinds whose shipped examples name data by a relative path: `dataset` (`data_path`, `data`)
-    and `repo` (`editable_path` or the composable `repo:`, `editables[].path`, `references[].path`,
-    `data`/`dataset` entries, as a bare string or a `{path: …}` spec). Every other kind and field keeps its own resolution."""
-    kind = task.get("kind")
-    if kind == "dataset":
-        yield task, "data_path"
-        if isinstance(task.get("data"), dict):
-            for name in task["data"]:
-                yield task["data"], name
-    elif kind == "repo" or isinstance(task.get("repo"), str):     # the composable `repo:` shorthand
-        yield task, "editable_path"
-        yield task, "repo"
-        for listed in ("editables", "references"):
-            for entry in task.get(listed) or ():
+    BY FIELD, never by the raw `kind`: `normalize_task` infers the kind later (a kind-less task, the
+    composable `repo:`/`dataset:`), so choosing slots from `kind` left those paths cwd-relative while
+    the same file's other paths were read against its directory (code review). Only the dataset and
+    repo adapters define these fields — `data_path`, `editable_path`, the `repo:` shorthand,
+    `editables[].path`, `references[].path`, and `data`/`dataset` as a bare path, a `{name: path}` map
+    or a `{name: {path: …}}` spec. A field of the wrong TYPE is skipped, never iterated: refusing it is
+    `validate_task`'s job, in one line (iterating `editables: 5` raised a TypeError traceback)."""
+    yield task, "data_path"
+    yield task, "editable_path"
+    yield task, "repo"
+    for listed in ("editables", "references"):
+        entries = task.get(listed)
+        if isinstance(entries, list):
+            for entry in entries:
                 if isinstance(entry, dict):
                     yield entry, "path"
-        for mounts in ("data", "dataset"):
-            if isinstance(task.get(mounts), dict):
-                for name, spec in task[mounts].items():
-                    if isinstance(spec, dict):
-                        yield spec, "path"
-                    else:
-                        yield task[mounts], name
+    for mounts in ("data", "dataset"):
+        value = task.get(mounts)
+        if isinstance(value, str):
+            yield task, mounts
+        elif isinstance(value, dict):
+            for name, spec in value.items():
+                if isinstance(spec, dict):
+                    yield spec, "path"
+                else:
+                    yield value, name
 
 
-def resolve_task_paths(task: dict, task_dir: Optional[Path], *, missing: str = "task_dir") -> dict:
+def resolve_task_paths(task: dict, task_dir: Optional[Path]) -> dict:
     """Make the task's relative host paths ABSOLUTE, once, before the task is validated and its
     snapshot written (doc 75 UX-04). Returns a new dict; raises `ConfigRefusal` on an ambiguity.
 
@@ -213,12 +216,13 @@ def resolve_task_paths(task: dict, task_dir: Optional[Path], *, missing: str = "
     that reading exists it is the one used — and when BOTH exist and differ the run is REFUSED: two
     real files of one name would otherwise mean silently training on the wrong data. `~` and `$VARS`
     are expanded first; an absolute path is untouched. The snapshot then records what was used, so
-    re-entry reads the same files from anywhere.
+    re-entry reads the same files from anywhere. A path that exists under neither reading is read
+    against the file's directory, which is what the refusal then names.
 
-    `missing` decides a path that exists under neither reading: `"task_dir"` (the `run` command)
-    reads it against the file's directory, which is what its refusal then names; `"keep"`
-    (`adapters/tasks.py::load_task`, whose callers include old snapshots) leaves it as written, so
-    the adapter resolves it against the current directory exactly as before.
+    Applied where a USER's task file enters — `run`, the UI launch (`serve/launch.py`), `bench` —
+    and never to a run's own `task.snapshot.json`: an old snapshot stored paths as written (cwd-
+    relative), and re-reading them against the run directory refused `editable_path: "."` or rewrote
+    the task into a spurious `task_changed` (code review). A snapshot this build writes is absolute.
     """
     import copy
     import os
@@ -244,8 +248,6 @@ def resolve_task_paths(task: dict, task_dir: Optional[Path], *, missing: str = "
                 f"task path {raw!r} names two different things: {beside} (next to the task file) "
                 f"and {here} (in the current directory). Write it as an absolute path, or as a "
                 "path relative to the task file's directory, so the run reads the one you mean.")
-        if not exists and missing == "keep":
-            continue
         container[key] = here if exists == {here} else beside
     return task
 

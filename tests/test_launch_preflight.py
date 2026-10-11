@@ -776,3 +776,26 @@ def test_validate_does_not_answer_for_the_servers_own_condition(tmp_path, monkey
     monkeypatch.setattr(launch_module, "load_run_deletion_fence", _broken)
     response = TestClient(make_app(tmp_path)).post("/api/validate", json={"run_id": "x", "task": _toy()})
     assert response.status_code == 503 and 503 not in READINESS_REFUSALS
+
+
+def test_a_task_files_relative_paths_are_read_against_its_directory(tmp_path, monkeypatch):
+    """Code review of doc 75 UX-04: the shipped examples name their data relative to the file, and
+    `looplab run` reads them that way — but a UI launch validated the raw document against the
+    server's own directory, so `examples/dataset_task.json` got 422 "data path(s) not found"."""
+    folder = tmp_path / "examples"
+    (folder / "dataset_example").mkdir(parents=True)
+    (folder / "dataset_example" / "data.csv").write_text("a,target\n1,0\n2,1\n", encoding="utf-8")
+    task_file = folder / "dataset_task.json"
+    task_file.write_text(json.dumps({"kind": "dataset", "goal": "predict target",
+                                     "direction": "max",
+                                     "data_path": "dataset_example/data.csv"}), encoding="utf-8")
+    elsewhere = tmp_path / "server-cwd"
+    elsewhere.mkdir()
+    monkeypatch.chdir(elsewhere)
+
+    response = TestClient(make_app(tmp_path)).post("/api/start/preflight", json={
+        "run_id": "relative", "task_file": str(task_file), "settings": {"backend": "toy"}})
+
+    assert response.status_code == 200, response.json()
+    data_path = Path(response.json()["preview"]["task"]["data_path"])
+    assert data_path.is_absolute() and data_path == folder / "dataset_example" / "data.csv"

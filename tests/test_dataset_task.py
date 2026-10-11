@@ -14,7 +14,7 @@ from looplab.engine.orchestrator import Engine
 from looplab.search.policy import GreedyTree
 from looplab.tools.run_tools import DataTools
 from looplab.runtime.sandbox import SubprocessSandbox
-from looplab.adapters.tasks import kinds, load_task, validate_task
+from looplab.adapters.tasks import kinds, load_task_file as load_task, validate_task
 
 ROOT = Path(__file__).resolve().parents[1]
 TASK_FILE = ROOT / "examples" / "dataset_task.json"

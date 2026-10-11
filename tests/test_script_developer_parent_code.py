@@ -219,7 +219,7 @@ def test_the_run_settings_reach_the_script_developer_through_the_factory(monkeyp
     """Settings -> `agents/factory.py::make_roles` -> the dataset task's `LLMDeveloper`, split roles
     and the unified facade both. MUTATION: drop the factory's assignment -> the `on` case is red."""
     import looplab.agents.factory as factory
-    from looplab.adapters.tasks import load_task
+    from looplab.adapters.tasks import load_task_file as load_task   # a USER's file, not a snapshot
     from looplab.core.config import (LEGACY_CONFIG_SNAPSHOT_DEFAULTS, Settings,
                                      settings_from_snapshot)
 

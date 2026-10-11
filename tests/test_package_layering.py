@@ -101,6 +101,8 @@ DEFERRED: dict[tuple[str, str], str] = {
     ("agents", "search"): "the documented one-way rule: `search` imports `agents` at module "
                           "level, so `agents` may reach `search` only function-locally "
                           "(`tests/test_agents_search_direction.py`)",
+    ("bench", "events"): "a re-run into a finished `--out` reads that run's own record as its "
+                         "result (`_open_and_drive` returns None for it, doc 75 UX-05)",
     ("cli", "agents"): "role builders are constructed per command",
     ("cli", "bench"): "the capability harness is loaded by its command only",
     ("cli", "judgebench"): "the bait instruments are loaded by their commands only",

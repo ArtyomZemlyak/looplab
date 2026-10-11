@@ -732,7 +732,16 @@ def preflight_start(srv, body: Any) -> LaunchPreflight:
             raw_task, raw_file_settings, _out = source.document()
         except (OSError, ValueError, TypeError) as exc:
             _reject(400, "invalid_task_file", f"could not load task_file: {exc}", "task_file")
-        task_input = raw_task
+        # A task FILE's relative paths are read against its own directory, exactly as `looplab run`
+        # reads them (doc 75 UX-04); the shipped examples now rely on it, and `/api/tasks` offers
+        # them as the launch catalogue (code review: `examples/dataset_task.json` got a 422 here).
+        from looplab.core.appconfig import resolve_task_paths
+        from looplab.core.errors import ConfigRefusal
+        try:
+            task_input = (resolve_task_paths(raw_task, source_path.parent)
+                          if isinstance(raw_task, dict) else raw_task)
+        except ConfigRefusal as exc:
+            _reject(422, "invalid_task", f"task is invalid: {exc}", "task_file")
         file_settings = _validate_settings_keys(raw_file_settings, "task-file")
         source_fp = source.fingerprint()
     else:

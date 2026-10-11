@@ -82,7 +82,9 @@ def run_benchmark(task_files, settings: Settings, out_dir) -> list[dict]:
             # The task exactly as `run` resolves a file given no task flags: the document's task
             # block, validated. The DICT is what the run's `task.snapshot.json` records.
             file_task, _file_settings, _file_out = appconfig.load_document(tf)
-            task_dict = dict(file_task)
+            # …including its relative paths, read against the file's directory (doc 75 UX-04;
+            # the shipped examples rely on it — code review: they failed here from the repo root).
+            task_dict = appconfig.resolve_task_paths(dict(file_task), tf.parent)
             task = validate_task(task_dict)
             # A FRESH Settings per task (review 2026-09-22, SCJ-05). The run's spend ceiling is a
             # `CostAccountant` cached ON the settings object (`core/llm.py::run_cost_accountant`),
@@ -92,7 +94,16 @@ def run_benchmark(task_files, settings: Settings, out_dir) -> list[dict]:
             task_settings = Settings.model_validate(settings.model_dump())
             driven = _open_and_drive(task, task_dict, task_settings, rd)
             if driven is None:
-                raise RuntimeError(f"another engine is already running on {rd}")
+                # None means one of TWO things since doc 75 UX-05: another engine holds the run, or
+                # the run is already finished with nothing left to do — then its record IS the
+                # result (a re-run into the same --out recorded every task as a lock conflict).
+                from looplab.events.eventstore import EventStore
+                from looplab.events.replay import fold
+                log = rd / "events.jsonl"
+                prior = fold(EventStore(log).read_all()) if log.exists() else None
+                if prior is None or not prior.finished:
+                    raise RuntimeError(f"another engine is already running on {rd}")
+                driven = (prior,)
             state = driven[0]
             best = state.best()
             results.append({
