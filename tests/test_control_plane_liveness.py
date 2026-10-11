@@ -55,6 +55,7 @@ from looplab.events.eventstore import EventStore
 from looplab.events.types import (
     EV_COMMAND_ACK, EV_HINT, EV_PAUSE, EV_RESUME, EV_RUN_ABORT, EV_RUN_FINISHED, EV_RUN_STARTED,
     EV_SET_STRATEGY)
+from looplab.serve.control_validation import CONTROL_SPECS
 
 
 # ------------------------------------------------------------ the universe the search runs inside
@@ -344,6 +345,11 @@ _DATA_FOR = {"hint": {"text": "try a smaller lr"},
              "finalize": {"reason": "operator"}}
 
 
+# Postconditions observed on the run's own fold — no engine needed, so no timeout is ever the
+# outcome a search edge is meant to reach for them.
+_FOLD_POSTCONDITIONS = frozenset({"paused", "folded_intent"})
+
+
 def _apply(world: _World, rd: Path, action: str) -> None:
     if action == "engine_dies":
         world.alive[rd.name] = False
@@ -361,7 +367,20 @@ def _apply(world: _World, rd: Path, action: str) -> None:
         # The out-of-band resume of the incident: the CLI/engine appends it, no command record.
         EventStore(rd / "events.jsonl").append(EV_RESUME, {})
     elif action in _EVENT_FOR:
-        _drive(world.commands, rd, _EVENT_FOR[action], _DATA_FOR.get(action, {}))
+        # The state an edge leads to must be a function of the WORLD, never of the runner's speed.
+        # The search's 0.12 s window let the command worker's ADMISSION decide instead: on a loaded
+        # Windows runner a control that settles on its own fold (or on a healthy engine's ack) read
+        # `timed_out` before its intent landed, each such record a new signature, and the search hit
+        # its 48-state cap (eb9b8f3, Windows CI 2026-10-11) where Linux closes at 22. Driven: a
+        # 0.2 s delay before `RunCommandService._execute` reproduces the cap here. Those controls
+        # get the deadline they land in (they return the moment they settle); a control that waits
+        # on a stalled or dead engine keeps the short window, because reaching THOSE timeouts is
+        # what the search is for.
+        healthy = world.alive.get(rd.name) and world.acking.get(rd.name, True)
+        fold_settled = CONTROL_SPECS[_EVENT_FOR[action]].postcondition in _FOLD_POSTCONDITIONS
+        with (_command_deadline(world.commands, _MUST_SUCCEED_DEADLINE_S) if healthy or fold_settled
+              else contextlib.nullcontext()):
+            _drive(world.commands, rd, _EVENT_FOR[action], _DATA_FOR.get(action, {}))
     else:  # pragma: no cover - the alphabet is closed
         raise AssertionError(f"unknown action {action!r}")
 
