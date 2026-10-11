@@ -130,7 +130,7 @@ _NOBODY_SAID = (
 )
 
 
-def stop_account(state) -> StopAccount:
+def stop_account(state, node_budget=None) -> StopAccount:
     """The stop account for a folded `RunState`. Total — never raises, and never touches the disk.
 
     IT NAMES THE LOCK AND DOES NOT TAKE IT, which is the one deliberate omission here. "Is a writer
@@ -170,7 +170,7 @@ def stop_account(state) -> StopAccount:
                 # and on the demo it was false: the run stopped because its node budget was spent.
                 # When the plan recorded the budget, say that with the count; otherwise say only
                 # what is known.
-                spent = _node_budget_spent(state)
+                spent = _node_budget_spent(state, node_budget)
                 if spent is not None:
                     return StopAccount("finished", None,
                                        f"finished — node budget spent ({spent[0]}/{spent[1]} "
@@ -213,19 +213,29 @@ def stop_account(state) -> StopAccount:
     return StopAccount("no_boundary", None, _NOBODY_SAID + _unserved_finalize(state))
 
 
-def _node_budget_spent(state) -> Optional[tuple[int, int]]:
-    """`(experiments, budget)` when the folded plan's node budget (plus any `budget_extend`) is
-    spent, else None — a run with no plan row cannot say what its budget was."""
+def _node_budget_spent(state, node_budget=None) -> Optional[tuple[int, int]]:
+    """`(used, budget)` when the node budget is spent, else None.
+
+    `node_budget` is the CALLER's `engine/run_capacity.py::node_budget` result — the engine's own
+    admission arithmetic (refunded reservations included), the one `resume` decides by, so the stop
+    line and `resume` cannot disagree. This package may not import the engine, so without it the
+    fallback reads the folded plan's `max_nodes`, which a `budget_extend` re-cut already includes
+    (adding `add_nodes` again said 16 for a 12-node budget), and counts the id allocator, not the
+    node count (code review of doc 75 UX-07)."""
+    if node_budget is not None:
+        used, limit = getattr(node_budget, "used", None), getattr(node_budget, "limit", None)
+        if not isinstance(used, int) or not isinstance(limit, int):
+            return None
+        return (min(used, limit), limit) if limit > 0 and node_budget.spent else None
     plan = getattr(state, "plan", None)
     if not isinstance(plan, dict):
         return None
     try:
         budget = int(plan.get("max_nodes"))
-        budget += int((getattr(state, "budget_overrides", None) or {}).get("add_nodes", 0) or 0)
     except (TypeError, ValueError, OverflowError):
         return None
-    nodes = len(getattr(state, "nodes", None) or {})
-    return (nodes, budget) if budget > 0 and nodes >= budget else None
+    used = max(getattr(state, "nodes", None) or {}, default=-1) + 1
+    return (min(used, budget), budget) if budget > 0 and used >= budget else None
 
 
 def _awaiting_approval(state) -> Optional[str]:

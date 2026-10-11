@@ -20,6 +20,7 @@ import typer
 from pydantic import ValidationError
 
 from looplab.core.atomicio import atomic_write_text
+from looplab.core.errors import EnvironmentRefusal
 from looplab.core.latebind import late_bound
 from looplab.events.eval_occupancy import withheld_lifecycles
 from looplab.events.eventstore import EventStore, EventStoreConcurrencyError, retry_tail_cas
@@ -879,20 +880,28 @@ def _open_and_drive(task, task_dict: dict, settings, out: Path, *, crash_after=N
 
 
 def _remove_if_only_locks(out: Path) -> None:
+    """Remove a refused run's directory when it holds nothing but lock files.
+
+    Only while NO other engine holds `engine.lock`: this runs after our own singleton was released,
+    and a concurrent `run` on the same new `--out` may have taken it and still be in setup with no
+    other file yet. Unlinking its lock then let a third process create a fresh one — two engines on
+    one event log (code review of doc 75 UX-33). So the singleton is taken AGAIN, non-blocking; held
+    elsewhere, nothing is touched. The other lock files go while we hold it; `engine.lock` itself
+    after release (Windows cannot unlink an open file), then the now-empty directory."""
     try:
-        entries = list(out.iterdir())
-    except OSError:
-        return
-    if all(entry.is_file() and entry.name.endswith(".lock") for entry in entries):
-        for entry in entries:
-            try:
-                entry.unlink()
-            except OSError:
+        with _engine_singleton(out) as ours:
+            if not ours:
                 return
-        try:
-            out.rmdir()
-        except OSError:
-            pass
+            entries = list(out.iterdir())
+            if not all(entry.is_file() and entry.name.endswith(".lock") for entry in entries):
+                return
+            for entry in entries:
+                if entry.name != "engine.lock":
+                    entry.unlink()
+        (out / "engine.lock").unlink()
+        out.rmdir()
+    except (OSError, EnvironmentRefusal):
+        pass   # a leftover lock file is the old, harmless outcome; never mask the refusal itself
 
 
 def _open_and_drive_in(task, settings, out, *, task_dict, crash_after,

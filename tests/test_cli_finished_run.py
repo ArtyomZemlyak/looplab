@@ -123,6 +123,43 @@ def test_timings_of_a_seconds_long_run_reads_in_seconds_and_tokens_says_offline(
     assert "offline run (backend=toy): no model calls to attribute." in _invoke("tokens", run_dir).output
 
 
+@pytest.mark.parametrize("command_id", ["cmd_" + "c0f1" * 8, None])
+def test_an_operator_intent_queued_after_the_finish_is_served_not_swallowed(demo, command_id):
+    """Code review of UX-05: the server appends an intent (Force confirm, Deep research, Set
+    strategy, Restart …) and spawns `looplab resume`. A no-op child left it unserved while the
+    reconciler re-spawned it until the command timed out. Queued work reopens the run, budget or not
+    — a server command intent (`_command_id`) or a plain control intent after the finish."""
+    from looplab.events.replay import fold
+    from looplab.events.types import EV_FORCE_CONFIRM
+    run_dir, _ = demo
+    store = EventStore(run_dir / "events.jsonl")
+    best = fold(store.read_all()).best()
+    data = {"node_id": best.id, "attempt": best.attempt}
+    if command_id:
+        data["_command_id"] = command_id
+    store.append(EV_FORCE_CONFIRM, data)
+    result = _invoke("resume", run_dir)
+    assert result.exit_code == 0, result.output
+    assert "already finished" not in result.output
+    state = fold(store.read_all())
+    assert best.id in state.confirmed_forced, "the forced confirm was served (confirm_done)"
+    if command_id:
+        acks = [event for event in store.read_all() if event.type == "command_ack"]
+        assert any(event.data.get("command_id") == command_id for event in acks)
+
+
+def test_an_extended_budget_is_counted_once_in_the_stop_line(demo):
+    """Code review of UX-07: the plan re-cut after `budget_extend` already includes `add_nodes`, and
+    the stop line added it again — 6 + 2 read as a budget of 10, and the run "finished normally"
+    with its 8-node budget spent. The line now uses the engine's own arithmetic."""
+    from looplab.events.types import EV_BUDGET_EXTEND
+    run_dir, _ = demo
+    EventStore(run_dir / "events.jsonl").append(EV_BUDGET_EXTEND, {"add_nodes": 2})
+    result = _invoke("resume", run_dir)
+    assert result.exit_code == 0, result.output
+    assert "stop: finished — node budget spent (8/8 experiments)." in result.output, result.output
+
+
 def test_a_run_refused_before_its_first_event_leaves_no_directory(tmp_path, monkeypatch):
     """doc 75 UX-33: driven through the real preflight refusal, only its network probe replaced."""
     import looplab.agents.preflight as preflight
@@ -149,6 +186,21 @@ def test_the_preflight_refusal_ends_its_cause_with_one_full_stop(tmp_path, monke
     monkeypatch.setattr(preflight, "_probe_role_endpoints", lambda *a, **k: [
         preflight._ProbeFailure("unreachable", "the default target: Connection refused")])
     assert "Connection refused.\n" in preflight.wrap_up_endpoint_warning(None, timeout_s=0.1)
+
+
+def test_a_refused_runs_cleanup_leaves_a_lock_another_engine_holds(tmp_path):
+    """Code review of UX-33: the cleanup ran after our singleton was released, so a concurrent `run`
+    on the same new `--out` that had just taken `engine.lock` lost it — and a third process could then
+    create a fresh one: two engines on one log. Held elsewhere, nothing is removed."""
+    from looplab.cli import _engine_singleton
+    from looplab.cli.run_cmds import _remove_if_only_locks
+    out = tmp_path / "new"
+    with _engine_singleton(out) as other:          # another engine, mid-setup, owns the lock
+        assert other
+        _remove_if_only_locks(out)
+        assert (out / "engine.lock").exists(), "a held lock was unlinked"
+    _remove_if_only_locks(out)                      # free now: the empty refused dir goes
+    assert not out.exists()
 
 
 def test_a_refusal_keeps_a_directory_this_command_did_not_create(tmp_path, monkeypatch):

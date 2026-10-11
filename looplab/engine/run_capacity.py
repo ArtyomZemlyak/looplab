@@ -26,7 +26,21 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Optional
 
-from looplab.events.types import EV_NODE_BUILDING
+from looplab.events.types import (EV_APPROVAL_GRANTED, EV_BUDGET_EXTEND, EV_COMMAND_ACK,
+                                  EV_DEEP_RESEARCH, EV_FORCE_ABLATE, EV_FORCE_CONFIRM, EV_FORK,
+                                  EV_INJECT_NODE, EV_METRIC_RETARGET, EV_NODE_BUILDING, EV_NODE_RESET,
+                                  EV_RESTART, EV_RESUME, EV_RUN_REOPENED, EV_SET_STRATEGY,
+                                  EV_TRACK_REQUESTED)
+
+# Operator intents a reopened finished run SERVES (forced confirm, deep research, a strategy pin, a
+# restart, an inject …). One recorded after the run's last finish is work, whatever the node budget
+# says: the server appends it and spawns `looplab resume`, and a no-op child left it unserved while
+# the reconciler re-spawned it until the command timed out (code review of doc 75 UX-05).
+_REOPENING_INTENTS = frozenset({
+    EV_FORCE_CONFIRM, EV_DEEP_RESEARCH, EV_SET_STRATEGY, EV_RESTART, EV_RUN_REOPENED,
+    EV_INJECT_NODE, EV_FORK, EV_NODE_RESET, EV_FORCE_ABLATE, EV_BUDGET_EXTEND, EV_METRIC_RETARGET,
+    EV_TRACK_REQUESTED, EV_APPROVAL_GRANTED, EV_RESUME,
+})
 
 
 @dataclass(frozen=True)
@@ -68,7 +82,7 @@ def nothing_left_sentence(state, events, max_nodes, *, run_dir, verb: str) -> Op
 
     `verb` is the command the operator typed (`resume` / `run`); the remedy names the flag that
     raises the budget on that same command, with the number one budget higher."""
-    if not getattr(state, "finished", False):
+    if not getattr(state, "finished", False) or work_queued_after_finish(state, events):
         return None
     budget = node_budget(state, events, max_nodes)
     if not budget.spent:
@@ -82,3 +96,27 @@ def nothing_left_sentence(state, events, max_nodes, *, run_dir, verb: str) -> Op
         return (f"{head}\n  To continue it: looplab resume {run_dir} --max-nodes {more}"
                 f"\n  Or start a fresh run: pass a new --out (e.g. --out {run_dir}-2)")
     return f"{head}\n  To continue it: looplab resume {run_dir} --max-nodes {more}"
+
+
+def work_queued_after_finish(state, events) -> bool:
+    """Is an operator waiting on this finished run? Then it reopens, budget or not.
+
+    Three signals, each the engine's own: a resume request no engine has served
+    (`RunState.resume_pending`), a server command intent (`_command_id`) with no `command_ack`
+    (`engine/forced_requests.py::_unacked_command_suffix` reads the same marker), and a control
+    intent recorded after the run's last finish."""
+    try:
+        if state.resume_pending():
+            return True
+    except AttributeError:
+        pass
+    acked = {(str((event.data or {}).get("command_id")), (event.data or {}).get("event_seq"))
+             for event in events if event.type == EV_COMMAND_ACK}
+    finish = getattr(state, "last_finish_seq", -1)
+    for event in events:
+        marker = (event.data or {}).get("_command_id")
+        if marker and (str(marker), event.seq) not in acked:
+            return True
+        if event.seq > finish and event.type in _REOPENING_INTENTS:
+            return True
+    return False

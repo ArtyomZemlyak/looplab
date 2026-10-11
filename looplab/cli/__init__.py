@@ -1089,7 +1089,8 @@ def _print_result(state, run_dir=None) -> None:
     # lines, not nine), and the result in the reader's words below it.
     typer.echo(f"run={state.run_id} task={state.task_id} finished={state.finished} "
                f"nodes={len(state.nodes)} evaluated={len(state.evaluated_nodes())}")
-    typer.echo(f"stop: {stop_account(state).line}")
+    account = stop_account(state, node_budget=_engine_node_budget(state, run_dir))
+    typer.echo(f"stop: {account.line}")
     if best is not None:
         m = best.robust_metric
         ms = f"{m:.6g}" if m is not None else "n/a"
@@ -1160,6 +1161,23 @@ def offline_baseline_note(state, backend, *, external_harness=False, events=(),
     return ("note: backend=toy — no model wrote or changed code, so this score is the task's offline "
             f"baseline (a pipeline check, not a tuned result).{rows} Configure a model to search "
             "this task.")
+
+
+def _engine_node_budget(state, run_dir):
+    """`engine/run_capacity.py::node_budget` for the summary's stop line, or None to let the stop
+    account fall back to the plan. The base is the launch's `max_nodes` (`config.snapshot.json`) —
+    the arithmetic adds `budget_extend` and refunded reservations itself, exactly as `resume` does."""
+    if run_dir is None:
+        return None
+    try:
+        from looplab.engine.run_capacity import node_budget
+        from looplab.events.eventstore import EventStore
+        base = snapshot_settings(Path(run_dir) / "config.snapshot.json").get("max_nodes")
+        if not isinstance(base, int):
+            return None
+        return node_budget(state, EventStore(Path(run_dir) / "events.jsonl").read_all(), base)
+    except (OSError, ValueError):
+        return None
 
 
 def _snapshot_task_kind(run_dir) -> Optional[str]:
