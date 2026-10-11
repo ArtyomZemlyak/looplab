@@ -1,7 +1,7 @@
 {
   "schema": 1,
   "language": "ru",
-  "count": 7752,
+  "count": 7755,
   "messages": {
     "# LoopLab run report — {0}": "# Отчёт запуска LoopLab — {0}",
     "## Agent narrative (advisory)": "## Пояснения агента (рекомендации)",
@@ -7754,7 +7754,10 @@
     "Key storage details": "Подробнее о хранении ключа",
     "Show filters, views and projects": "Показать фильтры, виды и проекты",
     "Starting the run…": "Запуск начинается…",
-    "was started from this tab. It opens here as soon as its first records are written.": "запущен из этой вкладки. Он откроется здесь, как только появятся первые записи."
+    "was started from this tab. It opens here as soon as its first records are written.": "запущен из этой вкладки. Он откроется здесь, как только появятся первые записи.",
+    "Deep research needs a model. This run used none (backend=toy), so it records no research memos.": "Глубокому исследованию нужна модель. Этот запуск обходился без неё (backend=toy), поэтому исследовательских записок в нём нет.",
+    "No research memo was recorded before this run finished.": "До завершения запуска не записано ни одной исследовательской записки.",
+    "No research memos": "Исследовательских записок нет"
   },
   "plurals": {
     "({0} paraphrases folded)": {

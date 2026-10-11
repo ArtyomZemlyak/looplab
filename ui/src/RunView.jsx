@@ -2738,6 +2738,7 @@ export default function RunView({ runId, onBack, reviewMode = false, reviewMeta 
         onReadReport={() => route.update(current => ({ ...current, view: 'report', panel: null }))}
         onOpenPanel={p => { if (panelAllowed(p)) setPanel(p, { mode: 'replace' }) }} />}
       {panel === 'research' && panelAllowed('research') && <ResearchPanel state={state} runId={runId}
+        runBackend={configResource.status === 'ready' ? configResource.data?.backend ?? null : null}
         onToast={showToast} onClose={closePanel} onSelect={selectNodeFromPanel}
         onSelectEvidence={selectEvidenceFromPanel} />}
       {panel === 'trust' && panelAllowed('trust') && <TrustPanel state={state} runId={runId} onSelect={selectNodeFromPanel} onToast={showToast} onClose={closePanel} readOnly={mutationReadOnlyMode} />}
