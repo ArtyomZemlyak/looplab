@@ -2003,6 +2003,10 @@ def stop(run_dir: Path = typer.Argument(..., help="Run directory to STOP (freeze
     # `RunState.pause_reason`; nothing decides on it (`classify_prior_run` is pinned not to read it).
     # `drain_builds` rides the pause row only when asked for, so a plain stop writes the exact row it
     # always did; the fold reads it only while this pause stands (`RunState.pause_drain_builds`).
+    # Read BEFORE the row lands: under `--wait` a finished run still gets its stop (it must stand
+    # against a queued server action), but it is not "frozen, not finalized" and has nothing to
+    # `resume` or `finalize` — the line said both about the finalized demo (doc 75 UX-05 follow-up).
+    was_finished = fold(store.read_all()).finished
     stop_row = store.append(EV_PAUSE, ({"reason": "operator stop (`looplab stop --drain-builds`)",
                                         "drain_builds": True} if draining
                                        else {"reason": "operator stop (`looplab stop`)"}))
@@ -2016,9 +2020,13 @@ def stop(run_dir: Path = typer.Argument(..., help="Run directory to STOP (freeze
                        f"effect: {why}. Builds already running are closed as a plain stop closes "
                        "them.", err=True)
             raise typer.Exit(code=1)
-    typer.echo(f"stopped {run_dir} (frozen, not finalized) — `looplab resume` to continue, "
-               "`looplab finalize` to wrap it up"
-               + ("; builds already running will finish and commit first" if draining else ""))
+    if was_finished:
+        typer.echo(f"{run_dir} is already finished; the stop is recorded so a queued server action "
+                   "does not reopen it")
+    else:
+        typer.echo(f"stopped {run_dir} (frozen, not finalized) — `looplab resume` to continue, "
+                   "`looplab finalize` to wrap it up"
+                   + ("; builds already running will finish and commit first" if draining else ""))
     if not waiting:
         return
     from looplab.engine.run_lifecycle import engine_liveness

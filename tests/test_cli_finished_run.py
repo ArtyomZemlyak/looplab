@@ -160,6 +160,17 @@ def test_an_extended_budget_is_counted_once_in_the_stop_line(demo):
     assert "stop: finished — node budget spent (8/8 experiments)." in result.output, result.output
 
 
+def test_stop_wait_on_a_finished_run_does_not_call_it_unfinalized(demo):
+    """`stop --wait` still records its stop on a finished run (it must stand against a queued server
+    action), but the line said "(frozen, not finalized) — `looplab resume` to continue, `looplab
+    finalize` to wrap it up" about the finalized demo."""
+    run_dir, _ = demo
+    result = _invoke("stop", run_dir, "--wait", "--timeout", "5")
+    assert result.exit_code == 0, result.output
+    assert "already finished" in result.output
+    assert "not finalized" not in result.output and "looplab resume" not in result.output
+
+
 def test_a_run_refused_before_its_first_event_leaves_no_directory(tmp_path, monkeypatch):
     """doc 75 UX-33: driven through the real preflight refusal, only its network probe replaced."""
     import looplab.agents.preflight as preflight
