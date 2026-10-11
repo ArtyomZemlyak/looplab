@@ -2,6 +2,7 @@ import { uiText, uiMessage, uiPlural, useUILanguage } from './uiLanguage.js'
 import React, { useEffect, useMemo, useRef, useState } from 'react'
 import { MODEL_CHECK_EVENT, paidActionModelNote, readModelCheck } from './modelConnection.js'
 import BaseRevision from './BaseRevision.jsx'
+import { runRecordsBases } from './baseRevision.js'
 import UpstreamPanel from './UpstreamPanel.jsx'
 import { peekReportRefreshIntent, reportRefreshIntent, isTransientCommandReadError, deadlineGet, fmt,
   fmtCost, fmtInt, CONTROL, runNodeApiPath } from './util.js'
@@ -229,6 +230,7 @@ export default function ReportView({ state, runId, onOpenPanel, canOpenPanel, on
   const nodeCount = Object.keys(state.nodes).length
   const coverage = useMemo(() => reportNarrativeCoverage(rep, nodeCount), [rep, nodeCount])
   const imp = useMemo(() => hyperImportance(state).slice(0, 6), [state])
+  const stepsHaveBase = useMemo(() => runRecordsBases(state), [state])
   const solutionRunReady = typeof runId === 'string' && runId.length > 0 && state.run_id === runId
   const solutionGeneration = RUN_GENERATION_RE.test(expectedGeneration || '')
     ? expectedGeneration : null
@@ -614,7 +616,12 @@ export default function ReportView({ state, runId, onOpenPanel, canOpenPanel, on
         <Trajectory nodes={Object.values(state.nodes)} direction={state.direction} state={state}
           steps={a.steps} onPick={onPickNode} />
         <ImprovementWaterfall steps={a.steps} direction={state.direction} />
-        <DataTable caption={uiText("Metric trajectory steps")} card={false}><table className="tbl report-steps-table"><thead><tr><th>#</th><th>{uiText("node")}</th><th>{uiText("operator")}</th><th>{uiText("recorded value")}</th><th>{uiText("measurement")}</th><th>{uiText("numeric change")}</th><th>{uiText("base")}</th><th>{uiText("what changed")}</th></tr></thead><tbody>
+        {/* The `base` column only where a base COULD be recorded (doc 75 UX-17, the rule BaseRevision
+            itself applies): on a run with none it was 130 always-empty pixels that, beside the
+            Assistant side panel, pushed `what changed` — the column the table exists for — out of
+            the 574px view. The region is a size container so the table can drop its desktop
+            min-width there (report-trust-polish.css). */}
+        <DataTable caption={uiText("Metric trajectory steps")} card={false} className="report-steps-region"><table className="tbl report-steps-table"><thead><tr><th>#</th><th>{uiText("node")}</th><th>{uiText("operator")}</th><th>{uiText("recorded value")}</th><th>{uiText("measurement")}</th><th>{uiText("numeric change")}</th>{stepsHaveBase && <th className="report-steps-base">{uiText("base")}</th>}<th>{uiText("what changed")}</th></tr></thead><tbody>
           {a.steps.map((s, i) => <tr key={s.id}>
             <td>{i + 1}</td><td>#{s.id}</td><td><span className="report-step-kind" aria-hidden="true">
               {((s.operator || uiText('unknown operator')))}
@@ -623,7 +630,7 @@ export default function ReportView({ state, runId, onOpenPanel, canOpenPanel, on
             <td>{fmt(s.to)}</td>
             <td>{uiText(s.measurement)}</td>
             <td className="report-delta">{((s.delta == null ? uiText('first eligible') : fmt(s.delta)))}</td>
-            <td><BaseRevision node={state.nodes[s.id]} state={state} compact /></td>
+            {stepsHaveBase && <td><BaseRevision node={state.nodes[s.id]} state={state} compact /></td>}
             <td className="muted">{s.diff.length > 2
               ? <details className="report-step-changes"><summary>{uiPlural(s.diff.length, '{0} parameter changes', '{0} parameter changes')}</summary>
                   <span>{uiText(paramDiffLabel(s.diff))}</span></details>
