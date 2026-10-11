@@ -21,6 +21,7 @@ because a live or crashed run otherwise has none at all.
 """
 from __future__ import annotations
 
+import os
 from pathlib import Path
 from typing import Optional
 
@@ -461,7 +462,8 @@ def inspect(
     settings can differ from it (the owner config API overlays the effective folded values).
     """
     if run_dir is None:       # doc 75 UX-35: no CLI command listed runs
-        raise typer.Exit(echo_run_list(Path("runs")))
+        # The run root `ui` and `tui` use (code review: a fixed `runs` ignored LOOPLAB_RUN_ROOT).
+        raise typer.Exit(echo_run_list(Path(os.environ.get("LOOPLAB_RUN_ROOT", "runs"))))
     # THE RESULT FIRST (doc 74 EB-10): the 10.8 KB snapshot used to scroll the result off-screen.
     snap = run_dir / "config.snapshot.json"
     events = run_dir / "events.jsonl"

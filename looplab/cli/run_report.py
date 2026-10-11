@@ -952,12 +952,19 @@ def echo_run_list(root: Path) -> int:
     'run_dir'" — so a terminal user who forgot a run's name had to `ls runs/` and guess which
     directories were runs. One line each, from each run's own log; a directory with no
     `events.jsonl` is not a run and is skipped. Returns the exit code."""
+    from looplab.core.run_discovery import discover_run_dirs
     from looplab.events.eventstore import EventStore
     from looplab.events.replay import fold
 
-    runs = sorted((d for d in (root.iterdir() if root.is_dir() else ())
-                   if (d / "events.jsonl").is_file()),
-                  key=lambda d: (d / "events.jsonl").stat().st_mtime, reverse=True)
+    # The runs the UI lists (`core/run_discovery.py`), nested campaign layouts included; a run
+    # removed between the walk and the sort is dropped, never a traceback (code review).
+    stamped = []
+    for rd in discover_run_dirs(root).runs:
+        try:
+            stamped.append(((rd / "events.jsonl").stat().st_mtime, rd))
+        except OSError:
+            continue
+    runs = [rd for _mtime, rd in sorted(stamped, key=lambda pair: pair[0], reverse=True)]
     if not runs:
         typer.echo(f"no runs under {root}/ — start one with `looplab run examples/demo.yaml`, "
                    "or pass a run directory: looplab inspect RUN_DIR")

@@ -224,6 +224,20 @@ def test_inspect_with_no_argument_lists_the_runs(demo, monkeypatch):
     assert "finished" in result.output
 
 
+def test_inspect_lists_the_run_root_the_ui_uses_with_nested_runs(demo, monkeypatch, tmp_path):
+    """Code review of UX-35: the list read a fixed `runs/` one level deep, so LOOPLAB_RUN_ROOT (which
+    `ui`/`tui` honour) printed "no runs", and a `<root>/<campaign>/<seed>` layout listed nothing."""
+    run_dir, _ = demo
+    root = tmp_path / "elsewhere"
+    (root / "campaign").mkdir(parents=True)
+    run_dir.rename(root / "campaign" / "seed1")
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("LOOPLAB_RUN_ROOT", str(root))
+    result = _invoke("inspect")
+    assert result.exit_code == 0, result.output
+    assert "campaign/seed1" in result.output.replace("\\", "/") and "6 experiments" in result.output
+
+
 def test_inspect_with_no_argument_and_no_runs_says_how_to_find_one(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
     result = _invoke("inspect")

@@ -117,6 +117,19 @@ def test_installation_names_the_read_fence_warning_a_windows_or_root_run_prints(
     assert message and message.startswith("the read fence's KERNEL self-protection rung is ADVISORY")
 
 
+def test_the_short_fence_warning_is_said_only_where_its_cause_holds():
+    """Code review of UX-03: the short line says "running as root or on Windows", and it replaced
+    `harden_guarantee`'s sentence for every reduced fence — a non-root user on a filesystem that
+    ignores mode bits was told the wrong cause, the real one at DEBUG. Elsewhere the full sentence
+    is the warning."""
+    import logging
+    from looplab.engine.resources import READ_FENCE_REDUCED_WARNING, read_fence_warning_lines
+    reduced = "the read fence's KERNEL self-protection rung is ADVISORY here: x carries write bits"
+    assert read_fence_warning_lines(reduced, privileged=True) == [
+        (logging.WARNING, READ_FENCE_REDUCED_WARNING), (logging.DEBUG, reduced)]
+    assert read_fence_warning_lines(reduced, privileged=False) == [(logging.WARNING, reduced)]
+
+
 def test_start_in_assistant_keeps_the_steps_and_names_no_code():
     """doc 74 EB-11: the UI guide's "Start in Assistant" opening is the user's path — at most 400
     words of its own (sub-sections hold the detail) and no developer identifiers (`uiText`,

@@ -42,6 +42,24 @@ _LOG = logging.getLogger(__name__)
 READ_FENCE_REDUCED_WARNING = ("running as root or on Windows: native programs that eval code starts "
                               "can overwrite the sandbox read fence (see Installation)")
 
+
+def read_fence_warning_lines(reduced: str, *, privileged: bool) -> list[tuple[int, str]]:
+    """`(log level, message)` for a reduced fence (`read_fence.harden_guarantee`'s sentence).
+
+    The short line NAMES A CAUSE, so it is said only where that cause holds — a root or Windows
+    launch, the case it was written for (doc 75 UX-03), with the full sentence at DEBUG. Anywhere
+    else (a filesystem that ignores mode bits, a stat that failed) the reduction is unexpected and
+    its own sentence IS the warning: "running as root or on Windows" told a non-root operator the
+    wrong cause and hid the real one below DEBUG (code review)."""
+    if privileged:
+        return [(logging.WARNING, READ_FENCE_REDUCED_WARNING), (logging.DEBUG, reduced)]
+    return [(logging.WARNING, reduced)]
+
+
+def _privileged_launch() -> bool:
+    """Root, or Windows — the two launches the short fence warning describes."""
+    return os.name == "nt" or (hasattr(os, "geteuid") and os.geteuid() == 0)
+
 _CUDA_DISABLED_SELECTORS = frozenset({"-1", "none", "nodevfiles", "void"})
 
 # How often a still-blocked host-lease wait repeats its notice.  The wait itself re-polls every 0.5s
@@ -1104,8 +1122,9 @@ class ResourceSchedulingMixin:
                 # 388-character sentence was written for the fence's author and was the first thing
                 # every run as root or on Windows printed. The short line still names the residual
                 # risk; `harden_guarantee`'s own words are untouched — they are the security record.
-                _LOG.warning("%s", READ_FENCE_REDUCED_WARNING)
-                _LOG.debug("%s", reduced)
+                for level, message in read_fence_warning_lines(
+                        reduced, privileged=_privileged_launch()):
+                    _LOG.log(level, "%s", message)
         if dropped:
             # A dropped root is the one case where the operator's fence silently shrinks, so say so.
             _LOG.warning("read fence ignoring editable root(s) %s: fencing a path that broad would "
