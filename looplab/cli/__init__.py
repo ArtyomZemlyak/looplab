@@ -1120,7 +1120,8 @@ def _print_result(state, run_dir=None) -> None:
 _AUTHORED_SOURCES = frozenset({"manual", "operator"})
 
 
-def offline_baseline_note(state, backend, *, external_harness=False, events=()) -> str:
+def offline_baseline_note(state, backend, *, external_harness=False, events=(),
+                          run_dir=None) -> str:
     """One line when an OFFLINE run's best score is the task's own baseline, or ``""``.
 
     `backend=toy` builds the task's offline roles (`agents/factory.py::make_roles` ->
@@ -1150,8 +1151,28 @@ def offline_baseline_note(state, backend, *, external_harness=False, events=()) 
         if (event.type == EV_NODE_CREATED and data.get("node_id") == best.id
                 and data.get("source") in _AUTHORED_SOURCES):
             return ""
+    # WHAT the number is, for the one kind whose baseline is not a score at all (doc 75 UX-27):
+    # an offline dataset run read "BEST experiment #7: metric = 200 (higher is better)", and 200
+    # was the row count of the user's own data. The kind is the engine's `task.snapshot.json`,
+    # never the candidate's stdout.
+    rows = (" For a dataset task it is the number of rows in the data."
+            if _snapshot_task_kind(run_dir) == "dataset" else "")
     return ("note: backend=toy — no model wrote or changed code, so this score is the task's offline "
-            "baseline (a pipeline check, not a tuned result). Configure a model to search this task.")
+            f"baseline (a pipeline check, not a tuned result).{rows} Configure a model to search "
+            "this task.")
+
+
+def _snapshot_task_kind(run_dir) -> Optional[str]:
+    """The task KIND the engine snapshotted for this run, or None. Display only."""
+    if run_dir is None:
+        return None
+    try:
+        import json
+        doc = json.loads((Path(run_dir) / "task.snapshot.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    kind = doc.get("kind") if isinstance(doc, dict) else None
+    return kind if isinstance(kind, str) else None
 
 
 def snapshot_settings(snap) -> dict:

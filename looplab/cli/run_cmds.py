@@ -1328,7 +1328,7 @@ def run(
     _print_result(state, run_dir=out)
     _offline = offline_baseline_note(state, settings.backend,
                                      external_harness=bool(settings.external_harness),
-                                     events=eng.store.read_all())
+                                     events=eng.store.read_all(), run_dir=out)
     if _offline:
         typer.echo(_offline)
     _note = wrap_up_degradation_note(eng)
@@ -1547,7 +1547,7 @@ def resume(
     _print_result(state, run_dir=run_dir)
     _offline = offline_baseline_note(state, settings.backend,
                                      external_harness=bool(settings.external_harness),
-                                     events=eng.store.read_all())
+                                     events=eng.store.read_all(), run_dir=run_dir)
     if _offline:
         typer.echo(_offline)
     _note = wrap_up_degradation_note(eng)

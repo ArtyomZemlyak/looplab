@@ -937,7 +937,8 @@ def echo_inspect_tail(state, run_dir: Path, *, show_config_hint: bool, events=No
     _offline = offline_baseline_note(
         state, _backend if isinstance(_backend, str) else None,
         external_harness=bool(_launch.get("external_harness")),
-        events=events if events is not None else EventStore(Path(run_dir) / "events.jsonl").read_all())
+        events=events if events is not None else EventStore(Path(run_dir) / "events.jsonl").read_all(),
+        run_dir=run_dir)
     if _offline:
         typer.echo(_offline)
     if show_config_hint:

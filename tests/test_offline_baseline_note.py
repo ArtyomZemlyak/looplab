@@ -68,3 +68,17 @@ def test_a_champion_written_by_an_agent_or_an_operator_is_not_called_a_baseline(
     other = SimpleNamespace(type="node_created", data={"node_id": 4, "source": "manual"})
     built = SimpleNamespace(type="node_created", data={"node_id": 3})
     assert offline_baseline_note(state, "toy", events=[other, built]).startswith(NOTE)
+
+
+def test_a_dataset_baseline_says_the_number_is_the_row_count(tmp_path):
+    """doc 75 UX-27: an offline dataset run printed "metric = 200 (higher is better)" and 200 was the
+    row count of the user's data. The note says so, from the KIND the engine snapshotted."""
+    untuned = SimpleNamespace(id=1, idea=SimpleNamespace(params={}))
+    state = SimpleNamespace(best=lambda: untuned)
+    run = tmp_path / "run"
+    run.mkdir()
+    (run / "task.snapshot.json").write_text('{"kind": "dataset"}', encoding="utf-8")
+    assert "the number of rows in the data" in offline_baseline_note(state, "toy", run_dir=run)
+    (run / "task.snapshot.json").write_text('{"kind": "repo"}', encoding="utf-8")
+    assert "rows" not in offline_baseline_note(state, "toy", run_dir=run)
+    assert "rows" not in offline_baseline_note(state, "toy")
