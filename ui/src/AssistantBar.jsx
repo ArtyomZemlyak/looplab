@@ -3178,7 +3178,7 @@ export default function AssistantBar({ runId, hidden = false, onReady }) {
   const proposalContext = !historical && draftingNewRun
   const runContextBanner = (runId || proposalContext) && <div className={`asst-run-context${!proposalContext && selectedRunStatus === 'stalled' ? ' stalled' : ''}`}>
     <span className="asst-run-context-label">{proposalContext ? text('Drafting', 'Подготовка')
-      : historical ? text('Viewing run', 'Просмотр запуска') : text('Next message to run', 'Следующее сообщение о запуске')}</span>
+      : historical ? text('Viewing run', 'Просмотр запуска') : text('Next message to run', 'Следующее сообщение для запуска')}</span>
     <strong title={proposalContext ? text('New run proposal', 'План нового запуска') : selectedRun?.goal || runId}>
       {proposalContext ? text('New run proposal', 'План нового запуска') : selectedRun?.label || selectedRun?.run_id || runId}
     </strong>
@@ -3701,7 +3701,7 @@ export default function AssistantBar({ runId, hidden = false, onReady }) {
         {text('Chat', 'Чат')} <strong>{currentSession?.title || text('New chat', 'Новый чат')}</strong>
       </span>
       <span className="asst-next-target" title={nextMessageTarget}>
-        {historical ? text('Viewing', 'Просмотр') : text('Next message to', 'Следующее сообщение о')} <strong>{nextMessageTarget}</strong>
+        {historical ? text('Viewing', 'Просмотр') : text('Next message to', 'Следующее сообщение для')} <strong>{nextMessageTarget}</strong>
       </span>
       {nextMessageRefs.length > 0 && <span className="asst-next-refs">
         {nextMessageRefs.map(id => <span key={id}>#{id}</span>)}

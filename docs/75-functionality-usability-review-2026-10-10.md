@@ -11,7 +11,7 @@ finished run, command help, the first run's screen, vocabulary, docs; 35 finding
 перепроверены на дереве и держатся (§3); предмет здесь — **одиннадцатая минута**: вторая команда,
 первая ошибка, завершённый прогон, справка конкретной команды, главный экран первого run.
 
-Как читать: §1 — вывод и первый пакет; §5 — реестр находок `UX-01…UX-35`, у каждой наблюдение
+Как читать: §1 — вывод и первый пакет; §5 — реестр находок `UX-01…UX-36`, у каждой наблюдение
 (измеренное), предложение и критерий приёмки; §7 — пакеты; §8 — метрики «сейчас → цель»; §10 —
 команды, которыми всё снято. Правило ведения — §11; критика плана и выбор вариантов — §12.
 
@@ -66,7 +66,7 @@ doc 74 закрепил свою приёмку, зелёные на этой б
 кнопок и одно аддитивное поле контракта; ни одно не трогает фолд, типы событий или промпты. Затем
 UX-10, UX-11 (справка команд), UX-14, UX-15 (главный экран), UX-19 (глоссарий). Остальное — §7.
 
-Реестр: 35 находок, из них P0 — 4, P1 — 14, P2 — 17; снятых — 0.
+Реестр: 36 находок, из них P0 — 4, P1 — 15, P2 — 17; снятых — 0.
 
 ## 2. Метод и границы
 
@@ -669,6 +669,20 @@ agent: connect `looplab harness-mcp` to this run (run dir runs/my-run); see `loo
 **Приёмка.** `inspect` без аргумента в каталоге с `runs/` печатает список; без `runs/` — одна
 строка, как найти прогон; тест.
 
+#### UX-36 · P1 · L — Русский каталог интерфейса местами машинный перевод
+
+**Наблюдение.** Демо на русском (2026-10-11, браузер): ось графика Report — «unde id ¶», легенда —
+«- границы: 1.343», строка оператора — «подниматься вокруг холмов», заголовок очереди — «Квью»;
+десять записей несли буквальное `&quot;`, среди них предупреждение о платном действии «может быть
+запрошено обвинение». Эвристика «латинское слово, которого нет в ключе» находит 74 записи из 7762;
+настоящих дефектов больше — большинство в описаниях настроек («tie» → «галстук», «wall clock» →
+«Настенные часы»).
+**Предложение.** Чинить по поверхностям, начиная с тех, что видит первый запуск (Report, очередь,
+стартовая страница, затем Настройки); то, что выражается правилом, держать тестом.
+**Приёмка.** В каталоге нет HTML-сущностей, которых нет в ключе; исправленные записи закреплены
+(`ui/test/russianCatalogueQuality.test.js`); описания настроек вычитаны, эвристика не находит
+латинских обрывков, кроме имён полей и команд.
+
 ## 6. Целевые сценарии после исправлений
 
 1. **Терминал, второй шаг.** `looplab init` → `looplab run looplab.yaml` без `data.csv`: одна строка
@@ -696,7 +710,7 @@ agent: connect `looplab harness-mcp` to this run (run dir runs/my-run); see `loo
 | 2. UI первого run | UX-13, UX-14, UX-15, UX-16, UX-17, UX-28, UX-30, UX-31 | `core/comparison.py`, `engine/comparability.py`, `ui/src/report.js`, `resultNoticeModel.js`, `RunView.jsx`, `Report.jsx`, `Settings.jsx`, `RunList.jsx` | сделано 2026-10-10: `tests/test_deterministic_contract.py`, `ui/test/deterministicObjective.test.js`, `whyStripPlain.test.js`, `settingsFreshDefaults.test.js`; у детерминированного результата нет и чипа «repeat checks are not established» рядом с «repeat checks are not needed» (`deterministicObjective.test.js`); полоса стратегии завершённого run не называет следующий шаг и говорит «Budget spent» (`whyStripPlain.test.js`); в русском интерфейсе переведены опции группировки линейки, уведомление о ссылке и заголовок страницы run (`russianRenderSites.test.js`); при открытой боковой панели Assistant шапка run переносится, и Concepts/Report/Overview больше не уходят под панель на 1280–1440px (`runHeaderResponsive.test.js`); завершённый run с поздней остановкой не показывает жёлтый чип «paused» рядом с «Finished» (`runViewFinishedPaused.test.js`); уведомление о ссылке без версии run говорит это словами, а не «generation fence» (`runRouteState.test.js`); карточка «Assistant could not reach the model provider» называет офлайн-демо и переводит своё сообщение (`assistantErrorCardLanguage.test.js`); таблица шагов Report рядом с боковой панелью Assistant (регион 574px при окне 1280px) больше не уводит «what changed» за правый край: пустой на run без кодовой базы столбец `base` не рисуется, а в регионе уже 1040px столбцы делят его ширину (`ui/test/reportStepsTable.test.js`); панель «Исследование» офлайн-run больше не обещает «запуск по расписанию»: без модели (backend=toy) она называет причину, у завершённого run не пишет «yet», значок заголовка переведён (`ui/test/researchEmptyState.test.js`); «Файлы» больше не открываются восемью пустыми блокировками движка среди 30 строк демо: пустые `*.lock` в корне каталога run свёрнуты под одну кнопку, поиск их находит (`ui/test/filesLockRows.test.js`); «Очередь» завершённого run не называет себя «живым списком работы», а её заголовок, значок и счётчики переведены (заголовок был «Квью», `Stat` не вызывал `uiText`), заодно исправлены ошибочные переводы подписей счётчиков («no failures» → «не срабатывает», «power draw» → «Электрический рычаг») (`ui/test/queuePanelFinished.test.js`) |
 | 3. Справка команд | UX-10, UX-11, UX-12, UX-34 | докстринги команд, `cli/help_panels.py`, `core/appconfig.py`, `tests/test_cli_help_panels.py` | сделано 2026-10-10: `tests/test_cli_help_panels.py`; у всех 74 команд `--help` без цитат — 37 команд сопровождающего показывают одну строку, а прежний текст хранят после `\f`, который `--help` не печатает; shrink-only список пуст |
 | 4. Пути и примеры | UX-04, UX-06, UX-22, UX-23, UX-29, UX-32 | `adapters/*_task.py`, снимок задачи, `tasks.md`, `cli-walkthrough.md`, `llm-and-agents.md`, `examples/` | сделано 2026-10-10: `tests/test_task_paths.py`, `test_api_key_recipes.py`, `test_entry_page_budgets.py` |
-| 5. Словарь | UX-18, UX-19 | вывод `run`/`inspect`, заголовок Report, список run, `docs/guide/glossary.md` | сделано 2026-10-10: `docs/guide/glossary.md`, `tests/test_glossary.py`; панель концептов не пишет «(the run is tagged)» про run без тегов, где merge-эксперимент не унаследовал теги от неотмеченных родителей (`ui/test/conceptChipBar.test.js`); `timings` озаглавливает блоки `experiment #N` и `run setup (node -1)`, столбец меток выровнен (`tests/test_timings.py`); список команд и справка `timings`/`tensorboard`/`export-git` говорят «experiment», буквальные имена (`--node`, `nodes/`, тег `node-<id>`) остаются (`tests/test_cli_help_panels.py`) |
+| 5. Словарь | UX-18, UX-19, UX-36 | вывод `run`/`inspect`, заголовок Report, список run, `docs/guide/glossary.md` | сделано 2026-10-10: `docs/guide/glossary.md`, `tests/test_glossary.py`; панель концептов не пишет «(the run is tagged)» про run без тегов, где merge-эксперимент не унаследовал теги от неотмеченных родителей (`ui/test/conceptChipBar.test.js`); `timings` озаглавливает блоки `experiment #N` и `run setup (node -1)`, столбец меток выровнен (`tests/test_timings.py`); список команд и справка `timings`/`tensorboard`/`export-git` говорят «experiment», буквальные имена (`--node`, `nodes/`, тег `node-<id>`) остаются (`tests/test_cli_help_panels.py`); UX-36 открыт: исправлена 21 запись русского каталога (ось, легенда и вердикт Report, все записи с `&quot;`), две строки адресата сообщения Ассистента и, раньше, подписи «Очереди» (`ui/test/russianCatalogueQuality.test.js`, `queuePanelFinished.test.js`, `russianRenderSites.test.js`); описания настроек ещё не вычитаны |
 | 6. Документация как система | UX-20, UX-21, UX-09, UX-03 | `00-INDEX.md`, `tests/test_entry_page_budgets.py`, `replay --summary`, предупреждение фенса | сделано 2026-10-10: `tests/test_index_language_tags.py`, потолки прозы в `test_entry_page_budgets.py` |
 
 Порядок (§12): 1 (сначала UX-01/UX-02 — один тип отказа, затем функция запаса для UX-05/UX-07) →

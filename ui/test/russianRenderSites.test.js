@@ -35,3 +35,12 @@ test('the run page label is translated as a template, not as a finished sentence
   assert.ok(catalogue['Run {0}'])
   assert.match(source('App.jsx'), /const routeLabel = route\.view === 'run' \? uiMessage\('Run \{0\}', \[route\.id\]\)/)
 })
+
+test('the Assistant names where the next message goes, not what it is about', () => {
+  // «Следующее сообщение о demo» reads "the next message ABOUT demo": the label names the run the
+  // message is SENT to (2026-10-11, the start page in Russian).
+  const bar = source('AssistantBar.jsx')
+  assert.match(bar, /text\('Next message to', 'Следующее сообщение для'\)/)
+  assert.match(bar, /text\('Next message to run', 'Следующее сообщение для запуска'\)/)
+  assert.doesNotMatch(bar, /Следующее сообщение о/)
+})
