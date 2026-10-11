@@ -2257,7 +2257,10 @@ export default function RunView({ runId, onBack, reviewMode = false, reviewMeta 
         {finalizing
           ? <span className="chip warn"><OpIcon name="stop" size={11} />
               {((lifecycle.mode === 'finalization-stalled' ? uiText('finalization stalled') : (lifecycle.mode === 'finishing' ? uiText('finishing') : uiText('finalizing'))))}</span>
-          : live.paused && <span className="chip warn"><OpIcon name="pause" size={11} />{uiText(" paused")}</span>}
+          // Not on a FINISHED run: a stop recorded after the finish (`looplab stop --wait`) only fences
+          // a queued server action from reopening it, so "paused" beside "Finished" named nothing to
+          // resume (seen on the finalized offline demo, 2026-10-11).
+          : live.paused && !live.finished && <span className="chip warn"><OpIcon name="pause" size={11} />{uiText(" paused")}</span>}
       </div>
 
       {configNoticeStatus && <div
