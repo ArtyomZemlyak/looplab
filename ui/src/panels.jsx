@@ -54,7 +54,9 @@ import {
 
 export { default as Panel } from './PanelShell.jsx'
 
-const Stat = ({ n, l }) => { useUILanguage(); return (<div className="stat"><div className="n">{n}</div><div className="l">{l}</div></div>) }
+// `l` is an English catalogue key: it skipped `uiText`, so every counter label in Queue, Trust,
+// Failures and Host & GPU read English in the Russian UI.
+const Stat = ({ n, l }) => { useUILanguage(); return (<div className="stat"><div className="n">{n}</div><div className="l">{typeof l === 'string' ? uiText(l) : l}</div></div>) }
 
 function overviewHintPreview(text) {
   const plain = stripMd(text || '').trim()
@@ -846,11 +848,15 @@ export function QueuePanel({ state, runId, onSelect, onClose, onToast }) {
   }
   const queuedCount = workNodes.length + injects.length + forks.length + confirmReq.length + ablateReq.length
   return (
-    <Panel title={uiText("Queue")} sub={`${queuedCount} planned / in-flight`} onClose={onClose}>
+    <Panel title={uiText("Queue")} sub={uiMessage('{0} planned / in-flight', [queuedCount])} onClose={onClose}>
       <div className="muted" style={{ marginBottom: 10 }}>
         {/* `/experiment` was never a command either (same dead end as the research panel's old
             `/deep-research`). The two shapes that DO append an inject/fork are the graph node menu's
-            own items, so name them exactly as Dag.jsx spells them. */}{uiText("The next experiment is chosen by the search policy; this is the live work-list — cancel a pending experiment, or add one from a node’s “Explore from here” / “Merge with…” menu on the graph.")}</div>
+            own items, so name them exactly as Dag.jsx spells them. A FINISHED run is not a "live
+            work-list" (the offline demo said so with nothing left to run): an added experiment
+            restarts the engine, and waits here while the run has no experiment left in its budget. */}{state.finished
+          ? uiText("This run has finished, so nothing is being built or evaluated. An experiment added from a node’s “Explore from here” / “Merge with…” menu on the graph is listed here until the run serves it.")
+          : uiText("The next experiment is chosen by the search policy; this is the live work-list — cancel a pending experiment, or add one from a node’s “Explore from here” / “Merge with…” menu on the graph.")}</div>
       <div className="cardgrid" style={{ marginBottom: 12 }}>
         <Stat n={work.building.length} l="building" />
         <Stat n={work.evaluating.length} l="training / evaluating" />
