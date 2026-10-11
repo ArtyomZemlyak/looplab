@@ -253,3 +253,34 @@ def test_inspect_with_no_argument_and_no_runs_says_how_to_find_one(tmp_path, mon
     monkeypatch.chdir(tmp_path)
     result = _invoke("inspect")
     assert result.exit_code == 2 and "looplab inspect RUN_DIR" in result.output
+
+
+@pytest.mark.parametrize("task, remedy, absent", [
+    # `looplab init --kind quadratic`'s snapshot: a builtin evaluation, no `eval` block to put
+    # `eval.inputs` in — the advice named a field this task kind does not have.
+    ({"kind": "quadratic", "goal": "min", "direction": "min"},
+     "A `quadratic` task's evaluation is built in, with no inputs to declare; a "
+     "`comparison_contract` on the task makes it decidable.", "eval.inputs"),
+    ({"kind": "repo", "goal": "min", "direction": "min", "eval": {"command": ["python", "e.py"]}},
+     "Declare `eval.inputs` on the task (or a `comparison_contract`) to make it decidable.", None),
+])
+def test_unknown_comparability_names_only_what_this_task_can_declare(tmp_path, task, remedy, absent):
+    """`looplab inspect`'s UNKNOWN comparability line (doc 75 UX-07) on a run whose champion carries
+    no comparability record, driven through the real command."""
+    import json
+
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+    store = EventStore(run_dir / "events.jsonl")
+    store.append("run_started", {"goal": "min", "direction": "min", "task_id": "t"})
+    store.append("node_created", {"node_id": 0, "parent_ids": [], "operator": "draft",
+                                  "idea": {"params": {"x": 1.0}}})
+    store.append("node_evaluated", {"node_id": 0, "metric": 1.0})
+    (run_dir / "task.snapshot.json").write_text(json.dumps(task), encoding="utf-8")
+    result = _invoke("inspect", run_dir)
+    assert result.exit_code == 0, result.output
+    line = next(line for line in result.output.splitlines() if line.startswith("comparability:"))
+    assert line.startswith("comparability: UNKNOWN"), line
+    assert line.endswith(remedy), line
+    if absent:
+        assert absent not in line, line

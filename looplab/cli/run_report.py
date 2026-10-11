@@ -907,6 +907,24 @@ def echo_parked_requests(events, state) -> None:
         typer.echo(f"parked: {parked['detail']}")
 
 
+def _unknown_comparability_remedy(run_dir) -> str:
+    """What the operator can declare so an UNKNOWN comparability becomes decidable — only what
+    THIS task can carry. `eval.inputs` lives in a task's `eval` block; a builtin-evaluation task
+    (the offline `quadratic` starter, `regression`) has none, and telling a first-run user to
+    declare it sent them looking for a field their task kind does not have (measured 2026-10-11 on
+    `looplab init --kind quadratic`). Every adapter accepts a `comparison_contract`."""
+    import json
+    try:
+        task = json.loads((Path(run_dir) / "task.snapshot.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        task = None
+    if isinstance(task, dict) and not isinstance(task.get("eval"), dict):
+        kind = task.get("kind") if isinstance(task.get("kind"), str) else "this"
+        return (f"A `{kind}` task's evaluation is built in, with no inputs to declare; a "
+                "`comparison_contract` on the task makes it decidable.")
+    return "Declare `eval.inputs` on the task (or a `comparison_contract`) to make it decidable."
+
+
 def echo_inspect_tail(state, run_dir: Path, *, show_config_hint: bool, events=None) -> None:
     """The last lines of `looplab inspect`: the champion's comparability key, the offline-baseline
     note, and where the launch settings are. Moved out of `inspect_cmds.py` VERBATIM for the
@@ -930,8 +948,8 @@ def echo_inspect_tail(state, run_dir: Path, *, show_config_hint: bool, events=No
     else:
         typer.echo(
             "comparability: UNKNOWN — this run records no key for what its metric was measured "
-            "against, so its number may not be ranked against any other run's. Declare "
-            "`eval.inputs` on the task (or a `comparison_contract`) to make it decidable.")
+            "against, so its number may not be ranked against any other run's. "
+            + _unknown_comparability_remedy(run_dir))
     _launch = snapshot_settings(Path(run_dir) / "config.snapshot.json")
     _backend = _launch.get("backend")
     _offline = offline_baseline_note(
