@@ -3207,6 +3207,12 @@ class SpeculationMixin:
         for node in self._speculative_pending_nodes(state):
             if (node.id, node.attempt) in eval_inflight:
                 continue  # burn-to-terminal once GPU dispatch has started
+            if node.id in state.aborted_nodes:
+                # The operator abort owns this node's terminal (`_skip_if_aborted` writes the
+                # "aborted" one when dispatch reaches it). The fold ignores any other terminal for an
+                # aborted node, so a "superseded" one here left it pending and returned True forever:
+                # a livelock that appended node_failed rows and starved dispatch (v14, 2026-10-11).
+                continue
             card_id = node.idea.card_id
             if not isinstance(card_id, str):
                 continue
