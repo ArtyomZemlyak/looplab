@@ -35,3 +35,30 @@ test('the Report chart and verdict read as Russian, not as a garbled translation
   for (const [key, value] of Object.entries(messages))
     if (!garbled.test(key)) assert.doesNotMatch(value, garbled, key)
 })
+
+test('a sub-option label keeps its ↳ marker in Russian', () => {
+  // The Settings form draws a dependent option as "↳ <label>" under the one it refines; 31 Russian
+  // labels had turned the marker into ", " (and their words into machine translation), so the
+  // dependency vanished from the form (2026-10-11).
+  const lost = Object.entries(messages).filter(([key, value]) => key.startsWith('↳') && !value.startsWith('↳ '))
+  assert.deepEqual(lost.map(([key]) => key), [])
+})
+
+test('the essential Settings fields read as Russian (doc 75 UX-36)', () => {
+  // What Settings shows before "Show all": the labels a first-run user sets the model and the
+  // budgets with. «Параллельные мероприятия в рамках ЛММ», «Макс. часы работы в стене» and a
+  // help text opening «С задницей игрушки» ("With backend=toy") were there on 2026-10-11.
+  const expected = {
+    'Eval parallel': 'Параллельные оценки',
+    'LLM parallel': 'Параллельные вызовы LLM',
+    'Max wall-clock (s)': 'Макс. реальное время (с)',
+    'LLM token limit': 'Предел токенов LLM',
+    'Per-eval timeout (s)': 'Тайм-аут одной оценки (с)',
+    'Role backend': 'Исполнитель ролей',
+    'Stream requests': 'Потоковые запросы',
+  }
+  for (const [key, value] of Object.entries(expected)) assert.equal(messages[key], value, key)
+  const garbled = /задниц|ЛММ|в стене|JOSON|STRAEAM|Уловка|Почетный доверенный/
+  for (const [key, value] of Object.entries(messages))
+    if (!garbled.test(key)) assert.doesNotMatch(value, garbled, key)
+})
