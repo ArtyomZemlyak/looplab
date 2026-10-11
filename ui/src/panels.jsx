@@ -3271,6 +3271,16 @@ const ARTIFACT_SCOPE_ERRORS = new Set([
 
 const artifactScopeChanged = error => error?.status === 409 || ARTIFACT_SCOPE_ERRORS.has(error?.code)
 
+// The engine's empty coordination locks at the top of the run directory (`events.jsonl.lock`,
+// `engine.lock`, `.spans-writer.lock`, …). On the offline demo they were 8 of the 30 rows Files
+// opened with — zero bytes each, nothing to read. Only top-level, zero-byte `*.lock` files in the
+// RUN root: a node's own file named `*.lock`, or one with content, is the candidate's and stays.
+// Pure, for its truth table (ui/test/filesLockRows.test.js).
+export function isRunLockFile(root, file) {
+  return !!(root?.is_run_dir && typeof file?.path === 'string' && !file.path.includes('/')
+    && file.path.endsWith('.lock') && file.size === 0)
+}
+
 // Workspace file browser: lists the run directory and live host repo / reference / data paths declared
 // by a RepoTask. Those task paths can contain inputs, later edits and outputs; without a start-time
 // manifest the UI deliberately makes no file-level production claim. Text files open inline; binary /
@@ -3285,6 +3295,7 @@ export function ArtifactsPanel({ runId, expectedGeneration, onToast, onClose }) 
   const [content, setContent] = useState(null)
   const [busy, setBusy] = useState(false)
   const [filter, setFilter] = useState('')
+  const [showLocks, setShowLocks] = useState(false)
   const [reload, setReload] = useState(0)
   const inventoryReqRef = useRef(0)
   const contentAbortRef = useRef(null)
@@ -3406,7 +3417,9 @@ export function ArtifactsPanel({ runId, expectedGeneration, onToast, onClose }) 
             {roots.map(r => {
               const isOpen = !!open[r.id]
               const matches = matchesByRoot?.get(r.id) || r.files
-              const files = isOpen ? matches : null
+              // A search still finds a lock file; only the unfiltered listing folds them away.
+              const locks = ql ? [] : matches.filter(f => isRunLockFile(r, f))
+              const files = isOpen ? (showLocks ? matches : matches.filter(f => ql || !isRunLockFile(r, f))) : null
               return (
                 <div className="art-root" key={r.id}>
                   <button type="button" className="art-root-h disclosure-button" title={r.path}
@@ -3427,6 +3440,9 @@ export function ArtifactsPanel({ runId, expectedGeneration, onToast, onClose }) 
                           <span className="art-name">{f.path}</span>
                           <span className="art-size">{fmtBytes(f.size)}</span>
                         </button>))}
+                    {locks.length > 0 && <button type="button" className="btn xs ghost"
+                      aria-pressed={showLocks} onClick={() => setShowLocks(v => !v)}>
+                      {showLocks ? uiText('Hide engine lock files') : uiPlural(locks.length, 'Show {0} empty engine lock file', 'Show {0} empty engine lock files')}</button>}
                     {r.truncated && <div className="muted art-empty">{(ql ? uiPlural(r.n_files, 'Filter checked {0} loaded files; this root may contain more matches.', 'Filter checked {0} loaded files; this root may contain more matches.') : uiPlural(r.n_files, 'Listing stopped at {0} files; this root may contain more.', 'Listing stopped at {0} files; this root may contain more.'))}</div>}
                   </div>}
                 </div>

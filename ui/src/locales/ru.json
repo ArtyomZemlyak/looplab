@@ -1,7 +1,7 @@
 {
   "schema": 1,
   "language": "ru",
-  "count": 7755,
+  "count": 7756,
   "messages": {
     "# LoopLab run report — {0}": "# Отчёт запуска LoopLab — {0}",
     "## Agent narrative (advisory)": "## Пояснения агента (рекомендации)",
@@ -7757,7 +7757,8 @@
     "was started from this tab. It opens here as soon as its first records are written.": "запущен из этой вкладки. Он откроется здесь, как только появятся первые записи.",
     "Deep research needs a model. This run used none (backend=toy), so it records no research memos.": "Глубокому исследованию нужна модель. Этот запуск обходился без неё (backend=toy), поэтому исследовательских записок в нём нет.",
     "No research memo was recorded before this run finished.": "До завершения запуска не записано ни одной исследовательской записки.",
-    "No research memos": "Исследовательских записок нет"
+    "No research memos": "Исследовательских записок нет",
+    "Hide engine lock files": "Скрыть файлы блокировок движка"
   },
   "plurals": {
     "({0} paraphrases folded)": {
@@ -9522,6 +9523,11 @@
       "one": "→ вызван {0} инструмент (показан ниже)",
       "few": "→ вызвано {0} инструмента (показаны ниже)",
       "many": "→ вызвано {0} инструментов (показаны ниже)"
+    },
+    "Show {0} empty engine lock files": {
+      "one": "Показать {0} пустой файл блокировки движка",
+      "few": "Показать {0} пустых файла блокировки движка",
+      "many": "Показать {0} пустых файлов блокировки движка"
     }
   }
 }
