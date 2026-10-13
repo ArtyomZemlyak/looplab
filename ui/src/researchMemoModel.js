@@ -394,7 +394,7 @@ export function memoLead(summary, { limit = MEMO_LEAD_CHARS } = {}) {
   if (!text) return ''
   // First sentence, when there is one worth calling a sentence. `.` followed by a space and a
   // capital — not any period, or "0.8835 recall" and "vs. the baseline" each end the headline.
-  const sentence = /^(.{20,}?[.!?])\s+[A-Z(“"']/.exec(text)
+  const sentence = /^(.{20,}?[.!?])\s+[A-ZА-ЯЁ(“"']/.exec(text)
   const lead = sentence ? sentence[1] : text
   if (lead.length <= limit) return lead
   // Cut on a word boundary so the ellipsis never lands mid-token.

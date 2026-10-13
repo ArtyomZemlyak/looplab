@@ -30,3 +30,9 @@ test('a check made against other settings stops speaking for the saved ones', ()
   noteSettingsRevisions('s2', 'k2')                          // the key was cleared
   assert.match(paidActionModelNote('toy', readModelCheck()), /Needs a model: this run used none/)
 })
+
+test('toy is an evaluator backend, not evidence that an external agent requires an internal model', () => {
+  assert.equal(paidActionModelNote('toy', null, { externalHarness: true }), '')
+  assert.match(paidActionModelNote('toy', null), /Needs a model/)
+  assert.match(paidActionModelNote('toy', { outcome: 'failed' }, { externalHarness: true }), /check failed/)
+})

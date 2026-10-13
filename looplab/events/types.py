@@ -1614,9 +1614,9 @@ EVENT_PAYLOAD_KEYS: dict[str, PayloadContract] = {
         optional=("by", "dropped_by", "reason"),
     ),
     "card_edited": PayloadContract(
-        "The operator rewrote a Card's statement.",
+        "The operator rewrote a Card's display statement or a research question's concepts.",
         required=("id",),
-        optional=("source", "statement"),
+        optional=("concepts", "source", "statement"),
     ),
     "card_enriched": PayloadContract(
         "A Card's novelty / cross-run / footprint delta (last write by seq wins).",

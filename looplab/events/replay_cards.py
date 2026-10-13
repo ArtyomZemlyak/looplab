@@ -217,13 +217,21 @@ def _on_card_reprioritized(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> 
 
 
 def _on_card_edited(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
-    """Fold a display-only edit; the immutable seed/action receipt remains untouched."""
+    """Fold display text and optional question tags; seed/action receipts stay untouched."""
     card_id = _card_replay_id(d.get("id"))
     statement = _card_replay_text(
         d.get("statement"), max_chars=_CARD_REPLAY_STATEMENT_MAX, strip=True)
     if card_id is not None and statement is not None and d.get("source") == "operator":
-        st.card_operator_edits.pop(card_id, None)
+        previous = st.card_operator_edits.pop(card_id, {})
         edit = {"statement": statement, "source": "operator"}
+        # A later text-only edit must not undo an explicitly authored question membership.
+        if "concepts" in previous:
+            edit["concepts"] = list(previous["concepts"])
+        raw_concepts = d.get("concepts")
+        if isinstance(raw_concepts, list):
+            concepts, overflow, invalid = bounded_raw_concept_values(raw_concepts)
+            if not overflow and not invalid:
+                edit["concepts"] = concepts
         # Legacy/in-memory Event objects may not carry a durable sequence. Never manufacture an
         # acknowledgement for those rows; modern EventStore records always take this exact branch.
         if type(e.seq) is int and e.seq >= 0:

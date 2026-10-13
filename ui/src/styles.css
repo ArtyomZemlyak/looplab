@@ -3593,11 +3593,23 @@ body.asst-side-open .app-shell-main { margin-right: var(--asst-side-w, 440px); }
 
 /* One experiment in the Research view: where it is filed (and, for the operator, the control that
    puts that on the record) above the shared card body. */
-.research-experiment { display: flex; flex-direction: column; gap: 2px; }
-.research-filing { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; font-size: 12px; }
-.research-filing:empty { display: none; }
-.research-inferred-chip, .research-operator-chip { align-self: flex-start; }
-.research-filing-select select { max-width: min(42ch, 100%); }
+.research-experiment { display: flex; flex-direction: column; gap: 6px; min-width: 0; }
+.research-filing { display: flex; flex-wrap: wrap; align-items: flex-start; gap: 12px;
+  padding: 10px 12px; border: 1px solid var(--border); border-radius: 8px;
+  background: var(--bg); font-size: 12px; min-width: 0; }
+.research-filing-context { display: grid; gap: 4px; flex: 1 1 220px; min-width: 0; }
+.research-filing-label { color: var(--fg-mut); font-size: 11px; }
+.research-filing-question { line-height: 1.45; font-weight: 600; overflow-wrap: anywhere; }
+.research-filing-provenance, .research-filing-overlap { color: var(--fg-mut); line-height: 1.4; }
+.research-filing-actions { display: flex; flex-wrap: wrap; align-items: flex-start; gap: 8px; max-width: 100%; }
+.research-filing-change { min-width: 0; max-width: 100%; }
+.research-filing-change > summary { cursor: pointer; padding: 6px 8px; color: var(--accent); }
+.research-filing-select { display: grid; gap: 6px; padding: 8px 0; max-width: 100%; }
+.research-filing-select select { width: min(38ch, 100%); max-width: 100%; min-width: 0; }
+@media (max-width: 640px) {
+  .research-filing-actions, .research-filing-change, .research-filing-select { width: 100%; }
+  .research-filing-select select { width: 100%; }
+}
 
 /* The offline demo on the first-run landing (doc 74 EB-24): a secondary action under the primary
    "Describe a goal" button, whose launch card reads left-aligned inside the centred landing. */

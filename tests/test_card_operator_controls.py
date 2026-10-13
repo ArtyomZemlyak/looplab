@@ -68,7 +68,7 @@ def test_all_four_card_controls_are_command_only_no_spawn_with_closed_payloads()
         assert {"source", "dropped_by", "pinned", "pinned_by"}.isdisjoint(
             CONTROL_DATA_FIELDS[event_type])
     assert CONTROL_DATA_FIELDS[EV_CARD_REPRIORITIZED] == frozenset({"id", "priority"})
-    assert CONTROL_DATA_FIELDS[EV_CARD_EDITED] == frozenset({"id", "statement"})
+    assert CONTROL_DATA_FIELDS[EV_CARD_EDITED] == frozenset({"id", "statement", "concepts"})
     assert CONTROL_DATA_FIELDS[EV_CARD_RESOURCE_PINNED] == frozenset(
         {"id", "gpus", "gpu_mem_mib"})
     assert CONTROL_DATA_FIELDS[EV_CARD_DROPPED] == frozenset({"id", "reason"})
@@ -503,3 +503,51 @@ def test_scheduler_resolves_canonical_pin_for_pending_node_with_merged_alias(tmp
     assert admitted["count"] == 2
     assert admitted["gpu_mem_mib"] == 12_000
     assert scheduler._node_resource_reservation_is_current(state, node, reservation) is True
+
+
+def test_external_question_creation_and_concept_edits_keep_identity_and_node_tags(tmp_path):
+    rd, store = _seed(tmp_path)
+    srv = _Srv()
+    payload = normalize_control(srv, rd, 'hypothesis_added', {
+        'id': 'q-old', 'statement': 'Does old context help?',
+        'concepts': ['old-context', 'old-context', 'data-composition'],
+    })
+    assert payload['concepts'] == ['old-context', 'data-composition']
+    store.append('hypothesis_added', payload)
+    before = fold(store.read_all()).cards['q-old']
+    assert before.concept_tags == ['old-context', 'data-composition']
+    seed = before.seed_statement
+    belief = before.belief_id
+    edit = normalize_control(srv, rd, EV_CARD_EDITED, {
+        'id': 'q-old', 'statement': before.statement, 'concepts': ['rare-item-recall'],
+    })
+    store.append(EV_CARD_EDITED, edit)
+    card = fold(store.read_all()).cards['q-old']
+    assert card.concept_tags == ['rare-item-recall']
+    assert card.concept_source.kind == 'card_edited'
+    assert card.concept_source.complete
+    assert card.seed_statement == seed and card.belief_id == belief
+    # A text-only edit keeps the authored membership; it is not an implicit clear.
+    store.append(EV_CARD_EDITED, normalize_control(srv, rd, EV_CARD_EDITED, {
+        'id': 'q-old', 'statement': 'Помогает ли старый контекст?',
+    }))
+    assert fold(store.read_all()).cards['q-old'].concept_tags == ['rare-item-recall']
+    store.append(EV_CARD_EDITED, normalize_control(srv, rd, EV_CARD_EDITED, {
+        'id': 'q-old', 'statement': 'Помогает ли старый контекст?', 'concepts': [],
+    }))
+    assert fold(store.read_all()).cards['q-old'].concept_tags == []
+    with pytest.raises(HTTPException) as exc:
+        normalize_control(srv, rd, EV_CARD_EDITED, {
+            'id': 'card-1', 'statement': 'immutable seed', 'concepts': ['forged-card-tags'],
+        })
+    assert exc.value.status_code == 400
+
+
+@pytest.mark.parametrize('concepts', ['old-context', [False], [''], [3], ['x'] * 65])
+def test_external_question_concepts_refuse_malformed_or_oversized_membership(tmp_path, concepts):
+    rd, _ = _seed(tmp_path)
+    with pytest.raises(HTTPException) as exc:
+        normalize_control(_Srv(), rd, 'hypothesis_added', {
+            'id': 'q-old', 'statement': 'Does old context help?', 'concepts': concepts,
+        })
+    assert exc.value.status_code == 400

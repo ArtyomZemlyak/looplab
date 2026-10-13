@@ -4,7 +4,7 @@ import { useAssistantUILanguage } from './useAssistantLanguage.js'
 
 export function validAgentActivity(value) {
   if (!value || typeof value !== 'object' || Array.isArray(value)
-      || value.scope !== 'this_ui_process' || value.source !== 'authenticated_harness_progress_read'
+      || value.scope !== 'this_ui_process' || !['authenticated_harness_progress_read', 'authenticated_harness_read'].includes(value.source)
       || !Number.isSafeInteger(value.quiet_after_s) || value.quiet_after_s < 1) return false
   if (value.status === 'not_observed') return value.last_seen_at === null && value.age_seconds === null
   return ['recent_request', 'quiet'].includes(value.status)
@@ -33,8 +33,8 @@ export default function AgentActivity({ activity, fresh }) {
       ? (ru ? `Нет новых обращений агента · ${ago}` : `No recent agent reads · ${ago}`)
       : (ru ? `Агент обращался ${ago} назад` : `Agent read ${ago} ago`)
   const explanation = ru
-    ? 'Только успешные чтения Agent cycle с harness-токеном в этом процессе UI. Опрос браузера не учитывается. Отсутствие обращений не доказывает гибель агента; проверьте клиент, вопросы и квитанции. Перезапуск UI очищает наблюдение.'
-    : 'Only successful Agent cycle reads with the harness credential in this UI process. Browser polling does not count. Silence does not prove agent death; inspect the client, questions and receipts. UI restart clears this observation.'
+    ? 'Учитываются успешные проверки требований и вопросов обучения внешним агентом в этом процессе UI. Опрос браузера не учитывается. Отсутствие обращений не доказывает гибель агента; проверьте клиент, вопросы и квитанции. Перезапуск UI очищает наблюдение.'
+    : 'Successful progress and training-checkpoint reads with the harness credential in this UI process. Browser polling does not count. Silence does not prove agent death; inspect the client, questions and receipts. UI restart clears this observation.'
   return <span className={'chip' + (activity.status === 'quiet' ? ' warn' : '')}
     role="status" title={explanation + (activity.last_seen_at
       ? ` ${ru ? 'Последнее чтение' : 'Last read'}: ${activity.last_seen_at}` : '')}>

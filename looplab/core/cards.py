@@ -725,7 +725,7 @@ class CardConceptSource(BaseModel):
     # owns no executable action. Filing those tags under `card_added` would mint a receipt nobody
     # issued — the exact provenance lie this class exists to prevent — and leaving `concept_source`
     # None would make an authored membership indistinguishable from one nobody claimed.
-    kind: Literal["card_added", "card_enriched", "node", "hypothesis_added"]
+    kind: Literal["card_added", "card_enriched", "node", "hypothesis_added", "card_edited"]
     node_id: Optional[int] = Field(default=None, ge=0)
     node_generation: Optional[int] = Field(default=None, ge=0)
     provenance: Optional[Literal[

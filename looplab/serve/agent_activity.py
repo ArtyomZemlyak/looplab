@@ -1,4 +1,4 @@
-"""Bounded, process-local observations of authenticated external progress reads.
+"""Bounded, process-local observations of authenticated external workflow reads.
 
 This is request activity, never an agent/transport lease or proof of life. No
 heartbeat thread, file write, engine gate or automatic recovery follows from age.
@@ -20,10 +20,10 @@ class AgentActivity:
         self._reads = OrderedDict()
         self._lock = threading.Lock()
 
-    def observe(self, rd, generation):
+    def observe(self, rd, generation, *, read_kind="harness-progress"):
         key = str(rd), generation
         with self._lock:
-            self._reads[key] = self._clock(), self._timestamp()
+            self._reads[key] = self._clock(), self._timestamp(), read_kind
             self._reads.move_to_end(key)
             while len(self._reads) > MAX_RUNS:
                 self._reads.popitem(last=False)
@@ -36,4 +36,6 @@ class AgentActivity:
                            "quiet" if age >= QUIET_AFTER_SECONDS else "recent_request"),
                 "last_seen_at": last[1] if last else None, "age_seconds": age,
                 "quiet_after_s": QUIET_AFTER_SECONDS,
-                "source": "authenticated_harness_progress_read", "scope": "this_ui_process"}
+                "source": ("authenticated_harness_progress_read" if last is None or last[2] == "harness-progress"
+                           else "authenticated_harness_read"),
+                "read_kind": last[2] if last else None, "scope": "this_ui_process"}

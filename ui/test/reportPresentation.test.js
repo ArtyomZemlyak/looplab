@@ -372,3 +372,17 @@ test('deterministic verdict stays authoritative across UI, Markdown, and model-c
     await vite.close()
   }
 })
+
+test('external report publishing is independent of the optional paid model generator', async () => {
+  const vite = await sharedVite()
+  try {
+    const { default: ReportView } = await vite.ssrLoadModule('/src/Report.jsx')
+    const markup = renderToStaticMarkup(React.createElement(ReportView, {
+      state: state('min', 10), runId: 'report-min', runBackend: 'toy', externalHarness: true,
+      expectedGeneration: 'a'.repeat(64),
+    }))
+    assert.match(markup, /external agent can publish the report directly/)
+    assert.match(markup, /Generate with model · optional · paid/)
+    assert.doesNotMatch(markup, /Needs a model: this run used none/)
+  } finally { await vite.close() }
+})

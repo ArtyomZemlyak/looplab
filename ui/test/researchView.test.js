@@ -196,7 +196,7 @@ test('the filing control: Keep here records the concept suggestion, the menu fil
     renderCard: card => React.createElement('span', { key: card.id, 'data-card': card.id }, card.id),
   }))
   const live = html(() => {})
-  assert.ok(live.includes('Keep here'), 'the inferred card offers to make the suggestion permanent')
+  assert.ok(live.includes('Confirm question'), 'the inferred card offers to make the suggestion permanent')
   assert.ok(live.includes('filed by the operator'), 'an operator filing says who filed it')
   assert.ok(live.includes('un-filed by the operator'),
     'an operator un-filing is drawn as such and NOT re-inferred under q2 by its concept')
@@ -204,7 +204,29 @@ test('the filing control: Keep here records the concept suggestion, the menu fil
     'every experiment carries the File under menu')
   assert.ok(live.includes('does beam width matter'), 'the menu lists the questions by statement')
   const readOnly = html(null)
-  assert.ok(!readOnly.includes('research-filing-select') && !readOnly.includes('Keep here'),
+  assert.ok(!readOnly.includes('research-filing-select') && !readOnly.includes('Confirm question'),
     'a read-only board shows provenance and offers no control')
-  assert.ok(readOnly.includes('filed by concepts'), 'the provenance chip stays')
+  assert.ok(readOnly.includes('Suggested by concepts · not saved'), 'the provenance chip stays')
+})
+
+test('question selector separates inferred suggestions from a saved relation', async () => {
+  const { default: ResearchView } = await loadView()
+  const { JSDOM } = await import('jsdom')
+  const cards = [
+    { id: 'q1', card_kind: 'direction', statement: 'Does old context improve recall?', concept_tags: ['old-context'] },
+    { id: 'e1', card_kind: 'experiment', concept_tags: ['old-context'] },
+    { id: 'e2', card_kind: 'experiment', parent_card_id: 'q1' },
+  ]
+  const dom = new JSDOM(renderToStaticMarkup(React.createElement(ResearchView, {
+    cards, state: { nodes: {} }, onFile() {}, renderCard: card => React.createElement('p', null, card.id),
+  })))
+  const blocks = [...dom.window.document.querySelectorAll('.research-filing')]
+  assert.equal(blocks.length, 2)
+  const suggestion = blocks.find(b => b.classList.contains('suggested'))
+  assert.match(suggestion.textContent, /Suggested by concepts · not saved/)
+  assert.match(suggestion.textContent, /Confirm question/)
+  assert.equal(suggestion.querySelector('details').open, false)
+  assert.match(blocks.find(b => !b.classList.contains('suggested')).textContent, /Saved question link/)
+  assert.ok(blocks.every(b => b.querySelector('.research-filing-question').textContent.includes('old context')))
+  dom.window.close()
 })

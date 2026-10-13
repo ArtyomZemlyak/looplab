@@ -631,11 +631,13 @@ new event arrives. The UI polls this read every ten seconds and displays the
 observation in its next step. A failed refresh withdraws that advice.
 
 Progress also has `agent_activity`, an informational observation independent of
-the journals and engine probe. Only a successful `harness-progress` read using
-the scoped harness credential updates it; this includes MCP `run_progress` and
-the progress read inside `connection_check`. Owner/browser polling, capabilities,
+the journals and engine probe. Successful `harness-progress` and `harness-checkpoints` reads using the scoped
+harness credential update it. This includes MCP `run_progress`, training monitoring,
+and the progress read inside `connection_check`. Owner/browser polling, capabilities,
 other API calls, a merely running MCP process and invalid requests do not count.
-`recent_request` means a progress request was observed within **120 seconds**;
+The optional `read_kind` names the last observed route; newer checkpoint observations
+use source `authenticated_harness_read`, while progress keeps its legacy source.
+`recent_request` means one of these workflow reads was observed within **120 seconds**;
 `quiet` means no such request was observed for at least that long. It does not
 prove agent death, thinking, connection or delivery of the response to the client.
 `not_observed` means this UI process has no observation for this run generation.
@@ -1894,3 +1896,25 @@ commentary, including human prose inside structured values. Preserve schema keys
 identifiers, commands, code, verbatim evidence and measured numbers. This preference adds
 no admission checkpoint or engine wait. It is fixed in the launched run snapshot; change it
 on resume or a new run. The UI language applies across the interface and owner generation.
+
+### Reports and readable external research
+
+External agents publish structured narratives with the durable `report_generated` command.
+The Report tab renders that narrative with the measured results, without a LoopLab model
+connection or a second provider request. The optional **Generate with model** action uses
+the separate model connection in Settings and retains its paid-action receipt protocol.
+
+Each `research_completed` memo is a new historical snapshot, not an instruction to append
+all old findings to the next memo. Keep the latest summary and findings concise, name
+changed conclusions and cite prior evidence instead of copying datasets or full JSON.
+The UI shows five findings first and preserves the rest in a disclosure. Write summaries,
+hypotheses and next actions in the user's language, with normal spacing. Concept ids and
+metric names can retain their exact technical spelling. Experiments answer a Research
+question through `idea.parent_card_id`; concept tags alone do not create that relation.
+
+Research questions can declare `concepts` in `hypothesis_added`, using the same
+validated concept ids as experiments. For an existing question, `card_edited` accepts
+`id`, `statement` and optional `concepts`; an explicit empty list clears its membership,
+while omitting it preserves earlier edits. This changes authored question membership
+and display text, not the immutable belief/action identity or measured node tags.
+Experiment tags remain generation-fenced through `concept_tag_edited`.

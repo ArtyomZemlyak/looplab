@@ -32,9 +32,9 @@ export function noteSettingsRevisions(settingsRevision, secretRevision) {
 // NOT the condition — it is also the ordinary state of a user with a working model who never pressed
 // "Check connection" — so the note fires on a failed check, or on a run that used no model
 // (backend=toy) with no passed check in this tab.
-export function paidActionModelNote(runBackend, check) {
+export function paidActionModelNote(runBackend, check, { externalHarness = false } = {}) {
   if (check?.outcome === 'failed') return 'Needs a model: the last connection check failed. Review Settings → Model.'
-  if (runBackend === 'toy' && check?.outcome !== 'passed')
+  if (runBackend === 'toy' && !externalHarness && check?.outcome !== 'passed')
     return 'Needs a model: this run used none (backend=toy). Check the connection in Settings → Model first.'
   return ''
 }

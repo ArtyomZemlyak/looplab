@@ -208,7 +208,7 @@ function List({ items }) {
 }
 
 export default function ReportView({ state, runId, onOpenPanel, canOpenPanel, onToast,
-  onPickNode, onPickEvidence, readOnly = false, runBackend = null,
+  onPickNode, onPickEvidence, readOnly = false, runBackend = null, externalHarness = false,
   historySeq = null, expectedGeneration = null, observedSeq = null,
   readOnlyReason = 'history', evidenceAvailable = true }) {
   const [, , localeRevision] = useUILanguage()
@@ -219,7 +219,7 @@ export default function ReportView({ state, runId, onOpenPanel, canOpenPanel, on
     window.addEventListener(MODEL_CHECK_EVENT, onCheck)
     return () => window.removeEventListener(MODEL_CHECK_EVENT, onCheck)
   }, [])
-  const needsModel = readOnly ? '' : paidActionModelNote(runBackend, modelCheck)
+  const needsModel = readOnly ? '' : paidActionModelNote(runBackend, modelCheck, { externalHarness })
 
   const failed = Object.values(state.nodes).filter(n => nodeIsActive(n, state) && n.status === 'failed')
   const a = useMemo(() => analyze(state), [state])
@@ -552,6 +552,7 @@ export default function ReportView({ state, runId, onOpenPanel, canOpenPanel, on
 
       <VerdictBanner v={v} onOpenPanel={onOpenPanel} canOpenPanel={canOpenPanel} />
 
+      {externalHarness && <p className="report-section-intro" role="note">{uiText('The external agent can publish the report directly. No model connection in LoopLab is required to read or export it. Generating a separate report with the model in Settings is optional and may incur provider charges.')}</p>}
       <div className="toolbar report-toolbar" role="group" aria-label={uiText("Report actions")}>
         {readOnly && <span className="history-inline">{((readOnlyReason === 'review' ? uiText('Read-only review · report refresh disabled') : (readOnlyReason === 'start-over' ? uiText('Start over unresolved · report refresh disabled') : uiMessage("{0} · report refresh disabled", [readOnlyLabel(readOnlyReason, historySeq)]))))}</span>}
         <button className="btn sm" onClick={() => window.print()}><OpIcon name="printer" size={12} />{uiText(" Print / PDF")}</button>
@@ -562,7 +563,7 @@ export default function ReportView({ state, runId, onOpenPanel, canOpenPanel, on
           disabled={refreshing || !refreshRetryAllowed || !refreshGenerationReady || !refreshStorageReady}
           onClick={refresh}
           aria-describedby="paid-report-refresh-status"
-          title={refreshDisabledReason || refreshStatus}><OpIcon name="replay" size={12} /> {uiText(refreshButtonLabel)}</button>}
+          title={refreshDisabledReason || refreshStatus}><OpIcon name="replay" size={12} /> {uiText(externalHarness && !refreshing && !savedRefreshIntent ? 'Generate with model · optional · paid' : refreshButtonLabel)}</button>}
         <nav className="report-sections" aria-label={uiText("Report sections")}>
           <span className="report-sections-label">{uiText("Jump to")}</span>
           {reportSections.map(([id, label]) => <button type="button" key={id}
@@ -573,7 +574,7 @@ export default function ReportView({ state, runId, onOpenPanel, canOpenPanel, on
       {!readOnly && <div id="paid-report-refresh-status" className="report-inline-state paid"
         role="status" aria-live="polite" aria-atomic="true">
         <OpIcon name={savedRefreshIntent || refreshing ? 'replay' : 'bolt'} size={14} />
-        <span>{uiText(refreshStatus)}</span>
+        <span>{uiText(externalHarness && !refreshing && !savedRefreshIntent && !needsModel && refreshGenerationReady && refreshStorageReady ? 'Optional model-generated report. The external agent can publish its own report without this action.' : refreshStatus)}</span>
         {/* The model note does not REPLACE the cost disclosure: the button still spends (code review). */}
         {needsModel && refreshStatus === needsModel && <span> {uiText('Paid AI action: provider charges may apply. One request identity will be saved when you start, so you can safely leave and resume.')}</span>}
       </div>}

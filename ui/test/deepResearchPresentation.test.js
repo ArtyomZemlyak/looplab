@@ -463,3 +463,20 @@ test('shared memo presentation keeps takeaway and trust visible while detail sta
     await vite.close()
   }
 })
+
+test('long findings remain available behind a closed disclosure, with five visible first', async () => {
+  const server = await createServer({ root: UI_ROOT, server: { middlewareMode: true }, logLevel: 'silent' })
+  try {
+    const { ResearchMemoBody } = await server.ssrLoadModule('/src/ResearchMemoCard.jsx')
+    const findings = Array.from({ length: 9 }, (_, i) => `Measured finding ${i + 1}`)
+    const markup = renderToStaticMarkup(React.createElement(ResearchMemoBody, { memo: { findings } }))
+    const dom = new JSDOM(markup)
+    const block = dom.window.document.querySelector('.findings')
+    assert.equal(block.querySelector(':scope > ul').children.length, 5)
+    assert.equal(block.querySelector('details > ul').children.length, 4)
+    assert.equal(block.querySelector('details').open, false)
+    assert.match(block.querySelector('summary').textContent, /4 more findings/)
+    assert.ok(findings.every(f => block.textContent.includes(f)), 'no finding is removed')
+    dom.window.close()
+  } finally { await server.close() }
+})

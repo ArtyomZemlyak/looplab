@@ -23,7 +23,7 @@ The event type itself is the contract's identity and is never renamed or reused;
 
 <!-- generated: event types -->
 
-187 event types — 130 folded into `RunState`, 57 diagnostic; 1231 declared payload keys; 32 types whose whole payload is stored by the fold.
+187 event types — 130 folded into `RunState`, 57 diagnostic; 1232 declared payload keys; 32 types whose whole payload is stored by the fold.
 
 | type | fold | records | required keys | optional keys |
 |---|---|---|---|---|
@@ -52,7 +52,7 @@ The event type itself is the contract's identity and is never renamed or reused;
 | `card_build_done` | folded | A Card's build finished: the node it produced, or the reason it was skipped. | `card_id`, `generation` | `index`, `node_id`, `producer_cancelled`, `skipped`, `skipped_reason`, `speculative` |
 | `card_build_requested` | folded | The durable selection-and-compute gate for one Card's build. | `card_id`, `generation` | — |
 | `card_dropped` | folded | The operator stopped a Card (server-stamped). | `id` | `by`, `dropped_by`, `reason` |
-| `card_edited` | folded | The operator rewrote a Card's statement. | `id` | `source`, `statement` |
+| `card_edited` | folded | The operator rewrote a Card's display statement or a research question's concepts. | `id` | `concepts`, `source`, `statement` |
 | `card_enriched` | folded | A Card's novelty / cross-run / footprint delta (last write by seq wins). | — | `claim_refs`, `concept_tags`, `confidence`, `cross_run_prior`, `footprint`, `foresight_rank`, `generation`, `id`, `lesson_refs`, `node_id`, `novelty_verdict`, `proposal_ref`, `research_origin`, `steering_context` |
 | `card_filed` | folded | The operator filed one Card under a research question, or un-filed it (server-stamped). | `id`, `parent_card_id` | `source` |
 | `card_merged` | folded | Alias Cards folded into a canonical one, with the seq that decided the edge. | `aliases`, `canonical`, `merged_by`, `source_event_seq` | `statement` |

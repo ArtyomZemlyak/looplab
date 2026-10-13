@@ -1100,7 +1100,7 @@ def build_router(srv) -> APIRouter:
         probe; agent connection is not measured. This read starts no work.
         language selects only next-step wording from the same decision branches;
         obligation identities, verdicts and read/action references are unchanged.
-        agent_activity records only successful progress reads using the scoped
+        agent_activity records successful progress and checkpoint reads using the scoped
         harness credential in this UI process. Owner/browser reads do not refresh
         it. Two minutes of silence is quiet activity, not proof of agent death.
         """
@@ -1150,15 +1150,24 @@ def build_router(srv) -> APIRouter:
         return publish(srv, _run_dir(run_id), body)
 
     @router.get("/api/runs/{run_id}/harness-checkpoints")
-    def get_harness_checkpoints(run_id: str, expected_generation: str = Query(...)):
+    def get_harness_checkpoints(run_id: str, request: Request, response: Response,
+                                expected_generation: str = Query(...)):
         """Pending mandatory stage checks and live training/rank observations."""
         from looplab.harness.checkpoints import pending
         if _RUN_GENERATION_RE.fullmatch(expected_generation) is None:
             raise HTTPException(400, "expected_generation must be a SHA-256 token")
+        response.headers["Cache-Control"] = "no-store"
+        response.headers["Vary"] = "X-LoopLab-Token, Authorization"
+        rd = _run_dir(run_id)
         try:
-            return {"pending": pending(_run_dir(run_id), expected_generation)}
+            result = {"pending": pending(rd, expected_generation)}
         except OSError as exc:
             raise HTTPException(503, "checkpoint ledger unavailable") from exc
+        # The controller can spend an hour monitoring training without needing a new proposal.
+        # Count that authenticated workflow read after validation, never browser/owner polling.
+        if request_agent_token(request):
+            srv.agent_activity.observe(rd, expected_generation, read_kind="harness-checkpoints")
+        return result
 
     @router.post("/api/runs/{run_id}/harness-checkpoints")
     def answer_harness_checkpoint(run_id: str, body: ExternalCheckpointAnswer):

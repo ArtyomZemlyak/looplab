@@ -2496,6 +2496,7 @@ export default function RunView({ runId, onBack, reviewMode = false, reviewMeta 
             <LazyBoundary label={"run report"} resetKey={`${runId}:${history.resolvedSeq ?? 'live'}`}>
               <ReportView state={state} runId={runId} onToast={showToast}
                 runBackend={configResource.status === 'ready' ? configResource.data?.backend ?? null : null}
+                externalHarness={configResource.status === 'ready' && configResource.data?.external_harness === true}
                 readOnly={mutationReadOnlyMode} historySeq={history.resolvedSeq}
                 observedSeq={historyActive ? history.resolvedSeq : seq}
                 expectedGeneration={reportGeneration}
@@ -2738,6 +2739,7 @@ export default function RunView({ runId, onBack, reviewMode = false, reviewMeta 
         onReadReport={() => route.update(current => ({ ...current, view: 'report', panel: null }))}
         onOpenPanel={p => { if (panelAllowed(p)) setPanel(p, { mode: 'replace' }) }} />}
       {panel === 'research' && panelAllowed('research') && <ResearchPanel state={state} runId={runId}
+        externalHarness={configResource.status === 'ready' && configResource.data?.external_harness === true}
         runBackend={configResource.status === 'ready' ? configResource.data?.backend ?? null : null}
         onToast={showToast} onClose={closePanel} onSelect={selectNodeFromPanel}
         onSelectEvidence={selectEvidenceFromPanel} />}

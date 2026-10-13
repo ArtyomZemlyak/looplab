@@ -216,7 +216,11 @@ export function ResearchMemoBody({ memo, onSteer, steeringDirection = '', onSele
     </section>}
     {value.findings.length > 0 && <section className="research-memo-block findings">
       <SectionHeading icon="bulb" meta={uiPlural(value.findings.length, '{0} finding', '{0} findings')}>{uiText("Key findings")}</SectionHeading>
-      <ul>{value.findings.map((finding, index) => <li key={index}><Markdown text={finding} externalOnly /></li>)}</ul>
+      <ul>{value.findings.slice(0, 5).map((finding, index) => <li key={index}><Markdown text={finding} externalOnly /></li>)}</ul>
+      {value.findings.length > 5 && <details className="research-memo-disclosure">
+        <summary>{uiPlural(value.findings.length - 5, 'Show {0} more finding', 'Show {0} more findings')}</summary>
+        <ul>{value.findings.slice(5).map((finding, index) => <li key={index}><Markdown text={finding} externalOnly /></li>)}</ul>
+      </details>}
     </section>}
     <EvidenceDisclosure value={value} trust={trust} onSelectNode={onSelectNode}
       onSelectEvidence={onSelectEvidence} />

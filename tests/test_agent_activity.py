@@ -88,3 +88,39 @@ def test_activity_cache_is_bounded_and_safe_for_concurrent_reads():
         list(pool.map(lambda i: (activity.observe("one", "gen"), activity.snapshot("one", "gen")), range(64)))
     assert len(activity._reads) == MAX_RUNS
     assert activity.snapshot("one", "gen")["age_seconds"] == 0
+
+
+def test_successful_scoped_training_checks_count_as_activity_without_domain_writes(tmp_path, monkeypatch):
+    rd, store, client = _run(tmp_path, monkeypatch)
+    generation = run_generation_token(store.read_all())
+    now = [0]
+    client.app.state.looplab.agent_activity = AgentActivity(clock=lambda: now[0])
+    before = (rd / 'events.jsonl').read_bytes()
+    path = '/api/runs/demo/harness-checkpoints'
+    args = {'expected_generation': generation}
+    assert client.get(path, params=args, headers=OWNER).status_code == 200
+    assert _read(client, generation).json()['agent_activity']['status'] == 'not_observed'
+    reply = client.get(path, params=args, headers=AGENT)
+    assert reply.status_code == 200 and reply.json() == {'pending': []}
+    assert reply.headers['Cache-Control'] == 'no-store'
+    activity = _read(client, generation).json()['agent_activity']
+    assert activity['status'] == 'recent_request'
+    assert activity['source'] == 'authenticated_harness_read'
+    assert activity['read_kind'] == 'harness-checkpoints'
+    now[0] = 121
+    assert client.get(path, params={'expected_generation': '0' * 64}, headers=AGENT).status_code == 409
+    assert _read(client, generation).json()['agent_activity']['status'] == 'quiet'
+    assert (rd / 'events.jsonl').read_bytes() == before
+
+
+def test_failed_checkpoint_read_never_refreshes_activity(tmp_path, monkeypatch):
+    rd, store, client = _run(tmp_path, monkeypatch)
+    generation = run_generation_token(store.read_all())
+    from looplab.harness import checkpoints
+    def unavailable(*args):
+        raise OSError('unreadable ledger')
+    monkeypatch.setattr(checkpoints, 'pending', unavailable)
+    response = client.get('/api/runs/demo/harness-checkpoints',
+        params={'expected_generation': generation}, headers=AGENT)
+    assert response.status_code == 503
+    assert client.app.state.looplab.agent_activity.snapshot(rd, generation)['status'] == 'not_observed'

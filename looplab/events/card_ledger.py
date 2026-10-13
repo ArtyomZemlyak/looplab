@@ -933,7 +933,7 @@ def _bounded_card_cross_run_enrichment(value) -> dict | None:
 
 
 def _proposal_card_concept_source(
-    kind: Literal["card_added", "card_enriched", "hypothesis_added"], *, present: bool,
+    kind: Literal["card_added", "card_enriched", "hypothesis_added", "card_edited"], *, present: bool,
     overflow: bool = False, invalid: bool = False,
 ) -> CardConceptSource:
     reasons: set[ConceptMaterializationReason] = set()
@@ -3196,7 +3196,8 @@ def _apply_card_operator_overlays(
 
     # 7) operator-override overlay — FINAL PHASE (docs/23 decision 27: the operator wins regardless of
     #    event arrival order). `card_edited`
-    #    overlays the DISPLAY statement only — the join key stays `seed_statement` (docs/23 decision 24).
+    #    overlays the DISPLAY statement and explicitly edited QUESTION concepts only — the join
+    #    key stays `seed_statement` (docs/23 decision 24), and node/action concepts stay node-owned.
     # Resolve through `_canon` so a control that named a card before it was merged still lands on the
     # canonical survivor. Bound the stored id first as an additional replay hardening fence.
     for raw_id, edit in (st.card_operator_edits or {}).items():
@@ -3204,6 +3205,9 @@ def _apply_card_operator_overlays(
         c = cards.get(_canon(bounded_id)) if bounded_id is not None else None
         if c is not None and isinstance(edit, dict) and edit.get("statement"):
             c.statement = str(edit["statement"])
+            if card_kind_of(c) == "direction" and isinstance(edit.get("concepts"), list):
+                c.concept_tags = list(edit["concepts"])
+                c.concept_source = _proposal_card_concept_source("card_edited", present=True)
             event_seq = edit.get("event_seq")
             if type(event_seq) is int and 0 <= event_seq <= (1 << 31) - 1:
                 c.statement_edit_seq = event_seq

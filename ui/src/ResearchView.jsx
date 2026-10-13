@@ -53,25 +53,40 @@ function FilingControl({ card, options, onFile, locked }) {
   const byOperator = card.filed_by === 'operator'
   const current = typeof card.parent_card_id === 'string' ? card.parent_card_id : ''
   const shared = Array.isArray(inferred?.shared) ? inferred.shared : []
-  return <div className="research-filing">
-    {inferred && <span className="chip muted research-inferred-chip"
-      title={uiText("No question names this experiment; it is shown here because its concepts overlap this question's the most. Not counted in this question's best.")}>
-      {uiText("filed by concepts")}: {shared.join(', ')}</span>}
-    {byOperator && <span className="chip muted research-operator-chip"
-      title={uiText("The operator filed this experiment here; it is on the run's record.")}>
-      {current ? uiText("filed by the operator") : uiText("un-filed by the operator")}</span>}
-    {onFile && inferred && current && <button type="button" className="btn sm ghost"
-      disabled={locked} onClick={() => onFile(card, current)}
-      title={uiText("Record this question as the one this experiment answers")}>{uiText("Keep here")}</button>}
-    {onFile && <label className="research-filing-select">
-      <span className="muted">{uiText("File under")}</span>{' '}
-      <select value={inferred ? '' : current} disabled={locked}
-        aria-label={uiMessage("Research question for {0}", [card.id])}
-        onChange={event => onFile(card, event.target.value || null)}>
-        <option value="">{inferred ? uiText("choose a question…") : uiText("not under a question")}</option>
-        {options.map(option => <option key={option.id} value={option.id}>{uiText(option.label)}</option>)}
-      </select>
-    </label>}
+  const question = options.find(option => option.id === current)
+  const label = question?.label || current || uiText('No question selected')
+  return <div className={`research-filing${inferred ? ' suggested' : ''}`}>
+    <div className="research-filing-context">
+      <span className="research-filing-label">{uiText('Answers question')}</span>
+      <span className="research-filing-question" title={uiText(label)}>{uiText(label)}</span>
+      <span className="research-filing-provenance">
+        {inferred ? uiText('Suggested by concepts · not saved')
+          : current ? uiText('Saved question link') : uiText('Not linked to a question')}
+      </span>
+      {inferred && shared.length > 0 && <span className="research-filing-overlap">
+        {uiText('Matching concepts')}: {shared.join(', ')}
+      </span>}
+      {byOperator && <span className="sr-only">{current ? uiText('filed by the operator') : uiText('un-filed by the operator')}</span>}
+    </div>
+    {onFile && <div className="research-filing-actions">
+      {inferred && current && <button type="button" className="btn sm"
+        disabled={locked} onClick={() => onFile(card, current)}
+        title={uiText('Record this question as the one this experiment answers')}>{uiText('Confirm question')}</button>}
+      <details className="research-filing-change">
+        <summary aria-label={uiMessage('Change research question for {0}', [card.id])}>
+          {current ? uiText('Change question') : uiText('Choose question')}
+        </summary>
+        <label className="research-filing-select">
+          <span>{uiText('Research question')}</span>
+          <select value={inferred ? '' : current} disabled={locked}
+            aria-label={uiMessage('Research question for {0}', [card.id])}
+            onChange={event => onFile(card, event.target.value || null)}>
+            <option value="">{inferred ? uiText('choose a question…') : uiText('not under a question')}</option>
+            {options.map(option => <option key={option.id} value={option.id}>{uiText(option.label)}</option>)}
+          </select>
+        </label>
+      </details>
+    </div>}
   </div>
 }
 

@@ -1391,6 +1391,23 @@ def _normalize_inject_node(ctx: _ControlIntake) -> dict:
 
 # ------------------------------------------------------------------ hypothesis board
 
+def _question_concepts(raw) -> list[str]:
+    """Authored question membership follows the same id/cap contract as node tags."""
+    from looplab.serve.concept_frame import MAX_CONCEPTS_PER_NODE, concept_id
+    if not isinstance(raw, list):
+        raise HTTPException(400, "concepts must be a list of axis/slug ids")
+    if len(raw) > MAX_CONCEPTS_PER_NODE:
+        raise HTTPException(400, f"concepts exceeds {MAX_CONCEPTS_PER_NODE} ids")
+    result = []
+    for value in raw:
+        cid = concept_id(value) if isinstance(value, str) else None
+        if cid is None:
+            raise HTTPException(400, f"invalid concept id: {value!r}")
+        if cid not in result:
+            result.append(cid)
+    return result
+
+
 def _normalize_hypothesis_added(ctx: _ControlIntake) -> dict:
     data = ctx.data
     data["statement"] = ctx.text("statement", limit=CARD_STATEMENT_MAX_CHARS)
@@ -1398,6 +1415,8 @@ def _normalize_hypothesis_added(ctx: _ControlIntake) -> dict:
         data["id"] = ctx.hypothesis_id()
     if data.get("source") is not None:
         data["source"] = ctx.text("source", limit=128)
+    if "concepts" in data:
+        data["concepts"] = _question_concepts(data["concepts"])
     return data
 
 
@@ -1687,9 +1706,17 @@ def _normalize_card_reprioritized(ctx: _ControlIntake) -> dict:
 def _normalize_card_edited(ctx: _ControlIntake) -> dict:
     card_id, card = ctx.card()
     statement = ctx.text("statement", limit=4_000)
-    if statement == card.statement:
+    result = {"id": card_id, "statement": statement, "source": "operator"}
+    if "concepts" in ctx.data:
+        # Experiment concepts are owned by the exact node lifecycle; never create a competing
+        # source on its Card. Questions own no node and need their own editable membership.
+        if getattr(card, "card_kind", None) != "direction":
+            raise HTTPException(400, "edit experiment concepts through concept_tag_edited")
+        result["concepts"] = _question_concepts(ctx.data["concepts"])
+    if statement == card.statement and (
+            "concepts" not in result or result["concepts"] == card.concept_tags):
         raise HTTPException(409, "Card display statement is unchanged")
-    return {"id": card_id, "statement": statement, "source": "operator"}
+    return result
 
 
 def _normalize_card_resource_pinned(ctx: _ControlIntake) -> dict:

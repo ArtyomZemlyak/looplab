@@ -68,3 +68,8 @@ test('the card shows the lead in the header AND the full conclusion in the body'
   assert.ok(!source.includes('>{value.summary || \'No conclusion was recorded.\'}</span>'),
     'the verbatim-paragraph header came back')
 })
+
+test('a Russian sentence boundary gives the same concise lead as English', () => {
+  assert.equal(memoLead('Все шесть контрольных запусков завершены. Следующий этап — подтверждение результата.'),
+    'Все шесть контрольных запусков завершены.')
+})

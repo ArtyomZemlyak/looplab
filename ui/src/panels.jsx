@@ -534,13 +534,16 @@ export function OverviewPanel({ state, maxEval, phase, runState, onClose, onOpen
 // The Research panel's empty-state sentence: what the run's own setup says about why no memo
 // exists — an English catalogue key, translated where it renders. Exported for its truth table
 // (ui/test/researchEmptyState.test.js).
-export function researchEmptyReason(runBackend, finished) {
+export function researchEmptyReason(runBackend, finished, externalHarness = false) {
+  if (externalHarness) return finished
+    ? 'The external agent did not publish a research memo before this run finished.'
+    : 'The external agent publishes research memos. A model connection in LoopLab is not required.'
   if (runBackend === 'toy') return 'Deep research needs a model. This run used none (backend=toy), so it records no research memos.'
   if (finished) return 'No research memo was recorded before this run finished.'
   return 'Deep research runs on the configured cadence or when the Strategist requests it.'
 }
 
-export function ResearchPanel({ state, runId, onToast, onClose, onSelect, onSelectEvidence, runBackend = null }) {
+export function ResearchPanel({ state, runId, onToast, onClose, onSelect, onSelectEvidence, runBackend = null, externalHarness = false }) {
   useUILanguage()
 
   const memoProjection = useMemo(() => normalizeResearchMemos(state.research), [state.research])
@@ -584,15 +587,15 @@ export function ResearchPanel({ state, runId, onToast, onClose, onSelect, onSele
   const latestSelected = selectedMemo?.sourceIndex === newestMemoIndex
   const finished = state.phase === 'finished'
   return (
-    <Panel title={uiText("Deep research")} sub={memos.length ? uiPlural(memos.length, '{0} memo', '{0} memos') : ((finished || runBackend === 'toy') ? uiText('none') : uiText('none yet'))} onClose={onClose}
+    <Panel title={uiText("Deep research")} sub={memos.length ? uiPlural(memos.length, '{0} memo', '{0} memos') : ((finished || (runBackend === 'toy' && !externalHarness)) ? uiText('none') : uiText('none yet'))} onClose={onClose}
       size={memos.length ? 'board' : undefined} className={`research-panel${memos.length ? '' : ' empty'}`}>
       <p className="research-purpose" role="note">{uiText('Hypothesis search and experiment planning. Research claims are suggestions to verify, not measured conclusions about what worked.')}</p>
       {!memos.length && <div className="research-empty-state" role="status">
-        <div><OpIcon name="search" size={16} /><strong>{((finished || runBackend === 'toy') ? uiText("No research memos") : uiText("No research memos yet"))}</strong></div>
+        <div><OpIcon name="search" size={16} /><strong>{((finished || (runBackend === 'toy' && !externalHarness)) ? uiText("No research memos") : uiText("No research memos yet"))}</strong></div>
         {/* The offline demo said research "runs on the configured cadence" on a run that had no
             model to run it, and a finished run promised a cadence that will never fire again. */}
-        <p>{uiText(researchEmptyReason(runBackend, finished))}</p>
-        {runBackend !== 'toy' && <details><summary>{uiText("Why can this be empty?")}</summary>
+        <p>{uiText(researchEmptyReason(runBackend, finished, externalHarness))}</p>
+        {runBackend !== 'toy' && !externalHarness && <details><summary>{uiText("Why can this be empty?")}</summary>
           <p>{uiText("The run may not have created its first experiment, the LLM backend may be unavailable, or ")}<code>{"deep_research_every"}</code>{uiText(" may be set to ")}<code>-1</code>.</p>
         </details>}
       </div>}

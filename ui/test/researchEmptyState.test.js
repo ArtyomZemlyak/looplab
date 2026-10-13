@@ -63,3 +63,10 @@ test('the offline demo’s Research panel says why it is empty and promises no c
   assert.match(live.reason, /configured cadence/)
   assert.equal(live.why, true)
 })
+
+test('external research can be published without an internal model', async () => {
+  const vite = await sharedVite()
+  const { researchEmptyReason } = await vite.ssrLoadModule('/src/panels.jsx')
+  assert.match(researchEmptyReason('toy', false, true), /external agent publishes.*not required/)
+  assert.match(researchEmptyReason('toy', true, true), /external agent did not publish/)
+})

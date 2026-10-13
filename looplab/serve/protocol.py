@@ -454,12 +454,12 @@ CONTROL_DATA_FIELDS: dict[str, frozenset[str]] = {
     EV_CONCEPT_TAG_EDITED: frozenset({"node_id", "node_generation", "concepts"}),
     EV_RUN_CONCEPTS: frozenset({"concepts"}),
     EV_PROMOTE: frozenset({"node_id", "generation", "alias"}),
-    EV_HYPOTHESIS_ADDED: frozenset({"id", "statement", "source"}),
+    EV_HYPOTHESIS_ADDED: frozenset({"id", "statement", "source", "concepts"}),
     EV_HYPOTHESIS_UPDATED: frozenset({"id", "status"}),
     # Provenance is deliberately absent: normalize_control stamps operator authority after validating
     # the exact current Card and rejects attempts to forge source/dropped_by/pinned.
     EV_CARD_REPRIORITIZED: frozenset({"id", "priority"}),
-    EV_CARD_EDITED: frozenset({"id", "statement"}),
+    EV_CARD_EDITED: frozenset({"id", "statement", "concepts"}),
     EV_CARD_RESOURCE_PINNED: frozenset({"id", "gpus", "gpu_mem_mib"}),
     EV_CARD_DROPPED: frozenset({"id", "reason"}),
     EV_CARD_REOPENED: frozenset({"id", "reason"}),

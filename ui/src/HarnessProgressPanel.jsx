@@ -69,6 +69,9 @@ export function HarnessProgressPanel({ runId, expectedGeneration, seq, externalM
     {!validGeneration && <p className="muted" role="status">{((ru ? 'Ожидаем сохранённую generation запуска…' : uiText('Waiting for a durable run generation…')))}</p>}
     {scope && <PanelResourceNotice resource={resource} label={((ru ? 'Цикл агента' : uiText('Agent cycle')))} language={readLanguage}
       onRetry={() => resource.retry()} />}
+    {scope && <p className="report-section-intro">{ru
+      ? 'Здесь показано, что внешний агент должен проверить перед следующим экспериментом и завершением работы: исследования, новизну идеи, вопросы обучения и отчёт. Эта панель сама не запускает агента и не управляет обучением.'
+      : uiText('This panel lists what the external agent must review before another experiment and finalization: research, novelty, training questions and reports. It does not start an agent or control training.')}</p>}
     {scope && <HarnessConnection runId={runId} generation={expectedGeneration} seq={seq} />}
     {scope && <LazyBoundary label={((ru ? 'Требования и история' : uiText('Requirements and history')))}
       resetKey={`${runId}:${expectedGeneration}`} language={readLanguage} focusOnFailure={false}
