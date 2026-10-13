@@ -27,29 +27,19 @@ export const UNFILED_EXPERIMENTS_ID = '__unfiled_experiments__'
 // A question's set, normalised: sorted, de-duplicated, blank-free. Sorting is what makes the key
 // stable — `{a,b}` and `{b,a}` are one set and must not render as two rows.
 export function conceptSet(card) {
-  // A QUESTION INHERITS THE CONCEPTS OF THE EXPERIMENTS FILED UNDER IT, and until 2026-08-26 this
-  // reader ignored the field that says so. `looplab/events/card_ledger.py::_apply_card_lineage` computes `child_concept_tags`
-  // as the union over every child — deliberately written there and never onto `concept_tags`, whose
-  // `concept_source` provenance records who AUTHORED a membership and may not be handed a derived
-  // union. This function read only the authored field, so a question with no memo-authored tags
-  // stayed permanently ungrouped even after tagged children arrived.
-  //
-  // THE OPERATOR REPORTED THE WHOLE CONSEQUENCE AT ONCE — "the cards are filed nowhere, where is the
-  // hierarchy, where do concepts attach to questions, and why do Directions and Research look the
-  // same" — and it is one cause: an empty set is a subset of nothing useful, so NO nesting relation
-  // exists, every row falls to the ungrouped bucket, and the ladder degenerates into exactly the flat
-  // parent->child list the Directions tab drew. Measured on `runs/e5small-dr-unified-v7`: five
-  // questions, ALL with `concept_tags = []`, one of them carrying `child_concept_tags` of NINE ids
-  // from the experiment filed under it — the union present, populated, and unread.
-  //
-  // DIRECTION ROWS ONLY. An experiment's tags are its OWN claim about what it touches; unioning a
-  // child's would be meaningless here (an experiment owns no children) and, the day it did, would
-  // make a card appear to touch everything its siblings do.
+  // An authored question defines its scope. Unioning every child's implementation tags into
+  // that scope inverted the real data-composition board: the broad root was nested under the
+  // rare-item question, and the compute question appeared twice under unrelated siblings.
+  // Untagged historical questions can still derive a fallback from filed experiments; keep
+  // that separate from explicit membership instead of making a broad question ever narrower.
   const authored = isRecord(card) && Array.isArray(card.concept_tags) ? card.concept_tags : []
   const inherited = cardIsDirection(card) && isRecord(card) && Array.isArray(card.child_concept_tags)
     ? card.child_concept_tags : []
   const seen = new Set()
-  for (const tag of [...authored, ...inherited]) {
+  for (const tag of authored) {
+    if (typeof tag === 'string' && tag.trim()) seen.add(tag.trim())
+  }
+  if (!seen.size) for (const tag of inherited) {
     if (typeof tag === 'string' && tag.trim()) seen.add(tag.trim())
   }
   return [...seen].sort()

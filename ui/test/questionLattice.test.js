@@ -321,10 +321,10 @@ test('a question with no authored tags inherits its children\'s', () => {
     'question is ungrouped and the ladder has no hierarchy to draw')
 })
 
-test('authored and inherited tags UNION rather than one replacing the other', () => {
+test('authored question scope takes priority over implementation tags from its children', () => {
   const q = _question('q-1', { tags: ['data'], childTags: ['data', 'loss/contrastive'] })
-  assert.deepEqual(conceptSet(q), ['data', 'loss/contrastive'],
-    'the overlap collapses — a set, not a concatenation')
+  assert.deepEqual(conceptSet(q), ['data'],
+    'child implementation details do not narrow the authored research question')
 })
 
 test('an EXPERIMENT does not inherit: its tags are its own claim', () => {
@@ -460,4 +460,17 @@ test('questionFilingOptions lists every question by its clipped statement, in a 
   assert.equal(options[0].label, 'beam width')
   assert.equal(options[1].label, 'q3', 'a question with no statement is labelled by its id')
   assert.ok(options[2].label.length <= 90 && options[2].label.endsWith('…'))
+})
+
+
+test('a broad data question cannot become a child of its rare-item subquestion', () => {
+  const rows = latticeRows([
+    _question('root', { tags: ['data-composition'], childTags: ['data-composition', 'rare', 'fresh', 'codebook'] }),
+    _question('rare', { tags: ['data-composition', 'rare'], childTags: [] }),
+    _question('compute', { tags: ['data-composition', 'compute'], childTags: ['data-composition', 'rare', 'fresh', 'replay'] }),
+  ])
+  assert.equal(rows.find(row => row.id === 'root').depth, 0)
+  assert.equal(rows.find(row => row.id === 'rare').parentId, 'root')
+  assert.equal(rows.find(row => row.id === 'compute').parentId, 'root')
+  assert.equal(rows.filter(row => row.id === 'compute').length, 1)
 })

@@ -1918,3 +1918,9 @@ validated concept ids as experiments. For an existing question, `card_edited` ac
 while omitting it preserves earlier edits. This changes authored question membership
 and display text, not the immutable belief/action identity or measured node tags.
 Experiment tags remain generation-fenced through `concept_tag_edited`.
+
+The Research question lattice uses a question's explicit concept set to determine
+its level of specificity. Tags derived from filed experiments are a fallback only
+when the question has no valid authored tags. Implementation details must not
+turn the broad question into a narrower child. Concept-based filing is a visible
+suggestion; an explicit `parent_card_id` or `card_filed` records the experiment link.
