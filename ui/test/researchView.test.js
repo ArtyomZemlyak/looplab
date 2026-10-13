@@ -209,7 +209,7 @@ test('the filing control: Keep here records the concept suggestion, the menu fil
   assert.ok(readOnly.includes('Suggested by concepts · not saved'), 'the provenance chip stays')
 })
 
-test('question selector separates inferred suggestions from a saved relation', async () => {
+test('only an edit icon is visible until the question chooser opens', async () => {
   const { default: ResearchView } = await loadView()
   const { JSDOM } = await import('jsdom')
   const cards = [
@@ -227,6 +227,13 @@ test('question selector separates inferred suggestions from a saved relation', a
   assert.match(suggestion.textContent, /Confirm question/)
   assert.equal(suggestion.querySelector('details').open, false)
   assert.match(blocks.find(b => !b.classList.contains('suggested')).textContent, /Saved question link/)
-  assert.ok(blocks.every(b => b.querySelector('.research-filing-question').textContent.includes('old context')))
+  for (const block of blocks) {
+    const summary = block.querySelector('summary')
+    assert.equal(summary.textContent.trim(), '', 'collapsed control has no repeated question or label')
+    assert.ok(summary.querySelector('use[href="#pencil"]'))
+    assert.match(summary.getAttribute('aria-label'), /Change research question/)
+    assert.equal(block.querySelector('.research-filing-question'), null)
+    assert.ok(block.querySelector('select').textContent.includes('old context'), 'question names remain in the chooser')
+  }
   dom.window.close()
 })

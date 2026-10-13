@@ -1924,3 +1924,7 @@ its level of specificity. Tags derived from filed experiments are a fallback onl
 when the question has no valid authored tags. Implementation details must not
 turn the broad question into a narrower child. Concept-based filing is a visible
 suggestion; an explicit `parent_card_id` or `card_filed` records the experiment link.
+
+In the Research view, an experiment’s pencil icon opens its question chooser.
+The question title is already the section heading and is not repeated on each card.
+Filing provenance and confirmation of a concept suggestion appear inside the chooser.

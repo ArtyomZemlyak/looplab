@@ -3594,22 +3594,21 @@ body.asst-side-open .app-shell-main { margin-right: var(--asst-side-w, 440px); }
 /* One experiment in the Research view: where it is filed (and, for the operator, the control that
    puts that on the record) above the shared card body. */
 .research-experiment { display: flex; flex-direction: column; gap: 6px; min-width: 0; }
-.research-filing { display: flex; flex-wrap: wrap; align-items: flex-start; gap: 12px;
-  padding: 10px 12px; border: 1px solid var(--border); border-radius: 8px;
-  background: var(--bg); font-size: 12px; min-width: 0; }
-.research-filing-context { display: grid; gap: 4px; flex: 1 1 220px; min-width: 0; }
-.research-filing-label { color: var(--fg-mut); font-size: 11px; }
-.research-filing-question { line-height: 1.45; font-weight: 600; overflow-wrap: anywhere; }
-.research-filing-provenance, .research-filing-overlap { color: var(--fg-mut); line-height: 1.4; }
-.research-filing-actions { display: flex; flex-wrap: wrap; align-items: flex-start; gap: 8px; max-width: 100%; }
-.research-filing-change { min-width: 0; max-width: 100%; }
-.research-filing-change > summary { cursor: pointer; padding: 6px 8px; color: var(--accent); }
-.research-filing-select { display: grid; gap: 6px; padding: 8px 0; max-width: 100%; }
-.research-filing-select select { width: min(38ch, 100%); max-width: 100%; min-width: 0; }
-@media (max-width: 640px) {
-  .research-filing-actions, .research-filing-change, .research-filing-select { width: 100%; }
-  .research-filing-select select { width: 100%; }
-}
+.research-filing { display: flex; justify-content: flex-end; min-width: 0; font-size: 12px; }
+.research-filing-change { position: relative; min-width: 0; }
+.research-filing-change > summary { display: flex; align-items: center; justify-content: center;
+  width: 30px; height: 30px; padding: 0; list-style: none; cursor: pointer; color: var(--fg-mut); }
+.research-filing-change > summary::-webkit-details-marker { display: none; }
+.research-filing-change > summary:hover, .research-filing-change[open] > summary { color: var(--accent); }
+.research-filing-change > summary:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.research-filing-change > summary[aria-disabled="true"] { opacity: .5; cursor: default; }
+.research-filing-menu { position: absolute; top: calc(100% + 4px); right: 0; z-index: 10;
+  display: grid; gap: 10px; width: min(340px, calc(100vw - 80px)); box-sizing: border-box;
+  padding: 12px; background: var(--bg); border: 1px solid var(--border); border-radius: 8px;
+  box-shadow: 0 6px 20px #0003; }
+.research-filing-provenance { color: var(--fg-mut); line-height: 1.4; }
+.research-filing-select { display: grid; gap: 6px; min-width: 0; }
+.research-filing-select select { width: 100%; min-width: 0; }
 
 /* The offline demo on the first-run landing (doc 74 EB-24): a secondary action under the primary
    "Describe a goal" button, whose launch card reads left-aligned inside the centred landing. */

@@ -13,6 +13,7 @@ import React, { useMemo, useState } from 'react'
 
 import { cardIsDirection, childrenByParent, descendantsOf } from './cardLineageModel.js'
 import { isRecord } from './panelPrimitives.js'
+import { OpIcon } from './icons.jsx'
 import { UNGROUPED_ID, inferQuestionFiling, latticeRollups, latticeRows, questionClosure,
   offPageParentExperiments, questionFilingOptions, unfiledExperiments } from './questionLattice.js'
 import { COMPARABILITY_REFUSAL_TEXT } from './runIndex.js'
@@ -37,56 +38,48 @@ function addedConcepts(row, byRowKey) {
   return row.tags.filter(tag => !inherited.has(tag))
 }
 
-// WHERE AN EXPERIMENT IS FILED, said and — for the operator — changeable, on the card itself.
-//
-// Every operator-injected card arrives naming no question (measured on `minionerec-backbones-v11`:
-// none of 39 operator injects named a question; 3 of 45 experiments were filed on the record). The concept inference draws most of
-// them somewhere, but only on this screen; the run's record — the question board the Researcher
-// reads, the open-question cap — still had them unfiled. This control is how the operator's
-// decision gets ON the record (`card_filed`): "Keep here" makes the concept suggestion permanent,
-// the menu files it anywhere else, and "not under a question" un-files it. Read-only boards get the
-// provenance chip and no control.
+// The question is already the heading above this experiment. Keep the filing control quiet:
+// one edit icon opens the chooser, including provenance and confirmation of inferred suggestions.
 function FilingControl({ card, options, onFile, locked }) {
   useUILanguage()
 
   const inferred = isRecord(card.question_inferred) ? card.question_inferred : null
-  const byOperator = card.filed_by === 'operator'
   const current = typeof card.parent_card_id === 'string' ? card.parent_card_id : ''
-  const shared = Array.isArray(inferred?.shared) ? inferred.shared : []
-  const question = options.find(option => option.id === current)
-  const label = question?.label || current || uiText('No question selected')
+  const provenance = inferred ? uiText('Suggested by concepts · not saved')
+    : current ? uiText('Saved question link') : uiText('Not linked to a question')
+  const attribution = card.filed_by === 'operator'
+    ? current ? uiText('filed by the operator') : uiText('un-filed by the operator') : ''
+  if (!onFile) return <span className="sr-only">{provenance} {attribution}</span>
   return <div className={`research-filing${inferred ? ' suggested' : ''}`}>
-    <div className="research-filing-context">
-      <span className="research-filing-label">{uiText('Answers question')}</span>
-      <span className="research-filing-question" title={uiText(label)}>{uiText(label)}</span>
-      <span className="research-filing-provenance">
-        {inferred ? uiText('Suggested by concepts · not saved')
-          : current ? uiText('Saved question link') : uiText('Not linked to a question')}
-      </span>
-      {inferred && shared.length > 0 && <span className="research-filing-overlap">
-        {uiText('Matching concepts')}: {shared.join(', ')}
-      </span>}
-      {byOperator && <span className="sr-only">{current ? uiText('filed by the operator') : uiText('un-filed by the operator')}</span>}
-    </div>
-    {onFile && <div className="research-filing-actions">
-      {inferred && current && <button type="button" className="btn sm"
-        disabled={locked} onClick={() => onFile(card, current)}
-        title={uiText('Record this question as the one this experiment answers')}>{uiText('Confirm question')}</button>}
-      <details className="research-filing-change">
-        <summary aria-label={uiMessage('Change research question for {0}', [card.id])}>
-          {current ? uiText('Change question') : uiText('Choose question')}
-        </summary>
+    <details className="research-filing-change">
+      <summary className="ic" title={uiText('Change question')}
+        aria-label={uiMessage('Change research question for {0}', [card.id])}
+        aria-disabled={locked || undefined}
+        onClick={event => { if (locked) event.preventDefault() }}>
+        <OpIcon name="pencil" size={14} />
+      </summary>
+      <div className="research-filing-menu">
         <label className="research-filing-select">
           <span>{uiText('Research question')}</span>
           <select value={inferred ? '' : current} disabled={locked}
             aria-label={uiMessage('Research question for {0}', [card.id])}
-            onChange={event => onFile(card, event.target.value || null)}>
+            onChange={event => {
+              onFile(card, event.target.value || null)
+              event.currentTarget.closest('details').open = false
+            }}>
             <option value="">{inferred ? uiText('choose a question…') : uiText('not under a question')}</option>
             {options.map(option => <option key={option.id} value={option.id}>{uiText(option.label)}</option>)}
           </select>
         </label>
-      </details>
-    </div>}
+        <span className="research-filing-provenance">{provenance}</span>
+        <span className="sr-only">{attribution}</span>
+        {inferred && current && <button type="button" className="btn sm"
+          disabled={locked} onClick={event => {
+            onFile(card, current)
+            event.currentTarget.closest('details').open = false
+          }} title={uiText('Record this question as the one this experiment answers')}>{uiText('Confirm question')}</button>}
+      </div>
+    </details>
   </div>
 }
 
