@@ -2,7 +2,7 @@ import assert from 'node:assert/strict'
 import test from 'node:test'
 import { readFileSync } from 'node:fs'
 
-// The Russian catalogue was raw machine translation (review 2026-10-14 §5): «Назад к бегу» for "Back to
+// The Russian catalogue was raw machine translation (review 2026-10-14 section 5): «Назад к бегу» for "Back to
 // runs", «наружный жгут» for "external harness", «код раствора» for "solution code". The glossary
 // is docs/guide/glossary.ru.md; this STOP-LIST keeps the known failure shapes from coming back.
 const catalogue = JSON.parse(readFileSync(new URL('../src/locales/ru.json', import.meta.url), 'utf8'))

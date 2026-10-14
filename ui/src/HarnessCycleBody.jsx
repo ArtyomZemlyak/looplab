@@ -84,7 +84,7 @@ export default function HarnessCycleBody({ progress, fresh, runId, offset, setOf
         {progress.finish_reviews_due.length ? `${t('Reviews due', 'Нужны разборы')}: ${progress.finish_reviews_due.join(', ')}`
           : t('No knowledge reviews due at this measured prefix.', 'В прочитанной части истории разбор знаний не требуется.')}</p>
     </>}
-    {/* AUDIT AND CONNECTION (review 2026-10-14 §1): journals, superseded receipts, the measured
+    {/* AUDIT AND CONNECTION (review 2026-10-14 section 1): journals, superseded receipts, the measured
         prefix and the connection instructions are for debugging the contract, not for deciding
         what the agent owes now — so they sit folded below the obligations. */}
     <details className="harness-audit">

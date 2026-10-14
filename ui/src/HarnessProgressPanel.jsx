@@ -80,7 +80,7 @@ export function HarnessProgressPanel({ runId, expectedGeneration, seq, externalM
     </LazyBoundary>}
     {/* The connection instructions stay in the panel SHELL, outside the lazily loaded body, so a
         failed body never takes the reconnect controls with it — but below the obligations and
-        folded: the agent is usually already connected (review 2026-10-14 §1). */}
+        folded: the agent is usually already connected (review 2026-10-14 section 1). */}
     {scope && <details className="harness-audit harness-connection-details">
       <summary>{((ru ? 'Подключение внешнего агента' : uiText('External agent connection')))}</summary>
       <HarnessConnection runId={runId} generation={expectedGeneration} seq={seq} />

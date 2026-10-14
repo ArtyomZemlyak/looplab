@@ -374,7 +374,7 @@ function normalizeFindingMeta(value, count) {
 
 const sameText = value => String(value || '').toLowerCase().replace(/\s+/g, ' ').trim()
 
-// What changed in a memo's findings against the PREVIOUS memo (review 2026-10-14 §9, doc 76 §3).
+// What changed in a memo's findings against the PREVIOUS memo (review 2026-10-14 section 9, doc 76 §3).
 // An author-stated status wins (`finding_meta`: new / refined / refuted / carried, `supersedes`);
 // otherwise an EXACT text match says `carried` and anything else `new` — never a guessed semantic
 // equivalence. Findings of the previous memo that this one neither repeats nor supersedes are

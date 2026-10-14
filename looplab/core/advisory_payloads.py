@@ -1138,7 +1138,7 @@ def sanitize_research_memo_payload(payload, *, add_receipts: bool = True, env=No
     out["reasoning"] = _text(src.get("reasoning", ""), 12_000, budget, env=env)
     out["findings"] = [_text(v, 1_200, budget, env=env)
                        for v in _items(src.get("findings"), 32)]
-    # FINDING IDENTITY AND STATUS (review 2026-10-14 §9), positionally aligned with `findings` the
+    # FINDING IDENTITY AND STATUS (review 2026-10-14 section 9), positionally aligned with `findings` the
     # way `question_concepts` is with `open_questions`: an external author may name a finding
     # (`id`), say what happened to it since its previous memo (`status`: new / refined / refuted /
     # carried), which earlier id it `supersedes` and the nodes behind it. Additive: absent on every
@@ -1319,7 +1319,7 @@ def sanitize_report_payload(payload, *, env=None) -> dict:
     out["at_node"] = (src.get("at_node") if type(src.get("at_node")) is int
                       and 0 <= src.get("at_node") <= (1 << 63) - 1 else None)
     out["trigger"] = _text(src.get("trigger", ""), 64, budget, single_line=True, env=env)
-    # THE AUTHORED REPORT BODY AND ITS MEASURED KEY METRICS (review 2026-10-14 §6). Additive and
+    # THE AUTHORED REPORT BODY AND ITS MEASURED KEY METRICS (review 2026-10-14 section 6). Additive and
     # conditional — an absent key stays absent, so every report written before this folds exactly
     # as it did. `body_markdown` is free GFM prose (tables included), never HTML the UI executes.
     # `key_metrics` are REFERENCES only — metric keys and node ids; the numbers are read from the

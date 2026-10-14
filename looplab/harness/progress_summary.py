@@ -36,7 +36,7 @@ def next_step(progress: dict, language: str = "en") -> dict:
         step["reads"].append(f"GET {_RUN}/command-receipt?expected_generation=TOKEN&command_id={{command_id}}")
     # The agent's own requests are reported beside this text (`agent_activity`), so the summary no
     # longer says "Agent connection: not measured" under a chip saying "Agent read 0s ago" — the
-    # contradiction an operator saw on one screen (review 2026-10-14 §1, §10.2).
+    # contradiction an operator saw on one screen (review 2026-10-14 section 1, section 10.2).
     step["detail"] += text(f" Engine last observed: {label}. Agent requests are shown separately.",
                            f" Последнее наблюдение движка: {label}. Обращения агента показаны отдельно.")
     if progress["complete"] and progress["finish_pending_nodes"]:

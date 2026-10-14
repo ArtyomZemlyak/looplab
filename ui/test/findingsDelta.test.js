@@ -2,7 +2,7 @@ import assert from 'node:assert/strict'
 import test from 'node:test'
 import { findingsDelta, normalizeResearchMemo } from '../src/researchMemoModel.js'
 
-// Review 2026-10-14 §9 / doc 76 §3: three memos — a repeat, a refinement and a refutation — must not
+// Review 2026-10-14 section 9 / doc 76 §3: three memos — a repeat, a refinement and a refutation — must not
 // inflate the current summary, and what changed must be visible.
 test('author statuses win; exact repeats are unchanged; vanished findings are listed', () => {
   const first = normalizeResearchMemo({ findings: ['A holds.', 'B holds.', 'C holds.'],

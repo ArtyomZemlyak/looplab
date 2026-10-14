@@ -333,7 +333,7 @@ export function parseRunRouteState(hash = '', { reviewMode = false } = {}) {
   const sanitized = sanitizeRunRouteState(state, { reviewMode })
   if (!sanitized.generation && runRouteStateHasTarget(sanitized, { reviewMode })) {
     // The VIEW, panel and event filters describe how to look at a run, not which lifecycle — a
-    // colleague's `#/run/<id>?view=report` must open the report (review 2026-10-14 §10.3). Only a
+    // colleague's `#/run/<id>?view=report` must open the report (review 2026-10-14 section 10.3). Only a
     // target bound to one version of the run — an experiment attempt, a Card, a point in history —
     // still needs the version and is dropped, visibly, without it.
     const kept = sanitizeRunRouteState({ ...emptyRunRouteState(), view: sanitized.view,

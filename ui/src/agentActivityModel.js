@@ -1,7 +1,7 @@
 import { uiMessage, uiPlural, uiText } from './uiLanguage.js'
 
 // The agent-activity chip as a pure projection of the server's `agent_activity` observation
-// (`looplab/serve/agent_activity.py`). Review 2026-10-14 §2: "No recent agent reads · 6m 40s" read
+// (`looplab/serve/agent_activity.py`). Review 2026-10-14 section 2: "No recent agent reads · 6m 40s" read
 // as an outage although nothing was asked of the agent. Silence is now neutral; the chip turns to a
 // warning only when the server says LoopLab is WAITING for the agent (`attention ===
 // 'waiting_on_agent'`: an unanswered evaluation question, or an idle running engine waiting for the

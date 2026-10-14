@@ -1,4 +1,4 @@
-"""Review 2026-10-14 §8.3: what the intake did to authored text is SAID on the command receipt.
+"""Review 2026-10-14 section 8.3: what the intake did to authored text is SAID on the command receipt.
 
 Measured before: findings of 7,200 characters stored as 1,200 plus a hash receipt, a fact stored as
 `***REDACTED***` and glued prose — each under a receipt that said `succeeded` and nothing else."""

@@ -127,7 +127,7 @@ def test_failed_checkpoint_read_never_refreshes_activity(tmp_path, monkeypatch):
 
 
 def test_any_successful_agent_request_counts_reads_and_writes_alike(tmp_path, monkeypatch):
-    """Review 2026-10-14 §2: an agent busy POSTing (decisions, reviews, commands) or reading
+    """Review 2026-10-14 section 2: an agent busy POSTing (decisions, reviews, commands) or reading
     `/state` looked silent because only the two progress/checkpoint GETs were counted."""
     rd, store, client = _run(tmp_path, monkeypatch)
     generation = run_generation_token(store.read_all())

@@ -172,7 +172,7 @@ function AgentNarrative({ rep, coverage, generation, snapshotSeq, nodes, champio
     <KeyMetricTable keyMetrics={rep.key_metrics} nodes={nodes} championId={championId} />
     {rep.body_markdown && <div className="agent-report-text agent-report-body"><Markdown text={rep.body_markdown} /></div>}
     {/* Empty sections are not drawn: four "No interpretation was published" boxes under an
-        agent's report read as missing work (review 2026-10-14 §6). */}
+        agent's report read as missing work (review 2026-10-14 section 6). */}
     {groups.some(([, items]) => items?.length) && <div className="agent-report-columns">
       {groups.filter(([, items]) => items?.length).map(([label, items]) => <div className="agent-report-group" key={label}>
         <h3>{uiText(label)}</h3><List items={items} />

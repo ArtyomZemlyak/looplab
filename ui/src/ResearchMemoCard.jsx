@@ -212,7 +212,7 @@ function FindingItem({ entry }) {
   </li>
 }
 
-// "Key findings grew endlessly" (review 2026-10-14 §9): the change against the previous memo is
+// "Key findings grew endlessly" (review 2026-10-14 section 9): the change against the previous memo is
 // stated, unchanged findings fold behind a disclosure, and dropped ones stay readable.
 function FindingsDeltaLine({ delta }) {
   useUILanguage()

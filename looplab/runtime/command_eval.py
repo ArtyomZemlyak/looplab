@@ -3659,7 +3659,7 @@ def captured_result_fields(out: str, workdir: str, metric: dict, m: Optional[flo
             if (not to and metric.get("kind", "stdout_json") == "stdout_json") else {})
     # DECLARED FIRST: the map is bounded downstream (`normalize_extra_metrics`), and with the
     # declared names after ~600 auto-captured ones the bound kept the noise and dropped the task's
-    # key metrics (review 2026-10-14 §7). The values are unchanged — a declared value still wins.
+    # key metrics (review 2026-10-14 section 7). The values are unchanged — a declared value still wins.
     extra = ({**declared, **{k: v for k, v in auto.items() if k not in declared}} or None)
     # WHICH DOOR EACH VALUE CAME THROUGH, recorded beside the values themselves. These two channels
     # are not equally trustworthy and until 2026-08-14 the record could not tell them apart: the

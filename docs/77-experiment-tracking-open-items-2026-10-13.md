@@ -6,7 +6,9 @@
 
 ## 1. Код, на котором выполнен эксперимент — P1
 
-OPEN[experiment-source-snapshot] proof:`absent:SourceSnapshotPanel@ui/src/Inspector.jsx`
+OPEN[experiment-source-snapshot] proof:`absent:source_snapshot_recorded@looplab/events/types.py`
+
+*Сделано 2026-10-14 (`fix/ui-review-20261014`):* Inspector → Overview показывает свёрнутый «Исходный код запуска» (`ui/src/SourceSnapshotPanel.jsx`): `run_started.workspace` как коммит git, когда он записан, или «коммит неизвестен (копия без git)» с хэшем содержимого — никогда не «clean»; список незакоммиченных файлов при старте (`dirty_inputs`); базу попытки показывает `BaseRevision`, патч — вкладка «Код». Остаётся снимок на уровне попытки (`source_snapshot_recorded`: declared/captured/unknown, исходный коммит не-git копии, diff digest) — отсюда новый proof.
 
 **Есть.** Патчи узлов, source/base digests и Git-экспорт DAG. Эти сведения нельзя свести к одному HEAD: кандидат может содержать незакоммиченные изменения.
 
@@ -21,7 +23,9 @@ OPEN[experiment-source-snapshot] proof:`absent:SourceSnapshotPanel@ui/src/Inspec
 
 ## 2. Фактические гиперпараметры — P1
 
-OPEN[experiment-runtime-parameters] proof:`absent:RuntimeSnapshotPanel@ui/src/Inspector.jsx`
+OPEN[experiment-runtime-parameters] proof:`absent:runtime_config_glob@looplab/adapters/repo_task.py`
+
+*Сделано 2026-10-14:* `GET /api/runs/{id}/nodes/{nid}/runtime-params` (`looplab/serve/runtime_params.py`) — плоская таблица ключей из конфигурационных файлов попытки (dotenv/JSON/YAML/TOML: авторский оверлей и буквальные файлы edit_surface в workdir), секретные имена файлов скрыты, значения-учётки маскируются, отсутствие ≠ 0; сравнение `Idea.params` с документами (same/different/absent/conflict). Парсер dotenv — `core/param_carriers.py::dotenv_assignments`. UI — «Параметры, с которыми шёл эксперимент» (`ui/src/RuntimeSnapshotPanel.jsx`). Остаётся фактический resolved-конфиг попытки вне корней артефактов (MiniOneRec: `run_metadata.json` на S3) — task-поле вида `eval.runtime_config_glob`; отсюда новый proof.
 
 **Есть.** Idea.params, применённые настройки из поддерживаемых carriers, сведения о расхождениях; в наших задачах сохраняется run_metadata.json. Единой полной таблицы runtime-параметров для env-рецептов пока нет.
 
@@ -38,6 +42,8 @@ OPEN[experiment-runtime-parameters] proof:`absent:RuntimeSnapshotPanel@ui/src/In
 ## 3. Предпросмотр файлов — P1
 
 OPEN[experiment-artifact-previews] proof:`absent:ArtifactPreview@ui/src/RecordedSeedFiles.jsx`
+
+*Сделано 2026-10-14:* `GET …/artifact/raw` (PNG/JPEG/GIF/WebP только при совпадении расширения и сигнатуры, `nosniff` + `CSP: sandbox`, ≤16 MiB; SVG/HTML отвергаются) и `GET …/artifact/meta` (размер, sha256, тип по сигнатуре, заголовок safetensors, список zip, заголовок `.npy`; ничего не распаковывается и не исполняется) с теми же fence, что `/artifact`; `ui/src/ArtifactPreview.jsx` в «Файлах»: JSON, CSV/TSV-таблица, Markdown, изображения, метаданные двоичных файлов. Остаются PDF, подключение к RecordedSeedFiles и фильтр инвентаря по node/attempt (обрезка на 1500 файлов).
 
 **Есть.** Инвентарь, фильтр, ограниченный текстовый просмотр и просмотр recorded seed files. Бинарные файлы не становятся доступными для inline-просмотра только от наличия строки в инвентаре.
 

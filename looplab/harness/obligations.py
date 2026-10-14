@@ -226,7 +226,7 @@ def run_obligations(task, settings, *, generation: str) -> dict:
                            "removing whitespace; put identifiers, paths and metric names in "
                            "backticks; do not paste raw JSON or tables into findings.",
         },
-        # WHAT THE INTAKE DOES TO AUTHORED TEXT, stated up front (review 2026-10-14 §8.3): the
+        # WHAT THE INTAKE DOES TO AUTHORED TEXT, stated up front (review 2026-10-14 section 8.3): the
         # bounds below are applied at the durable boundary and every cut, mask or glued-prose
         # suspicion is reported on the receipt (`serve/intake_notices.py`) — never silently.
         "authored_text": {
@@ -280,7 +280,7 @@ def run_obligations(task, settings, *, generation: str) -> dict:
                 "proof": "nonempty idea.hypothesis (injected candidate mints its own Card)",
                 "enforced": True,
             },
-            # ADVISORY, not a gate (review 2026-10-14 §4): 46 of 64 external injects named their
+            # ADVISORY, not a gate (review 2026-10-14 section 4): 46 of 64 external injects named their
             # question and the rest were filed by hand later. The receipt's intake_notices say
             # `experiment_not_filed` / `questions_not_on_board`; admission does not change.
             "question_filing": {

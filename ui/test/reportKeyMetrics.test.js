@@ -2,7 +2,7 @@ import assert from 'node:assert/strict'
 import test from 'node:test'
 import { normalizeRunReport, reportAuthor, reportKeyMetricRows } from '../src/reportModel.js'
 
-// Review 2026-10-14 §6: an external agent's report carries a GFM body and the metric/node
+// Review 2026-10-14 section 6: an external agent's report carries a GFM body and the metric/node
 // REFERENCES of its key results; every VALUE in the table comes from the recorded nodes.
 test('key-metric rows read values from the recorded nodes, never from the report', () => {
   const report = normalizeRunReport({

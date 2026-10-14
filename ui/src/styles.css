@@ -3637,7 +3637,7 @@ body.asst-side-open .app-shell-main { margin-right: var(--asst-side-w, 440px); }
 .protocol-diff { max-height: 320px; overflow: auto; font-size: 11px; white-space: pre; margin: 4px 0; }
 .campaign-report { margin-bottom: 12px; }
 .campaign-narrative { border-left: 3px solid var(--border, #d0d7de); padding-left: 10px; margin: 6px 0 10px; }
-/* Findings delta (review 2026-10-14 §9): what changed against the previous memo. */
+/* Findings delta (review 2026-10-14 section 9): what changed against the previous memo. */
 .finding-status { font-size: 11px; vertical-align: 1px; }
 .finding-status.refuted { border-color: var(--bad, #c0392b); color: var(--bad, #c0392b); }
 .finding-status.refined { border-color: var(--warn, #b7791f); }

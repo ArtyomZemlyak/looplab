@@ -565,7 +565,7 @@ def test_rebounding_never_redacts_and_never_grows():
     assert len(_rebound_redacted_text(plain, 50)) == 50
 
 
-# GLUED PROSE and identifier SLUGS (review 2026-10-14 §8.3.1): an external agent's memo said
+# GLUED PROSE and identifier SLUGS (review 2026-10-14 section 8.3.1): an external agent's memo said
 # `…leakage. ***REDACTED***.` because `NewdevexcludesALL35000frozenbenchmarkusers` mixes case and
 # digits at entropy 4.35. Every one of the six distinct tokens the pass masked over that agent's
 # request bodies was prose or a cache-directory slug; none a secret.

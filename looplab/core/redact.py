@@ -226,7 +226,7 @@ def _entropy_candidate(token: str) -> bool:
 
 
 # GLUED PROSE AND SLUGS are the second population the composition screen still admitted (review
-# 2026-10-14, `looplab-reviews/20261014-ui-issues` §8.3.1). An external agent that writes prose
+# 2026-10-14, `looplab-reviews/20261014-ui-issues` section 8.3.1). An external agent that writes prose
 # without spaces sends `NewdevexcludesALL35000frozenbenchmarkusers` — mixed case AND digits, entropy
 # 4.35 — and the memo durably said `…leakage. ***REDACTED***.`: a fact about the data destroyed in
 # silence (18 markers in one run's events, 4 in two others; every one of the 6 distinct masked

@@ -183,7 +183,7 @@ def normalize_extra_metrics(value, *, max_items: int = EXTRA_METRICS_MAX_ITEMS,
     ``priority`` names keys that survive the bound whatever their position: the task's DECLARED
     metrics. Until 2026-10-14 the bound kept the first 256 keys in map order, the auto-captured
     stdout keys came first, and a MiniOneRec eval printing ~615 numbers kept its primary and lost
-    three of the four declared key metrics (review 2026-10-14 §7) — silently.
+    three of the four declared key metrics (review 2026-10-14 section 7) — silently.
     `extra_metrics_overflow` names what the bound left out, so a writer can say so.
     """
     return _kept_extra_metrics(value, max_items, priority)[0]

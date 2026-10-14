@@ -4,7 +4,7 @@ This is request activity, never an agent/transport lease or proof of life. No
 heartbeat thread, file write, engine gate or automatic recovery follows from age.
 Server restart/eviction loses the observation; run generation fences resets.
 
-WHAT COUNTS (review 2026-10-14 §2): every SUCCESSFUL request a run's API answered for the harness
+WHAT COUNTS (review 2026-10-14 section 2): every SUCCESSFUL request a run's API answered for the harness
 credential — reads (`GET /state`, `/harness-progress`, `/harness-checkpoints`, …) and writes
 (`POST /commands`, `/harness-reviews`, `/harness-decisions`, a checkpoint answer, …). It used to be
 only the two progress/checkpoint GETs, so an agent that was busy publishing a report through POSTs

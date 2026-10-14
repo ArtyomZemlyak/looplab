@@ -52,7 +52,7 @@ from looplab.events.traceview import (
     trace_file_revision, trace_projection_json_bytes, unavailable_projection)
 # Per-theme rollup for the cross-run map: {theme: {count, best_metric}}. Now lives in `digest` so the
 # Researcher's working-set digest and this UI endpoint share one definition.
-# Advisory readability notices on the harness POST receipts (review 2026-10-14 §8.3.3).
+# Advisory readability notices on the harness POST receipts (review 2026-10-14 section 8.3.3).
 from looplab.serve.intake_notices import with_readability
 from looplab.serve.artifacts import (
     _ART_MAX_BYTES, _LOG_TAIL_MAX, ART_RAW_MAX_BYTES, ArtifactPolicyUnavailable, artifact_meta,

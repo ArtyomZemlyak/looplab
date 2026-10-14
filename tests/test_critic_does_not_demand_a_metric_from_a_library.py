@@ -269,7 +269,7 @@ def test_a_host_scored_task_has_no_in_tree_scorer_even_when_a_stage_resolves_in_
 
 
 def test_a_dotenv_edit_surface_is_declarative_configuration():
-    """Review 2026-10-14 §10.1: MiniOneRec's whole edit surface is `experiment.env`, and every
+    """Review 2026-10-14 section 10.1: MiniOneRec's whole edit surface is `experiment.env`, and every
     external node carried `critic:no_metric_output` + `critic:params_ignored` ("hack?" on every run)
     because a dotenv file was not counted as configuration."""
     for name in ("experiment.env", ".env", "conf/.env.local", "A.ENV"):

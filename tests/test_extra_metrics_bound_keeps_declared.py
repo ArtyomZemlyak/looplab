@@ -1,4 +1,4 @@
-"""Review 2026-10-14 §7: a MiniOneRec eval printed ~615 numeric keys on its metric line, the
+"""Review 2026-10-14 section 7: a MiniOneRec eval printed ~615 numeric keys on its metric line, the
 `extra_metrics` bound kept the first 256 in map order — all auto-captured — and three of the four
 DECLARED key metrics vanished from the record with nothing saying so."""
 from __future__ import annotations

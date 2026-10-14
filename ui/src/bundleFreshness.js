@@ -1,4 +1,4 @@
-// Is the JavaScript in THIS tab the bundle the server now serves? (review 2026-10-14 §3.4, §10.4)
+// Is the JavaScript in THIS tab the bundle the server now serves? (review 2026-10-14 section 3.4, section 10.4)
 //
 // A rebuilt `ui/dist` reaches only tabs opened after it: an open SPA tab keeps its old bundle, and the
 // operator saw fixed problems ("Needs a model… backend=toy") in a tab opened before the rebuild. The

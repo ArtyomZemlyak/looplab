@@ -218,7 +218,7 @@ def with_readability(result, body):
 # --------------------------------------------------------------------------- question board
 # External memos carried 212 open questions (69 unique) and the board registered none: the
 # internal researcher's steering step that turns `open_questions` into cards does not run for an
-# external author, and the receipt said `succeeded` (review 2026-10-14 §4). Until a server-side
+# external author, and the receipt said `succeeded` (review 2026-10-14 section 4). Until a server-side
 # projection exists these notices SAY so, with the exact command that files the question, and
 # remind an experiment to name the question it answers (`question_filing`).
 _CLOSED_CARD_STATUSES = frozenset({"dropped", "deleted", "abandoned"})

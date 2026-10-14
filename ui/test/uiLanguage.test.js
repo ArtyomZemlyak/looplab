@@ -138,7 +138,7 @@ test('RU/EN switching keeps draft, focus and user evidence; a late catalogue can
   } finally { await harness.close() }
 })
 
-test('changing the interface language never writes server settings (review 2026-10-14 §10.5)', async () => {
+test('changing the interface language never writes server settings (review 2026-10-14 section 10.5)', async () => {
   const harness = await mountLive(); localStorage.clear()
   const locale = await harness.load('/src/uiLanguage.js')
   const { default: Sync } = await harness.load('/src/OwnerLanguageSync.jsx')

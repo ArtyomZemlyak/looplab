@@ -1551,7 +1551,7 @@ def _normalize_research_completed(ctx: _ControlIntake) -> dict:
     raw = dict(raw)
     reaffirmed = _reaffirmed_memo(state, raw.pop("reaffirm_memo_id", None))
     if reaffirmed is not None:
-        # REAFFIRM, don't copy (review 2026-10-14 §9): the agent names the memo whose conclusions
+        # REAFFIRM, don't copy (review 2026-10-14 section 9): the agent names the memo whose conclusions
         # still stand and the server carries its content forward, marked `reaffirms`, so the due
         # research window closes without the author re-sending — and growing — the same findings.
         # Anything the author does send (a new summary, a refined finding) replaces that field.
@@ -1584,7 +1584,7 @@ def _normalize_report_generated(ctx: _ControlIntake) -> dict:
     raw = ctx.data.get("content")
     if not isinstance(raw, dict):
         raise HTTPException(400, "report_generated.content must be an object")
-    # `body_markdown` / `key_metrics` (review 2026-10-14 §6) are optional; `author_claim` names the
+    # `body_markdown` / `key_metrics` (review 2026-10-14 section 6) are optional; `author_claim` names the
     # agent product ("Codex CLI") inside the SERVER-set publisher, which says who published.
     allowed = (set(sanitize_report_payload({})) - {"at_node", "trigger"}) | {
         "body_markdown", "key_metrics", "author_claim"}

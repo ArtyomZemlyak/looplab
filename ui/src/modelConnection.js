@@ -34,7 +34,7 @@ export function noteSettingsRevisions(settingsRevision, secretRevision) {
 // (backend=toy) with no passed check in this tab.
 export function paidActionModelNote(runBackend, check, { externalHarness = false } = {}) {
   // An external-harness run's report is the AGENT's to publish: a failed check only disables the
-  // optional LoopLab generation, so it must not read as a requirement (review 2026-10-14 §3).
+  // optional LoopLab generation, so it must not read as a requirement (review 2026-10-14 section 3).
   if (check?.outcome === 'failed' && externalHarness)
     return 'Optional LoopLab generation is unavailable: the last model connection check failed. The external agent can still publish the report.'
   if (check?.outcome === 'failed') return 'Needs a model: the last connection check failed. Review Settings → Model.'

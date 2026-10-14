@@ -98,7 +98,7 @@ export function normalizeRunReport(value) {
     { remaining: TRIGGER_CHARS }, true)
   const publishedSeq = field(value, 'published_seq')
   result.published_seq = Number.isSafeInteger(publishedSeq) && publishedSeq >= 0 ? publishedSeq : null
-  // Review 2026-10-14 §6: an authored GFM body, the metric/node REFERENCES whose values LoopLab fills
+  // Review 2026-10-14 section 6: an authored GFM body, the metric/node REFERENCES whose values LoopLab fills
   // from the recorded nodes (`reportKeyMetricRows`), and the server-stamped publisher.
   result.body_markdown = boundedAdvisoryText(field(value, 'body_markdown'), REPORT_BODY_CHARS,
     { remaining: REPORT_BODY_CHARS })

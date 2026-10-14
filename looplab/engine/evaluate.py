@@ -6785,7 +6785,7 @@ class EvaluateMixin:
                 # `search/speculation_quality.py` compares for equality.
                 # The DECLARED names survive the map's bound whatever their position, and what
                 # the bound left out is COUNTED on the row (`extra_metrics_omitted`) rather than
-                # vanishing (review 2026-10-14 §7: ~615 stdout keys, 3 of 4 key metrics lost).
+                # vanishing (review 2026-10-14 section 7: ~615 stdout keys, 3 of 4 key metrics lost).
                 _declared_extras = [
                     k for k, c in (a.res.extra_metrics_provenance or {}).items()
                     if c == EXTRA_METRIC_DECLARED] if isinstance(
