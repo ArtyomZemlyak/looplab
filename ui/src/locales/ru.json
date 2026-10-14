@@ -1,7 +1,7 @@
 {
   "schema": 1,
   "language": "ru",
-  "count": 7890,
+  "count": 7898,
   "messages": {
     "# LoopLab run report — {0}": "# Отчёт запуска LoopLab — {0}",
     "## Agent narrative (advisory)": "## Пояснения агента (рекомендации)",
@@ -7892,7 +7892,15 @@
     "baseline": "база",
     "not in this run": "нет в этом запуске",
     "not measured": "не измерено",
-    "Optional LoopLab generation is unavailable: the last model connection check failed. The external agent can still publish the report.": "Дополнительная генерация через LoopLab недоступна: последняя проверка подключения к модели не прошла. Внешний агент по-прежнему может опубликовать отчёт."
+    "Optional LoopLab generation is unavailable: the last model connection check failed. The external agent can still publish the report.": "Дополнительная генерация через LoopLab недоступна: последняя проверка подключения к модели не прошла. Внешний агент по-прежнему может опубликовать отчёт.",
+    "pill finding-status {0}": "pill finding-status {0}",
+    "research-findings-delta muted": "research-findings-delta muted",
+    "Reaffirms an earlier memo: its conclusions still stand.": "Подтверждает более раннюю записку: её выводы остаются в силе.",
+    "Since the previous memo:": "По сравнению с предыдущей запиской:",
+    "new": "новое",
+    "refined": "уточнено",
+    "refuted": "опровергнуто",
+    "unchanged": "без изменений"
   },
   "plurals": {
     "({0} paraphrases folded)": {
@@ -9677,6 +9685,36 @@
       "one": "{0} вопрос оценки",
       "few": "{0} вопроса оценки",
       "many": "{0} вопросов оценки"
+    },
+    "{0} new": {
+      "one": "{0} новый",
+      "few": "{0} новых",
+      "many": "{0} новых"
+    },
+    "{0} refined": {
+      "one": "{0} уточнён",
+      "few": "{0} уточнено",
+      "many": "{0} уточнено"
+    },
+    "{0} refuted": {
+      "one": "{0} опровергнут",
+      "few": "{0} опровергнуто",
+      "many": "{0} опровергнуто"
+    },
+    "{0} unchanged": {
+      "one": "{0} без изменений",
+      "few": "{0} без изменений",
+      "many": "{0} без изменений"
+    },
+    "{0} no longer listed": {
+      "one": "{0} больше не указан",
+      "few": "{0} больше не указаны",
+      "many": "{0} больше не указаны"
+    },
+    "{0} findings of the previous memo are no longer listed": {
+      "one": "{0} вывод предыдущей записки больше не указан",
+      "few": "{0} вывода предыдущей записки больше не указаны",
+      "many": "{0} выводов предыдущей записки больше не указаны"
     }
   }
 }

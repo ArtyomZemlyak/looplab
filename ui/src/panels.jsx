@@ -624,6 +624,7 @@ export function ResearchPanel({ state, runId, onToast, onClose, onSelect, onSele
           </div>
           {!latestSelected && <p className="research-history-notice" role="note">{uiText("Historical memo. Newer research may supersede these directions; select the latest memo to steer.")}</p>}
           <ResearchMemoCard key={selectedMemo.sourceIndex} memo={selectedMemo}
+          previous={memos.find(memo => memo.sourceIndex === selectedMemo.sourceIndex - 1) || null}
           memoNumber={selectedMemo.sourceIndex + 1} latest={latestSelected}
           staticOpen variant="panel" normalized
           onSteer={latestSelected && !finished ? steer : undefined}

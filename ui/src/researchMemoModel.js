@@ -353,7 +353,53 @@ function normalizeResearchMemoFrom(value, budget) {
   normalized.claimsOmitted = claimProjection.omitted
   normalized.claimsComplete = claimProjection.complete
   normalized.memo_id = text(field(src, 'memo_id'), ADVISORY_ID_CHARS, budget, true)
+  normalized.finding_meta = normalizeFindingMeta(field(src, 'finding_meta'), normalized.findings.length)
+  normalized.reaffirms = text(field(src, 'reaffirms'), ADVISORY_ID_CHARS, budget, true)
   return normalized
+}
+
+export const FINDING_STATUSES = Object.freeze(['new', 'refined', 'refuted', 'carried'])
+const FINDING_ID = /^[A-Za-z0-9][A-Za-z0-9_.:-]{0,63}$/
+
+function normalizeFindingMeta(value, count) {
+  if (!Array.isArray(value)) return []
+  return value.slice(0, count).map(row => {
+    if (!record(row)) return {}
+    const out = {}
+    for (const key of ['id', 'supersedes']) if (typeof row[key] === 'string' && FINDING_ID.test(row[key])) out[key] = row[key]
+    if (FINDING_STATUSES.includes(row.status)) out.status = row.status
+    return out
+  })
+}
+
+const sameText = value => String(value || '').toLowerCase().replace(/\s+/g, ' ').trim()
+
+// What changed in a memo's findings against the PREVIOUS memo (review 2026-10-14 §9, doc 76 §3).
+// An author-stated status wins (`finding_meta`: new / refined / refuted / carried, `supersedes`);
+// otherwise an EXACT text match says `carried` and anything else `new` — never a guessed semantic
+// equivalence. Findings of the previous memo that this one neither repeats nor supersedes are
+// `dropped`: still readable in that memo, listed here so a silent disappearance is visible.
+export function findingsDelta(memo, previous) {
+  if (!memo || !Array.isArray(memo.findings)) return null
+  const meta = Array.isArray(memo.finding_meta) ? memo.finding_meta : []
+  const before = previous && Array.isArray(previous.findings) ? previous.findings : null
+  const beforeMeta = previous && Array.isArray(previous.finding_meta) ? previous.finding_meta : []
+  const beforeText = new Set((before || []).map(sameText))
+  const items = memo.findings.map((text, index) => {
+    const row = meta[index] || {}
+    const status = row.status || (before == null ? null : beforeText.has(sameText(text)) ? 'carried' : 'new')
+    return { text, index, status, id: row.id || '', supersedes: row.supersedes || '' }
+  })
+  const counts = { new: 0, refined: 0, refuted: 0, carried: 0 }
+  for (const entry of items) if (entry.status) counts[entry.status] += 1
+  const nowText = new Set(memo.findings.map(sameText))
+  const superseded = new Set(items.map(entry => entry.supersedes).filter(Boolean))
+  const nowIds = new Set(items.map(entry => entry.id).filter(Boolean))
+  const dropped = (before || []).filter((text, index) => {
+    const id = beforeMeta[index]?.id
+    return !nowText.has(sameText(text)) && !(id && (superseded.has(id) || nowIds.has(id)))
+  })
+  return { items, counts, dropped, comparable: before != null, reaffirms: memo.reaffirms || '' }
 }
 
 export function normalizeResearchMemo(value) {

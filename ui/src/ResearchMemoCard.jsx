@@ -2,7 +2,7 @@ import { uiText, uiMessage, uiPlural, useUILanguage } from './uiLanguage.js'
 import React, { useId, useMemo, useState } from 'react'
 import Markdown, { stripMd } from './markdown.jsx'
 import { OpIcon } from './icons.jsx'
-import { memoLead, memoLeadIsPartial, normalizeResearchMemo } from './researchMemoModel.js'
+import { findingsDelta, memoLead, memoLeadIsPartial, normalizeResearchMemo } from './researchMemoModel.js'
 import { safeExternalHref } from './urlSafety.js'
 import './research-memo.css'
 
@@ -201,8 +201,37 @@ function SourceDisclosure({ sources }) {
   </details>
 }
 
+const FINDING_STATUS_LABEL = { new: 'new', refined: 'refined', refuted: 'refuted', carried: 'unchanged' }
+
+function FindingItem({ entry }) {
+  useUILanguage()
+  return <li className={entry.status ? `finding-${entry.status}` : undefined}>
+    {entry.status && entry.status !== 'carried' && <span className={`pill finding-status ${entry.status}`}>
+      {uiText(FINDING_STATUS_LABEL[entry.status])}</span>}{entry.status && entry.status !== 'carried' ? ' ' : ''}
+    <Markdown text={entry.text} externalOnly />
+  </li>
+}
+
+// "Key findings grew endlessly" (review 2026-10-14 §9): the change against the previous memo is
+// stated, unchanged findings fold behind a disclosure, and dropped ones stay readable.
+function FindingsDeltaLine({ delta }) {
+  useUILanguage()
+  if (!delta || (!delta.comparable && !delta.reaffirms)) return null
+  const parts = []
+  if (delta.counts.new) parts.push(uiPlural(delta.counts.new, '{0} new', '{0} new'))
+  if (delta.counts.refined) parts.push(uiPlural(delta.counts.refined, '{0} refined', '{0} refined'))
+  if (delta.counts.refuted) parts.push(uiPlural(delta.counts.refuted, '{0} refuted', '{0} refuted'))
+  if (delta.counts.carried) parts.push(uiPlural(delta.counts.carried, '{0} unchanged', '{0} unchanged'))
+  if (delta.dropped.length) parts.push(uiPlural(delta.dropped.length, '{0} no longer listed', '{0} no longer listed'))
+  return <p className="research-findings-delta muted" role="note">
+    {delta.reaffirms && <>{uiText('Reaffirms an earlier memo: its conclusions still stand.')} </>}
+    {delta.comparable && parts.length > 0 && <>{uiText('Since the previous memo: ')}{parts.join(' · ')}</>}
+  </p>
+}
+
 export function ResearchMemoBody({ memo, onSteer, steeringDirection = '', onSelectNode,
-  onSelectEvidence, showSummary = false, compact = false, normalized = false, steeringNote }) {
+  onSelectEvidence, showSummary = false, compact = false, normalized = false, steeringNote,
+  previous = null }) {
   useUILanguage()
 
   // Collection owners already applied the bounded projection. Re-projecting that derived shape
@@ -210,6 +239,13 @@ export function ResearchMemoBody({ memo, onSteer, steeringDirection = '', onSele
   // different receipt field names.
   const value = useMemo(() => normalized ? memo : normalizeResearchMemo(memo), [memo, normalized])
   const trust = researchMemoTrust(value)
+  const delta = useMemo(() => findingsDelta(value, previous), [value, previous])
+  // Changed findings first; unchanged (carried) ones behind the disclosure with the overflow.
+  const ordered = delta ? [...delta.items.filter(e => e.status !== 'carried'),
+    ...delta.items.filter(e => e.status === 'carried')] : []
+  const shown = ordered.filter((entry, index) => index < 5 && entry.status !== 'carried')
+  const visible = shown.length ? shown : ordered.slice(0, 5)
+  const rest = ordered.filter(entry => !visible.includes(entry))
   return <div className={`research-memo-body${compact ? ' compact' : ''}`}>
     {showSummary && <section className="research-memo-block takeaway">
       <SectionHeading icon="search">{uiText("Research takeaway")}</SectionHeading>
@@ -217,10 +253,15 @@ export function ResearchMemoBody({ memo, onSteer, steeringDirection = '', onSele
     </section>}
     {value.findings.length > 0 && <section className="research-memo-block findings">
       <SectionHeading icon="bulb" meta={uiPlural(value.findings.length, '{0} finding', '{0} findings')}>{uiText("Key findings")}</SectionHeading>
-      <ul>{value.findings.slice(0, 5).map((finding, index) => <li key={index}><Markdown text={finding} externalOnly /></li>)}</ul>
-      {value.findings.length > 5 && <details className="research-memo-disclosure">
-        <summary>{uiPlural(value.findings.length - 5, 'Show {0} more finding', 'Show {0} more findings')}</summary>
-        <ul>{value.findings.slice(5).map((finding, index) => <li key={index}><Markdown text={finding} externalOnly /></li>)}</ul>
+      <FindingsDeltaLine delta={delta} />
+      <ul>{visible.map(entry => <FindingItem key={entry.index} entry={entry} />)}</ul>
+      {rest.length > 0 && <details className="research-memo-disclosure">
+        <summary>{uiPlural(rest.length, 'Show {0} more finding', 'Show {0} more findings')}</summary>
+        <ul>{rest.map(entry => <FindingItem key={entry.index} entry={entry} />)}</ul>
+      </details>}
+      {delta?.dropped.length > 0 && <details className="research-memo-disclosure">
+        <summary>{uiPlural(delta.dropped.length, '{0} finding of the previous memo is no longer listed', '{0} findings of the previous memo are no longer listed')}</summary>
+        <ul>{delta.dropped.map((finding, index) => <li key={index} className="muted"><Markdown text={finding} externalOnly /></li>)}</ul>
       </details>}
     </section>}
     <EvidenceDisclosure value={value} trust={trust} onSelectNode={onSelectNode}
@@ -254,7 +295,7 @@ export function ResearchMemoBody({ memo, onSteer, steeringDirection = '', onSele
 export default function ResearchMemoCard({ memo, memoNumber = 1, open, onToggle,
   defaultOpen = false, latest = false, variant = 'panel', keepMounted = false,
   staticOpen = false, onSteer, steeringDirection = '', steeringNote,
-  onSelectNode, onSelectEvidence, normalized = false }) {
+  onSelectNode, onSelectEvidence, normalized = false, previous = null }) {
   useUILanguage()
 
   const value = useMemo(() => normalized ? memo : normalizeResearchMemo(memo), [memo, normalized])
@@ -310,7 +351,7 @@ export default function ResearchMemoCard({ memo, memoNumber = 1, open, onToggle,
       className="research-memo-region" hidden={!expanded}>
       {/* `showSummary` because the header now shows only a lead: without it the full conclusion
           would exist nowhere on this card. */}
-      <ResearchMemoBody memo={value} normalized showSummary onSteer={onSteer}
+      <ResearchMemoBody memo={value} normalized showSummary onSteer={onSteer} previous={previous}
         steeringDirection={steeringDirection} steeringNote={steeringNote} onSelectNode={onSelectNode}
         onSelectEvidence={onSelectEvidence} />
     </div>}
