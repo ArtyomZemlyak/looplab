@@ -1,7 +1,7 @@
 {
   "schema": 1,
   "language": "ru",
-  "count": 7812,
+  "count": 7813,
   "messages": {
     "# LoopLab run report — {0}": "# Отчёт запуска LoopLab — {0}",
     "## Agent narrative (advisory)": "## Пояснения агента (рекомендации)",
@@ -2950,6 +2950,7 @@
     "Use the calibrated result verifier only to break otherwise tied candidate metrics. This policy is pinned when a run starts so replay and resumed scoring cannot diverge.": "Используйте калиброванный контрольный результат только для того, чтобы нарушить метрики, связанные другими способами. Эта политика прикрепляется, когда начинается запуск, и возобновление проигрывания не может расходиться.",
     "Use the current run generation. Refresh after an event or response.": "Используйте текущее поколение запусков. Продукт после события или реакции.",
     "Use without a run": "Использовать без запусков",
+    "Using a direction records it for the external agent: its progress read lists your standing directions. It does not start an experiment.": "Выбранное направление записывается для внешнего агента: он видит ваши действующие указания при чтении прогресса. Эксперимент оно не запускает.",
     "Using a direction queues a hint for the next proposal. It does not start an experiment.": "Выбор направления ставит в очередь подсказку для следующего предложения. Эксперимент при этом не запускается.",
     "Using current server copy of {0}.": "С использованием копий текущего сервера {0}.",
     "VRAM": "VRAM",

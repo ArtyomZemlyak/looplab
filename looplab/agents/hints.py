@@ -23,6 +23,17 @@ from __future__ import annotations
 DEEP_RESEARCH_HINT_PREFIX = "deep-research directions: "
 
 
+def operator_directive_texts(pending_hints) -> list[str]:
+    """The standing OPERATOR directives, oldest first — the one filter both the internal roles'
+    prompt block (`render_hint_directives`) and the external agent's progress read use, so the two
+    cannot disagree about which hints carry operator authority (deep-research rows never do)."""
+    rows = [h for h in (pending_hints or [])
+            if isinstance(h, dict) and h.get("source") != "deep_research"
+            and not str(h.get("text") or "").lstrip().startswith(DEEP_RESEARCH_HINT_PREFIX)]
+    hints = [str(h.get("text", "")).strip() for h in rows if h.get("text")]
+    return [h for h in hints if h]
+
+
 def render_hint_directives(pending_hints, *, max_shown: int = 6) -> str:
     """A prompt block listing standing directives oldest→newest with explicit precedence, or ""
     when there are none. The most recent directive is flagged as authoritative on conflict; only
@@ -39,11 +50,7 @@ def render_hint_directives(pending_hints, *, max_shown: int = 6) -> str:
     operator-authority block ("the most recent is authoritative") — model output relabelled as an
     operator instruction, on exactly the resumed and replayed runs this paragraph forbids it for.
     The writer imports the prefix from here so the pair cannot drift."""
-    rows = [h for h in (pending_hints or [])
-            if isinstance(h, dict) and h.get("source") != "deep_research"
-            and not str(h.get("text") or "").lstrip().startswith(DEEP_RESEARCH_HINT_PREFIX)]
-    hints = [str(h.get("text", "")).strip() for h in rows if h.get("text")]
-    hints = [h for h in hints if h]
+    hints = operator_directive_texts(pending_hints)
     if not hints:
         return ""
     if len(hints) == 1:

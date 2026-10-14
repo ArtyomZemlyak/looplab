@@ -63,6 +63,29 @@ def _policy_preview(settings, state) -> dict:
             "meaning": "read-only policy reconstruction on this event prefix; admission and the live engine may apply further gates; the external agent authors every candidate"}
 
 
+#: How many standing directions the progress read carries — the same window the internal roles'
+#: prompt block shows (`agents/hints.py::render_hint_directives`'s `max_shown`).
+OPERATOR_DIRECTIONS_SHOWN = 6
+
+
+def _operator_directions(state) -> dict:
+    """The operator's standing directions for an EXTERNAL run (codex audit 2026-10-14 L-15).
+
+    The Research panel's "use this direction" and the Assistant queue a `hint`; on an internal run
+    every role reads it as an operator directive, but on an external run nothing ever showed it to
+    the agent — the steer was accepted, folded and read by nobody. Advisory and read-only: it is
+    the operator's wish, not an obligation the candidate gate checks, and the newest wins on
+    conflict exactly as it does for the internal roles."""
+    from looplab.agents.hints import operator_directive_texts
+    texts = operator_directive_texts(getattr(state, "pending_hints", None))
+    shown = texts[-OPERATOR_DIRECTIONS_SHOWN:]
+    return {"items": [text[:2_000] for text in shown], "total": len(texts),
+            "truncated": len(texts) > len(shown),
+            "meaning": "standing operator directions, oldest first; the last one wins on conflict. "
+                       "Advisory: weigh them when choosing the next experiment; they are not a "
+                       "candidate permit and no gate checks them"}
+
+
 def _page(rows: list[dict], offset: int, limit: int) -> dict:
     return {"total": len(rows), "offset": offset, "limit": limit,
             "items": list(reversed(rows))[offset:offset + limit],
@@ -155,6 +178,7 @@ def snapshot(rd: Path, expected_generation: str, *, activity_reader,
             "finish_report_due": finish_due["report"],
             "finish_pending_nodes": finish_due["pending_nodes"],
             "execution": execution,
+            "operator_directions": _operator_directions(state),
             "pending_checkpoint_count": len(pending),
             "pending_checkpoints": pending[:100],
             "pending_checkpoints_truncated": len(pending) > 100,

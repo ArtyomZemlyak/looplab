@@ -304,3 +304,29 @@ def test_checkpoint_names_the_required_decision_even_after_engine_stops(tmp_path
     damaged = client.get("/api/runs/demo/harness-progress", params=args).json()
     assert damaged["next_step"]["code"] == "inspect_sources"
     assert damaged["pending_checkpoint_count"] == 1
+
+
+def test_an_operator_steer_reaches_the_external_agent_through_progress(tmp_path):
+    """Codex audit 2026-10-14 L-15: the Research panel's "use this direction" queued a `hint` that
+    every INTERNAL role reads as an operator directive, while on an external run nothing ever showed
+    it to the agent. Progress (full and the compact MCP view) now carries the standing directions,
+    with deep-research hints excluded exactly as the internal prompt block excludes them."""
+    rd, store, client = _run(tmp_path)
+    generation = run_generation_token(store.read_all())
+    path = "/api/runs/demo/harness-progress"
+    empty = client.get(path, params={"expected_generation": generation}).json()
+    assert empty["operator_directions"]["items"] == [] and empty["operator_directions"]["total"] == 0
+    store.append("hint", {"text": "try this research direction: warm-start from w06"})
+    store.append("hint", {"text": "model-written idea", "source": "deep_research"})
+    generation = run_generation_token(store.read_all())
+    full = client.get(path, params={"expected_generation": generation}).json()
+    assert full["operator_directions"]["items"] == ["try this research direction: warm-start from w06"]
+    assert full["operator_directions"]["total"] == 1 and not full["operator_directions"]["truncated"]
+    compact = client.get(path, params={"expected_generation": generation, "brief": True}).json()
+    assert compact["operator_directions"] == full["operator_directions"]
+    for index in range(8):
+        store.append("hint", {"text": f"direction {index}"})
+    generation = run_generation_token(store.read_all())
+    many = client.get(path, params={"expected_generation": generation}).json()["operator_directions"]
+    assert many["total"] == 9 and many["truncated"] and len(many["items"]) == 6
+    assert many["items"][-1] == "direction 7", "newest last: the last one wins on conflict"

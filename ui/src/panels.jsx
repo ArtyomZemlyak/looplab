@@ -628,7 +628,10 @@ export function ResearchPanel({ state, runId, onToast, onClose, onSelect, onSele
           staticOpen variant="panel" normalized
           onSteer={latestSelected && !finished ? steer : undefined}
           steeringNote={latestSelected && finished
-            ? 'This run is finished. Resume it before choosing a direction for a future proposal.' : undefined}
+            ? 'This run is finished. Resume it before choosing a direction for a future proposal.'
+            : externalHarness
+              ? 'Using a direction records it for the external agent: its progress read lists your standing directions. It does not start an experiment.'
+              : undefined}
           steeringDirection={steeringDirection} onSelectNode={onSelect}
           onSelectEvidence={onSelectEvidence} />
         </div>
