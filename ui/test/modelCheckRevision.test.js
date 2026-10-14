@@ -36,3 +36,11 @@ test('toy is an evaluator backend, not evidence that an external agent requires 
   assert.match(paidActionModelNote('toy', null), /Needs a model/)
   assert.match(paidActionModelNote('toy', { outcome: 'failed' }, { externalHarness: true }), /check failed/)
 })
+
+test('an external run reads a failed check as an unavailable option, not a requirement', async () => {
+  const { paidActionModelNote } = await import('../src/modelConnection.js')
+  const note = paidActionModelNote('toy', { outcome: 'failed' }, { externalHarness: true })
+  assert.match(note, /^Optional LoopLab generation is unavailable/)
+  assert.doesNotMatch(note, /Needs a model/)
+  assert.match(paidActionModelNote('toy', { outcome: 'failed' }), /^Needs a model/)
+})

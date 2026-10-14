@@ -14,8 +14,8 @@ import { OpIcon } from './icons.jsx'
 import { OBJECTIVE_SOURCE_LABEL, objectiveMetricSource, objectiveSourceCaveated,
   objectiveSourceHelp, reportStepIdentity } from './trustSemantics.js'
 import { DataTable, downloadBlob } from './accessibility.jsx'
-import { normalizeReportNodeDetail, normalizeRunReport, reportCoverageText,
-  reportNarrativeCoverage } from './reportModel.js'
+import { normalizeReportNodeDetail, normalizeRunReport, reportAuthor, reportCoverageText,
+  reportKeyMetricRows, reportNarrativeCoverage } from './reportModel.js'
 import { nodeTheme } from './conceptId.js'
 import { nodeIsActive } from './nodeProjection.js'
 import { readOnlyLabel } from './runMode.js'
@@ -102,10 +102,41 @@ function VerdictBanner({ v, onOpenPanel, canOpenPanel }) {
   )
 }
 
-function AgentNarrative({ rep, coverage, generation, snapshotSeq }) {
+const AUTHOR_INTRO = {
+  external_agent: 'Written by the external agent that drives this run. These interpretations may be wrong; the measured verdict and comparison coverage above take precedence.',
+  looplab_model: "Written by LoopLab's model connection. These interpretations may be wrong; the measured verdict and comparison coverage above take precedence.",
+  operator: 'Written by the operator. These interpretations may be wrong; the measured verdict and comparison coverage above take precedence.',
+}
+const AUTHOR_LABEL = { external_agent: 'Author: external agent', looplab_model: "Author: LoopLab's model", operator: 'Author: operator' }
+
+// The author's key metrics, with every VALUE read from the recorded nodes (`reportKeyMetricRows`).
+function KeyMetricTable({ keyMetrics, nodes, championId }) {
+  useUILanguage()
+  const rows = reportKeyMetricRows(keyMetrics, nodes, championId)
+  if (!rows || !rows.length) return null
+  return <div className="md-table-wrap agent-report-metrics" role="region" tabIndex={0}
+    aria-label={uiText('Key metrics (values measured by LoopLab)')}>
+    <table className="tbl md-table">
+      <caption>{uiText('Key metrics (values measured by LoopLab)')}</caption>
+      <thead><tr><th scope="col">{uiText('Experiment')}</th>
+        {keyMetrics.metrics.map(m => <th scope="col" key={m.key} title={m.key}>{m.label || m.key}</th>)}</tr></thead>
+      <tbody>{rows.map(row => <tr key={row.node_id}>
+        <th scope="row">#{row.node_id}{row.label ? ` · ${row.label}` : ''}{row.baseline ? ` · ${uiText('baseline')}` : ''}
+          {row.missing && <span className="muted"> · {uiText('not in this run')}</span>}</th>
+        {row.values.map(v => <td key={v.key} style={{ textAlign: 'right' }}>
+          {v.value == null ? <span className="muted">{uiText('not measured')}</span> : fmt(v.value)}
+          {v.delta != null && <span className="muted"> ({v.delta >= 0 ? '+' : ''}{fmt(v.delta)})</span>}
+        </td>)}
+      </tr>)}</tbody>
+    </table>
+  </div>
+}
+
+function AgentNarrative({ rep, coverage, generation, snapshotSeq, nodes, championId }) {
   useUILanguage()
 
   if (!rep) return null
+  const author = reportAuthor(rep)
   const publishedIso = rep.published_at == null ? null : new Date(rep.published_at * 1000).toISOString()
   const warning = coverage.status === 'stale'
     ? 'This narrative predates visible nodes. Refresh it before relying on its claims.'
@@ -122,7 +153,9 @@ function AgentNarrative({ rep, coverage, generation, snapshotSeq }) {
       <h2 id="agent-report-heading" tabIndex={-1}>{uiText("Agent narrative")}</h2>
       <span className="pill">{uiText("advisory · not deterministic")}</span>
     </div>
-    <p className="report-section-intro">{uiText('The assistant explains the recorded results. These interpretations may be wrong; the measured verdict and comparison coverage above take precedence.')}</p>
+    <p className="report-section-intro">
+      <span className="pill">{uiText(AUTHOR_LABEL[author.kind] || AUTHOR_LABEL.looplab_model)}{author.claim ? ` · ${author.claim}` : ''}</span>{' '}
+      {uiText(AUTHOR_INTRO[author.kind] || AUTHOR_INTRO.looplab_model)}</p>
     <span className={`report-coverage ${coverage.status}`}>{uiText(reportCoverageText(coverage))}</span>
     <details className="report-publication-details"><summary>{uiText('Publication details')}</summary>
     <div className="report-provenance" aria-label={uiText("Agent narrative publication provenance")}>
@@ -136,9 +169,14 @@ function AgentNarrative({ rep, coverage, generation, snapshotSeq }) {
     {warning && <div className="report-coverage-warning" role="status"><OpIcon name="alert" size={13} /> {uiText(warning)}</div>}
     {rep.headline && <h3 className="agent-report-headline">{rep.headline}</h3>}
     {(rep.verdict || rep.summary) && <div className="agent-report-text"><Markdown text={rep.verdict || rep.summary} /></div>}
-    <div className="agent-report-columns">{groups.map(([label, items]) => <div className="agent-report-group" key={label}>
-      <h3>{uiText(label)}</h3>{items?.length ? <List items={items} /> : <p className="muted">{uiText('No interpretation was published for this section.')}</p>}
-    </div>)}</div>
+    <KeyMetricTable keyMetrics={rep.key_metrics} nodes={nodes} championId={championId} />
+    {rep.body_markdown && <div className="agent-report-text agent-report-body"><Markdown text={rep.body_markdown} /></div>}
+    {/* Empty sections are not drawn: four "No interpretation was published" boxes under an
+        agent's report read as missing work (review 2026-10-14 §6). */}
+    {groups.some(([, items]) => items?.length) && <div className="agent-report-columns">
+      {groups.filter(([, items]) => items?.length).map(([label, items]) => <div className="agent-report-group" key={label}>
+        <h3>{uiText(label)}</h3><List items={items} />
+      </div>)}</div>}
     {rep.caveats.length > 0 && <div className="agent-report-caveats">
       <div className="agent-report-caveats-title"><OpIcon name="alert" size={12} />
         <strong>{uiText("Agent caveats")}</strong><span className="muted">{uiText("advisory narrative")}</span></div>
@@ -604,7 +642,8 @@ export default function ReportView({ state, runId, onOpenPanel, canOpenPanel, on
       </dl>
       {!Object.keys(a.failures).length && !a.infeasible.length && <p className="muted">{uiText('No execution failures or constraint violations are recorded.')}</p>}
 
-      <AgentNarrative rep={rep} coverage={coverage} generation={expectedGeneration} snapshotSeq={observedSeq} />
+      <AgentNarrative rep={rep} coverage={coverage} generation={expectedGeneration} snapshotSeq={observedSeq}
+        nodes={state.nodes} championId={best?.id ?? null} />
       {!rep && <p className="report-section-intro">{uiText('No detailed Assistant report has been published. Recorded outcomes remain available; discuss them in chat or refresh the report.')}</p>}
 
       {best && <><h2 id="report-section-champion" tabIndex={-1} className="section-h">{uiText("Selected experiment")}</h2>

@@ -164,3 +164,30 @@ def test_an_unfiled_experiment_is_reminded_only_while_questions_are_open():
     memo = {"memo": {"open_questions": ["does   replay HELP?", "Is week 7 worse?"]}}
     notice = board_notices("research_completed", memo, with_board)[0]
     assert notice["count"] == 1 and notice["samples"] == ["Is week 7 worse?"]
+
+
+def test_an_agent_report_keeps_its_body_metric_refs_and_server_stamped_publisher(
+        tmp_path, monkeypatch):
+    from looplab.events.replay import fold
+    client, rd = _client(tmp_path, monkeypatch)
+    content = {"headline": "D3 beats the base on all four metrics",
+               "body_markdown": "| Metric | D3 |\n|---|---:|\n| IC200 | 0.25 |",
+               "key_metrics": {"metrics": ["IC200", {"key": "NB20", "label": "New@20"}],
+                               "nodes": [3, {"node_id": 1, "label": "base"}],
+                               "baseline_node_id": 1},
+               "author_claim": "Codex CLI"}
+    response = post_command(client, "report_generated", {"content": content}, key="rep-1",
+                            headers=AGENT)
+    assert response.status_code == 200 and response.json()["status"] != "rejected", response.text
+    report = fold(EventStore(rd / "events.jsonl").read_all()).report
+    assert report["body_markdown"].startswith("| Metric | D3 |")
+    assert report["key_metrics"] == {
+        "metrics": [{"key": "IC200", "label": ""}, {"key": "NB20", "label": "New@20"}],
+        "nodes": [{"node_id": 3, "label": ""}, {"node_id": 1, "label": "base"}],
+        "baseline_node_id": 1}
+    assert report["publisher"] == {"kind": "external_agent", "author_claim": "Codex CLI"}
+    # The publisher is the server's statement: an author cannot claim to be LoopLab's model.
+    forged = post_command(client, "report_generated",
+                          {"content": {"headline": "x", "publisher": {"kind": "looplab_model"}}},
+                          key="rep-2", headers=AGENT)
+    assert forged.json()["status"] == "rejected"

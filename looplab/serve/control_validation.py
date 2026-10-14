@@ -1584,15 +1584,29 @@ def _normalize_report_generated(ctx: _ControlIntake) -> dict:
     raw = ctx.data.get("content")
     if not isinstance(raw, dict):
         raise HTTPException(400, "report_generated.content must be an object")
-    allowed = set(sanitize_report_payload({})) - {"at_node", "trigger"}
+    # `body_markdown` / `key_metrics` (review 2026-10-14 §6) are optional; `author_claim` names the
+    # agent product ("Codex CLI") inside the SERVER-set publisher, which says who published.
+    allowed = (set(sanitize_report_payload({})) - {"at_node", "trigger"}) | {
+        "body_markdown", "key_metrics", "author_claim"}
     unknown = set(raw) - allowed
     if unknown:
         raise HTTPException(400, f"report_generated.content has unknown field(s): {', '.join(sorted(unknown))}")
-    if not any(raw.get(key) for key in ("headline", "summary", "verdict", "champion_summary")):
+    if not any(raw.get(key) for key in ("headline", "summary", "verdict", "champion_summary",
+                                        "body_markdown")):
         raise HTTPException(400, "report_generated.content needs a narrative")
+    raw = dict(raw)
+    author_claim = raw.pop("author_claim", None)
+    if author_claim is not None and not isinstance(author_claim, str):
+        raise HTTPException(400, "report_generated.content.author_claim must be a string")
+    if "key_metrics" in raw and not isinstance(raw["key_metrics"], dict):
+        raise HTTPException(400, "report_generated.content.key_metrics must be an object "
+                                 "{metrics: [{key, label}], nodes: [{node_id, label}], "
+                                 "baseline_node_id}")
+    publisher = {"kind": "external_agent", **({"author_claim": author_claim}
+                                              if author_claim else {})}
     at_node = len(ctx.state().nodes)
     return {"content": sanitize_report_payload({**raw, "at_node": at_node,
-                                                "trigger": "external"}),
+                                                "trigger": "external", "publisher": publisher}),
             "at_node": at_node, "trigger": "external"}
 
 

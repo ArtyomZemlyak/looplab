@@ -1319,4 +1319,53 @@ def sanitize_report_payload(payload, *, env=None) -> dict:
     out["at_node"] = (src.get("at_node") if type(src.get("at_node")) is int
                       and 0 <= src.get("at_node") <= (1 << 63) - 1 else None)
     out["trigger"] = _text(src.get("trigger", ""), 64, budget, single_line=True, env=env)
+    # THE AUTHORED REPORT BODY AND ITS MEASURED KEY METRICS (review 2026-10-14 §6). Additive and
+    # conditional — an absent key stays absent, so every report written before this folds exactly
+    # as it did. `body_markdown` is free GFM prose (tables included), never HTML the UI executes.
+    # `key_metrics` are REFERENCES only — metric keys and node ids; the numbers are read from the
+    # recorded nodes by whoever renders the report, never from the author's text.
+    if "body_markdown" in src:
+        out["body_markdown"] = _text(src.get("body_markdown", ""), REPORT_BODY_MAX_CHARS,
+                                     budget, env=env)
+    if "key_metrics" in src:
+        out["key_metrics"] = _report_key_metrics(src.get("key_metrics"), budget, env=env)
+    if "publisher" in src:
+        publisher = src.get("publisher") if isinstance(src.get("publisher"), dict) else {}
+        kind = publisher.get("kind")
+        out["publisher"] = {
+            "kind": kind if kind in REPORT_PUBLISHER_KINDS else "unknown",
+            **({"author_claim": _text(publisher.get("author_claim"), 120, budget,
+                                      single_line=True, env=env)}
+               if isinstance(publisher.get("author_claim"), str) else {}),
+        }
     return out
+
+
+REPORT_BODY_MAX_CHARS = 24_000
+REPORT_PUBLISHER_KINDS = ("external_agent", "looplab_model", "operator")
+_METRIC_KEY_MAX = 200
+
+
+def _report_key_metrics(value, budget: list[int], *, env) -> dict:
+    """`{metrics: [{key, label}], nodes: [{node_id, label}], baseline_node_id}` — bounded refs."""
+    src = value if isinstance(value, dict) else {}
+    metrics = []
+    for row in _items(src.get("metrics"), 12):
+        row = {"key": row} if isinstance(row, str) else row
+        if not isinstance(row, dict) or not isinstance(row.get("key"), str):
+            continue
+        key = row["key"].strip()[:_METRIC_KEY_MAX]
+        if not key:
+            continue
+        metrics.append({"key": key, "label": _text(row.get("label", ""), 120, budget,
+                                                   single_line=True, env=env)})
+    nodes = []
+    for row in _items(src.get("nodes"), 24):
+        row = {"node_id": row} if type(row) is int else row
+        if not isinstance(row, dict) or type(row.get("node_id")) is not int or row["node_id"] < 0:
+            continue
+        nodes.append({"node_id": row["node_id"], "label": _text(row.get("label", ""), 120,
+                                                                budget, single_line=True, env=env)})
+    baseline = src.get("baseline_node_id")
+    return {"metrics": metrics, "nodes": nodes,
+            "baseline_node_id": baseline if type(baseline) is int and baseline >= 0 else None}

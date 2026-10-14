@@ -1,7 +1,7 @@
 {
   "schema": 1,
   "language": "ru",
-  "count": 7877,
+  "count": 7890,
   "messages": {
     "# LoopLab run report — {0}": "# Отчёт запуска LoopLab — {0}",
     "## Agent narrative (advisory)": "## Пояснения агента (рекомендации)",
@@ -7879,7 +7879,20 @@
     "Agent last contacted the API {0} · nothing required": "Последнее обращение агента к API: {0} · ничего не требуется",
     "Agent last contacted the API {0}": "Последнее обращение агента к API: {0}",
     "Counts successful requests (reads and writes) made with the harness credential in this UI process. Browser polling does not count. Silence does not prove agent death; inspect the client, questions and receipts. UI restart clears this observation.": "Учитываются успешные обращения агента с harness-токеном (чтение и запись) в этом процессе UI. Опрос из браузера не учитывается. Молчание не доказывает, что агент остановился; проверьте клиент, вопросы и квитанции. Перезапуск UI очищает наблюдение.",
-    "Last contact": "Последнее обращение"
+    "Last contact": "Последнее обращение",
+    "Written by the external agent that drives this run. These interpretations may be wrong; the measured verdict and comparison coverage above take precedence.": "Написано внешним агентом, который ведёт этот запуск. Эти интерпретации могут быть ошибочными; измеренный вердикт и охват сравнений выше важнее.",
+    "Written by LoopLab's model connection. These interpretations may be wrong; the measured verdict and comparison coverage above take precedence.": "Написано моделью, подключённой к LoopLab. Эти интерпретации могут быть ошибочными; измеренный вердикт и охват сравнений выше важнее.",
+    "Written by the operator. These interpretations may be wrong; the measured verdict and comparison coverage above take precedence.": "Написано оператором. Эти интерпретации могут быть ошибочными; измеренный вердикт и охват сравнений выше важнее.",
+    "Author: external agent": "Автор: внешний агент",
+    "Author: LoopLab's model": "Автор: модель LoopLab",
+    "Author: operator": "Автор: оператор",
+    "md-table-wrap agent-report-metrics": "md-table-wrap agent-report-metrics",
+    "agent-report-text agent-report-body": "agent-report-text agent-report-body",
+    "Key metrics (values measured by LoopLab)": "Ключевые метрики (значения измерены LoopLab)",
+    "baseline": "база",
+    "not in this run": "нет в этом запуске",
+    "not measured": "не измерено",
+    "Optional LoopLab generation is unavailable: the last model connection check failed. The external agent can still publish the report.": "Дополнительная генерация через LoopLab недоступна: последняя проверка подключения к модели не прошла. Внешний агент по-прежнему может опубликовать отчёт."
   },
   "plurals": {
     "({0} paraphrases folded)": {

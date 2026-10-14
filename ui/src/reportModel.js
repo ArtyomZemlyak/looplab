@@ -98,6 +98,12 @@ export function normalizeRunReport(value) {
     { remaining: TRIGGER_CHARS }, true)
   const publishedSeq = field(value, 'published_seq')
   result.published_seq = Number.isSafeInteger(publishedSeq) && publishedSeq >= 0 ? publishedSeq : null
+  // Review 2026-10-14 §6: an authored GFM body, the metric/node REFERENCES whose values LoopLab fills
+  // from the recorded nodes (`reportKeyMetricRows`), and the server-stamped publisher.
+  result.body_markdown = boundedAdvisoryText(field(value, 'body_markdown'), REPORT_BODY_CHARS,
+    { remaining: REPORT_BODY_CHARS })
+  result.key_metrics = normalizeKeyMetrics(field(value, 'key_metrics'))
+  result.publisher = normalizePublisher(field(value, 'publisher'))
   const publishedAt = field(value, 'published_at')
   result.published_at = typeof publishedAt === 'number' && Number.isFinite(publishedAt)
     && publishedAt > 0 && publishedAt <= 253_402_300_799 ? publishedAt : null
@@ -136,4 +142,68 @@ export function reportCoverageText(coverage) {
   return coverage.currentNodeCount == null
     ? 'Node coverage unknown.'
     : `Node coverage unknown for ${coverage.currentNodeCount} current nodes.`
+}
+
+export const REPORT_BODY_CHARS = 24_000
+const PUBLISHER_KINDS = ['external_agent', 'looplab_model', 'operator']
+
+function normalizeKeyMetrics(value) {
+  if (!isAdvisoryRecord(value)) return null
+  const metrics = (Array.isArray(value.metrics) ? value.metrics : []).slice(0, 12)
+    .filter(m => isAdvisoryRecord(m) && typeof m.key === 'string' && m.key)
+    .map(m => ({ key: m.key.slice(0, 200), label: typeof m.label === 'string' ? m.label.slice(0, 120) : '' }))
+  const nodes = (Array.isArray(value.nodes) ? value.nodes : []).slice(0, 24)
+    .filter(n => isAdvisoryRecord(n) && Number.isSafeInteger(n.node_id) && n.node_id >= 0)
+    .map(n => ({ node_id: n.node_id, label: typeof n.label === 'string' ? n.label.slice(0, 120) : '' }))
+  const baseline = Number.isSafeInteger(value.baseline_node_id) && value.baseline_node_id >= 0
+    ? value.baseline_node_id : null
+  return metrics.length || nodes.length ? { metrics, nodes, baseline_node_id: baseline } : null
+}
+
+function normalizePublisher(value) {
+  if (!isAdvisoryRecord(value)) return null
+  const kind = PUBLISHER_KINDS.includes(value.kind) ? value.kind : 'unknown'
+  const claim = typeof value.author_claim === 'string' ? value.author_claim.slice(0, 120) : ''
+  return { kind, author_claim: claim }
+}
+
+// Who wrote the narrative: the server-stamped publisher, else the trigger ('external' is the agent).
+export function reportAuthor(report) {
+  if (!report) return null
+  const kind = report.publisher?.kind && report.publisher.kind !== 'unknown' ? report.publisher.kind
+    : report.trigger === 'external' ? 'external_agent' : 'looplab_model'
+  return { kind, claim: report.publisher?.author_claim || '' }
+}
+
+// The key-metric table's rows: every referenced node (or the champion when none is named) × every
+// referenced metric, VALUES READ FROM THE RECORDED NODES — never from the author's prose. A key the
+// node did not record is `null` ("not measured"), never 0; a node the run does not hold is flagged.
+export function reportKeyMetricRows(keyMetrics, nodes, championId = null) {
+  if (!keyMetrics || !keyMetrics.metrics.length) return null
+  const byId = nodes || {}
+  const refs = keyMetrics.nodes.length ? keyMetrics.nodes
+    : (championId != null ? [{ node_id: championId, label: '' }] : [])
+  const valueOf = (node, key) => {
+    if (!node) return null
+    const extra = node.extra_metrics?.[key]
+    if (typeof extra === 'number' && Number.isFinite(extra)) return extra
+    if (key === 'metric') {
+      const m = node.confirmed_mean ?? node.metric
+      return typeof m === 'number' && Number.isFinite(m) ? m : null
+    }
+    return null
+  }
+  const baseline = keyMetrics.baseline_node_id != null ? byId[keyMetrics.baseline_node_id] : null
+  return refs.map(ref => {
+    const node = byId[ref.node_id]
+    return {
+      node_id: ref.node_id, label: ref.label, missing: !node,
+      baseline: ref.node_id === keyMetrics.baseline_node_id,
+      values: keyMetrics.metrics.map(m => {
+        const value = valueOf(node, m.key)
+        const base = baseline && ref.node_id !== keyMetrics.baseline_node_id ? valueOf(baseline, m.key) : null
+        return { key: m.key, value, delta: value != null && base != null ? value - base : null }
+      }),
+    }
+  })
 }

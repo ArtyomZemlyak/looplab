@@ -21,7 +21,9 @@ test('catalogue covers authored UI copy and preserves placeholders without a run
     assert.deepEqual([...key.matchAll(/\{\d+\}/g)].map(m => m[0]).sort(),
       [...value.matchAll(/\{\d+\}/g)].map(m => m[0]).sort(), key)
     assert.doesNotMatch(value, /999900\d\d/)
-    assert.doesNotMatch(value, /Аллах|многобожник|Вечная жизнь|Судный день|show le|show loc|(?:\b\w+[ -]){30}/u)
+    // An IDENTITY entry (an identifier list or class name the collector picked up) is the source
+    // text itself, not a machine translation, so the long-run heuristic does not apply to it.
+    if (value !== key) assert.doesNotMatch(value, /Аллах|многобожник|Вечная жизнь|Судный день|show le|show loc|(?:\b\w+[ -]){30}/u)
   }
   for (const file of await readdir(new URL('../src/', import.meta.url))) {
     if (!/\.(jsx|js)$/.test(file) || /^(uiLanguage|useAssistantLanguage|locale)/.test(file)) continue
