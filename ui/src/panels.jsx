@@ -2909,8 +2909,12 @@ function CmpCol({ resource, label, surfaceRef = null, onFocusCapture = null, onR
   </div>
 }
 
+// UI review 2026-10-14 section 7.7: any number of experiments as one table (lazy; read on open).
+const CompareTable = React.lazy(() => import('./CompareTable.jsx'))
+
 export function ComparePanel({ state, runId, expectedGeneration, reviewMode = false, onClose, initialPair = null }) {
   useUILanguage()
+  const [tableOpen, setTableOpen] = useState(false)
 
   const ids = Object.keys(state.nodes).map(Number).sort((a, b) => a - b)
   const [a, setA] = useState(null), [b, setB] = useState(null)
@@ -3022,6 +3026,12 @@ export function ComparePanel({ state, runId, expectedGeneration, reviewMode = fa
   </Panel>
   return (
     <Panel title={uiText("Compare nodes")} onClose={onClose} wide>
+      <details className="compare-table-section" onToggle={event => setTableOpen(event.currentTarget.open)}>
+        <summary>{uiText("Table: all experiments × parameters × metrics")}</summary>
+        {tableOpen && <React.Suspense fallback={<div className="muted">{uiText("Loading…")}</div>}>
+          <CompareTable state={state} runId={runId} reviewMode={reviewMode} />
+        </React.Suspense>}
+      </details>
       <div className="toolbar" style={{ marginBottom: 10 }}>
         <CmpSel label={uiText("Left node")} v={a} set={setA} ids={ids} nodes={state.nodes}
           currentAttempt={displayedAttemptA} selectRef={leftSelectRef} />

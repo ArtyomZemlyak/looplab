@@ -1,0 +1,10 @@
+/* Experiments × parameters × metrics (CompareTable.jsx). */
+.compare-table { margin: 0 0 14px; }
+.compare-table-tools { flex-wrap: wrap; gap: 8px; align-items: center; }
+.compare-table-pick > summary { cursor: pointer; }
+.compare-table-pick-list { display: flex; flex-wrap: wrap; gap: 4px 10px; max-height: 160px; overflow: auto; padding: 6px 0; }
+.compare-table-wrap { max-height: 60vh; overflow: auto; }
+.compare-table-wrap td.num, .compare-table-wrap th .num { text-align: right; font-variant-numeric: tabular-nums; }
+.compare-table .linklike { background: none; border: 0; padding: 0; color: inherit; font: inherit; cursor: pointer; text-align: left; }
+.compare-table .linklike:hover { text-decoration: underline; }
+.compare-table th.ct-config code { color: var(--accent); }

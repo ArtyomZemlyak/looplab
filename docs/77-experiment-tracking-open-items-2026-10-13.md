@@ -42,7 +42,9 @@ OPEN[experiment-artifact-previews] proof:`absent:RESULT 20@docs/audit/experiment
 
 ## 4. Скорость и ресурсы в карточке эксперимента — P2
 
-OPEN[experiment-resource-snapshot] proof:`absent:ResourceSnapshotPanel@ui/src/Inspector.jsx`
+OPEN[experiment-resource-snapshot] proof:`absent:RESULT 20@docs/audit/experiment-resource-snapshot-20261014.md`
+
+*Сделано 2026-10-14 (ветка `fix/ui-remaining-20261014`):* `ui/src/ResourceSnapshotPanel.jsx` в Inspector → Overview (ленивый, читает `GET /code` только при раскрытии): попытка и исправления; GPU — заявленные экспериментом, world size — из фактического конфига; время оценки (измерено); время по стадиям только текущего жизненного цикла (строки до сброса не считаются); GPU·ч — вычислено с допущением; шаги/с — вычислено как max_steps ÷ время стадии обучения (с запуском); скорости, которые сообщил тренер, — под их именами и в их единицах; пиковая память — «не записано», если её нет. Чистая модель `resourceSnapshotModel.js`, проверка `ui/test/resourceSnapshot.test.js` (на числах D3: 25,453 GPU·ч). Остаётся приёмка на реальной 8-GPU попытке — протокол в audit-документе proof.
 
 **Есть.** Времена стадий и наши training-resources JSON/CSV с wall time, GPU·ч и измерениями обучения. Пользователь явно попросил сохранять скорость для планирования ресурсов.
 

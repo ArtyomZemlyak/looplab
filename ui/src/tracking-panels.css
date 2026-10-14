@@ -7,3 +7,5 @@
 .art-pdf object { width: 100%; height: min(70vh, 720px); border: 1px solid var(--line); border-radius: 6px; }
 .art-node-filter { display: flex; gap: 4px; align-items: baseline; margin-bottom: 6px; }
 .seed-file-format { margin: 6px 0; }
+.resource-snapshot > summary { cursor: pointer; font-weight: 600; }
+.resource-snapshot .kv dd { overflow-wrap: anywhere; }

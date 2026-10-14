@@ -202,8 +202,10 @@ export const DEFAULT_BUDGETS = Object.freeze({
     // 2026-10-14 (doc 80 §11, branch fix/ui-remaining-20261014): the memo-question banner, report
     // figures and version history measured 695,195 B JS / 61,203 B CSS, all of it in lazy chunks
     // and their own stylesheets; every route closure kept its ceiling. Re-baselined to that build.
-    js: { gzip: 682 * KIB },
-    css: { gzip: 60 * KIB },
+    // Then the Files paging/PDF view, the attempt Resources panel and the experiments table:
+    // 702,223 B JS / 61,745 B CSS, again only lazy chunks and their own stylesheets.
+    js: { gzip: 686.5 * KIB },
+    css: { gzip: 60.5 * KIB },
   },
   individual: {
     js: { raw: 450 * KIB, gzip: 110 * KIB },

@@ -77,6 +77,8 @@ import {
 // review transport out of the base DAG closure, then load the same component only when this tab opens.
 const SourceSnapshotPanel = React.lazy(() => import('./SourceSnapshotPanel.jsx'))
 const RuntimeSnapshotPanel = React.lazy(() => import('./RuntimeSnapshotPanel.jsx'))
+// doc 77 §4: what the attempt used (GPUs, stage wall time, GPU-hours, throughput, peak memory).
+const ResourceSnapshotPanel = React.lazy(() => import('./ResourceSnapshotPanel.jsx'))
 const CommentsThread = React.lazy(() => import('./CommentsThread.jsx'))
 
 const withoutNodeTrace = value => value && typeof value === 'object'
@@ -1065,6 +1067,7 @@ function Overview({ n, state, runId, onToast, draftStore, expectedGeneration, on
     <React.Suspense fallback={null}>
       <SourceSnapshotPanel state={state} runId={runId} node={n} />
       {expectedGeneration && <RuntimeSnapshotPanel runId={runId} node={n} expectedGeneration={expectedGeneration} />}
+      <ResourceSnapshotPanel runId={runId} node={n} />
     </React.Suspense>
     <div className="kv">
       <KV k="node" v={`#${n.id}`} />

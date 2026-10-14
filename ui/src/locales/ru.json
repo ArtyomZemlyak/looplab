@@ -1,7 +1,7 @@
 {
   "schema": 1,
   "language": "ru",
-  "count": 8012,
+  "count": 8047,
   "messages": {
     "# LoopLab run report — {0}": "# Отчёт запуска LoopLab — {0}",
     "## Agent narrative (advisory)": "## Пояснения агента (рекомендации)",
@@ -3024,7 +3024,7 @@
     "Waiting {0}s. {1}": "Ожидание {0} с. {1}",
     "Waiting…": "Жду...",
     "Wall clock for ONE probe (hard max 300). Deliberately short: a probe is a question, and anything that needs longer is a declared eval stage — the surface with a metric contract, a live log and a repair loop. There is no probe COUNT limit; a probe spends the Developer session’s own time budget like any other turn.": "Настенные часы для зонда ONE (сильный максимум 300) Преднамеренно короткое: зонд является вопросом, и все, что нужно дольше, это объявленная эвральная стадия — поверхность с метрическим контрактом, живой журнал и петлю ремонта. Не существует зонда COONT; зонд проводит сеанс Разработчика, он имеет собственный бюджет времени, как и любой другой поворот.",
-    "Wall time": "Время строительства",
+    "Wall time": "Время выполнения",
     "Wall-clock budget (s)": "Бюджет (с)",
     "Wall-clock ceiling across an agent’s tool-loop turns. Blank/0 = no cap. Raise/clear this if a slow reasoning model gets cut off before it emits (replaces the old hardcoded 45s boss limit).": "Потолок в режиме волшебного времени через агент, ручки инструментов. Бланк/0 = нет крышки. Поднять/отключить эту модель, если медленный аргументационный образец отключается до того, как он излучает (заменит старый жесткий код 45-х предельный уровень босса).",
     "Wall-clock ceiling for ONE crash/timeout triage call — the same 20 minutes as the session above, because triage and the repair it hands to sit on the same eval-blocking thread. Applied only when the shared agent time budget is 0 (unlimited); a finite one is yours and is never shortened. It exists because the turn ceilings meant to bound this loop are sized in TURNS: e5small-dr-unified-v8 node 2 spent 88 minutes and 206 provider calls re-sweeping one 663-line file with both GPUs idle, inside a healthy turn budget. Hitting it is not a lost verdict — the loop reports the cut and forces the emit from what it gathered. 0 = unlimited.": "Потолок времени для вызова на случай аварии/посадки на время OE — те же 20 минут, что и в ходе сессии, потому что сортировка и ремонт, который он осуществляет, чтобы сидеть на одной и той же евральной панели. Применяется только тогда, когда общий агент бюджет времени равен 0 (не ограничено); конечный один является вашим и никогда не сокращается. Он существует потому, что потолочные значения поворота, предназначенные для связывания этой цепи, калибруются в TURNS: e5 мало-дридифицированный-v8 узел 2 потратил 88 минут и 206 звонков провайдера звонит перепроверять один 663-линейный файл с обоими GPU в рамках здорового бюджета поворота. Это не является потерянным вердиктом — петля сообщает об отсеве и форсирует то, что он собрал. 0 = неограниченно.",
@@ -8014,7 +8014,42 @@
     "load more failed:": "не удалось загрузить ещё:",
     "Show the files of one experiment": "Показать файлы одного эксперимента",
     "all files": "все файлы",
-    "Load more files": "Загрузить ещё файлы"
+    "Load more files": "Загрузить ещё файлы",
+    "Resources of this attempt": "Ресурсы этой попытки",
+    "generation {0} · {1} repair(s)": "версия {0} · исправлений: {1}",
+    "declared by the experiment": "заявлено экспериментом",
+    "not declared": "не заявлено",
+    "world size {0}": "world size {0}",
+    "from the effective config": "из фактического конфига",
+    "evaluation wall time": "время оценки",
+    "measured": "измерено",
+    "GPU-hours": "GPU·ч",
+    "derived: declared GPUs × stage wall time, assuming every GPU was held for every stage": "вычислено: заявленные GPU × время стадий, при допущении, что все GPU заняты на всех стадиях",
+    "not derivable: GPUs or stage times missing": "не вычислить: нет числа GPU или времени стадий",
+    "throughput": "скорость",
+    "{0} steps/s": "{0} шаг./с",
+    "derived: max_steps {0} ÷ stage {1} wall time (includes start-up)": "вычислено: max_steps {0} ÷ время стадии {1} (включая запуск)",
+    "not derivable: no max_steps in the effective config or no timed training stage": "не вычислить: в фактическом конфиге нет max_steps или нет измеренной стадии обучения",
+    "trainer reported": "сообщил тренер",
+    "as the trainer reported them, in its own units": "как их сообщил тренер, в его единицах",
+    "peak memory": "пиковая память",
+    "Stage wall time, this attempt": "Время стадий этой попытки",
+    "The effective config could not be read; world size and step rate are not shown.": "Не удалось прочитать фактический конфиг; world size и скорость шагов не показаны.",
+    "ran with": "запущено с",
+    "Experiments, parameters and metrics": "Эксперименты, параметры и метрики",
+    "toolbar compare-table-tools": "toolbar compare-table-tools",
+    "all": "все",
+    "only columns that differ": "только различающиеся столбцы",
+    "filter metrics…": "фильтр метрик…",
+    "Filter metric columns": "Фильтр столбцов метрик",
+    "Download CSV": "Скачать CSV",
+    "Select experiments to compare.": "Выберите эксперименты для сравнения.",
+    "md-table-wrap compare-table-wrap": "md-table-wrap compare-table-wrap",
+    "Experiment comparison table": "Таблица сравнения экспериментов",
+    "gen {0}": "версия {0}",
+    "Empty cell: the experiment does not have that value (never zero). \"idea\" is what the experiment asked for; \"ran with\" is the effective config its attempt recorded.": "Пустая ячейка: у эксперимента нет этого значения (это не ноль). «идея» — что эксперимент запросил; «запущено с» — фактический конфиг, записанный его попыткой.",
+    "The effective configs could not be read; the \"ran with\" columns are missing.": "Не удалось прочитать фактические конфиги; столбцов «запущено с» нет.",
+    "Table: all experiments × parameters × metrics": "Таблица: все эксперименты × параметры × метрики"
   },
   "plurals": {
     "({0} paraphrases folded)": {
@@ -9864,6 +9899,16 @@
       "one": "{0} версия дословно повторяет более раннюю.",
       "few": "{0} версии дословно повторяют более раннюю.",
       "many": "{0} версий дословно повторяют более раннюю."
+    },
+    "{0} experiments selected": {
+      "one": "Выбран {0} эксперимент",
+      "few": "Выбрано {0} эксперимента",
+      "many": "Выбрано {0} экспериментов"
+    },
+    "{0} more columns are not shown; narrow the metric filter.": {
+      "one": "Ещё {0} столбец не показан; сузьте фильтр метрик.",
+      "few": "Ещё {0} столбца не показаны; сузьте фильтр метрик.",
+      "many": "Ещё {0} столбцов не показаны; сузьте фильтр метрик."
     }
   }
 }
