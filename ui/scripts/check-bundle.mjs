@@ -196,21 +196,24 @@ export const DEFAULT_BUDGETS = Object.freeze({
     // reachability gates unchanged. Ceilings re-baselined with < 1.5 KiB headroom. The doc 77
     // experiment-tracking readers (code/parameter snapshot, artifact previews) then measured
     // 681,916 B JS — all of it in lazy chunks; every route closure kept its ceiling.
-    js: { gzip: 667 * KIB },
-    css: { gzip: 59 * KIB },
+    // Rebased onto master 2026-10-14 (doc 78-81 orchestration/campaign UI): master alone measured
+    // 682,358 B JS / 60,229 B CSS (10 violations); with the review fixes 691,096 B JS / 60,540 B CSS,
+    // index CSS 194,904 B raw / 36,998 B gzip. Re-baselined; every reachability gate unchanged.
+    js: { gzip: 677 * KIB },
+    css: { gzip: 59.5 * KIB },
   },
   individual: {
     js: { raw: 450 * KIB, gzip: 110 * KIB },
     // 2026-09-22: the one stylesheet (index CSS) measured 190,304 B raw / 35,933 B gzip (was 180/35).
     // 2026-09-30: index CSS measured 192,530 B raw (+18 B over 188 KiB) after the same merge.
-    css: { raw: 190 * KIB, gzip: 36 * KIB },
+    css: { raw: 191 * KIB, gzip: 36.5 * KIB },
   },
   closures: [
     {
       name: 'initial shell',
       roots: [entry],
       // 2026-09-22: CSS measured 35,933 B gzip (was 35 KiB).
-      limits: { js: { gzip: 175 * KIB }, css: { gzip: 36 * KIB } },
+      limits: { js: { gzip: 175 * KIB }, css: { gzip: 36.5 * KIB } },
     },
     {
       name: 'owner List route',
@@ -252,7 +255,7 @@ export const DEFAULT_BUDGETS = Object.freeze({
         ownerChrome,
       ],
       // 2026-09-22: measured 192,625 B JS (under) / 41,725 B CSS gzip (was 40 KiB).
-      limits: { js: { gzip: 210 * KIB }, css: { gzip: 42 * KIB } },
+      limits: { js: { gzip: 210 * KIB }, css: { gzip: 42.5 * KIB } },
     },
     {
       name: 'owner run DAG route',
@@ -290,7 +293,7 @@ export const DEFAULT_BUDGETS = Object.freeze({
       // verdict and the Energy switch's new place, all in RunView's closure. 400.25 KiB leaves 451 B.
       // 2026-10-11 code review of doc 75: 410,099 B (+694 B) — the fresh-launch rule, the strip's
       // plan reading and the Russian render sites in the same closure. 401 KiB leaves 525 B.
-      limits: { js: { gzip: 403 * KIB }, css: { gzip: 46.5 * KIB } },
+      limits: { js: { gzip: 404.5 * KIB }, css: { gzip: 46.5 * KIB } },
     },
     {
       name: 'valid review DAG route',
@@ -344,7 +347,7 @@ export const DEFAULT_BUDGETS = Object.freeze({
       // 2026-10-02 same Assistant labels: measured 269,500 B; 324 B headroom.
       // 2026-10-02 launch next steps: 269,623 -> 269,917 B from shared phase/language wiring;
       // the actual guidance remains lazy. 264 KiB leaves 419 B; other route ceilings are unchanged.
-      limits: { js: { gzip: 264 * KIB }, css: { gzip: 43 * KIB } },
+      limits: { js: { gzip: 264 * KIB }, css: { gzip: 43.5 * KIB } },
     },
     {
       name: 'panel-hub increment',

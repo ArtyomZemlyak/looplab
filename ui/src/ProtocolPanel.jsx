@@ -3,7 +3,7 @@ import React, { useState } from 'react'
 import PanelShell from './PanelShell.jsx'
 import { PanelResourceNotice } from './PanelResourceNotice.jsx'
 import { DataTable } from './accessibility.jsx'
-import { get } from './api.js'
+import { get, runApiPath } from './api.js'
 import { useScopedResource } from './useScopedResource.js'
 import { comparisonView, fmtWhen, protocolView } from './campaignModel.js'
 import { ContrastTable, Registration } from './CampaignTables.jsx'
@@ -18,7 +18,7 @@ function ExperimentComparison({ runId, experiment }) {
   useUILanguage()
   const [open, setOpen] = useState(false)
   const resource = useScopedResource(
-    signal => get(`/api/runs/${encodeURIComponent(runId)}/experiments/${encodeURIComponent(experiment.id)}/comparison`, { signal }),
+    signal => get(runApiPath(runId, `/experiments/${encodeURIComponent(experiment.id)}/comparison`), { signal }),
     { scope: `${runId}:${experiment.id}`, gate: open ? null : 'idle', timeout: TIMEOUT_MS })
   const view = resource.data ? comparisonView(resource.data) : null
   return <div className="protocol-experiment">
@@ -50,7 +50,7 @@ function ExperimentComparison({ runId, experiment }) {
 export default function ProtocolPanel({ runId, onClose }) {
   useUILanguage()
   const resource = useScopedResource(
-    signal => get(`/api/runs/${encodeURIComponent(runId)}/protocol`, { signal }),
+    signal => get(runApiPath(runId, '/protocol'), { signal }),
     { scope: runId, timeout: TIMEOUT_MS })
   const view = resource.data ? protocolView(resource.data) : null
   const amendmentColumns = [
