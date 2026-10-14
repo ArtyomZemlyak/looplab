@@ -784,11 +784,10 @@ class AppState:
         # THE MEMO QUESTIONS THE BOARD DOES NOT HOLD (review 2026-10-14 §4.2): a DERIVED read model,
         # never folded, so no recorded run's board moves (`serve/memo_questions.py`). Computed from
         # the same fold as the cards beside it, so the two cannot disagree about one frame.
+        # The projection is total over junk memos/cards (driven in `tests/test_memo_question_projection.py`),
+        # so it needs no blind handler here.
         from looplab.serve.memo_questions import memo_question_projection
-        try:
-            d["memo_questions"] = _public_state_value(memo_question_projection(st))
-        except Exception:  # noqa: BLE001 — an advisory projection must never cost the state payload
-            d["memo_questions"] = None
+        d["memo_questions"] = _public_state_value(memo_question_projection(st))
         better = (lambda a, b: a < b) if st.direction == "min" else (lambda a, b: a > b)
         from looplab.core.redact import redact_secrets
         for node_id, n in d.get("nodes", {}).items():
