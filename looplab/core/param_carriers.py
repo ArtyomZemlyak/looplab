@@ -128,6 +128,11 @@ def _plain_scalar_number(text):
         return None
 
 
+# The public name of the rule above, for readers outside this module (a plain scalar's own text as
+# a number, or None). One body: a second spelling is how two numeric grammars start.
+plain_scalar_number = _plain_scalar_number
+
+
 def yaml_numeric_paths(source) -> dict:
     """`(dotted path) -> (value, line)` for every numeric leaf of one YAML document.
 
@@ -246,6 +251,103 @@ def document_numeric_paths(path, source) -> dict:
     if name.endswith(".yaml") or name.endswith(".yml"):
         return yaml_numeric_paths(source)
     return {}
+
+
+# ================================================================================================
+# THE DOTENV CARRIER (doc 77 §2). An env-recipe task's whole edit surface can be one `KEY=VALUE`
+# file — MiniOneRec's `MiniOneRec/looplab/experiment.env` is the only file its candidates author —
+# and until 2026-10-14 nothing in LoopLab could read one, so every such node's configuration was
+# invisible beside its metric. This is that reader and NOTHING ELSE: it is not registered in
+# `DOCUMENT_SUFFIXES`, so `runtime/applied_params.py`'s dotted-path rung is unchanged (an env key is
+# flat, and a one-part declaration is refused there by `declared_numeric_params` anyway). Its only
+# consumer is the read-side runtime-parameter projection (`serve/runtime_params.py`).
+#
+# THE GRAMMAR IS THE COMMON SUBSET that `docker --env-file`, `python-dotenv` and a POSIX `source`
+# agree on, and nothing is EXPANDED: `${OTHER}` stays the literal text, because resolving it would
+# be reading this process's environment into a record about the candidate's file.
+#   * blank lines and `#` comment lines are skipped;
+#   * an optional leading `export ` is dropped;
+#   * the key is `[A-Za-z_][A-Za-z0-9_.-]*`, then `=` (spaces around it tolerated);
+#   * a value in single quotes is literal, in double quotes takes `\n \t \" \\` escapes, both on ONE
+#     line (an unterminated quote keeps the rest of the line verbatim — refusing would hide a
+#     coordinate the shell itself would still have set);
+#   * an unquoted value ends at ` #` (an inline comment) and is stripped.
+# Duplicate keys are LAST-WINS, which is what every one of those readers does.
+# ================================================================================================
+
+DOTENV_MAX_LINES = 5_000
+_DOTENV_KEY_CHARS = frozenset("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_.-")
+_DOTENV_ESCAPES = {"n": "\n", "t": "\t", '"': '"', "\\": "\\", "$": "$"}
+
+
+def is_dotenv_carrier(path) -> bool:
+    """Whether `path` names a dotenv file: `*.env`, `.env` or `.env.<suffix>` (basename only)."""
+    name = str(path or "").replace("\\", "/").rsplit("/", 1)[-1].lower()
+    return name == ".env" or name.endswith(".env") or name.startswith(".env.")
+
+
+def _dotenv_value(raw: str) -> tuple[str, bool]:
+    """`(value, quoted)` for the text after `=`. See the grammar above."""
+    text = raw.strip()
+    if text[:1] == "'":
+        end = text.find("'", 1)
+        return (text[1:end] if end > 0 else text[1:]), True
+    if text[:1] == '"':
+        out, k = [], 1
+        while k < len(text):
+            ch = text[k]
+            if ch == "\\" and k + 1 < len(text):
+                out.append(_DOTENV_ESCAPES.get(text[k + 1], "\\" + text[k + 1]))
+                k += 2
+                continue
+            if ch == '"':
+                break
+            out.append(ch)
+            k += 1
+        return "".join(out), True
+    cut = text.find(" #")
+    if cut < 0:
+        cut = text.find("\t#")
+    return (text[:cut] if cut >= 0 else text).strip(), False
+
+
+def dotenv_assignments(source) -> dict:
+    """`KEY -> (value_text, line, quoted)` for every assignment of one dotenv document.
+
+    Never raises: a line that is not an assignment is skipped, exactly as a shell would ignore it
+    for this purpose. Bounded at `DOTENV_MAX_LINES` lines (over the bound the tail is unread, which
+    can only under-report)."""
+    out: dict = {}
+    for number, line in enumerate(str(source or "").splitlines()[:DOTENV_MAX_LINES], start=1):
+        body = line.strip()
+        if not body or body.startswith("#"):
+            continue
+        if body.startswith("export ") or body.startswith("export\t"):
+            body = body[7:].lstrip()
+        key, sep, rest = body.partition("=")
+        key = key.strip()
+        if (not sep or not key or not (key[0].isascii() and (key[0].isalpha() or key[0] == "_"))
+                or any(ch not in _DOTENV_KEY_CHARS for ch in key)):
+            continue
+        value, quoted = _dotenv_value(rest)
+        out.pop(key, None)                                 # last-wins AND last-position
+        out[key] = (value, number, quoted)
+    return out
+
+
+def dotenv_numeric_paths(source) -> dict:
+    """`(KEY,) -> (value, line)` for every UNQUOTED assignment whose text `float()` accepts.
+
+    The same line `yaml_numeric_paths` draws: a quoted `"512"` is a string its author chose to quote.
+    One-part paths, so a reader can hand the map to `resolve_declaration` like any document's."""
+    out: dict = {}
+    for key, (value, line, quoted) in dotenv_assignments(source).items():
+        if quoted:
+            continue
+        number = _plain_scalar_number(value)
+        if number is not None:
+            out[(key,)] = (number, line)
+    return out
 
 
 def resolve_declaration(paths: dict, parts):

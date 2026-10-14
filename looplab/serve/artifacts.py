@@ -307,3 +307,184 @@ def _list_artifact_files(
                 return out, True
     out.sort(key=lambda f: f["path"])
     return out, False
+
+
+# ---------------------------------------------------------------- artifact previews (doc 77 §3)
+# Two read views beside the inline text one, and both stop at what a FILE says about itself:
+#
+#   * `/artifact/raw` serves the BYTES of a raster image only — PNG, JPEG, GIF, WebP, checked by
+#     magic number as well as by suffix — so the browser's own decoder draws a chart the candidate
+#     wrote. SVG is refused on purpose: it is a document that can carry script, and this origin is
+#     the control plane. The response is `nosniff` + `Content-Security-Policy: sandbox;
+#     default-src 'none'`, so even a mislabelled body cannot run as a page here.
+#   * `/artifact/meta` describes ANY regular file without interpreting it as code: size, sha256
+#     (bounded), a magic-number kind, and three structural headers that are pure data — the
+#     safetensors JSON header, a zip central directory (the container PyTorch's `torch.save`
+#     writes) and the `.npy` header dict. Nothing is unpickled, imported or executed; a `.pt`'s
+#     pickle stays opaque bytes, which is the point.
+ART_RAW_MAX_BYTES = 16 * 1024 * 1024          # one image inline; a bigger one is metadata only
+ART_HASH_MAX_BYTES = 512 * 1024 * 1024        # sha256 is skipped (and SAID) over this size
+SAFETENSORS_HEADER_MAX = 16 * 1024 * 1024     # the format's own readers refuse ~100 MB; 16 is ample
+_META_LIST_CAP = 200
+
+ART_IMAGE_MIME = {".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg",
+                  ".gif": "image/gif", ".webp": "image/webp"}
+
+
+def sniff_kind(head: bytes) -> Optional[str]:
+    """A file's kind from its first bytes, or None. Magic numbers only — never the suffix."""
+    if head.startswith(b"\x89PNG\r\n\x1a\n"):
+        return "png"
+    if head.startswith(b"\xff\xd8\xff"):
+        return "jpeg"
+    if head[:6] in (b"GIF87a", b"GIF89a"):
+        return "gif"
+    if head[:4] == b"RIFF" and head[8:12] == b"WEBP":
+        return "webp"
+    if head.startswith(b"%PDF-"):
+        return "pdf"
+    if head.startswith(b"PK\x03\x04") or head.startswith(b"PK\x05\x06"):
+        return "zip"
+    if head.startswith(b"\x93NUMPY"):
+        return "npy"
+    if head.startswith(b"\x89HDF\r\n\x1a\n"):
+        return "hdf5"
+    if head[:2] in (b"\x1f\x8b",):
+        return "gzip"
+    if head[:1] == b"\x80" and len(head) > 1 and head[1:2] in (b"\x02", b"\x03", b"\x04", b"\x05"):
+        return "pickle"
+    return None
+
+
+_IMAGE_KIND_MIME = {"png": "image/png", "jpeg": "image/jpeg", "gif": "image/gif",
+                    "webp": "image/webp"}
+
+
+def raster_mime(path: str, head: bytes) -> Optional[str]:
+    """The MIME type to serve a raster image as, or None when suffix and magic do not AGREE."""
+    declared = ART_IMAGE_MIME.get(Path(str(path)).suffix.lower())
+    sniffed = _IMAGE_KIND_MIME.get(sniff_kind(head) or "")
+    return declared if declared is not None and declared == sniffed else None
+
+
+def safetensors_summary(f, size: int) -> Optional[dict]:
+    """The safetensors header as a bounded summary, read from an open binary file at offset 0.
+
+    Layout: an 8-byte little-endian header length, then that many bytes of JSON mapping tensor
+    name -> {dtype, shape, data_offsets}, plus an optional `__metadata__` string map. None when the
+    bytes are not that shape."""
+    import json as _json
+    import math as _math
+    f.seek(0)
+    raw_len = f.read(8)
+    if len(raw_len) != 8:
+        return None
+    n = int.from_bytes(raw_len, "little")
+    if n <= 1 or n > SAFETENSORS_HEADER_MAX or n + 8 > size:
+        return None
+    body = f.read(n)
+    if len(body) != n or body[:1] != b"{":
+        return None
+    try:
+        from looplab.core.jsonutil import bounded_json_loads
+        doc = bounded_json_loads(body.decode("utf-8"))
+    except (ValueError, UnicodeDecodeError, _json.JSONDecodeError):
+        return None
+    if not isinstance(doc, dict):
+        return None
+    meta = doc.get("__metadata__")
+    tensors, dtypes, params, sample = 0, {}, 0, []
+    for name, spec in doc.items():
+        if name == "__metadata__" or not isinstance(spec, dict):
+            continue
+        shape = spec.get("shape")
+        dtype = str(spec.get("dtype") or "?")[:16]
+        if not isinstance(shape, list) or not all(isinstance(d, int) and d >= 0 for d in shape):
+            return None
+        tensors += 1
+        dtypes[dtype] = dtypes.get(dtype, 0) + 1
+        params += _math.prod(shape) if shape else 1
+        if len(sample) < 50:
+            sample.append({"name": str(name)[:200], "dtype": dtype, "shape": shape[:8]})
+    return {
+        "header_bytes": n, "tensor_count": tensors, "parameter_count": params, "dtypes": dtypes,
+        "metadata": ({str(k)[:100]: str(v)[:300] for k, v in list(meta.items())[:32]}
+                     if isinstance(meta, dict) else None),
+        "tensors_sample": sample, "tensors_truncated": tensors > len(sample),
+    }
+
+
+def zip_summary(f) -> Optional[dict]:
+    """Member names/sizes from a zip central directory (a `torch.save` file is one). No member is
+    decompressed and nothing is unpickled."""
+    import zipfile
+    try:
+        f.seek(0)
+        with zipfile.ZipFile(f) as zf:
+            infos = zf.infolist()
+    except (zipfile.BadZipFile, OSError, ValueError, EOFError):
+        return None
+    names = [{"name": i.filename[:300], "size": i.file_size} for i in infos[:_META_LIST_CAP]]
+    pickled = any(i.filename.endswith(".pkl") or i.filename.endswith("/data.pkl") for i in infos)
+    return {"members": len(infos), "entries": names, "entries_truncated": len(infos) > len(names),
+            "pickle_inside": pickled}
+
+
+def npy_summary(f) -> Optional[dict]:
+    """dtype / shape / order from a `.npy` header — a Python literal dict, read with
+    `ast.literal_eval`, which evaluates literals and nothing else."""
+    import ast
+    f.seek(0)
+    head = f.read(10)
+    if len(head) < 10 or not head.startswith(b"\x93NUMPY"):
+        return None
+    major = head[6]
+    if major == 1:
+        hlen = int.from_bytes(head[8:10], "little")
+    else:
+        more = f.read(2)
+        if len(more) != 2:
+            return None
+        hlen = int.from_bytes(head[8:10] + more, "little")
+    if hlen > 65536:
+        return None
+    try:
+        header = ast.literal_eval(f.read(hlen).decode("latin-1").strip())
+    except (ValueError, SyntaxError, MemoryError, RecursionError):
+        return None
+    if not isinstance(header, dict):
+        return None
+    return {"dtype": str(header.get("descr"))[:64], "shape": list(header.get("shape") or ())[:16],
+            "fortran_order": bool(header.get("fortran_order"))}
+
+
+def artifact_meta(f, size: int, path: str) -> dict:
+    """Everything `/artifact/meta` says about one opened file. Reads only; total over bad input."""
+    import hashlib
+    f.seek(0)
+    head = f.read(64)
+    kind = sniff_kind(head)
+    out: dict = {"size": size, "kind": kind, "sha256": None}
+    if size <= ART_HASH_MAX_BYTES:
+        f.seek(0)
+        h = hashlib.sha256()
+        for chunk in iter(lambda: f.read(1 << 20), b""):
+            h.update(chunk)
+        out["sha256"] = h.hexdigest()
+    else:
+        out["sha256_skipped"] = "too_large"
+    suffix = Path(str(path)).suffix.lower()
+    if suffix == ".safetensors" or (kind is None and suffix in (".bin", ".st")):
+        summary = safetensors_summary(f, size)
+        if summary is not None:
+            out["kind"] = "safetensors"
+            out["safetensors"] = summary
+    if kind == "zip":
+        out["zip"] = zip_summary(f)
+    if kind == "npy":
+        out["npy"] = npy_summary(f)
+    image_mime = raster_mime(path, head)
+    out["inline_image"] = bool(image_mime) and size <= ART_RAW_MAX_BYTES
+    if image_mime:
+        out["mime"] = image_mime
+    return out

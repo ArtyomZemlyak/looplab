@@ -10,7 +10,7 @@ vocabulary a client may append is `serve/protocol.py::CONTROL_EVENTS`.
 
 <!-- generated: api routes -->
 
-191 routes on 165 paths; 10 deprecated; 27 with a declared response model.
+194 routes on 168 paths; 10 deprecated; 27 with a declared response model.
 
 ### `/api`
 
@@ -188,6 +188,8 @@ vocabulary a client may append is `serve/protocol.py::CONTROL_EVENTS`.
 | `PUT` | `/api/runs/{run_id}/agent-notify` | Set this run's hook variables (e.g. `{"thread": "<id>"}`) or switch its notifications | — |  |
 | `GET` | `/api/runs/{run_id}/agents_md` | DEPRECATED. Serve a run's AGENTS.md. | — | yes |
 | `GET` | `/api/runs/{run_id}/artifact` | Serve ONE artifact's content for inline viewing. `root` must be one of the ids returned by | — |  |
+| `GET` | `/api/runs/{run_id}/artifact/meta` | Describe ONE artifact without interpreting it as code: size, sha256 (skipped over 512 MiB), | — |  |
+| `GET` | `/api/runs/{run_id}/artifact/raw` | Serve ONE raster image (PNG/JPEG/GIF/WebP) for inline preview. The suffix AND the magic | — |  |
 | `GET` | `/api/runs/{run_id}/artifacts` | List files currently visible to the run, grouped by root. | — |  |
 | `GET` | `/api/runs/{run_id}/attempt-logs` | Logs of earlier lifecycles, kept when a node's workdir was rebuilt (reset/retry). | — |  |
 | `GET` | `/api/runs/{run_id}/cards/{card_id}/trace` | One CARD's whole story: the research that proposed it, then every node it produced. | — |  |
@@ -248,6 +250,7 @@ vocabulary a client may append is `serve/protocol.py::CONTROL_EVENTS`.
 | `GET` | `/api/runs/{run_id}/nodes/{nid}/episodes` | THE MAP of one node's trace: every episode (band) it recorded, with none of their contents. | — |  |
 | `GET` | `/api/runs/{run_id}/nodes/{nid}/logs` | Live training/eval logs for a node — the streamed stdout/stderr of its eval + setup | — |  |
 | `GET` | `/api/runs/{run_id}/nodes/{nid}/metrics` | Online metric SERIES a node's training logged — every scalar (loss, each recall@k, grad | — |  |
+| `GET` | `/api/runs/{run_id}/nodes/{nid}/runtime-params` | The configuration documents one attempt carried, as a flat parameter table (doc 77 §2). | — |  |
 | `GET` | `/api/runs/{run_id}/nodes/{nid}/seed-files` | Verified pre-overlay base inventory/text, explicitly read for one current measured attempt. | — |  |
 | `GET` | `/api/runs/{run_id}/nodes/{nid}/trace` | The LIGHT trace tree for ONE node — the hot path for expanding a node's trace card. Reads | — |  |
 | `GET` | `/api/runs/{run_id}/nodes/{node_id}/failure-forensics` | Every recorded forensic record of a node's failed attempts (newest first) — the | — |  |

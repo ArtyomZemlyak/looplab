@@ -53,8 +53,8 @@ from looplab.events.traceview import (
 # Per-theme rollup for the cross-run map: {theme: {count, best_metric}}. Now lives in `digest` so the
 # Researcher's working-set digest and this UI endpoint share one definition.
 from looplab.serve.artifacts import (
-    _ART_MAX_BYTES, _LOG_TAIL_MAX, ArtifactPolicyUnavailable,
-    _artifact_exposure_policy, _artifact_file_identity, _artifact_node_id, _artifact_roots,
+    _ART_MAX_BYTES, _LOG_TAIL_MAX, ART_RAW_MAX_BYTES, ArtifactPolicyUnavailable, artifact_meta,
+    raster_mime, _artifact_exposure_policy, _artifact_file_identity, _artifact_node_id, _artifact_roots,
     _list_artifact_files)
 # The paid CONCEPT-LENS subsystem is `serve/concept_lens_service.py` (doc 25 SR-04): 21 helpers,
 # two ledger folds, the provider worker and the four command bodies. What stays here is the four
@@ -1799,6 +1799,48 @@ def build_router(srv) -> APIRouter:
         result["run_generation"] = generation
         return result
 
+    def _task_edit_surface(rd: Path) -> list:
+        """The task snapshot's `edit_surface`, normalized like the engine reads it; [] when absent
+        or unreadable (a missing surface only removes WORKSPACE rows, never authored ones)."""
+        try:
+            snap = json.loads((rd / "task.snapshot.json").read_text(encoding="utf-8"))
+            from looplab.adapters.tasks import normalize_task
+            surface = (normalize_task(snap) if isinstance(snap, dict) else {}).get("edit_surface")
+        except (OSError, ValueError, TypeError, AttributeError, HTTPException):
+            # Best-effort context for a read-only table: an unreadable/odd snapshot only removes
+            # WORKSPACE rows, never authored ones.
+            return []
+        return [s for s in surface if isinstance(s, str)] if isinstance(surface, list) else []
+
+    @router.get("/api/runs/{run_id}/nodes/{nid}/runtime-params")
+    def node_runtime_params(run_id: str, nid: int, expected_generation: str,
+                            attempt: int = Query(..., ge=0)):
+        """The configuration documents one attempt carried, as a flat parameter table (doc 77 §2).
+
+        Authored carriers come from the node's folded `files`; the task's literal `edit_surface`
+        configuration files come from the attempt's workdir. Secret-named files are withheld and
+        credential-shaped values masked (`serve/runtime_params.py`). Fenced like `seed-files`: the run
+        generation and the node attempt are compared before and after the read, so a reset between
+        them is a 409, never a table from another attempt."""
+        from looplab.serve.runtime_params import runtime_params
+        rd = _run_dir(run_id)
+        generation = _assert_historical_generation(rd, expected_generation)
+        node = srv.state(rd).nodes.get(nid)
+        if node is None or node.tombstoned:
+            raise HTTPException(404, "no such node")
+        if node.attempt != attempt:
+            raise _attempt_cas_409(nid, attempt, node.attempt,
+                                   "The node was reset before its configuration was read.")
+        result = runtime_params(node, workdir=_node_dir(rd, nid),
+                                edit_surface=_task_edit_surface(rd))
+        _assert_historical_generation(rd, expected_generation)
+        current = srv.state(rd).nodes.get(nid)
+        if current is None or current.attempt != attempt or current.tombstoned:
+            raise _attempt_cas_409(nid, attempt, current.attempt if current else None,
+                                   "The node changed while its configuration was read.")
+        result["run_generation"] = generation
+        return result
+
     @router.get("/api/runs/{run_id}/nodes/{nid}/logs")
     def node_logs(run_id: str, nid: int, tail: int = 200_000,
                   attempt: Optional[int] = Query(default=None, ge=0),
@@ -2768,16 +2810,14 @@ def build_router(srv) -> APIRouter:
             "roots": out,
         }
 
-    @router.get("/api/runs/{run_id}/artifact")
-    def artifact(run_id: str, root: str, path: str,
-                 expected_generation: str = Query(...),
-                 node_id: Optional[int] = Query(default=None, ge=0),
-                 attempt: Optional[int] = Query(default=None, ge=0)):
-        """Serve ONE artifact's content for inline viewing. `root` must be one of the ids returned by
-        /artifacts; `path` is resolved within that root and traversal-guarded (a browser can never read
-        outside the declared roots). Text is returned UTF-8 (errors replaced) capped at 2 MB; binary or
-        oversize files return is_text=false / truncated=true with no inline content. The exact inventory
-        generation is required; a canonical node-workdir target additionally requires node id + attempt."""
+    def _read_artifact_fenced(run_id: str, root: str, path: str, expected_generation: str,
+                              node_id: Optional[int], attempt: Optional[int], reader):
+        """The ONE fenced read behind `/artifact`, `/artifact/raw` and `/artifact/meta`.
+
+        Root lookup, traversal guard, node-attempt fence, exposure policy and the opened-descriptor
+        identity checks, then `reader(fileobj, size)` runs ON THE VERIFIED DESCRIPTOR and its result
+        is returned after the generation/attempt are re-checked: `(payload, size, identity)`. A new
+        view of an artifact is a new `reader`, never a second copy of these fences."""
         rd = _run_dir(run_id)
         generation = _assert_artifact_generation(rd, expected_generation, phase="before")
         base = next((r["base"] for r in _artifact_roots(rd) if r["id"] == root), None)
@@ -2846,7 +2886,7 @@ def build_router(srv) -> APIRouter:
                 if not opened_exposed(current_target, path, opened_stat):
                     raise HTTPException(404, "no such artifact")
                 size = opened_stat.st_size
-                head = f.read(_ART_MAX_BYTES + 1)
+                payload = reader(f, size)
         except ArtifactPolicyUnavailable:
             raise HTTPException(503, "artifact access unavailable") from None
         except (OSError, RuntimeError, ValueError):
@@ -2859,16 +2899,78 @@ def build_router(srv) -> APIRouter:
                     target_node_id, target_attempt, current_attempt,
                     "The node was reset while its file was being read.")
         generation = _assert_artifact_generation(rd, expected_generation, phase="while")
-        body = head[:_ART_MAX_BYTES]
         response_identity = {"run_generation": generation}
         if target_node_id is not None:
             response_identity.update({"node_id": target_node_id, "attempt": target_attempt})
+        return payload, size, response_identity
+
+    @router.get("/api/runs/{run_id}/artifact")
+    def artifact(run_id: str, root: str, path: str,
+                 expected_generation: str = Query(...),
+                 node_id: Optional[int] = Query(default=None, ge=0),
+                 attempt: Optional[int] = Query(default=None, ge=0)):
+        """Serve ONE artifact's content for inline viewing. `root` must be one of the ids returned by
+        /artifacts; `path` is resolved within that root and traversal-guarded (a browser can never read
+        outside the declared roots). Text is returned UTF-8 (errors replaced) capped at 2 MB; binary or
+        oversize files return is_text=false / truncated=true with no inline content. The exact inventory
+        generation is required; a canonical node-workdir target additionally requires node id + attempt."""
+        head, size, response_identity = _read_artifact_fenced(
+            run_id, root, path, expected_generation, node_id, attempt,
+            lambda f, _size: f.read(_ART_MAX_BYTES + 1))
+        body = head[:_ART_MAX_BYTES]
         if b"\x00" in body:                                    # a NUL anywhere in the read → binary
             return {"root": root, "path": path, "size": size, "is_text": False,
                     "truncated": False, "content": None, **response_identity}
         return {"root": root, "path": path, "size": size, "is_text": True,
                 "truncated": size > _ART_MAX_BYTES,
                 "content": body.decode("utf-8", errors="replace"), **response_identity}
+
+    # The two preview views (doc 77 §3) read through `_read_artifact_fenced` — the SAME root, traversal,
+    # node-attempt, exposure-policy and descriptor-identity fences as `/artifact` — and differ only in
+    # what they do with the verified descriptor (`serve/artifacts.py` states what each may read).
+    _RAW_HEADERS = {"X-Content-Type-Options": "nosniff",
+                    "Content-Security-Policy": "sandbox; default-src 'none'",
+                    "Cache-Control": "no-store", "Content-Disposition": "inline"}
+
+    @router.get("/api/runs/{run_id}/artifact/raw")
+    def artifact_raw(run_id: str, root: str, path: str,
+                     expected_generation: str = Query(...),
+                     node_id: Optional[int] = Query(default=None, ge=0),
+                     attempt: Optional[int] = Query(default=None, ge=0)):
+        """Serve ONE raster image (PNG/JPEG/GIF/WebP) for inline preview. The suffix AND the magic
+        number must name the same format; anything else (SVG, HTML, PDF, a mislabelled body) is a
+        415 `preview_unsupported`, and an image over 16 MiB a 413 `preview_too_large`. Served with
+        `nosniff` and a sandboxing CSP, fenced exactly like `/artifact`."""
+        def read(f, size):
+            if size > ART_RAW_MAX_BYTES:
+                raise HTTPException(413, {"code": "preview_too_large", "size": size,
+                                          "limit": ART_RAW_MAX_BYTES,
+                                          "message": "Image is too large to preview inline."})
+            body = f.read(ART_RAW_MAX_BYTES + 1)
+            mime = raster_mime(path, body[:64])
+            if mime is None:
+                raise HTTPException(415, {"code": "preview_unsupported",
+                                          "message": "Only PNG, JPEG, GIF and WebP images whose "
+                                                     "content matches their extension are previewed."})
+            return body, mime
+
+        (body, mime), _size, identity = _read_artifact_fenced(
+            run_id, root, path, expected_generation, node_id, attempt, read)
+        headers = dict(_RAW_HEADERS, **{"X-LoopLab-Run-Generation": str(identity["run_generation"])})
+        return Response(content=body, media_type=mime, headers=headers)
+
+    @router.get("/api/runs/{run_id}/artifact/meta")
+    def artifact_metadata(run_id: str, root: str, path: str,
+                          expected_generation: str = Query(...),
+                          node_id: Optional[int] = Query(default=None, ge=0),
+                          attempt: Optional[int] = Query(default=None, ge=0)):
+        """Describe ONE artifact without interpreting it as code: size, sha256 (skipped over 512 MiB),
+        the magic-number kind, and the safetensors header / zip member list / `.npy` header when the
+        file is one. Nothing is unpickled or executed. Fenced exactly like `/artifact`."""
+        meta, _size, identity = _read_artifact_fenced(
+            run_id, root, path, expected_generation, node_id, attempt,
+            lambda f, size: artifact_meta(f, size, path))
+        return {"root": root, "path": path, **meta, **identity}
 
     @router.get("/api/runs/{run_id}/trace")
     def trace(run_id: str,
