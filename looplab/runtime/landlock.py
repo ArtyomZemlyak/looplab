@@ -749,7 +749,16 @@ def _looplab_read_confine(allow):
                 skipped.append((str(_path), getattr(exc, "strerror", None) or str(exc)))
                 continue
             try:
-                rule = _Beneath(allowed_access=%(handled)d, parent_fd=pfd)
+                # A FILE rule may carry only the rights a file can hold (`rule_access`'s rule): the
+                # kernel answers EINVAL to READ_DIR on a non-directory, which would turn every file
+                # grant (`/dev/null`, a FILE mount) into a "skipped" denial.
+                _access = %(handled)d
+                try:
+                    if not __import__("stat").S_ISDIR(os.fstat(pfd).st_mode):
+                        _access &= %(file)d
+                except OSError:
+                    pass
+                rule = _Beneath(allowed_access=_access, parent_fd=pfd)
                 ctypes.set_errno(0)
                 if lib.syscall(ctypes.c_long(%(add)d), ctypes.c_int(fd), ctypes.c_uint32(1),
                                ctypes.byref(rule), ctypes.c_uint32(0)) != 0:
@@ -778,7 +787,7 @@ def read_confine_source() -> str:
     Spliced rather than imported for `no_mutation_source`'s reason: the launcher runs in the probe's
     own interpreter, which may not have this package importable, and a hand-copied constant does not
     crash — it silently produces a different ruleset."""
-    return _READ_CONFINE_SOURCE % {"handled": READ_CONFINE_HANDLED,
+    return _READ_CONFINE_SOURCE % {"handled": READ_CONFINE_HANDLED, "file": _FILE_ACCESS,
                                    "create": _SYS_LANDLOCK_CREATE_RULESET,
                                    "add": _SYS_LANDLOCK_ADD_RULE,
                                    "restrict": _SYS_LANDLOCK_RESTRICT_SELF}

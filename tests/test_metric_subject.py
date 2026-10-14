@@ -752,8 +752,13 @@ def test_landlock_refuses_a_path_outside_the_allow_list_in_a_child_process(tmp_p
     wd.mkdir()
     denied.mkdir()
     (denied / "secret.txt").write_text("nope", encoding="utf-8")
+    # Every grant that is an ANCESTOR of `denied` is dropped, not only `/tmp` and the basetemp:
+    # with `--basetemp` under `/dev/shm` the machine tier `/dev` (readwrite, for CUDA/NCCL device
+    # nodes and DataLoader shared memory) contains the fixture, and the test then measured the
+    # tier, not the rung (2026-10-14). The workdir grant is not an ancestor and stays.
+    real_denied = os.path.realpath(str(denied)) + os.sep
     allow = [(p, m) for p, m in read_allowlist.derive(workdir=str(wd), run_dir=str(wd))
-             if p != os.path.realpath(str(tmp_path.parent)) and p != "/tmp"]
+             if not real_denied.startswith(os.path.realpath(p).rstrip(os.sep) + os.sep)]
     prog = ("import sys\n"
             "try:\n"
             "    open(sys.argv[1]).read(); print('READ')\n"

@@ -30,6 +30,7 @@ import pytest
 from looplab.core.config import Settings
 from looplab.runtime import read_allowlist, read_fence
 from looplab.runtime.sandbox import run_argv
+from _fs_capabilities import user_xattr_workdir
 from _posix_gates import FENCE_POSIX_PATHS, MODE_BITS, POSIX_ONLY_OS_CALLS, SHEBANG
 
 # The fixture the whole file shares: an editable SOURCE tree holding the operator's checkpoint, a
@@ -714,7 +715,7 @@ def test_mutation_arg_shapes_match_the_interpreter(tmp_path):
         # to check; everywhere they exist they are driven exactly as before.
         if hasattr(os, "chown"):
             os.chown(A, -1, -1)
-        if hasattr(os, "setxattr"):
+        if hasattr(os, "setxattr") and os.environ.get("SHAPES_PROBE_SKIP_XATTR") != "1":
             os.setxattr(A, "user.p", b"1"); os.removexattr(A, "user.p")
         os.symlink(A, os.path.join(D, "sym")); os.link(A, os.path.join(D, "hard"))
         os.mkdir(os.path.join(D, "made")); os.rmdir(sub)
@@ -723,17 +724,30 @@ def test_mutation_arg_shapes_match_the_interpreter(tmp_path):
         print(json.dumps({k: [[a if isinstance(a, (str, int)) else None for a in args]
                               for args in v] for k, v in SEEN.items()}))
         """), encoding="utf-8")
-    work = tmp_path / "shapework"
-    work.mkdir()
-    # Not through `_run`/`run_argv`: this child must be UNFENCED (it performs every mutation for
-    # real) and it takes an argv the fenced helper does not pass.
-    res = subprocess.run([sys.executable, str(probe), str(work)], capture_output=True, text=True)
-    assert res.returncode == 0, res.stderr
-    seen = json.loads(res.stdout.strip().splitlines()[-1])
+    # The xattr pair needs a filesystem that stores user xattrs (tmpfs before Linux 6.6 does not:
+    # a `--basetemp` under `/dev/shm` failed here on EOPNOTSUPP — the box, not the registry).
+    # Measure on one that does; only when NO candidate on the box has the capability is the pair
+    # left out of BOTH the child's operations and the expected set, on the footing a function the
+    # interpreter lacks already is.
+    with user_xattr_workdir(tmp_path) as (xattr_root, _reasons):
+        work = (xattr_root or tmp_path) / "shapework"
+        work.mkdir()
+        env = dict(os.environ, **({"SHAPES_PROBE_SKIP_XATTR": "1"} if xattr_root is None else {}))
+        # Not through `_run`/`run_argv`: this child must be UNFENCED (it performs every mutation
+        # for real) and it takes an argv the fenced helper does not pass.
+        res = subprocess.run([sys.executable, str(probe), str(work)], capture_output=True,
+                             text=True, env=env)
+        assert res.returncode == 0, res.stderr
+        seen = json.loads(res.stdout.strip().splitlines()[-1])
 
-    # Every registered event whose function THIS interpreter has — on POSIX, all of them.
-    raisable = {event for event in read_fence.MUTATION_EVENTS
-                if hasattr(os, event.split(".", 1)[1])}
+        # Every registered event whose function THIS interpreter has — on POSIX, all of them.
+        raisable = {event for event in read_fence.MUTATION_EVENTS
+                    if hasattr(os, event.split(".", 1)[1])
+                    and not (xattr_root is None and "xattr" in event)}
+        _check_mutation_slots(seen, raisable, work)
+
+
+def _check_mutation_slots(seen, raisable, work):
     assert raisable <= set(seen), (
         "this interpreter did not raise every registered event: "
         f"{sorted(raisable - set(seen))}")

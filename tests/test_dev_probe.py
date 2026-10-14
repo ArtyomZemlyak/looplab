@@ -25,6 +25,7 @@ from looplab.runtime import landlock, read_allowlist, read_fence
 from looplab.tools import dev_probe
 from looplab.tools._base import RESULT_CAP, stream_tails
 from looplab.tools.dev_probe import _MAX_CODE_CHARS, _MAX_TIMEOUT, DevProbeTools
+from _fs_capabilities import user_xattr_workdir
 from _posix_gates import KERNEL_READ_RUNG
 
 # WHY A PROBE-EXECUTING TEST CAN SKIP, AND EXACTLY ONE CANNOT.
@@ -364,16 +365,24 @@ def test_the_unaudited_mutator_set_is_re_derived_from_the_interpreter(tmp_path):
     # exist on Windows, so there the measurement is over what it can run and the launcher's set is
     # compared on the same footing (Windows CI run 35785582444: "chown did not run").
     available = {name: case for name, case in _OS_MUTATORS.items() if hasattr(os, name)}
-    for name, case in sorted(available.items()):
-        work = tmp_path / ("w_" + name)
-        work.mkdir()
-        res = subprocess.run([sys.executable, str(probe), str(work), case],
-                             capture_output=True, text=True)
-        assert res.returncode == 0, f"{name}: {res.stderr}"
-        row = json.loads([ln for ln in res.stdout.splitlines() if ln.startswith("@@")][-1][2:])
-        assert "err" not in row, f"{name} did not run: {row['err']}"
-        if not row["events"]:
-            unaudited.append(name)
+    # The xattr pair needs a FILESYSTEM that stores user xattrs, and tmpfs before Linux 6.6 does
+    # not: with `--basetemp` under `/dev/shm` the pair failed on EOPNOTSUPP, which is the box and
+    # not the property. Run the pair where the capability exists; only when NO candidate directory
+    # has it is the pair dropped from BOTH sides of the comparison, on the footing the Windows
+    # branch above already uses for a function that cannot run.
+    with user_xattr_workdir(tmp_path) as (xattr_root, xattr_reasons):
+        if xattr_root is None:
+            available = {n: c for n, c in available.items() if "xattr" not in n}
+        for name, case in sorted(available.items()):
+            work = (xattr_root if "xattr" in name else tmp_path) / ("w_" + name)
+            work.mkdir()
+            res = subprocess.run([sys.executable, str(probe), str(work), case],
+                                 capture_output=True, text=True)
+            assert res.returncode == 0, f"{name}: {res.stderr}"
+            row = json.loads([ln for ln in res.stdout.splitlines() if ln.startswith("@@")][-1][2:])
+            assert "err" not in row, f"{name} did not run: {row['err']}"
+            if not row["events"]:
+                unaudited.append(name)
     pre_empted = sorted(n for n in dev_probe._UNAUDITED_MUTATORS if n in available)
     assert sorted(unaudited) == pre_empted, (
         "this interpreter's unaudited filesystem mutators are "
@@ -1159,14 +1168,20 @@ def test_the_replica_cannot_flow_back_into_the_build():
     assert files == {"conf.py": "N = 41\n"}
 
 
-def test_the_probes_whole_world_is_deleted_when_it_returns():
+def test_the_probes_whole_world_is_deleted_when_it_returns(tmp_path, monkeypatch):
     """No side effect is not a claim about intent — it is what makes the span-not-event decision
     correct, so it has to be observed."""
-    before = {p for p in Path(tempfile.gettempdir()).glob("looplab-probe-*")}
+    # A PRIVATE temp root: the probe's world is `tempfile.mkdtemp(prefix="looplab-probe-")`, and
+    # under `pytest -n` every worker's probes land in the one shared `/tmp`, so a diff of that
+    # directory read a NEIGHBOUR's live probe as this test's leak (order- and timing-dependent).
+    private = tmp_path / "private-tmp"
+    private.mkdir()
+    monkeypatch.setattr(tempfile, "tempdir", str(private))
+    assert Path(tempfile.gettempdir()) == private
     _probe("print('x')")
     _probe("raise SystemExit(3)")
     _probe("import time; time.sleep(0.05)")
-    assert {p for p in Path(tempfile.gettempdir()).glob("looplab-probe-*")} == before
+    assert list(private.glob("looplab-probe-*")) == []
 
 
 # ------------------------------------------------------------- the bounded output projection

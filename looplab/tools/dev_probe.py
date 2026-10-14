@@ -673,7 +673,61 @@ if _LL_READ_EXTRA is not None:
         except Exception:                       # noqa: BLE001 — absent in some venvs; prefixes cover it
             continue
         _ll_allow.update([_got] if isinstance(_got, str) else _got)
+    # THE DIRECTORIES THE SITE `.pth` FILES ADD to this interpreter's path -- part of what it needs
+    # to import, exactly like `site-packages` itself. A venv layered on another environment through a
+    # `.pth` (every agent venv on the MiniOneRec box points into `/dev/shm/looplab-env`) used to
+    # import only because the whole-`/dev` grant happened to cover `/dev/shm`; with that grant cut
+    # (below) its packages were `PermissionError`. Only plain path lines (an `import` line is code,
+    # not a path), only existing directories, and never one INSIDE a fenced root: an editable install
+    # of the operator's own tree is a `.pth` line too, and the containment rule below only catches
+    # an ANCESTOR of a root.
+    _ll_pth = set()
+    _ll_sites = {_ll_sysconfig.get_paths().get("purelib") or ""}
+    for _fn in (_ll_site.getsitepackages, _ll_site.getusersitepackages):
+        try:
+            _got = _fn()
+        except Exception:                       # noqa: BLE001 — absent in some venvs, as above
+            continue
+        _ll_sites.update([_got] if isinstance(_got, str) else _got)
+    for _sp in sorted(_s for _s in _ll_sites if _s):
+        try:
+            _names = sorted(n for n in os.listdir(_sp) if n.endswith(".pth"))
+        except OSError:
+            continue
+        for _n in _names:
+            try:
+                with open(os.path.join(_sp, _n), encoding="utf-8", errors="replace") as _fh:
+                    _lines = _fh.read(65536).splitlines()
+            except OSError:
+                continue
+            for _line in _lines:
+                _line = _line.strip()
+                if not _line or _line.startswith(("#", "import ", "import\\t")):
+                    continue
+                _cand = _line if os.path.isabs(_line) else os.path.join(_sp, _line)
+                if os.path.isdir(_cand):
+                    _rc = os.path.realpath(_cand)
+                    _rc = _rc if _rc.endswith(os.sep) else _rc + os.sep
+                    if not any(_rc.startswith(_r) for _r in (_LL_READ_DENY or ())):
+                        _ll_pth.add(_cand)
+    _ll_allow.update(_ll_pth)
     _ll_allow.update(_LL_READ_EXTRA)
+    # `/dev` IS GRANTED WITHOUT ITS SHARED-MEMORY TREES (2026-10-14). The device nodes are what an
+    # interpreter needs (`/dev/null`, `/dev/urandom`, `/dev/pts`); `/dev/shm` and `/dev/mqueue` are
+    # filesystems, and on a box that keeps run directories in tmpfs `/dev/shm` holds every run's log,
+    # node workdirs and the operator's campaign trees -- a whole-`/dev` grant handed the confined
+    # probe all of it. A probe cannot write (rule 2), so it has no use for shared memory either. An
+    # interpreter or mount UNDER `/dev/shm` still arrives as its own grant above. If `/dev` cannot be
+    # listed the historical whole grant stands: a probe without `/dev/null` is a broken interpreter.
+    _ll_dev = {_p for _p in _ll_allow if _p and os.path.realpath(_p).rstrip(os.sep) == "/dev"}
+    if _ll_dev:
+        try:
+            _ll_dev_entries = [os.path.join("/dev", _n) for _n in os.listdir("/dev")
+                               if _n not in ("shm", "mqueue")]
+        except OSError:
+            _ll_dev_entries = None
+        if _ll_dev_entries is not None:
+            _ll_allow = (_ll_allow - _ll_dev) | set(_ll_dev_entries)
     # THE CONTAINMENT RULE, applied where the grant is made. A grant that CONTAINS the operator's
     # source root is not a wide grant, it is the fence removed: Landlock grants a whole subtree and
     # has no way to subtract, so `/opt` granted with an editable tree at `/opt/myrepo` hands the
@@ -744,7 +798,14 @@ def _shared_temp_root(path: str) -> bool:
     """
     import tempfile
 
-    roots = {"/tmp", "/var/tmp", os.path.realpath(tempfile.gettempdir())}
+    # `/dev/shm` is one of them too (2026-10-14). `read_allowlist._DEFAULT_TIERS` grants it beside
+    # `/tmp` for torch DataLoader workers and NCCL, which a probe (no writes, rule 2) never needs.
+    # Granted whole it made the probe's read confinement weaker on a box that keeps run
+    # directories in tmpfs: there `/dev/shm` holds `looplab-runs/` (every run's log and node
+    # workdirs) and the operator's campaign trees, and a confined probe could read all of them.
+    # Equality, not containment, exactly as above: an interpreter or a declared mount UNDER
+    # `/dev/shm` is still granted on its own merits.
+    roots = {"/tmp", "/var/tmp", "/dev/shm", os.path.realpath(tempfile.gettempdir())}
     return os.path.realpath(path) in roots
 
 
@@ -1396,7 +1457,13 @@ class DevProbeTools:
                     "`developer_probe_confine=false` is the smaller one, and it still refuses this "
                     "read — the hook denies the grader by PREFIX and needs no tier to punch, at the "
                     "price of leaving every read outside the fenced roots unpoliced.")
-        tiers = tuple(path for path in self._interpreter_allow() if not _shared_temp_root(path))
+        # `/dev` is not granted from HERE either: the child grants it itself (`_READ_RUNG`), entry by
+        # entry and without `/dev/shm`/`/dev/mqueue`, because its device nodes are FILE rules this
+        # prefix list cannot spell (`_norm_root` makes every grant a directory prefix). A whole `/dev`
+        # here would hand the kernel rung every run directory a tmpfs box keeps under `/dev/shm`.
+        tiers = tuple(path for path in self._interpreter_allow()
+                      if not _shared_temp_root(path)
+                      and os.path.realpath(path).rstrip(os.sep) != "/dev")
         # THE TASK'S DECLARED MOUNTS, from the one enumeration of them, and NOT through `allow`.
         # `fence_inputs` drops every allow entry that lies under no editable root -- right for the
         # HOOK, a deny-prefix fence that never looks outside the roots, and exactly wrong for THIS
