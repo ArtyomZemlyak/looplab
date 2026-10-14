@@ -613,15 +613,18 @@ def upstream_readiness(task, settings) -> dict:
     def need(what: str, how: str):
         missing.append({"what": what, "how": how})
 
-    declared = getattr(task, "upstream", None) if task is not None else None
-    if task is None or not hasattr(task, "seed_base"):
+    from looplab.adapters.repo_task import RepoTask
+
+    is_repo = isinstance(task, RepoTask)
+    declared = task.upstream if is_repo else None
+    if not is_repo:
         need("repo_task", "the upstream lane serves repository tasks only")
     else:
-        if getattr(task, "seed_base", None) is None:
+        if task.seed_base is None:
             need("seed_base", "declare the immutable initial seed (`seed_base`) in the task "
                               "BEFORE the run starts; it is pinned at run start and cannot be "
                               "added to a running run")
-        scorer = getattr(getattr(task, "eval", None), "scorer_boundary", None)
+        scorer = task.eval.scorer_boundary if task.eval is not None else None
         if scorer is None:
             need("eval.scorer_boundary", "declare the evaluator files (`eval.scorer_boundary`) the "
                                          "gate must find byte-identical on both sides")

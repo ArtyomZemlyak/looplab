@@ -206,7 +206,7 @@ def list_runs(cfg: MirrorConfig) -> list[Path]:
 
 def plan_run(run_dir: Path, cfg: MirrorConfig, copied: dict, pass_no: int) -> tuple[list, dict]:
     """`(todo, skipped)`: files of `run_dir` that changed since `copied` recorded them, in priority
-    order, as `(rel, size, mtime_ns)`; and `{rel: reason}` for what is never mirrored."""
+    order, as `[rel, stat_result]`; and `{rel: reason}` for what is never mirrored."""
     todo, skipped = [], {}
     for dirpath, dirnames, filenames in os.walk(run_dir, followlinks=False):
         base = Path(dirpath)
@@ -236,9 +236,12 @@ def plan_run(run_dir: Path, cfg: MirrorConfig, copied: dict, pass_no: int) -> tu
                 if rel in copied:
                     continue
             prior = copied.get(rel)
+            # (size, mtime) is deliberately the WEAK change tier: the mirror re-copies what moved,
+            # and a same-size same-mtime rewrite is caught by the next manifest SHA mismatch only
+            # at restore. `st` itself rides along; the copy reads its two fields.
             if prior and prior.get("size") == st.st_size and prior.get("mtime_ns") == st.st_mtime_ns:
                 continue
-            todo.append((rel, st.st_size, st.st_mtime_ns))
+            todo.append([rel, st])
     todo.sort(key=lambda row: _priority(row[0]))
     return todo, skipped
 
@@ -396,7 +399,8 @@ def mirror_run(run_dir: Path, cfg: MirrorConfig, state: dict, *, pass_no: int,
     dst_run = cfg.dst_root / run
     n = nbytes = 0
     errors = []
-    for rel, size, mtime_ns in todo:
+    for rel, st in todo:
+        size, mtime_ns = st.st_size, st.st_mtime_ns
         dst = dst_run / rel
         parent = dst.parent
         if str(parent) not in made_dirs:

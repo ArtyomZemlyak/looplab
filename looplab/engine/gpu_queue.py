@@ -44,7 +44,7 @@ import time
 from pathlib import Path
 from typing import Optional
 
-from looplab.core.atomicio import file_identity
+from looplab.core.atomicio import file_identity, same_file_entry
 
 _LOG = logging.getLogger(__name__)
 
@@ -505,7 +505,7 @@ class _LogScan:
             st = path.stat()
         except OSError:
             return
-        ident = (st.st_dev, st.st_ino)
+        ident = same_file_entry(st)          # a REPLACED log (new inode) restarts the scan
         if ident != self.identity or st.st_size < self.offset:
             self.__init__()
             self.identity = ident

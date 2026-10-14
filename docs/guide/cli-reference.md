@@ -3303,7 +3303,7 @@ looplab landlock-check RUN_DIR [--no-probe] [--gpu-smoke [--python EVAL_PYTHON]]
 |---|---|---|
 | `RUN_DIR` | *(required)* | Run dir; the allow-list is derived from its own `task.snapshot.json` |
 | `--probe / --no-probe` | `--probe` | Fork a child, apply the ruleset, and prove a read inside the allow-list succeeds while one outside it is refused. The fork is why the irreversible `restrict_self` cannot touch your shell. |
-| `--gpu-smoke` | off | Under this run's allow-list (plus a scratch workdir), in `--python` (the eval's interpreter, e.g. the task's conda env), run: import torch, a CUDA matmul, a 2-worker DataLoader (`/dev/shm`), `torch.distributed` over loopback (NCCL with CUDA, else gloo), `/sys/class` + `/proc/driver/nvidia` reads, a workdir write and a read of every declared mount. Absent libraries are `skipped`, never `ok`; any `failed` step exits 1. Uses one GPU for seconds — run it when the GPUs are free (`runtime/landlock_smoke.py`). |
+| `--gpu-smoke` | off | Under this run's allow-list (plus a scratch workdir), in `--python` (the eval's interpreter, e.g. the task's conda env), run: import torch, a CUDA matmul, a 2-worker DataLoader (`/dev/shm`), `torch.distributed` over loopback (NCCL with CUDA, else gloo), `/sys/class` + `/proc/driver/nvidia` reads, a workdir write and a read of every declared mount. Absent libraries are `skipped`, never `ok`; any `failed` step exits 1. Uses one GPU for seconds — run it when the GPUs are free (`engine/landlock_smoke.py`). |
 
 What it prints, in order: the Landlock ABI this kernel offers; **the mounts the task declares**, each
 marked if it is not present on this box; the full allow-list (workdir readwrite, run dir READ — it is the run's record — plus its

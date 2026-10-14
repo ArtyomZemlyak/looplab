@@ -552,7 +552,7 @@ _LAYOUT = {
     "assistant_monitor": "serve",
     "upstream_requests": "engine",
     "infra_probe": "runtime",  # the box before the candidate (incident 2026-10-06)
-    "landlock_smoke": "runtime",  # the GPU smoke under an allow-list, before landlock=enforce
+    "landlock_smoke": "engine",  # the GPU smoke under an allow-list, before landlock=enforce
     "artifact_sync": "engine",  # the operator's copy-out of a finished node's workdir
     "upstream_board": "core",  # the one reading of the upstream lane's folded history (doc 73)
     "memo_questions": "serve",  # memo open questions projected onto the question board (2ab0db610)

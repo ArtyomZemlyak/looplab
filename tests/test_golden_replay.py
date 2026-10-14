@@ -34,6 +34,9 @@ the same change and say why in the commit:
 Regenerations so far, each one an ADDITIVE model field (the case the paragraph above names), with
 the diff that justified it:
 
+* 2026-10-14 — `Node.protocol_version` (doc 81 §8: the campaign protocol version a node was
+  created under, from `node_created.protocol_version`). 8 insertions, 0 deletions — `null` per
+  node, what a row without the key folds to.
 * 2026-10-14 — `Node.extra_metrics_omitted` (review 2026-10-14 section 7: what the 256-key
   extra-metric bound left out of `node_evaluated`). 8 insertions, 0 deletions — `{}` per node, the
   default every log without the key folds to.

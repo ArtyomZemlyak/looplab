@@ -351,6 +351,7 @@
       "operator": "draft",
       "origin": null,
       "parent_ids": [],
+      "protocol_version": null,
       "repairs": 0,
       "rerun_from": null,
       "rerun_stage": null,
@@ -424,6 +425,7 @@
       "operator": "draft",
       "origin": null,
       "parent_ids": [],
+      "protocol_version": null,
       "repairs": 0,
       "rerun_from": null,
       "rerun_stage": null,
@@ -497,6 +499,7 @@
       "operator": "draft",
       "origin": null,
       "parent_ids": [],
+      "protocol_version": null,
       "repairs": 0,
       "rerun_from": null,
       "rerun_stage": null,
@@ -575,6 +578,7 @@
       "parent_ids": [
         2
       ],
+      "protocol_version": null,
       "repairs": 0,
       "rerun_from": null,
       "rerun_stage": null,
@@ -653,6 +657,7 @@
       "parent_ids": [
         2
       ],
+      "protocol_version": null,
       "repairs": 0,
       "rerun_from": null,
       "rerun_stage": null,
@@ -728,6 +733,7 @@
       "parent_ids": [
         2
       ],
+      "protocol_version": null,
       "repairs": 0,
       "rerun_from": null,
       "rerun_stage": null,
@@ -807,6 +813,7 @@
         5,
         2
       ],
+      "protocol_version": null,
       "repairs": 0,
       "rerun_from": null,
       "rerun_stage": null,
@@ -885,6 +892,7 @@
       "parent_ids": [
         5
       ],
+      "protocol_version": null,
       "repairs": 0,
       "rerun_from": null,
       "rerun_stage": null,

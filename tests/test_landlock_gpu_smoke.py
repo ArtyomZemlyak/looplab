@@ -10,7 +10,7 @@ import sys
 import pytest
 
 from looplab.runtime import landlock, read_allowlist
-from looplab.runtime.landlock_smoke import STEPS, run_smoke
+from looplab.engine.landlock_smoke import STEPS, run_smoke
 
 _NO_LANDLOCK = landlock.unavailable_reason()
 

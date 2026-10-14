@@ -19,7 +19,8 @@ itself, once a real train+score has also completed under `LOOPLAB_LANDLOCK=enfor
 `landlock` default to `"enforce"` and add `"landlock": "off"` to
 `core/config.py::LEGACY_CONFIG_SNAPSHOT_DEFAULTS` so every pre-flip run resumes unchanged.
 
-Imports nothing above `core`.
+Lives in `engine/` (not `runtime/`, which holds only what a launch itself needs): it is an
+operator's acceptance instrument OVER the runtime's ruleset, not part of any launch.
 """
 from __future__ import annotations
 
@@ -156,4 +157,20 @@ def mount_paths(mounts: Iterable) -> list[str]:
             if os.path.exists(os.path.expanduser(str(path)))]
 
 
-__all__ = ["STEPS", "mount_paths", "run_smoke"]
+def smoke_report(allow: list, mounts: Iterable, python: str) -> tuple[bool, list[str]]:
+    """`(ok, lines)` for `looplab landlock-check --gpu-smoke`."""
+    result = run_smoke(allow, python=python, mounts=mount_paths(mounts))
+    lines = []
+    for name, row in result["steps"].items():
+        detail = row.get("error") or row.get("why") or row.get("detail") or ""
+        lines.append(f"gpu-smoke {name:<17} {row.get('status', '?'):<8} {detail}")
+    if result["ok"]:
+        lines.append("gpu-smoke: every exercised surface works under the allow-list "
+                     "(skipped steps were NOT exercised)")
+    else:
+        lines.append("gpu-smoke: FAILED — a surface above is refused by this ruleset; do NOT flip "
+                     "landlock to enforce. stderr tail:\n" + result["stderr_tail"])
+    return result["ok"], lines
+
+
+__all__ = ["STEPS", "mount_paths", "run_smoke", "smoke_report"]
