@@ -130,6 +130,12 @@ def docker_use_binds(paths, *, windows: bool) -> tuple[list, Optional[str]]:
     return [(p, True, d) for p, d in zip(paths, dsts)], (":".join(dsts) if dsts else None)
 
 
+# The environment an external-harness evaluation gets by default so a native crash leaves a stack:
+# `faulthandler` prints every thread's Python stack on SIGSEGV/SIGABRT/SIGBUS/SIGILL/SIGFPE, and
+# PyTorch adds the C++ frames to its errors. Lowest-precedence layer of `_declared_eval_env`.
+CRASH_DIAGNOSTICS_ENV = {"PYTHONFAULTHANDLER": "1", "TORCH_SHOW_CPP_STACKTRACES": "1"}
+
+
 class _DeferredBudgetStop:
     """A task-group facade that DEFERS a background task's `BudgetExceeded` instead of letting it
     cancel that group's siblings -- used by `_dispatch_evals` for exactly one caller,
@@ -994,7 +1000,13 @@ class EvalDispatchMixin:
         `cmd.command` itself, which is an argv the eval executes.
         """
         from looplab.runtime.command_eval import merge_env
-        declared = merge_env(getattr(self, "_eval_env", {}), (es or {}).get("env"))
+        # CRASH DIAGNOSTICS for an external-harness run (doc 78 §3, audit incident G0: several ranks
+        # died of SIGSEGV and the record held only the wrapper's AssertionError). The LOWEST layer:
+        # `Settings.eval_env`, the task's `eval.env` and a stage's `env` all override it — set
+        # `PYTHONFAULTHANDLER=` (empty) there to switch faulthandler off. An internal run is
+        # unchanged byte for byte.
+        crash = CRASH_DIAGNOSTICS_ENV if getattr(self, "external_harness", False) else None
+        declared = merge_env(crash, getattr(self, "_eval_env", {}), (es or {}).get("env"))
         if not declared:
             return env
         return {**(env or {}), **declared}

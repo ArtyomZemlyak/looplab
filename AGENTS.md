@@ -151,3 +151,12 @@ changed, caveats and the next decision; LoopLab supplies the measured numbers.
 Retry lost responses with the exact same body/action_id. This appears in Assistant
 chat without writing the owner's chat log or executing actions. It adds no hidden
 engine wait and never replaces checkpoints or report obligations.
+
+Do not script orchestration LoopLab owns ([doc 78](docs/78-external-agent-orchestration-2026-10-14.md)).
+Between decisions, block on MCP `wait_for_next(after=<last id>)` instead of polling: LoopLab
+records node evaluated/failed, stage failed, monitor question, obligation due, run idle, run
+paused/finished and GPU free itself; the operator's `looplab agent-notify` hook can also wake you.
+Order GPU work across runs with `PUT /api/runs/{run_id}/gpu-gate` (`hold`, `start_after`).
+Declare routine monitor answers with `PUT /api/runs/{run_id}/harness-monitor-rules`; never
+answer checkpoints with an unattended bot under the agent's name. Read
+`node_failed.failure_forensics` and `/attempt-logs` before repairing; declare `eval.canary`.

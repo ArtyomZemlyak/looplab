@@ -1170,10 +1170,45 @@ def build_router(srv) -> APIRouter:
         return result
 
     @router.post("/api/runs/{run_id}/harness-checkpoints")
-    def answer_harness_checkpoint(run_id: str, body: ExternalCheckpointAnswer):
-        """Answer exactly one checkpoint; the engine applies the verdict before advancing."""
+    def answer_harness_checkpoint(run_id: str, body: ExternalCheckpointAnswer, request: Request):
+        """Answer exactly one checkpoint; the engine applies the verdict before advancing.
+
+        The stored answer names its author: `agent` for the harness credential, `human` for the
+        owner. Questions the run's declared monitor rules cover are answered by LoopLab itself
+        (`answerer: rule`) and never reach this route."""
         from looplab.harness.checkpoints import respond
-        return respond(srv, _run_dir(run_id), body)
+        # `human` only when an owner token is configured and THIS request used it; on an open
+        # (token-less) UI the two parties are indistinguishable and the historical reading — the
+        # external agent answers checkpoints — stands.
+        owner = bool(getattr(srv, "owner_auth_enabled", False)) and not request_agent_token(request)
+        return respond(srv, _run_dir(run_id), body, answerer="human" if owner else "agent")
+
+    @router.get("/api/runs/{run_id}/harness-monitor-rules")
+    def get_harness_monitor_rules(run_id: str, response: Response):
+        """The run's declared routine-answer rules for checkpoints (null when none)."""
+        from looplab.harness.monitor_rules import read_rules
+        response.headers["Cache-Control"] = "no-store"
+        return {"rules": read_rules(_run_dir(run_id))}
+
+    @router.put("/api/runs/{run_id}/harness-monitor-rules")
+    def put_harness_monitor_rules(run_id: str, body: dict, request: Request):
+        """Declare which checkpoint questions are ROUTINE, so LoopLab answers them itself.
+
+        Body: `{"train_monitor": {"routine_if": {"loss_finite": true, "progress_advances": true,
+        "forbid_patterns": ["Traceback", "out of memory"]}}, "stage_check": {"routine_if":
+        {"require_patterns": ["Saved checkpoint"]}}}`. A rule only ever answers continue/proceed
+        (`answerer: rule`); anything it does not cover stays open for the agent. `{}` clears."""
+        from looplab.harness.monitor_rules import RulesRefused, rules_path, write_rules
+        rd = _run_dir(run_id)
+        if not {k: v for k, v in body.items() if k != "version"}:
+            rules_path(rd).unlink(missing_ok=True)
+            return {"rules": None}
+        try:
+            owner = (bool(getattr(srv, "owner_auth_enabled", False))
+                     and not request_agent_token(request))
+            return {"rules": write_rules(rd, body, author="human" if owner else "agent")}
+        except RulesRefused as exc:
+            raise HTTPException(400, str(exc)) from exc
 
     @router.get("/api/runs/{run_id}/harness-hypotheses")
     def get_harness_hypotheses(run_id: str, expected_generation: str = Query(...)):

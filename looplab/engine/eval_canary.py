@@ -112,7 +112,24 @@ def canary_spec(eval_spec) -> Optional[dict]:
         return None
     if not (timeout > 0 and timeout != float("inf")):
         return None
-    return {"env": {**env, CANARY_ENV: "1"}, "timeout": timeout}
+    mode = c.get("mode", "slice")
+    if mode not in ("slice", "smoke"):
+        return None
+    out = {"env": {**env, CANARY_ENV: "1"}, "timeout": timeout}
+    if mode == "smoke":
+        out["mode"] = "smoke"     # absent = `slice`: every pre-mode spec reads back byte for byte
+    return out
+
+
+def smoke_canary_passed(res, *, expired: bool, interrupted: bool) -> bool:
+    """A SMOKE canary's pass rule (doc 78 §5): the chain SURVIVED its cap (the clock stopped a
+    still-running process) or exited 0 before it. A non-zero exit, or a stage that died before the
+    clock, is the failure it exists to catch — in seconds rather than after hours of preparation."""
+    if res is None or interrupted:
+        return False
+    if expired or getattr(res, "timed_out", False):
+        return True
+    return getattr(res, "exit_code", 1) == 0
 
 
 def capped_pipeline(timeout, stages, cap: float):

@@ -3615,3 +3615,14 @@ body.asst-side-open .app-shell-main { margin-right: var(--asst-side-w, 440px); }
 .offline-demo { margin-top: 14px; }
 .offline-demo > p { margin: 10px 0 8px; }
 .offline-demo .asst-launch { text-align: left; }
+
+/* Cross-run orchestration (doc 78): the runs page's GPU queue / agent wake-up panel and the
+   Inspector's failure forensics. */
+.orchestration-panel { margin: 8px 16px; padding: 6px 10px; border: 1px solid var(--border, #ddd); border-radius: 6px; }
+.orchestration-panel > summary { cursor: pointer; }
+.orchestration-body { display: grid; grid-template-columns: repeat(auto-fit, minmax(320px, 1fr)); gap: 12px; margin-top: 8px; }
+.orchestration-queue { margin: 4px 0 8px 18px; padding: 0; }
+.orchestration-panel tr.wake-warn td:nth-child(2) { color: var(--warn, #b26b00); }
+.orchestration-panel tr.wake-bad td:nth-child(2) { color: var(--bad, #b00020); }
+.failure-forensics details { margin: 4px 0; }
+.failure-forensics summary { cursor: pointer; }

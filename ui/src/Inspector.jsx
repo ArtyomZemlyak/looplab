@@ -6,6 +6,7 @@ import { conditionalGet, costPricing, deadlineGet, get, fmt, fmtInt, isSweep, CO
   traceReadQuery, activityKey, nodeActivityStatus, nodeActivityView, NODE_ACTIVITY } from './util.js'
 import { useNodeSpanWindow, usePoll, useScopedResource, useTraceRetry, useTraceScroll } from './hooks.js'
 import { Trajectory, ParallelCoords, Scatter } from './charts.jsx'
+import FailureForensics from './FailureForensics.jsx'
 import { MetricLines } from './MetricLines.jsx'
 import { themeFilteredGroupAggregate } from './grouping.js'
 import { mergeSummary, nodeChip } from './report.js'
@@ -497,7 +498,7 @@ export default function Inspector({ runId, nodeId, state, live, tab, setTab, onT
             : <div className="insp-empty">{uiText("Loading code…")}</div>)}
         {activeTab === 'Metrics' && <Metrics n={n} detail={detail} state={state} runId={runId}
           expectedGeneration={expectedGeneration} onToast={onToast} canRetarget={!readOnly} />}
-        {activeTab === 'Trust' && <Trust n={n} drifts={nodeDrifts} />}
+        {activeTab === 'Trust' && <Trust n={n} drifts={nodeDrifts} runId={readOnly ? null : runId} />}
         {activeTab === 'Cost' && <Cost state={state} />}
       </div>
     </>
@@ -3051,7 +3052,7 @@ function Trials({ n, detail, state }) {
   </>
 }
 
-function Trust({ n, drifts = [] }) {
+function Trust({ n, drifts = [], runId = null }) {
   useUILanguage()
 
   const feasibility = nodeFeasibilityStatus(n)
@@ -3095,7 +3096,8 @@ function Trust({ n, drifts = [] }) {
         </DataTable>
       </>
       : <State tone="unknown" label={uiText("No drift flag recorded")} detail="This does not prove that an independent cross-check ran for this node." />}
-    {n.status === 'failed' && <><div className="section-h">{uiText("Failure")}</div><span className="badge reason">{n.error_reason}</span><pre className="code">{n.error}</pre></>}
+    {n.status === 'failed' && <><div className="section-h">{uiText("Failure")}</div><span className="badge reason">{n.error_reason}</span><pre className="code">{n.error}</pre>
+      {runId != null && <FailureForensics runId={runId} nodeId={n.id} />}</>}
   </div>
 }
 

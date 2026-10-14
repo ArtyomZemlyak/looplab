@@ -180,6 +180,42 @@ def build_router(srv) -> APIRouter:
         except ValueError as exc:
             raise HTTPException(400, str(exc)) from exc
 
+    # ------------------------------------------------------------------ earlier attempts' logs
+    @router.get("/api/runs/{run_id}/attempt-logs")
+    def get_attempt_logs(run_id: str, response: Response,
+                         node_id: Optional[int] = Query(None, ge=0)):
+        """Logs of earlier lifecycles, kept when a node's workdir was rebuilt (reset/retry).
+
+        Each file's `path` is readable through `GET /api/runs/{run_id}/artifact?root=run&path=...`
+        with the current expected_generation."""
+        from looplab.engine.attempt_logs import list_attempt_logs
+
+        response.headers["Cache-Control"] = "no-store"
+        return {"run_id": run_id, "archives": list_attempt_logs(srv.run_dir(run_id), node_id)}
+
+    @router.get("/api/runs/{run_id}/nodes/{node_id}/failure-forensics")
+    def get_failure_forensics(run_id: str, node_id: int, response: Response):
+        """Every recorded forensic record of a node's failed attempts (newest first) — the
+        `failure_forensics` on its `node_failed` / `node_repaired` rows — plus the logs of its
+        earlier lifecycles kept across resets."""
+        from looplab.engine.attempt_logs import list_attempt_logs
+        from looplab.events.types import EV_NODE_FAILED, EV_NODE_REPAIRED
+
+        response.headers["Cache-Control"] = "no-store"
+        rd = srv.run_dir(run_id)
+        attempts = []
+        for ev in srv.events(rd):
+            if ev.type not in (EV_NODE_FAILED, EV_NODE_REPAIRED):
+                continue
+            data = ev.data if isinstance(ev.data, dict) else {}
+            if data.get("node_id") != node_id or not isinstance(data.get("failure_forensics"), dict):
+                continue
+            attempts.append({"seq": ev.seq, "event": ev.type, "generation": data.get("generation"),
+                             "attempt": data.get("attempt"),
+                             "forensics": data["failure_forensics"]})
+        return {"run_id": run_id, "node_id": node_id, "attempts": attempts[::-1],
+                "attempt_logs": list_attempt_logs(rd, node_id)}
+
     # ------------------------------------------------------------------ GPU queue and gates
     def _gates() -> list[dict]:
         from looplab.engine.gpu_queue import gate_blockers, read_gate

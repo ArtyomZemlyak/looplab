@@ -2203,7 +2203,8 @@ EVENT_PAYLOAD_KEYS: dict[str, PayloadContract] = {
         required=(),
         optional=(
             "attempt", "card_id", "engine_reason", "error", "error_evidence", "eval_seconds",
-            "failed_stage", "failure_signature", "finish_data", "finish_report_planned",
+            "failed_stage", "failure_forensics", "failure_signature", "finish_data",
+            "finish_report_planned",
             "generation", "never_evaluated", "node_id", "reason", "reason_evidence",
             "reason_evidence_resolved", "reason_evidence_root", "reason_findings",
             "reason_hypotheses",
@@ -2219,8 +2220,8 @@ EVENT_PAYLOAD_KEYS: dict[str, PayloadContract] = {
         ),
         optional=(
             "attribution", "budget_exhausted", "code", "edit_calls", "engine_reason",
-            "error_evidence", "eval_seconds", "failure_signature", "footprint_finalized",
-            "idea_footprint", "judge_deferred",
+            "error_evidence", "eval_seconds", "failure_forensics", "failure_signature",
+            "footprint_finalized", "idea_footprint", "judge_deferred",
             "param_overrides", "reason", "reason_evidence", "reason_evidence_resolved",
             "reason_evidence_root", "reason_findings", "reason_hypotheses",
             "reason_override_refused", "reason_source",

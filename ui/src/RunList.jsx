@@ -6,6 +6,7 @@ import { get, fmt, fmtDate, fmtAgo, listProjects, createProject, patchProject, d
   storageGet, storageSet } from './util.js'
 import { useMediaQuery, usePoll } from './hooks.js'
 import LazyBoundary from './LazyBoundary.jsx'
+import OrchestrationPanel from './OrchestrationPanel.jsx'
 import OFFLINE_DEMO_SPEC from './offlineDemo.json'
 import ThemeSwitcher from './ThemeSwitcher.jsx'
 import EnergyToggle from './EnergyToggle.jsx'
@@ -2590,6 +2591,8 @@ export default function RunList({ onOpen, onGlobalNavigate,
           </button>}
         </div>
       })}
+
+      {!firstRunLanding && <OrchestrationPanel />}
 
       <div className={'runlayout' + (projectsOpen ? ' projects-open' : '')}>
         {!firstRunLanding && projectsOpen && <button className="project-backdrop" disabled={projectBusy} aria-disabled={navigationBusy || undefined}

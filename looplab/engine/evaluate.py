@@ -1274,7 +1274,7 @@ from looplab.runtime.sandbox import GpuPinUnenforceable
 from looplab.engine.eval_canary import (CANARY_NEAR_CAP_FRACTION, CANARY_RETRY_CAP_FACTOR,
                                        CanaryClock, canary_already_passed, canary_failure_detail,
                                        canary_failure_result, canary_near_cap, canary_passed,
-                                       canary_spec, own_timeout_fired)
+                                       canary_spec, own_timeout_fired, smoke_canary_passed)
 from looplab.events.types import (DIAGNOSTIC_EVENTS, EV_CARD_DROPPED, EV_DEPS_INSTALLED,
                                   EV_EVAL_INVOCATION_CLAIMED, EV_EVAL_INVOCATION_RECOVERED,
                                   EV_EVAL_INVOCATION_SETTLED, EV_WORKSPACE_SEEDED,
@@ -1694,6 +1694,10 @@ class EvalAttempt:
     watchdog_reason: Any = None
     watchdog_err: str = ""
     err_evidence: Any = None
+    # THE FORENSIC RECORD of this attempt's failure (`runtime/failure_forensics.py`): root
+    # exception, signals, per-rank exit codes and log tails. Bound beside `err_evidence`; a RECORD
+    # on `node_repaired`/`node_failed`, read by nothing that decides.
+    failure_forensics: Any = None
     _depth: int = 0
     triage: Any = None
     _monitor_verdicts: Any = None
@@ -2662,6 +2666,50 @@ class EvaluateMixin:
         """
         return _redacted_tail(self._redact, getattr(res, "stderr", ""),
                               _DURABLE_EVIDENCE_CHARS)
+
+    def _failure_forensics(self, a: "EvalAttempt") -> Optional[dict]:
+        """The forensic record of this attempt's failure (`runtime/failure_forensics.py`, doc 78
+        §3): the ORIGINAL exception under any wrapper, deaths by signal per rank, exit codes and
+        the failed stage's log tail — parsed, never judged. Every string goes through the engine's
+        one redaction funnel. Best-effort: a record that cannot be built is simply absent."""
+        from looplab.core.node_evidence import open_untrusted_regular
+        from looplab.runtime.failure_forensics import failure_forensics
+
+        res = a.res
+        if res is None:
+            return None
+        logs: dict = {}
+        workdir = getattr(a, "workdir", None)
+        names = []
+        if getattr(res, "failed_stage", None):
+            names.append(f"{res.failed_stage}.log")
+        names.append("eval.log")
+        for name in names:
+            if workdir is None or name in logs:
+                continue
+            try:
+                with open_untrusted_regular(os.path.join(str(workdir), name)) as fh:
+                    size = os.fstat(fh.fileno()).st_size
+                    fh.seek(max(0, size - 65536))
+                    logs[name] = fh.read(65536).decode("utf-8", "replace")
+            except OSError:
+                continue
+        try:
+            record = failure_forensics(
+                exit_code=getattr(res, "exit_code", None),
+                timed_out=bool(getattr(res, "timed_out", False)),
+                stdout=str(getattr(res, "stdout", "") or "")[-65536:],
+                stderr=str(getattr(res, "stderr", "") or "")[-65536:],
+                logs=logs, failed_stage=getattr(res, "failed_stage", None),
+                stage_rows=getattr(res, "stages", None) or (),
+                redact=lambda text: self._redact(text))
+        except Exception:  # noqa: BLE001 — a forensic record is optional; the failure itself stands
+            return None
+        # Only a record that FOUND something rides the row: a bare "exit code 1" with no exception,
+        # signal or crash dump says nothing `error`/`error_evidence` do not already say.
+        found = any(record.get(key) for key in ("root_exception", "signals", "ranks",
+                                                "faulthandler", "hints"))
+        return record if found else None
 
     def _scored_stdout_tail(self, res) -> str:
         """The `stdout_tail` column of a scored terminal. A method rather than an inline call since
@@ -3983,7 +4031,11 @@ class EvaluateMixin:
         a canary would be the full eval run twice), and the log holds no PASSED canary for this
         node's lifecycle and exact code (the durable gate, invariant #3 — a resume, or a dependency
         round that changed no code, does not re-run a canary already paid for)."""
-        if not self._eval_canary or not self._eval_spec:
+        # ON BY DEFAULT FOR AN EXTERNAL-HARNESS RUN (doc 78 §5, audit incident G1): an external
+        # agent's broken candidate (a CLI flag its script does not know) otherwise fails only
+        # after the data preparation it is queued behind. The task's `eval.canary` declaration is
+        # still what makes a canary possible — without it there is no slice to run.
+        if not (self._eval_canary or getattr(self, "external_harness", False)) or not self._eval_spec:
             return False
         if canary_spec(self._eval_spec) is None:
             return False
@@ -4109,9 +4161,14 @@ class EvaluateMixin:
             raise
         except Exception as exc:  # noqa: BLE001 — fail-open preflight: the full eval owns this fault
             fault = f"{type(exc).__name__}: {exc}"[:300]
-        passed = fault is None and canary_passed(
-            res, expired=expired, artifact=getattr(a.node, "kind", None) == "artifact")
         interrupted = cancel.is_set() and not expired
+        if spec.get("mode") == "smoke":
+            # A SMOKE canary passes by SURVIVING its cap (`eval_canary.smoke_canary_passed`).
+            passed = fault is None and smoke_canary_passed(res, expired=expired,
+                                                           interrupted=interrupted)
+        else:
+            passed = fault is None and canary_passed(
+                res, expired=expired, artifact=getattr(a.node, "kind", None) == "artifact")
         # A stage killed at its OWN declared timeout (at or under the canary's cap) is not the
         # canary's clock: a longer cap runs into the same second, so it takes the ordinary failure
         # path with its own words instead of the retry (critic 2026-09-29).
@@ -5029,7 +5086,11 @@ class EvaluateMixin:
         # engine outcome on the same verdict, never this attempt's crash.
         if await self._settle_artifact_refusal(a):
             return PHASE_RETURN
-        if self.external_harness and getattr(self, "_eval_spec", None) and not a._seen.get("kind"):
+        from looplab.engine.external_watch import attempt_failed as _attempt_failed
+        if (self.external_harness and getattr(self, "_eval_spec", None) and not a._seen.get("kind")
+                # A FAILED evaluation is not asked about after the fact (doc 78 §4): the question
+                # would only delay its terminal while it waits for a moot answer.
+                and not _attempt_failed(getattr(a, "res", None))):
             # A short command evaluation can finish before the first live-monitor tick.
             # Inspect its final attributed log once so enabled monitoring cannot vanish merely
             # because the configured cadence was longer than the evaluation. A phase already
@@ -5243,6 +5304,7 @@ class EvaluateMixin:
         # so the two windows onto the same bytes are visibly siblings rather than one being
         # discovered later at a write site. See `_durable_failure_evidence`.
         a.err_evidence = self._durable_failure_evidence(a.res)
+        a.failure_forensics = self._failure_forensics(a)
         if a.canary_failed:
             # A FAILED CANARY IS NEVER SALVAGED: the only numbers and files it produced measured a
             # slice, in a scratch directory, and no rung may turn them into this node's metric
@@ -6293,6 +6355,8 @@ class EvaluateMixin:
                 # lines below. Nothing on the prompt path reads it; `_durable_repair_ledger`
                 # keeps building the judge's history from `error_in`, unchanged.
                 **({"error_evidence": a.err_evidence} if a.err_evidence else {}),
+                # THE FORENSIC RECORD of the failure this repair was bought over (doc 78 §3).
+                **({"failure_forensics": a.failure_forensics} if a.failure_forensics else {}),
                 # Same screen as `node_failed.triage_rationale` below, and for the same
                 # reason — this is the judge's own words about a crash, on a DURABLE row, and
                 # its two sibling log-derived verdicts (`train_monitor` / `asha_monitor`'s
@@ -6936,6 +7000,10 @@ class EvaluateMixin:
                 # rule as on the repair row.
                 if a.err_evidence:
                     data["error_evidence"] = a.err_evidence
+                # WHAT IT ACTUALLY DIED OF (doc 78 §3, audit L-07): the original exception under
+                # any wrapper, signals per rank, exit codes, log tails. A record, never a verdict.
+                if a.failure_forensics:
+                    data["failure_forensics"] = a.failure_forensics
                 # The diagnostician's citation rides the TERMINAL too, on the same additive,
                 # omitted-when-absent rule as on `node_repaired` above: the terminal is the row a
                 # whole run is audited from, and "who said this and what did they read" is

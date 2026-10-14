@@ -21,7 +21,7 @@ import posixpath
 from pathlib import Path
 import random
 import re
-from typing import NamedTuple, Optional
+from typing import Literal, NamedTuple, Optional
 
 from pydantic import BaseModel, ConfigDict, Field, PrivateAttr, ValidationInfo, field_validator, model_validator, model_serializer
 
@@ -1100,6 +1100,13 @@ class CanarySpec(BaseModel):
 
     env: dict[str, str] = Field(default_factory=dict)
     timeout: float = 900.0
+    # `slice` (the default): the chain must FINISH on the tiny slice and print a number. `smoke`
+    # (doc 78 §5): for a script that cannot run a slice, the chain only has to SURVIVE `timeout`
+    # seconds (or exit 0 sooner) — it catches what dies at start-up (a wrong CLI flag, an import or
+    # missing-file error) and is then stopped. A smoke canary runs the real command with the real
+    # environment in a scratch directory, so a script writing to an ABSOLUTE output path writes
+    # there too: declare `env` that redirects such outputs, or use `slice`.
+    mode: Literal["slice", "smoke"] = "slice"
 
     @field_validator("env")
     @classmethod

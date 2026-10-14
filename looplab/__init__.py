@@ -397,7 +397,9 @@ _LAYOUT = {
     "reset_route": "serve",
     "reset_transaction": "serve",
     "resources": "engine",  # resource-envelope and Card footprint scheduling helpers
-    "gpu_queue": "engine",  # the cross-run FIFO in front of the host GPU lease + the run's GPU gate
+    "gpu_queue": "engine",
+    "failure_forensics": "runtime",
+    "attempt_logs": "engine",  # the earlier attempts' logs, kept aside when a node's workdir is rebuilt  # the parsed root exception / signals / exit codes of a failed eval
     "reposcout": "tools",
     "retrieval": "tools",
     "reviews": "serve",

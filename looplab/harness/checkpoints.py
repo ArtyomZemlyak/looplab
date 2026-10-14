@@ -114,9 +114,64 @@ def ask(rd: Path, node_id: int, node_generation: int, phase_id: str,
            "kill_enabled": bool(kill_enabled), "created_at": time.time()}
     path = _path(rd)
     with interprocess_lock(Path(str(path) + ".lock"), required=True):
-        _rows(path)
+        rows = _rows(path)
         append_jsonl_bytes_locked(path, orjson.dumps(row))
+        # ROUTINE QUESTIONS ARE ANSWERED BY THE AGENT'S DECLARED RULES, here, in the same critical
+        # section (`harness/monitor_rules.py`, audit 2026-10-14 L-05): the engine never waits on a
+        # question whose answer the agent already wrote down as policy, and the answer says it was
+        # a rule — never an agent decision.
+        _answer_by_rule(rd, path, row, rows)
     return row
+
+
+def _answer_by_rule(rd: Path, path: Path, question: dict, rows: list[dict]) -> None:
+    from looplab.harness.monitor_rules import evaluate, read_rules
+
+    rules = read_rules(rd)
+    if not rules:
+        return
+    previous = None
+    questions = {r["checkpoint_id"]: r for r in rows if r.get("type") == "question"}
+    for r in rows:
+        if r.get("type") != "answer" or not isinstance(r.get("rule_facts"), dict):
+            continue
+        q = questions.get(r["checkpoint_id"])
+        if (q is not None and q.get("node_id") == question["node_id"]
+                and q.get("node_generation") == question["node_generation"]
+                and q.get("phase_id") == question["phase_id"]
+                and isinstance(r["rule_facts"].get("progress"), (int, float))):
+            previous = r["rule_facts"]["progress"]
+    try:
+        verdict = evaluate(rules, question, previous_progress=previous)
+    except Exception:  # noqa: BLE001 — a rule that cannot be evaluated leaves the question to the agent
+        return
+    if verdict is None:
+        return
+    append_jsonl_bytes_locked(path, orjson.dumps({
+        "type": "answer", "checkpoint_id": question["checkpoint_id"],
+        "verdict": verdict["verdict"], "failure_kind": "", "reason": verdict["reason"][:1000],
+        "action_id": f"rule:{question['checkpoint_id']}", "answered_at": time.time(),
+        "answerer": "rule", "rule_id": verdict["rule_id"], "rule_facts": verdict["facts"]}))
+
+
+def close_unanswered(rd: Path, checkpoint_ids, reason: str) -> list[str]:
+    """Record an ENGINE answer for live questions that can no longer matter — the evaluation they
+    asked about already ended (a failed stage must not wait for an advisory answer). Only advisory
+    live-monitor questions are closed; returns the ids answered here."""
+    path = _path(rd)
+    closed = []
+    with interprocess_lock(Path(str(path) + ".lock"), required=True):
+        questions, answers = _projection(_rows(path))
+        for cid in checkpoint_ids:
+            q = questions.get(cid)
+            if q is None or cid in answers or q.get("phase_id") not in ("train_monitor", "asha_live"):
+                continue
+            append_jsonl_bytes_locked(path, orjson.dumps({
+                "type": "answer", "checkpoint_id": cid, "verdict": "continue",
+                "failure_kind": "", "reason": reason[:1000], "action_id": f"engine:{cid}",
+                "answered_at": time.time(), "answerer": "engine"}))
+            closed.append(cid)
+    return closed
 
 
 def answer_for(rd: Path, checkpoint_id: str) -> dict | None:
@@ -149,7 +204,7 @@ def pending(rd: Path, expected_generation: str) -> list[dict]:
             and node.attempt == q["node_generation"] and node.status == "pending"]
 
 
-def respond(srv, rd: Path, body) -> dict:
+def respond(srv, rd: Path, body, *, answerer: str = "agent") -> dict:
     from looplab.core.config import read_config_snapshot
     from looplab.runtime.command_eval import STAGE_CHECK_HARD_KINDS
 
@@ -199,7 +254,10 @@ def respond(srv, rd: Path, body) -> dict:
                 row = {"type": "answer", "checkpoint_id": body.checkpoint_id,
                        "verdict": body.verdict, "failure_kind": body.failure_kind,
                        "reason": body.reason, "action_id": body.action_id,
-                       "answered_at": time.time()}
+                       "answered_at": time.time(),
+                       # WHO answered (doc 78 §4): `agent` (the harness credential) or `human`
+                       # (the owner). Rule and engine answers are written by LoopLab itself.
+                       "answerer": answerer if answerer in ("agent", "human") else "agent"}
                 append_jsonl_bytes_locked(path, orjson.dumps(row))
                 return {"ok": True, "replayed": False, "answer": row}
     except HTTPException:

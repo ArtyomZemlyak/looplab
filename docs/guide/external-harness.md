@@ -1132,6 +1132,16 @@ previous verified rows are explicitly stale. Engine liveness and agent connectiv
 remain separate facts. The existing inbox refresh can delay discovery by several
 seconds; it adds no evaluation wait of its own.
 
+## Orchestration ([doc 78](../78-external-agent-orchestration-2026-10-14.md))
+
+| `wait_for_next(after=…)` / `GET /api/agent-events` | Long poll of actionable events LoopLab derives itself: node evaluated/failed, stage failed, monitor question, obligation due, run idle, run paused/finished, GPU free. |
+|---|---|
+| `looplab agent-notify --command '…{message}…'` | Operator's wake-up command: debounced, retried, recorded in a ledger. `PUT /api/runs/{run_id}/agent-notify` sets your run's `vars` (thread). |
+| `PUT /api/runs/{run_id}/gpu-gate` | `hold` or `start_after` other runs' engines; the host GPU lease is served FIFO (`GET /api/gpu-queue`). `looplab gpu-gate` writes it before the run exists. |
+| `node_failed.failure_forensics` | Original exception under a wrapper, signals per rank, exit codes, log tails; `GET /api/runs/{run_id}/attempt-logs` keeps earlier attempts' logs. |
+| `PUT /api/runs/{run_id}/harness-monitor-rules` | Routine checkpoint answers LoopLab gives itself (`answerer: rule`); a failed evaluation never waits for an answer. |
+| `eval.canary` (`slice` / `smoke`) | On by default for external runs when declared: a broken CLI flag fails in seconds. |
+
 ## Reconnect and recovery
 
 The UI server, run engine, and coding agent are separate processes. If the agent

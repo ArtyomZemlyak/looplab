@@ -486,6 +486,11 @@ class WorkspaceSeeder:
         # on files left by a previous generation. Stage-scoped reuse deliberately bypasses this method
         # in EvaluateMixin; every actual materialization is therefore safe to rebuild from scratch.
         if wd.exists():
+            # The previous lifecycle's logs survive the rebuild (`engine/attempt_logs.py`, doc 78
+            # §3): a reset used to delete the only record of why the earlier attempt failed.
+            from looplab.engine.attempt_logs import archive_attempt_logs
+            archive_attempt_logs(run_dir, wd, getattr(authored_node, "id", 0),
+                                 getattr(authored_node, "attempt", None))
             # Read-only-aware: a workdir seeded from a git clone holds read-only pack files, which
             # Windows refuses to unlink — a second materialization of the same node failed there.
             rmtree_readonly_aware(wd)

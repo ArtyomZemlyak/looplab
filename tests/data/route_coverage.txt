@@ -77,6 +77,7 @@ PUT /api/runs/{run_id}/agent-notify	tests/test_agent_events.py
 GET /api/runs/{run_id}/agents_md	tests/test_server.py
 GET /api/runs/{run_id}/artifact	tests/test_server.py
 GET /api/runs/{run_id}/artifacts	tests/test_refusal_vocabulary.py tests/test_server.py
+GET /api/runs/{run_id}/attempt-logs	tests/test_failure_forensics.py
 GET /api/runs/{run_id}/cards/{card_id}/trace	tests/test_card_trace_projection.py
 POST /api/runs/{run_id}/chat	tests/test_collaboration.py tests/test_provider_error_redaction.py tests/test_report.py tests/test_serve_prompt_review.py tests/test_server.py
 GET /api/runs/{run_id}/chat-log	tests/test_provider_error_redaction.py tests/test_server.py
@@ -102,12 +103,14 @@ GET /api/runs/{run_id}/events	tests/test_card_public_projection.py tests/test_co
 GET /api/runs/{run_id}/gpu-gate	tests/test_gpu_queue.py
 PUT /api/runs/{run_id}/gpu-gate	tests/test_gpu_queue.py
 GET /api/runs/{run_id}/harness-checkpoints	tests/test_external_checkpoints.py
-POST /api/runs/{run_id}/harness-checkpoints	tests/test_external_checkpoints.py tests/test_external_progress.py
+POST /api/runs/{run_id}/harness-checkpoints	tests/test_external_checkpoints.py tests/test_external_progress.py tests/test_monitor_rules.py
 GET /api/runs/{run_id}/harness-contract	tests/test_external_run_mode.py
 POST /api/runs/{run_id}/harness-decisions	tests/test_external_progress.py tests/test_external_run_mode.py
 GET /api/runs/{run_id}/harness-handoff	tests/test_harness_handoff.py
 GET /api/runs/{run_id}/harness-hypotheses	tests/test_external_run_mode.py
 POST /api/runs/{run_id}/harness-hypotheses	tests/test_external_run_mode.py
+GET /api/runs/{run_id}/harness-monitor-rules	tests/test_monitor_rules.py
+PUT /api/runs/{run_id}/harness-monitor-rules	tests/test_monitor_rules.py
 GET /api/runs/{run_id}/harness-progress	tests/test_external_progress.py tests/test_harness_handoff.py
 POST /api/runs/{run_id}/harness-reviews	tests/test_external_progress.py tests/test_external_run_mode.py tests/test_external_selection.py
 GET /api/runs/{run_id}/harness-selection	tests/test_external_selection.py
@@ -127,6 +130,7 @@ GET /api/runs/{run_id}/nodes/{nid}/logs	tests/test_node_sidecar_reads.py tests/t
 GET /api/runs/{run_id}/nodes/{nid}/metrics	tests/test_node_sidecar_reads.py tests/test_server.py tests/test_span_index.py
 GET /api/runs/{run_id}/nodes/{nid}/seed-files	tests/test_recorded_seed_files.py
 GET /api/runs/{run_id}/nodes/{nid}/trace	tests/test_refusal_vocabulary.py tests/test_span_index.py tests/test_trace_episode_seek.py tests/test_trace_facts_and_sse_offload.py tests/test_trace_projection_security.py tests/test_trace_projection_transport.py
+GET /api/runs/{run_id}/nodes/{node_id}/failure-forensics	tests/test_failure_forensics.py
 POST /api/runs/{run_id}/novelty-preview	tests/test_external_run_mode.py
 POST /api/runs/{run_id}/project	tests/test_report.py tests/test_server.py
 GET /api/runs/{run_id}/prov	tests/test_fork_from_seq.py tests/test_prov_claims.py tests/test_refusal_vocabulary.py tests/test_server.py

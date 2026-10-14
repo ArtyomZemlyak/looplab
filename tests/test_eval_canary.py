@@ -48,7 +48,9 @@ def test_the_task_declaration_is_validated_at_submit():
     assert CanarySpec().timeout == 900.0 and CanarySpec().env == {}
     spec = EvalSpec(command=["python", "run.py"], canary={"env": {"CANARY_USERS": "2000"},
                                                           "timeout": 300})
-    assert spec.model_dump()["canary"] == {"env": {"CANARY_USERS": "2000"}, "timeout": 300.0}
+    # `mode` (doc 78 §5) joined the declaration; `slice` is the historical behaviour.
+    assert spec.model_dump()["canary"] == {"env": {"CANARY_USERS": "2000"}, "timeout": 300.0,
+                                           "mode": "slice"}
     assert EvalSpec(command=["python", "run.py"]).model_dump()["canary"] is None
     with pytest.raises(ValidationError):                       # the marker is the ENGINE's
         CanarySpec(env={"LOOPLAB_CANARY": "0"})

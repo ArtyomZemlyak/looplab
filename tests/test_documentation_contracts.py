@@ -176,7 +176,8 @@ def test_index_mentions_every_numbered_document():
     #   "eleventh minute" after the entry barrier. No collision — 75 was claimed by checking the
     #   glob, the index table and the mkdocs nav together; all four move in this one change.
     # 74 -> 76 (2026-10-13): docs 76/77, index and mkdocs nav added together.
-    assert len(numbered) == 76, "the derived numbered-document inventory changed"
+    # 76 -> 77 (2026-10-14): doc 78, external-agent orchestration (waking, GPU order, forensics).
+    assert len(numbered) == 77, "the derived numbered-document inventory changed"
     #   51 -> 52 (2026-09-05): the development plan (doc 52). No collision — the number was
     #   claimed by checking the glob AND the index table together.
     #   52 -> 53 (2026-09-06): the agent guide's narratives, archived verbatim when `CLAUDE.md`

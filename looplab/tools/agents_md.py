@@ -71,6 +71,15 @@ Author concept tags in the injected idea or use `concept_tag_edited` and
 `concept-merge`, split, purge or alias-clear. No internal model will perform
 reflection, taxonomy stewardship or automatic concept ratification in this mode.
 Cross-run task facets have a revision-fenced `/api/cross-run/task-facets` ledger.
+Between decisions, block on MCP `wait_for_next(after=<last event id>)` (or
+`GET /api/agent-events?after=&timeout=`): LoopLab itself records node evaluated/failed,
+stage failed, monitor question, obligation due, run idle, run paused/finished and GPU free.
+Declare routine monitor answers once with `PUT /api/runs/{run_id}/harness-monitor-rules`;
+LoopLab answers those (`answerer: rule`) and wakes you only for the rest. Order GPU work
+across runs with `PUT /api/runs/{run_id}/gpu-gate` (`hold`, `start_after`), not scripts.
+A failed node carries `failure_forensics` (root exception, signals, exit codes); earlier
+attempts' logs are listed by `/api/runs/{run_id}/attempt-logs`. Declare `eval.canary`
+(slice, or `smoke` to survive N seconds) so a broken candidate fails in seconds.
 """
     if repo_task:
         # A repository task owns its evaluation environment: it may install declared requirements,

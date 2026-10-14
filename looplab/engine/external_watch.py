@@ -160,7 +160,7 @@ async def observe_external_eval(engine, a, cancel, phase: str, *, final_pass: bo
                                 "confidence": 0.0, "log_role": facts["log_role"],
                                 "stage": stage,
                                 "kill": answer["verdict"] == "abort",
-                                "source": "external_agent",
+                                "source": answer_source(answer),
                                 "checkpoint_id": question["checkpoint_id"]},
                                 engine, shield=answer["verdict"] == "abort")
                         else:
@@ -168,7 +168,7 @@ async def observe_external_eval(engine, a, cancel, phase: str, *, final_pass: bo
                                 "node_id": a.node_id, "generation": a.generation,
                                 **facts,
                                 **({"stop_refusal": "objective_retargeted"} if stop_refused else {}),
-                                "source": "external_agent",
+                                "source": answer_source(answer),
                                 "checkpoint_id": question["checkpoint_id"]},
                                 engine, shield=answer["verdict"] == "abort")
                     except Exception:  # noqa: BLE001 — diagnostic failure cannot lose the answered stop
@@ -208,15 +208,50 @@ async def observe_external_eval(engine, a, cancel, phase: str, *, final_pass: bo
             continue
 
 
+def answer_source(answer: dict) -> str:
+    """WHO answered, as the diagnostic monitor rows name it (doc 78 §4). A rule's or the engine's
+    answer is never presented as the external agent's decision."""
+    return {"rule": "rule", "engine": "engine", "human": "operator"}.get(
+        str(answer.get("answerer") or ""), "external_agent")
+
+
+def attempt_failed(res) -> bool:
+    """Did the evaluation this attempt ran END WITHOUT a measurement (non-zero exit, timeout, no
+    metric)? Then every live monitor question about it is moot."""
+    if res is None:
+        return False
+    try:
+        return bool(getattr(res, "timed_out", False) or int(getattr(res, "exit_code", 0) or 0) != 0
+                    or getattr(res, "metric", None) is None)
+    except (TypeError, ValueError):
+        return True
+
+
 async def settle_external_observations(engine, a) -> None:
     """A completed evaluator cannot silently outrun an unanswered live tick."""
     # the external agent's checkpoints: an engine reach into the harness taken only in an
     # external_harness run (`tests/test_package_layering.py` DEFERRED, engine -> harness)
-    from looplab.harness.checkpoints import answer_for
+    from looplab.harness.checkpoints import answer_for, close_unanswered
     from looplab.engine.evaluate import _watch_limiter
 
     if a._seen.get("kind"):
         return  # explicit operator abort/reset owns the lifecycle
+    if attempt_failed(getattr(a, "res", None)):
+        # A FAILED EVALUATION DOES NOT WAIT FOR AN ADVISORY ANSWER (audit 2026-10-14 L-05, incident
+        # C2: the failed stage sat 139 s on a `train_monitor` question). The question asked whether
+        # to stop a process that has already ended; the engine closes it, saying so, and the
+        # failure goes on to its terminal now.
+        res = a.res
+        reason = (f"engine: the evaluation already ended without a measurement "
+                  f"(exit {getattr(res, 'exit_code', None)}, timed_out="
+                  f"{bool(getattr(res, 'timed_out', False))}); this live question is moot")
+        try:
+            await anyio.to_thread.run_sync(
+                lambda: close_unanswered(engine.run_dir, list(a._live_questions), reason),
+                limiter=_watch_limiter())
+        except Exception:  # noqa: BLE001 — a ledger failure must not hold a failed terminal back
+            pass
+        return
     for checkpoint_id in a._live_questions:
         while True:
             try:

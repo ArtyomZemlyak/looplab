@@ -10,7 +10,7 @@ vocabulary a client may append is `serve/protocol.py::CONTROL_EVENTS`.
 
 <!-- generated: api routes -->
 
-172 routes on 149 paths; 10 deprecated; 27 with a declared response model.
+176 routes on 152 paths; 10 deprecated; 27 with a declared response model.
 
 ### `/api`
 
@@ -189,6 +189,7 @@ vocabulary a client may append is `serve/protocol.py::CONTROL_EVENTS`.
 | `GET` | `/api/runs/{run_id}/agents_md` | DEPRECATED. Serve a run's AGENTS.md. | — | yes |
 | `GET` | `/api/runs/{run_id}/artifact` | Serve ONE artifact's content for inline viewing. `root` must be one of the ids returned by | — |  |
 | `GET` | `/api/runs/{run_id}/artifacts` | List files currently visible to the run, grouped by root. | — |  |
+| `GET` | `/api/runs/{run_id}/attempt-logs` | Logs of earlier lifecycles, kept when a node's workdir was rebuilt (reset/retry). | — |  |
 | `GET` | `/api/runs/{run_id}/cards/{card_id}/trace` | One CARD's whole story: the research that proposed it, then every node it produced. | — |  |
 | `POST` | `/api/runs/{run_id}/chat` | Advisory chat grounded on a run (and optionally one experiment node). Read-only — it | — | yes |
 | `GET` | `/api/runs/{run_id}/chat-log` | The saved chat turns for this run, in order ({role:'user'\|'assistant'\|'action', …}). | — |  |
@@ -220,6 +221,8 @@ vocabulary a client may append is `serve/protocol.py::CONTROL_EVENTS`.
 | `GET` | `/api/runs/{run_id}/harness-handoff` | Credential-free connection context for an already launched external run. | — |  |
 | `GET` | `/api/runs/{run_id}/harness-hypotheses` | Live pure-belief board and whether configured duplicate review is due. | — |  |
 | `POST` | `/api/runs/{run_id}/harness-hypotheses` | Record a duplicate review; a merge and its receipt append atomically. | — |  |
+| `GET` | `/api/runs/{run_id}/harness-monitor-rules` | The run's declared routine-answer rules for checkpoints (null when none). | — |  |
+| `PUT` | `/api/runs/{run_id}/harness-monitor-rules` | Declare which checkpoint questions are ROUTINE, so LoopLab answers them itself. | — |  |
 | `GET` | `/api/runs/{run_id}/harness-progress` | Live external obligations, pending questions and paged decision histories. | — |  |
 | `POST` | `/api/runs/{run_id}/harness-reviews` | Record a configured end-of-run review, including a reason for no action. | — |  |
 | `GET` | `/api/runs/{run_id}/harness-selection` | Current selector ties and MCTS branches requiring an agent judgment. | — |  |
@@ -239,6 +242,7 @@ vocabulary a client may append is `serve/protocol.py::CONTROL_EVENTS`.
 | `GET` | `/api/runs/{run_id}/nodes/{nid}/metrics` | Online metric SERIES a node's training logged — every scalar (loss, each recall@k, grad | — |  |
 | `GET` | `/api/runs/{run_id}/nodes/{nid}/seed-files` | Verified pre-overlay base inventory/text, explicitly read for one current measured attempt. | — |  |
 | `GET` | `/api/runs/{run_id}/nodes/{nid}/trace` | The LIGHT trace tree for ONE node — the hot path for expanding a node's trace card. Reads | — |  |
+| `GET` | `/api/runs/{run_id}/nodes/{node_id}/failure-forensics` | Every recorded forensic record of a node's failed attempts (newest first) — the | — |  |
 | `POST` | `/api/runs/{run_id}/novelty-preview` | Compare an idea with tried nodes using LoopLab's pure graded novelty rubric. | — |  |
 | `POST` | `/api/runs/{run_id}/project` | *Assign Run* (no docstring) | — |  |
 | `GET` | `/api/runs/{run_id}/prov` | W3C-PROV-style provenance of the search DAG AND of what the run claimed: each node's | — |  |
