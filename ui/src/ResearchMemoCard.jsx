@@ -183,7 +183,7 @@ function SourceDisclosure({ sources }) {
     <ol className="research-source-list">
       {sources.map((source, index) => {
         const href = safeExternalHref(source.url)
-        const label = source.title || source.url || `Research step ${index + 1}`
+        const label = source.title || source.url || source.path || `Research step ${index + 1}`
         const looksLikeTool = /^[\w.-]+\([^)]*\)$/.test(label)
         return <li key={`${source.url}-${index}`}>
           <span className="research-source-index">{index + 1}</span>
@@ -192,6 +192,7 @@ function SourceDisclosure({ sources }) {
               {looksLikeTool && <span className="pill">{uiText("tool")}</span>}
               {href ? <a href={href} target="_blank" rel="noreferrer noopener">{uiText(label)}</a> : uiText(label)}
             </div>
+            {source.path && source.path !== label && <div className="research-source-snippet"><code>{source.path}</code></div>}
             {source.snippet && <div className="research-source-snippet">{source.snippet}</div>}
           </div>
         </li>

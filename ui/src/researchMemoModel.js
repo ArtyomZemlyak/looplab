@@ -307,7 +307,10 @@ function normalizeCollections(value, budget) {
       url: text(field(raw, 'url'), SOURCE_URL_CHARS, budget, true),
       snippet: text(field(raw, 'snippet'), SOURCE_SNIPPET_CHARS, budget),
     }
-    if (source.title || source.url || source.snippet) sources.push(source)
+    // A LOCAL source (a file the agent read) carries a path instead of a URL (codex audit L-08).
+    const path = text(field(raw, 'path'), SOURCE_URL_CHARS, budget, true)
+    if (path) source.path = path
+    if (source.title || source.url || source.snippet || source.path) sources.push(source)
   }
 
   const atNode = field(src, 'at_node')

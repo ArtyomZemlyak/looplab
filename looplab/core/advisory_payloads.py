@@ -1089,15 +1089,30 @@ def sanitize_research_memo_payload(payload, *, add_receipts: bool = True, env=No
     for source in _items(src.get("sources"), MAX_RESEARCH_SOURCES):
         if not isinstance(source, dict):
             continue
-        title = _text(source.get("title", ""), 400, budget, single_line=True, env=env)
+        # A LOCAL source — `{kind: "local", path, description}`, a file the agent read rather than
+        # a web page — used to keep only title/url/snippet, so 124 of 144 sources an external agent
+        # cited became three empty strings the UI then hid (codex audit 2026-10-14 L-08). The
+        # description now stands in for a missing title/snippet and the path rides beside them;
+        # a web source is projected exactly as before.
+        description = source.get("description")
+        raw_title = source.get("title") or (
+            description if isinstance(description, str) else "") or source.get("path") or ""
+        title = _text(raw_title, 400, budget, single_line=True, env=env)
         display_url, url_identity = _source_url(
             source.get("url", ""), source.get("url_identity"), budget, env=env)
-        out["sources"].append({
+        raw_snippet = source.get("snippet", "")
+        if not raw_snippet and isinstance(description, str) and source.get("title"):
+            raw_snippet = description
+        row = {
             "title": title,
             "url": display_url,
             "url_identity": url_identity,
-            "snippet": _text(source.get("snippet", ""), 200, budget, env=env),
-        })
+            "snippet": _text(raw_snippet, 200, budget, env=env),
+        }
+        for key, limit in (("kind", 32), ("path", 400)):
+            if isinstance(source.get(key), str) and source[key].strip():
+                row[key] = _text(source[key], limit, budget, single_line=True, env=env)
+        out["sources"].append(row)
     out["reasoning"] = _text(src.get("reasoning", ""), 12_000, budget, env=env)
     out["findings"] = [_text(v, 1_200, budget, env=env)
                        for v in _items(src.get("findings"), 32)]

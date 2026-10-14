@@ -304,3 +304,13 @@ test('MemoCard and Report SSR stay bounded for 10k-entry and malformed payloads'
     await vite.close()
   }
 })
+
+test('a local memo source keeps its path instead of vanishing (codex audit L-08)', () => {
+  const memo = normalizeResearchMemo({
+    summary: 's', findings: ['f'],
+    sources: [{ title: '', url: '', snippet: '', kind: 'local', path: 'reports/D3.md' },
+      { title: '', url: '', snippet: '' }],
+  })
+  assert.equal(memo.sources.length, 1, 'an empty row is still dropped')
+  assert.equal(memo.sources[0].path, 'reports/D3.md')
+})
