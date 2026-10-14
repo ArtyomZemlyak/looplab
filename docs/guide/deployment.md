@@ -342,7 +342,7 @@ What it guarantees (`looplab/events/run_mirror.py`):
   one stops the pass (recorded as `stuck`; `--exit-on-stuck` exits 3 for a supervisor to restart).
   The mirror is its own process and takes no lock the engine takes, so a hung mount cannot stall a
   run;
-* not copied: lock files, SQLite read models (rebuilt from the log), `code/` (rebuilt by
+* not copied: lock files, SQLite read models (rebuilt from the log), `code/repo.git` and `code/worktrees` (rebuilt by
   `looplab code-status --sync`), `canary/`, and files over `--max-file-mb` (listed as `skipped`).
 
 Measured on the MiniOneRec box (S3 via geesefs, 2026-10-14): a 762-file, 27 MB run copy mirrored in

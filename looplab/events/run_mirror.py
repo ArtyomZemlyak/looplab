@@ -23,7 +23,8 @@ WHAT. `mirror_pass` copies each run directory under `src_root` to `dst_root/<run
     trusts: a file the manifest does not vouch for, or whose bytes do not hash to the manifest, is
     reported, never silently restored;
   * lock files, SQLite read models (rebuilt from the log), `__pycache__`, the eval canary's scratch
-    and the run's private code repository (`code/`, rebuilt from the log by `code_identity.sync_run`)
+    and the run's private code repository (`code/repo.git`, `code/worktrees`, rebuilt from the log by
+    `code_identity.sync_run`; the binary-overlay store `code/blobs` IS copied)
     are skipped, as is any file over `max_file_bytes` (named in the manifest's `skipped`).
 
 THROTTLED. A token bucket bounds bytes per second and destination file operations per second; the
@@ -67,9 +68,11 @@ _STATE_VERSION = 1
 SKIP_SUFFIXES = (".lock", TMP_SUFFIX, ".sqlite", ".sqlite-wal", ".sqlite-shm", ".sqlite-journal",
                  ".pyc", ".tmp")
 SKIP_NAMES = frozenset({"engine.lock"})
-# Top-level directories of a run that are rebuildable or scratch: the private code repository is
-# rebuilt from the log (`engine/code_identity.py::sync_run`), the canary tree is disposable by design.
-SKIP_TOP_DIRS = frozenset({"code", "canary", STATE_DIR})
+# Directories of a run that are rebuildable or scratch: the private code repository and its agent
+# worktrees are rebuilt from the log (`engine/code_identity.py::sync_run`), the canary tree is
+# disposable by design. `code/blobs/` (binary overlay files) is NOT rebuildable and IS mirrored.
+SKIP_TOP_DIRS = frozenset({"canary", STATE_DIR})
+SKIP_SUBTREES = frozenset({"code/repo.git", "code/worktrees"})
 SKIP_ANY_DIRS = frozenset({"__pycache__", ".git"})
 # The large append-only trace logs: worth keeping, not worth re-uploading every pass.
 SLOW_FILES = frozenset({"spans.jsonl", ".spans-append.jsonl", "trace.json"})
@@ -162,6 +165,8 @@ def _skipped(rel: str, cfg: MirrorConfig) -> Optional[str]:
     name = parts[-1]
     if parts[0] in SKIP_TOP_DIRS and len(parts) > 1:
         return "rebuildable"
+    if len(parts) > 2 and "/".join(parts[:2]) in SKIP_SUBTREES:
+        return "rebuildable"
     if any(p in SKIP_ANY_DIRS for p in parts[:-1]):
         return "rebuildable"
     if name in SKIP_NAMES or name.endswith(SKIP_SUFFIXES):
@@ -210,6 +215,7 @@ def plan_run(run_dir: Path, cfg: MirrorConfig, copied: dict, pass_no: int) -> tu
         dirnames[:] = sorted(d for d in dirnames
                              if d not in SKIP_ANY_DIRS
                              and not (rel_dir == "" and d in SKIP_TOP_DIRS)
+                             and (rel_dir + d) not in SKIP_SUBTREES
                              and not (base / d).is_symlink())
         for name in sorted(filenames):
             rel = rel_dir + name

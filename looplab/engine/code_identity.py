@@ -599,6 +599,53 @@ def _metric(node):
     return node.task_metric if getattr(node, "task_metric", None) is not None else node.metric
 
 
+def upstream_readiness(task, settings) -> dict:
+    """What stands between this run and a WORKING upstream lane, obligation by obligation (doc 79 §9
+    leftover, 2026-10-14). An external-agent run usually declares none of them (the live MiniOneRec
+    runs declare no `upstream`, no `seed_base` and no `cmd.scorer_boundary`), and the lane then
+    stayed `off` with one reason string. The lane is DELIBERATELY not given defaults: its gate runs
+    operator-declared probes on the host and compares scorer bytes, and a default would be a gate
+    that checks nothing. So this says exactly what to declare — and that, until then, the run's
+    fixes still reach the task repository through `looplab code-export` (node and base commits,
+    no gate)."""
+    missing = []
+
+    def need(what: str, how: str):
+        missing.append({"what": what, "how": how})
+
+    declared = getattr(task, "upstream", None) if task is not None else None
+    if task is None or not hasattr(task, "seed_base"):
+        need("repo_task", "the upstream lane serves repository tasks only")
+    else:
+        if getattr(task, "seed_base", None) is None:
+            need("seed_base", "declare the immutable initial seed (`seed_base`) in the task "
+                              "BEFORE the run starts; it is pinned at run start and cannot be "
+                              "added to a running run")
+        scorer = getattr(getattr(task, "eval", None), "scorer_boundary", None)
+        if scorer is None:
+            need("eval.scorer_boundary", "declare the evaluator files (`eval.scorer_boundary`) the "
+                                         "gate must find byte-identical on both sides")
+        if declared is None:
+            need("upstream", "declare `upstream: {tests, regressions, repair_probes, repeats}` — "
+                             "the measured gate a fix must pass before it becomes the base")
+    mode = getattr(settings, "upstream_mode", None) if settings is not None else None
+    if mode in (None, "off"):
+        need("Settings.upstream_mode", "launch with upstream_mode=propose (gate, operator "
+                                       "advances) or auto")
+    if settings is not None and getattr(settings, "trust_mode", "trusted_local") != "trusted_local":
+        need("Settings.trust_mode", "the gate runs on the host: trust_mode=trusted_local")
+    return {"ready": not missing, "missing": missing,
+            "meanwhile": ("looplab code-export RUN --repo <task repo> delivers this run's base "
+                          "edits and the champion's change as a new branch, without a gate"),
+            "example": {"seed_base": {"run_dir": "<absolute run or bundle directory>",
+                                      "event_seq": "<its workspace_seeded seq>",
+                                      "digest": "<the seed archive's SHA-256>"},
+                        "eval": {"scorer_boundary": {"files": ["score.py"]}},
+                        "upstream": {"tests": [{"name": "unit", "command": ["python", "-m",
+                                                                            "pytest", "-q"]}],
+                                     "repeats": 3}}}
+
+
 def code_status(run_dir, events=None, *, task=None, settings=None, nominations: bool = True) -> dict:
     """The operator's one read of a run's code: bases (with upstream evidence), attempts (commit,
     changed paths, metric, effective config), what is pending upstream, and the branches.
@@ -710,6 +757,7 @@ def code_status(run_dir, events=None, *, task=None, settings=None, nominations: 
                                                    "generation": row["generation"],
                                                    "commit": row.get("commit"),
                                                    "metric": row.get("metric"), "paths": code[:20]})
+    pending["readiness"] = upstream_readiness(task, settings)
     branches = {name[len("refs/heads/"):]: sha for name, sha in refs.items()
                 if name.startswith("refs/heads/")}
     missing = sum(1 for a in attempts if not a["recorded"] and a.get("commit") is None)

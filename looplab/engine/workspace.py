@@ -189,6 +189,14 @@ class WorkspaceSeeder:
             if _protected_after_resolve(target):
                 continue
             target.parent.mkdir(parents=True, exist_ok=True)
+            if isinstance(content, str) and content.startswith("\x00looplab-blob:"):
+                # A BINARY overlay file (doc 79 §9 leftover): the bytes live in the run's blob
+                # store, verified against the marker's hash; a missing or altered blob refuses the
+                # materialization loudly rather than writing the marker text as the file.
+                from looplab.core.atomicio import atomic_write_bytes
+                from looplab.engine.code_worktree import resolve_blob
+                atomic_write_bytes(target, resolve_blob(self._e.run_dir, content), mode=0o644)
+                continue
             atomic_write_text(target, content, mode=0o644)      # a rename: see `write_assets`
         # Apply accepted deletions (the agent removed an in-surface file). Skip protected names
         # and never escape the workdir; missing is fine (idempotent).

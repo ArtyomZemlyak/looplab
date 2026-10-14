@@ -33,6 +33,60 @@ NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$")
 MAX_OVERLAY_FILES = 128
 MAX_OVERLAY_BYTES = 2 * 1024 * 1024
 
+# BINARY FILES IN AN OVERLAY (doc 79 §9 leftover, 2026-10-14). `Node.files` is text; a worktree or
+# patch that changed a binary file (a small model config in protobuf, an `.npy` fixture, an image)
+# used to be refused (`code_overlay_binary`). Its bytes now go to a content-addressed store inside
+# the run, `RUN_DIR/code/blobs/<sha256>`, and the overlay carries a MARKER string in their place,
+# which `engine/workspace.py::write_node_files` resolves — verifying the hash — when it materializes
+# the node. The marker starts with NUL, which no text file an agent writes on purpose begins with,
+# so a text file can never be mistaken for one. Bounded per file and per overlay; the store is part
+# of the run's record (the run mirror copies it, unlike the rebuildable `code/repo.git`).
+BLOBS_REL = "code/blobs"
+BLOB_MARKER = "\x00looplab-blob:v1:"
+MAX_BLOB_BYTES = 32 * 1024 * 1024
+MAX_OVERLAY_BINARY_BYTES = 64 * 1024 * 1024
+_BLOB_SPEC = re.compile(r"^sha256=([0-9a-f]{64});size=([0-9]{1,12})$")
+
+
+def is_blob_marker(content) -> bool:
+    return isinstance(content, str) and content.startswith(BLOB_MARKER)
+
+
+def store_blob(run_dir, data: bytes) -> str:
+    """Put `data` in the run's blob store (idempotent) and return the overlay marker for it."""
+    import hashlib
+    import os
+    digest = hashlib.sha256(data).hexdigest()
+    path = Path(run_dir) / BLOBS_REL / digest
+    if not path.is_file() or path.stat().st_size != len(data):
+        from looplab.core.atomicio import atomic_write_bytes
+        path.parent.mkdir(parents=True, exist_ok=True)
+        atomic_write_bytes(path, data, mode=0o444)
+        try:
+            os.chmod(path, 0o444)
+        except OSError:
+            pass
+    return f"{BLOB_MARKER}sha256={digest};size={len(data)}"
+
+
+def resolve_blob(run_dir, marker: str) -> bytes:
+    """The bytes a marker names, verified; raises `OverlayRefusal` when missing or altered."""
+    import hashlib
+    m = _BLOB_SPEC.match(marker[len(BLOB_MARKER):]) if is_blob_marker(marker) else None
+    if m is None:
+        raise OverlayRefusal("code_blob_marker_invalid", "not a LoopLab binary overlay marker")
+    path = Path(run_dir) / BLOBS_REL / m.group(1)
+    try:
+        data = path.read_bytes()
+    except OSError as exc:
+        raise OverlayRefusal("code_blob_missing",
+                             f"binary overlay blob {m.group(1)[:12]} is missing from "
+                             f"{BLOBS_REL} of this run") from exc
+    if len(data) != int(m.group(2)) or hashlib.sha256(data).hexdigest() != m.group(1):
+        raise OverlayRefusal("code_blob_altered",
+                             f"binary overlay blob {m.group(1)[:12]} does not match its hash")
+    return data
+
 
 class OverlayRefusal(CodeRepoError):
     """The worktree/patch cannot become an overlay; `code` says why."""
@@ -130,7 +184,7 @@ def _surface_check(run_dir, paths) -> list:
 def _overlay_between(repo: CodeRepo, run_dir, start: str, tree_or_commit: str, *,
                      allow_outside_surface: bool = False) -> dict:
     changed = repo.changed(start, tree_or_commit) if tree_or_commit != start else []
-    files, deleted, total = {}, [], 0
+    files, deleted, total, binary_total, binaries = {}, [], 0, 0, []
     if len(changed) > MAX_OVERLAY_FILES:
         raise OverlayRefusal("code_overlay_too_large",
                              f"{len(changed)} changed paths; an overlay holds at most {MAX_OVERLAY_FILES}")
@@ -140,22 +194,38 @@ def _overlay_between(repo: CodeRepo, run_dir, start: str, tree_or_commit: str, *
             deleted.append(path)
             continue
         data = repo.git("cat-file", "blob", f"{tree_or_commit}:{path}").stdout
-        total += len(data)
-        if total > MAX_OVERLAY_BYTES:
-            raise OverlayRefusal("code_overlay_too_large",
-                                 f"changed text exceeds {MAX_OVERLAY_BYTES} bytes")
         try:
-            files[path] = data.decode("utf-8")
-        except UnicodeDecodeError as exc:
-            raise OverlayRefusal("code_overlay_binary",
-                                 f"{path} is not UTF-8 text; an overlay carries text files") from exc
-    refused = _surface_check(run_dir, [*files, *deleted])
+            text = data.decode("utf-8")
+        except UnicodeDecodeError:
+            text = None
+        if text is not None and not text.startswith("\x00"):
+            total += len(data)
+            if total > MAX_OVERLAY_BYTES:
+                raise OverlayRefusal("code_overlay_too_large",
+                                     f"changed text exceeds {MAX_OVERLAY_BYTES} bytes")
+            files[path] = text
+            continue
+        # A BINARY file: stored by content, carried as a marker (see `BLOB_MARKER`).
+        if len(data) > MAX_BLOB_BYTES:
+            raise OverlayRefusal("code_overlay_binary_too_large",
+                                 f"{path} is {len(data)} bytes; a binary overlay file holds at most "
+                                 f"{MAX_BLOB_BYTES} (larger inputs belong in a data mount)")
+        binary_total += len(data)
+        if binary_total > MAX_OVERLAY_BINARY_BYTES:
+            raise OverlayRefusal("code_overlay_binary_too_large",
+                                 f"binary files exceed {MAX_OVERLAY_BINARY_BYTES} bytes in one overlay")
+        binaries.append((path, data))
+    refused = _surface_check(run_dir, [*files, *(p for p, _ in binaries), *deleted])
     if refused and not allow_outside_surface:
         raise OverlayRefusal("code_overlay_outside_surface",
                              "outside the task's edit surface or protected: "
                              + ", ".join(r["path"] for r in refused[:10]))
+    # Stored only after the surface check: a refused overlay leaves nothing behind.
+    for path, data in binaries:
+        files[path] = store_blob(run_dir, data)
     return {"files": files, "deleted": deleted, "changed": changed, "start_commit": start,
-            "base_digest": _digest_of(repo, start), "outside_surface": refused}
+            "base_digest": _digest_of(repo, start), "outside_surface": refused,
+            "binary_files": sorted(p for p, _ in binaries)}
 
 
 def _stale(repo: CodeRepo, start: str) -> bool:
