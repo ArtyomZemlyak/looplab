@@ -563,3 +563,40 @@ def test_rebounding_never_redacts_and_never_grows():
     plain = "password=already-masked-upstream " * 10        # would be masked by a redactor
     assert _rebound_redacted_text(plain, 10_000) == plain   # a fit is returned untouched
     assert len(_rebound_redacted_text(plain, 50)) == 50
+
+
+# GLUED PROSE and identifier SLUGS (review 2026-10-14 §8.3.1): an external agent's memo said
+# `…leakage. ***REDACTED***.` because `NewdevexcludesALL35000frozenbenchmarkusers` mixes case and
+# digits at entropy 4.35. Every one of the six distinct tokens the pass masked over that agent's
+# request bodies was prose or a cache-directory slug; none a secret.
+_GLUED_PROSE_MUST_SURVIVE = [
+    "NewdevexcludesALL35000frozenbenchmarkusers",
+    "mergedmodel989117472B+COMPLETE+tokenizer",
+    "5B_t12_seqprefix_k0mixh50_treeb8_n-1_e-1_s42_L512_v1-e1e5811a8c",
+    "G1measuredRequiredG0controlNotFinished2x",
+    "trainLoss0p231EvalRecall20at0p45Week06",
+]
+
+
+@pytest.mark.parametrize("token", _GLUED_PROSE_MUST_SURVIVE)
+def test_entropy_pass_does_not_eat_glued_prose_or_slugs(token):
+    text = f"notproventrain/testleakage. {token}."
+    assert redact_secrets(text, entropy=True) == text
+
+
+def test_the_prose_screen_lets_through_only_a_heuristic_tail_of_random_credentials():
+    # The measured escape rate is <= 0.2 % per shape; a fixed seed keeps this deterministic and the
+    # bound (1 %) leaves room without letting the screen silently widen into "anything goes".
+    import base64
+    import random
+    import string
+    rng = random.Random(20261014)
+    shapes = {
+        "base64url-32": lambda: base64.urlsafe_b64encode(rng.randbytes(24)).decode().rstrip("="),
+        "alnum-40": lambda: "".join(rng.choice(string.ascii_letters + string.digits)
+                                    for _ in range(40)),
+    }
+    for name, make in shapes.items():
+        tokens = [make() for _ in range(4000)]
+        masked = [t for t in tokens if redact_secrets(t, entropy=True) != t]
+        assert len(masked) / len(tokens) >= 0.97, name

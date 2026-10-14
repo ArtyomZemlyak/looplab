@@ -222,7 +222,45 @@ def _entropy_candidate(token: str) -> bool:
     operator's tracebacks is the whole reason the entropy half is separable at all.
     """
     return bool(_HAS_LOWER.search(token) and _HAS_UPPER.search(token)
-                and _HAS_DIGIT.search(token))
+                and _HAS_DIGIT.search(token)) and not _prose_like_token(token)
+
+
+# GLUED PROSE AND SLUGS are the second population the composition screen still admitted (review
+# 2026-10-14, `looplab-reviews/20261014-ui-issues` §8.3.1). An external agent that writes prose
+# without spaces sends `NewdevexcludesALL35000frozenbenchmarkusers` — mixed case AND digits, entropy
+# 4.35 — and the memo durably said `…leakage. ***REDACTED***.`: a fact about the data destroyed in
+# silence (18 markers in one run's events, 4 in two others; every one of the 6 distinct masked
+# tokens over all the agent's request bodies was prose or a cache-directory slug, none a secret).
+#
+# What separates them is again COMPOSITION: a word is a run of lowercase letters with vowels in it,
+# and a credential's alphabet hands it neither long runs nor a natural vowel share. A token is prose
+# when its word-like runs (>= 4 letters, an optional leading capital, >= 25 % vowels) cover at least
+# half of it and one is >= 6 long; a slug when it splits on `_`/`-` into >= 5 short segments (mean
+# <= 8) and one holds such a word. Measured 2026-10-14 over 50,000 random tokens per shape: the
+# share of masked credentials this screen lets through is 0.15 % (base64, 24 chars), 0.02 % (32),
+# 0.11 % (alphanumeric, 32), 0.08 % (40), 0.20 % / 0.14 % / 0.06 % / 0.02 % (base64url at
+# 24/32/48/64 chars) and 0 at 128 — the same order as the slash rule's accepted tail below, and
+# again only a heuristic's tail: known shapes and this box's env values are masked regardless.
+_PROSE_WORD = re.compile(r"[A-Z]?[a-z]{3,}")
+_VOWELS = frozenset("aeiouyAEIOUY")
+
+
+def _word_like(word: str, *, min_len: int) -> bool:
+    return (len(word) >= min_len
+            and sum(ch in _VOWELS for ch in word) / len(word) >= 0.25)
+
+
+def _prose_like_token(token: str) -> bool:
+    """Whether a high-entropy run is glued words or an identifier slug rather than a credential."""
+    words = [m.group(0) for m in _PROSE_WORD.finditer(token)]
+    covered = sum(len(w) for w in words if _word_like(w, min_len=4))
+    if covered * 2 >= len(token) and any(_word_like(w, min_len=6) for w in words):
+        return True
+    segments = re.split(r"[_\-]", token)
+    if len(segments) < 5 or sum(map(len, segments)) > 8 * len(segments):
+        return False
+    return any(_word_like(m.group(0), min_len=6)
+               for seg in segments for m in re.finditer(r"[a-z]{6,}", seg))
 
 
 # `/` is a SEPARATOR here, not a token character — the second half of the same fix, and BOTH halves
