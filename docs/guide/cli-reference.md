@@ -90,9 +90,9 @@ looplab agent-notify    Agent wake-up hook (doc 78)
 looplab agent-events    Agent event outbox
 looplab gpu-gate        Hold/order a run's GPUs
 looplab gpu-queue       GPU queue
-looplab run-mirror      Mirror tmpfs run dirs to durable storage, throttled (doc 80)
-looplab run-mirror-status Mirror's last pass, per-run lag and errors (read-only)
-looplab run-mirror-restore Restore a mirrored run, verified against its manifest
+looplab run-mirror      Mirror run dirs to durable storage
+looplab run-mirror-status Mirror status
+looplab run-mirror-restore Restore a mirrored run
 ```
 
 Engine settings from `run -s/--set` (and typed overrides) may also come from `LOOPLAB_*` variables
@@ -3317,25 +3317,17 @@ exit 1 and names the path that would be refused.
 point of the command — "this task declares no mounts" and "I could not look" must not print the same
 thing, because what follows a green light here is `LOOPLAB_LANDLOCK=enforce` on a real GPU eval, and
 a mount missing from a kernel allow-list does not degrade: the eval dies mid-training on a
-`PermissionError` reading the dataset. (Until 2026-08-15 the command read the wrong key and derived
-its list with the operator's mounts silently dropped, then reported `skipped: 0`.)
+`PermissionError` reading the dataset.
 
 The procedure before anyone flips the default:
 
 ```bash
 looplab landlock-check RUN_DIR          # read the mounts + list, confirm `skipped: 0`
-looplab landlock-check RUN_DIR --gpu-smoke --python <eval python>   # GPUs free: every surface ok
+looplab landlock-check RUN_DIR --gpu-smoke --python <eval python>
 LOOPLAB_LANDLOCK=enforce looplab run …  # then ONE real eval, and check it completed
 ```
 
-Measured on the MiniOneRec box 2026-10-14 with `CUDA_VISIBLE_DEVICES=""` (GPUs busy): torch
-2.10 import, the 2-worker DataLoader, gloo `all_reduce`, `/sys/class` and `/proc/driver/nvidia`
-all `ok` under the derived list; the CUDA matmul and NCCL steps are the owner's to run. The flip is
-then two lines: the `landlock` default to `"enforce"` and `"landlock": "off"` in
-`LEGACY_CONFIG_SNAPSHOT_DEFAULTS`, so every run launched before it resumes unchanged.
-
-The evidence that justifies the flip is that eval, not this command — this only tells you the ruleset
-is well-formed, contains your declarations, and applies.
+The flip needs that eval and a clean `--gpu-smoke`.
 
 ### The syscall fence's own check
 
