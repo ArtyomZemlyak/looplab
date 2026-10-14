@@ -1,7 +1,7 @@
 {
   "schema": 1,
   "language": "ru",
-  "count": 7958,
+  "count": 7959,
   "messages": {
     "# LoopLab run report — {0}": "# Отчёт запуска LoopLab — {0}",
     "## Agent narrative (advisory)": "## Пояснения агента (рекомендации)",
@@ -7960,7 +7960,8 @@
     "This attempt: commit and effective configuration": "Эта попытка: коммит и фактическая конфигурация",
     "The run's code repository could not be read.": "Репозиторий кода запуска не удалось прочитать.",
     "No commit is recorded for this attempt.": "Для этой попытки коммит не записан.",
-    "Effective configuration (what the evaluation used)": "Фактическая конфигурация (с ней шла оценка)"
+    "Effective configuration (what the evaluation used)": "Фактическая конфигурация (с ней шла оценка)",
+    "created by the external agent": "создана внешним агентом"
   },
   "plurals": {
     "({0} paraphrases folded)": {

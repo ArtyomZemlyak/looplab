@@ -121,7 +121,21 @@ def _public(record: dict) -> dict:
         "expires_at": _finite_number(record.get("expires_at"), 0.0),
         # Any malformed non-null revocation marker stays revoked (epoch 0), never active.
         "revoked_at": (None if revoked is None else _finite_number(revoked, 0.0)),
+        # WHICH credential minted the link (doc 70 70.8c): the agent token is the `owner` principal
+        # and may mint one, so the owner must be able to find and revoke the agent's links. A record
+        # written before the field existed (or any other value) says `None` — unknown, never "owner".
+        "minted_by": (record.get("minted_by")
+                      if record.get("minted_by") in REVIEW_MINTERS else None),
     }
+
+
+# The two credentials that may mint a review link (`routers/reviews.py::create_review`).
+REVIEW_MINTERS = frozenset({"owner", "harness_agent"})
+
+
+def _minted_by(value: object) -> dict:
+    """The record's `minted_by` key, or nothing for a caller that did not say (legacy callers)."""
+    return {"minted_by": value} if value in REVIEW_MINTERS else {}
 
 
 class ReviewStore:
@@ -239,7 +253,8 @@ class ReviewStore:
 
     def create(self, run_id: str, *, generation: str,
                ttl_seconds: int = DEFAULT_TTL_SECONDS,
-               include_evidence: bool = False) -> tuple[str, dict]:
+               include_evidence: bool = False,
+               minted_by: str | None = None) -> tuple[str, dict]:
         ttl = self._ttl(ttl_seconds)
         exact_generation = exact_review_generation(generation)
         if exact_generation is None:
@@ -250,7 +265,8 @@ class ReviewStore:
                 link_id, path = self._reserve()
                 token = f"rv_{link_id[4:]}_{secrets.token_urlsafe(32)}"
                 record = self._record(
-                    str(run_id), exact_generation, ttl, bool(include_evidence), link_id, token)
+                    str(run_id), exact_generation, ttl, bool(include_evidence), link_id, token,
+                    **_minted_by(minted_by))
                 self._publish_reserved(path, record)
             except ReviewError:
                 raise
@@ -290,7 +306,8 @@ class ReviewStore:
                          expected_generation: str, request_id: str,
                          token_secret: bytes | str,
                          ttl_seconds: int = DEFAULT_TTL_SECONDS,
-                         include_evidence: bool = False) -> tuple[str, dict, bool]:
+                         include_evidence: bool = False,
+                         minted_by: str | None = None) -> tuple[str, dict, bool]:
         """Create once or reconstruct the exact bearer from a client-held recovery envelope.
 
         The full identity, intent, and token hashes are durable collision/conflict checks. The path
@@ -374,7 +391,7 @@ class ReviewStore:
                 canonical_run, current, ttl, include_evidence, link_id, token,
                 create_contract=_CREATE_CONTRACT,
                 create_identity_hash=identity_hash,
-                create_intent_hash=intent_hash)
+                create_intent_hash=intent_hash, **_minted_by(minted_by))
             self._publish_reserved(reserved_path, record)
             return token, _public(record), False
 

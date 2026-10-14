@@ -288,13 +288,14 @@ read-only*, источник *Process environment*. Это не ошибка д�
   готовые кандидаты остаются. Манифест харнесса и руководство называют ровно этот список
   (`tests/test_agent_token_scope.py`). Выбран второй из двух путей пункта: отдельный вид принципала
   менял бы и доступ к портфелю, а это решение владельца.*
-- **70.8a** OPEN[agent-token-governance-provenance] cross-run записи управления, которые агентский
-  токен делает законно (слияние, чистка и разбиение концептов, `claim-decide`, `task-facets` — поток
-  знаний харнесса), записаны как `by: deployment-owner` (`serve/routers/cross_run.py::_actor`): владелец
-  не отличит их от своих — тот же пробел, который `submitted_by` закрыл для команд (критик crit_v62
-  F6). Пометка агента должна пройти валидаторы строк реестров управления, которые тотальны по всем
-  поколениям строк (`engine/governance_health.py::_validate_curation_row`).
-  proof:absent:agent_token@looplab/serve/routers/cross_run.py
+- **70.8a** *Закрыто 2026-10-14 (ветка `fix/ui-remaining-20261014`) — маркер
+  `agent-token-governance-provenance` стоял здесь.* Cross-run записи управления, сделанные агентским
+  токеном (слияние, чистка и разбиение концептов, `claim-decide`, `task-facets`, вызовы стюардов),
+  раньше писались как `by: deployment-owner`. Теперь `serve/routers/cross_run.py::_actor` смотрит на
+  учётные данные запроса и пишет `by: harness-agent` (`HARNESS_AGENT_ACTOR`); владелец и локальный
+  оператор пишут как прежде. `by` во всех валидаторах реестров — ограниченный свободный текст, поэтому
+  `governance_health` читает старые и новые строки одинаково, ничего не переписывается. Проверка:
+  `tests/test_cross_run_server.py::test_governance_rows_written_with_the_agent_token_name_the_agent`.
 - **70.8b** *Закрыто 2026-10-14 (doc 80, ветка `fix/backlog-triage-20261014`) — маркер
   `agent-token-comment-reads-as-owner` стоял здесь.* Комментарий, отправленный агентским токеном,
   раньше писался с `actor_kind: "deployment_owner"` и показывался как комментарий владельца. Теперь
@@ -307,14 +308,14 @@ read-only*, источник *Process environment*. Это не ошибка д�
   L-09). Старые строки без `actor_kind` фолдятся как раньше и никого не называют. Проверка:
   `tests/test_agent_actor_attribution.py`, `ui/test/researchView.test.js`,
   `ui/test/commentsModel.test.js`.
-- **70.8c** OPEN[harness-token-mints-share-links] харнесс-токен может создать ссылку-ревью на
-  внутренний ран владельца (`POST /api/runs/{id}/reviews`, с доказательствами, срок около недели), по
-  которой читает третья сторона, но не может её отозвать, и ротация `LOOPLAB_HARNESS_TOKEN` её не
-  отзывает (критик crit_v64 F3, прогнано). Раскрытие — решение владельца: исправление ставит
-  `minted_by` на запись ссылки (`serve/reviews.py::ReviewStore`), чтобы владелец нашёл и отозвал такие
-  ссылки, а выдавать ли их харнесс-токену — его политика. Тот же токен может переименовать или
-  перевесить проекты и супер-задачи владельца (обратимо, под CAS).
-  proof:absent:minted_by@looplab/serve/reviews.py
+- **70.8c** *Закрыто 2026-10-14 (ветка `fix/ui-remaining-20261014`) — маркер
+  `harness-token-mints-share-links` стоял здесь.* Харнесс-токен может создать ссылку-ревью на ран
+  владельца (`POST /api/runs/{id}/reviews`), и раньше владелец не мог отличить такие ссылки от своих.
+  Теперь запись ссылки несёт `minted_by: owner | harness_agent` (`serve/reviews.py::REVIEW_MINTERS`),
+  список ссылок возвращает его, а панель «Ссылки для ревью» помечает ссылку «создана внешним агентом» —
+  владелец находит и отзывает её как любую другую. Старая запись без поля читается как `minted_by: null`
+  (неизвестно), а не как «владелец». Выдавать ли ссылки харнесс-токену — по-прежнему политика владельца.
+  Проверка: `tests/test_review_capabilities.py::test_a_link_minted_with_the_agent_token_says_so`.
 
 ## 9. Рекомендуемый порядок
 

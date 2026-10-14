@@ -634,7 +634,10 @@ def build_router(srv) -> APIRouter:
             return _scrub_json(out)
 
     @router.post("/api/runs/{run_id}/reviews")
-    def create_review(run_id: str, body: ReviewCreate, response: Response):
+    def create_review(run_id: str, body: ReviewCreate, response: Response, request: Request):
+        # doc 70 70.8c: the agent token may mint a link; the record says which credential did.
+        from looplab.serve.principal import request_agent_token
+        minted_by = "harness_agent" if request_agent_token(request) else "owner"
         if not getattr(srv, "owner_auth_enabled", False):
             raise HTTPException(
                 409, "read-only sharing requires LOOPLAB_UI_TOKEN so the owner control plane is not anonymous")
@@ -648,7 +651,8 @@ def build_router(srv) -> APIRouter:
                 if recovery is None:
                     token, record = srv.reviews.create(
                         rd.name, generation=current_generation,
-                        ttl_seconds=body.ttl_seconds, include_evidence=body.include_evidence)
+                        ttl_seconds=body.ttl_seconds, include_evidence=body.include_evidence,
+                        minted_by=minted_by)
                     replayed = False
                     status = None
                 else:
@@ -656,7 +660,7 @@ def build_router(srv) -> APIRouter:
                         rd.name, generation=current_generation,
                         ttl_seconds=body.ttl_seconds,
                         include_evidence=body.include_evidence,
-                        **recovery)
+                        minted_by=minted_by, **recovery)
                     status = srv.reviews.status(
                         record, current_generation=current_generation)
         except ReviewError as exc:

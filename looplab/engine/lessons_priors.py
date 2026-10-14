@@ -437,6 +437,15 @@ class LessonPriorsMixin:
         the two load sites; DIAGNOSTIC, so fold-ignored and fence-excluded. Best-effort."""
         from looplab.events.types import DIAGNOSTIC_EVENTS, EV_PRIOR_INJECTED
         assert EV_PRIOR_INJECTED in DIAGNOSTIC_EVENTS
+        # AN EXTERNAL RUN INJECTS NOTHING (Codex audit 2026-10-14 L-10b, doc 80 §9 #10). The load
+        # still runs on an external-harness run (its lessons are scanned for the run-end reconcile),
+        # but no LoopLab Researcher/Developer prompt is ever rendered there, and the text it built
+        # is the `[MEMORY_SOURCE: …]` header alone whenever no lesson matches — 229 chars, `rows: []`.
+        # Each start/resume wrote two such rows (44 on one MiniOneRec campaign), which the citation
+        # instrument read as "shown to the proposals that followed" — proposals the external agent
+        # wrote without ever seeing them. No row is the honest record.
+        if getattr(self._e, "external_harness", False):
+            return
         receipts = getattr(self, "prior_receipts", None) or {}
         for role, receipt in receipts.items():
             try:

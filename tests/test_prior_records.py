@@ -284,3 +284,19 @@ def test_the_prior_receipt_records_a_retargeted_lesson_without_its_clause(tmp_pa
     [shown] = receipt["rows"]
     assert shown["statement"] == "warmup stabilizes the contrastive loss"
     assert cites(shown["statement"], "As the prior says, warmup stabilizes the contrastive loss.")
+
+
+def test_an_external_harness_run_records_no_prior_injection(tmp_path):
+    """Codex audit 2026-10-14 L-10b: an external-harness run renders no LoopLab role prompt, yet
+    every start/resume wrote two `prior_injected` rows (header-only text, `rows: []`) that the
+    citation instrument credited to the external agent's proposals. The same receipts on an
+    internal run are still written."""
+    receipt = {"notes": 0, "case": False, "rows": [], "quarantined_useless": 0,
+               "source": {"lessons_sha256": "a", "notes_sha256": "b", "complete": True}, "chars": 229}
+    for external, expected in ((False, 2), (True, 0)):
+        eng = make_engine(tmp_path / f"run-{external}", n_seeds=1, max_nodes=1)
+        eng.external_harness = external
+        eng.lessons.prior_receipts = {"researcher": dict(receipt), "developer": dict(receipt)}
+        eng.lessons.record_prior_injection(at_node=0, phase="run_start")
+        rows = [e for e in eng.store.read_all() if e.type == EV_PRIOR_INJECTED]
+        assert len(rows) == expected, external

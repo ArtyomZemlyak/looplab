@@ -678,3 +678,30 @@ def test_reviewer_cost_says_whether_a_roll_up_was_recorded_at_all(tmp_path, monk
     assert {key: absent.json()[key] for key in ("cost", "calls", "total_tokens")} \
         == {key: measured.json()[key] for key in ("cost", "calls", "total_tokens")}, \
         "the numbers must be indistinguishable — `recorded` is what carries the difference"
+
+
+def test_a_link_minted_with_the_agent_token_says_so(tmp_path, monkeypatch):
+    """doc 70 70.8c: the agent token may mint a review link (it is the `owner` principal), and the
+    owner must be able to find and revoke those links. The record and the owner's list carry
+    `minted_by`; a record written before the field existed reads `None`, never "owner"."""
+    _seed_run(tmp_path)
+    monkeypatch.setenv("LOOPLAB_UI_TOKEN", "owner-secret")
+    monkeypatch.setenv("LOOPLAB_HARNESS_TOKEN", "agent-secret")
+    client = TestClient(make_app(tmp_path))
+    by_owner = _create(client)
+    by_agent = client.post("/api/runs/demo/reviews", headers={"X-LoopLab-Token": "agent-secret"},
+                           json={"ttl_seconds": 3600, "include_evidence": False})
+    assert by_agent.status_code == 200, by_agent.text
+    assert by_owner["minted_by"] == "owner" and by_agent.json()["minted_by"] == "harness_agent"
+    store_dir = tmp_path / ".reviews"
+    legacy = next(p for p in store_dir.glob("rvl_*.json")
+                  if json.loads(p.read_text())["id"] == by_owner["id"])
+    row = json.loads(legacy.read_text())
+    row.pop("minted_by")
+    legacy.write_text(json.dumps(row))
+    listed = {link["id"]: link["minted_by"] for link in
+              client.get("/api/runs/demo/reviews", headers=OWNER).json()["links"]}
+    assert listed == {by_owner["id"]: None, by_agent.json()["id"]: "harness_agent"}
+    # The owner revokes the agent's link like any other.
+    assert client.delete(f"/api/runs/demo/reviews/{by_agent.json()['id']}",
+                         headers=OWNER).json()["revoked_at"] is not None

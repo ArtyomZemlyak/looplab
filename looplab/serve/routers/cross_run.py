@@ -16,7 +16,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Annotated, Any, Literal
 
-from fastapi import APIRouter, HTTPException, Query
+from fastapi import APIRouter, HTTPException, Query, Request
 from pydantic import BaseModel, ConfigDict, Field, StrictInt
 
 from looplab.engine.governance_health import read_curation_rows as _read_curation_rows
@@ -24,6 +24,9 @@ from looplab.trust.cross_run import cross_run_text, sanitize_cross_run_projectio
 
 
 _PORTFOLIO_ID_PATTERN = r"^portfolio-sha256:[0-9a-f]{64}$"
+# The `by` of a governance row the AGENT token wrote (doc 70 70.8a); the owner and the local
+# operator keep `deployment-owner` / `local-operator`.
+HARNESS_AGENT_ACTOR = "harness-agent"
 
 
 def _resolved_portfolio_identity(memory_dir: object) -> tuple[str, str, bool]:
@@ -460,7 +463,16 @@ def build_router(srv) -> APIRouter:
                 "message": "the cross-run portfolio was replaced while this projection was read",
             }, headers={"Cache-Control": "no-store"})
 
-    def _actor() -> str:
+    def _actor(request: Request | None = None) -> str:
+        # WHO wrote a governance row (doc 70 70.8a). The agent token is the `owner` principal and may
+        # legitimately merge/split concepts, decide claims and set task facets, but its rows were
+        # stamped `deployment-owner`, so the owner could not tell the agent's curation from their
+        # own (the gap `submitted_by` closed for commands). `by` is bounded free text in every
+        # registry validator (`concept_registry`, `claims`, `task_facets`, `steward_invocation`), so
+        # a third value needs no validator change and old rows read exactly as before.
+        from looplab.serve.principal import request_agent_token
+        if request is not None and request_agent_token(request):
+            return HARNESS_AGENT_ACTOR
         return "deployment-owner" if getattr(srv, "owner_auth_enabled", False) else "local-operator"
 
     def _timestamp() -> str:
@@ -710,7 +722,7 @@ def build_router(srv) -> APIRouter:
             payload, max_chars=1_000_000, max_items=4_096, max_total_items=16_384)
 
     @router.post("/api/cross-run/claim-decide", response_model=ClaimDecisionResponse)
-    def claim_decide(body: _ClaimDecision):
+    def claim_decide(body: _ClaimDecision, request: Request):
         """Ratify/reject/pin/clear exactly the claim ID and revision the operator observed."""
         from looplab.engine.claims import record_observed_claim_decision
         memory_dir, portfolio_id = _portfolio(body.expected_portfolio_id)
@@ -718,7 +730,7 @@ def build_router(srv) -> APIRouter:
             rec = record_observed_claim_decision(
                 memory_dir, statement=body.statement, claim_uid=body.claim_uid,
                 scope=body.scope, metric=body.metric, evidence_digest=body.evidence_digest,
-                decision=body.decision, note=body.note, by=_actor(), at=_timestamp(),
+                decision=body.decision, note=body.note, by=_actor(request), at=_timestamp(),
                 expected_revision=body.expected_revision, action_id=body.action_id,
             )
         except Exception as exc:  # noqa: BLE001 — converted to stable HTTP semantics below
@@ -751,57 +763,57 @@ def build_router(srv) -> APIRouter:
         }
 
     @router.post("/api/cross-run/concept-merge", response_model=ConceptAliasResponse)
-    def concept_merge(body: _ConceptMerge):
+    def concept_merge(body: _ConceptMerge, request: Request):
         """Merge one non-empty concept into another; purge is a separate confirmed action."""
         from looplab.engine.concept_registry import record_concept_alias
         return _governed_mutation(body, lambda memory_dir: record_concept_alias(
             memory_dir, from_concept=body.from_concept, to_concept=body.to_concept,
-            by=_actor(), at=_timestamp(), expected_revision=body.expected_revision,
+            by=_actor(request), at=_timestamp(), expected_revision=body.expected_revision,
             expected_governance_revision=body.expected_governance_revision,
             action_id=body.action_id, require_existing=True,
         ), "alias")
 
     @router.post("/api/cross-run/concept-purge", response_model=ConceptAliasResponse)
-    def concept_purge(body: _ConceptPurge):
+    def concept_purge(body: _ConceptPurge, request: Request):
         """Explicitly tombstone one concept after a typed confirmation."""
         from looplab.engine.concept_registry import record_concept_alias
         # An EMPTY `to_concept` is what makes this a tombstone rather than a redirect.
         return _governed_mutation(body, lambda memory_dir: record_concept_alias(
             memory_dir, from_concept=body.from_concept, to_concept="",
-            by=_actor(), at=_timestamp(), expected_revision=body.expected_revision,
+            by=_actor(request), at=_timestamp(), expected_revision=body.expected_revision,
             expected_governance_revision=body.expected_governance_revision,
             action_id=body.action_id, require_existing=True,
         ), "alias")
 
     @router.post("/api/cross-run/concept-alias-clear", response_model=ConceptAliasResponse)
-    def concept_alias_clear(body: _ConceptSource):
+    def concept_alias_clear(body: _ConceptSource, request: Request):
         """Undo the current alias/purge policy without deleting its audit history."""
         from looplab.engine.concept_registry import clear_concept_alias
         return _governed_mutation(body, lambda memory_dir: clear_concept_alias(
-            memory_dir, from_concept=body.from_concept, by=_actor(), at=_timestamp(),
+            memory_dir, from_concept=body.from_concept, by=_actor(request), at=_timestamp(),
             expected_revision=body.expected_revision,
             expected_governance_revision=body.expected_governance_revision,
             action_id=body.action_id, require_existing=True,
         ), "alias")
 
     @router.post("/api/cross-run/concept-split", response_model=ConceptSplitResponse)
-    def concept_split(body: _ConceptSplit):
+    def concept_split(body: _ConceptSplit, request: Request):
         """Record one bounded deterministic split rule set."""
         from looplab.engine.concept_registry import record_concept_split
         return _governed_mutation(body, lambda memory_dir: record_concept_split(
             memory_dir, from_concept=body.from_concept,
             rules=[rule.model_dump() for rule in body.rules], default=body.default,
-            by=_actor(), at=_timestamp(), expected_revision=body.expected_revision,
+            by=_actor(request), at=_timestamp(), expected_revision=body.expected_revision,
             expected_governance_revision=body.expected_governance_revision,
             action_id=body.action_id, require_existing=True,
         ), "split")
 
     @router.post("/api/cross-run/concept-split-clear", response_model=ConceptSplitResponse)
-    def concept_split_clear(body: _ConceptSource):
+    def concept_split_clear(body: _ConceptSource, request: Request):
         """Undo the active split while preserving the append-only history."""
         from looplab.engine.concept_registry import clear_concept_split
         return _governed_mutation(body, lambda memory_dir: clear_concept_split(
-            memory_dir, from_concept=body.from_concept, by=_actor(), at=_timestamp(),
+            memory_dir, from_concept=body.from_concept, by=_actor(request), at=_timestamp(),
             expected_revision=body.expected_revision,
             expected_governance_revision=body.expected_governance_revision,
             action_id=body.action_id, require_existing=True,
@@ -854,7 +866,7 @@ def build_router(srv) -> APIRouter:
             "total": len(current), "offset": offset, "limit": limit}
 
     @router.post("/api/cross-run/task-facets", response_model=TaskFacetsSetResponse)
-    def task_facets_set(body: _TaskFacetsSet):
+    def task_facets_set(body: _TaskFacetsSet, request: Request):
         """Record an agent-authored facet decision using the existing strict ledger."""
         from looplab.engine.task_facets import FACET_AXES, record_task_facets
         if set(body.facets) - set(FACET_AXES):
@@ -862,7 +874,7 @@ def build_router(srv) -> APIRouter:
         memory_dir, portfolio_id = _portfolio(body.expected_portfolio_id)
         try:
             row = record_task_facets(
-                memory_dir, task_id=body.task_id, facets=body.facets, by=_actor(),
+                memory_dir, task_id=body.task_id, facets=body.facets, by=_actor(request),
                 at=_timestamp(), expected_revision=body.expected_revision,
                 action_id=body.action_id)
         except Exception as exc:  # noqa: BLE001 - strict ledger errors become HTTP receipts
@@ -926,7 +938,7 @@ def build_router(srv) -> APIRouter:
         return f"{phase}:{safe_assistant_failure(exc)['error_kind']}"
 
     def _run_steward(kind: str, action_id: str, expected_portfolio_id: str, apply: bool,
-                     *, probe, steward) -> dict:
+                     *, probe, steward, request: Request | None = None) -> dict:
         """Drive one proposal-only steward invocation.
 
         The concept and claim stewards differ in exactly two things — which revision they probe for
@@ -949,10 +961,10 @@ def build_router(srv) -> APIRouter:
         _read_governance(lambda: probe(memory_dir))
         try:
             record, _replayed = run_steward_invocation(
-                memory_dir, kind, action_id, actor=_actor(), at=_timestamp(),
+                memory_dir, kind, action_id, actor=_actor(request), at=_timestamp(),
                 prepare=_steward_client,
                 invoke=lambda client: steward(
-                    memory_dir, client, apply=False, by=_actor(), raise_on_failure=True),
+                    memory_dir, client, apply=False, by=_actor(request), raise_on_failure=True),
                 safe_error=lambda exc, phase: _safe_steward_error(exc, phase=phase),
                 request={"surface": "owner-http"},
             )
@@ -961,7 +973,7 @@ def build_router(srv) -> APIRouter:
         return _steward_response(record, portfolio_id)
 
     @router.post("/api/cross-run/concept-steward", response_model=StewardProposalResponse)
-    def concept_steward(action_id: str = Query(..., min_length=1, max_length=160),
+    def concept_steward(request: Request, action_id: str = Query(..., min_length=1, max_length=160),
                         expected_portfolio_id: str = Query(
                             ..., pattern=_PORTFOLIO_ID_PATTERN),
                         apply: bool = False):
@@ -969,10 +981,11 @@ def build_router(srv) -> APIRouter:
         from looplab.engine.concept_registry import concept_governance_snapshot
         from looplab.engine.concept_steward import steward_concepts
         return _run_steward("concept", action_id, expected_portfolio_id, apply,
-                            probe=concept_governance_snapshot, steward=steward_concepts)
+                            probe=concept_governance_snapshot, steward=steward_concepts,
+                            request=request)
 
     @router.post("/api/cross-run/claim-steward", response_model=StewardProposalResponse)
-    def claim_steward(action_id: str = Query(..., min_length=1, max_length=160),
+    def claim_steward(request: Request, action_id: str = Query(..., min_length=1, max_length=160),
                       expected_portfolio_id: str = Query(
                           ..., pattern=_PORTFOLIO_ID_PATTERN),
                       apply: bool = False):
@@ -980,6 +993,7 @@ def build_router(srv) -> APIRouter:
         from looplab.engine.claims import claim_governance_revision
         from looplab.engine.claim_steward import steward_claims
         return _run_steward("claim", action_id, expected_portfolio_id, apply,
-                            probe=claim_governance_revision, steward=steward_claims)
+                            probe=claim_governance_revision, steward=steward_claims,
+                            request=request)
 
     return router

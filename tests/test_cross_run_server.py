@@ -1237,3 +1237,29 @@ def test_concept_policy_makes_a_ratified_merge_visible_to_the_map(tmp_path):
     rows = [json.loads(line) for line in
             (md / "concept_aliases.jsonl").read_text(encoding="utf-8").splitlines() if line]
     assert [row["by"] for row in rows] == [RATIFIER_ACTOR]
+
+
+def test_governance_rows_written_with_the_agent_token_name_the_agent(tmp_path, monkeypatch):
+    """doc 70 70.8a: the agent token is the `owner` principal, so its legitimate curation (task
+    facets here; the concept/claim routes share `_actor`) was stamped `deployment-owner` and the
+    owner could not tell it from their own. The row now says `harness-agent`; the owner's token
+    still writes `deployment-owner`, and the strict ledger reads both."""
+    from looplab.serve.routers.cross_run import HARNESS_AGENT_ACTOR
+    monkeypatch.setenv("LOOPLAB_UI_TOKEN", "owner-secret")
+    monkeypatch.setenv("LOOPLAB_HARNESS_TOKEN", "agent-secret")
+    memory = _initialize_memory()
+    client = TestClient(make_app(tmp_path))
+    agent = {"X-LoopLab-Token": "agent-secret"}
+    owner = {"X-LoopLab-Token": "owner-secret"}
+    saved = client.post("/api/cross-run/task-facets", headers=agent, json={
+        "task_id": "task-a", "facets": {"domain": "retrieval"},
+        "expected_revision": 0, "action_id": "agent-facet"})
+    assert saved.status_code == 200, saved.text
+    saved = client.post("/api/cross-run/task-facets", headers=owner, json={
+        "task_id": "task-b", "facets": {"domain": "vision"},
+        "expected_revision": 1, "action_id": "owner-facet"})
+    assert saved.status_code == 200, saved.text
+    rows = [json.loads(line) for line in (memory / "task_facets.jsonl").read_text().splitlines()]
+    assert [row["by"] for row in rows] == [HARNESS_AGENT_ACTOR, "deployment-owner"]
+    assert client.get("/api/cross-run/task-facets", headers=owner).json()["facets"] == {
+        "task-a": {"domain": "retrieval"}, "task-b": {"domain": "vision"}}

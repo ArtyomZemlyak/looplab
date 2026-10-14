@@ -474,3 +474,55 @@ test('a broad data question cannot become a child of its rare-item subquestion',
   assert.equal(rows.find(row => row.id === 'compute').parentId, 'root')
   assert.equal(rows.filter(row => row.id === 'compute').length, 1)
 })
+
+
+// --------------------------------------------------------------------------- //
+// REGRESSION FOR ORDINARY (NON-EXTERNAL) RUNS (Codex audit 2026-10-14 §5, doc 80 §9 #12).
+// `conceptSet` stopped unioning `child_concept_tags` into an AUTHORED question scope on 2026-10-13
+// (128a0217f) to fix an external board. The model is shared by every run, so this pins what the
+// change may and may not do to an internal run's ladder: on the shapes an internal run produces —
+// questions the Researcher filed with no tags (the v7 shape) and questions whose authored tags
+// already cover what their experiments touch — the ladder is IDENTICAL to the old union rule.
+// Only an authored question whose children add tags outside its scope moves, and it moves toward
+// the authored scope.
+// --------------------------------------------------------------------------- //
+
+function _unionReference(cards) {
+  // The pre-2026-10-13 rule spelled as data: a direction's set is authored ∪ children.
+  return cards.map(card => card.card_kind !== 'direction' ? card : {
+    ...card,
+    concept_tags: [...new Set([...(card.concept_tags || []), ...(card.child_concept_tags || [])])],
+    child_concept_tags: [],
+  })
+}
+
+const _ladder = rows => rows.map(row => `${row.depth}:${row.parentId || '-'}>${row.id}`)
+
+test('an ordinary run\'s ladder is unchanged by the authored-scope rule', () => {
+  const internalBoard = [
+    // Researcher-filed questions with no authored tags: their scope comes from their experiments.
+    _question('q-bare-broad', { childTags: ['loss/contrastive'] }),
+    _question('q-bare-narrow', { childTags: ['loss/contrastive', 'training/negative-mining'] }),
+    // Concept-pivot-tagged questions whose experiments stay inside the authored scope.
+    _question('q-data', { tags: ['data'], childTags: ['data'] }),
+    _question('q-data-aug', { tags: ['data', 'data/aug'], childTags: ['data/aug'] }),
+    _question('q-untouched'),
+  ]
+  assert.deepEqual(_ladder(latticeRows(internalBoard)), _ladder(latticeRows(_unionReference(internalBoard))),
+    'MUTATION: drop the child fallback for untagged questions and q-bare-* fall to the ungrouped bucket')
+  const placed = latticeRows(internalBoard)
+  assert.equal(placed.find(row => row.id === 'q-bare-narrow').parentId, 'q-bare-broad')
+  assert.equal(placed.find(row => row.id === 'q-data-aug').parentId, 'q-data')
+  assert.equal(placed.find(row => row.id === 'q-untouched').parentId, UNGROUPED_ID)
+})
+
+test('the one shape that moves: an authored question keeps its scope against wider children', () => {
+  const board = [
+    _question('q-data', { tags: ['data'], childTags: ['data', 'loss/contrastive'] }),
+    _question('q-data-loss', { tags: ['data', 'loss/contrastive'] }),
+  ]
+  // Old rule: q-data reads {data, loss/contrastive}, equal to q-data-loss, so they were siblings.
+  assert.equal(latticeRows(_unionReference(board)).find(row => row.id === 'q-data-loss').depth, 0)
+  // Authored rule: the narrower question hangs under the broad one, as its own tags say.
+  assert.equal(latticeRows(board).find(row => row.id === 'q-data-loss').parentId, 'q-data')
+})

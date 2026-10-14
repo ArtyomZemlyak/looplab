@@ -640,6 +640,7 @@ export default function CollabPanel({
           else linkRowRefs.current.delete(rowId)
         }} tabIndex={-1} className="review-link-row">
           <div><b>{uiText(link.status)}</b> · {((evidence ? uiText('summary + evidence') : uiText('summary')))}
+            {link.minted_by === 'harness_agent' && <> · <span className="review-link-minter">{uiText("created by the external agent")}</span></>}
             <div className="muted">{uiText("expires ")}{expires}</div></div>
           {activeLink(link) && <button type="button" className="btn sm danger" disabled={rowBusy}
             ref={element => {
