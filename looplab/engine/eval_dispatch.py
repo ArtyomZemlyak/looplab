@@ -1159,6 +1159,11 @@ class EvalDispatchMixin:
             # The canary's env (`LOOPLAB_CANARY=1` + the task's `eval.canary.env`) wins over every
             # declared layer: it is what makes this run tiny.
             env = {**(env or {}), **dict(canary.get("env") or {})}
+            if canary.get("sandbox"):
+                # The IMPLICIT sandboxed smoke (`eval_canary.sandboxed_env`): writes only under
+                # this scratch tree, whatever absolute path a script names.
+                from looplab.engine.eval_canary import sandboxed_env
+                env = sandboxed_env(env, workdir)
         if self._eval_spec:
             from looplab.runtime import command_eval
             es = self._eval_spec

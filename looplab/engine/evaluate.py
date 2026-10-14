@@ -1013,6 +1013,25 @@ def inert_path_account(inert: dict) -> str:
             + "\n".join(lines) + "\n")
 
 
+def effective_canary_spec(engine) -> Optional[dict]:
+    """The canary this run's attempts owe: the task's declaration (`eval.canary`), else — on an
+    external-harness run whose operator opted in (`harness_policy.json` `implicit_canary:
+    "sandboxed"`, doc 78 leftover) and on a kernel that can sandbox it — the implicit SANDBOXED
+    smoke (`eval_canary.implicit_canary_spec`). None = no canary."""
+    declared = canary_spec(engine._eval_spec)
+    if declared is not None or not getattr(engine, "external_harness", False):
+        return declared
+    run_dir = getattr(engine, "run_dir", None)
+    if run_dir is None:
+        return None
+    policy = implicit_canary_policy(run_dir)
+    if policy["mode"] != "sandboxed" or implicit_canary_unavailable() is not None:
+        return None
+    if engine.trust_mode in ("untrusted", "hostile"):
+        return None          # a container tier never sees the host ruleset; nothing to sandbox
+    return implicit_canary_spec(policy["timeout"])
+
+
 def withheld_metric(res) -> Optional[dict]:
     """`{"metric": m, "reason": "inert_path"}` when `res` withheld a finite metric as `inert_path`,
     else None -- the `withheld_metric` column `node_repaired` and `node_failed` carry so the number a
@@ -1275,7 +1294,9 @@ from looplab.runtime.sandbox import GpuPinUnenforceable
 from looplab.engine.eval_canary import (CANARY_NEAR_CAP_FRACTION, CANARY_RETRY_CAP_FACTOR,
                                        CanaryClock, canary_already_passed, canary_failure_detail,
                                        canary_failure_result, canary_near_cap, canary_passed,
-                                       canary_spec, own_timeout_fired, smoke_canary_passed)
+                                       canary_spec, implicit_canary_policy,
+                                       implicit_canary_spec, implicit_canary_unavailable,
+                                       own_timeout_fired, sandbox_denied, smoke_canary_passed)
 from looplab.events.types import (DIAGNOSTIC_EVENTS, EV_CARD_DROPPED, EV_DEPS_INSTALLED,
                                   EV_EVAL_INVOCATION_CLAIMED, EV_EVAL_INVOCATION_RECOVERED,
                                   EV_EVAL_INVOCATION_SETTLED, EV_WORKSPACE_SEEDED,
@@ -4038,10 +4059,13 @@ class EvaluateMixin:
         # still what makes a canary possible — without it there is no slice to run.
         if not (self._eval_canary or getattr(self, "external_harness", False)) or not self._eval_spec:
             return False
-        if canary_spec(self._eval_spec) is None:
+        if effective_canary_spec(self) is None:
             return False
         return not canary_already_passed(self.store.read_all(), a.node_id, a.generation,
                                          _canary_code_digest(a.node))
+
+    def _effective_canary_spec(self) -> Optional[dict]:
+        return effective_canary_spec(self)
 
     def _run_canary_in_scratch(self, a: "EvalAttempt", spec: dict, scratch, cancel):
         """The canary's blocking half, in a worker thread: a FRESH scratch tree from the node's own
@@ -4096,7 +4120,7 @@ class EvaluateMixin:
         a retry is new work; that attempt fails on the one expiry it had, and DECIDE_REPAIR's own
         fold then holds a paused node pending or settles a stopping one.
         """
-        spec = canary_spec(self._eval_spec)
+        spec = self._effective_canary_spec()
         digest = _canary_code_digest(a.node)
         scratch = self._canary_scratch(a.node_id)
         res, clocked, fault, passed, detail = await self._eval_canary_round(
@@ -4149,6 +4173,8 @@ class EvaluateMixin:
         its finished row's `error` carries ("" on a pass or an engine fault)."""
         started = {"node_id": a.node_id, "generation": a.generation, "attempt": a.attempt,
                    "code_digest": digest, "timeout": spec["timeout"]}
+        if spec.get("implicit"):
+            started["implicit"] = "sandboxed"
         if retry:
             started["retry"] = retry
         async with self._write_lock:
@@ -4163,10 +4189,18 @@ class EvaluateMixin:
         except Exception as exc:  # noqa: BLE001 — fail-open preflight: the full eval owns this fault
             fault = f"{type(exc).__name__}: {exc}"[:300]
         interrupted = cancel.is_set() and not expired
+        inconclusive = None
         if spec.get("mode") == "smoke":
             # A SMOKE canary passes by SURVIVING its cap (`eval_canary.smoke_canary_passed`).
             passed = fault is None and smoke_canary_passed(res, expired=expired,
                                                            interrupted=interrupted)
+            if (not passed and fault is None and not interrupted and spec.get("sandbox")
+                    and res is not None and sandbox_denied(res)):
+                # A refused WRITE is the sandbox, not the candidate: the implicit smoke cannot say
+                # anything about this code, so the full eval decides (never a crash on our wall).
+                passed = True
+                inconclusive = ("the sandboxed smoke hit a refused write (the script writes outside "
+                                "its workspace); declare eval.canary to preflight this task")
         else:
             passed = fault is None and canary_passed(
                 res, expired=expired, artifact=getattr(a.node, "kind", None) == "artifact")
@@ -4184,6 +4218,10 @@ class EvaluateMixin:
                "eval_seconds": seconds, "log_dir": str(scratch)}
         if retry:
             row["retry"] = retry
+        if spec.get("implicit"):
+            row["implicit"] = "sandboxed"
+        if inconclusive:
+            row["inconclusive"] = inconclusive
         if res is not None:
             row["exit_code"] = getattr(res, "exit_code", None)
             row["timed_out"] = bool(getattr(res, "timed_out", False) or expired)

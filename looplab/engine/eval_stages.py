@@ -1135,6 +1135,7 @@ class EvalStagesMixin:
         """
         from looplab.engine.train_monitor import eval_log_plan
         from looplab.events.types import LOG_ROLE_UNKNOWN, PROGRESS_STAGE_EVAL
+        from looplab.runtime.command_eval import BEACON_OUTCOMES
 
         try:
             _plan = eval_log_plan(stages or []).roles or {}
@@ -1152,11 +1153,18 @@ class EvalStagesMixin:
 
         def _emit(payload):
             name = str(payload.get("name") or "")
-            self._emit_progress(
-                PROGRESS_STAGE_EVAL, "stage", str(payload.get("status") or ""),
-                {"node_id": node_id, "generation": generation, "name": name[:64],
-                 "index": payload.get("index"), "total": payload.get("total"),
-                 "role": roles.get(name, LOG_ROLE_UNKNOWN)})
+            detail = {"node_id": node_id, "generation": generation, "name": name[:64],
+                      "index": payload.get("index"), "total": payload.get("total"),
+                      "role": roles.get(name, LOG_ROLE_UNKNOWN)}
+            # HOW the stage left, on the closing beacon only (doc 78 leftover): `ok` / `failed` /
+            # `timeout` / `error`, and the exit code when the process returned one. Absent on a
+            # `started` row and on every row written before 2026-10-14.
+            if payload.get("outcome") in BEACON_OUTCOMES:
+                detail["outcome"] = payload["outcome"]
+            if type(payload.get("exit_code")) is int:
+                detail["exit_code"] = payload["exit_code"]
+            self._emit_progress(PROGRESS_STAGE_EVAL, "stage", str(payload.get("status") or ""),
+                                detail)
         return _emit
 
     def _safe_reuse_start(self, stages: list, failed_stage, changed_files, workdir,

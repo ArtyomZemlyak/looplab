@@ -80,6 +80,10 @@ class PolicyBody(BaseModel):
     amendments: Literal["off", "experiments", "inputs", "all"] = "all"
     max_agent_added_nodes: Optional[int] = Field(default=None, ge=0, le=1_000_000)
     note: Optional[str] = Field(default=None, max_length=1000)
+    # doc 78 leftover: a SANDBOXED smoke canary for a task that declares no `eval.canary`
+    # (`engine/eval_canary.py::implicit_canary_policy`); `off` = no canary, as before.
+    implicit_canary: Literal["off", "sandboxed"] = "off"
+    implicit_canary_timeout: float = Field(default=120.0, gt=0, le=3600)
 
 
 def build_router(srv) -> APIRouter:

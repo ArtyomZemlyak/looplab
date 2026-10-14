@@ -247,3 +247,38 @@ def test_a_failing_phase_keeps_its_own_exception():
     # …and the beacon still recorded both ends of the phase it was narrating.
     assert [d["status"] for _t, d in engine.store.rows] == ["started", "finished"]
     assert engine.store.rows[-1][1]["ok"] is False
+
+
+def test_the_closing_beacon_says_how_each_stage_left():
+    """doc 78 leftover (2026-10-14): a crashed stage's closing beacon used to read exactly like a
+    successful one's — `finished` — so every beacon reader showed a failed stage as done. The close
+    now carries `outcome` and the exit code; the status word stays `finished` (pair readers)."""
+    seen: list[dict] = []
+    stages = [{"name": "mine", "command": _py("print('ok')")},
+              {"name": "train", "command": _py("import sys; sys.exit(3)")},
+              {"name": "score", "command": _py("print('{\"metric\": 1.0}')")}]
+    import tempfile
+    with tempfile.TemporaryDirectory() as wd:
+        run_command_eval(["true"], wd, 60, _METRIC, stages=stages, on_stage_event=seen.append)
+    closes = [(e["name"], e.get("outcome"), e.get("exit_code")) for e in seen
+              if e["status"] == "finished"]
+    assert closes == [("mine", "ok", 0), ("train", "failed", 3)]
+    assert all("outcome" not in e for e in seen if e["status"] == "started")
+
+
+def test_the_outcome_words_follow_the_stage_row_rule():
+    from looplab.runtime.command_eval import BEACON_OUTCOMES, _beacon_outcome
+    assert (_beacon_outcome(0, False), _beacon_outcome(2, False), _beacon_outcome(-9, True)) == (
+        "ok", "failed", "timeout")
+    assert set(BEACON_OUTCOMES) == {"ok", "failed", "timeout", "error"}
+
+
+def test_the_engine_records_the_outcome_on_the_phase_progress_row():
+    engine = _engine_with_store()
+    emit = engine._stage_progress_fn(2, 1, [{"name": "train", "command": ["x"]}])
+    emit({"name": "train", "index": 0, "total": 1, "status": "finished", "outcome": "failed",
+          "exit_code": -11})
+    emit({"name": "train", "index": 0, "total": 1, "status": "finished", "outcome": "bogus"})
+    first, second = (row[1] for row in engine.store.rows)
+    assert (first["outcome"], first["exit_code"]) == ("failed", -11)
+    assert "outcome" not in second and "exit_code" not in second

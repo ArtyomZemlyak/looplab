@@ -232,3 +232,97 @@ def test_gpu_gate_cli_writes_a_gate_before_the_run_exists(tmp_path):
     assert cleared["gate"] is None
     queue = CliRunner().invoke(app, ["gpu-queue"])
     assert queue.exit_code == 0 and "queue_length" in queue.output
+
+
+def _append_rows(run_dir, rows):
+    run_dir.mkdir(parents=True, exist_ok=True)
+    path = run_dir / "events.jsonl"
+    seq = sum(1 for _ in open(path)) if path.exists() else 0
+    with open(path, "a", encoding="utf-8") as fh:
+        for etype, data in rows:
+            fh.write(json.dumps({"seq": seq, "type": etype, "data": data, "ts": 0}) + "\n")
+            seq += 1
+
+
+def test_start_after_a_node_or_a_stage_opens_before_the_predecessor_exits(tmp_path):
+    """doc 78 leftover (2026-10-14): `start_after` waited only for the predecessor's ENGINE TO EXIT.
+    A condition now waits for a node's terminal or a stage's end in its log; the engine stays up."""
+    a, b = tmp_path / "a", tmp_path / "b"
+    _append_rows(a, [("run_started", {}), ("node_evaluated", {"node_id": 0})])
+    write_gate(b, hold=False, start_after=[{"run": str(a), "until": "node_evaluated"}])
+    gate = read_gate(b)
+    assert gate["conditions"][0]["after_seq"] == 1          # node 0 is already history
+    alive = lambda p: True                                   # noqa: E731
+    assert [x["until"] for x in gate_blockers(gate, liveness=alive)] == ["node_evaluated"]
+    _append_rows(a, [("stage_finished", {"node_id": 1, "name": "train", "status": "ok"})])
+    assert gate_blockers(gate, liveness=alive)               # a stage is not a node
+    _append_rows(a, [("node_failed", {"node_id": 1})])       # a FAILED node is a terminal too
+    assert gate_blockers(gate, liveness=alive) == []
+    write_gate(b, hold=False, start_after=[{"run": str(a), "until": "stage_done", "node_id": 2,
+                                            "stage": "train"}])
+    gate = read_gate(b)
+    assert gate_blockers(gate, liveness=alive)[0]["stage"] == "train"
+    _append_rows(a, [("stage_finished", {"node_id": 2, "name": "train", "status": "ok"})])
+    assert gate_blockers(gate, liveness=alive) == []
+    write_gate(b, hold=False, start_after=[{"run": str(a), "until": "node_evaluated",
+                                            "node_id": 9}])
+    gate = read_gate(b)
+    assert gate_blockers(gate, liveness=alive)[0]["node_id"] == 9
+    # An exited predecessor can write no later row: every condition opens, never a deadlock.
+    assert gate_blockers(gate, liveness=lambda p: False) == []
+
+
+def test_drain_holds_new_gpu_work_and_a_successor_waits_for_the_release(tmp_path, monkeypatch):
+    a, b = tmp_path / "a", tmp_path / "b"
+    _append_rows(a, [("run_started", {})])
+    write_gate(a, hold=False, start_after=[], drain=True, reason="handing over to b")
+    drained = read_gate(a)
+    assert drained["hold"] is True and drained["drain"] is True
+    assert [x["kind"] for x in gate_blockers(drained)] == ["drain"]
+    write_gate(b, hold=False, start_after=[{"run": str(a), "until": "gpu_released"}])
+    gate = read_gate(b)
+    holding = {"value": True}
+    monkeypatch.setattr(gpu_queue, "_holds_lease", lambda rd: holding["value"])
+    alive = lambda p: True                                   # noqa: E731
+    assert gate_blockers(gate, liveness=alive)[0]["until"] == "gpu_released"
+    holding["value"] = None                                   # unknowable -> keep waiting
+    assert gate_blockers(gate, liveness=alive)
+    holding["value"] = False                                  # a's evaluation let go
+    assert gate_blockers(gate, liveness=alive) == []
+    write_gate(a, hold=False, start_after=[], drain=False)    # an undrained a takes GPUs again
+    assert gate_blockers(gate, liveness=alive)
+
+
+def test_an_old_engine_reads_a_condition_gate_as_a_hold():
+    """Fail closed across versions: an object entry is not a string, so a pre-condition reader's
+    shape check fails and it HOLDS — it never starts GPU work early."""
+    raw = {"hold": False, "start_after": [{"run": "/x", "until": "node_evaluated"}]}
+    old_shape_ok = all(isinstance(item, str) and item for item in raw["start_after"])
+    assert old_shape_ok is False
+
+
+def test_gpu_gate_api_and_cli_take_conditions_and_drain(tmp_path):
+    root, client = _app_with_runs(tmp_path, "a", "b")
+    r = client.put("/api/runs/b/gpu-gate", json={"start_after": [
+        {"run": "a", "until": "stage_done", "node_id": 0, "stage": "train"}]})
+    assert r.status_code == 200, r.text
+    assert r.json()["gate"]["conditions"][0]["until"] == "stage_done"
+    assert client.put("/api/runs/b/gpu-gate", json={"start_after": [
+        {"run": "a", "until": "stage_done"}]}).status_code == 400
+    assert client.put("/api/runs/b/gpu-gate", json={"start_after": [
+        {"run": "a", "until": "whenever"}]}).status_code == 422
+    drained = client.put("/api/runs/a/gpu-gate", json={"drain": True}).json()
+    assert [x["kind"] for x in drained["blockers"]] == ["drain"]
+    from typer.testing import CliRunner
+    from looplab.cli import app
+    run, other = tmp_path / "later", tmp_path / "first"
+    out = CliRunner().invoke(app, ["gpu-gate", str(run), "--after-node", f"{other}:3",
+                                   "--after-stage", f"{other}:score", "--after-release", str(other)])
+    assert out.exit_code == 0, out.output
+    conds = json.loads(out.output)["gate"]["conditions"]
+    assert [(c["until"], c.get("node_id"), c.get("stage")) for c in conds] == [
+        ("node_evaluated", 3, None), ("stage_done", None, "score"), ("gpu_released", None, None)]
+    out = json.loads(CliRunner().invoke(app, ["gpu-gate", str(other), "--drain"]).output)
+    assert out["gate"]["drain"] is True and out["gate"]["hold"] is True
+    out = json.loads(CliRunner().invoke(app, ["gpu-gate", str(other), "--undrain"]).output)
+    assert out["gate"]["drain"] is False and out["gate"]["hold"] is False

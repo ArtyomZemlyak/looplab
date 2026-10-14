@@ -71,6 +71,13 @@ STATE = "state.json"
 NOTIFY = "notify.json"
 LEDGER = "deliveries.jsonl"
 RUN_NOTIFY = "agent_notify.json"
+HOOKS_DIR = "hooks"
+# THE DEFAULT HOOK is the historical single `notify.json`; every other hook is a NAMED AGENT
+# CONNECTION (doc 78 leftover, 2026-10-14): one per agent that wants waking — `codex`, `claude` —
+# each with its own command, vars, kinds, run filter, delivery watermark and retry state, so a
+# failing Codex bridge neither delays nor re-delivers what a Claude Code session is told.
+DEFAULT_HOOK = "default"
+_HOOK_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,31}$")
 
 ACTIONABLE_KINDS = (
     "node_evaluated", "node_failed", "stage_failed", "monitor_question", "obligation_due",
@@ -322,9 +329,45 @@ def derive_condition_events(run_id: str, run_uid: str, progress: dict, *,
 
 
 # ------------------------------------------------------------------------------- notifications
-def read_notify_config(root) -> Optional[dict]:
-    data = _read_json(events_dir(root) / NOTIFY, {})
+def check_hook_name(hook: Optional[str]) -> str:
+    """The hook's name, `default` for None; raises ValueError for anything else unsafe."""
+    if hook is None or hook == "" or hook == DEFAULT_HOOK:
+        return DEFAULT_HOOK
+    if not isinstance(hook, str) or not _HOOK_NAME.match(hook):
+        raise ValueError("hook names are 1-32 characters of [A-Za-z0-9_.-], starting alphanumeric")
+    return hook
+
+
+def _hook_path(root, hook: Optional[str]) -> Path:
+    name = check_hook_name(hook)
+    if name == DEFAULT_HOOK:
+        return events_dir(root) / NOTIFY
+    return events_dir(root) / HOOKS_DIR / f"{name}.json"
+
+
+def read_notify_config(root, hook: Optional[str] = None) -> Optional[dict]:
+    data = _read_json(_hook_path(root, hook), {})
     return data if data else None
+
+
+def notify_hooks(root) -> dict[str, dict]:
+    """Every configured hook by name: the default (`notify.json`) and each named connection."""
+    out: dict[str, dict] = {}
+    default = read_notify_config(root)
+    if default:
+        out[DEFAULT_HOOK] = default
+    try:
+        named = sorted((events_dir(root) / HOOKS_DIR).glob("*.json"))
+    except OSError:
+        named = []
+    for path in named:
+        name = path.stem
+        if name == DEFAULT_HOOK or not _HOOK_NAME.match(name):
+            continue
+        config = _read_json(path, {})
+        if config:
+            out[name] = config
+    return out
 
 
 def validate_notify_config(body: dict) -> dict:
@@ -400,24 +443,37 @@ def _template_fields(command: list[str]) -> set[str]:
     return fields
 
 
-def write_notify_config(root, body: dict) -> dict:
+def write_notify_config(root, body: dict, hook: Optional[str] = None) -> dict:
     config = validate_notify_config(body)
-    d = events_dir(root)
+    path = _hook_path(root, hook)
+    name = check_hook_name(hook)
     with _lock(root):
-        _write_json(d / NOTIFY, config)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        _write_json(path, config)
+        if name != DEFAULT_HOOK:
+            # A new connection is woken for what happens FROM NOW: pin its watermark at the
+            # outbox's end when it is first configured (a reconfiguration keeps its position).
+            state_path = events_dir(root) / STATE
+            state = _read_json(state_path, {})
+            hooks = state.get("delivery_hooks") if isinstance(state.get("delivery_hooks"), dict) else {}
+            if name not in hooks:
+                hooks[name] = {"through": int(state.get("next_id", 0) or 0) - 1, "attempts": 0,
+                               "next_try": 0, "failed": 0}
+                state["delivery_hooks"] = hooks
+                _write_json(state_path, state)
     return config
 
 
-def clear_notify_config(root) -> None:
+def clear_notify_config(root, hook: Optional[str] = None) -> None:
+    path = _hook_path(root, hook)
     with _lock(root):
         try:
-            (events_dir(root) / NOTIFY).unlink()
+            path.unlink()
         except FileNotFoundError:
             pass
 
 
-def read_run_notify(rd) -> dict:
-    data = _read_json(Path(rd) / RUN_NOTIFY, {})
+def _run_entry(data: dict) -> dict:
     out = {}
     if isinstance(data.get("vars"), dict):
         try:
@@ -430,16 +486,47 @@ def read_run_notify(rd) -> dict:
     return out
 
 
-def write_run_notify(rd, *, variables: Optional[dict] = None, enabled: Optional[bool] = None) -> dict:
-    current = read_run_notify(rd)
+def read_run_notify(rd, hook: Optional[str] = None) -> dict:
+    """A run's override for one hook: the top-level `vars`/`enabled` are the DEFAULT hook's (the
+    historical shape); `hooks: {name: {vars, enabled}}` holds a named connection's."""
+    data = _read_json(Path(rd) / RUN_NOTIFY, {})
+    name = check_hook_name(hook)
+    if name == DEFAULT_HOOK:
+        out = _run_entry(data)
+        hooks = data.get("hooks")
+        if isinstance(hooks, dict):
+            named = {k: _run_entry(v) for k, v in hooks.items()
+                     if isinstance(k, str) and _HOOK_NAME.match(k) and isinstance(v, dict)}
+            if named:
+                out["hooks"] = named
+        return out
+    hooks = data.get("hooks") if isinstance(data.get("hooks"), dict) else {}
+    entry = hooks.get(name)
+    return _run_entry(entry) if isinstance(entry, dict) else {}
+
+
+def write_run_notify(rd, *, variables: Optional[dict] = None, enabled: Optional[bool] = None,
+                     hook: Optional[str] = None) -> dict:
+    name = check_hook_name(hook)
+    data = _read_json(Path(rd) / RUN_NOTIFY, {})
+    if name == DEFAULT_HOOK:
+        current = {k: v for k, v in data.items() if k in ("vars", "enabled", "hooks")}
+        target = current
+    else:
+        current = {k: v for k, v in data.items() if k in ("vars", "enabled", "hooks")}
+        hooks = current.get("hooks") if isinstance(current.get("hooks"), dict) else {}
+        target = dict(hooks.get(name) or {}) if isinstance(hooks.get(name), dict) else {}
+        hooks = dict(hooks)
+        hooks[name] = target
+        current["hooks"] = hooks
     if variables is not None:
         _check_vars(variables)
-        current["vars"] = dict(variables)
+        target["vars"] = dict(variables)
     if enabled is not None:
-        current["enabled"] = bool(enabled)
-    current.pop("invalid", None)
+        target["enabled"] = bool(enabled)
+    target.pop("invalid", None)
     _write_json(Path(rd) / RUN_NOTIFY, current)
-    return current
+    return read_run_notify(rd, name)
 
 
 def compose_message(rows: list[dict], *, limit_chars: int, failed_before: int = 0) -> str:
@@ -667,12 +754,24 @@ class AgentEventPump:
 
     # notifications
     def deliver(self) -> Optional[dict]:
-        config = read_notify_config(self.root)
+        """Deliver every configured hook once; returns the default hook's ledger record (the
+        historical return), else the first named hook's, else None."""
+        records = {}
+        for name, config in notify_hooks(self.root).items():
+            try:
+                records[name] = self._deliver_hook(name, config)
+            except Exception:  # noqa: BLE001 — one connection's failure must not starve the others
+                _log.warning("agent notify hook %s failed", name, exc_info=True)
+        if records.get(DEFAULT_HOOK) is not None:
+            return records[DEFAULT_HOOK]
+        return next((r for r in records.values() if r is not None), None)
+
+    def _deliver_hook(self, hook: str, config: dict) -> Optional[dict]:
         if not config or not config.get("enabled", True) or not config.get("command"):
             return None
         d = events_dir(self.root)
         state = _read_json(d / STATE, {})
-        delivery = state.get("delivery") or {}
+        delivery = _hook_delivery(state, hook)
         through = int(delivery.get("through", -1))
         now = self.clock()
         if now < float(delivery.get("next_try", 0) or 0):
@@ -683,7 +782,7 @@ class AgentEventPump:
         if not rows:
             if page["events"]:
                 self._save_delivery(state, through=page["events"][-1]["id"], attempts=0,
-                                    next_try=0, failed=delivery.get("failed", 0))
+                                    next_try=0, failed=delivery.get("failed", 0), hook=hook)
             return None
         newest_ts = max(float(r.get("ts", 0)) for r in rows)
         oldest_ts = min(float(r.get("ts", 0)) for r in rows)
@@ -695,7 +794,8 @@ class AgentEventPump:
         groups: dict[str, list[dict]] = {}
         merged_vars: dict[str, dict] = {}
         for row in rows:
-            run_cfg = read_run_notify(self.root / row["run_id"]) if row.get("run_id") else {}
+            run_cfg = (read_run_notify(self.root / row["run_id"], hook)
+                       if row.get("run_id") else {})
             if run_cfg.get("enabled") is False:
                 continue
             variables = {**config.get("vars", {}), **run_cfg.get("vars", {})}
@@ -727,11 +827,14 @@ class AgentEventPump:
                       "exit_code": result.get("exit_code"),
                       "error": _clip(result.get("error") or "", 400),
                       "command": config["command"][0], "message_chars": len(message)}
+            if hook != DEFAULT_HOOK:
+                record["hook"] = hook
             all_ok &= bool(result["ok"])
             _append_ledger(self.root, record)
         last_id = rows[-1]["id"]
         if all_ok:
-            self._save_delivery(state, through=last_id, attempts=0, next_try=0, failed=0)
+            self._save_delivery(state, through=last_id, attempts=0, next_try=0, failed=0,
+                                hook=hook)
         elif attempts >= int(config.get("max_attempts", 5)):
             _append_ledger(self.root, {"ts": now, "attempt": attempts, "status": "abandoned",
                                        "event_ids": [r["id"] for r in rows],
@@ -739,25 +842,33 @@ class AgentEventPump:
                                                        if r.get("run_id")}),
                                        "kinds": sorted({r["kind"] for r in rows}),
                                        "error": "gave up after max_attempts; the events stay in "
-                                                "the outbox"})
+                                                "the outbox",
+                                       **({"hook": hook} if hook != DEFAULT_HOOK else {})})
             self._save_delivery(state, through=last_id, attempts=0, next_try=0,
-                                failed=failed_before + 1)
+                                failed=failed_before + 1, hook=hook)
         else:
             backoff = float(config.get("retry_base_s", 30)) * (2 ** (attempts - 1))
             self._save_delivery(state, through=through, attempts=attempts,
-                                next_try=now + min(backoff, 3600), failed=failed_before)
+                                next_try=now + min(backoff, 3600), failed=failed_before,
+                                hook=hook)
         return record
 
     def _run_wanted(self, config, run_id) -> bool:
         runs = config.get("runs")
         return runs is None or run_id is None or run_id in runs
 
-    def _save_delivery(self, _state, *, through, attempts, next_try, failed):
+    def _save_delivery(self, _state, *, through, attempts, next_try, failed,
+                       hook: str = DEFAULT_HOOK):
         d = events_dir(self.root)
+        row = {"through": through, "attempts": attempts, "next_try": next_try, "failed": failed}
         with _lock(self.root):
             state = _read_json(d / STATE, {})
-            state["delivery"] = {"through": through, "attempts": attempts,
-                                 "next_try": next_try, "failed": failed}
+            if hook == DEFAULT_HOOK:
+                state["delivery"] = row
+            else:
+                hooks = state.get("delivery_hooks") if isinstance(state.get("delivery_hooks"), dict) else {}
+                hooks[hook] = row
+                state["delivery_hooks"] = hooks
             _write_json(d / STATE, state)
 
     @staticmethod
@@ -775,20 +886,37 @@ class AgentEventPump:
                 "error": "" if proc.returncode == 0 else tail}
 
 
+def _hook_delivery(state: dict, hook: str) -> dict:
+    """A hook's delivery watermark. A NEW named hook starts at the outbox's current end: it was
+    configured now, and replaying the whole retained history into a fresh agent connection is a
+    burst, not a wake-up (the default hook keeps its historical start)."""
+    if hook == DEFAULT_HOOK:
+        return state.get("delivery") or {}
+    hooks = state.get("delivery_hooks") if isinstance(state.get("delivery_hooks"), dict) else {}
+    row = hooks.get(hook)
+    if isinstance(row, dict):
+        return row
+    return {"through": int(state.get("next_id", 0)) - 1}
+
+
 def notify_status(root) -> dict:
     """The UI/API view: the configured hook (command shown, vars shown), delivery watermark, and
-    the recent ledger. Nothing secret is stored here by construction (vars are short tokens)."""
+    the recent ledger. Nothing secret is stored here by construction (vars are short tokens).
+    `hooks` lists every configured connection — the default and each named one."""
     config = read_notify_config(root)
     state = _read_json(events_dir(root) / STATE, {})
+    hooks = {name: {"config": cfg, "delivery": _hook_delivery(state, name)}
+             for name, cfg in notify_hooks(root).items()}
     return {"configured": bool(config), "config": config,
             "delivery": state.get("delivery") or {}, "newest_event_id": state.get("next_id", 0) - 1,
-            "ledger": ledger_rows(root, limit=50)}
+            "hooks": hooks, "ledger": ledger_rows(root, limit=50)}
 
 
 def run_event_summary(root, run_id: str, *, limit: int = 20) -> dict:
     page = read_outbox(root, after=-1, run_id=run_id, limit=10**6)
     events = [e for e in page["events"] if e.get("run_id") == run_id][-limit:][::-1]
     return {"events": events, "notify": read_run_notify(Path(root) / run_id),
+            "hooks": sorted(notify_hooks(root)),
             "ledger": ledger_rows(root, limit=limit, run_id=run_id)}
 
 

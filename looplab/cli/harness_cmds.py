@@ -52,6 +52,14 @@ def gpu_gate(
                                           "must have exited before this run takes a GPU. Repeatable."),
     reason: str = typer.Option("", "--reason", help="Why (shown in the UI and GPU queue)."),
     clear: bool = typer.Option(False, "--clear", help="Remove the gate entirely."),
+    after_node: list[str] = typer.Option([], "--after-node", help="DIR or DIR:NODE — start once "
+                                         "that run evaluated NODE (or its next node). Repeatable."),
+    after_stage: list[str] = typer.Option([], "--after-stage", help="DIR:STAGE or DIR:NODE:STAGE — "
+                                          "start once that stage finished. Repeatable."),
+    after_release: list[str] = typer.Option([], "--after-release", help="DIR — start once that "
+                                            "run drains and lets go of the GPUs. Repeatable."),
+    drain: Optional[bool] = typer.Option(None, "--drain/--undrain", help="Finish the GPU work "
+                                         "already running, take no new (a hold that says so)."),
 ) -> None:
     """Hold a run's GPU work or order it after other runs (`<run>/gpu_gate.json`).
 
@@ -63,17 +71,51 @@ def gpu_gate(
     from looplab.engine.gpu_queue import clear_gate, gate_blockers, read_gate, write_gate
 
     rd = Path(run_dir).expanduser().resolve()
+
+    def _abs(p: str) -> str:
+        return str(Path(p).expanduser().resolve())
+
+    def _conditions() -> list:
+        out = [_abs(p) for p in start_after]
+        for spec in after_node:
+            path, _, node = spec.rpartition(":") if spec.rpartition(":")[2].isdigit() else (spec, "", "")
+            out.append({"run": _abs(path), "until": "node_evaluated",
+                        **({"node_id": int(node)} if node else {})})
+        for spec in after_stage:
+            parts = spec.split(":")
+            if len(parts) == 3 and parts[1].isdigit():
+                out.append({"run": _abs(parts[0]), "until": "stage_done", "node_id": int(parts[1]),
+                            "stage": parts[2]})
+            elif len(parts) == 2 and parts[1]:
+                out.append({"run": _abs(parts[0]), "until": "stage_done", "stage": parts[1]})
+            else:
+                raise CliRefusal(f"--after-stage {spec!r} must be DIR:STAGE or DIR:NODE:STAGE")
+        for path in after_release:
+            out.append({"run": _abs(path), "until": "gpu_released"})
+        return out
+
     if clear:
         clear_gate(rd)
-    elif hold is not None or start_after or reason:
+    elif (hold is not None or start_after or reason or after_node or after_stage
+          or after_release or drain is not None):
         current = read_gate(rd) or {"hold": False, "start_after": []}
-        after = ([str(Path(p).expanduser().resolve()) for p in start_after]
-                 if start_after else current.get("start_after", []))
-        if any(Path(p) == rd for p in after):
+        fresh = _conditions()
+        after = fresh if fresh else [c if c["until"] != "engine_exit" else c["run"]
+                                     for c in current.get("conditions") or []]
+        if any(Path(c if isinstance(c, str) else c["run"]) == rd for c in after):
             raise CliRefusal("a run cannot start after itself")
-        write_gate(rd, hold=current.get("hold", False) if hold is None else hold,
-                   start_after=after, reason=reason or current.get("reason", ""),
-                   updated_by="cli")
+        draining = current.get("drain", False) if drain is None else drain
+        held = current.get("hold", False) if hold is None else hold
+        if hold is False:
+            draining = False                 # --release drops a drain too: it is a hold
+        elif drain is False and hold is None:
+            held = False                     # --undrain releases the hold the drain was
+        try:
+            write_gate(rd, hold=held and not draining, start_after=after,
+                       reason=reason or current.get("reason", ""), updated_by="cli",
+                       drain=draining)
+        except ValueError as exc:
+            raise CliRefusal(str(exc)) from exc
     gate = read_gate(rd)
     typer.echo(json.dumps({"run_dir": str(rd), "gate": gate, "blockers": gate_blockers(gate)},
                           ensure_ascii=False, indent=1))
@@ -99,6 +141,8 @@ def agent_notify(
     kinds: str = typer.Option(None, "--kinds", help="Comma list of event kinds to deliver."),
     disable: bool = typer.Option(False, "--disable", help="Keep the config but stop delivering."),
     clear: bool = typer.Option(False, "--clear", help="Remove the notification hook."),
+    hook: str = typer.Option(None, "--hook", help="A NAMED agent connection (e.g. codex, claude) "
+                             "with its own command, vars and delivery; omitted = the default hook."),
 ) -> None:
     """Configure the command the UI server runs to wake an external agent (operator only).
 
@@ -108,11 +152,17 @@ def agent_notify(
     from looplab.serve.agent_events import (clear_notify_config, notify_status,
                                             read_notify_config, write_notify_config)
 
+    from looplab.serve.agent_events import check_hook_name
+
     root = run_root
+    try:
+        hook = check_hook_name(hook)
+    except ValueError as exc:
+        raise CliRefusal(str(exc)) from exc
     if clear:
-        clear_notify_config(root)
+        clear_notify_config(root, hook)
     elif command or var or debounce is not None or kinds or disable:
-        body = dict(read_notify_config(root) or {})
+        body = dict(read_notify_config(root, hook) or {})
         if command:
             body["command"] = command
         if not body.get("command"):
@@ -130,7 +180,7 @@ def agent_notify(
             body["kinds"] = [k.strip() for k in kinds.split(",") if k.strip()]
         body["enabled"] = not disable
         try:
-            write_notify_config(root, body)
+            write_notify_config(root, body, hook)
         except ValueError as exc:
             raise CliRefusal(str(exc)) from exc
     typer.echo(json.dumps(notify_status(root), ensure_ascii=False, indent=1))

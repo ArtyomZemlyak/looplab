@@ -1907,12 +1907,16 @@ EVENT_PAYLOAD_KEYS: dict[str, PayloadContract] = {
         required=("attempt", "code_digest", "eval_seconds", "generation", "node_id", "passed"),
         # `retry` (1) marks the one re-run at twice the cap after a clock kill (doc 69 69.10);
         # `near_cap` a PASS that used >= 75 % of its cap. Both written only when true.
-        optional=("error", "exit_code", "failed_stage", "log_dir", "near_cap", "retry", "timed_out"),
+        # `implicit` ("sandboxed"): the operator-enabled smoke for a task declaring no canary
+        # (doc 78 leftover, 2026-10-14); `inconclusive`: that smoke died on a REFUSED WRITE, so it
+        # passed without a verdict and the full eval decided.
+        optional=("error", "exit_code", "failed_stage", "implicit", "inconclusive", "log_dir",
+                  "near_cap", "retry", "timed_out"),
     ),
     "eval_canary_started": PayloadContract(
         "An eval canary is about to run the node's stage chain on the task's tiny slice.",
         required=("attempt", "code_digest", "generation", "node_id", "timeout"),
-        optional=("retry",),
+        optional=("implicit", "retry"),
     ),
     "eval_invocation_claimed": PayloadContract(
         "One paid evaluation attempt is about to invoke the evaluator, under a reconciliable id.",
@@ -2312,7 +2316,10 @@ EVENT_PAYLOAD_KEYS: dict[str, PayloadContract] = {
     "phase_progress": PayloadContract(
         "One build/eval phase started or finished — the live activity feed's row.",
         required=("phase", "stage", "status"),
-        optional=(),
+        # The eval-stage cursor's closing row (`eval_stages.py::_stage_progress_fn`) says HOW the
+        # stage left: `outcome` (`ok`/`failed`/`timeout`/`error`, `command_eval.BEACON_OUTCOMES`)
+        # and the process `exit_code` — additive since 2026-10-14; `status` stays `finished`.
+        optional=("exit_code", "outcome"),
     ),
     "plan": PayloadContract(
         "The run's PLAN artifact: how `max_nodes` was cut into seed, search and endgame reserve.",

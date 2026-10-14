@@ -16,7 +16,7 @@ Routes (all JSON; the harness token may use every one except the operator-only h
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Optional
+from typing import Literal, Optional, Union
 
 import anyio
 from fastapi import APIRouter, HTTPException, Query, Request, Response
@@ -25,10 +25,22 @@ from pydantic import BaseModel, ConfigDict, Field
 from looplab.serve.principal import request_agent_token
 
 
+class StartCondition(BaseModel):
+    """Start after a finer event of run `run` than its engine's exit (doc 78 leftover)."""
+    model_config = ConfigDict(extra="forbid")
+    run: str = Field(max_length=255)
+    until: Literal["engine_exit", "node_evaluated", "stage_done", "gpu_released"] = "engine_exit"
+    node_id: Optional[int] = Field(default=None, ge=0)
+    stage: Optional[str] = Field(default=None, min_length=1, max_length=64)
+
+
 class GpuGateBody(BaseModel):
     model_config = ConfigDict(extra="forbid")
     hold: bool = False
-    start_after: list[str] = Field(default_factory=list, max_length=16)
+    # DRAIN: finish the GPU work already running, take no new (a hold that says why, and the
+    # state a successor's `until: gpu_released` waits for).
+    drain: bool = False
+    start_after: list[Union[str, StartCondition]] = Field(default_factory=list, max_length=16)
     reason: str = Field(default="", max_length=500)
     clear: bool = False
 
@@ -37,6 +49,16 @@ class RunNotifyBody(BaseModel):
     model_config = ConfigDict(extra="forbid")
     vars: Optional[dict[str, str]] = None
     enabled: Optional[bool] = None
+    # A named agent connection (`PUT /api/agent-notify?hook=codex`); omitted = the default hook.
+    hook: Optional[str] = Field(default=None, max_length=32)
+
+
+def _hook_param(hook: Optional[str]) -> Optional[str]:
+    from looplab.serve.agent_events import check_hook_name
+    try:
+        return check_hook_name(hook)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
 
 
 def _owner_only(request: Request, what: str) -> None:
@@ -100,41 +122,49 @@ def build_router(srv) -> APIRouter:
         return {**notify_status(srv.root), "kinds": describe_event_kinds()}
 
     @router.put("/api/agent-notify")
-    async def put_agent_notify(request: Request):
+    async def put_agent_notify(request: Request,
+                               hook: Optional[str] = Query(None, max_length=32)):
         """Configure the hook: `{command: [argv...] | "string", vars: {...}, debounce_s, ...}`.
 
         Operator only. The command runs without a shell; placeholders are `{message}`,
         `{run_id}`, `{runs}`, `{kinds}`, `{count}`, `{after}`, `{first_id}`, `{last_id}` and
-        every name in `vars` (a run may override vars via its own agent-notify)."""
+        every name in `vars` (a run may override vars via its own agent-notify). `?hook=<name>`
+        configures a NAMED agent connection beside the default one (its own command, vars, kinds,
+        runs, watermark and retries; a new one is woken only for events from now on)."""
         from looplab.serve.agent_events import write_notify_config
 
         from looplab.serve.http import json_object
 
         _owner_only(request, "configure the notification command")
+        name = _hook_param(hook)
         body = await json_object(request, "notification hook")
         try:
-            return {"ok": True, "config": await anyio.to_thread.run_sync(
-                lambda: write_notify_config(srv.root, body))}
+            return {"ok": True, "hook": name, "config": await anyio.to_thread.run_sync(
+                lambda: write_notify_config(srv.root, body, name))}
         except (ValueError, TypeError) as exc:
             raise HTTPException(400, str(exc)) from exc
 
     @router.delete("/api/agent-notify")
-    def delete_agent_notify(request: Request):
-        """Remove the hook (the outbox and ledger stay)."""
+    def delete_agent_notify(request: Request, hook: Optional[str] = Query(None, max_length=32)):
+        """Remove the hook, or the named connection `?hook=` (the outbox and ledger stay)."""
         from looplab.serve.agent_events import clear_notify_config
 
         _owner_only(request, "remove the notification command")
-        clear_notify_config(srv.root)
+        clear_notify_config(srv.root, _hook_param(hook))
         return {"ok": True}
 
     @router.post("/api/agent-notify/test")
-    def test_agent_notify(request: Request):
-        """Run the configured command once with a test message; the result lands in the ledger."""
-        from looplab.serve.agent_events import (_append_ledger, read_notify_config, render_argv)
+    def test_agent_notify(request: Request, hook: Optional[str] = Query(None, max_length=32)):
+        """Run the configured command once with a test message; the result lands in the ledger.
+
+        `?hook=<name>` tests a named agent connection instead of the default hook."""
+        from looplab.serve.agent_events import (DEFAULT_HOOK, _append_ledger, read_notify_config,
+                                                render_argv)
         import time as _time
 
         _owner_only(request, "run the notification command")
-        config = read_notify_config(srv.root)
+        name = _hook_param(hook)
+        config = read_notify_config(srv.root, name)
         if not config:
             raise HTTPException(409, "no notification hook is configured")
         pump = _pump()
@@ -154,6 +184,8 @@ def build_router(srv) -> APIRouter:
                "status": "delivered" if result["ok"] else "failed",
                "exit_code": result.get("exit_code"), "error": str(result.get("error") or "")[:400],
                "command": config["command"][0], "test": True}
+        if name != DEFAULT_HOOK:
+            row["hook"] = name
         _append_ledger(srv.root, row)
         return row
 
@@ -169,13 +201,16 @@ def build_router(srv) -> APIRouter:
     @router.put("/api/runs/{run_id}/agent-notify")
     def put_run_agent_notify(run_id: str, body: RunNotifyBody):
         """Set this run's hook variables (e.g. `{"thread": "<id>"}`) or switch its notifications
-        on/off. Values are short tokens; the command itself is the operator's."""
+        on/off — for the default hook, or for the named connection `hook`. Values are short
+        tokens; the command itself is the operator's."""
         from looplab.serve.agent_events import write_run_notify
 
         rd = srv.run_dir(run_id)
+        name = _hook_param(body.hook)
         try:
-            return {"ok": True, "notify": write_run_notify(rd, variables=body.vars,
-                                                           enabled=body.enabled)}
+            return {"ok": True, "hook": name,
+                    "notify": write_run_notify(rd, variables=body.vars, enabled=body.enabled,
+                                               hook=name)}
         except ValueError as exc:
             raise HTTPException(400, str(exc)) from exc
 
@@ -258,9 +293,12 @@ def build_router(srv) -> APIRouter:
     def put_gpu_gate(run_id: str, body: GpuGateBody):
         """Hold this run's GPU admission, or start it only after other runs' engines exit.
 
-        `{"hold": true}` takes no GPU until a later PUT with `hold: false`; `{"start_after":
-        ["run-a"]}` waits until run-a's engine is no longer running (paused, finished, aborted or
-        crashed). `{"clear": true}` removes the gate. CPU-only work is never gated. The engine
+        `{"hold": true}` takes no GPU until a later PUT with `hold: false`; `{"drain": true}` is a
+        hold that lets the GPU work already running finish. `{"start_after": ["run-a"]}` waits
+        until run-a's engine is no longer running (paused, finished, aborted or crashed); an entry
+        `{"run": "run-a", "until": "node_evaluated"|"stage_done"|"gpu_released", "node_id"?,
+        "stage"?}` waits for that event of run-a instead (any condition also opens when run-a's
+        engine exits). `{"clear": true}` removes the gate. CPU-only work is never gated. The engine
         re-reads the gate on every admission poll; a cycle of start_after edges is refused."""
         from looplab.engine.gpu_queue import clear_gate, gate_blockers, read_gate, write_gate
 
@@ -268,17 +306,28 @@ def build_router(srv) -> APIRouter:
         if body.clear:
             clear_gate(rd)
             return {"run_id": run_id, "gate": None, "blockers": []}
-        targets = []
+        targets, entries = [], []
         for other in body.start_after:
-            if other == run_id:
+            cond = other if isinstance(other, StartCondition) else StartCondition(run=other)
+            if cond.run == run_id:
                 raise HTTPException(400, "a run cannot start after itself")
-            targets.append(srv.run_dir(other))          # 404 for an unknown run
+            if cond.until == "stage_done" and not cond.stage:
+                raise HTTPException(400, "until=stage_done names the stage")
+            target = srv.run_dir(cond.run)               # 404 for an unknown run
+            targets.append(target)
+            entries.append(str(target) if cond.until == "engine_exit" else
+                           {"run": str(target), "until": cond.until,
+                            **({"node_id": cond.node_id} if cond.node_id is not None else {}),
+                            **({"stage": cond.stage} if cond.stage else {})})
         edges = {g["run_id"]: set(g["start_after_ids"]) for g in _gates()}
         edges[run_id] = {Path(t).name for t in targets}
         if _has_cycle(edges):
             raise HTTPException(409, "start_after would create a cycle; no run could ever start")
-        gate = write_gate(rd, hold=body.hold, start_after=[str(t) for t in targets],
-                          reason=body.reason, updated_by="api")
+        try:
+            gate = write_gate(rd, hold=body.hold, start_after=entries, reason=body.reason,
+                              updated_by="api", drain=body.drain)
+        except ValueError as exc:
+            raise HTTPException(400, str(exc)) from exc
         return {"run_id": run_id, "gate": read_gate(rd) or gate,
                 "blockers": gate_blockers(read_gate(rd))}
 

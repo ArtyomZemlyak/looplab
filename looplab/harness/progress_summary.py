@@ -163,6 +163,8 @@ def brief(progress: dict) -> dict:
         result["agent_activity"] = progress["agent_activity"]
     if "operator_directions" in progress:
         result["operator_directions"] = progress["operator_directions"]
+    if "canary_preflight" in progress:
+        result["canary_preflight"] = progress["canary_preflight"]
     nodes = progress["finish_pending_nodes"]
     result.update(finish_pending_nodes=nodes[:20], finish_pending_node_count=len(nodes),
                   finish_pending_nodes_truncated=len(nodes) > 20)

@@ -372,8 +372,47 @@ def gate_path(run_dir) -> Path:
     return Path(run_dir) / GATE_FILE
 
 
+# WHAT A `start_after` ENTRY WAITS FOR (doc 78 leftover, 2026-10-14). A bare run directory (the
+# historical shape) waits for its ENGINE TO EXIT. An object `{run, until, node_id?, stage?}` waits
+# for something finer, read off the predecessor's own event log:
+#   * `node_evaluated` — a terminal (`node_evaluated` / `node_failed`) for `node_id`, or for any node
+#     after the gate was written when no `node_id` is named;
+#   * `stage_done`     — a `stage_finished` row of `stage` (of `node_id` when named) after the gate;
+#   * `gpu_released`   — the predecessor takes no new GPU work (its own gate holds or DRAINS) and
+#     does not hold the host lease now: "start B as soon as A's current evaluation lets go".
+# Every condition is also met when the predecessor's engine has EXITED: an engine that is gone
+# can produce no later row, and waiting for one would be a deadlock, not an order.
+# An object entry makes an OLD engine read the gate as malformed — a HOLD — which is the fail-closed
+# direction (it never starts GPUs early); only an engine that understands the condition opens it.
+START_CONDITIONS = ("engine_exit", "node_evaluated", "stage_done", "gpu_released")
+_LOG_SCAN_CHUNK = 8 * 1024 * 1024
+
+
+def _normalize_condition(item) -> Optional[dict]:
+    """One `start_after` entry as `{run, until, node_id, stage, after_seq}`, or None if invalid."""
+    if isinstance(item, str) and item:
+        return {"run": item, "until": "engine_exit", "node_id": None, "stage": None,
+                "after_seq": None}
+    if not isinstance(item, dict):
+        return None
+    run, until = item.get("run"), item.get("until", "engine_exit")
+    node_id, stage, after_seq = item.get("node_id"), item.get("stage"), item.get("after_seq")
+    if not isinstance(run, str) or not run or until not in START_CONDITIONS:
+        return None
+    if node_id is not None and (type(node_id) is not int or node_id < 0):
+        return None
+    if stage is not None and (not isinstance(stage, str) or not stage or len(stage) > 64):
+        return None
+    if until == "stage_done" and stage is None:
+        return None
+    if after_seq is not None and type(after_seq) is not int:
+        return None
+    return {"run": run, "until": until, "node_id": node_id, "stage": stage, "after_seq": after_seq}
+
+
 def read_gate(run_dir) -> Optional[dict]:
-    """The run's gate as `{hold, start_after: [abs dir], reason, updated_at}`, or None.
+    """The run's gate as `{hold, drain, start_after: [abs dir], conditions: [...], reason,
+    updated_at}`, or None.
 
     A malformed file is a HOLD with a reason, never "no gate": an operator who wrote a gate meant
     to stop GPU work, and a typo must not silently start it."""
@@ -386,23 +425,49 @@ def read_gate(run_dir) -> Optional[dict]:
                 "malformed": True}
     hold = data.get("hold", False)
     after = data.get("start_after", [])
-    if (not isinstance(hold, bool) or not isinstance(after, list)
-            or not all(isinstance(item, str) and item for item in after)
-            or len(after) > MAX_START_AFTER):
+    drain = data.get("drain", False)
+    conditions = ([_normalize_condition(item) for item in after]
+                  if isinstance(after, list) else [None])
+    if (not isinstance(hold, bool) or not isinstance(drain, bool) or not isinstance(after, list)
+            or any(c is None for c in conditions) or len(after) > MAX_START_AFTER):
         return {"hold": True, "start_after": [], "reason": "gpu_gate.json has an invalid shape",
                 "malformed": True}
     reason = data.get("reason") if isinstance(data.get("reason"), str) else ""
-    return {"hold": hold, "start_after": list(after), "reason": reason[:500],
+    return {"hold": hold or drain, "drain": drain,
+            "start_after": [c["run"] for c in conditions], "conditions": conditions,
+            "reason": reason[:500],
             "updated_at": data.get("updated_at"), "updated_by": data.get("updated_by")}
 
 
-def write_gate(run_dir, *, hold: bool, start_after: list[str], reason: str = "",
-               updated_by: str = "") -> dict:
-    """Atomically publish a gate; `start_after` entries are run DIRECTORIES (absolute)."""
+def write_gate(run_dir, *, hold: bool, start_after: list, reason: str = "",
+               updated_by: str = "", drain: bool = False) -> dict:
+    """Atomically publish a gate. `start_after` entries are run DIRECTORIES (wait for the engine to
+    exit) or condition objects `{run, until, node_id?, stage?}` (see `START_CONDITIONS`). A
+    condition with no `node_id` is pinned to the predecessor's log as it is NOW (`after_seq`), so
+    only a LATER terminal or stage counts. `drain` = take no new GPU work, finish what runs."""
     if len(start_after) > MAX_START_AFTER:
         raise ValueError(f"start_after names at most {MAX_START_AFTER} runs")
-    body = {"version": 1, "hold": bool(hold),
-            "start_after": [str(Path(item).resolve()) for item in start_after],
+    entries = []
+    for item in start_after:
+        cond = _normalize_condition(item)
+        if cond is None:
+            raise ValueError(f"invalid start_after entry {item!r}: a run directory or "
+                             f"{{run, until: {'|'.join(START_CONDITIONS)}, node_id?, stage?}}")
+        run = str(Path(cond["run"]).resolve())
+        if cond["until"] == "engine_exit":
+            entries.append(run)
+            continue
+        out = {"run": run, "until": cond["until"]}
+        if cond["node_id"] is not None:
+            out["node_id"] = cond["node_id"]
+        if cond["stage"] is not None:
+            out["stage"] = cond["stage"]
+        if cond["until"] in ("node_evaluated", "stage_done") and cond["node_id"] is None:
+            out["after_seq"] = (cond["after_seq"] if cond["after_seq"] is not None
+                                else _scan_log(Path(run)).last_seq)
+        entries.append(out)
+    body = {"version": 1, "hold": bool(hold or drain), "drain": bool(drain),
+            "start_after": entries,
             "reason": str(reason or "")[:500], "updated_by": str(updated_by or "")[:40],
             "updated_at": time.time()}
     run_dir = Path(run_dir)
@@ -421,8 +486,139 @@ def clear_gate(run_dir) -> None:
         pass
 
 
+class _LogScan:
+    """What a predecessor's log said so far: terminals by node, finished stages, last seq.
+
+    Read INCREMENTALLY (only bytes appended since the last scan, complete lines only, at most
+    `_LOG_SCAN_CHUNK` per call) and cached per path in this process, because the engine asks on
+    every admission poll and a predecessor's log can be hundreds of MB."""
+
+    def __init__(self):
+        self.identity = None
+        self.offset = 0
+        self.last_seq = -1
+        self.terminals: dict[int, int] = {}            # node_id -> seq of its LATEST terminal
+        self.stages: list[tuple] = []                  # (node_id, stage name, seq)
+
+    def advance(self, path: Path) -> None:
+        try:
+            st = path.stat()
+        except OSError:
+            return
+        ident = (st.st_dev, st.st_ino)
+        if ident != self.identity or st.st_size < self.offset:
+            self.__init__()
+            self.identity = ident
+        if st.st_size <= self.offset:
+            return
+        try:
+            with open(path, "rb") as fh:
+                fh.seek(self.offset)
+                data = fh.read(min(_LOG_SCAN_CHUNK, st.st_size - self.offset))
+        except OSError:
+            return
+        cut = data.rfind(b"\n")
+        if cut < 0:
+            return
+        lines = data[:cut + 1].splitlines()
+        for line in lines:
+            self._row(line)
+        for line in reversed(lines):                    # the seq cursor: the last complete row
+            try:
+                seq = json.loads(line).get("seq")
+            except (ValueError, AttributeError):
+                continue
+            if type(seq) is int:
+                self.last_seq = max(self.last_seq, seq)
+                break
+        self.offset += cut + 1
+
+    def _row(self, line: bytes) -> None:
+        # Only the three row types a condition reads are parsed; the rest is skipped on bytes.
+        if not (b'"node_evaluated"' in line or b'"node_failed"' in line
+                or b'"stage_finished"' in line):
+            return
+        try:
+            row = json.loads(line)
+        except ValueError:
+            return
+        if not isinstance(row, dict):
+            return
+        seq = row.get("seq")
+        if type(seq) is int:
+            self.last_seq = max(self.last_seq, seq)
+        etype, data = row.get("type"), row.get("data")
+        if not isinstance(data, dict) or type(seq) is not int:
+            return
+        node = data.get("node_id")
+        if etype in ("node_evaluated", "node_failed") and type(node) is int:
+            self.terminals[node] = seq
+        elif etype == "stage_finished":
+            name = data.get("stage") or data.get("name")
+            if isinstance(name, str):
+                self.stages.append((node if type(node) is int else None, name, seq))
+                del self.stages[:-4096]
+
+
+_LOG_SCANS: dict[str, _LogScan] = {}
+
+
+def _scan_log(run_dir: Path) -> _LogScan:
+    key = str(Path(run_dir) / "events.jsonl")
+    scan = _LOG_SCANS.setdefault(key, _LogScan())
+    scan.advance(Path(key))
+    return scan
+
+
+def _holds_lease(run_dir: Path) -> Optional[bool]:
+    """Does `run_dir`'s engine hold the host GPU lease now? None when it cannot be told."""
+    from looplab.engine import resources
+
+    try:
+        status = queue_status(resources.default_gpu_host_lease_path())
+    except Exception:  # noqa: BLE001 — an unknowable holder keeps the successor waiting (None)
+        return None
+    if status.get("lease_held") is False:
+        return False
+    holder = status.get("holder") or {}
+    if status.get("lease_held") is None or holder.get("unverified"):
+        return None
+    if not holder.get("run_dir"):
+        return None
+    try:
+        return Path(holder["run_dir"]).resolve() == Path(run_dir).resolve()
+    except OSError:
+        return None
+
+
+def _condition_open(cond: dict, alive) -> bool:
+    if alive is False:
+        return True
+    run = Path(cond["run"])
+    until = cond["until"]
+    if until == "engine_exit":
+        return False
+    if until == "gpu_released":
+        pred = read_gate(run)
+        if not (pred and pred.get("hold")):
+            return False
+        return _holds_lease(run) is False
+    scan = _scan_log(run)
+    floor = cond.get("after_seq")
+    floor = -1 if floor is None else floor
+    if until == "node_evaluated":
+        if cond.get("node_id") is not None:
+            return cond["node_id"] in scan.terminals
+        return any(seq > floor for seq in scan.terminals.values())
+    if until == "stage_done":
+        return any(name == cond["stage"] and seq > floor
+                   and (cond.get("node_id") is None or node == cond["node_id"])
+                   for node, name, seq in scan.stages)
+    return False
+
+
 def gate_blockers(gate: Optional[dict], *, liveness=None) -> list[dict]:
-    """What the gate is still waiting for: `[{kind: hold|start_after, ...}]`; empty = open.
+    """What the gate is still waiting for: `[{kind: hold|drain|start_after, ...}]`; empty = open.
 
     `liveness(Path) -> True|False|None` is `run_lifecycle.engine_liveness`; an INCONCLUSIVE probe
     keeps waiting (a predecessor we cannot judge has not provably released the GPUs)."""
@@ -430,16 +626,27 @@ def gate_blockers(gate: Optional[dict], *, liveness=None) -> list[dict]:
         return []
     blockers = []
     if gate.get("hold"):
-        blockers.append({"kind": "hold", "reason": gate.get("reason") or "held"})
-    if gate.get("start_after"):
+        blockers.append({"kind": "drain" if gate.get("drain") else "hold",
+                         "reason": gate.get("reason") or ("draining" if gate.get("drain")
+                                                          else "held")})
+    conditions = gate.get("conditions")
+    if conditions is None:
+        conditions = [_normalize_condition(item) for item in gate.get("start_after") or []]
+    if conditions:
         if liveness is None:
             from looplab.engine.run_lifecycle import engine_liveness as liveness
-        for item in gate["start_after"]:
-            alive = liveness(Path(item))
-            if alive is not False:
-                blockers.append({"kind": "start_after", "run_dir": item,
-                                 "run_id": Path(item).name,
-                                 "engine_running": alive})
+        for cond in conditions:
+            if cond is None:
+                continue
+            alive = liveness(Path(cond["run"]))
+            if _condition_open(cond, alive):
+                continue
+            row = {"kind": "start_after", "run_dir": cond["run"], "run_id": Path(cond["run"]).name,
+                   "engine_running": alive, "until": cond["until"]}
+            for key in ("node_id", "stage"):
+                if cond.get(key) is not None:
+                    row[key] = cond[key]
+            blockers.append(row)
     return blockers
 
 
@@ -477,7 +684,7 @@ class GateReader:
         if self._checked_at is None or now - self._checked_at >= _GATE_PROBE_INTERVAL_S:
             self._checked_at = now
             self._blockers = gate_blockers(self._gate, liveness=self._liveness)
-            key = tuple((b["kind"], b.get("run_dir")) for b in self._blockers)
+            key = tuple((b["kind"], b.get("run_dir"), b.get("until")) for b in self._blockers)
             if key != self._announced:
                 self._announced = key
                 if self._blockers:
@@ -489,6 +696,13 @@ class GateReader:
 
 
 def _describe(blocker: dict) -> str:
-    if blocker["kind"] == "hold":
-        return f"hold ({blocker.get('reason') or 'held'})"
-    return f"waiting for run {blocker.get('run_id')} to stop its engine"
+    if blocker["kind"] in ("hold", "drain"):
+        return f"{blocker['kind']} ({blocker.get('reason') or 'held'})"
+    until = blocker.get("until", "engine_exit")
+    what = {"engine_exit": "to stop its engine",
+            "node_evaluated": (f"to finish node {blocker['node_id']}" if "node_id" in blocker
+                               else "to finish its next node"),
+            "stage_done": f"to finish stage {blocker.get('stage')}"
+                          + (f" of node {blocker['node_id']}" if "node_id" in blocker else ""),
+            "gpu_released": "to drain and release the GPUs"}.get(until, until)
+    return f"waiting for run {blocker.get('run_id')} {what}"

@@ -427,3 +427,104 @@ def canary_already_passed(events, node_id: int, generation: int, code_digest: st
                 and d.get("code_digest") == code_digest and d.get("passed") is True):
             return True
     return False
+
+
+# ------------------------------------------------------------------- the IMPLICIT sandboxed smoke
+# doc 78 leftover (2026-10-14). The canary needs `eval.canary`; an external agent that declared none
+# got no preflight at all, and a SMOKE canary run with the real environment can write the real
+# absolute paths a script names (doc 78 §5 tells the author to redirect them through `canary.env`).
+# The SANDBOXED smoke closes both: when the run's OPERATOR opts in (`harness_policy.json`
+# `implicit_canary: "sandboxed"`, owner token only) an undeclared task gets a smoke canary whose
+# process tree may WRITE only its scratch tree — a Landlock ruleset (read anywhere, write the
+# scratch, the device nodes minus `/dev/shm`, `/proc`, `/sys`), `TMPDIR` and the compiler caches
+# pointed into the scratch. A refused write is NOT a verdict on the candidate: a smoke that died on
+# a permission error is INCONCLUSIVE and the full eval proceeds; only a crash with no permission
+# denial in its output (an unknown CLI flag, an ImportError) fails the canary.
+# Without Landlock on the kernel there is no safe sandbox, so nothing runs and the contract says so.
+IMPLICIT_CANARY_MODES = ("off", "sandboxed")
+IMPLICIT_CANARY_TIMEOUT_S = 120.0
+_POLICY_FILE = "harness_policy.json"
+_DENIAL_MARKERS = ("Permission denied", "PermissionError", "EACCES", "[Errno 13]",
+                   "Read-only file system", "Operation not permitted", "[Errno 30]",
+                   "LOOPLAB landlock:")      # the launcher could not build the sandbox at all
+
+
+def implicit_canary_policy(run_dir) -> dict:
+    """`{mode, timeout}` from the run's operator policy (`harness_policy.json`); `off` when the file
+    is absent, unreadable or says anything else. Read by the engine on every canary decision, so an
+    operator switching it on takes effect at the next attempt without a restart."""
+    import json
+    from pathlib import Path
+
+    try:
+        data = json.loads((Path(run_dir) / _POLICY_FILE).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {"mode": "off"}
+    mode = data.get("implicit_canary") if isinstance(data, dict) else None
+    if mode not in IMPLICIT_CANARY_MODES:
+        return {"mode": "off"}
+    timeout = data.get("implicit_canary_timeout", IMPLICIT_CANARY_TIMEOUT_S)
+    if type(timeout) not in (int, float) or not (0 < timeout <= 3600):
+        timeout = IMPLICIT_CANARY_TIMEOUT_S
+    return {"mode": mode, "timeout": float(timeout)}
+
+
+def implicit_canary_unavailable() -> Optional[str]:
+    """Why a sandboxed smoke cannot be built on this box, or None."""
+    from looplab.runtime import landlock
+
+    return landlock.unavailable_reason()
+
+
+def implicit_canary_spec(timeout: float) -> dict:
+    """The spec `_run_eval` runs for an undeclared task: a SMOKE whose writes are sandboxed."""
+    return {"env": {CANARY_ENV: "1"}, "timeout": float(timeout), "mode": "smoke",
+            "sandbox": True, "implicit": True}
+
+
+def sandboxed_env(env: Optional[dict], scratch) -> dict:
+    """`env` with the canary's write sandbox: a Landlock allow-list (`LOOPLAB_LANDLOCK_ALLOWLIST`,
+    applied by `runtime/sandbox.py::run_argv` around every launch, which adds the launch's own cwd)
+    and the scratch-local temp/cache directories. Reads keep what the engine's own allow-list
+    granted (read-only), or everything when the run has none."""
+    import os
+    from pathlib import Path
+
+    from looplab.runtime import landlock
+
+    scratch = Path(scratch).resolve()
+    tmp = scratch / ".canary-tmp"
+    tmp.mkdir(parents=True, exist_ok=True)
+    out = dict(env or {})
+    existing = landlock.parse_env(out.get(landlock.LANDLOCK_ENV) or "")
+    rules = ([(path, "read") for path, _mode in existing] if existing else [("/", "read")])
+    rules.append((str(scratch), "readwrite"))
+    try:
+        devices = sorted(n for n in os.listdir("/dev") if n not in ("shm", "mqueue"))
+    except OSError:
+        devices = []
+    # Only real directories and device nodes: under an allow-list a rule the launcher cannot add
+    # REFUSES the whole launch (`landlock.py::_LAUNCHER`), and `/dev` carries LINKS that resolve to a
+    # pipe or nothing (`/dev/stderr` -> `/proc/self/fd/2` failed with EBADFD on this box). The
+    # standard streams need no rule: they are inherited descriptors, which Landlock does not check.
+    import stat as _stat
+    for n in devices:
+        path = os.path.join("/dev", n)
+        try:
+            mode = os.lstat(path).st_mode
+        except OSError:
+            continue
+        if _stat.S_ISDIR(mode) or _stat.S_ISCHR(mode) or _stat.S_ISBLK(mode):
+            rules.append((path, "readwrite"))
+    rules += [("/proc", "readwrite"), ("/sys", "readwrite")]
+    out[landlock.LANDLOCK_ENV] = landlock.format_env(rules)
+    for name in ("TMPDIR", "TMP", "TEMP", "TRITON_CACHE_DIR", "TORCHINDUCTOR_CACHE_DIR",
+                 "MPLCONFIGDIR", "CUDA_CACHE_PATH"):
+        out[name] = str(tmp)
+    return out
+
+
+def sandbox_denied(res) -> bool:
+    """Did the sandboxed smoke die on a REFUSED WRITE (inconclusive) rather than on its own code?"""
+    text = f"{getattr(res, 'stdout', '') or ''}\n{getattr(res, 'stderr', '') or ''}"
+    return any(marker in text for marker in _DENIAL_MARKERS)

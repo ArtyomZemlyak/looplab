@@ -58,7 +58,8 @@ AMENDMENT_KINDS = ("experiment", "task", "files", "budget")
 # The operator's amendment levels, each including the ones before it.
 POLICY_LEVELS = ("off", "experiments", "inputs", "all")
 _LEVEL_FOR_KIND = {"experiment": "experiments", "task": "inputs", "files": "all", "budget": "experiments"}
-DEFAULT_POLICY = {"amendments": "all", "max_agent_added_nodes": None}
+DEFAULT_POLICY = {"amendments": "all", "max_agent_added_nodes": None, "implicit_canary": "off",
+                  "implicit_canary_timeout": 120.0}
 
 SLUG_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
 METRIC_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9@._:/+-]{0,63}$")
@@ -125,6 +126,11 @@ def read_policy(rd: Path) -> dict:
         cap = raw.get("max_agent_added_nodes")
         if cap is None or (isinstance(cap, int) and not isinstance(cap, bool) and cap >= 0):
             policy["max_agent_added_nodes"] = cap
+        if raw.get("implicit_canary") in ("off", "sandboxed"):
+            policy["implicit_canary"] = raw["implicit_canary"]
+        timeout = raw.get("implicit_canary_timeout")
+        if type(timeout) in (int, float) and 0 < timeout <= 3600:
+            policy["implicit_canary_timeout"] = float(timeout)
         for key in ("updated_at", "updated_by", "note"):
             if key in raw:
                 policy[key] = raw[key]
@@ -143,7 +149,14 @@ def write_policy(rd: Path, body: dict) -> dict:
     note = body.get("note")
     if note is not None and (not isinstance(note, str) or len(note) > 1000):
         raise HTTPException(400, "note must be a string of at most 1000 characters")
-    policy = {"amendments": level, "max_agent_added_nodes": cap, "updated_at": time.time(),
+    implicit = body.get("implicit_canary", "off")
+    if implicit not in ("off", "sandboxed"):
+        raise HTTPException(400, "implicit_canary must be off or sandboxed")
+    timeout = body.get("implicit_canary_timeout", 120.0)
+    if type(timeout) not in (int, float) or not 0 < timeout <= 3600:
+        raise HTTPException(400, "implicit_canary_timeout must be within (0, 3600] seconds")
+    policy = {"amendments": level, "max_agent_added_nodes": cap, "implicit_canary": implicit,
+              "implicit_canary_timeout": float(timeout), "updated_at": time.time(),
               "updated_by": "operator", **({"note": note} if note else {})}
     atomic_write_text(Path(rd) / POLICY, json.dumps(policy, indent=2))
     return {**policy, "source": POLICY}

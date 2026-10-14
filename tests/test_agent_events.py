@@ -322,3 +322,71 @@ def test_agent_notify_and_events_cli(tmp_path):
     cleared = json.loads(runner.invoke(app, ["agent-notify", "--run-root", str(root),
                                              "--clear"]).output)
     assert cleared["configured"] is False
+
+
+def test_named_agent_connections_deliver_independently(tmp_path):
+    """doc 78 leftover (2026-10-14): one hook per run root could wake ONE agent. A named connection
+    has its own command, vars, watermark and retries: a failing `codex` bridge neither blocks nor
+    re-delivers what `claude` is told, and a new connection starts at the outbox's end."""
+    root = tmp_path / "runs"
+    (root / "r").mkdir(parents=True)
+    ae.append_events(root, [{"run_id": "r", "kind": "run_idle", "key": "old", "summary": "old"}])
+    calls = {"codex": [], "claude": []}
+
+    def runner(argv, timeout):
+        calls[argv[0]].append(argv)
+        return ({"ok": False, "exit_code": 1, "error": "busy"} if argv[0] == "codex"
+                else {"ok": True, "exit_code": 0})
+
+    pump = ae.AgentEventPump(SimpleNamespace(root=root), clock=_Clock(), runner=runner)
+    ae.write_notify_config(root, {"command": ["codex", "{thread}", "{message}"],
+                                  "vars": {"thread": "C-1"}, "debounce_s": 0}, "codex")
+    ae.write_notify_config(root, {"command": ["claude", "{message}"], "debounce_s": 0,
+                                  "kinds": ["node_failed"]}, "claude")
+    ae.write_run_notify(root / "r", variables={"thread": "C-run"}, hook="codex")
+    ae.append_events(root, [{"run_id": "r", "kind": "node_failed", "key": "new", "summary": "boom"}])
+    _rewrite_outbox_ts(root, pump.clock() - 1)
+    pump.deliver()
+    assert len(calls["codex"]) == 1 and calls["codex"][0][1] == "C-run"
+    assert len(calls["claude"]) == 1 and "old" not in calls["claude"][0][1]   # starts from now
+    assert "#1 node_failed" in calls["claude"][0][1]
+    pump.clock.t += 1
+    pump.deliver()
+    assert len(calls["claude"]) == 1 and len(calls["codex"]) == 1     # codex backs off alone
+    hooks = {r.get("hook") for r in ae.ledger_rows(root)}
+    assert hooks == {"codex", "claude"}
+    status = ae.notify_status(root)
+    assert set(status["hooks"]) == {"codex", "claude"} and status["configured"] is False
+    assert status["hooks"]["codex"]["delivery"]["attempts"] == 1
+    with pytest.raises(ValueError):
+        ae.write_notify_config(root, {"command": ["x"]}, "../evil")
+    ae.clear_notify_config(root, "codex")
+    assert set(ae.notify_status(root)["hooks"]) == {"claude"}
+    assert ae.read_run_notify(root / "r", "codex")["vars"] == {"thread": "C-run"}
+    assert "vars" not in ae.read_run_notify(root / "r")          # the default hook is untouched
+
+
+def test_named_connection_routes(tmp_path, monkeypatch):
+    monkeypatch.setenv("LOOPLAB_UI_TOKEN", "owner-token-123456")
+    monkeypatch.setenv("LOOPLAB_HARNESS_TOKEN", "agent-token-654321")
+    root = tmp_path / "runs"
+    _external_run(root)
+    client = TestClient(make_app(root))
+    agent = {"X-LoopLab-Token": "agent-token-654321"}
+    owner = {"X-LoopLab-Token": "owner-token-123456"}
+    body = {"command": ["claude-wake", "{message}"]}
+    assert client.put("/api/agent-notify?hook=claude", json=body, headers=agent).status_code == 403
+    assert client.put("/api/agent-notify?hook=../x", json=body, headers=owner).status_code == 400
+    r = client.put("/api/agent-notify?hook=claude", json=body, headers=owner)
+    assert r.status_code == 200 and r.json()["hook"] == "claude"
+    r = client.put("/api/runs/demo/agent-notify", json={"hook": "claude", "enabled": False},
+                   headers=agent)
+    assert r.status_code == 200 and r.json()["notify"] == {"enabled": False}
+    status = client.get("/api/agent-notify", headers=agent).json()
+    assert "claude" in status["hooks"] and status["configured"] is False
+    monkeypatch.setattr(ae.AgentEventPump, "_run_command",
+                        staticmethod(lambda argv, t: {"ok": True, "exit_code": 0}))
+    tested = client.post("/api/agent-notify/test?hook=claude", headers=owner).json()
+    assert tested["hook"] == "claude" and tested["status"] in ("delivered", "failed")
+    assert client.delete("/api/agent-notify?hook=claude", headers=owner).json()["ok"] is True
+    assert "claude" not in client.get("/api/agent-notify", headers=owner).json()["hooks"]

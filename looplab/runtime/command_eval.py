@@ -3052,7 +3052,7 @@ def absent_metric_subject() -> dict:
     return _ms.absent_declaration()
 
 
-def _stage_beacon(ex: _EvalExec, name: str, index: int, total: int, status: str) -> None:
+def _stage_beacon(ex: _EvalExec, name: str, index: int, total: int, status: str, extra: Optional[dict] = None) -> None:
     """Publish the live stage cursor, and NEVER fail the eval for it.
 
     Contained exactly as `stage_key_fn` is, and for the reason `Engine._progress` states: an
@@ -3073,9 +3073,20 @@ def _stage_beacon(ex: _EvalExec, name: str, index: int, total: int, status: str)
     if callback is None:
         return
     try:
-        callback({"name": name, "index": index, "total": total, "status": status})
+        callback({"name": name, "index": index, "total": total, "status": status,
+                  **(extra or {})})
     except Exception:  # noqa: BLE001 - observability must never take down the work it reports on
         pass
+
+
+# The `outcome` vocabulary of a closing stage beacon, the same words a stage ROW uses for the same
+# three cases (`ok` / `fail` / `timeout` below are the row's; the beacon says `failed`, a word for a
+# reader, plus `error` for a body that raised). A literal set so a reader can branch on it.
+BEACON_OUTCOMES = ("ok", "failed", "timeout", "error")
+
+
+def _beacon_outcome(rc, timed_out) -> str:
+    return "timeout" if timed_out else ("ok" if rc == 0 else "failed")
 
 
 @contextmanager
@@ -3094,10 +3105,22 @@ def _stage_cursor(ex: _EvalExec, name: str, index: int, total: int):
     were written for.
     """
     _stage_beacon(ex, name, index, total, "started")
+    # HOW THE STAGE LEFT (doc 78 leftover, 2026-10-14). The close beacon used to say only
+    # "finished", so a stage that crashed read exactly like one that succeeded on every surface that
+    # reads beacons — the failure was visible only on the later `stage_finished` row and in
+    # `failure_forensics`. The body records `exit_code`/`outcome` in `close` once its process
+    # returns; a body that RAISES (a cancel, a tree-kill surfacing as an exception) closes as
+    # `error`. The status word stays `finished` so every reader keyed on the open/closed PAIR
+    # (`buildingModel.js::openPhases`, `stop_account`) is unchanged; `outcome` is additive.
+    close: dict = {}
+    returned = False
     try:
-        yield
+        yield close
+        returned = True
     finally:
-        _stage_beacon(ex, name, index, total, "finished")
+        if not returned:
+            close.setdefault("outcome", "error")
+        _stage_beacon(ex, name, index, total, "finished", close)
 
 
 # WHAT A STAGE ROW'S `status` MAY SAY. `_run_stages` below is the only writer of these; every other
@@ -3332,7 +3355,7 @@ def _run_stages(stages: list, ex: _EvalExec, *, timeout: float, start_stage: Opt
         # cursor opened there would name a stage that is not running. Its sibling `stage_started`
         # span just below answers the same question for the TRACE; this answers it for the run-level
         # status surfaces, which do not read spans.
-        with _stage_cursor(ex, _sname, _i, len(stages)), \
+        with _stage_cursor(ex, _sname, _i, len(stages)) as _close, \
                 ex.span(_sname, kind="operation", sandboxed=bool(ex.wrap), stage=_sname) as _sh:
             # Live-band anchor: a training subprocess emits NO child LLM/tool spans, and this stage's
             # operation span is written to spans.jsonl only on CLOSE (tracing.Tracer.span), so without
@@ -3369,6 +3392,7 @@ def _run_stages(stages: list, ex: _EvalExec, *, timeout: float, start_stage: Opt
                 deadline_grace_max_s=ex.deadline_grace_max_s)
             run.timed_out = _timed_out(run.timed_out, run.rc, ex.is_docker)
             run.out_is_this_stage = True
+            _close.update(exit_code=run.rc, outcome=_beacon_outcome(run.rc, run.timed_out))
             if _sh is not None:
                 _sh.set_many(exit_code=run.rc, timed_out=run.timed_out, stage=_sname)
         _status = "timeout" if run.timed_out else ("ok" if run.rc == 0 else "fail")
@@ -3582,7 +3606,7 @@ def _run_single(command: list, ex: _EvalExec, *, timeout: float) -> _EvalRun:
     # which is what this branch is: `eval_log_plan` grants this command `LOG_ROLE_TRAINING` on the
     # ground that it "IS the training (train->eval in one process, often multi-hour)", so the cursor
     # must not go silent here just because nobody wrote a manifest. `1 of 1` is the honest count.
-    with _stage_cursor(ex, "eval", 0, 1), \
+    with _stage_cursor(ex, "eval", 0, 1) as _close, \
             ex.span("command", sandboxed=bool(ex.wrap)) as _h:
         # Live-band anchor (see the multi-stage branch): flush a child the instant the single eval
         # command starts, so the "Evaluate" block shows live instead of only when the command ends.
@@ -3617,6 +3641,7 @@ def _run_single(command: list, ex: _EvalExec, *, timeout: float) -> _EvalRun:
             signals=run.signals, on_deadline=ex.on_deadline,
             deadline_grace_max_s=ex.deadline_grace_max_s)
         run.timed_out = _timed_out(run.timed_out, run.rc, ex.is_docker)
+        _close.update(exit_code=run.rc, outcome=_beacon_outcome(run.rc, run.timed_out))
         if _h is not None:
             _h.set_many(exit_code=run.rc, timed_out=run.timed_out)
     return run

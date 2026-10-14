@@ -31,7 +31,7 @@ vocabulary a client may append is `serve/protocol.py::CONTROL_EVENTS`.
 |---|---|---|---|---|
 | `GET` | `/api/agent-notify` | The operator's notification hook, its delivery watermark and the recent ledger. | — |  |
 | `PUT` | `/api/agent-notify` | Configure the hook: `{command: [argv...] \| "string", vars: {...}, debounce_s, ...}`. | — |  |
-| `DELETE` | `/api/agent-notify` | Remove the hook (the outbox and ledger stay). | — |  |
+| `DELETE` | `/api/agent-notify` | Remove the hook, or the named connection `?hook=` (the outbox and ledger stay). | — |  |
 | `POST` | `/api/agent-notify/test` | Run the configured command once with a test message; the result lands in the ledger. | — |  |
 
 ### `/api/assistant`

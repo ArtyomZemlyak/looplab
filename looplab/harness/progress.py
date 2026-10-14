@@ -86,6 +86,43 @@ def _operator_directions(state) -> dict:
                        "candidate permit and no gate checks them"}
 
 
+def canary_preflight(rd: Path) -> dict:
+    """What preflight a candidate of this run gets before its full evaluation (doc 78 §5 + its
+    leftover): the task's `eval.canary`, the operator's IMPLICIT sandboxed smoke, or NOTHING — and,
+    when nothing, the contract WARNING that a broken CLI flag or import is found only after every
+    stage in front of it has run (incident G1: after the data preparation)."""
+    import json as _json
+    from looplab.engine.eval_canary import (canary_spec, implicit_canary_policy,
+                                            implicit_canary_unavailable)
+    try:
+        task = _json.loads((Path(rd) / "task.snapshot.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        task = {}
+    declared = canary_spec((task.get("eval") if isinstance(task, dict) else None) or {})
+    if declared is not None:
+        return {"effective": "declared", "mode": declared.get("mode", "slice"),
+                "timeout": declared["timeout"], "warning": None}
+    policy = implicit_canary_policy(rd)
+    if policy["mode"] == "sandboxed":
+        why = implicit_canary_unavailable()
+        if why is None:
+            return {"effective": "implicit_sandboxed", "mode": "smoke",
+                    "timeout": policy["timeout"],
+                    "warning": ("no eval.canary declared: the operator's sandboxed smoke runs each "
+                                "new code for its first seconds with writes confined to a scratch "
+                                "tree; a refused write is inconclusive, not a failure")}
+        return {"effective": "none", "mode": None, "timeout": None,
+                "warning": (f"the operator enabled the sandboxed smoke but it cannot be built here "
+                            f"({why}); it is NOT run, because an unsandboxed smoke may write the "
+                            "absolute paths your scripts name. Declare eval.canary.")}
+    return {"effective": "none", "mode": None, "timeout": None,
+            "warning": ("no eval.canary declared and no implicit canary enabled: a broken CLI flag, "
+                        "import or missing file is found only after every stage in front of it has "
+                        "run. Declare eval.canary {mode: smoke|slice, timeout, env} (redirect "
+                        "absolute output paths through env), or ask the operator for "
+                        "harness_policy implicit_canary=sandboxed.")}
+
+
 def _page(rows: list[dict], offset: int, limit: int) -> dict:
     return {"total": len(rows), "offset": offset, "limit": limit,
             "items": list(reversed(rows))[offset:offset + limit],
@@ -179,6 +216,7 @@ def snapshot(rd: Path, expected_generation: str, *, activity_reader,
             "finish_pending_nodes": finish_due["pending_nodes"],
             "execution": execution,
             "operator_directions": _operator_directions(state),
+            "canary_preflight": canary_preflight(rd),
             "pending_checkpoint_count": len(pending),
             "pending_checkpoints": pending[:100],
             "pending_checkpoints_truncated": len(pending) > 100,
