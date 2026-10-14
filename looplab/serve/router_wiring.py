@@ -129,6 +129,7 @@ def router_builders() -> tuple:
       3. collaboration — owner-only bounded comment current/history projections
       4. reviews   — owner link management + the token-scoped reviewer manifest
       5. org       — projects / super-tasks / label / delete-run
+      5b. campaign — protocol journal, per-query uploads, comparisons, super-task campaign report
       6. control   — /commands + reset//api/start engine spawns
       7. genesis   — /api/research + /api/genesis (reads srv.list_tasks_fn at request time)
       8. assistant — sessions + the HITL permission registry
@@ -153,7 +154,8 @@ def router_builders() -> tuple:
     from looplab.serve import jobs as _jobs_router
     from looplab.serve.routers import (
         assistant as _assistant_router, attention as _attention_router,
-        boss as _boss_router, collaboration as _collaboration_router,
+        boss as _boss_router, campaign as _campaign_router,
+        collaboration as _collaboration_router,
         control as _control_router, cross_run as _cross_run_router,
         genesis as _genesis_router, misc as _misc_router, org as _org_router,
         orchestration as _orchestration_router,
@@ -163,7 +165,7 @@ def router_builders() -> tuple:
     return (_runs_router.build_router, _attention_router.build_router,
             _collaboration_router.build_router,
             _reviews_router.build_router, _org_router.build_router,
-            _control_router.build_router, _genesis_router.build_router,
+            _campaign_router.build_router, _control_router.build_router, _genesis_router.build_router,
             _assistant_router.build_router, _boss_router.build_router,
             _jobs_router.build_router, _reports_router.build_router,
             _cross_run_router.build_router, _upstream_router.build_router,

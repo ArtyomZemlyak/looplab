@@ -89,6 +89,17 @@ _IMMUTABLE_ASSET_CACHE = "public, max-age=31536000, immutable"
 _REVALIDATE_ASSET_CACHE = "no-cache"
 _CONTENT_HASHED_ASSET = re.compile(r"-[A-Za-z0-9_-]{8,}\.[^/]+$")
 _API_REQUEST_BODY_MAX = 2_000_000
+# The ONE route that carries a binary payload: a node's per-query evaluation arrays (doc 79), base64
+# in JSON. A 40k-query `.npz` of four arrays is ~2 MB before encoding, so the general bound refused
+# every real upload; this route alone gets a larger envelope, and only for that path shape.
+_API_REQUEST_BODY_ROUTE_MAX = ((re.compile(r"/api/runs/[^/]+/per-query"), 32_000_000),)
+
+
+def _route_body_limit(path: str, default: int) -> int:
+    for pattern, limit in _API_REQUEST_BODY_ROUTE_MAX:
+        if pattern.fullmatch(path):
+            return max(default, limit)
+    return default
 
 
 def _is_live_sse_path(path: str) -> bool:
@@ -207,6 +218,7 @@ class _APIRequestBodyLimitMiddleware:
             await self.app(scope, receive, send)
             return
 
+        limit = _route_body_limit(_scope_route_path(scope), self.max_bytes)
         headers = {bytes(k).lower(): bytes(v) for k, v in scope.get("headers", [])}
         raw_length = headers.get(b"content-length")
         if raw_length is not None:
@@ -218,7 +230,7 @@ class _APIRequestBodyLimitMiddleware:
             if declared < 0:
                 await self._reject(send, 400, "invalid Content-Length")
                 return
-            if declared > self.max_bytes:
+            if declared > limit:
                 await self._reject(send, 413, "API request body is too large")
                 return
 
@@ -236,7 +248,7 @@ class _APIRequestBodyLimitMiddleware:
             chunk = message.get("body") or b""
             # Reject before copying an attacker-sized ASGI chunk. Extending first
             # defeats the advertised memory envelope even though the eventual response is 413.
-            if len(chunk) > self.max_bytes - len(buffered):
+            if len(chunk) > limit - len(buffered):
                 await self._reject(send, 413, "API request body is too large")
                 return
             buffered.extend(chunk)
@@ -649,6 +661,9 @@ def make_app(run_root: str | os.PathLike, *, bind_host: Optional[str] = None) ->
                          or re.fullmatch(r"/api/scope-report-actions/[^/]+/abandon", p)
                          or (p.startswith("/api/scope-report/") and p.endswith("/generate"))
                          or re.fullmatch(r"/api/runs/[^/]+/(reset|deletions)", p)
+                         # The operator's limits on what the agent may amend or add (doc 79): an
+                         # agent that could write them would set its own ceiling.
+                         or re.fullmatch(r"/api/runs/[^/]+/harness-policy", p)
                          # The owner's prompts, skills and knowledge: every live internal run
                          # re-reads them (critic crit_v61 M2, driven: a PUT answered 200).
                          or re.fullmatch(r"/api/(prompts|skills|knowledge)/.+", p)
@@ -657,7 +672,7 @@ def make_app(run_root: str | os.PathLike, *, bind_host: Optional[str] = None) ->
                          or (request.method == "DELETE"
                              and re.fullmatch(r"/api/(runs/[^/]+|runs/[^/]+/reviews/[^/]+"
                                               r"|projects/[^/]+|supertasks/[^/]+)", p)))):
-                return JSONResponse({"detail": "harness token cannot change operator defaults (settings, prompts, skills, knowledge), launch, reset, purge or delete a run, write a run's chat log, clear or abandon the owner's work (a trace, an activity claim, a lens, a scope action, a share link, a project or super-task), or invoke an internal model workflow; ask the operator"},
+                return JSONResponse({"detail": "harness token cannot change operator defaults (settings, prompts, skills, knowledge), launch, reset, purge or delete a run, set a run's harness policy, write a run's chat log, clear or abandon the owner's work (a trace, an activity claim, a lens, a scope action, a share link, a project or super-task), or invoke an internal model workflow; ask the operator"},
                                     status_code=403)
             # Protected mode uses the owner principal; open UI uses the local principal.
             # The scoped harness remains agent-stamped; unauthenticated protected reads are anonymous.

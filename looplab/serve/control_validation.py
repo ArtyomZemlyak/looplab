@@ -2535,6 +2535,13 @@ def normalize_control(srv, rd: Path, event_type: str, data, *, agent_token: bool
         # the node it WILL carry — for a source node reset from `implement`, no code and no files,
         # which the run's Developer would build. The rule judges that payload, not the reference.
         _external_mode_restriction(rd, event_type, data, agent_token=agent_token)
+    if agent_token and event_type == EV_BUDGET_EXTEND:
+        # The operator's cap on the nodes the AGENT may add (doc 79, `harness_policy.json`), on the
+        # raw command as on the protocol-journal budget amendment — one rule, one counter.
+        from looplab.harness.campaign import agent_budget_refusal
+        refused = agent_budget_refusal(srv, rd, data.get("add_nodes"))
+        if refused is not None:
+            raise refused
 
     try:
         # Encode INSIDE the guard: json.dumps(ensure_ascii=False) accepts a lone surrogate (valid

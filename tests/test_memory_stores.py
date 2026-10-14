@@ -55,6 +55,8 @@ NOT_MEMORY_JSONL = {
     "harness_checkpoints.jsonl": "the run's external-agent checkpoint ledger (run directory)",
     "harness_reviews.jsonl": "the run's external knowledge reviews (run directory)",
     "result_commentary.jsonl": "the run's evidence-bound result interpretations (run directory)",
+    "protocol_amendments.jsonl": "the run's campaign protocol journal (run directory, doc 79)",
+    "manifest.jsonl": "the run's per-query upload manifest (`<run>/per_query/`, doc 79)",
 }
 
 # The closed vocabulary of calls that WRITE a store. Generic spellings (`add`, `save`, `write`) are

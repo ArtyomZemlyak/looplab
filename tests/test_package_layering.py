@@ -65,7 +65,7 @@ MODULE_LEVEL: dict[str, frozenset[str]] = {
     # at import time. Its generation fence is `events/run_generation.py` (it used to reach
     # `serve/run_commands.py` for it, pulling the server into the engine through
     # `engine/external_watch.py`), and its manifest is `harness/manifest.py`, not the CLI's.
-    "harness": frozenset({"core", "events", "engine", "adapters", "tools"}),
+    "harness": frozenset({"core", "events", "engine", "adapters", "tools", "trust"}),
     # `engine`: the backfills ask the engine's OWN liveness rule (`engine/run_lifecycle.py`, which
     # imports only `core` and `events`) instead of a drifting copy — review 2026-09-22, EVT-14.
     "maintenance": frozenset({"events", "runtime", "engine"}),
