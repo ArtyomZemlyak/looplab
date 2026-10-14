@@ -36,6 +36,7 @@ ACTION_ROUTES = frozenset({
     "harness-decisions", "harness-reviews", "harness-checkpoints", "harness-hypotheses",
     "harness-selection/verify", "harness-selection/values", "lessons", "skill-candidates",
     "result-notices", "upstream/proposals", "upstream/check", "upstream/advance", "upstream/recover",
+    "protocol/amendments",
 })
 
 

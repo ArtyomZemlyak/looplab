@@ -14,7 +14,12 @@ def test_mcp_advertises_run_controls_and_full_settings_discovery():
     assert {"capabilities", "phases", "phase_info", "settings_keys", "setting_info", "operations",
             "operation_schema", "api_request", "run_progress", "result_notices", "command_receipt", "connection_check",
             "saved_commands", "saved_command", "saved_actions", "saved_action", "wait_for_next",
-            "upstream_status", "upstream_request", "upstream_propose", "upstream_check", "upstream_advance"} == {tool.name for tool in tools}
+            "upstream_status", "upstream_request", "upstream_propose", "upstream_check", "upstream_advance",
+            # The campaign surface (doc 79, tests/test_campaign_composite.py).
+            "amend_protocol", "run_protocol", "upload_per_query", "compare_experiment",
+            "shared_test_leaderboard", "campaign_supertask", "campaign_report",
+            "publish_campaign_narrative", "submit_experiment", "finish_run",
+            "retry_node"} == {tool.name for tool in tools}
     for tool in (t for t in tools if t.name.startswith("upstream_")):
         hints = tool.annotations.model_dump(by_alias=True)
         assert hints["idempotentHint"]

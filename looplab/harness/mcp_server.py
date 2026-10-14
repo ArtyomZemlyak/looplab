@@ -308,6 +308,20 @@ class HarnessAPI:
                                "wait_for_next again with the same after cursor; no event was lost."}
         return self._result(response, method="GET")
 
+    def post_large(self, path: str, body: dict, *, max_bytes: int = 32_000_000) -> dict:
+        """POST one bounded binary-carrying body (a per-query upload, doc 79) past the 1 MiB
+        general cap; the server bounds the same route at the same size. Not saved in the client
+        request store (its records are 1 MiB): keep the file and the action_id to retry exactly."""
+        payload = json.dumps(body).encode("utf-8")
+        if len(payload) > max_bytes:
+            raise ValueError(f"body must be at most {max_bytes} bytes")
+        try:
+            response = self.client.request("POST", self._path(path), content=payload,
+                                           headers={"Content-Type": "application/json"})
+        except httpx.TransportError:
+            return self._unknown_write({"status": None}, "transport_error")
+        return self._result(response, method="POST")
+
     def saved_commands(self, run_id, expected_generation, offset=0, limit=20):
         """Private local records only; not a server receipt or an automatic recovery."""
         if self.requests is None:
@@ -1020,7 +1034,141 @@ def build_server(api: HarnessAPI):
         return api.saved_action(run_id, expected_generation, request_id, offset, limit,
                                 expected_request_hash)
 
+    _campaign_tools(mcp, api, ToolAnnotations)
     return mcp
+
+
+def _campaign_tools(mcp, api, ToolAnnotations) -> None:
+    """The campaign surface (doc 79): protocol amendments, per-query uploads, LoopLab-computed
+    comparisons, super-task grouping, and the composite submit/finish/retry operations."""
+    from looplab.harness import composite
+
+    @mcp.tool()
+    def amend_protocol(run_id: str, expected_generation: str, kind: Literal["experiment", "task", "files", "budget"],
+                       reason: str, action_id: str, experiment: dict | None = None,
+                       task: dict | None = None, files: list[dict] | None = None,
+                       budget: dict | None = None) -> dict:
+        """Append to this run's protocol journal instead of starting a new run.
+        kind=experiment pre-registers {experiment_id, hypothesis, arms, tests, metrics, contrasts,
+        correction}; registrations are immutable (supersede with a new id). kind=task changes
+        eval inputs / protect list / data mounts; kind=files changes base-repo files (protected
+        ones included) with expected_sha256 CAS — both need a STOPPED engine (pause first) and
+        record a diff. kind=budget adds nodes with a reason within the operator's cap.
+        Every row names you as author. Exact retry with the same action_id replays."""
+        body = {"expected_generation": expected_generation, "action_id": action_id, "kind": kind,
+                "reason": reason}
+        for name, value in (("experiment", experiment), ("task", task), ("files", files),
+                            ("budget", budget)):
+            if value is not None:
+                body[name] = value
+        return api.request("POST", f"/api/runs/{quote(run_id, safe='')}/protocol/amendments", body)
+
+    @mcp.tool(annotations=ToolAnnotations(readOnlyHint=True, destructiveHint=False,
+                                        idempotentHint=True, openWorldHint=False))
+    def run_protocol(run_id: str) -> dict:
+        """Read the run's pre-registered experiments, amendment audit trail and operator policy."""
+        return api.request("GET", f"/api/runs/{quote(run_id, safe='')}/protocol")
+
+    @mcp.tool()
+    def upload_per_query(run_id: str, expected_generation: str, node_id: int, path: str,
+                         metrics: dict, action_id: str, test_label: str | None = None,
+                         experiment_id: str | None = None, arm: str | None = None,
+                         query_key: str = "keys", cluster_key: str | None = "users",
+                         measured_check: dict | None = None) -> dict:
+        """Send a TERMINAL node's per-query arrays (local .npz or .json, <=24 MB) so LoopLab can
+        compare models itself. metrics: {name: {kind: mean, array, columns?} | {kind: ratio, num,
+        den, columns?}}; columns selects 2-D columns before the row sum. LoopLab derives the shared
+        test id from query ids + clusters (users), and measured_check={metric, node_metric?}
+        compares the upload's mean with the metric LoopLab measured. experiment_id+arm binds the
+        node to a registered experiment arm."""
+        return composite.upload_per_query(
+            api, run_id, expected_generation, node_id=node_id, path=path, metrics=metrics,
+            action_id=action_id, test_label=test_label, experiment_id=experiment_id, arm=arm,
+            query_key=query_key, cluster_key=cluster_key, measured_check=measured_check)
+
+    @mcp.tool(annotations=ToolAnnotations(readOnlyHint=True, destructiveHint=False,
+                                        idempotentHint=True, openWorldHint=False))
+    def compare_experiment(run_id: str, experiment_id: str, bootstrap: int | None = None) -> dict:
+        """LoopLab's paired comparison for a registered experiment: per contrast delta, user-
+        clustered 95% CI, p, Holm-adjusted p within its family, provenance and caveats. Quote
+        these numbers; never compute your own in place of them."""
+        query = f"?bootstrap={int(bootstrap)}" if bootstrap else ""
+        return api.request("GET", f"/api/runs/{quote(run_id, safe='')}/experiments/"
+                                  f"{quote(experiment_id, safe='')}/comparison{query}")
+
+    @mcp.tool(annotations=ToolAnnotations(readOnlyHint=True, destructiveHint=False,
+                                        idempotentHint=True, openWorldHint=False))
+    def shared_test_leaderboard(test_id: str, metric: str | None = None,
+                                reference: str | None = None) -> dict:
+        """Every node of every run under this root scored on one shared test id; reference=
+        'run_id:node_id' adds paired deltas against that node."""
+        from urllib.parse import urlencode as _urlencode
+        params = {k: v for k, v in (("metric", metric), ("reference", reference)) if v}
+        return api.request("GET", f"/api/shared-tests/{quote(test_id, safe='')}"
+                                  + (f"?{_urlencode(params)}" if params else ""))
+
+    @mcp.tool()
+    def campaign_supertask(name: str, run_ids: list[str], supertask_id: str | None = None) -> dict:
+        """Group related runs into a super-task (created by name if absent). Use it when a
+        campaign genuinely needs several runs (incompatible task or protected code); otherwise keep
+        experiments in one run with amend_protocol."""
+        return composite.campaign_supertask(api, name, run_ids, supertask_id)
+
+    @mcp.tool(annotations=ToolAnnotations(readOnlyHint=True, destructiveHint=False,
+                                        idempotentHint=True, openWorldHint=False))
+    def campaign_report(supertask_id: str) -> dict:
+        """The super-task's campaign report: computed contrast tables, shared-test leaderboards and
+        the current narrative revision (read it before publishing a new narrative)."""
+        return api.request("GET", f"/api/supertasks/{quote(supertask_id, safe='')}/campaign")
+
+    @mcp.tool()
+    def publish_campaign_narrative(supertask_id: str, body_markdown: str, action_id: str,
+                                   expected_revision: int, title: str | None = None,
+                                   key_findings: list[str] | None = None) -> dict:
+        """Publish the campaign narrative (markdown; GFM tables allowed). Cite LoopLab's computed
+        contrasts; the UI shows prose and computed tables apart. CAS on expected_revision."""
+        return api.request("POST", f"/api/supertasks/{quote(supertask_id, safe='')}/campaign/narrative", {
+            "action_id": action_id, "expected_revision": expected_revision, "title": title,
+            "body_markdown": body_markdown, "key_findings": key_findings or []})
+
+    @mcp.tool()
+    def submit_experiment(run_id: str, expected_generation: str, key: str, idea: dict,
+                          files: dict | None = None, code: str | None = None,
+                          deleted: list[str] | None = None, parent_id: int | None = None,
+                          research_question: dict | None = None, experiment: dict | None = None,
+                          experiment_reason: str = "", memo: dict | None = None,
+                          decisions: dict | None = None, dry_run: bool = False) -> dict:
+        """One call for the whole admission ceremony: pre-register `experiment` (protocol
+        journal), add `research_question` {id, statement?, concepts?} and file the idea under it,
+        publish `memo`, record `decisions` {phase: {reason, alternatives?}} the run requires,
+        then inject the candidate (idea with concepts + files/code). dry_run=true lists missing
+        obligations and the plan without writing. Stops at the first failed step; repeat with the
+        SAME key to resume — completed steps replay their receipts."""
+        return composite.submit_experiment(
+            api, run_id, expected_generation, key=key, idea=idea, files=files, code=code,
+            deleted=deleted, parent_id=parent_id, research_question=research_question,
+            experiment=experiment, experiment_reason=experiment_reason, memo=memo,
+            decisions=decisions, dry_run=dry_run)
+
+    @mcp.tool()
+    def finish_run(run_id: str, expected_generation: str, key: str, report: dict | None = None,
+                   reviews: list[dict] | None = None, reason: str = "campaign complete",
+                   dry_run: bool = False) -> dict:
+        """Publish the final report (report_generated content), the run-end reviews
+        ({phase_id, decision, reason, evidence?}) and finalize the run, after reading the finish
+        gates. dry_run=true shows the gates and plan. Same-key repeat resumes."""
+        return composite.finish_run(api, run_id, expected_generation, key=key, report=report,
+                                    reviews=reviews, reason=reason, dry_run=dry_run)
+
+    @mcp.tool()
+    def retry_node(run_id: str, expected_generation: str, node_id: int, key: str,
+                   from_stage: str = "eval", generation: int | None = None) -> dict:
+        """Retry a failed node's setup/launch as a NEW ATTEMPT of the same node (node_reset from
+        eval or a later stage) — not a new node, not a new run. Earlier attempts keep their
+        terminal rows; their stage logs are archived under attempt_logs/. If the fix needs a protected
+        file or input, amend_protocol (kind=files/task) first, with the engine paused."""
+        return composite.retry_node(api, run_id, expected_generation, node_id=node_id, key=key,
+                                    from_stage=from_stage, generation=generation)
 
 
 def run_stdio(url: str | None = None, token: str | None = None) -> None:
