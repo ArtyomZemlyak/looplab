@@ -193,8 +193,10 @@ export const DEFAULT_BUDGETS = Object.freeze({
     // 673,985 B JS / 59,986 B CSS (4 violations); with GFM tables, the agent-activity chip model,
     // findings delta, report key metrics/author, Agent obligations and the build-id check it is
     // 677,753 B JS / 60,097 B CSS. Route closures +1.0/+1.5 KiB JS, +76..183 B CSS; all lazy
-    // reachability gates unchanged. Ceilings re-baselined with < 1.5 KiB headroom.
-    js: { gzip: 663 * KIB },
+    // reachability gates unchanged. Ceilings re-baselined with < 1.5 KiB headroom. The doc 77
+    // experiment-tracking readers (code/parameter snapshot, artifact previews) then measured
+    // 681,916 B JS — all of it in lazy chunks; every route closure kept its ceiling.
+    js: { gzip: 667 * KIB },
     css: { gzip: 59 * KIB },
   },
   individual: {

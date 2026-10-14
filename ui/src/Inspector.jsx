@@ -75,6 +75,8 @@ import {
 
 // Comments are an explicit Inspector interaction. Keep their independently secured
 // review transport out of the base DAG closure, then load the same component only when this tab opens.
+const SourceSnapshotPanel = React.lazy(() => import('./SourceSnapshotPanel.jsx'))
+const RuntimeSnapshotPanel = React.lazy(() => import('./RuntimeSnapshotPanel.jsx'))
 const CommentsThread = React.lazy(() => import('./CommentsThread.jsx'))
 
 const withoutNodeTrace = value => value && typeof value === 'object'
@@ -1058,6 +1060,12 @@ function Overview({ n, state, runId, onToast, draftStore, expectedGeneration, on
   return <>
     <ExperimentResult node={resultNode} state={state} onTab={onTab} />
     <BaseRevision node={resultNode} state={state} />
+    {/* Lazy: the code/parameter snapshot (doc 77 §1-2) is read on demand and stays out of the
+        run route's eager closure. */}
+    <React.Suspense fallback={null}>
+      <SourceSnapshotPanel state={state} />
+      {expectedGeneration && <RuntimeSnapshotPanel runId={runId} node={n} expectedGeneration={expectedGeneration} />}
+    </React.Suspense>
     <div className="kv">
       <KV k="node" v={`#${n.id}`} />
       <KV k="operator" v={n.operator} />

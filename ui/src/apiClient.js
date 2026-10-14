@@ -157,6 +157,14 @@ export async function get(path, options = {}) {
   return r.json()
 }
 
+// Raw bytes through the same credential boundary as `get` (artifact image previews, doc 77 §3): an
+// <img src> cannot carry the owner token, so the page fetches the bytes and shows an object URL.
+export async function getBlob(path, options = {}) {
+  const r = await readResponse(path, options || {})
+  if (!r.ok) await _throw(r, path)
+  return r.blob()
+}
+
 const entityTag = value => /^W\/"llconv1-[0-9a-f]{64}"$/.test(value) ? value : null
 
 // Conditional JSON transport for application-owned last-good snapshots. A 304 is deliberately a

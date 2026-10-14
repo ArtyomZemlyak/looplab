@@ -38,7 +38,7 @@ import {
 import { createEventStreamParser } from './eventStream.js'
 
 export {
-  apiPrefix, apiUrl, authStatus, clearOwnerToken, conditionalGet, deadlineGet, deadlineSharedAssistant, get,
+  apiPrefix, apiUrl, authStatus, clearOwnerToken, conditionalGet, deadlineGet, deadlineSharedAssistant, get, getBlob,
   isReviewLocation, post, putText, reviewReadPath, reviewTokenFromLocation, runApiPath,
   runNodeApiPath, setOwnerToken, verifyOwnerToken,
 } from './apiClient.js'

@@ -1,7 +1,7 @@
 {
   "schema": 1,
   "language": "ru",
-  "count": 7915,
+  "count": 7954,
   "messages": {
     "# LoopLab run report — {0}": "# Отчёт запуска LoopLab — {0}",
     "## Agent narrative (advisory)": "## Пояснения агента (рекомендации)",
@@ -7917,7 +7917,46 @@
     "What the external agent must do now, before another experiment and before finalization: research, novelty, evaluation questions and reports. Journals and the agent connection are folded below. This panel does not start an agent or control training.": "Что внешний агент должен сделать сейчас, перед следующим экспериментом и перед завершением: исследования, новизна идеи, вопросы оценки и отчёт. Журналы и подключение агента — в свёрнутых разделах ниже. Панель сама не запускает агента и не управляет обучением.",
     "harness-audit harness-connection-details": "harness-audit harness-connection-details",
     "The interface was updated. Reload the page to use the new version; save any draft first.": "Интерфейс обновлён. Перезагрузите страницу, чтобы открыть новую версию; сначала сохраните черновики.",
-    "notice warn bundle-stale": "notice warn bundle-stale"
+    "notice warn bundle-stale": "notice warn bundle-stale",
+    "applied as declared": "применено, как в идее",
+    "differs from the idea": "отличается от идеи",
+    "not in the configuration": "нет в конфигурации",
+    "conflicting values": "противоречивые значения",
+    "Parameters it ran with": "Параметры, с которыми шёл эксперимент",
+    "Parameters are unavailable for this attempt.": "Параметры этой попытки недоступны.",
+    "Idea parameters against the configuration": "Параметры идеи и конфигурация",
+    "Parameter": "Параметр",
+    "Idea": "Идея",
+    "Configuration": "Конфигурация",
+    "Result": "Итог",
+    "No configuration document (.env, JSON, YAML, TOML) was found for this attempt.": "Для этой попытки не найден файл конфигурации (.env, JSON, YAML, TOML).",
+    "changed by this experiment": "изменён этим экспериментом",
+    "task workspace": "рабочая копия задачи",
+    "withheld: secret-like file name": "скрыт: имя файла похоже на секрет",
+    "Only the first configuration rows are shown.": "Показаны только первые строки конфигурации.",
+    "Read from the documents only: a value set on the command line or in code is not visible here.": "Значения прочитаны только из файлов: заданное в командной строке или в коде здесь не видно.",
+    "Source code of the run": "Исходный код запуска",
+    "changed since launch": "изменился после старта",
+    "Git commit": "коммит git",
+    "captured at launch": "записан при старте",
+    "absent at launch": "отсутствовал при старте",
+    "commit unknown (not a git checkout)": "коммит неизвестен (копия без git)",
+    "content digest": "хэш содержимого",
+    "This experiment's own changes are in the Code tab; its base is shown above.": "Изменения самого эксперимента — во вкладке «Код»; его база показана выше.",
+    "The image could not be previewed (unsupported or too large).": "Изображение не удалось показать (формат не поддерживается или файл слишком большой).",
+    "Image {0}": "Изображение {0}",
+    "Binary file — not shown inline.": "Двоичный файл — не показывается в окне.",
+    "Binary file — described, not executed.": "Двоичный файл — показано описание, содержимое не выполняется.",
+    "kind": "тип",
+    "size": "размер",
+    "sha256": "sha256",
+    "tensors": "тензоры",
+    "parameters": "параметров",
+    "npy": "npy",
+    "archive members": "файлов в архиве",
+    "contains a pickle (not loaded)": "содержит pickle (не загружается)",
+    "Tensor list": "Список тензоров",
+    "Only the first 200 rows and 32 columns are shown.": "Показаны только первые 200 строк и 32 столбца."
   },
   "plurals": {
     "({0} paraphrases folded)": {
@@ -9737,6 +9776,11 @@
       "one": "{0} устаревшая запись",
       "few": "{0} устаревшие записи",
       "many": "{0} устаревших записей"
+    },
+    "{0} uncommitted inputs at launch": {
+      "one": "{0} незакоммиченный файл при старте",
+      "few": "{0} незакоммиченных файла при старте",
+      "many": "{0} незакоммиченных файлов при старте"
     }
   }
 }

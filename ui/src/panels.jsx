@@ -1,4 +1,5 @@
 import { uiText, uiMessage, uiPlural, useUILanguage } from './uiLanguage.js'
+import ArtifactPreview from './ArtifactPreview.jsx'
 import React, { useEffect, useId, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import UpstreamPanel from './UpstreamPanel.jsx'
 import { deadlineGet, get, post, fmt, fmtInt, fmtBytes, fmtElapsedSeconds, CONTROL,
@@ -3469,10 +3470,10 @@ export function ArtifactsPanel({ runId, expectedGeneration, onToast, onClose }) 
                 {content && <span className="muted">{fmtBytes(content.size)}</span>}
               </div>
               {busy ? <div className="muted">{uiText("Loading…")}</div>
-                : binary ? <div className="notice">{uiText("Binary file — not shown inline (")}{fmtBytes(content.size)}).</div>
+                : binary ? <ArtifactPreview runId={runId} sel={sel} content={content} expectedGeneration={expectedGeneration} />
                 : content ? <>
                     {content.truncated && <div className="notice art-trunc">{uiText("Showing the first ")}{fmtBytes(_MAX_VIEW)}{uiText(" — the file is larger.")}</div>}
-                    <pre className="art-pre" role="region" aria-label={uiMessage("File {0} contents", [sel.path])} tabIndex={0}>{content.content}</pre>
+                    <ArtifactPreview runId={runId} sel={sel} content={content} expectedGeneration={expectedGeneration} />
                   </> : <div className="muted art-hint">{uiText("Could not load this file.")}</div>}
             </>}
           </div>
