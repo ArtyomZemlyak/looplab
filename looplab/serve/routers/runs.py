@@ -2984,7 +2984,7 @@ def build_router(srv) -> APIRouter:
             lambda f, size: artifact_meta(f, size, path))
         return {"root": root, "path": path, **meta, **identity}
 
-    # ---- the report's figures and its version history (review 2026-10-14 §6, §6.3) -------------
+    # ---- the report's figures and its version history (review 2026-10-14 section 6, section 6.3) -------------
     # A figure is UPLOADED from an artifact through `_read_artifact_fenced` — the same fences as
     # `/artifact/raw`, raster only — and stored content-addressed beside the run
     # (`serve/report_figures.py`); `report_generated.content.figures` then names it by id.

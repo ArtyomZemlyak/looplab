@@ -1,4 +1,4 @@
-"""Review 2026-10-14 §4.2: research-memo open questions on the question board, as a DERIVED read model.
+"""Review 2026-10-14 section 4.2: research-memo open questions on the question board, as a DERIVED read model.
 
 An external agent's memos carried 212 open questions and the board registered none. The fix is a
 read-time projection (`serve/memo_questions.py`) published beside the cards as `memo_questions`,

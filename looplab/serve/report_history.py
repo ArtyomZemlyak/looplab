@@ -1,6 +1,6 @@
 """The run report's VERSION HISTORY and its duplicate rule — read models over `report_generated`.
 
-Review 2026-10-14 §6.3 / doc 80 §9 #13, #14. The fold keeps ONE report (`RunState.report`, latest
+Review 2026-10-14 section 6.3 / doc 80 §9 items 13, 14. The fold keeps ONE report (`RunState.report`, latest
 wins, `events/replay_journals.py::_on_report_generated`), so every earlier version — what the agent
 said three experiments ago, what the paid refresh replaced — was in the log and nowhere on screen.
 And an agent re-sending the same report counted as a new one (Codex audit L-06): the report gate

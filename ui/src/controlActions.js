@@ -141,7 +141,7 @@ export const CONTROL = {
   deepResearch: (rid) => runCommand(rid, 'deep_research', {}),
   // P1: register an open hypothesis on the board (a question the search should resolve), or drop one.
   addHypothesis: (rid, statement) => runCommand(rid, 'hypothesis_added', { statement, source: 'human' }),
-  // Review 2026-10-14 §4.2: file a research-memo question the board does not hold yet — the SAME
+  // Review 2026-10-14 section 4.2: file a research-memo question the board does not hold yet — the SAME
   // command, with the memo's own concepts (`memoQuestionsModel.js::memoQuestionCommand`).
   fileMemoQuestion: (rid, payload) => runCommand(rid, 'hypothesis_added', payload),
   abandonHypothesis: (rid, id) => runCommand(rid, 'hypothesis_updated', { id, status: 'abandoned' }),

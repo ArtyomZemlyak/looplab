@@ -1,4 +1,4 @@
-"""Review 2026-10-14 §6 / §6.3 and Codex audit L-06: the report's history, its duplicates, its figures.
+"""Review 2026-10-14 section 6 / section 6.3 and Codex audit L-06: the report's history, its duplicates, its figures.
 
 * The fold keeps ONE report; `GET /report/versions` lists every `report_generated` row through the
   fold's own sanitizer, marks the current one and the repeats (`duplicate_of`).

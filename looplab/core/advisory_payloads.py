@@ -1344,7 +1344,7 @@ def sanitize_report_payload(payload, *, env=None) -> dict:
 
 
 REPORT_BODY_MAX_CHARS = 24_000
-# Attached figures (review 2026-10-14 §6): the image bytes live content-addressed beside the run
+# Attached figures (review 2026-10-14 section 6): the image bytes live content-addressed beside the run
 # (`serve/report_figures.py`, uploaded from a fenced artifact read), the report carries only the id,
 # its caption and where the image came from. Bounded and additive like `key_metrics`.
 REPORT_FIGURES_MAX = 12

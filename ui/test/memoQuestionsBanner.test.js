@@ -1,4 +1,4 @@
-// Review 2026-10-14 §4.2: research-memo questions the board does not hold. The server decides
+// Review 2026-10-14 section 4.2: research-memo questions the board does not hold. The server decides
 // which are missing (`looplab/serve/memo_questions.py`); this file drives the browser half — the
 // defensive reader, the exact filing command, and the banner on both Research branches.
 import assert from 'node:assert/strict'

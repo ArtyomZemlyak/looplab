@@ -1,5 +1,5 @@
 import { uiText, uiMessage, uiPlural, useUILanguage } from './uiLanguage.js'
-// The Report's figures and its version history (review 2026-10-14 §6, §6.3).
+// The Report's figures and its version history (review 2026-10-14 section 6, section 6.3).
 //
 // Figures are images the publisher ATTACHED from the run's artifacts: the server copied each one
 // through the `/artifact/raw` fences into a content-addressed store and serves it with nosniff and a

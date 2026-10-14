@@ -1,6 +1,6 @@
 """Report FIGURES: images attached to `report_generated`, stored content-addressed beside the run.
 
-Review 2026-10-14 §6: the agent had real plots and nowhere in the report to put them. A figure is
+Review 2026-10-14 section 6: the agent had real plots and nowhere in the report to put them. A figure is
 uploaded FROM AN ARTIFACT the run already exposes — `POST /api/runs/{id}/report-figures` reads it
 through the same fences as `/artifact/raw` (root, traversal, node attempt, exposure policy, the
 opened descriptor's identity) and accepts a raster image only, suffix and magic number agreeing.

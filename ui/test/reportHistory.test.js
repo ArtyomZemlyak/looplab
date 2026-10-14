@@ -1,4 +1,4 @@
-// Review 2026-10-14 §6 / §6.3 and UI review §3.2: the report's figures, its version history, the
+// Review 2026-10-14 section 6 / section 6.3 and UI review section 3.2: the report's figures, its version history, the
 // field-by-field comparison of two recorded versions, and where the optional paid action sits.
 import assert from 'node:assert/strict'
 import test from 'node:test'

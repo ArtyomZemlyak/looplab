@@ -1,6 +1,6 @@
 """Research-memo open questions projected onto the question board — a DERIVED read model.
 
-Review 2026-10-14 §4.2 / doc 80 §7 UI 4.2. An external agent's memos carried 212 open questions (69
+Review 2026-10-14 section 4.2 / doc 80 §7 UI 4.2. An external agent's memos carried 212 open questions (69
 unique) and the board registered none: the step that turns `open_questions` into cards
 (`engine/research_cadence.py::_record_research_steering`) runs only for LoopLab's own Researcher.
 

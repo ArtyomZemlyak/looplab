@@ -781,7 +781,7 @@ class AppState:
                 for c in st.research_cards()
                 if isinstance((dto := _card_dtos.get(c.id)), dict)
             }
-        # THE MEMO QUESTIONS THE BOARD DOES NOT HOLD (review 2026-10-14 §4.2): a DERIVED read model,
+        # THE MEMO QUESTIONS THE BOARD DOES NOT HOLD (review 2026-10-14 section 4.2): a DERIVED read model,
         # never folded, so no recorded run's board moves (`serve/memo_questions.py`). Computed from
         # the same fold as the cards beside it, so the two cannot disagree about one frame.
         # The projection is total over junk memos/cards (driven in `tests/test_memo_question_projection.py`),

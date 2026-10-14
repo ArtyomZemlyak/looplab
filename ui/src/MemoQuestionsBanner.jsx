@@ -1,6 +1,6 @@
 import { uiText, uiMessage, uiPlural, useUILanguage } from './uiLanguage.js'
 // The Research view's banner for memo questions that are NOT on the question board (review
-// 2026-10-14 §4.2). An external agent's memos carried 212 open questions and the board held none,
+// 2026-10-14 section 4.2). An external agent's memos carried 212 open questions and the board held none,
 // because only LoopLab's own Researcher turns memo questions into cards. The server projects them
 // (`serve/memo_questions.py`, a derived read model: no recorded run's board moves); this banner
 // SAYS so and offers the one explicit action that changes the log — filing the question, the same
