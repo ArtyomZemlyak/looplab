@@ -266,3 +266,34 @@ def test_a_host_scored_task_has_no_in_tree_scorer_even_when_a_stage_resolves_in_
     assert scorer_is_in_tree(_Task(ev)) is False
     assert "no_metric_output" not in _issues(SOLVER, scorer_in_tree=scorer_is_in_tree(_Task(ev)))
 
+
+
+def test_a_dotenv_edit_surface_is_declarative_configuration():
+    """Review 2026-10-14 §10.1: MiniOneRec's whole edit surface is `experiment.env`, and every
+    external node carried `critic:no_metric_output` + `critic:params_ignored` ("hack?" on every run)
+    because a dotenv file was not counted as configuration."""
+    for name in ("experiment.env", ".env", "conf/.env.local", "A.ENV"):
+        assert candidate_only_configuration("", {name: "LR=2e-4\nBATCH=1024\n"}), name
+    assert not candidate_only_configuration("", {"experiment.env": "X=1", "run.sh": "echo"})
+    assert not candidate_only_configuration("", {"environment.py": "X=1"})
+
+
+def test_engine_does_not_accuse_a_dotenv_only_candidate_with_label_params(tmp_path):
+    eng = _critic_only_engine(tmp_path / "dotenv", _Eval(command=["python", "score.py"]))
+    node = types.SimpleNamespace(
+        idea=Idea(operator="improve", params={"arm_index": 3, "model_week": 6}), code="",
+        files={"experiment.env": "export LR=2e-4\nMAX_STEPS=1200\nSEED=42\n"})
+    source = eng._trust_scan_surface(node)
+    signals = {row["signal"] for row in eng._trust_gate_signals(node, source)}
+    assert "critic:no_metric_output" not in signals
+    assert "critic:params_ignored" not in signals
+
+
+def test_a_dotenv_literal_metric_is_still_the_hard_gate(tmp_path):
+    eng = _critic_only_engine(tmp_path / "dotenv-hard", _Eval(command=["python", "score.py"]))
+    node = types.SimpleNamespace(
+        idea=Idea(operator="improve", params={}), code="",
+        files={"experiment.env": "metric=0.95\nEPOCHS=3\n"})
+    source = eng._trust_scan_surface(node)
+    signals = {row["signal"] for row in eng._trust_gate_signals(node, source)}
+    assert "critic:hardcoded_metric" in signals

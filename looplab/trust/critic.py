@@ -130,7 +130,14 @@ def critique(idea: Idea, code: str, *, submission_file: str | None = None,
     # its params describe a diagnostic or repair (e.g. verify_cuda, test_gru_forward) or are
     # inherited from the parent node being fixed — they are NOT modeling knobs that must be threaded
     # into the solution, so demanding they appear in the code is a category error.
-    if (idea.operator or "") != "debug":
+    # A CONFIGURATION-ONLY candidate (`candidate_only_configuration`) is the declarative config and
+    # nothing else, so a param either names one of its keys — in whatever case the carrier spells
+    # it, `lr` against a dotenv `LR=`, which this grep would miss — or it is a LABEL the proposer
+    # gave the arm (`arm_index`, `model_week`: every external MiniOneRec node, review 2026-10-14
+    # §10.1). Neither is an ignored proposal. Whether a declared value was APPLIED is
+    # `runtime/applied_params.py`'s question, answered by reading the carrier rather than grepping
+    # it, so this advisory text check does not run in that mode.
+    if (idea.operator or "") != "debug" and not configuration_only:
         pnames = [str(k) for k in (idea.params or {})]
         if pnames and not any(_param_is_referenced(p, code) for p in pnames):
             issues.append({"issue": "params_ignored",
@@ -403,9 +410,21 @@ def candidate_only_configuration(code: str | None, files: dict | None) -> bool:
     the candidate has no standalone code body; the hardcoded-metric check still
     examines the same bytes.
     """
-    config_suffixes = (".json", ".yaml", ".yml", ".toml", ".ini", ".cfg")
     return (not (code or "").strip() and bool(files)
-            and all(str(path).lower().endswith(config_suffixes) for path in files))
+            and all(is_declarative_config_path(path) for path in files))
+
+
+# `.env` / `experiment.env` / `.env.local` are configuration too: a dotenv file is KEY=VALUE data a
+# launcher sources, never code (review 2026-10-14 §10.1 — MiniOneRec's whole edit surface is
+# `experiment.env`, and without this every external node carried `critic:no_metric_output`, shown
+# as "hack?" on every run).
+_CONFIG_SUFFIXES = (".json", ".yaml", ".yml", ".toml", ".ini", ".cfg", ".env")
+
+
+def is_declarative_config_path(path) -> bool:
+    """Whether an authored file is declarative configuration by its NAME (suffix or dotenv form)."""
+    name = str(path).replace("\\", "/").rsplit("/", 1)[-1].lower()
+    return name.endswith(_CONFIG_SUFFIXES) or name == ".env" or name.startswith(".env.")
 
 
 def critic_findings(idea, code: str, *, submission_file: str | None = None,
