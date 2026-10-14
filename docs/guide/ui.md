@@ -195,12 +195,14 @@ and cost warning follow the selected language. Authored task JSON, paths, metric
 and exact server diagnostics retain their original text.
 
 **Language / Язык** in the header offers **Auto**, **English** and **Русский** on every screen,
-even before the first run. It sets the language of the entire interface and all newly generated human
-prose. (Until 2026-10-09 an identical selector also sat beside the composer; both drove the same
-preference, so one was removed, doc 74 EB-22.) The browser preference is saved locally;
-owner workspaces also save `output_language` on the server for new runs and model roles. If saving
-fails, a visible retry keeps that distinction explicit. Public review pages never save owner
-settings. Auto chooses the browser language for interface copy and lets the model follow the task.
+even before the first run. It sets the language of the interface for this viewer only. (Until
+2026-10-09 an identical selector also sat beside the composer; both drove the same preference, so
+one was removed, doc 74 EB-22.) The browser preference is saved locally and never written to the
+server: until 2026-10-14 an owner workspace also saved `output_language`, so one viewer's choice
+changed generated text and the default for every other viewer. The language of new generated
+prose is **Settings → Output language** (`output_language`), an explicit server setting; a viewer
+who never chose a UI language adopts it once as the starting choice. Public review pages never
+save owner settings. Auto chooses the browser language for interface copy and lets the model follow the task.
 Russian covers navigation, settings and their help/search, run/Card/concept/research views, results,
 report exports, confirmations and accessibility labels. The Russian catalogue loads only when
 needed; a failed load offers retry. Switching does not remount the workspace. New prose from

@@ -1,54 +1,26 @@
-import React, { useEffect, useRef, useState } from 'react'
-import { get, saveSettings } from './api.js'
+import { useEffect, useRef } from 'react'
+import { get } from './api.js'
 import { boundedRequest } from './requestDeadline.js'
-import { setUILanguage, useUILanguage, uiText } from './uiLanguage.js'
+import { setUILanguage, useUILanguage } from './uiLanguage.js'
 
-// Owner-only persistence; public reviews never save global generation settings.
+// The interface language is a PER-VIEWER preference (localStorage). Until 2026-10-14 every change
+// also PUT the server's `output_language`, so one viewer switching the UI to Russian changed the
+// language of every later generated text and the default of every other viewer of a shared
+// server (review 2026-10-14 §10.5). Now this only READS: a viewer who never chose a language
+// ('auto') adopts the saved generation language once; the server setting itself changes only
+// through Settings → output language, an explicit action.
 export default function OwnerLanguageSync() {
   const [language] = useUILanguage()
-  const [error, setError] = useState(false), [retry, setRetry] = useState(0)
-  const wanted = useRef(language), initialized = useRef(false)
-  const alive = useRef(true), worker = useRef(null)
-  wanted.current = language
-  useEffect(() => { alive.current = true; return () => { alive.current = false } }, [])
+  const adopted = useRef(false)
   useEffect(() => {
-    if (worker.current) return
-    const work = async () => {
-      try {
-        const read = () => boundedRequest(signal => get('/api/settings', { signal }), 8000)
-        let snapshot = await read()
-        const valid = value => value && typeof value.settings_revision === 'string'
-          && value.settings_revision && ['auto', 'en', 'ru'].includes(value.settings?.output_language)
-        if (!valid(snapshot)) throw new Error('Language settings unavailable')
-        if (!alive.current) return
-        if (!initialized.current) {
-          initialized.current = true
-          const saved = snapshot.settings?.output_language
-          if (wanted.current === 'auto' && ['en', 'ru'].includes(saved)) {
-            wanted.current = saved; setUILanguage(saved)
-          }
-          else if (wanted.current === 'auto') return
-        }
-        while (alive.current) {
-          const choice = wanted.current, output = choice
-          if (snapshot.settings?.output_language !== output) {
-            snapshot = await boundedRequest(signal => saveSettings({ output_language: output },
-              { expectedRevision: snapshot.settings_revision, signal }), 8000)
-            if (!valid(snapshot) || snapshot.ok !== true || snapshot.settings.output_language !== output) {
-              throw new Error('Language save unavailable')
-            }
-          }
-          if (choice === wanted.current) break
-          snapshot = await read()
-          if (!valid(snapshot)) throw new Error('Language settings unavailable')
-        }
-        if (alive.current) setError(false)
-      } catch { if (alive.current) setError(true) }
-    }
-    worker.current = work().finally(() => { worker.current = null })
-  }, [language, retry])
-  return error ? <div className="notice resource-error" role="alert">
-    {uiText('The interface language changed, but the language for new generated text was not saved.')}
-    {' '}<button className="btn sm" onClick={() => setRetry(value => value + 1)}>{uiText('Retry saving language')}</button>
-  </div> : null
+    if (adopted.current || language !== 'auto') return
+    adopted.current = true
+    let alive = true
+    boundedRequest(signal => get('/api/settings', { signal }), 8000).then(snapshot => {
+      const saved = snapshot?.settings?.output_language
+      if (alive && ['en', 'ru'].includes(saved)) setUILanguage(saved)
+    }).catch(() => {})   // an unreadable default leaves the viewer's own 'auto' in place
+    return () => { alive = false }
+  }, [language])
+  return null
 }

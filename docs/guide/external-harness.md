@@ -1893,7 +1893,7 @@ for all new explanations, research, reviews, lesson/skill descriptions, reports 
 commentary, including human prose inside structured values. Preserve schema keys, enums,
 identifiers, commands, code, verbatim evidence and measured numbers. This preference adds
 no admission checkpoint or engine wait. It is fixed in the launched run snapshot; change it
-on resume or a new run. The UI language applies across the interface and owner generation.
+on resume or a new run. The UI language selector is a per-viewer interface preference and does not change it.
 
 Write complete sentences with normal spaces between words. Never shorten prose by removing
 whitespace (`Следомc5w01оттогожеbase` is unreadable to the operator); put identifiers, paths

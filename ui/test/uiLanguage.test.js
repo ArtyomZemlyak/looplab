@@ -138,53 +138,40 @@ test('RU/EN switching keeps draft, focus and user evidence; a late catalogue can
   } finally { await harness.close() }
 })
 
-test('owner language persistence serializes rapid choices with fresh revisions and only a sparse language patch', async () => {
+test('changing the interface language never writes server settings (review 2026-10-14 §10.5)', async () => {
   const harness = await mountLive(); localStorage.clear()
   const locale = await harness.load('/src/uiLanguage.js')
   const { default: Sync } = await harness.load('/src/OwnerLanguageSync.jsx')
-  let saved = 'auto', revision = 1, release
-  const snapshot = () => ({ settings_revision: `r${revision}`, settings: { output_language: saved, llm_model: 'RAW-model' } })
   const backend = fetchStub({
-    '/api/settings': ({ method, init }) => {
-      if (method === 'GET') return snapshot()
-      const request = JSON.parse(init.body)
-      assert.equal(request.expected_revision, `r${revision}`)
-      assert.deepEqual(Object.keys(request.settings), ['output_language'])
-      const accept = () => { saved = request.settings.output_language; revision++; return { ok: true, ...snapshot() } }
-      if (saved === 'auto') return new Promise(resolve => { release = () => resolve(accept()) })
-      return accept()
+    '/api/settings': ({ method }) => {
+      assert.equal(method, 'GET', 'the UI language is a per-viewer preference')
+      return { settings_revision: 'r1', settings: { output_language: 'ru' } }
     },
   })
   globalThis.fetch = backend
   const view = await harness.mount(Sync)
   try {
-    await settle(); assert.equal(backend.calls.filter(c => c.method === 'PUT').length, 0)
-    await React.act(async () => locale.setUILanguage('ru')); await until(() => release, 'first save')
+    // A viewer who never chose adopts the saved generation language once…
+    await until(() => locale.getUILanguage?.() === 'ru' || localStorage.getItem('looplab.language') === 'ru',
+      'saved default adopted')
+    // …and every later choice stays local.
     await React.act(async () => locale.setUILanguage('en'))
-    await React.act(async () => release())
-    await until(() => saved === 'en', 'latest choice saved')
-    assert.deepEqual(backend.calls.filter(c => c.method === 'PUT').map(c => JSON.parse(c.body)), [
-      { settings: { output_language: 'ru' }, expected_revision: 'r1' },
-      { settings: { output_language: 'en' }, expected_revision: 'r2' },
-    ])
+    await React.act(async () => locale.setUILanguage('ru'))
+    await settle()
+    assert.equal(backend.calls.filter(c => c.method !== 'GET').length, 0)
     assert.equal(view.container.querySelector('[role="alert"]'), null)
   } finally { await harness.close() }
 })
 
-test('an incomplete save is visible and retry reads current settings before writing', async () => {
+test('a viewer who already chose a language does not even read the server default', async () => {
   const harness = await mountLive(); localStorage.clear(); localStorage.setItem('looplab.language', 'en')
   const { default: Sync } = await harness.load('/src/OwnerLanguageSync.jsx')
-  let revision = 1, valid = false
-  globalThis.fetch = fetchStub({ '/api/settings': ({ method, init }) => {
-    if (method === 'GET') return { settings_revision: `r${revision}`, settings: { output_language: 'auto' } }
-    const body = JSON.parse(init.body); assert.equal(body.expected_revision, `r${revision}`)
-    if (!valid) { revision++; return { ok: true } }
-    return { ok: true, settings_revision: `r${++revision}`, settings: { output_language: 'en' } }
-  } })
-  const view = await harness.mount(Sync)
+  const backend = fetchStub({ '/api/settings': () => ({ settings_revision: 'r1', settings: { output_language: 'ru' } }) })
+  globalThis.fetch = backend
+  await harness.mount(Sync)
   try {
-    await until(() => view.container.querySelector('[role="alert"]'), 'honest incomplete-save error')
-    valid = true; await click(view.container.querySelector('button'))
-    await until(() => !view.container.querySelector('[role="alert"]'), 'retry acknowledged')
+    await settle()
+    assert.equal(backend.calls.length, 0)
+    assert.equal(localStorage.getItem('looplab.language'), 'en')
   } finally { await harness.close() }
 })
