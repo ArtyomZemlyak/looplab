@@ -10,7 +10,7 @@ vocabulary a client may append is `serve/protocol.py::CONTROL_EVENTS`.
 
 <!-- generated: api routes -->
 
-181 routes on 157 paths; 10 deprecated; 27 with a declared response model.
+191 routes on 165 paths; 10 deprecated; 27 with a declared response model.
 
 ### `/api`
 
@@ -217,6 +217,7 @@ vocabulary a client may append is `serve/protocol.py::CONTROL_EVENTS`.
 | `POST` | `/api/runs/{run_id}/deletions` | Delete one exact run generation through an operation-bound durable transaction. | — |  |
 | `GET` | `/api/runs/{run_id}/deletions/{operation_id}` | *Observe Run Deletion* (no docstring) | — |  |
 | `GET` | `/api/runs/{run_id}/events` | Stream canonical public state frames — a full `state` frame first, then `state_delta` | — |  |
+| `GET` | `/api/runs/{run_id}/experiments/{experiment_id}/comparison` | The experiment's declared contrasts, computed now by LoopLab with provenance. | — |  |
 | `GET` | `/api/runs/{run_id}/gpu-gate` | This run's GPU gate and what it still waits for (empty `blockers` = open). | — |  |
 | `PUT` | `/api/runs/{run_id}/gpu-gate` | Hold this run's GPU admission, or start it only after other runs' engines exit. | — |  |
 | `GET` | `/api/runs/{run_id}/harness-checkpoints` | Pending mandatory stage checks and live training/rank observations. | — |  |
@@ -228,6 +229,8 @@ vocabulary a client may append is `serve/protocol.py::CONTROL_EVENTS`.
 | `POST` | `/api/runs/{run_id}/harness-hypotheses` | Record a duplicate review; a merge and its receipt append atomically. | — |  |
 | `GET` | `/api/runs/{run_id}/harness-monitor-rules` | The run's declared routine-answer rules for checkpoints (null when none). | — |  |
 | `PUT` | `/api/runs/{run_id}/harness-monitor-rules` | Declare which checkpoint questions are ROUTINE, so LoopLab answers them itself. | — |  |
+| `GET` | `/api/runs/{run_id}/harness-policy` | What the operator lets the agent amend in this run, and its node-addition cap. | — |  |
+| `PUT` | `/api/runs/{run_id}/harness-policy` | Set the agent's amendment level and node cap (the agent token is refused here). | — |  |
 | `GET` | `/api/runs/{run_id}/harness-progress` | Live external obligations, pending questions and paged decision histories. | — |  |
 | `POST` | `/api/runs/{run_id}/harness-reviews` | Record a configured end-of-run review, including a reason for no action. | — |  |
 | `GET` | `/api/runs/{run_id}/harness-selection` | Current selector ties and MCTS branches requiring an agent judgment. | — |  |
@@ -249,7 +252,11 @@ vocabulary a client may append is `serve/protocol.py::CONTROL_EVENTS`.
 | `GET` | `/api/runs/{run_id}/nodes/{nid}/trace` | The LIGHT trace tree for ONE node — the hot path for expanding a node's trace card. Reads | — |  |
 | `GET` | `/api/runs/{run_id}/nodes/{node_id}/failure-forensics` | Every recorded forensic record of a node's failed attempts (newest first) — the | — |  |
 | `POST` | `/api/runs/{run_id}/novelty-preview` | Compare an idea with tried nodes using LoopLab's pure graded novelty rubric. | — |  |
+| `GET` | `/api/runs/{run_id}/per-query` | The run's current per-query uploads (latest per node and test) and their test ids. | — |  |
+| `POST` | `/api/runs/{run_id}/per-query` | Upload a terminal node's per-query arrays; LoopLab derives the shared test id. | — |  |
 | `POST` | `/api/runs/{run_id}/project` | *Assign Run* (no docstring) | — |  |
+| `GET` | `/api/runs/{run_id}/protocol` | The run's pre-registered experiments, its amendment audit trail and the agent policy. | — |  |
+| `POST` | `/api/runs/{run_id}/protocol/amendments` | Append an experiment, or record a task/file/budget amendment with its reason and diff. | — |  |
 | `GET` | `/api/runs/{run_id}/prov` | W3C-PROV-style provenance of the search DAG AND of what the run claimed: each node's | — |  |
 | `POST` | `/api/runs/{run_id}/report_refresh` | Force a high-quality regeneration of the agent-authored run report NOW. Appends a | — |  |
 | `POST` | `/api/runs/{run_id}/reset` | round-7 "Replay": reset a run IN PLACE — archive its event log + spans + node workspaces and | — |  |
@@ -298,6 +305,12 @@ vocabulary a client may append is `serve/protocol.py::CONTROL_EVENTS`.
 | `GET` | `/api/settings/schema/{version}` | Revalidated display metadata for the versioned Settings/Config form contract. | `SettingsUISchemaResponse` |  |
 | `PUT` | `/api/settings/secret` | Store (or clear) a secret credential securely. The value is written owner-only to | `SecretUpdateResponse` |  |
 
+### `/api/shared-tests`
+
+| method | path | summary | response model | deprecated |
+|---|---|---|---|---|
+| `GET` | `/api/shared-tests/{test_id}` | Every node, in every run under this root, scored on one shared test id. | — |  |
+
 ### `/api/start`
 
 | method | path | summary | response model | deprecated |
@@ -315,6 +328,8 @@ vocabulary a client may append is `serve/protocol.py::CONTROL_EVENTS`.
 | `POST` | `/api/supertasks` | *Create Supertask* (no docstring) | — |  |
 | `DELETE` | `/api/supertasks/{sid}` | *Delete Supertask* (no docstring) | — |  |
 | `PATCH` | `/api/supertasks/{sid}` | *Patch Supertask* (no docstring) | — |  |
+| `GET` | `/api/supertasks/{sid}/campaign` | The super-task's campaign report: computed comparisons + the authored narrative. | — |  |
+| `POST` | `/api/supertasks/{sid}/campaign/narrative` | Publish a new revision of the campaign narrative (compare-and-swap on the revision). | — |  |
 
 ### `/api/tasks`
 
