@@ -136,6 +136,7 @@ def router_builders() -> tuple:
                      srv.flush_*_run_costs hooks the destructive and command layers call)
      10. jobs      — GET /api/jobs/{id} over the shared JobRegistry
      11. reports   — cross-run scope reports
+     11b. orchestration — agent events / notification hook / GPU queue and gates (doc 78)
      12. misc      — settings/secret/tasks/health/gpu, then the generic `GET /api/{kind}`
                      authoring route, which MUST register after every other /api route it would
                      otherwise shadow (and before /api/memory, preserving the original order).
@@ -155,6 +156,7 @@ def router_builders() -> tuple:
         boss as _boss_router, collaboration as _collaboration_router,
         control as _control_router, cross_run as _cross_run_router,
         genesis as _genesis_router, misc as _misc_router, org as _org_router,
+        orchestration as _orchestration_router,
         reports as _reports_router, reviews as _reviews_router, runs as _runs_router,
         upstream_ops as _upstream_router)
 
@@ -164,7 +166,8 @@ def router_builders() -> tuple:
             _control_router.build_router, _genesis_router.build_router,
             _assistant_router.build_router, _boss_router.build_router,
             _jobs_router.build_router, _reports_router.build_router,
-            _cross_run_router.build_router, _upstream_router.build_router, _misc_router.build_router)
+            _cross_run_router.build_router, _upstream_router.build_router,
+            _orchestration_router.build_router, _misc_router.build_router)
 
 
 def _module_stem(builder) -> str:

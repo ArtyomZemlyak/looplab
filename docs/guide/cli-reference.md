@@ -83,6 +83,10 @@ looplab tensorboard     Serve TensorBoard over per-experiment training logs
 looplab build-ui        Build the React UI bundle (ui/dist)
 looplab harness         Print the external-agent capability contract as JSON (read-only)
 looplab harness-mcp     Serve the live UI API to a coding agent over stdio MCP
+looplab agent-notify    Configure the command the UI runs to wake an external agent (doc 78)
+looplab agent-events    Print the actionable events LoopLab derived for external agents
+looplab gpu-gate        Hold a run's GPU work, or start it only after other runs' engines exit
+looplab gpu-queue       Show who holds the host GPU pool and who waits for it, in FIFO order
 ```
 
 Every engine setting supplied through `run -s/--set` (and the typed setting overrides) can also come

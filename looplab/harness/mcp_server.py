@@ -58,7 +58,10 @@ MCP_INSTRUCTIONS = (
     "Typed command_receipt also verifies v1 status/terminal consistency, control event, sequence, error_code and retryable fields. Incomplete HTTP 200 means unavailable without body, not a command verdict. Read again explicitly; a terminal rejected/failed receipt or succeeded inject still does not prove completed training. "
     "Typed run_progress and connection_check validate critical progress fields, source completeness, explicit expansion/finish gates and pending counts. Missing fields are unavailable, not empty obligations. A structurally valid complete=false read retains source diagnostics; read success does not grant admission. Refresh explicitly; no automatic retry or work. "
     "The stdio client durably saves original command and supported semantic action POSTs before HTTP in its private client store. On reconnect use saved_commands/saved_command or saved_actions/saved_action, verify hashes, then read original server receipts and fresh progress/checkpoints/source_health before any explicit exact retry. Semantic actions include decisions/reviews, checkpoints, hypotheses, selection verify/values, lessons/skill-candidates, result commentary and upstream operations. Preserve all original action IDs and evidence revisions/tokens. Local records are unobserved intentions, not applied verdicts; an empty/missing client store proves no absence of server effects. Other API routes still require retaining originals yourself. Client storage failure returns not_sent for that invocation, without HTTP or automatic repair. "
-    "Use only the scoped harness credential; owner-only workflows require the operator."
+    "Use only the scoped harness credential; owner-only workflows require the operator. "
+    "Between decisions, block on wait_for_next(after=<last id>) instead of polling: LoopLab "
+    "derives node/stage/question/obligation/idle/GPU events itself. Order GPU work across runs "
+    "with PUT /api/runs/{run_id}/gpu-gate (hold / start_after) instead of handoff scripts."
 )
 
 
@@ -279,6 +282,31 @@ class HarnessAPI:
         else:
             result = self._result(response, method=verb)
         return {**result, "client_request": saved} if saved is not None else result
+
+    def wait_for_next(self, after: int | None = None, timeout_s: float = 120.0,
+                      run_id: str = "", kinds: str = "", limit: int = 50) -> dict:
+        """Long-poll the server's actionable-event outbox (doc 78). One GET; no retry."""
+        if after is not None and (type(after) is not int or after < -1):
+            raise ValueError("after must be an integer >= -1 (the last event id you processed)")
+        if not isinstance(timeout_s, (int, float)) or not 0 <= timeout_s <= 600:
+            raise ValueError("timeout_s must be within 0..600 seconds")
+        if type(limit) is not int or not 1 <= limit <= 500:
+            raise ValueError("limit must be an integer from 1 to 500")
+        query: dict = {"timeout": timeout_s, "limit": limit}
+        if after is not None:
+            query["after"] = after
+        if run_id:
+            query["run_id"] = run_id
+        if kinds:
+            query["kinds"] = kinds
+        try:
+            response = self.client.request("GET", f"api/agent-events?{urlencode(query)}",
+                                           timeout=float(timeout_s) + 30.0)
+        except httpx.TransportError:
+            return {"status": None, "code": "api_unreachable", "outcome": "unavailable",
+                    "message": "Agent-event read unavailable. Check the UI/server and call "
+                               "wait_for_next again with the same after cursor; no event was lost."}
+        return self._result(response, method="GET")
 
     def saved_commands(self, run_id, expected_generation, offset=0, limit=20):
         """Private local records only; not a server receipt or an automatic recovery."""
@@ -868,6 +896,21 @@ def build_server(api: HarnessAPI):
         invalid_progress/unavailable without body. Valid complete=false diagnostics
         are retained; empty gates must be explicit, and advice grants no permission."""
         return api.run_progress(run_id, expected_generation, language)
+
+    @mcp.tool(annotations=ToolAnnotations(readOnlyHint=True, destructiveHint=False,
+                                        idempotentHint=True, openWorldHint=False))
+    def wait_for_next(after: int | None = None, timeout_s: float = 120.0, run_id: str = "",
+                      kinds: str = "", limit: int = 50) -> dict:
+        """Block until LoopLab records an actionable event for you, then return it.
+
+        Events: node_evaluated, node_failed (with root exception / signals), stage_failed,
+        monitor_question, obligation_due, run_idle (engine waits for your next experiment),
+        run_paused, run_finished, gpu_free. Pass the last processed event id as `after`
+        (omit it once to subscribe from now; -1 reads the retained history) and keep
+        `next_after` for the next call. Returns early on the first event, else after
+        timeout_s (<= 600) with timed_out=true. An event is a nudge: read run_progress
+        for the run before acting. Filter with run_id or a comma list of kinds."""
+        return api.wait_for_next(after, timeout_s, run_id, kinds, limit)
 
     @mcp.tool(annotations=ToolAnnotations(readOnlyHint=True, destructiveHint=False,
                                         idempotentHint=True, openWorldHint=False))

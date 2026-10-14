@@ -76,6 +76,8 @@ _RESERVED_RUN_IDS = {
     "secrets.json", "secrets.json.lock",
     ".settings-launch.lock",
     "projects.json", "projects.json.lock",
+    # The external-agent outbox, its delivery ledger and hook config (`serve/agent_events.py`).
+    ".agent-events",
 }
 # `engine_proc._lifecycle_lock_path` builds `<run-root>/.looplab-lifecycle-<digest>.lock`.
 _LIFECYCLE_LOCK_PREFIX = ".looplab-lifecycle-"

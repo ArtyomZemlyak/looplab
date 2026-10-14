@@ -819,6 +819,13 @@ def make_app(run_root: str | os.PathLike, *, bind_host: Optional[str] = None) ->
     lifecycle.on_startup("result_commentary", srv.result_commentary.start)
     lifecycle.on_shutdown("result_commentary", srv.result_commentary.stop)
 
+    # The external agent's wake-up source (doc 78): derives actionable events from every external
+    # run's own record into the run root's outbox and delivers the operator's notification hook.
+    from looplab.serve.agent_events import AgentEventPump
+    srv.agent_events = AgentEventPump(srv)
+    lifecycle.on_startup("agent_events", srv.agent_events.start)
+    lifecycle.on_shutdown("agent_events", srv.agent_events.stop)
+
     @app.get("/api/auth/status")
     def auth_status(request: Request):
         return {"required": bool(ui_token),

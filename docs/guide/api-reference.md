@@ -10,7 +10,7 @@ vocabulary a client may append is `serve/protocol.py::CONTROL_EVENTS`.
 
 <!-- generated: api routes -->
 
-162 routes on 143 paths; 10 deprecated; 27 with a declared response model.
+172 routes on 149 paths; 10 deprecated; 27 with a declared response model.
 
 ### `/api`
 
@@ -18,6 +18,21 @@ vocabulary a client may append is `serve/protocol.py::CONTROL_EVENTS`.
 |---|---|---|---|---|
 | `GET` | `/api/{kind}` | *List Author* (no docstring) | — |  |
 | `PUT` | `/api/{kind}/{name}` | *Write Author* (no docstring) | — |  |
+
+### `/api/agent-events`
+
+| method | path | summary | response model | deprecated |
+|---|---|---|---|---|
+| `GET` | `/api/agent-events` | Actionable events LoopLab recorded for external agents, oldest first. | — |  |
+
+### `/api/agent-notify`
+
+| method | path | summary | response model | deprecated |
+|---|---|---|---|---|
+| `GET` | `/api/agent-notify` | The operator's notification hook, its delivery watermark and the recent ledger. | — |  |
+| `PUT` | `/api/agent-notify` | Configure the hook: `{command: [argv...] \| "string", vars: {...}, debounce_s, ...}`. | — |  |
+| `DELETE` | `/api/agent-notify` | Remove the hook (the outbox and ledger stay). | — |  |
+| `POST` | `/api/agent-notify/test` | Run the configured command once with a test message; the result lands in the ledger. | — |  |
 
 ### `/api/assistant`
 
@@ -98,6 +113,12 @@ vocabulary a client may append is `serve/protocol.py::CONTROL_EVENTS`.
 |---|---|---|---|---|
 | `GET` | `/api/gpu` | *Gpu* (no docstring) | — |  |
 
+### `/api/gpu-queue`
+
+| method | path | summary | response model | deprecated |
+|---|---|---|---|---|
+| `GET` | `/api/gpu-queue` | Who holds the host GPU pool, who waits for it (FIFO order) and every run's GPU gate. | — |  |
+
 ### `/api/health`
 
 | method | path | summary | response model | deprecated |
@@ -163,6 +184,8 @@ vocabulary a client may append is `serve/protocol.py::CONTROL_EVENTS`.
 | `GET` | `/api/runs` | *List Runs* (no docstring) | — |  |
 | `DELETE` | `/api/runs/{run_id}` | Never let a bodyless request delete an uninspected replacement generation. | — | yes |
 | `PATCH` | `/api/runs/{run_id}` | Set/clear a run's UI display label. Non-destructive: the run dir id is unchanged. | — |  |
+| `GET` | `/api/runs/{run_id}/agent-notify` | This run's recent actionable events, its delivery ledger rows and hook variables. | — |  |
+| `PUT` | `/api/runs/{run_id}/agent-notify` | Set this run's hook variables (e.g. `{"thread": "<id>"}`) or switch its notifications | — |  |
 | `GET` | `/api/runs/{run_id}/agents_md` | DEPRECATED. Serve a run's AGENTS.md. | — | yes |
 | `GET` | `/api/runs/{run_id}/artifact` | Serve ONE artifact's content for inline viewing. `root` must be one of the ids returned by | — |  |
 | `GET` | `/api/runs/{run_id}/artifacts` | List files currently visible to the run, grouped by root. | — |  |
@@ -188,6 +211,8 @@ vocabulary a client may append is `serve/protocol.py::CONTROL_EVENTS`.
 | `POST` | `/api/runs/{run_id}/deletions` | Delete one exact run generation through an operation-bound durable transaction. | — |  |
 | `GET` | `/api/runs/{run_id}/deletions/{operation_id}` | *Observe Run Deletion* (no docstring) | — |  |
 | `GET` | `/api/runs/{run_id}/events` | Stream canonical public state frames — a full `state` frame first, then `state_delta` | — |  |
+| `GET` | `/api/runs/{run_id}/gpu-gate` | This run's GPU gate and what it still waits for (empty `blockers` = open). | — |  |
+| `PUT` | `/api/runs/{run_id}/gpu-gate` | Hold this run's GPU admission, or start it only after other runs' engines exit. | — |  |
 | `GET` | `/api/runs/{run_id}/harness-checkpoints` | Pending mandatory stage checks and live training/rank observations. | — |  |
 | `POST` | `/api/runs/{run_id}/harness-checkpoints` | Answer exactly one checkpoint; the engine applies the verdict before advancing. | — |  |
 | `GET` | `/api/runs/{run_id}/harness-contract` | Effective choices and enforced task constraints for this run incarnation. | — |  |

@@ -505,6 +505,13 @@ class ResourceSchedulingMixin:
             self._gpu_host_lease_path = None
         if not hasattr(self, "_gpu_host_lease_handle"):
             self._gpu_host_lease_handle = None
+        if not hasattr(self, "_gpu_queue_ticket"):
+            # This process's place in the cross-run FIFO in front of the lease (`gpu_queue.py`),
+            # minted on the first contended admission.
+            self._gpu_queue_ticket = None
+        if not hasattr(self, "_gpu_gate_reader"):
+            # The run's own `gpu_gate.json` (hold / start_after), minted on first admission.
+            self._gpu_gate_reader = None
         if not hasattr(self, "_gpu_host_lease_wait_since"):
             # Contention-notice bookkeeping (see `_note_gpu_host_lease_contention`). Lives here rather
             # than in Engine.__init__ so the focused mixin users get it too — the silent wait they can
@@ -783,6 +790,16 @@ class ResourceSchedulingMixin:
                 # `admission_unpinnable` reservation marker, so `_resource_eval_env` re-raises it into
                 # each caller's existing node-terminal / retry contract instead of aborting the run mid
                 # task-group with no terminal and re-crashing on every resume.
+                # THE GPU GATE and THE QUEUE (`engine/gpu_queue.py`, audit 2026-10-14 L-02) come
+                # before the lease: a gated run does not even take a place in the queue, and only
+                # the queue's HEAD may try the lease, so a release hands the pool to the run that
+                # waited longest — never to whichever process happened to poll first.
+                if self._gpu_gate_blocked():
+                    return None
+                ticket = self._gpu_queue_place(lease_path)
+                if ticket is not None and not ticket.is_head():
+                    self._note_gpu_host_lease_contention(lease_path)
+                    return None
                 handle = _try_acquire_gpu_host_lease(Path(lease_path))
                 if handle is None:
                     # A holder that can never release (see `abandoned_gpu_host_lease_holder`) would
@@ -800,6 +817,10 @@ class ResourceSchedulingMixin:
                     return None
                 self._note_gpu_host_lease_acquired(lease_path)
                 self._gpu_host_lease_handle = handle
+                if ticket is not None:
+                    ticket.release()
+                from looplab.engine.gpu_queue import write_holder
+                write_holder(lease_path, run_dir=getattr(self, "run_dir", None))
             chosen = fitting[:count]
             chosen_set = set(chosen)
             self._free_gpus[:] = [gpu for gpu in self._free_gpus if gpu not in chosen_set]
@@ -821,9 +842,43 @@ class ResourceSchedulingMixin:
                     and self._gpu_host_lease_handle is not None):
                 handle = self._gpu_host_lease_handle
                 self._gpu_host_lease_handle = None
+                if self._gpu_host_lease_path is not None:
+                    from looplab.engine.gpu_queue import clear_holder
+                    clear_holder(self._gpu_host_lease_path)
                 _release_gpu_host_lease(handle)
             self._gpu_epoch += 1
             self._gpu_condition.notify_all()
+
+    def _gpu_gate_blocked(self) -> bool:
+        """Is GPU admission held by this run's `gpu_gate.json`? Called under `_gpu_condition`.
+
+        Cheap on the hot path: the reader re-reads the file only when its stat changes and probes
+        a predecessor's engine lock at most every two seconds (`gpu_queue.GateReader`)."""
+        from looplab.engine.gpu_queue import GateReader
+
+        if self._gpu_gate_reader is None:
+            self._gpu_gate_reader = GateReader(getattr(self, "run_dir", None))
+        try:
+            blockers = self._gpu_gate_reader.blockers()
+        except Exception:  # noqa: BLE001 — an unreadable gate HOLDS (fail closed), never starts GPUs
+            return True
+        return bool(blockers)
+
+    def _gpu_queue_place(self, lease_path):
+        """This process's ticket in the host GPU queue, taken on first use; None when the queue is
+        unusable here (Windows, an unwritable directory) and the unordered lease applies."""
+        from looplab.engine.gpu_queue import GpuQueueTicket
+
+        ticket = self._gpu_queue_ticket
+        if ticket is None or Path(ticket.lease_path) != Path(lease_path):
+            if ticket is not None:
+                ticket.release()
+            run_dir = getattr(self, "run_dir", None)
+            ticket = GpuQueueTicket(lease_path, run_dir=run_dir)
+            self._gpu_queue_ticket = ticket
+        if not ticket.ensure():
+            return None
+        return ticket
 
     def _gpu_pool_epoch(self) -> int:
         self._ensure_resource_state()

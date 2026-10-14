@@ -41,6 +41,10 @@ HELP_PANELS: tuple[tuple[str, tuple[tuple[str, str], ...]], ...] = (
     ("External coding agent", (
         ("harness", "Print the external-agent capability contract as JSON."),
         ("harness-mcp", "Serve the UI's API to a coding agent over stdio MCP."),
+        ("agent-notify", "Configure the command that wakes an external agent on run events."),
+        ("agent-events", "Print the actionable events derived for external agents."),
+        ("gpu-gate", "Hold a run's GPU work or start it after other runs finish."),
+        ("gpu-queue", "Show who holds the host GPU pool and who waits, in order."),
     )),
     ("Export", (
         ("export-notebook", "Export the best solution as a runnable Jupyter notebook."),

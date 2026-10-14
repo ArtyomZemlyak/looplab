@@ -3,6 +3,11 @@
 #   python -m pytest -p tests._route_recorder --route-manifest=tests/data/route_coverage.txt -o addopts="" -q <files>
 # Checked by tests/test_route_coverage.py against make_app(...).routes.
 GET /	tests/test_review_capabilities.py tests/test_server.py tests/test_static_delivery.py
+GET /api/agent-events	tests/test_agent_events.py
+DELETE /api/agent-notify	tests/test_agent_events.py
+GET /api/agent-notify	tests/test_agent_events.py
+PUT /api/agent-notify	tests/test_agent_events.py
+POST /api/agent-notify/test	tests/test_agent_events.py
 GET /api/assistant/commands	tests/test_assistant_p3.py
 GET /api/assistant/permissions	tests/test_approval_preview_bound.py tests/test_assistant_endpoint.py tests/test_server.py
 POST /api/assistant/permissions/{req_id}	tests/test_approval_preview_bound.py tests/test_assistant_endpoint.py
@@ -47,6 +52,7 @@ POST /api/cross-run/task-facets	tests/test_cross_run_server.py
 POST /api/genesis	tests/test_assistant_endpoint.py tests/test_evidence_consumer_fences.py tests/test_provider_error_redaction.py tests/test_report.py tests/test_router_wiring.py tests/test_serve_prompt_review.py tests/test_server.py tests/test_tui.py
 GET /api/genesis/{job_id}	tests/test_report.py
 GET /api/gpu	tests/test_server.py
+GET /api/gpu-queue	tests/test_gpu_queue.py
 GET /api/health	tests/test_owner_token.py tests/test_server.py tests/test_startup_resume_scan_prefilter.py
 GET /api/jobs/{job_id}	tests/test_assistant_endpoint.py tests/test_concept_lens_durability.py tests/test_evidence_consumer_fences.py tests/test_jobs.py tests/test_report.py tests/test_server.py
 POST /api/llm/health	tests/test_provider_error_redaction.py tests/test_server.py
@@ -66,6 +72,8 @@ GET /api/review/state	tests/test_card_public_projection.py tests/test_collaborat
 GET /api/runs	tests/test_campaign_runs.py tests/test_concept_shelf.py tests/test_node_sidecar_reads.py tests/test_owner_token.py tests/test_refusal_vocabulary.py tests/test_report.py tests/test_run_command_service.py tests/test_seq_gap_visibility.py tests/test_server.py tests/test_span_index.py tests/test_tui.py
 DELETE /api/runs/{run_id}	tests/test_deletion_identity_leak.py
 PATCH /api/runs/{run_id}	tests/test_server.py
+GET /api/runs/{run_id}/agent-notify	tests/test_agent_events.py
+PUT /api/runs/{run_id}/agent-notify	tests/test_agent_events.py
 GET /api/runs/{run_id}/agents_md	tests/test_server.py
 GET /api/runs/{run_id}/artifact	tests/test_server.py
 GET /api/runs/{run_id}/artifacts	tests/test_refusal_vocabulary.py tests/test_server.py
@@ -91,6 +99,8 @@ GET /api/runs/{run_id}/cost	tests/test_refusal_vocabulary.py tests/test_seq_gap_
 POST /api/runs/{run_id}/deletions	tests/test_deletion_identity_leak.py tests/test_durable_op_kit.py tests/test_finalization_stall_deletion.py tests/test_projects.py tests/test_report.py tests/test_review_fixes.py tests/test_run_command_service.py tests/test_run_deletion_memory_cascade.py tests/test_run_deletion_quarantine_residue.py tests/test_server.py tests/test_start_idempotency.py
 GET /api/runs/{run_id}/deletions/{operation_id}	tests/test_deletion_identity_leak.py
 GET /api/runs/{run_id}/events	tests/test_card_public_projection.py tests/test_collaboration.py tests/test_server.py tests/test_state_delta.py tests/test_trace_facts_and_sse_offload.py
+GET /api/runs/{run_id}/gpu-gate	tests/test_gpu_queue.py
+PUT /api/runs/{run_id}/gpu-gate	tests/test_gpu_queue.py
 GET /api/runs/{run_id}/harness-checkpoints	tests/test_external_checkpoints.py
 POST /api/runs/{run_id}/harness-checkpoints	tests/test_external_checkpoints.py tests/test_external_progress.py
 GET /api/runs/{run_id}/harness-contract	tests/test_external_run_mode.py

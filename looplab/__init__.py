@@ -89,6 +89,7 @@ _LAYOUT = {
     "evidence": "core",  # the ONE untrusted-evidence envelope: label + guard sentence + fence
     "appstate": "serve",
     "agent_activity": "serve",  # process-local authenticated harness-read observations, not liveness
+    "agent_events": "serve",    # the external agent's wake-up outbox, long poll and notification hook
     "command_identity": "serve",
     "command_receipt": "serve",
     "external_attention": "serve",
@@ -396,6 +397,7 @@ _LAYOUT = {
     "reset_route": "serve",
     "reset_transaction": "serve",
     "resources": "engine",  # resource-envelope and Card footprint scheduling helpers
+    "gpu_queue": "engine",  # the cross-run FIFO in front of the host GPU lease + the run's GPU gate
     "reposcout": "tools",
     "retrieval": "tools",
     "reviews": "serve",

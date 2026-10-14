@@ -1037,6 +1037,10 @@ class Engine(ConfirmPhaseMixin, NoiseFloorMixin, AblationMixin, NoveltyGateMixin
         self._gpu_host_lease_path = (
             default_gpu_host_lease_path() if self._gpu_ids else None)
         self._gpu_host_lease_handle = None
+        # The cross-run FIFO ticket and this run's GPU gate reader (`engine/gpu_queue.py`): both
+        # minted on the first admission that needs the host lease.
+        self._gpu_queue_ticket = None
+        self._gpu_gate_reader = None
         self._gpu_lock = threading.Lock()
         self._gpu_condition = threading.Condition(self._gpu_lock)
         self._gpu_epoch = 0
