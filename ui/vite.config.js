@@ -1,5 +1,16 @@
 import { defineConfig } from 'vite'
 import react from '@vitejs/plugin-react'
+import { createHash, randomBytes } from 'node:crypto'
+
+// ONE id per build, stamped into the bundle (`__LOOPLAB_BUILD_ID__`) and into index.html, so an
+// open tab can tell that the server now serves a newer interface (src/bundleFreshness.js).
+const BUILD_ID = createHash('sha256').update(`${Date.now()}:${randomBytes(16).toString('hex')}`)
+  .digest('hex').slice(0, 16)
+const buildStamp = {
+  name: 'looplab-build-stamp',
+  transformIndexHtml: html => html.replace('<head>',
+    `<head>\n    <meta name="looplab-build" content="${BUILD_ID}" />`),
+}
 
 // Build to ui/dist (served by looplab/server.py). The dev server proxies /api to the
 // Python server so `npm run dev` works against a live `LoopLab ui` backend.
@@ -14,7 +25,8 @@ export default defineConfig({
   // wrapper for every element in this large reader UI (~4 KiB gzip on the doc 72 baseline).
   // Components must import React; productionJsxRuntime.test.js executes shipped SSR output against
   // the automatic-runtime control, including real controls, icons, concepts and result readers.
-  plugins: [react({ jsxRuntime: 'classic' })],
+  plugins: [react({ jsxRuntime: 'classic' }), buildStamp],
+  define: { __LOOPLAB_BUILD_ID__: JSON.stringify(BUILD_ID) },
   build: {
     // Rolldown/Oxc performs graph-aware compression first (configured below); Terser then gives the
     // emitted chunks one final cross-statement pass. This is measurably smaller over gzip than either

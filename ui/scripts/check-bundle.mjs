@@ -189,14 +189,19 @@ export const DEFAULT_BUDGETS = Object.freeze({
     // 2026-10-11 doc 75 follow-ups + its code review: 672,051 -> 672,804 B (+753 B) for the Russian
     // render sites, the Assistant's no-model hint, the fresh-launch rule, the plan-read strategy
     // strip and the model-check revision rule. 658 KiB leaves 988 B; every proof unchanged.
-    js: { gzip: 658 * KIB },
-    css: { gzip: 58.5 * KIB },
+    // 2026-10-14 review fixes (looplab-reviews/20261014-ui-issues): master c4e068b98 already measured
+    // 673,985 B JS / 59,986 B CSS (4 violations); with GFM tables, the agent-activity chip model,
+    // findings delta, report key metrics/author, Agent obligations and the build-id check it is
+    // 677,753 B JS / 60,097 B CSS. Route closures +1.0/+1.5 KiB JS, +76..183 B CSS; all lazy
+    // reachability gates unchanged. Ceilings re-baselined with < 1.5 KiB headroom.
+    js: { gzip: 663 * KIB },
+    css: { gzip: 59 * KIB },
   },
   individual: {
     js: { raw: 450 * KIB, gzip: 110 * KIB },
     // 2026-09-22: the one stylesheet (index CSS) measured 190,304 B raw / 35,933 B gzip (was 180/35).
     // 2026-09-30: index CSS measured 192,530 B raw (+18 B over 188 KiB) after the same merge.
-    css: { raw: 189 * KIB, gzip: 36 * KIB },
+    css: { raw: 190 * KIB, gzip: 36 * KIB },
   },
   closures: [
     {
@@ -226,7 +231,7 @@ export const DEFAULT_BUDGETS = Object.freeze({
       // preserve the current draft mode and return focus after an explicit selection.
       // 2026-10-01 Assistant language: 223,790 B; owner chrome contains its translated controls.
       // 2026-10-02 first-run labels/handoff: 224,200 -> 224,404 B; 364 B headroom.
-      limits: { js: { gzip: 219.5 * KIB }, css: { gzip: 40 * KIB } },
+      limits: { js: { gzip: 219.5 * KIB }, css: { gzip: 40.5 * KIB } },
     },
     {
       name: 'Run compare increment',
@@ -283,7 +288,7 @@ export const DEFAULT_BUDGETS = Object.freeze({
       // verdict and the Energy switch's new place, all in RunView's closure. 400.25 KiB leaves 451 B.
       // 2026-10-11 code review of doc 75: 410,099 B (+694 B) — the fresh-launch rule, the strip's
       // plan reading and the Russian render sites in the same closure. 401 KiB leaves 525 B.
-      limits: { js: { gzip: 401 * KIB }, css: { gzip: 46 * KIB } },
+      limits: { js: { gzip: 403 * KIB }, css: { gzip: 46.5 * KIB } },
     },
     {
       name: 'valid review DAG route',
@@ -309,7 +314,7 @@ export const DEFAULT_BUDGETS = Object.freeze({
       // 2026-10-11 code review of doc 75: 272,025 B (+153 B over) — RunView's fresh-launch rule
       // (`freshLaunch.js::freshLaunchShown`) and the strip's plan reading (`planStanding`).
       // 266 KiB leaves 359 B; owner exclusions and cycle checks unchanged.
-      limits: { js: { gzip: 266 * KIB }, css: { gzip: 41 * KIB } },
+      limits: { js: { gzip: 268 * KIB }, css: { gzip: 41.5 * KIB } },
     },
     {
       name: 'owner Concepts route',

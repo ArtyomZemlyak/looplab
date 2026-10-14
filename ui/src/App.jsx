@@ -11,6 +11,8 @@ import { initDensity } from './DensityToggle.jsx'
 import { routeHashPath } from './runRouteState.js'
 import { installationRouteLabel, isInstallationRouteView } from './globalNav.js'
 
+// Lazy, so the build-id check is its own chunk and never joins the entry's import cycle.
+const BundleFreshness = lazy(() => import('./BundleFreshness.jsx'))
 const RunList = lazy(() => import('./RunList.jsx'))
 const RunView = lazy(() => import('./RunView.jsx'))
 const Settings = lazy(() => import('./Settings.jsx'))
@@ -372,6 +374,7 @@ export default function App() {
     autoFocus={!restoreListNavigation}>
     {/* OwnerWorkspace is stable across list/run/settings/claim-ledger changes. Its one Assistant instance keeps
         conversation and draft state; public review/share returns above before owner pollers mount. */}
+    <React.Suspense fallback={null}><BundleFreshness /></React.Suspense>
     <OwnerWorkspace route={route}>{content}</OwnerWorkspace>
   </RouteFocus></OwnerAuth>
 }

@@ -1,7 +1,7 @@
 {
   "schema": 1,
   "language": "ru",
-  "count": 7913,
+  "count": 7915,
   "messages": {
     "# LoopLab run report — {0}": "# Отчёт запуска LoopLab — {0}",
     "## Agent narrative (advisory)": "## Пояснения агента (рекомендации)",
@@ -7915,7 +7915,9 @@
     "External agent connection": "Подключение внешнего агента",
     "Audit: journals and history": "Аудит: журналы и история",
     "What the external agent must do now, before another experiment and before finalization: research, novelty, evaluation questions and reports. Journals and the agent connection are folded below. This panel does not start an agent or control training.": "Что внешний агент должен сделать сейчас, перед следующим экспериментом и перед завершением: исследования, новизна идеи, вопросы оценки и отчёт. Журналы и подключение агента — в свёрнутых разделах ниже. Панель сама не запускает агента и не управляет обучением.",
-    "harness-audit harness-connection-details": "harness-audit harness-connection-details"
+    "harness-audit harness-connection-details": "harness-audit harness-connection-details",
+    "The interface was updated. Reload the page to use the new version; save any draft first.": "Интерфейс обновлён. Перезагрузите страницу, чтобы открыть новую версию; сначала сохраните черновики.",
+    "notice warn bundle-stale": "notice warn bundle-stale"
   },
   "plurals": {
     "({0} paraphrases folded)": {
