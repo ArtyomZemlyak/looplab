@@ -142,3 +142,15 @@ def test_an_agent_comment_reads_as_the_external_agent(tmp_path):
     (comment,) = comments.values()
     assert comment.actor_kind == "harness_agent"
     assert ACTOR_LABELS[comment.actor_kind] == "External agent"
+
+
+def test_the_harness_manifest_does_not_promise_capsules_from_authored_tags():
+    """UI review 2026-10-14 §4: the manifest said concept capsules are projected "from authored
+    evidence", while `engine/lessons.py` admits only classifier-provenance concepts ("authored ...
+    labels never cross this wall") — an external agent tagged every node expecting cross-run
+    knowledge that could not arrive."""
+    import json
+    from looplab.harness.manifest import harness_manifest
+    text = json.dumps(harness_manifest())
+    assert "concept capsules are still deterministic run-end projections" not in text
+    assert "classifier-tagged" in text
