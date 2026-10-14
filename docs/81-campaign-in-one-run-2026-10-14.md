@@ -4,7 +4,7 @@
 (`/home/jovyan/data/looplab-reviews/20261014-codex-external-audit/report.md`, §4 «Почему почти
 каждый эксперимент — отдельный ран», L-03/L-04/L-13). Связанные документы:
 [doc 76](76-external-agent-ux-open-items-2026-10-13.md), [doc 77](77-experiment-tracking-open-items-2026-10-13.md),
-руководство [external-harness](guide/external-harness.md#running-a-campaign-in-one-run).
+руководство [external-harness](guide/external-harness.md).
 
 ## 1. Что было не так
 
