@@ -10,7 +10,7 @@ vocabulary a client may append is `serve/protocol.py::CONTROL_EVENTS`.
 
 <!-- generated: api routes -->
 
-194 routes on 168 paths; 10 deprecated; 27 with a declared response model.
+198 routes on 172 paths; 10 deprecated; 27 with a declared response model.
 
 ### `/api`
 
@@ -261,6 +261,10 @@ vocabulary a client may append is `serve/protocol.py::CONTROL_EVENTS`.
 | `GET` | `/api/runs/{run_id}/protocol` | The run's pre-registered experiments, its amendment audit trail and the agent policy. | — |  |
 | `POST` | `/api/runs/{run_id}/protocol/amendments` | Append an experiment, or record a task/file/budget amendment with its reason and diff. | — |  |
 | `GET` | `/api/runs/{run_id}/prov` | W3C-PROV-style provenance of the search DAG AND of what the run claimed: each node's | — |  |
+| `POST` | `/api/runs/{run_id}/report-figures` | Copy ONE raster image artifact into the run's report-figure store and return its id | — |  |
+| `GET` | `/api/runs/{run_id}/report-figures/{figure_id}` | Serve one stored report figure (re-verified against its own sha256). | — |  |
+| `GET` | `/api/runs/{run_id}/report/versions` | Every `report_generated` row, newest first: seq, when, who published it, its content | — |  |
+| `GET` | `/api/runs/{run_id}/report/versions/{seq}` | The sanitized content of the report published at `seq` (the fold's own sanitizer). | — |  |
 | `POST` | `/api/runs/{run_id}/report_refresh` | Force a high-quality regeneration of the agent-authored run report NOW. Appends a | — |  |
 | `POST` | `/api/runs/{run_id}/reset` | round-7 "Replay": reset a run IN PLACE — archive its event log + spans + node workspaces and | — |  |
 | `POST` | `/api/runs/{run_id}/resolve-activity-claims` | Guarded operator recovery for an ownership claim that cannot be proven dead. | — |  |

@@ -1,7 +1,7 @@
 {
   "schema": 1,
   "language": "ru",
-  "count": 7973,
+  "count": 7995,
   "messages": {
     "# LoopLab run report — {0}": "# Отчёт запуска LoopLab — {0}",
     "## Agent narrative (advisory)": "## Пояснения агента (рекомендации)",
@@ -7975,7 +7975,29 @@
     "narrows: {0}": "уточняет: {0}",
     "Filing…": "Добавляем…",
     "File on the board": "Добавить на доску",
-    "Only the {0} most recently asked are listed.": "Показаны только {0} последних вопросов."
+    "Only the {0} most recently asked are listed.": "Показаны только {0} последних вопросов.",
+    "More actions": "Другие действия",
+    "This figure is no longer available.": "Этот рисунок больше недоступен.",
+    "Report figure": "Рисунок отчёта",
+    "from {0}": "из {0}",
+    "Headline": "Заголовок",
+    "Verdict": "Итог",
+    "Report body": "Текст отчёта",
+    "Figures": "Рисунки",
+    "Key metrics": "Ключевые метрики",
+    "The two versions say the same thing.": "Обе версии говорят одно и то же.",
+    "Too long to compare line by line.": "Слишком длинно для построчного сравнения.",
+    "{0} added, {1} removed": "добавлено: {0}, удалено: {1}",
+    "external agent": "внешний агент",
+    "LoopLab model": "модель LoopLab",
+    "The report history could not be read.": "Не удалось прочитать историю отчёта.",
+    "Version history": "История версий",
+    "Every published version of this report, newest first. Pick two to compare them.": "Все опубликованные версии отчёта, новые сверху. Отметьте две, чтобы сравнить.",
+    "Compare version #{0}": "Сравнить версию #{0}",
+    "same as #{0}": "совпадает с #{0}",
+    "{0} experiments": "экспериментов: {0}",
+    "Only the most recent versions are listed.": "Показаны только последние версии.",
+    "The two versions could not be read.": "Не удалось прочитать две версии."
   },
   "plurals": {
     "({0} paraphrases folded)": {
@@ -9815,6 +9837,16 @@
       "one": "Добавить {0} вопрос на доску",
       "few": "Добавить {0} вопроса на доску",
       "many": "Добавить {0} вопросов на доску"
+    },
+    "{0} attached figures are not shown in this view.": {
+      "one": "{0} приложенный рисунок в этом виде не показывается.",
+      "few": "{0} приложенных рисунка в этом виде не показываются.",
+      "many": "{0} приложенных рисунков в этом виде не показываются."
+    },
+    "{0} versions repeat an earlier one word for word.": {
+      "one": "{0} версия дословно повторяет более раннюю.",
+      "few": "{0} версии дословно повторяют более раннюю.",
+      "many": "{0} версий дословно повторяют более раннюю."
     }
   }
 }

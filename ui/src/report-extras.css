@@ -1,0 +1,17 @@
+/* Report figures and version history (ReportExtras.jsx). */
+.report-figures { display: grid; grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)); gap: 12px; margin: 12px 0; }
+.report-figure { margin: 0; border: 1px solid var(--line); border-radius: 8px; padding: 8px; background: var(--bg-1); }
+.report-figure img { display: block; max-width: 100%; height: auto; margin: 0 auto; }
+.report-figure figcaption { font-size: 12px; margin-top: 6px; line-height: 1.4; overflow-wrap: anywhere; }
+.report-versions { margin: 10px 0; }
+.report-versions > summary { cursor: pointer; font-weight: 600; }
+.report-version-list { list-style: none; padding: 0; margin: 8px 0; display: grid; gap: 4px; }
+.report-version-list li.current { font-weight: 600; }
+.report-version-list label { display: flex; flex-wrap: wrap; gap: 6px; align-items: baseline; }
+.report-version-headline { flex: 1 1 240px; overflow-wrap: anywhere; }
+.report-diff dt { margin-top: 8px; font-weight: 600; }
+.report-diff dd { margin: 4px 0 0 0; }
+.report-diff-add { background: color-mix(in srgb, var(--ok, #2e7d32) 12%, transparent); }
+.report-diff-del { background: color-mix(in srgb, var(--bad, #c62828) 12%, transparent); text-decoration: line-through; }
+.report-diff-lines { white-space: pre-wrap; font-size: 12px; max-height: 360px; overflow: auto; }
+.report-more > summary { cursor: pointer; }

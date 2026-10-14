@@ -199,8 +199,11 @@ export const DEFAULT_BUDGETS = Object.freeze({
     // Rebased onto master 2026-10-14 (doc 78-81 orchestration/campaign UI): master alone measured
     // 682,358 B JS / 60,229 B CSS (10 violations); with the review fixes 691,096 B JS / 60,540 B CSS,
     // index CSS 194,904 B raw / 36,998 B gzip. Re-baselined; every reachability gate unchanged.
-    js: { gzip: 677 * KIB },
-    css: { gzip: 59.5 * KIB },
+    // 2026-10-14 (doc 80 §11, branch fix/ui-remaining-20261014): the memo-question banner, report
+    // figures and version history measured 695,195 B JS / 61,203 B CSS, all of it in lazy chunks
+    // and their own stylesheets; every route closure kept its ceiling. Re-baselined to that build.
+    js: { gzip: 680 * KIB },
+    css: { gzip: 60 * KIB },
   },
   individual: {
     js: { raw: 450 * KIB, gzip: 110 * KIB },

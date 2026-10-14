@@ -1578,6 +1578,30 @@ def _normalize_research_completed(ctx: _ControlIntake) -> dict:
             **({"memo_id": memo_id} if memo_id else {})}
 
 
+def _report_figure_refs(ctx: _ControlIntake, figures) -> list:
+    """Each figure must name an UPLOADED image (`POST /api/runs/{id}/report-figures`); its mime is
+    the stored file's, never the author's word. Caption and source ride as given (bounded later)."""
+    from looplab.core.advisory_payloads import REPORT_FIGURES_MAX
+    from looplab.serve.report_figures import figure_file
+    if not isinstance(figures, list) or len(figures) > REPORT_FIGURES_MAX:
+        raise HTTPException(400, f"report_generated.content.figures must be a list of at most "
+                                 f"{REPORT_FIGURES_MAX} {{figure_id, caption}} objects")
+    out = []
+    for index, row in enumerate(figures):
+        row = {"figure_id": row} if isinstance(row, str) else row
+        found = figure_file(ctx.rd, row.get("figure_id")) if isinstance(row, dict) else None
+        if found is None:
+            raise HTTPException(400, {
+                "code": "report_figure_unknown",
+                "message": f"report_generated.content.figures[{index}] names no uploaded figure",
+                "remediation": ("POST /api/runs/{run_id}/report-figures with the artifact's root, "
+                                "path, node_id and attempt, then use the returned figure_id"),
+            })
+        out.append({**{k: v for k, v in row.items() if k in ("figure_id", "caption", "source")},
+                    "mime": found[1]})
+    return out
+
+
 def _normalize_report_generated(ctx: _ControlIntake) -> dict:
     from looplab.core.advisory_payloads import sanitize_report_payload
 
@@ -1587,7 +1611,7 @@ def _normalize_report_generated(ctx: _ControlIntake) -> dict:
     # `body_markdown` / `key_metrics` (review 2026-10-14 section 6) are optional; `author_claim` names the
     # agent product ("Codex CLI") inside the SERVER-set publisher, which says who published.
     allowed = (set(sanitize_report_payload({})) - {"at_node", "trigger"}) | {
-        "body_markdown", "key_metrics", "author_claim"}
+        "body_markdown", "key_metrics", "author_claim", "figures"}
     unknown = set(raw) - allowed
     if unknown:
         raise HTTPException(400, f"report_generated.content has unknown field(s): {', '.join(sorted(unknown))}")
@@ -1602,6 +1626,8 @@ def _normalize_report_generated(ctx: _ControlIntake) -> dict:
         raise HTTPException(400, "report_generated.content.key_metrics must be an object "
                                  "{metrics: [{key, label}], nodes: [{node_id, label}], "
                                  "baseline_node_id}")
+    if "figures" in raw:
+        raw["figures"] = _report_figure_refs(ctx, raw["figures"])
     publisher = {"kind": "external_agent", **({"author_claim": author_claim}
                                               if author_claim else {})}
     at_node = len(ctx.state().nodes)

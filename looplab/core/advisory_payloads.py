@@ -1329,6 +1329,8 @@ def sanitize_report_payload(payload, *, env=None) -> dict:
                                      budget, env=env)
     if "key_metrics" in src:
         out["key_metrics"] = _report_key_metrics(src.get("key_metrics"), budget, env=env)
+    if "figures" in src:
+        out["figures"] = _report_figures(src.get("figures"), budget, env=env)
     if "publisher" in src:
         publisher = src.get("publisher") if isinstance(src.get("publisher"), dict) else {}
         kind = publisher.get("kind")
@@ -1342,6 +1344,36 @@ def sanitize_report_payload(payload, *, env=None) -> dict:
 
 
 REPORT_BODY_MAX_CHARS = 24_000
+# Attached figures (review 2026-10-14 §6): the image bytes live content-addressed beside the run
+# (`serve/report_figures.py`, uploaded from a fenced artifact read), the report carries only the id,
+# its caption and where the image came from. Bounded and additive like `key_metrics`.
+REPORT_FIGURES_MAX = 12
+_FIGURE_ID = re.compile(r"[0-9a-f]{64}")
+_FIGURE_MIMES = ("image/png", "image/jpeg", "image/gif", "image/webp")
+
+
+def _report_figures(value, budget: list[int], *, env) -> list[dict]:
+    """`[{figure_id, caption, mime, source: {root, path, node_id?, attempt?}}]` — bounded refs."""
+    figures = []
+    for row in _items(value, REPORT_FIGURES_MAX):
+        if not isinstance(row, dict) or not isinstance(row.get("figure_id"), str) \
+                or not _FIGURE_ID.fullmatch(row["figure_id"]):
+            continue
+        figure = {"figure_id": row["figure_id"],
+                  "caption": _text(row.get("caption", ""), 300, budget, single_line=True, env=env)}
+        if row.get("mime") in _FIGURE_MIMES:
+            figure["mime"] = row["mime"]
+        source = row.get("source") if isinstance(row.get("source"), dict) else None
+        if source is not None:
+            ref = {key: _text(source.get(key, ""), 500, budget, single_line=True, env=env)
+                   for key in ("root", "path") if isinstance(source.get(key), str)}
+            for key in ("node_id", "attempt"):
+                if type(source.get(key)) is int and source[key] >= 0:
+                    ref[key] = source[key]
+            if ref:
+                figure["source"] = ref
+        figures.append(figure)
+    return figures
 REPORT_PUBLISHER_KINDS = ("external_agent", "looplab_model", "operator")
 _METRIC_KEY_MAX = 200
 

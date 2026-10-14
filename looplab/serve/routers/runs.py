@@ -171,6 +171,16 @@ def _conversation_etag(run_id: str, node_id: int, run_generation: Optional[str],
     return f'W/"llconv1-{digest}"'
 
 
+class ReportFigureUpload(BaseModel):
+    """`POST /api/runs/{id}/report-figures`: which artifact to attach (the `/artifact/raw` fields)."""
+    root: str = Field(max_length=200)
+    path: str = Field(max_length=4096)
+    expected_generation: str = Field(max_length=200)
+    node_id: Optional[int] = None
+    attempt: Optional[int] = None
+    caption: str = Field(default="", max_length=300)
+
+
 class RunConfigMetadata(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -2973,6 +2983,82 @@ def build_router(srv) -> APIRouter:
             run_id, root, path, expected_generation, node_id, attempt,
             lambda f, size: artifact_meta(f, size, path))
         return {"root": root, "path": path, **meta, **identity}
+
+    # ---- the report's figures and its version history (review 2026-10-14 §6, §6.3) -------------
+    # A figure is UPLOADED from an artifact through `_read_artifact_fenced` — the same fences as
+    # `/artifact/raw`, raster only — and stored content-addressed beside the run
+    # (`serve/report_figures.py`); `report_generated.content.figures` then names it by id.
+
+    @router.post("/api/runs/{run_id}/report-figures")
+    def report_figure_upload(run_id: str, body: ReportFigureUpload):
+        """Copy ONE raster image artifact into the run's report-figure store and return its id
+        (`{figure_id, mime, bytes, source}`) for `report_generated.content.figures`. The read is
+        fenced exactly like `/artifact/raw`; PNG/JPEG/GIF/WebP only, suffix and magic agreeing."""
+        from looplab.serve.report_figures import FIGURE_MAX_BYTES, store_figure
+
+        if any(v is not None and v < 0 for v in (body.node_id, body.attempt)):
+            raise HTTPException(400, "node_id and attempt must be non-negative")
+
+        def read(f, size):
+            if size > min(ART_RAW_MAX_BYTES, FIGURE_MAX_BYTES):
+                raise HTTPException(413, {"code": "figure_too_large", "size": size,
+                                          "limit": min(ART_RAW_MAX_BYTES, FIGURE_MAX_BYTES)})
+            data = f.read(FIGURE_MAX_BYTES + 1)
+            mime = raster_mime(body.path, data[:64])
+            if mime is None:
+                raise HTTPException(415, {"code": "figure_unsupported",
+                                          "message": "A report figure must be a PNG, JPEG, GIF or "
+                                                     "WebP image whose content matches its extension."})
+            return data, mime
+
+        (data, mime), size, identity = _read_artifact_fenced(
+            run_id, body.root, body.path, body.expected_generation, body.node_id, body.attempt, read)
+        try:
+            figure_id = store_figure(_run_dir(run_id), data, mime)
+        except (OSError, ValueError) as exc:
+            raise HTTPException(503, {"code": "figure_storage_unavailable",
+                                      "message": "The figure could not be stored."}) from exc
+        source = {"root": body.root, "path": body.path,
+                  **({"node_id": identity["node_id"], "attempt": identity["attempt"]}
+                     if "node_id" in identity else {})}
+        return {"figure_id": figure_id, "mime": mime, "bytes": size, "source": source,
+                "run_generation": identity["run_generation"],
+                "use": {"figure_id": figure_id, "caption": body.caption[:300]}}
+
+    @router.get("/api/runs/{run_id}/report-figures/{figure_id}")
+    def report_figure(run_id: str, figure_id: str):
+        """Serve one stored report figure (re-verified against its own sha256)."""
+        from looplab.serve.report_figures import read_figure, valid_figure_id
+        if not valid_figure_id(figure_id):
+            raise HTTPException(404, "no such figure")
+        found = read_figure(_run_dir(run_id), figure_id)
+        if found is None:
+            raise HTTPException(404, "no such figure")
+        data, mime = found
+        return Response(content=data, media_type=mime, headers=dict(_RAW_HEADERS))
+
+    @router.get("/api/runs/{run_id}/report/versions")
+    def report_versions_route(run_id: str, response: Response):
+        """Every `report_generated` row, newest first: seq, when, who published it, its content
+        digest and `duplicate_of` when it repeats an earlier version (`serve/report_history.py`)."""
+        from looplab.serve.report_history import report_versions
+        response.headers["Cache-Control"] = "no-store"
+        rd = _run_dir(run_id)
+        state = srv.state(rd)
+        current = (state.report or {}).get("published_seq") if isinstance(state.report, dict) else None
+        return {"run_id": run_id, **report_versions(srv.events(rd), current_seq=current)}
+
+    @router.get("/api/runs/{run_id}/report/versions/{seq}")
+    def report_version_route(run_id: str, seq: int, response: Response):
+        """The sanitized content of the report published at `seq` (the fold's own sanitizer)."""
+        from looplab.serve.report_history import report_digest, report_version
+        response.headers["Cache-Control"] = "no-store"
+        if seq < 0:
+            raise HTTPException(404, "no such report version")
+        content = report_version(srv.events(_run_dir(run_id)), seq)
+        if content is None:
+            raise HTTPException(404, "no such report version")
+        return {"run_id": run_id, "seq": seq, "digest": report_digest(content), "content": content}
 
     @router.get("/api/runs/{run_id}/trace")
     def trace(run_id: str,

@@ -903,10 +903,10 @@ research request served. Use `hypothesis_added` and `hypothesis_updated` command
 for standalone board decisions, and the Card controls for prioritization.
 
 An authored run report uses `type: report_generated` and
-`data: {"content": {"headline": "...", "verdict": "..."}}`; the same
-projection and publication sequence as an internal report serve it. These
-commands are valid in normal runs too, so a human or external collaborator can
-add evidence while built-in roles continue their work.
+`data: {"content": {"headline": "...", "verdict": "..."}}`, served like an internal
+report. `content.figures` takes `{figure_id, caption}` from `POST .../report-figures`
+(an image artifact). An identical re-send is a `noop`. These commands are valid in
+normal runs too.
 
 The agent can call `POST /api/runs/{run_id}/novelty-preview` with
 `expected_generation` and an `idea` before submitting a candidate. It returns

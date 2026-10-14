@@ -21,6 +21,7 @@ import { nodeIsActive } from './nodeProjection.js'
 import { readOnlyLabel } from './runMode.js'
 import { nodeRepeatChecksNotApplicable, resultMeasurement } from './resultMeasurement.js'
 import './report-trust-polish.css'
+import { ReportFigures, ReportVersions } from './ReportExtras.jsx'
 
 const TRUST_CLASS = { unverified: 'neutral', caveats: 'warn', suspect: 'alarm' }
 const TRUST_LABEL = { unverified: 'not fully verified', caveats: 'with caveats', suspect: 'flags found' }
@@ -132,7 +133,8 @@ function KeyMetricTable({ keyMetrics, nodes, championId }) {
   </div>
 }
 
-function AgentNarrative({ rep, coverage, generation, snapshotSeq, nodes, championId }) {
+function AgentNarrative({ rep, coverage, generation, snapshotSeq, nodes, championId,
+  runId = null, figures = null, liveReads = true }) {
   useUILanguage()
 
   if (!rep) return null
@@ -171,6 +173,9 @@ function AgentNarrative({ rep, coverage, generation, snapshotSeq, nodes, champio
     {(rep.verdict || rep.summary) && <div className="agent-report-text"><Markdown text={rep.verdict || rep.summary} /></div>}
     <KeyMetricTable keyMetrics={rep.key_metrics} nodes={nodes} championId={championId} />
     {rep.body_markdown && <div className="agent-report-text agent-report-body"><Markdown text={rep.body_markdown} /></div>}
+    {/* Attached figures (review 2026-10-14 section 6): owner reads only; a review link or a
+        historical snapshot says how many it does not show. */}
+    <ReportFigures runId={runId} figures={figures} available={liveReads} />
     {/* Empty sections are not drawn: four "No interpretation was published" boxes under an
         agent's report read as missing work (review 2026-10-14 section 6). */}
     {groups.some(([, items]) => items?.length) && <div className="agent-report-columns">
@@ -555,6 +560,18 @@ export default function ReportView({ state, runId, onOpenPanel, canOpenPanel, on
       : !refreshRetryAllowed
         ? (refreshError || 'This paid refresh cannot be resumed safely yet.')
         : ''
+  // UI review 2026-10-14 section 3.2: on an external run the model-generated report is OPTIONAL
+  // (the agent publishes its own), so the paid button sits behind "More actions" until a refresh
+  // is running or saved; and a run whose model is known to be unavailable (`needsModel`) cannot
+  // start one at all — the button is disabled with the reason instead of offering a paid action
+  // that has nothing to call.
+  const optionalGeneration = externalHarness && !refreshing && !savedRefreshIntent
+  const paidButton = <button className="btn sm"
+    disabled={refreshing || !refreshRetryAllowed || !refreshGenerationReady || !refreshStorageReady
+      || (!!needsModel && !savedRefreshIntent && !refreshing)}
+    onClick={refresh}
+    aria-describedby="paid-report-refresh-status"
+    title={refreshDisabledReason || refreshStatus}><OpIcon name="replay" size={12} /> {uiText(optionalGeneration ? 'Generate with model · optional · paid' : refreshButtonLabel)}</button>
   const exportContext = { generation: expectedGeneration, snapshotSeq: observedSeq }
   const hasResearchMemo = Array.isArray(state.research) && state.research.length > 0
   const researchBody = <>
@@ -597,11 +614,7 @@ export default function ReportView({ state, runId, onOpenPanel, canOpenPanel, on
         <button className="btn sm" onClick={() => dl(`${state.run_id}_report.md`, toMarkdown({ ...state, report: rep }, best, exportContext), 'text/markdown')}><OpIcon name="download" size={12} />{uiText(" Markdown")}</button>
         {best && evidenceAvailable && <button className="btn sm" disabled={!bestCode?.code} onClick={() => dl(`solution_node${best.id}.py`, bestCode.code, 'text/x-python')}><OpIcon name="download" size={12} />{uiText(" Solution")}</button>}
         <button className="btn sm" onClick={() => dl(`${state.run_id}_model_card.json`, modelCard(), 'application/json')}><OpIcon name="download" size={12} />{uiText(" Model card")}</button>
-        {!readOnly && <button className="btn sm"
-          disabled={refreshing || !refreshRetryAllowed || !refreshGenerationReady || !refreshStorageReady}
-          onClick={refresh}
-          aria-describedby="paid-report-refresh-status"
-          title={refreshDisabledReason || refreshStatus}><OpIcon name="replay" size={12} /> {uiText(externalHarness && !refreshing && !savedRefreshIntent ? 'Generate with model · optional · paid' : refreshButtonLabel)}</button>}
+        {!readOnly && !optionalGeneration && paidButton}
         <nav className="report-sections" aria-label={uiText("Report sections")}>
           <span className="report-sections-label">{uiText("Jump to")}</span>
           {reportSections.map(([id, label]) => <button type="button" key={id}
@@ -609,6 +622,8 @@ export default function ReportView({ state, runId, onOpenPanel, canOpenPanel, on
         </nav>
 
       </div>
+      {!readOnly && optionalGeneration && <details className="report-more">
+        <summary>{uiText('More actions')}</summary>{paidButton}</details>}
       {!readOnly && <div id="paid-report-refresh-status" className="report-inline-state paid"
         role="status" aria-live="polite" aria-atomic="true">
         <OpIcon name={savedRefreshIntent || refreshing ? 'replay' : 'bolt'} size={14} />
@@ -643,7 +658,10 @@ export default function ReportView({ state, runId, onOpenPanel, canOpenPanel, on
       {!Object.keys(a.failures).length && !a.infeasible.length && <p className="muted">{uiText('No execution failures or constraint violations are recorded.')}</p>}
 
       <AgentNarrative rep={rep} coverage={coverage} generation={expectedGeneration} snapshotSeq={observedSeq}
-        nodes={state.nodes} championId={best?.id ?? null} />
+        nodes={state.nodes} championId={best?.id ?? null} runId={runId}
+        figures={state.report?.figures} liveReads={!readOnly || readOnlyReason === 'history'} />
+      {/* Every published version, and a field-by-field comparison of any two (section 6.3). */}
+      {rep && <ReportVersions runId={runId} available={readOnlyReason !== 'review'} />}
       {!rep && <p className="report-section-intro">{uiText('No detailed Assistant report has been published. Recorded outcomes remain available; discuss them in chat or refresh the report.')}</p>}
 
       {best && <><h2 id="report-section-champion" tabIndex={-1} className="section-h">{uiText("Selected experiment")}</h2>

@@ -2706,6 +2706,26 @@ class RunCommandService:
             for hint in self.srv.state(rd).pending_hints
         )
 
+    def _identical_report_duplicate(self, rd: Path, event_type: str,
+                                    data: Optional[dict]) -> Optional[int]:
+        """The seq of the CURRENT report when `data` re-sends it unchanged, else None.
+
+        Codex audit 2026-10-14 L-06: an identical `report_generated` was appended and counted as a
+        new report, so the report gate accepted a copy. Content identity is
+        `serve/report_history.py::report_digest` — everything but where/when it was published — so
+        a re-send is a `noop` with a notice, and a changed word is a new version.
+        """
+        if event_type != "report_generated" or not isinstance(data, dict):
+            return None
+        from looplab.serve.report_history import report_digest
+        current = self.srv.state(rd).report
+        if not isinstance(current, dict) or not isinstance(data.get("content"), dict):
+            return None
+        if report_digest(data["content"]) != report_digest(current):
+            return None
+        seq = current.get("published_seq")
+        return seq if type(seq) is int else -1
+
     def _decision(self, rd: Path, event_type: str,
                   *, drain: Optional[dict] = None) -> tuple[str, Optional[dict]]:
         """Choose what this command does to the engine: append / attach / noop / reject.
@@ -3041,6 +3061,15 @@ class RunCommandService:
                         if (decision == "append"
                                 and self._standing_hint_duplicate(rd, event_type, normalized)):
                             decision = "noop"
+                        duplicate_report = (self._identical_report_duplicate(
+                            rd, event_type, normalized) if decision == "append" else None)
+                        if duplicate_report is not None:
+                            decision = "noop"
+                            record["intake_notices"] = [*record.get("intake_notices", []), {
+                                "kind": "report_unchanged", "current_seq": duplicate_report,
+                                "message": ("This report is identical to the current one, so "
+                                            "nothing was appended and it does not count as a new "
+                                            "report. Publish what changed, or nothing.")}]
                         if decision == "reject":
                             record["status"] = "rejected"
                             record["error"] = err
