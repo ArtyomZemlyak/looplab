@@ -84,6 +84,8 @@ site that proves it is open.
 
 ### §0.1 Ranked
 
+> **[2026-10-14 — сверено заново, [doc 80](80-open-items-triage-2026-10-14.md) §3.]** Из 19 строк открыты три: #7 (остаток, маркер `landlock-is-opt-in-by-default`, ждёт GPU-проверки владельцем), #14 (адаптеры AutoML/multimodal, P3) и #18 (маркер `eval-parallelism-is-in-process-only`, P3). #6 отклонён (`DECLINED`), остальные 15 закрыты.
+
 > **THIS LIST IS NOT GUARDED, AND ON 2026-08-21 THAT WAS MEASURED RATHER THAN SUSPECTED.**
 >
 > `grep -rn 'OPEN\['` IS this repo's backlog: every marker carries a falsifier, closing one is a

@@ -1,5 +1,7 @@
 # 72 — Из ноды во фреймворк: upstream возможностей, найденных в прогоне (2026-10-01)
 
+> **Статус на 2026-10-14:** открытые пункты этого документа сверены с кодом и разнесены по владельцам в [doc 80](80-open-items-triage-2026-10-14.md) (исправлено / у агента / открыто / неактуально).
+
 *EN summary: upstreaming capabilities found inside a run into the task's framework (2026-10-01) — a Maintainer
 role, a gated equivalence/regression check and a logged `base_advanced`; implemented opt-in (its §18).*
 

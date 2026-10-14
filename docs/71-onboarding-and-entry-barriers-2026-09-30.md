@@ -1,5 +1,7 @@
 # 71. Снижение порога входа в LoopLab
 
+> **Статус на 2026-10-14:** открытые пункты этого документа сверены с кодом и разнесены по владельцам в [doc 80](80-open-items-triage-2026-10-14.md) (исправлено / у агента / открыто / неактуально).
+
 *EN summary: an audit of LoopLab's entry barrier (2026-09-30) — the onboarding path, what blocked a first run, and a
 plan in packages; partly implemented (its §13). Continued by docs 74 and 75.*
 

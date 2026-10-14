@@ -1,5 +1,7 @@
 # 75. Ревью функциональности, удобства и понятности: вторая десятиминутка (2026-10-10)
 
+> **Статус на 2026-10-14:** открытые пункты этого документа сверены с кодом и разнесены по владельцам в [doc 80](80-open-items-triage-2026-10-14.md) (исправлено / у агента / открыто / неактуально).
+
 *EN summary: a usability review of the minutes after the first ten (2026-10-10) — refusal messages, verbs on a
 finished run, command help, the first run's screen, vocabulary, docs; 35 findings, revised by four critics (§12).*
 

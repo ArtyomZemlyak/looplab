@@ -1,5 +1,7 @@
 # 74. Инспекция порога входа: README, установка, CLI, документация, UI
 
+> **Статус на 2026-10-14:** открытые пункты этого документа сверены с кодом и разнесены по владельцам в [doc 80](80-open-items-triage-2026-10-14.md) (исправлено / у агента / открыто / неактуально).
+
 *EN summary: an inspection of the first ten minutes (2026-10-09) — README, install, CLI, docs, UI — with 28
 findings and acceptance checks in six packages; its audit and corrected statuses are in doc 75 §12.*
 

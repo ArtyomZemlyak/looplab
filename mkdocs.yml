@@ -167,6 +167,7 @@ nav:
       - Tracing: 08-tracing-architecture.md
   - Design records:
       - Index: 00-INDEX.md
+      - "Open-items triage (2026-10-14)": 80-open-items-triage-2026-10-14.md
       - "Attempt git identity and code export (2026-10-14)": 79-node-git-identity-and-code-upstream-2026-10-14.md
       - "External-agent orchestration: waking, GPU order, forensics (2026-10-14)": 78-external-agent-orchestration-2026-10-14.md
       - "Experiment tracking: open requirements (2026-10-13)": 77-experiment-tracking-open-items-2026-10-13.md
