@@ -23,7 +23,7 @@ The event type itself is the contract's identity and is never renamed or reused;
 
 <!-- generated: event types -->
 
-189 event types — 130 folded into `RunState`, 59 diagnostic; 1275 declared payload keys; 32 types whose whole payload is stored by the fold.
+189 event types — 130 folded into `RunState`, 59 diagnostic; 1276 declared payload keys; 32 types whose whole payload is stored by the fold.
 
 | type | fold | records | required keys | optional keys |
 |---|---|---|---|---|
