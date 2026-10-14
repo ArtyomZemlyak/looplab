@@ -1,64 +1,53 @@
-// Defects of the Russian catalogue itself, as opposed to render sites that skip `uiText`
-// (`russianRenderSites.test.js`). Found reading the offline demo in Russian in a real browser
-// (2026-10-11): the Report's chart axis read «unde id ¶», its legend «- границы: 1.343», the
-// operator line «подниматься вокруг холмов»; ten entries carried literal `&quot;` (React prints an
-// entity as-is), among them a paid-action notice that read «может быть запрошено обвинение».
-//
-// The catalogue still holds machine-translated text a reader would trip over, mostly in Settings
-// descriptions; the doc 75 registry tracks that backlog. What is pinned here is what a rule can
-// state: an entity never belongs in a value, and the entries fixed here stay fixed.
-import test from 'node:test'
 import assert from 'node:assert/strict'
+import test from 'node:test'
 import { readFileSync } from 'node:fs'
 
-const { messages } = JSON.parse(readFileSync(new URL('../src/locales/ru.json', import.meta.url), 'utf8'))
-const ENTITY = /&(?:quot|amp|lt|gt|apos|nbsp|#\d+);/
+// The Russian catalogue was raw machine translation (review 2026-10-14 §5): «Назад к бегу» for "Back to
+// runs", «наружный жгут» for "external harness", «код раствора» for "solution code". The glossary
+// is docs/guide/glossary.ru.md; this STOP-LIST keeps the known failure shapes from coming back.
+const catalogue = JSON.parse(readFileSync(new URL('../src/locales/ru.json', import.meta.url), 'utf8'))
+const entries = [...Object.entries(catalogue.messages)]
+for (const [key, forms] of Object.entries(catalogue.plurals)) {
+  for (const form of Object.values(forms)) entries.push([key, form])
+}
 
-test('no Russian entry carries an HTML entity its English key does not', () => {
-  const offenders = Object.entries(messages)
-    .filter(([key, value]) => ENTITY.test(value) && !ENTITY.test(key))
-    .map(([key]) => key)
-  assert.deepEqual(offenders, [])
-})
+const KNOWN_BAD = ['Назад к бегу', 'наружный жгут', 'код раствора', 'Обед не доступен', 'Остановите бегство',
+  'Беги не найден', 'Здесь не бегать', 'Символ владельца', 'Кодекс / Клод', 'Клод Код', 'show noted',
+  'Призрак Btn', 'Линейный холст', 'Карточное доска', 'Обзор потребностей', 'Клею...', 'Эвальный трубопровод',
+  'Здание узла', 'улиочное', 'концептуальной пули', 'судебн', 'Взлом?', 'возможный награда',
+  'водном знаке', 'освежает', 'Агент читает']
+// Words a machine translation produced for run / claim / evidence / harness / seed / solution / fork /
+// refresh / trial. Matched at a word start; `\bNo {` is "#{n}" rendered as "No {n}".
+const MARKERS = /(^|[^А-Яа-яЁё])(бег|забег|бегств|пробег|пробеж|претензи|улик|жгут|семян|семечк|раствор|вилк|освеж|бухгалтерск|стюард|судебн|Клод|Кодекс)|\bNo \{/
 
-test('the Report chart and verdict read as Russian, not as a garbled translation', () => {
-  const expected = {
-    'node id →': 'номер узла →',
-    'node id': 'номер узла',
-    'eligible frontier:': 'лучшее среди допустимых:',
-    'improve — hill-climb around best': 'improve — локальный поиск рядом с лучшим',
-    'better evaluation score': 'оценка лучше',
-    'Run loading · Assistant paused': 'Запуск загружается · Ассистент приостановлен',
+test('no known machine-translation phrase survives in the Russian catalogue', () => {
+  for (const [key, value] of entries) {
+    for (const bad of KNOWN_BAD) assert.ok(!value.includes(bad), `${key} => ${value} contains «${bad}»`)
   }
-  for (const [key, value] of Object.entries(expected)) assert.equal(messages[key], value, key)
-  const garbled = /unde id|¶|вокруг холмов|^- границы|обвинение|галстук/
-  for (const [key, value] of Object.entries(messages))
-    if (!garbled.test(key)) assert.doesNotMatch(value, garbled, key)
 })
 
-test('a sub-option label keeps its ↳ marker in Russian', () => {
-  // The Settings form draws a dependent option as "↳ <label>" under the one it refines; 31 Russian
-  // labels had turned the marker into ", " (and their words into machine translation), so the
-  // dependency vanished from the form (2026-10-11).
-  const lost = Object.entries(messages).filter(([key, value]) => key.startsWith('↳') && !value.startsWith('↳ '))
-  assert.deepEqual(lost.map(([key]) => key), [])
+test('no catalogue value carries a machine-translation marker word', () => {
+  const hits = entries.filter(([, value]) => MARKERS.test(value))
+  assert.deepEqual(hits, [], 'translate run as «запуск», claim as «утверждение», evidence as «доказательства», '
+    + 'harness as «внешний агент», solution as «решение», refresh as «обновить» (docs/guide/glossary.ru.md)')
 })
 
-test('the essential Settings fields read as Russian (doc 75 UX-36)', () => {
-  // What Settings shows before "Show all": the labels a first-run user sets the model and the
-  // budgets with. «Параллельные мероприятия в рамках ЛММ», «Макс. часы работы в стене» and a
-  // help text opening «С задницей игрушки» ("With backend=toy") were there on 2026-10-11.
-  const expected = {
-    'Eval parallel': 'Параллельные оценки',
-    'LLM parallel': 'Параллельные вызовы LLM',
-    'Max wall-clock (s)': 'Макс. реальное время (с)',
-    'LLM token limit': 'Предел токенов LLM',
-    'Per-eval timeout (s)': 'Тайм-аут одной оценки (с)',
-    'Role backend': 'Исполнитель ролей',
-    'Stream requests': 'Потоковые запросы',
+test('identifiers, numbering and arrows survive translation', () => {
+  for (const [key, value] of entries) {
+    if (key.includes('#{')) assert.ok(value.includes('#{'), `${key} => ${value} lost the # before {n}`)
+    for (const arrow of ['→', '›', '←']) {
+      if (key.includes(arrow)) assert.ok(value.includes(arrow), `${key} => ${value} lost ${arrow}`)
+    }
+    const placeholders = text => [...text.matchAll(/\{\d+\}/g)].map(m => m[0]).sort()
+    assert.deepEqual(placeholders(value), placeholders(key), key)
   }
-  for (const [key, value] of Object.entries(expected)) assert.equal(messages[key], value, key)
-  const garbled = /задниц|ЛММ|в стене|JOSON|STRAEAM|Уловка|Почетный доверенный/
-  for (const [key, value] of Object.entries(messages))
-    if (!garbled.test(key)) assert.doesNotMatch(value, garbled, key)
+})
+
+test('product names are not translated', () => {
+  // Short UI strings only: a long help paragraph may legitimately be summarised without the name.
+  for (const [key, value] of entries.filter(([key]) => key.length <= 200)) {
+    for (const name of ['Codex', 'Claude Code', 'LoopLab', 'MLflow']) {
+      if (key.includes(name)) assert.ok(value.includes(name), `${key} => ${value} translated ${name}`)
+    }
+  }
 })
