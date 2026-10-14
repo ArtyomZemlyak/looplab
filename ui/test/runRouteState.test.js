@@ -80,11 +80,23 @@ test('historical sequence requires an exact generation fence', () => {
   assert.equal(exact.state.sequence, 29)
 })
 
-test('node, panel, view, and filters also fail closed without a generation fence', () => {
-  for (const query of ['node=4', 'panel=trust', 'view=report', 'view=concepts', 'q=timeout', 'kinds=eval']) {
+test('a lifecycle-bound target fails closed without a generation fence', () => {
+  for (const query of ['node=4', 'node=4&view=report']) {
     const parsed = parseRunRouteState(`#/run/demo?${query}`)
-    assert.deepEqual(parsed.state, emptyRunRouteState(), query)
+    assert.equal(parsed.state.nodeId, null, query)
     assert.match(parsed.issues.join(' '), /does not say which version of the run/, query)
+  }
+  // …while the view itself survives: a shared `?view=report` opens the report.
+  assert.equal(parseRunRouteState('#/run/demo?node=4&view=report').state.view, 'report')
+})
+
+test('view, panel and filters need no version: a shared link opens them (review 2026-10-14)', () => {
+  for (const [query, key, value] of [['view=report', 'view', 'report'], ['view=concepts', 'view', 'concepts'],
+    ['panel=trust', 'panel', 'trust'], ['q=timeout', 'timelineFilter', 'timeout']]) {
+    const parsed = parseRunRouteState(`#/run/demo?${query}`)
+    assert.equal(parsed.state[key], value, query)
+    assert.equal(parsed.state.generation, null, query)
+    assert.deepEqual(parsed.issues, [], query)
   }
 })
 

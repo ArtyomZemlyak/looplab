@@ -332,8 +332,18 @@ export function parseRunRouteState(hash = '', { reviewMode = false } = {}) {
   }
   const sanitized = sanitizeRunRouteState(state, { reviewMode })
   if (!sanitized.generation && runRouteStateHasTarget(sanitized, { reviewMode })) {
-    issues.push("This link's view settings were ignored: it does not say which version of the run they belong to.")
-    return { state: emptyRunRouteState(), issues, hadState: query.length > 0 }
+    // The VIEW, panel and event filters describe how to look at a run, not which lifecycle — a
+    // colleague's `#/run/<id>?view=report` must open the report (review 2026-10-14 §10.3). Only a
+    // target bound to one version of the run — an experiment attempt, a Card, a point in history —
+    // still needs the version and is dropped, visibly, without it.
+    const kept = sanitizeRunRouteState({ ...emptyRunRouteState(), view: sanitized.view,
+      panel: sanitized.panel, timelineFilter: sanitized.timelineFilter,
+      timelineKinds: sanitized.timelineKinds }, { reviewMode })
+    if (sanitized.nodeId != null || sanitized.cardId != null || sanitized.sequence != null
+        || runRouteStateHasTarget(kept, { reviewMode }) !== runRouteStateHasTarget(sanitized, { reviewMode })) {
+      issues.push("This link's view settings were ignored: it does not say which version of the run they belong to.")
+    }
+    return { state: kept, issues, hadState: query.length > 0 }
   }
   return { state: sanitized, issues, hadState: query.length > 0 }
 }
