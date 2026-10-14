@@ -586,6 +586,14 @@ class AgentEventPump:
                 return []
             if last_sig == sig and now - last_at < _RECHECK_S:
                 return []
+            if last_sig == sig:
+                # Nothing on disk moved. Only a LIVE engine can make a time-based condition (idle,
+                # an open question) newly true without a write, so a stopped run is not re-folded
+                # every 30 s — on a root with dozens of runs that fold is the pump's whole cost.
+                from looplab.engine.run_lifecycle import engine_liveness
+                if engine_liveness(rd) is not True:
+                    self._run_marks[rd.name] = (sig, now)
+                    return []
         from looplab.core.config import read_config_snapshot
         from looplab.core.errors import OperatorRefusal
         try:
