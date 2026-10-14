@@ -56,8 +56,8 @@ from looplab.events.traceview import (
 from looplab.serve.intake_notices import with_readability
 from looplab.serve.artifacts import (
     _ART_MAX_BYTES, _LOG_TAIL_MAX, ART_RAW_MAX_BYTES, ArtifactPolicyUnavailable, artifact_meta,
-    raster_mime, _artifact_exposure_policy, _artifact_file_identity, _artifact_node_id, _artifact_roots,
-    _list_artifact_files)
+    preview_mime, raster_mime, _artifact_exposure_policy, _artifact_file_identity, _artifact_node_id,
+    _artifact_roots, _list_artifact_files)
 # The paid CONCEPT-LENS subsystem is `serve/concept_lens_service.py` (doc 25 SR-04): 21 helpers,
 # two ledger folds, the provider worker and the four command bodies. What stays here is the four
 # route decorators with the docstrings that are their OpenAPI descriptions, and the ConceptFrame
@@ -2768,13 +2768,22 @@ def build_router(srv) -> APIRouter:
                                remediation="Reload Files and request the current node attempt.")
 
     @router.get("/api/runs/{run_id}/artifacts")
-    def artifacts(run_id: str, expected_generation: str = Query(...)):
+    def artifacts(run_id: str, expected_generation: str = Query(...),
+                  node_id: Optional[int] = Query(default=None, ge=0),
+                  root: Optional[str] = Query(default=None, max_length=300),
+                  offset: int = Query(default=0, ge=0),
+                  limit: Optional[int] = Query(default=None, ge=1, le=5_000)):
         """List files currently visible to the run, grouped by root.
 
         The run directory and declared RepoTask host paths are live request-time views. They can contain
         inputs, later edits and outputs, so this endpoint explicitly reports workspace visibility rather
         than claiming file-level production provenance it cannot prove. The response is fenced to the
         required run generation; files in a current node workdir carry their node id and attempt.
+
+        Paged and filterable (UI review 2026-10-14 section 7.6): `root` lists one root, `node_id` lists
+        only that experiment's workdir (inside the run root, paths unchanged), and `offset`/`limit` page
+        through a root of any size — each root reports `next_offset` while files remain. Without them
+        the response is the historical one: every root, the first 1,500 files each.
         """
         rd = _run_dir(run_id)
         generation = _assert_artifact_generation(rd, expected_generation, phase="before")
@@ -2799,13 +2808,33 @@ def build_router(srv) -> APIRouter:
             node_attempts[node_id] = attempt
             return {**file_info, "node_id": node_id, "attempt": attempt}
 
-        for r in _artifact_roots(rd):
-            files, truncated = _list_artifact_files(
-                r["base"], exposed=exposed, transform=_identify_node_file)
+        roots = _artifact_roots(rd)
+        if node_id is not None:
+            root = "run"
+        if root is not None:
+            roots = [r for r in roots if r["id"] == root]
+            if not roots:
+                raise HTTPException(404, "no such artifact root")
+        for r in roots:
+            start = None
+            if node_id is not None:
+                # One experiment's workdir, addressed exactly as the run root addresses it.
+                start = r["base"] / "nodes" / f"node_{node_id}"
+                if start.is_symlink() or not start.is_dir():
+                    start = None
+            if node_id is not None and start is None:
+                files, truncated = [], False
+            else:
+                files, truncated = _list_artifact_files(
+                    r["base"], exposed=exposed, transform=_identify_node_file, start=start,
+                    offset=offset, limit=limit)
             visibility = "run_workspace" if r["id"] == "run" else "live_task_path"
             out.append({"id": r["id"], "label": r["label"], "path": str(r["base"]),
                         "is_run_dir": r["id"] == "run", "truncated": truncated,
-                        "visibility": visibility, "n_files": len(files), "files": files})
+                        "visibility": visibility, "n_files": len(files), "files": files,
+                        "offset": offset,
+                        "next_offset": offset + len(files) if truncated else None,
+                        **({"node_id": node_id} if node_id is not None else {})})
         generation = _assert_artifact_generation(rd, expected_generation, phase="while")
         after_state = srv.state(rd)
         for node_id, expected_attempt in node_attempts.items():
@@ -2949,8 +2978,8 @@ def build_router(srv) -> APIRouter:
                      expected_generation: str = Query(...),
                      node_id: Optional[int] = Query(default=None, ge=0),
                      attempt: Optional[int] = Query(default=None, ge=0)):
-        """Serve ONE raster image (PNG/JPEG/GIF/WebP) for inline preview. The suffix AND the magic
-        number must name the same format; anything else (SVG, HTML, PDF, a mislabelled body) is a
+        """Serve ONE raster image (PNG/JPEG/GIF/WebP) or PDF for inline preview. The suffix AND the
+        magic number must name the same format; anything else (SVG, HTML, a mislabelled body) is a
         415 `preview_unsupported`, and an image over 16 MiB a 413 `preview_too_large`. Served with
         `nosniff` and a sandboxing CSP, fenced exactly like `/artifact`."""
         def read(f, size):
@@ -2959,11 +2988,12 @@ def build_router(srv) -> APIRouter:
                                           "limit": ART_RAW_MAX_BYTES,
                                           "message": "Image is too large to preview inline."})
             body = f.read(ART_RAW_MAX_BYTES + 1)
-            mime = raster_mime(path, body[:64])
+            mime = preview_mime(path, body[:64])
             if mime is None:
                 raise HTTPException(415, {"code": "preview_unsupported",
-                                          "message": "Only PNG, JPEG, GIF and WebP images whose "
-                                                     "content matches their extension are previewed."})
+                                          "message": "Only PNG, JPEG, GIF and WebP images and PDF "
+                                                     "documents whose content matches their "
+                                                     "extension are previewed."})
             return body, mime
 
         (body, mime), _size, identity = _read_artifact_fenced(

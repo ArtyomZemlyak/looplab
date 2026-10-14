@@ -3,3 +3,7 @@
 .art-meta dl.kv { display: grid; grid-template-columns: max-content 1fr; gap: 2px 10px; }
 .source-snapshot, .runtime-snapshot { margin: 6px 0; }
 .runtime-carrier .tbl td, .runtime-carrier .tbl th { font-variant-numeric: tabular-nums; }
+.art-pdf { display: grid; gap: 6px; }
+.art-pdf object { width: 100%; height: min(70vh, 720px); border: 1px solid var(--line); border-radius: 6px; }
+.art-node-filter { display: flex; gap: 4px; align-items: baseline; margin-bottom: 6px; }
+.seed-file-format { margin: 6px 0; }

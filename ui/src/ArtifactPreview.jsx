@@ -27,6 +27,33 @@ function ImagePreview({ runId, sel, expectedGeneration }) {
   return <img className="art-image" src={url} alt={uiMessage('Image {0}', [sel.path])} />
 }
 
+// The browser's own PDF viewer, over bytes the server verified as a PDF and served with nosniff and
+// a sandboxing CSP. If the browser shows no inline viewer, the link opens the same object URL.
+function PdfPreview({ runId, sel, expectedGeneration }) {
+  useUILanguage()
+  const [url, setUrl] = useState(null), [failed, setFailed] = useState(false)
+  useEffect(() => {
+    let alive = true, objectUrl = null
+    const controller = new AbortController()
+    getBlob(runApiPath(runId, `/artifact/raw?${artifactQuery(sel, expectedGeneration)}`), { signal: controller.signal, cache: 'no-store' })
+      .then(blob => {
+        if (!alive) return
+        objectUrl = URL.createObjectURL(new Blob([blob], { type: 'application/pdf' }))
+        setUrl(objectUrl)
+      })
+      .catch(() => { if (alive) setFailed(true) })
+    return () => { alive = false; controller.abort(); if (objectUrl) URL.revokeObjectURL(objectUrl) }
+  }, [runId, sel.root, sel.path, sel.nodeId, sel.attempt, expectedGeneration])
+  if (failed) return <div className="notice">{uiText('The PDF could not be previewed (not a PDF, or too large).')}</div>
+  if (!url) return <div className="muted">{uiText('Loading…')}</div>
+  return <div className="art-pdf">
+    <object data={url} type="application/pdf" aria-label={uiMessage('PDF {0}', [sel.path])}>
+      <p className="muted">{uiText('This browser shows no inline PDF viewer.')}</p>
+    </object>
+    <a className="btn sm" href={url} target="_blank" rel="noopener noreferrer">{uiText('Open the PDF in a new tab')}</a>
+  </div>
+}
+
 function MetaPreview({ runId, sel, expectedGeneration, size }) {
   useUILanguage()
   const [meta, setMeta] = useState(null), [failed, setFailed] = useState(false)
@@ -60,6 +87,8 @@ export default function ArtifactPreview({ runId, sel, content, expectedGeneratio
   useUILanguage()
   const kind = previewKind(sel?.path, content)
   if (kind === 'image') return <ImagePreview runId={runId} sel={sel} expectedGeneration={expectedGeneration} />
+  if (kind === 'pdf') return runId ? <PdfPreview runId={runId} sel={sel} expectedGeneration={expectedGeneration} />
+    : <div className="notice">{uiText('Binary file — not shown inline.')}</div>
   if (kind === 'meta') return <MetaPreview runId={runId} sel={sel} expectedGeneration={expectedGeneration} size={content.size} />
   if (kind === 'none') return null
   if (kind === 'json' || kind === 'jsonl') {

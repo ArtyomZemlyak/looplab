@@ -1,7 +1,7 @@
 {
   "schema": 1,
   "language": "ru",
-  "count": 8000,
+  "count": 8012,
   "messages": {
     "# LoopLab run report — {0}": "# Отчёт запуска LoopLab — {0}",
     "## Agent narrative (advisory)": "## Пояснения агента (рекомендации)",
@@ -7267,7 +7267,7 @@
     "unread count incomplete": "нечитаемый подсчет не завершен",
     "unsaved change": "Несохранённое изменение",
     "v muted": "v muted",
-    "view failed:": "Вид не сработал:",
+    "view failed:": "не удалось открыть файл:",
     "view-toggle crumb-report": "view-toggle crumb-report",
     "vt report": "vt report",
     "waiting for a slot": "ожидание слота",
@@ -8002,7 +8002,19 @@
     "Concepts that run authors tagged their experiments with, remembered across runs. This is coverage — which runs used a concept and on how many experiments — not evidence that it worked.": "Концепты, которыми авторы запусков пометили эксперименты, сохранённые между запусками. Это охват — какие запуски использовали концепт и на скольких экспериментах, — а не доказательство, что он сработал.",
     "Authored concept memory could not be read.": "Не удалось прочитать память авторских концептов.",
     "No run has recorded authored concepts yet.": "Ни один запуск ещё не сохранил авторские концепты.",
-    "{0} run(s) · {1} experiment(s)": "запусков: {0} · экспериментов: {1}"
+    "{0} run(s) · {1} experiment(s)": "запусков: {0} · экспериментов: {1}",
+    "The PDF could not be previewed (not a PDF, or too large).": "PDF не удалось показать (это не PDF или файл слишком большой).",
+    "PDF {0}": "PDF {0}",
+    "This browser shows no inline PDF viewer.": "Этот браузер не показывает PDF внутри страницы.",
+    "noopener noreferrer": "noopener noreferrer",
+    "Open the PDF in a new tab": "Открыть PDF в новой вкладке",
+    "toolbar seed-file-format": "toolbar seed-file-format",
+    "File view": "Вид файла",
+    "Formatted": "Форматированный",
+    "load more failed:": "не удалось загрузить ещё:",
+    "Show the files of one experiment": "Показать файлы одного эксперимента",
+    "all files": "все файлы",
+    "Load more files": "Загрузить ещё файлы"
   },
   "plurals": {
     "({0} paraphrases folded)": {

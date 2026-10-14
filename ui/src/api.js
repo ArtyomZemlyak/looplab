@@ -278,9 +278,16 @@ const validateArtifactContentIdentity = (payload, expected, requestPath) => {
 }
 
 export async function getRunArtifactInventory(runId, expectedGeneration, options = {}) {
+  // UI review 2026-10-14 section 7.6: one experiment's workdir (`nodeId`), one root (`root`), and a
+  // page past the first (`offset`, `limit`). None given = the historical whole-run inventory.
+  const { nodeId = null, root = null, offset = null, limit = null, ...fetchOptions } = options || {}
   const query = artifactGenerationQuery(expectedGeneration)
+  if (Number.isSafeInteger(nodeId) && nodeId >= 0) query.set('node_id', String(nodeId))
+  if (typeof root === 'string' && root) query.set('root', root)
+  if (Number.isSafeInteger(offset) && offset > 0) query.set('offset', String(offset))
+  if (Number.isSafeInteger(limit) && limit > 0) query.set('limit', String(limit))
   const path = runApiPath(runId, `/artifacts?${query}`)
-  const payload = await get(path, { ...options, cache: 'no-store' })
+  const payload = await get(path, { ...fetchOptions, cache: 'no-store' })
   const fenced = validateArtifactGeneration(payload, expectedGeneration, path)
   if (fenced.run_id !== String(runId)) {
     throw artifactProtocolError(

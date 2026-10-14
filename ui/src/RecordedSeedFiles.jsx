@@ -1,7 +1,11 @@
 import { uiText, uiMessage, useUILanguage, effectiveUILanguage } from './uiLanguage.js'
-import React, { useEffect, useRef, useState } from 'react'
+import React, { Suspense, lazy, useEffect, useRef, useState } from 'react'
 import { deadlineGet, runNodeApiPath } from './api.js'
 import CodeViewer from './CodeViewer.jsx'
+// LAZY: the Inspector's Code tab is in the run route's static closure, and the shaped view (with its
+// Markdown renderer and stylesheet) is drawn only after an explicit "Formatted" click.
+const ArtifactPreview = lazy(() => import('./ArtifactPreview.jsx'))
+import { extensionOf, previewKind } from './artifactPreviewModel.js'
 import { recordedFileOverlay } from './nodeCodeModel.js'
 import { seedReadError, seedTextSha256 } from './seedReadError.js'
 import './RecordedSeedFiles.css'
@@ -41,6 +45,12 @@ export function validSeedFilesPage(page, identity, offset, path) {
         ? file.bytes > page.text_limit : file.bytes <= page.text_limit))
 }
 
+// A recorded text file whose shape the Files panel can draw: JSON / JSONL, CSV / TSV, Markdown.
+const formattable = file => {
+  const kind = previewKind(file.path, { content: file.text, is_text: true })
+  return ['json', 'jsonl', 'table'].includes(kind) || extensionOf(file.path) === 'md'
+}
+
 export default function RecordedSeedFiles({ runId, node, generation, baseDigest, language, draftStore, draftScope }) {
   useUILanguage()
 
@@ -48,6 +58,9 @@ export default function RecordedSeedFiles({ runId, node, generation, baseDigest,
   const [page, setPage] = useState(null)
   const [file, setFile] = useState(null)
   const [version, setVersion] = useState('base')
+  // The same shaped view the Files panel gives a JSON, CSV/TSV or Markdown file (doc 77 §3), as an
+  // option beside the source: the recorded text is already verified against its sha256 above.
+  const [formatted, setFormatted] = useState(false)
   const [pending, setPending] = useState(false)
   const [error, setError] = useState(false)
   const request = useRef(null)
@@ -128,8 +141,18 @@ export default function RecordedSeedFiles({ runId, node, generation, baseDigest,
       ? <CodeViewer code={overlay.text} label={(mainCode ? (ru ? `Основной код #${node.id}: ${file.path}` : uiMessage("Main code #{0}: {1}", [node.id, file.path])) : (ru ? `Правка #${node.id}: ${file.path}` : uiMessage("Edit #{0}: {1}", [node.id, file.path])))}
           language={language} draftStore={draftStore} draftScope={mainCode ? `${draftScope}:main` : `${draftScope}:file:${file.path}`} />
       : file.text_status === 'utf8'
-      ? <CodeViewer code={file.text} label={(ru ? `База: ${file.path}` : uiMessage("Base: {0}", [file.path]))} language={language}
-          draftStore={draftStore} draftScope={`${draftScope}:base:${file.path}`} />
+      ? <>
+        {formattable(file) && <div className="toolbar seed-file-format" aria-label={uiText('File view')}>
+          <button className="btn sm" aria-pressed={!formatted} onClick={() => setFormatted(false)}>{uiText('Source')}</button>
+          <button className="btn sm" aria-pressed={formatted} onClick={() => setFormatted(true)}>{uiText('Formatted')}</button>
+        </div>}
+        {formatted && formattable(file)
+          ? <Suspense fallback={<div className="muted">{uiText('Loading…')}</div>}>
+            <ArtifactPreview sel={{ path: file.path }} content={{ content: file.text, is_text: true, size: file.bytes }} />
+          </Suspense>
+          : <CodeViewer code={file.text} label={(ru ? `База: ${file.path}` : uiMessage("Base: {0}", [file.path]))} language={language}
+            draftStore={draftStore} draftScope={`${draftScope}:base:${file.path}`} />}
+      </>
       : <p className="notice compact" role="status">{file.path}: {((file.text_status === 'too_large' ? (ru ? 'слишком большой файл для текстового просмотра (лимит 256 КиБ).' : uiText('too large for text preview (256 KiB limit).')) : (ru ? 'бинарный файл; текстовый просмотр недоступен.' : uiText('binary file; no text preview.'))))}</p>}
     </>}
     {page && <ul className="recorded-seed-list" aria-label={((ru ? 'Файлы записанной базы' : uiText('Recorded base file list')))}>

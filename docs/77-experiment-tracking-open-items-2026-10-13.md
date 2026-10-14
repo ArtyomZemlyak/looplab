@@ -28,9 +28,11 @@ OPEN[experiment-runtime-parameters] proof:`absent:RESULT 20@docs/audit/experimen
 
 ## 3. Предпросмотр файлов — P1
 
-OPEN[experiment-artifact-previews] proof:`absent:ArtifactPreview@ui/src/RecordedSeedFiles.jsx`
+OPEN[experiment-artifact-previews] proof:`absent:RESULT 20@docs/audit/experiment-artifact-previews-20261014.md`
 
 *Сделано 2026-10-14:* `GET …/artifact/raw` (PNG/JPEG/GIF/WebP только при совпадении расширения и сигнатуры, `nosniff` + `CSP: sandbox`, ≤16 MiB; SVG/HTML отвергаются) и `GET …/artifact/meta` (размер, sha256, тип по сигнатуре, заголовок safetensors, список zip, заголовок `.npy`; ничего не распаковывается и не исполняется) с теми же fence, что `/artifact`; `ui/src/ArtifactPreview.jsx` в «Файлах»: JSON, CSV/TSV-таблица, Markdown, изображения, метаданные двоичных файлов. Остаются PDF, подключение к RecordedSeedFiles и фильтр инвентаря по node/attempt (обрезка на 1500 файлов).
+
+*Сделано 2026-10-14 (ветка `fix/ui-remaining-20261014`):* PDF — `/artifact/raw` отдаёт `.pdf` с сигнатурой `%PDF-` (тот же `nosniff` + CSP sandbox), «Файлы» показывают его встроенным просмотрщиком браузера из object URL со ссылкой «Открыть в новой вкладке»; RecordedSeedFiles предлагает «Форматированный» вид JSON/CSV/Markdown через тот же `ArtifactPreview` (исходник — по умолчанию); инвентарь листается страницами (`offset`/`limit`, `next_offset`, кнопка «Загрузить ещё файлы») и фильтруется по эксперименту (`node_id`: только `nodes/node_N`, адреса файлов прежние). Остаётся приёмка на реальных файлах — протокол в audit-документе proof.
 
 **Есть.** Инвентарь, фильтр, ограниченный текстовый просмотр и просмотр recorded seed files. Бинарные файлы не становятся доступными для inline-просмотра только от наличия строки в инвентаре.
 

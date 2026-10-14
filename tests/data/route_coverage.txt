@@ -76,10 +76,10 @@ PATCH /api/runs/{run_id}	tests/test_server.py
 GET /api/runs/{run_id}/agent-notify	tests/test_agent_events.py
 PUT /api/runs/{run_id}/agent-notify	tests/test_agent_events.py
 GET /api/runs/{run_id}/agents_md	tests/test_server.py
-GET /api/runs/{run_id}/artifact	tests/test_server.py
+GET /api/runs/{run_id}/artifact	tests/test_artifact_preview.py tests/test_server.py
 GET /api/runs/{run_id}/artifact/meta	tests/test_artifact_preview.py
 GET /api/runs/{run_id}/artifact/raw	tests/test_artifact_preview.py
-GET /api/runs/{run_id}/artifacts	tests/test_refusal_vocabulary.py tests/test_server.py
+GET /api/runs/{run_id}/artifacts	tests/test_artifact_preview.py tests/test_refusal_vocabulary.py tests/test_server.py
 GET /api/runs/{run_id}/attempt-logs	tests/test_failure_forensics.py
 GET /api/runs/{run_id}/cards/{card_id}/trace	tests/test_card_trace_projection.py
 POST /api/runs/{run_id}/chat	tests/test_collaboration.py tests/test_provider_error_redaction.py tests/test_report.py tests/test_serve_prompt_review.py tests/test_server.py

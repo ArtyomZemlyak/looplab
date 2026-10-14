@@ -190,7 +190,7 @@ vocabulary a client may append is `serve/protocol.py::CONTROL_EVENTS`.
 | `GET` | `/api/runs/{run_id}/agents_md` | DEPRECATED. Serve a run's AGENTS.md. | — | yes |
 | `GET` | `/api/runs/{run_id}/artifact` | Serve ONE artifact's content for inline viewing. `root` must be one of the ids returned by | — |  |
 | `GET` | `/api/runs/{run_id}/artifact/meta` | Describe ONE artifact without interpreting it as code: size, sha256 (skipped over 512 MiB), | — |  |
-| `GET` | `/api/runs/{run_id}/artifact/raw` | Serve ONE raster image (PNG/JPEG/GIF/WebP) for inline preview. The suffix AND the magic | — |  |
+| `GET` | `/api/runs/{run_id}/artifact/raw` | Serve ONE raster image (PNG/JPEG/GIF/WebP) or PDF for inline preview. The suffix AND the | — |  |
 | `GET` | `/api/runs/{run_id}/artifacts` | List files currently visible to the run, grouped by root. | — |  |
 | `GET` | `/api/runs/{run_id}/attempt-logs` | Logs of earlier lifecycles, kept when a node's workdir was rebuilt (reset/retry). | — |  |
 | `GET` | `/api/runs/{run_id}/cards/{card_id}/trace` | One CARD's whole story: the research that proposed it, then every node it produced. | — |  |

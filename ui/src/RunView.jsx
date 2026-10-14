@@ -2791,6 +2791,7 @@ export default function RunView({ runId, onBack, reviewMode = false, reviewMeta 
         historyActive={historyActive} onReturnToLive={returnToLive} onClose={closePanel} />}
       {panel === 'artifacts' && panelAllowed('artifacts') && <ArtifactsPanel
         key={`artifacts:${runId}@${generation || 'pending'}`} runId={runId}
+        nodeIds={Object.keys(state?.nodes || {}).map(Number).filter(Number.isSafeInteger).sort((a, b) => a - b)}
         expectedGeneration={generation} onToast={showToast} onClose={closePanel} />}
       </>
       </LazyBoundary>}

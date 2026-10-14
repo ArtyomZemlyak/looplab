@@ -14,6 +14,9 @@ export const extensionOf = path => {
 
 export function previewKind(path, content) {
   const ext = extensionOf(path)
+  // A PDF is shown by the browser's own viewer from bytes `/artifact/raw` verified (suffix + magic),
+  // whether or not its body happened to contain a NUL (UI review 2026-10-14 section 7.4).
+  if (ext === 'pdf' && content && (content.is_text === false || typeof content.content === 'string')) return 'pdf'
   if (content && content.is_text === false) return IMAGE_EXT.has(ext) ? 'image' : 'meta'
   if (!content || typeof content.content !== 'string') return 'none'
   if (ext === 'json' || ext === 'jsonl') return ext

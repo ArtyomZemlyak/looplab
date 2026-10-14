@@ -3299,9 +3299,13 @@ export function isRunLockFile(root, file) {
 // by a RepoTask. Those task paths can contain inputs, later edits and outputs; without a start-time
 // manifest the UI deliberately makes no file-level production claim. Text files open inline; binary /
 // oversize ones are flagged. Backed by GET /api/runs/{id}/artifacts + /artifact.
-export function ArtifactsPanel({ runId, expectedGeneration, onToast, onClose }) {
+export function ArtifactsPanel({ runId, expectedGeneration, onToast, onClose, nodeIds = [] }) {
   useUILanguage()
 
+  // UI review 2026-10-14 section 7.6: list ONE experiment's workdir (`node_id`), and page past the
+  // first 1,500 files of a root instead of stopping there.
+  const [nodeFilter, setNodeFilter] = useState(null)
+  const [moreBusy, setMoreBusy] = useState(null)
   const [roots, setRoots] = useState(null)
   const [err, setErr] = useState(null)
   const [open, setOpen] = useState({})        // root id -> expanded?
@@ -3336,7 +3340,9 @@ export function ArtifactsPanel({ runId, expectedGeneration, onToast, onClose }) 
     if (!generationReady) return () => { inventoryReqRef.current += 1 }
 
     const controller = new AbortController()
-    getRunArtifactInventory(runId, expectedGeneration, { signal: controller.signal }).then(d => {
+    getRunArtifactInventory(runId, expectedGeneration, {
+      signal: controller.signal, ...(nodeFilter != null ? { nodeId: nodeFilter } : {}),
+    }).then(d => {
       if (token !== inventoryReqRef.current || requestScope !== scopeRef.current) return
       if (!Array.isArray(d.roots)) throw new Error('Invalid file inventory')
       const rs = d.roots
@@ -3356,7 +3362,29 @@ export function ArtifactsPanel({ runId, expectedGeneration, onToast, onClose }) 
       contentAbortRef.current = null
       if (token === inventoryReqRef.current) inventoryReqRef.current += 1
     }
-  }, [expectedGeneration, generationReady, reload, runId, scope])
+  }, [expectedGeneration, generationReady, reload, runId, scope, nodeFilter])
+
+  // The next page of ONE root, appended in walk order. A scope change while it loads drops it.
+  const loadMore = root => {
+    if (!generationReady || root.next_offset == null || moreBusy) return
+    const requestScope = scope
+    const token = inventoryReqRef.current
+    setMoreBusy(root.id)
+    getRunArtifactInventory(runId, expectedGeneration, {
+      root: root.id, offset: root.next_offset,
+      ...(nodeFilter != null ? { nodeId: nodeFilter } : {}),
+    }).then(d => {
+      if (token !== inventoryReqRef.current || requestScope !== scopeRef.current) return
+      const page = Array.isArray(d.roots) ? d.roots.find(r => r.id === root.id) : null
+      if (!page || !Array.isArray(page.files)) throw new Error('Invalid file inventory')
+      setRoots(prev => (prev || []).map(r => r.id !== root.id ? r : {
+        ...r, files: [...r.files, ...page.files], n_files: r.n_files + page.files.length,
+        truncated: page.truncated, next_offset: page.next_offset,
+      }))
+    }).catch(e => {
+      if (token === inventoryReqRef.current) onToast?.('load more failed: ' + (e?.message || e))
+    }).finally(() => setMoreBusy(null))
+  }
 
   const view = (rootId, f) => {
     if (!generationReady) return
@@ -3421,6 +3449,15 @@ export function ArtifactsPanel({ runId, expectedGeneration, onToast, onClose }) 
         : !roots ? <div className="muted">{uiText("Loading…")}</div> :
         <div className="art-wrap">
           <div className="art-list">
+            {nodeIds.length > 0 && <label className="art-node-filter">
+              <span className="muted">{uiText("Show")}</span>{' '}
+              <select value={nodeFilter == null ? '' : String(nodeFilter)}
+                aria-label={uiText("Show the files of one experiment")}
+                onChange={e => setNodeFilter(e.target.value === '' ? null : Number(e.target.value))}>
+                <option value="">{uiText("all files")}</option>
+                {nodeIds.map(id => <option key={id} value={String(id)}>{uiMessage("experiment #{0}", [id])}</option>)}
+              </select>
+            </label>}
             <input className="text art-filter" aria-label={uiText("Filter loaded files")} placeholder={uiText("filter loaded files…")} value={filter}
                    onChange={e => setFilter(e.target.value)} />
             {ql && <div className="muted art-filter-status" role="status" aria-live="polite" aria-atomic="true">
@@ -3457,7 +3494,10 @@ export function ArtifactsPanel({ runId, expectedGeneration, onToast, onClose }) 
                     {locks.length > 0 && <button type="button" className="btn xs ghost"
                       aria-pressed={showLocks} onClick={() => setShowLocks(v => !v)}>
                       {showLocks ? uiText('Hide engine lock files') : uiPlural(locks.length, 'Show {0} empty engine lock file', 'Show {0} empty engine lock files')}</button>}
-                    {r.truncated && <div className="muted art-empty">{(ql ? uiPlural(r.n_files, 'Filter checked {0} loaded files; this root may contain more matches.', 'Filter checked {0} loaded files; this root may contain more matches.') : uiPlural(r.n_files, 'Listing stopped at {0} files; this root may contain more.', 'Listing stopped at {0} files; this root may contain more.'))}</div>}
+                    {r.truncated && <div className="muted art-empty">{(ql ? uiPlural(r.n_files, 'Filter checked {0} loaded files; this root may contain more matches.', 'Filter checked {0} loaded files; this root may contain more matches.') : uiPlural(r.n_files, 'Listing stopped at {0} files; this root may contain more.', 'Listing stopped at {0} files; this root may contain more.'))}
+                      {r.next_offset != null && <> <button type="button" className="btn xs"
+                        disabled={moreBusy != null} onClick={() => loadMore(r)}>
+                        {moreBusy === r.id ? uiText('Loading…') : uiText('Load more files')}</button></>}</div>}
                   </div>}
                 </div>
               )

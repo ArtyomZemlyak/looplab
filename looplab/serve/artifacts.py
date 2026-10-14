@@ -274,13 +274,24 @@ def _list_artifact_files(
     *,
     exposed: Optional[ArtifactExposure] = None,
     transform: Optional[ArtifactListingTransform] = None,
+    start: Optional[Path] = None,
+    offset: int = 0,
+    limit: Optional[int] = None,
 ) -> tuple[list[dict], bool]:
     """Walk `base`, pruning heavy/noise dirs, capped at _ART_MAX_FILES. Returns (files, truncated). The
     walk is sorted (dirs + files) so a truncated listing is deterministic across calls/platforms rather
     than whatever arbitrary subset os.scandir happened to yield first. An optional transform may
-    decorate or reject an already-authorized file; rejection happens before it consumes the cap."""
+    decorate or reject an already-authorized file; rejection happens before it consumes the cap.
+
+    PAGES, not one cut (UI review 2026-10-14 section 7.6): `offset` skips that many LISTED files of the
+    same deterministic walk and `limit` bounds the page, so a root larger than one page is read page by
+    page instead of ending at file 1,500 — the MiniOneRec run root ended inside its repository copy.
+    `start` walks a SUBTREE of `base` (one node's workdir) while paths stay relative to `base`, so a
+    file keeps the address the content route already accepts. The defaults are the old behaviour."""
     out: list[dict] = []
-    for dirpath, dirnames, filenames in os.walk(base):
+    skipped = 0
+    cap = _ART_MAX_FILES if limit is None else limit     # read at CALL time (a patched cap holds)
+    for dirpath, dirnames, filenames in os.walk(start if start is not None else base):
         dirnames[:] = sorted(d for d in dirnames if d not in _ART_SKIP_DIRS)
         for fn in sorted(filenames):
             fp = Path(dirpath) / fn
@@ -301,10 +312,13 @@ def _list_artifact_files(
                 item = transform(fp, item)
                 if item is None:
                     continue
-            out.append(item)
-            if len(out) >= _ART_MAX_FILES:
+            if skipped < offset:
+                skipped += 1
+                continue
+            if len(out) >= cap:
                 out.sort(key=lambda f: f["path"])
                 return out, True
+            out.append(item)
     out.sort(key=lambda f: f["path"])
     return out, False
 
@@ -365,6 +379,18 @@ def raster_mime(path: str, head: bytes) -> Optional[str]:
     declared = ART_IMAGE_MIME.get(Path(str(path)).suffix.lower())
     sniffed = _IMAGE_KIND_MIME.get(sniff_kind(head) or "")
     return declared if declared is not None and declared == sniffed else None
+
+
+def preview_mime(path: str, head: bytes) -> Optional[str]:
+    """`raster_mime`, plus PDF (doc 77 §3): a `.pdf` whose bytes begin `%PDF-`. The browser's own PDF
+    viewer draws it from an object URL, under the same `nosniff` + sandboxing CSP as an image — a PDF
+    is a document for that viewer, never HTML or script in this origin. SVG and HTML stay refused."""
+    mime = raster_mime(path, head)
+    if mime is not None:
+        return mime
+    if Path(str(path)).suffix.lower() == ".pdf" and head[:5] == b"%PDF-":
+        return "application/pdf"
+    return None
 
 
 def safetensors_summary(f, size: int) -> Optional[dict]:

@@ -202,7 +202,7 @@ export const DEFAULT_BUDGETS = Object.freeze({
     // 2026-10-14 (doc 80 §11, branch fix/ui-remaining-20261014): the memo-question banner, report
     // figures and version history measured 695,195 B JS / 61,203 B CSS, all of it in lazy chunks
     // and their own stylesheets; every route closure kept its ceiling. Re-baselined to that build.
-    js: { gzip: 680 * KIB },
+    js: { gzip: 682 * KIB },
     css: { gzip: 60 * KIB },
   },
   individual: {
@@ -296,7 +296,10 @@ export const DEFAULT_BUDGETS = Object.freeze({
       // verdict and the Energy switch's new place, all in RunView's closure. 400.25 KiB leaves 451 B.
       // 2026-10-11 code review of doc 75: 410,099 B (+694 B) — the fresh-launch rule, the strip's
       // plan reading and the Russian render sites in the same closure. 401 KiB leaves 525 B.
-      limits: { js: { gzip: 404.5 * KIB }, css: { gzip: 46.5 * KIB } },
+      // 2026-10-14 doc 80 §11: 414,622 B (+414 B over 404.5 KiB) — the Files experiment filter and
+      // paging, the memo-question banner's Research wiring and the RecordedSeedFiles format switch
+      // (its ArtifactPreview is a lazy chunk). 405 KiB leaves 98 B.
+      limits: { js: { gzip: 405 * KIB }, css: { gzip: 46.5 * KIB } },
     },
     {
       name: 'valid review DAG route',
