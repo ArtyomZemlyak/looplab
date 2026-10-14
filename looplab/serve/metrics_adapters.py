@@ -2,8 +2,9 @@
 
 Read a node's logged metric SERIES from whatever the training/eval code wrote — so the UI can plot
 ALL metrics online (loss, every recall@k, grad norms, lr, …), not just the run's objective. Pluggable
-by design: the TensorBoard adapter is the base (PyTorch-Lightning et al. write event files); add CSV /
-MLflow / JSONL adapters later behind the same `read(node_dir) -> {tag: [points]}` shape.
+by design: the TensorBoard adapter is the base (PyTorch-Lightning et al. write event files); Hugging Face
+`trainer_state.json` and `*.metrics.jsonl` adapters sit beside it behind the same
+`read(node_dir) -> {tag: [points]}` shape.
 
 Best-effort everywhere: a mid-write log, a missing optional dependency, or a corrupt file yields an
 empty result, never an exception — the UI must never break because a training log isn't ready yet.
@@ -147,7 +148,190 @@ class TensorBoardAdapter:
         return out
 
 
-_ADAPTERS: list[MetricsAdapter] = [TensorBoardAdapter()]
+# ---------------------------------------------------------------- file-based adapters (JSONL, HF)
+#
+# UI review 2026-10-14 §7: a Hugging Face `Trainer` writes its curves to `trainer_state.json`
+# (`log_history`), and many training scripts append one JSON object per logging step to a
+# `*.metrics.jsonl`. Neither reached the Metrics view, which read TensorBoard only — so a run whose
+# trainer logged loss/lr/grad-norm every step showed no curve at all. Same safety rules as the
+# TensorBoard walk (no link followed, bounded walk, hidden dirs skipped, regular files only), plus a
+# byte cap per file and a parse cache keyed by (path, size, mtime), because this is read on a poll.
+
+_TRAINER_STATE_NAME = "trainer_state.json"
+_JSONL_SUFFIX = ".metrics.jsonl"
+_TRAINER_STATE_MAX_BYTES = 16 * 1024 * 1024
+_JSONL_MAX_BYTES = 32 * 1024 * 1024
+_MAX_POINTS_PER_TAG = 100_000
+#: Keys of a `log_history` row that are bookkeeping, not curves.
+_TRAINER_SKIP_KEYS = frozenset({"step", "epoch", "total_flos"})
+_PARSE_CACHE: dict[tuple, dict] = {}
+_PARSE_CACHE_MAX = 64
+
+
+def _named_regular_files(node_dir: str, match) -> list[tuple[str, os.stat_result]]:
+    """Regular, unlinked files under `node_dir` whose NAME satisfies `match`, with their lstat.
+
+    The `_event_files` walk rules, for adapters that read a single named file per directory."""
+    try:
+        if is_reparse(os.lstat(node_dir)):
+            return []
+        root = os.path.realpath(node_dir)
+    except (OSError, ValueError):
+        return []
+    found: list[tuple[str, os.stat_result]] = []
+    seen = 0
+    for dirpath, dirnames, filenames in os.walk(node_dir, followlinks=False):
+        dirnames[:] = sorted(d for d in dirnames if not d.startswith("."))
+        seen += len(dirnames) + len(filenames)
+        if seen > _EVENT_WALK_ENTRY_CAP:
+            break
+        real = os.path.realpath(dirpath)
+        if real != root and not real.startswith(root.rstrip(os.sep) + os.sep):
+            dirnames[:] = []
+            continue
+        for name in sorted(filenames):
+            if not match(name):
+                continue
+            path = os.path.join(dirpath, name)
+            try:
+                info = os.lstat(path)
+            except OSError:
+                continue
+            if stat.S_ISREG(info.st_mode) and not is_reparse(info):
+                found.append((path, info))
+    return found
+
+
+def _finite(value) -> bool:
+    return (isinstance(value, (int, float)) and not isinstance(value, bool)
+            and value == value and value not in (float("inf"), float("-inf")))
+
+
+def _cached_parse(path: str, info: os.stat_result, max_bytes: int, parse) -> dict:
+    if info.st_size > max_bytes:
+        return {}
+    key = (path, info.st_size, info.st_mtime_ns)
+    hit = _PARSE_CACHE.get(key)
+    if hit is not None:
+        return hit
+    try:
+        flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0)
+        fd = os.open(path, flags)
+        try:
+            if not stat.S_ISREG(os.fstat(fd).st_mode):
+                return {}
+            with os.fdopen(fd, "rb", closefd=False) as fh:
+                raw = fh.read(max_bytes + 1)
+        finally:
+            os.close(fd)
+    except OSError:
+        return {}
+    if len(raw) > max_bytes:
+        return {}
+    try:
+        result = parse(raw, info.st_mtime)
+    except Exception:  # noqa: BLE001 - a half-written or foreign file is "no data yet"
+        result = {}
+    if len(_PARSE_CACHE) >= _PARSE_CACHE_MAX:
+        _PARSE_CACHE.pop(next(iter(_PARSE_CACHE)))
+    _PARSE_CACHE[key] = result
+    return result
+
+
+def _point(series: dict, tag: str, step, value, wall_time: float) -> None:
+    if not _finite(value) or not (isinstance(step, int) and not isinstance(step, bool)):
+        return
+    points = series.setdefault(tag, [])
+    if len(points) < _MAX_POINTS_PER_TAG:
+        points.append({"step": step, "value": float(value), "wall_time": float(wall_time)})
+
+
+def _parse_trainer_state(raw: bytes, mtime: float) -> dict:
+    import json
+    doc = json.loads(raw.decode("utf-8"))
+    history = doc.get("log_history") if isinstance(doc, dict) else None
+    out: dict[str, list[dict]] = {}
+    if not isinstance(history, list):
+        return out
+    for row in history:
+        if not isinstance(row, dict):
+            continue
+        step = row.get("step")
+        for key, value in row.items():
+            if key not in _TRAINER_SKIP_KEYS and isinstance(key, str) and len(key) <= 120:
+                # `log_history` rows carry no clock; the file's mtime is the latest moment any of
+                # them can have been written, which is what the attempt fence compares against.
+                _point(out, f"trainer/{key}", step, value, mtime)
+    return out
+
+
+def _parse_metrics_jsonl(raw: bytes, mtime: float, stem: str) -> dict:
+    import json
+    out: dict[str, list[dict]] = {}
+    for line in raw.decode("utf-8", errors="replace").splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            row = json.loads(line)
+        except ValueError:
+            continue                           # a torn last line while the trainer appends
+        if not isinstance(row, dict):
+            continue
+        step = row.get("step", row.get("global_step"))
+        clock = next((row[k] for k in ("wall_time", "time", "timestamp") if _finite(row.get(k))),
+                     mtime)
+        for key, value in row.items():
+            if key in ("step", "global_step", "wall_time", "time", "timestamp", "epoch"):
+                continue
+            if isinstance(key, str) and len(key) <= 120:
+                _point(out, f"{stem}/{key}", step, value, float(clock))
+    return out
+
+
+def _newest_trainer_state(files) -> dict:
+    """`Trainer` writes one `trainer_state.json` into the output dir AND into every
+    `checkpoint-N/`, each holding the WHOLE history so far — merging them would plot every point
+    several times. Only the file with the largest logged step is read (newest mtime on a tie), the
+    same "newest re-run wins" rule the TensorBoard adapter applies to Lightning's `version_N`."""
+    best = None
+    for path, info in files:
+        parsed = _cached_parse(path, info, _TRAINER_STATE_MAX_BYTES, _parse_trainer_state)
+        last = max((p["step"] for pts in parsed.values() for p in pts), default=-1)
+        rank = (last, info.st_mtime)
+        if parsed and (best is None or rank > best[0]):
+            best = (rank, parsed)
+    return {tag: list(points) for tag, points in (best[1] if best else {}).items()}
+
+
+def _jsonl_series(files) -> dict:
+    """`*.metrics.jsonl`: one JSON object per logging step, a `step` (or `global_step`) and numeric
+    fields. Tags are `<file stem>/<field>` so two files never interleave."""
+    out: dict[str, list[dict]] = {}
+    for path, info in files:
+        stem = os.path.basename(path)[:-len(_JSONL_SUFFIX)] or "metrics"
+        parsed = _cached_parse(path, info, _JSONL_MAX_BYTES,
+                               lambda raw, mtime, stem=stem: _parse_metrics_jsonl(raw, mtime, stem))
+        for tag, points in parsed.items():
+            out.setdefault(tag, []).extend(points)
+    return out
+
+
+class FileMetricsAdapter:
+    """Hugging Face `trainer_state.json` and `*.metrics.jsonl` curves, from ONE bounded walk of
+    the node dir (this runs on the Metrics poll beside the TensorBoard walk)."""
+    name = "metric_files"
+
+    def read(self, node_dir: str) -> dict[str, list[dict]]:
+        files = _named_regular_files(
+            node_dir, lambda n: n == _TRAINER_STATE_NAME or n.endswith(_JSONL_SUFFIX))
+        out = _newest_trainer_state([f for f in files if os.path.basename(f[0]) == _TRAINER_STATE_NAME])
+        for tag, points in _jsonl_series([f for f in files if f[0].endswith(_JSONL_SUFFIX)]).items():
+            out.setdefault(tag, []).extend(points)
+        return out
+
+
+_ADAPTERS: list[MetricsAdapter] = [TensorBoardAdapter(), FileMetricsAdapter()]
 
 
 def read_node_metrics(node_dir: str, *, since_wall_time: float | None = None) -> dict[str, list[dict]]:
