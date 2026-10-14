@@ -41,6 +41,19 @@ class UpstreamAdvance(UpstreamCheck):
     evidence_token: str = Field(pattern=r"^[0-9a-f]{64}$")
 
 
+class CodeWorktree(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    name: str = Field(pattern=r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$")
+    start: str = Field("base", max_length=80)
+
+
+class CodeOverlay(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    worktree: Optional[str] = Field(None, pattern=r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$")
+    patch: Optional[str] = Field(None, max_length=2 * 1024 * 1024)
+    start: str = Field("base", max_length=80)
+
+
 class UpstreamRecovery(UpstreamAction):
     claim_action_id: str = Field(min_length=1, max_length=128)
     reason: str = Field(min_length=1, max_length=700)
@@ -121,5 +134,107 @@ def build_router(srv):
         if request_agent_token(request):
             raise HTTPException(403, {"code": "operator_required", "message": "Only the operator can abandon an interrupted claim"})
         return call(run_id, "abandon", body.model_dump())
+
+    # ------------------------------------------------------------- doc 79: the run's code repository
+
+    def code_call(run_id, fn, *, request=None, write=False):
+        from looplab.engine.code_repo import CodeRepoError
+        rd = srv.run_dir(run_id)
+        if not (rd / "events.jsonl").is_file():
+            raise HTTPException(404, {"code": "run_not_found", "message": f"no run {run_id}"})
+        if write and request is not None and request_agent_token(request):
+            try:
+                settings = read_config_snapshot(rd / "config.snapshot.json", refuse_unknown=False)
+            except (ConfigRefusal, OSError, ValueError):
+                settings = None
+            if not getattr(settings, "external_harness", False):
+                raise HTTPException(403, {"code": "agent_token_refused", "message":
+                                          "Code writes on internal runs require the operator credential"})
+        try:
+            return fn(rd)
+        except CodeRepoError as exc:
+            status = 503 if exc.code.startswith("git_") else (409 if exc.code.endswith("_exists") else 400)
+            raise HTTPException(status, {"code": exc.code, "message": str(exc)}) from exc
+        except OSError as exc:
+            raise HTTPException(503, {"code": "code_storage_unavailable",
+                                      "message": "The run's code repository could not be read"}) from exc
+
+    @router.get("/api/runs/{run_id}/code")
+    def code_status(run_id: str, response: Response):
+        """The run's code: bases (with upstream evidence), per-attempt commits with changed paths,
+        metric and effective config, what is pending upstream, and the branches. Starts no work."""
+        response.headers["Cache-Control"] = "no-store"
+
+        def read(rd):
+            from looplab.engine.code_identity import code_status as status_of
+            try:
+                task = load_task(rd / "task.snapshot.json", existing_run=True)
+            except (ConfigRefusal, OSError, ValueError):
+                task = None
+            try:
+                settings = read_config_snapshot(rd / "config.snapshot.json", refuse_unknown=False)
+            except (ConfigRefusal, OSError, ValueError):
+                settings = None
+            return status_of(rd, task=task, settings=settings)
+        return code_call(run_id, read)
+
+    @router.get("/api/runs/{run_id}/code/diff")
+    def code_diff(run_id: str, response: Response,
+                  commit: str = Query(..., pattern=r"^[0-9a-f]{7,64}$"),
+                  against: Optional[str] = Query(None, pattern=r"^[0-9a-f]{7,64}$"),
+                  max_bytes: int = Query(256 * 1024, ge=1024, le=2 * 1024 * 1024)):
+        """A bounded unified diff of one commit of the run's code repository against `against`
+        (default: its parent, i.e. the base it was seeded on). Read-only."""
+        response.headers["Cache-Control"] = "no-store"
+
+        def read(rd):
+            from looplab.engine.code_repo import CodeRepo
+            repo = CodeRepo(rd)
+            sha = repo.rev(commit) if repo.exists() else None
+            if sha is None:
+                raise HTTPException(404, {"code": "code_commit_unknown", "message": "no such commit"})
+            old = repo.rev(against) if against else repo.rev(sha + "^")
+            if old is None:
+                raise HTTPException(404, {"code": "code_commit_unknown", "message": "no comparison commit"})
+            text, truncated = repo.diff(old, sha, max_bytes=max_bytes)
+            return {"commit": sha, "against": old, "changed": repo.changed(old, sha),
+                    "diff": text, "truncated": truncated}
+        return code_call(run_id, read)
+
+    @router.post("/api/runs/{run_id}/code/sync")
+    def code_sync(run_id: str, request: Request):
+        """Build the attempt commits the log implies but no code_snapshot recorded (old runs).
+        Writes only the run's private code repository; appends no event."""
+        def write(rd):
+            from looplab.engine.code_identity import sync_run
+            out = sync_run(rd)
+            return {"built": len(out["built"]), "recorded": out["recorded"],
+                    "unavailable": [b for b in out["built"] if b.get("status") != "recorded"][:20]}
+        return code_call(run_id, write, request=request, write=True)
+
+    @router.post("/api/runs/{run_id}/code/worktrees")
+    def code_worktree(run_id: str, body: CodeWorktree, request: Request):
+        """Check out the run's active base (or `node:<id>`) from the PRIVATE run repository into
+        `RUN_DIR/code/worktrees/<name>` on branch `agent/<name>`, for an external agent to edit.
+        Submit it with `inject_node` `code_from: {"worktree": name}`."""
+        def write(rd):
+            from looplab.engine.code_worktree import add_worktree
+            return add_worktree(rd, body.name, start=body.start)
+        return code_call(run_id, write, request=request, write=True)
+
+    @router.post("/api/runs/{run_id}/code/overlay")
+    def code_overlay(run_id: str, body: CodeOverlay, request: Request):
+        """Preview the `files`/`deleted` overlay a worktree or a patch becomes (the same conversion
+        `inject_node` `code_from` applies), held to the edit surface. Submits nothing."""
+        if (body.worktree is None) == (body.patch is None):
+            raise HTTPException(400, {"code": "code_from_invalid",
+                                      "message": "give exactly one of worktree or patch"})
+
+        def compute(rd):
+            from looplab.engine.code_worktree import overlay_from_patch, overlay_from_worktree
+            if body.worktree is not None:
+                return overlay_from_worktree(rd, body.worktree)
+            return overlay_from_patch(rd, body.patch, start=body.start)
+        return code_call(run_id, compute, request=request, write=True)
 
     return router

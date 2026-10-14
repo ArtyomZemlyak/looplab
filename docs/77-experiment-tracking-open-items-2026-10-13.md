@@ -12,6 +12,11 @@ OPEN[experiment-source-snapshot] proof:`absent:SourceSnapshotPanel@ui/src/Inspec
 
 **Приёмка.** Два узла с одинаковым HEAD и разным dirty diff показаны как разные снимки. Повторная попытка, смена базы и архивный запуск привязаны к своим исходникам; недоступный Git показывается как unknown, не как clean. Снимок позволяет определить фактически выполненный код и не меняет результаты оценки.
 
+**Данные есть (2026-10-14, doc 79 §3).** Каждая попытка — коммит приватного репозитория прогона
+(`code_snapshot`: commit, base digest/commit, changed paths); база — архив засева, т.е. рабочее
+дерево с dirty-правками, поэтому два узла с одинаковым HEAD и разным dirty diff — разные снимки.
+`GET /api/runs/{id}/code` и `/code/diff?commit=` отдают их UI; панели в Inspector ещё нет.
+
 ## 2. Фактические гиперпараметры — P1
 
 OPEN[experiment-runtime-parameters] proof:`absent:RuntimeSnapshotPanel@ui/src/Inspector.jsx`
@@ -21,6 +26,12 @@ OPEN[experiment-runtime-parameters] proof:`absent:RuntimeSnapshotPanel@ui/src/In
 **Нужно.** RuntimeSnapshotPanel: declared / applied / source, отдельно неизвестное значение и конфликт источников. Поддержать объявленные env/JSON/YAML carriers и runtime-артефакт задачи без вывода секретов. Самоотчёт кандидата не становится независимо подтверждённым фактом. Наличие поля в Idea не доказывает его применение.
 
 **Приёмка.** lr, effective/global batch, micro batch, world size, max_steps, seed, precision, модель и выборка показаны из фактической конфигурации соответствующей попытки. Переопределение в коде и конфликт двух carriers видны; missing не превращается в ноль. Нельзя выводить «число примеров/с» из tree rows/s: единицы сохраняются.
+
+**Данные есть (2026-10-14, doc 79 §6).** Событие `effective_config`: значения в канонических ключах
+(lr, batch/micro batch, world size, max_steps, epochs, warmup, seed, scheduler) с источником
+(env оценки / env-файл оверлея / лог стадии со строкой), сверка с объявленными params — `checked`,
+`mismatches`, `unknown` (missing не ноль), `conflicts` по стадиям; есть в `GET /api/runs/{id}/code`
+(`attempts[].effective_config`). Панели RuntimeSnapshotPanel ещё нет.
 
 ## 3. Предпросмотр файлов — P1
 

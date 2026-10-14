@@ -757,6 +757,10 @@ class RunResult:
     # stays in every saved config while the batch that ran survives only in the trainer's own state
     # file. None on every task that is not a transformers training, which is silence and not a claim.
     effective_train_batch: Optional[dict] = None
+    # EFFECTIVE CONFIG (`core/effective_config.py`, doc 79): every hyperparameter-shaped value the
+    # launch env, the overlay's env files and the stage logs' config dumps showed, by source, with
+    # the declared params checked against them. None when nothing was seen or declared.
+    effective_config: Optional[dict] = None
     # HOST-SIDE SCORING (doc 52 row 10a, `adapters/repo_task.py::HostScorerSpec`): when the task
     # declared a host scorer, `metric` above is ITS number and these two carry what the candidate
     # said about itself. `self_metric` is the candidate's own printed number, read off the last

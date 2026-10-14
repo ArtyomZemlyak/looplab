@@ -10,7 +10,7 @@ vocabulary a client may append is `serve/protocol.py::CONTROL_EVENTS`.
 
 <!-- generated: api routes -->
 
-176 routes on 152 paths; 10 deprecated; 27 with a declared response model.
+181 routes on 157 paths; 10 deprecated; 27 with a declared response model.
 
 ### `/api`
 
@@ -194,6 +194,11 @@ vocabulary a client may append is `serve/protocol.py::CONTROL_EVENTS`.
 | `POST` | `/api/runs/{run_id}/chat` | Advisory chat grounded on a run (and optionally one experiment node). Read-only — it | — | yes |
 | `GET` | `/api/runs/{run_id}/chat-log` | The saved chat turns for this run, in order ({role:'user'\|'assistant'\|'action', …}). | — |  |
 | `POST` | `/api/runs/{run_id}/chat-log` | Append ONE chat turn (the verbatim feed entry: role/content/trace or role/action/status) | — |  |
+| `GET` | `/api/runs/{run_id}/code` | The run's code: bases (with upstream evidence), per-attempt commits with changed paths, | — |  |
+| `GET` | `/api/runs/{run_id}/code/diff` | A bounded unified diff of one commit of the run's code repository against `against` | — |  |
+| `POST` | `/api/runs/{run_id}/code/overlay` | Preview the `files`/`deleted` overlay a worktree or a patch becomes (the same conversion | — |  |
+| `POST` | `/api/runs/{run_id}/code/sync` | Build the attempt commits the log implies but no code_snapshot recorded (old runs). | — |  |
+| `POST` | `/api/runs/{run_id}/code/worktrees` | Check out the run's active base (or `node:<id>`) from the PRIVATE run repository into | — |  |
 | `POST` | `/api/runs/{run_id}/command` | Action-router (Workstream C): turn a free-text instruction into EITHER a concrete control | — |  |
 | `GET` | `/api/runs/{run_id}/command-receipt` | Observe a saved command by ID or Idempotency-Key without restarting work. | — |  |
 | `POST` | `/api/runs/{run_id}/commands` | *Submit Command* (no docstring) | `RunCommandRecord` |  |

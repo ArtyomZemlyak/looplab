@@ -116,7 +116,7 @@ _ABSENT = object()
 # them: they are inputs to normalization, never event data.  Named once here because two sites must
 # agree about them — the pop, and the residual allow-list that refuses whatever the pop did not
 # take.  See `_normalize_inject_node` for why that residual check is not `data_fields` itself.
-_INJECT_IMPORT_FIELDS = frozenset({"source_run", "source_node"})
+_INJECT_IMPORT_FIELDS = frozenset({"source_run", "source_node", "code_from"})
 
 
 def task_file_for(rd: Path) -> Optional[str]:
@@ -1126,6 +1126,33 @@ def _check_inject_question(ctx: _ControlIntake, question_id: Optional[str]) -> N
         })
 
 
+def _apply_code_from(ctx: _ControlIntake) -> None:
+    """Doc 79: turn `code_from` — a LoopLab-provided worktree or a unified patch against the run's
+    active base — into the `files`/`deleted` overlay every other inject carries, held to the task's
+    edit surface (`engine/code_worktree.py`). Consumed here; never written to the event."""
+    data = ctx.data
+    spec = data.pop("code_from")
+    if not isinstance(spec, dict) or len({"worktree", "patch"} & set(spec)) != 1 or (
+            set(spec) - {"worktree", "patch", "start"}):
+        raise HTTPException(400, {"code": "code_from_invalid", "message":
+                                  "code_from must be {\"worktree\": name} or {\"patch\": text, \"start\"?: "
+                                  "\"base\"|\"node:<id>\"}"})
+    if data.get("files") or data.get("deleted"):
+        raise HTTPException(400, {"code": "code_from_conflict", "message":
+                                  "give either code_from or files/deleted, not both"})
+    from looplab.engine.code_repo import CodeRepoError
+    from looplab.engine.code_worktree import overlay_from_patch, overlay_from_worktree
+    try:
+        if "worktree" in spec:
+            overlay = overlay_from_worktree(ctx.rd, spec["worktree"])
+        else:
+            overlay = overlay_from_patch(ctx.rd, spec["patch"], start=str(spec.get("start") or "base"))
+    except CodeRepoError as exc:
+        status = 503 if exc.code.startswith("git_") else 400
+        raise HTTPException(status, {"code": exc.code, "message": str(exc)}) from exc
+    data["files"], data["deleted"] = overlay["files"], overlay["deleted"]
+
+
 def _normalize_inject_node(ctx: _ControlIntake) -> dict:
     data = ctx.data
     # BEFORE the import, because the import MINTS this key and after it runs a server-derived
@@ -1140,6 +1167,8 @@ def _normalize_inject_node(ctx: _ControlIntake) -> dict:
         })
     if data.get("source_run") and data.get("source_node") is not None:
         _import_cross_run_source(ctx)
+    if "code_from" in data:
+        _apply_code_from(ctx)
     # The RESIDUAL allow-list: the event's own fields MINUS the two the import consumes.  It is not
     # `CONTROL_DATA_FIELDS[EV_INJECT_NODE]` itself, and that is load-bearing rather than a leftover
     # (doc 25 SC-02 read the difference as drift and proposed collapsing the two).  The import above
@@ -2355,7 +2384,7 @@ def external_intent_refusal(event_type: str, data: dict) -> Optional[HTTPExcepti
                                  "remeasure, or submit a corrected ready-made inject_node")
         return None
     if event_type == EV_INJECT_NODE and not (data.get("code") or data.get("files") or
-                                              data.get("deleted") or
+                                              data.get("deleted") or data.get("code_from") or
                                               (data.get("source_run") and
                                                data.get("source_node") is not None)):
         return HTTPException(400, "external harness requires code or files for inject_node")

@@ -58,7 +58,8 @@ SETTLED_RESULT_VERSION = 1
 _RESULT_FIELDS = (
     "metric", "exit_code", "timed_out", "stalled", "drift", "extra_metrics",
     "extra_metrics_provenance", "extra_metrics_direction", "violations", "trials", "stages",
-    "metric_subject", "eval_inputs", "applied_params", "effective_train_batch", "self_metric",
+    "metric_subject", "eval_inputs", "applied_params", "effective_train_batch", "effective_config",
+    "self_metric",
     "host_scorer",
     # The protocol facets' inputs (doc 68 §1, 2026-09-26), both as DIGESTS: the resolved profile's
     # facet (`comparability.py::digested_protocol` — never the override argv, which no other row

@@ -23,7 +23,7 @@ The event type itself is the contract's identity and is never renamed or reused;
 
 <!-- generated: event types -->
 
-187 event types — 130 folded into `RunState`, 57 diagnostic; 1240 declared payload keys; 32 types whose whole payload is stored by the fold.
+189 event types — 130 folded into `RunState`, 59 diagnostic; 1268 declared payload keys; 32 types whose whole payload is stored by the fold.
 
 | type | fold | records | required keys | optional keys |
 |---|---|---|---|---|
@@ -61,6 +61,7 @@ The event type itself is the contract's identity and is never renamed or reused;
 | `card_reopened` | folded | The operator resumed a dropped Card (server-stamped). | `id` | `actor_kind`, `by`, `dropped_by`, `reason` |
 | `card_reprioritized` | folded | The operator moved one Card's priority. | `id` | `actor_kind`, `pinned`, `priority`, `source` |
 | `card_resource_pinned` | folded | The operator pinned one Card's GPU footprint. | `id` | `actor_kind`, `gpu_mem_mib`, `gpus`, `pinned`, `source` |
+| `code_snapshot` | diagnostic | A materialized lifecycle's code as a commit in the run's private code repository, with its base commit and changed paths (doc 79). | `generation`, `node_id`, `repo`, `seed_event_seq`, `source`, `status`, `version` | `base`, `changed`, `changed_count`, `commit`, `message`, `reason`, `ref`, `repair_of`, `stats` |
 | `command_ack` | diagnostic | The engine folded one server command intent — the causal ack that closes it. | `command_id`, `event_seq` | `deferred`, `drain_only` |
 | `comment_created` | folded | An operator comment on one node, at that node's generation. | `node_id` | `actor_kind`, `comment_id`, `node_generation`, `text`, `version` |
 | `comment_edited` | folded | A new revision of one comment, compare-and-swapped against the version the author saw. | `comment_id` | `actor_kind`, `base_version`, `node_generation`, `node_id`, `text`, `version` |
@@ -85,6 +86,7 @@ The event type itself is the contract's identity and is never renamed or reused;
 | `deps_installed` | diagnostic | The packages one evaluation installed and how they resolved. | `generation`, `node_id`, `packages`, `resolved`, `round` | `eval_seconds`, `source` |
 | `diversity_archive` | folded · whole | The finalization snapshot of the diversity archive. | — | `elites`, `finalize_scope`, `finish_seq`, `niches`, `resolution` |
 | `drift_unavailable` | diagnostic | Why the run could not compare its environment against the one it started in. | `reason` | — |
+| `effective_config` | diagnostic | Hyperparameter values one evaluation actually ran with, by source, and their mismatches with the node's declared params (doc 79). | `generation`, `node_id`, `version` | `by_stage`, `checked`, `conflicts`, `declared`, `effective`, `mismatches`, `sources_read`, `unknown`, `values` |
 | `effective_train_batch` | diagnostic | What the training process itself recorded as the batch it ran at, read off the node's own workdir at the metric read. | `disagree`, `generation`, `node_id`, `read_at`, `readings`, `train_batch_size` | `files_seen`, `truncated` |
 | `env_changed` | folded | A resume observed that the Python/library environment differs from the one the run started in. | `now`, `was` | — |
 | `eval_attempt_withheld` | diagnostic | A pause, a stop or an infra_unavailable pause withheld a lifecycle's evaluation; its seconds, for its next terminal. | `at`, `attempt`, `eval_seconds`, `generation`, `node_id`, `reason` | `fault`, `occupant` |

@@ -160,3 +160,16 @@ Order GPU work across runs with `PUT /api/runs/{run_id}/gpu-gate` (`hold`, `star
 Declare routine monitor answers with `PUT /api/runs/{run_id}/harness-monitor-rules`; never
 answer checkpoints with an unattended bot under the agent's name. Read
 `node_failed.failure_forensics` and `/attempt-logs` before repairing; declare `eval.canary`.
+
+## Code changes belong in the run, not in copies
+
+Every candidate's code is recorded as a commit of the run's private repository
+(`RUN_DIR/code/repo.git`, `docs/guide/code-identity.md`), and the operator exports
+the run's fixes into the task repository with `looplab code-export`. Code edited in
+a copy outside the run — a scratch clone, a campaign directory, the editable source
+between runs — reaches neither. To change code, take a worktree of the run's
+current base (`looplab code-worktree RUN NAME` or `POST /api/runs/{run_id}/code/worktrees`),
+edit and commit there, and submit `inject_node` with `code_from: {"worktree": NAME}`
+(or `{"patch": "<unified diff>"}`); the overlay is held to the task's edit surface.
+`GET /api/runs/{run_id}/code` shows each attempt's commit and the effective
+hyperparameters LoopLab observed, with mismatches against the params you declared.

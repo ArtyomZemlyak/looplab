@@ -150,7 +150,7 @@ def test_start_in_assistant_keeps_the_steps_and_names_no_code():
 # would contradict that rule. Shrink freely; lower the number when you do. Generated pages
 # (`api-reference.md`, `event-reference.md`) are written by their generators and are not held here.
 PROSE_CEILINGS = {
-    "cli-reference.md": 28776,
+    "cli-reference.md": 28772,
     "concepts.md": 32764,
     "configuration.md": 10447,
     "external-harness.md": 17985,

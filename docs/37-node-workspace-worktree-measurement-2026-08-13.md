@@ -19,6 +19,15 @@ a different mechanism entirely, and §6 names it.
 > the cap's exhaustion recorded in the receipt, so a truncated measurement can never read as a small
 > workspace.
 
+> **Status update (2026-10-14), doc 79.** The decision above STANDS for node workspaces: a node still
+> runs in a materialized copy, never in a worktree of the source repository, for §5c and §5d. What
+> changed is that every ATTEMPT now has a git identity anyway — a commit of a run-owned private
+> repository `RUN_DIR/code/repo.git` whose base commit is the archived seed (the working tree, so §5d
+> does not apply) and which shares nothing with the operator's object database (so §5c does not
+> apply). Measured on the MiniOneRec `work-train` clone (741 files, 13.8 MB): 0.60 s once per base,
+> 26 ms per attempt, ~16 KB of repository per attempt. Worktrees are offered only to EXTERNAL agents,
+> and only of that private repository ([doc 79](79-node-git-identity-and-code-upstream-2026-10-14.md) §2).
+
 Everything below is measured, not reasoned. Where a number is a median over repetitions the spread is
 given, because two of the conclusions turn on whether a difference is real.
 

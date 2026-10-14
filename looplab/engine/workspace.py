@@ -503,4 +503,11 @@ class WorkspaceSeeder:
                          if upstream_plan else self._e._seed_workspace(wd, node=node))
         self._e._write_node_files(node, wd)         # … agent edits on top …
         self._e._write_assets(wd)                   # … task assets win any name collision
+        # CODE IDENTITY (doc 79): the bytes just materialized become a commit in the run's private
+        # code repository, parented on its seed's base commit, recorded as the diagnostic
+        # `code_snapshot` row. Read off disk AFTER the assets, so it is what the eval will run.
+        # Best-effort and bounded: it returns None rather than raise, and only a node's own
+        # lifecycle workdir is recorded (a canary scratch or confirm seed re-runs the same code).
+        from looplab.engine.code_identity import record_materialized
+        record_materialized(self._e, node, wd, base_revision)
         return base_revision

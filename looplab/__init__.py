@@ -37,6 +37,10 @@ _LAYOUT = {
     "upstream_state": "engine",
     "upstream_spec": "engine",
     "upstream_workspace": "engine",
+    "code_repo": "engine",       # doc 79: the run-owned private code repository (git plumbing)
+    "code_identity": "engine",   # doc 79: per-attempt commits, base lineage, code status
+    "code_export": "engine",     # doc 79: export the run's code to the task repo as a branch
+    "code_worktree": "engine",   # doc 79: external-agent worktrees and patch overlays
     "upstream_gate": "engine",
     "upstream_evidence": "core",
     "upstream_tools": "tools",
@@ -366,6 +370,7 @@ _LAYOUT = {
     "seccomp": "runtime",          # the kernel syscall policy applied at the launch (doc 52 row 28)
     "stage_identity": "runtime",   # what a stage RAN ON and what it MADE: the reuse key a cache
     #                              would consult + the produced artifacts' content identity
+    "effective_config": "core",  # doc 79: hyperparameters an eval actually ran with, by source
     "applied_params": "runtime",   # what the CONFIGURATION that ran said the declared coordinates
     #                              were worth, bound at the metric read
     "effective_batch": "runtime",   # what the training PROCESS recorded about the one

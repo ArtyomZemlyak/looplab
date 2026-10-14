@@ -75,6 +75,9 @@ looplab bench           Capability self-benchmark across tasks
 looplab ui              Serve the live React UI (needs the [ui] extra)
 looplab tui             Terminal control plane: start/steer runs by chat (no browser)
 looplab export-git      The node DAG as a git repository: a commit per node lifecycle, its parents as the DAG, `Looplab-*` trailers (doc 67 67.15)
+looplab code-status     Attempt commits, bases, pending upstream (doc 79)
+looplab code-worktree   Worktree of the run's private repo (doc 79)
+looplab code-export     Run's fixes to the task repo, new branch (doc 79)
 looplab export-mlflow   Log the champion to MLflow
 looplab export-notebook Export the champion as a runnable .ipynb
 looplab export-sft      This run's model turns as execution-grounded SFT rows, each carrying its node's outcome (doc 52 row 33)
@@ -3106,6 +3109,18 @@ parent — set [`mlflow_tracking_uri`](configuration.md) (`LOOPLAB_MLFLOW_TRACKI
 `looplab run` / `looplab resume`. It is blank (off) by default because a tracking server is an
 egress boundary.
 
+## `code-status`
+
+| `RUN_DIR [--sync] [--json]` | Each attempt's commit in `RUN_DIR/code/repo.git`, bases, pending upstream; `--sync` builds commits an old log implies. [Code identity](code-identity.md) |
+
+## `code-worktree`
+
+| `RUN_DIR NAME [--start base\|node:<id>]` | A worktree of the run's private repository, branch `agent/NAME`, for an external agent. |
+
+## `code-export`
+
+| `RUN_DIR --repo TASK_REPO [--branch B] [--onto REV] [--node champion\|<id>\|none] [--patches DIR] [--dry-run]` | A new branch in the task repository; HEAD, index, working tree and remotes untouched, no push. Exit 3 = conflict. |
+
 ## `export-git`
 
 The run's node DAG as a **git repository**, so `git log --graph`, `git diff node-3 node-7`,
@@ -3138,12 +3153,10 @@ edit set relative to the task's base tree, since every materialization seeds tha
 `files` on top — where `solution.py` is always the node's `code` (the sandbox writes it from `code`
 and never from a `files["solution.py"]`), minus the names the materializer never writes from a node
 (the task's assets, a ratified onboarding adapter) and the names the node's own `deleted` list
-removes. The base bytes are not part of this export, even if the run separately archived them;
-a node's `deleted` names are removals from that base and are listed in the message.
-Runtime inputs, task assets and the environment are also absent. Equal exported edit trees or
-an empty `git diff` do not establish equal materialized programs when their bases differ.
-The command's success message and every commit identify the export's scope. Creating or checking
-out `champion` performs no delivery to the user's task repository.
+removes. The base bytes, runtime inputs, task assets and environment are absent; a node's
+`deleted` names are listed in the message. Equal edit trees with different bases are not equal
+programs. Whole materialized trees and delivery to the task repository are `code-status` and
+`code-export`.
 
 A path a checkout or a receiving host could turn against its reader is left out: absolute or `..`;
 any name NTFS or HFS+ reads as `.git` (`.git.`, `GIT~1`, …) or that starts `.git` (`.gitattributes`,

@@ -82,6 +82,11 @@ GET /api/runs/{run_id}/cards/{card_id}/trace	tests/test_card_trace_projection.py
 POST /api/runs/{run_id}/chat	tests/test_collaboration.py tests/test_provider_error_redaction.py tests/test_report.py tests/test_serve_prompt_review.py tests/test_server.py
 GET /api/runs/{run_id}/chat-log	tests/test_provider_error_redaction.py tests/test_server.py
 POST /api/runs/{run_id}/chat-log	tests/test_provider_error_redaction.py tests/test_report.py tests/test_server.py
+GET /api/runs/{run_id}/code	tests/test_code_identity.py
+GET /api/runs/{run_id}/code/diff	tests/test_code_identity.py
+POST /api/runs/{run_id}/code/overlay	tests/test_code_identity.py
+POST /api/runs/{run_id}/code/sync	tests/test_code_identity.py
+POST /api/runs/{run_id}/code/worktrees	tests/test_code_identity.py
 POST /api/runs/{run_id}/command	tests/test_evidence_consumer_fences.py tests/test_provider_error_redaction.py tests/test_report.py tests/test_serve_prompt_review.py tests/test_server.py
 GET /api/runs/{run_id}/command-receipt	tests/test_command_receipt.py
 POST /api/runs/{run_id}/commands	tests/test_admission_refuses_a_snapshot_the_child_would_refuse.py tests/test_collaboration.py tests/test_command_receipt.py tests/test_concept_tag_command.py tests/test_external_run_mode.py tests/test_fork_from_seq.py tests/test_refusal_vocabulary.py tests/test_run_command_service.py tests/test_server.py tests/test_stalled_finalization_affordance.py

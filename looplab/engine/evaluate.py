@@ -7055,3 +7055,29 @@ class EvaluateMixin:
                     data["withheld_metric"] = _withheld
                 self.store.append(EV_NODE_FAILED, data)
             self._maybe_crash()
+        # CODE IDENTITY AFTER THE TERMINAL (doc 79, `engine/code_identity.py`): the effective
+        # configuration this evaluation ran with, and — when an in-place repair changed the overlay
+        # during evaluation — a second commit parented on the materialized one, so the repair is a
+        # reviewable diff of its own. Both rows are DIAGNOSTIC, appended AFTER the terminal (the
+        # `effective_train_batch` ground: a record may not sit between an evaluation and its
+        # terminal), outside the write lock and off the event loop (git and file reads).
+        try:
+            await anyio.to_thread.run_sync(self._record_code_after_terminal, a)
+        except Exception:  # noqa: BLE001 - a record may never cost a node its terminal
+            pass
+
+    def _record_code_after_terminal(self, a: "EvalAttempt") -> None:
+        from looplab.engine.code_identity import record_after_terminal
+        from looplab.events.types import EV_EFFECTIVE_CONFIG
+        if self._repo_spec:
+            record_after_terminal(self, a)
+        record = getattr(a.res, "effective_config", None) if a.res is not None else None
+        if isinstance(record, dict) and (record.get("values") or record.get("unknown")):
+            self.store.append(EV_EFFECTIVE_CONFIG, {
+                "node_id": a.node_id, "generation": a.generation,
+                "version": record.get("version", 1), "values": record.get("values") or {},
+                "effective": record.get("effective") or {}, "by_stage": record.get("by_stage") or {},
+                "conflicts": record.get("conflicts") or [], "declared": record.get("declared") or {},
+                "mismatches": record.get("mismatches") or [], "unknown": record.get("unknown") or [],
+                "checked": int(record.get("checked") or 0),
+                "sources_read": record.get("sources_read") or []})

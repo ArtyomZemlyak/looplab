@@ -863,6 +863,17 @@ EV_FULL_RETRAIN_CHARGED = "full_retrain_charged"
 # wholesale — a property of the readers, not of the event. Diagnostic is also what lets the eval
 # worker thread append it at all (invariant 1).
 EV_EFFECTIVE_TRAIN_BATCH = "effective_train_batch"
+# CODE IDENTITY of one materialized lifecycle (doc 79, `engine/code_identity.py`): the commit in the
+# run's private code repository (`code/repo.git`) whose tree is exactly what the engine seeded plus
+# the node's overlay, parented on the base commit of the archive it was seeded from; a second row for
+# the same seed names the in-place repair commit made at the terminal. DIAGNOSTIC: a record, read by
+# no fold and no fence, appended from the eval worker thread like `workspace_seeded`.
+EV_CODE_SNAPSHOT = "code_snapshot"
+# THE EFFECTIVE CONFIGURATION one evaluation actually ran with (doc 79, `core/effective_config.py`):
+# hyperparameter-shaped values read off the launch environment, the overlay's env files and the stage
+# logs' configuration dumps, reconciled against the node's declared `Idea.params`. DIAGNOSTIC, on
+# `effective_train_batch`'s ground: it ranks nothing, gates nothing and cannot cost a terminal.
+EV_EFFECTIVE_CONFIG = "effective_config"
 # ONE stage ROLLBACK decision — the Developer asserting that a LATER stage's failure was caused by an
 # EARLIER stage that had already been counted successful, and the engine's answer. Written on BOTH
 # outcomes (`accepted` true/false, with `refusal` naming which rung of the ladder said no) because the
@@ -1332,6 +1343,7 @@ DIAGNOSTIC_EVENTS: frozenset[str] = frozenset({
     EV_DRIFT_UNAVAILABLE, EV_INJECT_FAILED, EV_BUDGET, EV_DATA_SHIFT,
     EV_READMODEL_SKIPPED, EV_DEPS_INSTALLED, EV_DEPS_DECLARED, EV_FULL_RETRAIN_CHARGED,
     EV_STAGE_ROLLBACK, EV_REPAIR_CRITIC_VERDICT, EV_TRUST_SCAN, EV_EFFECTIVE_TRAIN_BATCH,
+    EV_CODE_SNAPSHOT, EV_EFFECTIVE_CONFIG,
     EV_WORKSPACE_SEEDED,
     EV_LOG_REPAIRED, EV_REFLECTION_NOTE, EV_SKILLS_PROMOTED, EV_LESSONS_RECONCILED,
     EV_COMMAND_ACK, EV_FINALIZE_STEP, EV_REPORT_REFRESH_STARTED, EV_REPORT_REFRESH_FAILED,
@@ -1829,6 +1841,20 @@ EVENT_PAYLOAD_KEYS: dict[str, PayloadContract] = {
         "Why the run could not compare its environment against the one it started in.",
         required=("reason",),
         optional=(),
+    ),
+    "code_snapshot": PayloadContract(
+        "A materialized lifecycle's code as a commit in the run's private code repository, with its "
+        "base commit and changed paths (doc 79).",
+        required=("generation", "node_id", "repo", "seed_event_seq", "source", "status", "version"),
+        optional=("base", "changed", "changed_count", "commit", "message", "reason", "ref",
+                  "repair_of", "stats"),
+    ),
+    "effective_config": PayloadContract(
+        "Hyperparameter values one evaluation actually ran with, by source, and their mismatches "
+        "with the node's declared params (doc 79).",
+        required=("generation", "node_id", "version"),
+        optional=("by_stage", "checked", "conflicts", "declared", "effective", "mismatches",
+                  "sources_read", "unknown", "values"),
     ),
     "effective_train_batch": PayloadContract(
         "What the training process itself recorded as the batch it ran at, read off the node's own "

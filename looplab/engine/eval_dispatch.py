@@ -31,6 +31,7 @@ from looplab.engine.track_lane import track_gpus_held
 from looplab.engine.shared import engine_fold as fold
 from looplab.events.types import (EV_NODE_FAILED, EV_RUN_SETUP_FINISHED, EV_RUN_SETUP_STARTED,
                                   SETUP_THREAD_APPENDABLE)
+from looplab.core import effective_config
 from looplab.runtime import applied_params, effective_batch, metric_inputs
 
 # THE engine sentinel (engine/options.py): `_evaluate` passes it into `_run_eval` positionally
@@ -1438,6 +1439,16 @@ class EvalDispatchMixin:
                         if start_stage is _UNSET else start_stage))
             except Exception:  # noqa: BLE001 - a record may never cost a node its terminal
                 res.effective_train_batch = None
+            # THE EFFECTIVE CONFIGURATION (`core/effective_config.py`, doc 79): every
+            # hyperparameter-shaped value the launch env, the overlay's env files and the stage
+            # logs' configuration dumps showed, reconciled against the declared params. Same
+            # instant and same reasons as its siblings above; `capture` never raises.
+            res.effective_config = effective_config.capture(
+                str(workdir), env=env,
+                overlay_files=sorted((node.files or {}) if node is not None else {}),
+                stage_names=[s.get("name") for s in (stages or ()) if isinstance(s, dict)],
+                declared=(dict(node.idea.params or {})
+                          if node is not None and node.idea is not None else {}))
             # THE PROTOCOL SIDE — which profile's overrides the score command ran under, as
             # `_eval_pipeline` resolved them for THIS dispatch (`command_eval.eval_protocol`). A pure
             # record: it folds into `metric_provenance.comparability` at the terminal, where it can

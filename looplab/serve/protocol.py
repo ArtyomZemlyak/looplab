@@ -439,7 +439,11 @@ CONTROL_DATA_FIELDS: dict[str, frozenset[str]] = {
         # metric and is never ranked; `uses` names produced artifact nodes whose workdirs this node's
         # eval reads (`LOOPLAB_USES_WORKDIRS`).
         "node_kind", "uses",
-        "source_run", "source_node"}),
+        "source_run", "source_node",
+        # Doc 79: `{"worktree": name}` or `{"patch": text, "start"?}` — an external agent's code in the
+        # run's private code repository, converted to `files`/`deleted` and consumed at intake
+        # (`control_validation._apply_code_from`), so no inject_node row carries it.
+        "code_from"}),
     EV_DEEP_RESEARCH: frozenset(),
     EV_RESEARCH_COMPLETED: frozenset({"memo"}),
     EV_REPORT_GENERATED: frozenset({"content"}),
