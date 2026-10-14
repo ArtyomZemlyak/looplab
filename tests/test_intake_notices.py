@@ -61,6 +61,11 @@ def test_a_clean_payload_has_no_notices():
     assert intake_notices("pause", {}, {}) == []
 
 
+def _research(rd):
+    from looplab.events.replay import fold
+    return fold(EventStore(rd / "events.jsonl").read_all()).research
+
+
 def _client(tmp_path, monkeypatch):
     monkeypatch.setenv("LOOPLAB_UI_TOKEN", "operator-secret")
     monkeypatch.setenv("LOOPLAB_HARNESS_TOKEN", "agent-secret")
@@ -111,3 +116,51 @@ def test_a_harness_decision_receipt_warns_about_glued_reason(tmp_path, monkeypat
     clean = client.post("/api/runs/demo/harness-decisions", headers=headers, json={
         **decision, "action_id": "novelty-2", "reason": "The idea differs from previous trials"})
     assert clean.status_code == 200 and "readability_warnings" not in clean.json()
+
+
+def test_reaffirm_carries_the_named_memo_and_finding_objects_keep_their_status(
+        tmp_path, monkeypatch):
+    client, rd = _client(tmp_path, monkeypatch)
+    first = {"summary": "Week 6 regresses on new users.",
+             "findings": [{"id": "f-new-users", "text": "New users lose 3 % recall.",
+                           "status": "new", "evidence_node_ids": [0]},
+                          "Old users are unchanged."],
+             "open_questions": ["Does replay of 15k old users recover recall?"]}
+    response = post_command(client, "research_completed", {"memo": first}, key="memo-a",
+                            headers=AGENT)
+    assert response.status_code == 200, response.text
+    notices = response.json().get("intake_notices") or []
+    assert any(n["kind"] == "questions_not_on_board" and n["count"] == 1 for n in notices)
+    memo = _research(rd)[-1]
+    assert memo["findings"] == ["New users lose 3 % recall.", "Old users are unchanged."]
+    assert memo["finding_meta"] == [{"id": "f-new-users", "status": "new",
+                                     "evidence_node_ids": [0]}, {}]
+    response = post_command(client, "research_completed",
+                            {"memo": {"reaffirm_memo_id": memo["memo_id"]}}, key="memo-b",
+                            headers=AGENT)
+    assert response.status_code == 200, response.text
+    assert response.json()["status"] in ("succeeded", "accepted", "executing"), response.json()
+    again = _research(rd)[-1]
+    assert again["reaffirms"] == memo["memo_id"]
+    assert again["findings"] == memo["findings"] and again["summary"] == memo["summary"]
+    bad = post_command(client, "research_completed",
+                       {"memo": {"reaffirm_memo_id": "memo-nope"}}, key="memo-c", headers=AGENT)
+    assert bad.json()["status"] == "rejected"
+    assert bad.json()["error"]["code"] == "reaffirmed_memo_not_found"
+
+
+def test_an_unfiled_experiment_is_reminded_only_while_questions_are_open():
+    from types import SimpleNamespace
+    from looplab.serve.intake_notices import board_notices
+    question = SimpleNamespace(card_kind="direction", merged_into=None, status="proposed",
+                               statement="Does replay help?")
+    with_board = SimpleNamespace(cards={"card-1": question})
+    empty = SimpleNamespace(cards={})
+    unfiled = {"idea": {"operator": "draft"}}
+    filed = {"idea": {"operator": "draft", "parent_card_id": "card-1"}}
+    assert board_notices("inject_node", unfiled, with_board)[0]["kind"] == "experiment_not_filed"
+    assert board_notices("inject_node", filed, with_board) == []
+    assert board_notices("inject_node", unfiled, empty) == []
+    memo = {"memo": {"open_questions": ["does   replay HELP?", "Is week 7 worse?"]}}
+    notice = board_notices("research_completed", memo, with_board)[0]
+    assert notice["count"] == 1 and notice["samples"] == ["Is week 7 worse?"]

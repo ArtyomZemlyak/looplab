@@ -280,6 +280,18 @@ def run_obligations(task, settings, *, generation: str) -> dict:
                 "proof": "nonempty idea.hypothesis (injected candidate mints its own Card)",
                 "enforced": True,
             },
+            # ADVISORY, not a gate (review 2026-10-14 §4): 46 of 64 external injects named their
+            # question and the rest were filed by hand later. The receipt's intake_notices say
+            # `experiment_not_filed` / `questions_not_on_board`; admission does not change.
+            "question_filing": {
+                "required": False,
+                "settings": {"track_hypotheses": settings.track_hypotheses},
+                "checkpoint": "candidate_admission_and_research_memo",
+                "proof": ("idea.parent_card_id names the open research question an experiment "
+                          "answers; memo open_questions that experiments will answer are filed "
+                          "with hypothesis_added (statement, concepts)"),
+                "enforced": False, "policy": "advisory_receipt_notice",
+            },
             "hypothesis_merge": {
                 "required": bool(external and settings.track_hypotheses),
                 "settings": {"track_hypotheses": settings.track_hypotheses},

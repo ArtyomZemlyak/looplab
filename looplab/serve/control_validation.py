@@ -1481,6 +1481,53 @@ def _normalize_hypothesis_updated(ctx: _ControlIntake) -> dict:
     return data
 
 
+# What a reaffirmed memo carries forward. Claims are not: a claim is verified against the run's
+# state at ITS memo, and a carried copy would present an old verdict as a fresh one.
+_REAFFIRM_FIELDS = ("summary", "findings", "finding_meta", "open_questions", "question_concepts",
+                    "question_parents", "recommended_directions", "next_experiments", "sources")
+
+
+def _reaffirmed_memo(state, memo_id) -> Optional[dict]:
+    """The earlier memo `reaffirm_memo_id` names, or None when the field is absent; 400 otherwise."""
+    if memo_id is None:
+        return None
+    if not isinstance(memo_id, str):
+        raise HTTPException(400, "reaffirm_memo_id must be a memo_id string from GET /state research")
+    for memo in reversed(state.research or []):
+        if isinstance(memo, dict) and memo.get("memo_id") == memo_id:
+            return memo
+    raise HTTPException(400, {
+        "code": "reaffirmed_memo_not_found",
+        "message": f"reaffirm_memo_id {memo_id[:80]!r} names no research memo in this run",
+        "remediation": "read the current memo ids from GET /state (research[].memo_id)",
+    })
+
+
+def _split_finding_objects(raw: dict) -> dict:
+    """Accept `findings` items as `{id?, text, status?, supersedes?, evidence_node_ids?}` objects
+    beside plain strings: the text goes to `findings`, the rest to the aligned `finding_meta`."""
+    findings = raw.get("findings")
+    if not isinstance(findings, list) or not any(isinstance(item, dict) for item in findings):
+        return raw
+    texts, meta = [], []
+    for item in findings:
+        if isinstance(item, dict):
+            text = item.get("text", item.get("statement"))
+            if not isinstance(text, str) or not text.strip():
+                raise HTTPException(400, "each findings object needs a non-empty text")
+            status = item.get("status")
+            if status is not None and status not in ("new", "refined", "refuted", "carried"):
+                raise HTTPException(
+                    400, "findings[].status must be new, refined, refuted or carried")
+            texts.append(text)
+            meta.append({key: item[key] for key in ("id", "status", "supersedes",
+                                                    "evidence_node_ids") if key in item})
+        else:
+            texts.append(item)
+            meta.append({})
+    return {**raw, "findings": texts, "finding_meta": meta}
+
+
 def _normalize_research_completed(ctx: _ControlIntake) -> dict:
     """Author a memo through the same sanitized projection as the built-in researcher.
 
@@ -1495,14 +1542,31 @@ def _normalize_research_completed(ctx: _ControlIntake) -> dict:
     raw = ctx.data.get("memo")
     if not isinstance(raw, dict):
         raise HTTPException(400, "research_completed.memo must be an object")
-    allowed = set(ResearchMemo.model_fields) - {"at_node", "trigger", "claims_receipt"}
+    allowed = (set(ResearchMemo.model_fields) - {"at_node", "trigger", "claims_receipt"}) | {
+        "reaffirm_memo_id"}
     unknown = set(raw) - allowed
     if unknown:
         raise HTTPException(400, f"research_completed.memo has unknown field(s): {', '.join(sorted(unknown))}")
+    state = ctx.state()
+    raw = dict(raw)
+    reaffirmed = _reaffirmed_memo(state, raw.pop("reaffirm_memo_id", None))
+    if reaffirmed is not None:
+        # REAFFIRM, don't copy (review 2026-10-14 §9): the agent names the memo whose conclusions
+        # still stand and the server carries its content forward, marked `reaffirms`, so the due
+        # research window closes without the author re-sending — and growing — the same findings.
+        # Anything the author does send (a new summary, a refined finding) replaces that field.
+        carried = {key: reaffirmed[key] for key in _REAFFIRM_FIELDS if reaffirmed.get(key)}
+        if raw.get("findings"):
+            carried.pop("finding_meta", None)     # it described the findings being replaced
+        if raw.get("open_questions"):
+            carried.pop("question_concepts", None)
+            carried.pop("question_parents", None)
+        raw = {**carried, **{key: value for key, value in raw.items() if value}}
+        raw["reaffirms"] = reaffirmed["memo_id"]
+    raw = _split_finding_objects(raw)
     if not any(raw.get(key) for key in ("summary", "findings", "claims", "open_questions",
                                         "next_experiments", "recommended_directions")):
         raise HTTPException(400, "research_completed.memo needs a conclusion or direction")
-    state = ctx.state()
     at_node = len(state.nodes)
     memo = sanitize_research_memo_payload({**raw, "at_node": at_node, "trigger": "external"})
     if memo.get("claims"):

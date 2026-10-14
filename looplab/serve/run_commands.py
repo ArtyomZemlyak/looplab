@@ -3023,8 +3023,10 @@ class RunCommandService:
                         # — said back on the receipt instead of a silent `succeeded`
                         # (`serve/intake_notices.py`). Advisory and record-only: the event stays
                         # byte-identical, and a client that ignores the field loses nothing.
-                        from looplab.serve.intake_notices import intake_notices
+                        from looplab.serve.intake_notices import board_notices, intake_notices
                         notices = intake_notices(event_type, raw_data, normalized)
+                        if event_type in ("research_completed", "inject_node"):
+                            notices += board_notices(event_type, normalized, self.srv.state(rd))
                         if notices:
                             record["intake_notices"] = notices
                         if gate_field is not None:

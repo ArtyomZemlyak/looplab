@@ -213,3 +213,54 @@ def with_readability(result, body):
         if warnings:
             return {**result, "readability_warnings": warnings}
     return result
+
+
+# --------------------------------------------------------------------------- question board
+# External memos carried 212 open questions (69 unique) and the board registered none: the
+# internal researcher's steering step that turns `open_questions` into cards does not run for an
+# external author, and the receipt said `succeeded` (review 2026-10-14 §4). Until a server-side
+# projection exists these notices SAY so, with the exact command that files the question, and
+# remind an experiment to name the question it answers (`question_filing`).
+_CLOSED_CARD_STATUSES = frozenset({"dropped", "deleted", "abandoned"})
+
+
+def _norm_statement(text) -> str:
+    return " ".join(str(text or "").lower().split())
+
+
+def _open_questions(state) -> list:
+    cards = getattr(state, "cards", None) or {}
+    return [card for card in cards.values()
+            if getattr(card, "card_kind", None) == "direction"
+            and getattr(card, "merged_into", None) is None
+            and getattr(card, "status", None) not in _CLOSED_CARD_STATUSES]
+
+
+def board_notices(event_type: str, normalized: dict, state) -> list[dict]:
+    """Question-board notices for one admitted command against the run's current board."""
+    if state is None or not isinstance(normalized, dict):
+        return []
+    if event_type == "research_completed":
+        memo = normalized.get("memo") if isinstance(normalized.get("memo"), dict) else {}
+        board = {_norm_statement(getattr(card, "statement", "")) for card in
+                 (getattr(state, "cards", None) or {}).values()}
+        missing = [q for q in memo.get("open_questions") or []
+                   if isinstance(q, str) and q.strip() and _norm_statement(q) not in board]
+        if missing:
+            return [{"kind": "questions_not_on_board", "count": len(missing),
+                     "samples": [q[:160] for q in missing[:MAX_SAMPLES]],
+                     "message": ("These open questions are not on the Research question board. "
+                                 "File each one that experiments will answer with a "
+                                 "hypothesis_added command (statement, concepts), then name it "
+                                 "in idea.parent_card_id of those experiments.")}]
+    elif event_type == "inject_node":
+        idea = normalized.get("idea") if isinstance(normalized.get("idea"), dict) else {}
+        if not idea.get("parent_card_id"):
+            questions = _open_questions(state)
+            if questions:
+                return [{"kind": "experiment_not_filed", "open_questions": len(questions),
+                         "message": ("This experiment names no research question. Set "
+                                     "idea.parent_card_id to the question it answers (GET /state "
+                                     "cards with card_kind=direction), or file it later with "
+                                     "card_filed.")}]
+    return []

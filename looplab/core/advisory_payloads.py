@@ -979,6 +979,28 @@ def memo_snapshot_cue(memo) -> str:
             "see them; the working set above is the current board]")
 
 
+FINDING_STATUSES = ("new", "refined", "refuted", "carried")
+_FINDING_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.:-]{0,63}\Z")
+
+
+def _finding_meta(value) -> dict:
+    """One finding's bounded identity/status row; `{}` for anything unusable (keeps alignment)."""
+    if not isinstance(value, dict):
+        return {}
+    out: dict = {}
+    for key in ("id", "supersedes"):
+        ref = value.get(key)
+        if isinstance(ref, str) and _FINDING_ID.match(ref):
+            out[key] = ref
+    if value.get("status") in FINDING_STATUSES:
+        out["status"] = value["status"]
+    nodes = [n for n in _items(value.get("evidence_node_ids"), 16)
+             if type(n) is int and 0 <= n <= (1 << 63) - 1]
+    if nodes:
+        out["evidence_node_ids"] = nodes
+    return out
+
+
 def sanitize_research_memo_payload(payload, *, add_receipts: bool = True, env=None) -> dict:
     """Canonicalize a model-, tool-, or legacy-event research memo.
 
@@ -1116,6 +1138,18 @@ def sanitize_research_memo_payload(payload, *, add_receipts: bool = True, env=No
     out["reasoning"] = _text(src.get("reasoning", ""), 12_000, budget, env=env)
     out["findings"] = [_text(v, 1_200, budget, env=env)
                        for v in _items(src.get("findings"), 32)]
+    # FINDING IDENTITY AND STATUS (review 2026-10-14 §9), positionally aligned with `findings` the
+    # way `question_concepts` is with `open_questions`: an external author may name a finding
+    # (`id`), say what happened to it since its previous memo (`status`: new / refined / refuted /
+    # carried), which earlier id it `supersedes` and the nodes behind it. Additive: absent on every
+    # memo written before it existed, and an absent key stays absent.
+    if "finding_meta" in src:
+        out["finding_meta"] = [
+            _finding_meta(v) for v in _items(src.get("finding_meta"), 32)][:len(out["findings"])]
+    # A memo that REAFFIRMS an earlier one (`reaffirm_memo_id` on the external intake) names it, so
+    # a reader can show "no change since memo X" instead of a copy that looks like new work.
+    if valid_advisory_ref(src.get("reaffirms"), "memo"):
+        out["reaffirms"] = src["reaffirms"]
     # The compat field and the two halves it was split into share ONE bound and one text rule: a
     # reader putting them side by side must not find one clipped where the other was not. See
     # `ResearchMemo.open_questions` for why the split exists — the old field's NAME contradicted its

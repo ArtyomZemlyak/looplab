@@ -1923,4 +1923,9 @@ five findings first. An experiment answers a Research question through `idea.par
 `card_filed`; concept tags only suggest filing. `hypothesis_added` and `card_edited` may declare a
 question's `concepts` (an empty list clears them, omission keeps them); a question's own tags set
 its lattice level, filed experiments' tags only when it has none. Experiment tags stay
-generation-fenced through `concept_tag_edited`.
+generation-fenced through `concept_tag_edited`. An earlier memo that still stands is
+reaffirmed with `{"memo": {"reaffirm_memo_id": "<memo_id>"}}` (the server carries it forward,
+marked `reaffirms`). `findings` items may be `{id, text, status, supersedes, evidence_node_ids}`
+(`status`: `new`, `refined`, `refuted`, `carried`); the Research view shows the change against the
+previous memo. The receipt reports `questions_not_on_board` and `experiment_not_filed`.
+
