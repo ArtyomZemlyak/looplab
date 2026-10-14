@@ -555,6 +555,8 @@ _LAYOUT = {
     "artifact_sync": "engine",  # the operator's copy-out of a finished node's workdir
     "upstream_board": "core",  # the one reading of the upstream lane's folded history (doc 73)
     "memo_questions": "serve",  # memo open questions projected onto the question board (2ab0db610)
+    "report_history": "serve",  # the report's version history and its duplicate rule (doc 80 §11)
+    "report_figures": "serve",  # report figures stored content-addressed beside the run (doc 80 §11)
     "track_lane": "engine",  # eval.tracks served by a live engine (doc 73 §1.4)
     "artifact_fence": "engine",  # a uses-consumer reads the artifact it was admitted with
     "artifact_ideas": "agents",  # Settings.researcher_artifacts: the Researcher's artifact schema
