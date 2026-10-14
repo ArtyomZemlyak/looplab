@@ -1,7 +1,7 @@
 {
   "schema": 1,
   "language": "ru",
-  "count": 7954,
+  "count": 7958,
   "messages": {
     "# LoopLab run report — {0}": "# Отчёт запуска LoopLab — {0}",
     "## Agent narrative (advisory)": "## Пояснения агента (рекомендации)",
@@ -7956,7 +7956,11 @@
     "archive members": "файлов в архиве",
     "contains a pickle (not loaded)": "содержит pickle (не загружается)",
     "Tensor list": "Список тензоров",
-    "Only the first 200 rows and 32 columns are shown.": "Показаны только первые 200 строк и 32 столбца."
+    "Only the first 200 rows and 32 columns are shown.": "Показаны только первые 200 строк и 32 столбца.",
+    "This attempt: commit and effective configuration": "Эта попытка: коммит и фактическая конфигурация",
+    "The run's code repository could not be read.": "Репозиторий кода запуска не удалось прочитать.",
+    "No commit is recorded for this attempt.": "Для этой попытки коммит не записан.",
+    "Effective configuration (what the evaluation used)": "Фактическая конфигурация (с ней шла оценка)"
   },
   "plurals": {
     "({0} paraphrases folded)": {
@@ -9781,6 +9785,11 @@
       "one": "{0} незакоммиченный файл при старте",
       "few": "{0} незакоммиченных файла при старте",
       "many": "{0} незакоммиченных файлов при старте"
+    },
+    "{0} changed files": {
+      "one": "{0} изменённый файл",
+      "few": "{0} изменённых файла",
+      "many": "{0} изменённых файлов"
     }
   }
 }

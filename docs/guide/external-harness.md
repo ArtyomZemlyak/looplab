@@ -34,7 +34,7 @@ operator starts the server and run, while the coding agent proposes candidates.
    `looplab run task.json --out runs/my-run --backend toy -s external_harness=true`.
    Keep this process running. The external agent, not LoopLab's built-in Researcher,
    chooses the next candidate; the task's evaluator still runs inside LoopLab.
-3. In **Progress → Agent obligations → Audit and connection → Connect external agent**, inspect the server/root
+3. In **Progress → Agent obligations → Connect external agent**, inspect the server/root
    and copy the instruction for this run. Configure the coding client's stdio MCP
    server as `looplab harness-mcp`, passing only `LOOPLAB_HARNESS_TOKEN` and the UI
    URL. Supply the credential separately; client-specific examples are below.
@@ -1888,30 +1888,12 @@ metric provenance as the durable center.
 
 ### Language of authored output
 
-The harness contract exposes `output_language.language` (`auto`, `en`, `ru`). Use it
-for all new explanations, research, reviews, lesson/skill descriptions, reports and result
-commentary, including human prose inside structured values. Preserve schema keys, enums,
-identifiers, commands, code, verbatim evidence and measured numbers. This preference adds
-no admission checkpoint or engine wait. It is fixed in the launched run snapshot; change it
-on resume or a new run. The UI language selector is a per-viewer interface preference and does not change it.
-
-Write complete sentences with normal spaces between words. Never shorten prose by removing
-whitespace (`Следомc5w01оттогожеbase` is unreadable to the operator); put identifiers, paths
-and metric names in backticks and keep raw JSON or tables out of findings.
-
-### What the intake does to authored text
-
-The harness contract's `authored_text` block lists the bounds applied at the durable
-boundary: memo `findings` 32 × 1,200 characters, `open_questions`, `recommended_directions`
-and `next_experiments` 16 × 1,200, `summary` 4,000, `reasoning` 12,000 and 64,000 in total;
-report lists 32 × 1,200 and `verdict`/`summary` 4,000. Nothing is cut silently: the
-`POST /commands` receipt carries `intake_notices` — `truncated` (`original_chars`,
-`kept_chars`), `items_omitted`, `dropped` (total budget), `redacted` (`reason`:
-`credential_shape`, `env_value` or `entropy`) and `readability` (glued-prose samples). The
-harness-decisions, reviews, lessons, skill-candidates, checkpoint and result-notice receipts
-carry `readability_warnings`. Notices are advisory; the command is admitted as before. When
-stored text lost meaning, send a corrected command with a new idempotency key. LoopLab never
-inserts spaces itself, because a heuristic can corrupt identifiers.
+Use the contract's `output_language.language` (`auto`, `en`, `ru`) for all new human prose,
+including prose inside structured values; keep keys, identifiers, code, evidence and numbers
+verbatim. It adds no gate, is fixed in the run snapshot (change it on resume or new run) and
+the UI language selector does not change it. Write normal spaced prose; receipts report
+truncation, masking and glued text (`intake_notices`, `readability_warnings`; bounds in
+`authored_text`).
 
 ### Reports and readable external research
 
@@ -1923,9 +1905,6 @@ five findings first. An experiment answers a Research question through `idea.par
 `card_filed`; concept tags only suggest filing. `hypothesis_added` and `card_edited` may declare a
 question's `concepts` (an empty list clears them, omission keeps them); a question's own tags set
 its lattice level, filed experiments' tags only when it has none. Experiment tags stay
-generation-fenced through `concept_tag_edited`. An earlier memo that still stands is
-reaffirmed with `{"memo": {"reaffirm_memo_id": "<memo_id>"}}` (the server carries it forward,
-marked `reaffirms`). `findings` items may be `{id, text, status, supersedes, evidence_node_ids}`
-(`status`: `new`, `refined`, `refuted`, `carried`); the Research view shows the change against the
-previous memo. The receipt reports `questions_not_on_board` and `experiment_not_filed`.
+generation-fenced through `concept_tag_edited`. Reaffirm a standing memo with
+`reaffirm_memo_id`; findings may carry `{id, text, status}` ([doc 76 §3](../76-external-agent-ux-open-items-2026-10-13.md)).
 

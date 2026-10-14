@@ -34,6 +34,9 @@ the same change and say why in the commit:
 Regenerations so far, each one an ADDITIVE model field (the case the paragraph above names), with
 the diff that justified it:
 
+* 2026-10-14 — `Node.extra_metrics_omitted` (review 2026-10-14 section 7: what the 256-key
+  extra-metric bound left out of `node_evaluated`). 8 insertions, 0 deletions — `{}` per node, the
+  default every log without the key folds to.
 * 2026-09-08 — `RunState.eval_noise_floor` + `RunState.eval_noise_seed_results` (`core/models.py`,
   doc 52 row 11: the eval NOISE FLOOR's summary and its per-seed resume memo). The diff was 2
   insertions and 0 deletions — `"eval_noise_floor": null` and `"eval_noise_seed_results": {}`, the

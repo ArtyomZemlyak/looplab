@@ -1063,7 +1063,7 @@ function Overview({ n, state, runId, onToast, draftStore, expectedGeneration, on
     {/* Lazy: the code/parameter snapshot (doc 77 §1-2) is read on demand and stays out of the
         run route's eager closure. */}
     <React.Suspense fallback={null}>
-      <SourceSnapshotPanel state={state} />
+      <SourceSnapshotPanel state={state} runId={runId} node={n} />
       {expectedGeneration && <RuntimeSnapshotPanel runId={runId} node={n} expectedGeneration={expectedGeneration} />}
     </React.Suspense>
     <div className="kv">

@@ -4,28 +4,15 @@
 
 Дата: 2026-10-13. База: `22e2e345c`. Запрос — получить в LoopLab удобный учёт кода, параметров, файлов и ресурсов, привычный по MLflow. Ниже собственные требования к LoopLab, не сравнительный аудит актуальной версии MLflow и не обещание готовой совместимости. Связанные документы: [doc 76](76-external-agent-ux-open-items-2026-10-13.md), [doc 46](46-params-proposed-vs-run-2026-08-20.md), [doc 37](37-node-workspace-worktree-measurement-2026-08-13.md).
 
-## 1. Код, на котором выполнен эксперимент — P1
+## 1. Код, на котором выполнен эксперимент — P1, закрыто 2026-10-14
 
-OPEN[experiment-source-snapshot] proof:`absent:source_snapshot_recorded@looplab/events/types.py`
-
-*Сделано 2026-10-14 (`fix/ui-review-20261014`):* Inspector → Overview показывает свёрнутый «Исходный код запуска» (`ui/src/SourceSnapshotPanel.jsx`): `run_started.workspace` как коммит git, когда он записан, или «коммит неизвестен (копия без git)» с хэшем содержимого — никогда не «clean»; список незакоммиченных файлов при старте (`dirty_inputs`); базу попытки показывает `BaseRevision`, патч — вкладка «Код». Остаётся снимок на уровне попытки (`source_snapshot_recorded`: declared/captured/unknown, исходный коммит не-git копии, diff digest) — отсюда новый proof.
-
-**Есть.** Патчи узлов, source/base digests и Git-экспорт DAG. Эти сведения нельзя свести к одному HEAD: кандидат может содержать незакоммиченные изменения.
-
-**Нужно.** Единый снимок исходников для попытки: repository, исходный commit, состояние dirty, digest/артефакт diff и применённые изменения кандидата. В Inspector предложен SourceSnapshotPanel со ссылками на содержимое снимка. Явно различать declared, captured и unknown; не выводить токены из remote URL и конфигурации Git. Локальный commit не требует автоматического push пользовательского репозитория.
-
-**Приёмка.** Два узла с одинаковым HEAD и разным dirty diff показаны как разные снимки. Повторная попытка, смена базы и архивный запуск привязаны к своим исходникам; недоступный Git показывается как unknown, не как clean. Снимок позволяет определить фактически выполненный код и не меняет результаты оценки.
-
-**Данные есть (2026-10-14, doc 79 §3).** Каждая попытка — коммит приватного репозитория прогона
-(`code_snapshot`: commit, base digest/commit, changed paths); база — архив засева, т.е. рабочее
-дерево с dirty-правками, поэтому два узла с одинаковым HEAD и разным dirty diff — разные снимки.
-`GET /api/runs/{id}/code` и `/code/diff?commit=` отдают их UI; панели в Inspector ещё нет.
+*Отгружено.* Данные — doc 79 §3: каждая попытка — коммит приватного репозитория прогона (`code_snapshot`: commit, base digest/commit, changed paths; база — архив засева с dirty-правками, поэтому одинаковый HEAD с разным dirty diff даёт разные коммиты; сбой git — `status: unavailable`, не «clean»). UI — `ui/src/SourceSnapshotPanel.jsx` в Inspector → Overview (ветка `fix/ui-review-20261014`): `run_started.workspace` (коммит git или «коммит неизвестен (копия без git)» с хэшем содержимого), незакоммиченные файлы при старте и — по раскрытию — коммит этой попытки, её база и изменённые файлы из `GET /api/runs/{id}/code`; патч — вкладка «Код». Проверка: `ui/test/sourceSnapshot.test.js`; живая проверка — после выкладки сборки.
 
 ## 2. Фактические гиперпараметры — P1
 
-OPEN[experiment-runtime-parameters] proof:`absent:runtime_config_glob@looplab/adapters/repo_task.py`
+OPEN[experiment-runtime-parameters] proof:`absent:RESULT 20@docs/audit/experiment-runtime-parameters-20261014.md`
 
-*Сделано 2026-10-14:* `GET /api/runs/{id}/nodes/{nid}/runtime-params` (`looplab/serve/runtime_params.py`) — плоская таблица ключей из конфигурационных файлов попытки (dotenv/JSON/YAML/TOML: авторский оверлей и буквальные файлы edit_surface в workdir), секретные имена файлов скрыты, значения-учётки маскируются, отсутствие ≠ 0; сравнение `Idea.params` с документами (same/different/absent/conflict). Парсер dotenv — `core/param_carriers.py::dotenv_assignments`. UI — «Параметры, с которыми шёл эксперимент» (`ui/src/RuntimeSnapshotPanel.jsx`). Остаётся фактический resolved-конфиг попытки вне корней артефактов (MiniOneRec: `run_metadata.json` на S3) — task-поле вида `eval.runtime_config_glob`; отсюда новый proof.
+*Сделано 2026-10-14:* `GET /api/runs/{id}/nodes/{nid}/runtime-params` (`looplab/serve/runtime_params.py`) — плоская таблица ключей из конфигурационных файлов попытки (dotenv/JSON/YAML/TOML: авторский оверлей и буквальные файлы edit_surface в workdir), секретные имена файлов скрыты, значения-учётки маскируются, отсутствие ≠ 0; сравнение `Idea.params` с документами (same/different/absent/conflict). Парсер dotenv — `core/param_carriers.py::dotenv_assignments`. UI — «Параметры, с которыми шёл эксперимент» (`ui/src/RuntimeSnapshotPanel.jsx`). Там же по раскрытию показывается `effective_config` попытки из `GET /api/runs/{id}/code` (doc 79 §6: lr, batch, world size, max_steps, seed… с источником). Остаётся приёмка на реальной 8-GPU попытке MiniOneRec (значения совпадают с её `run_metadata.json`) — протокол в audit-документе proof.
 
 **Есть.** Idea.params, применённые настройки из поддерживаемых carriers, сведения о расхождениях; в наших задачах сохраняется run_metadata.json. Единой полной таблицы runtime-параметров для env-рецептов пока нет.
 

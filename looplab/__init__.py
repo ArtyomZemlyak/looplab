@@ -95,6 +95,8 @@ _LAYOUT = {
     "evidence": "core",  # the ONE untrusted-evidence envelope: label + guard sentence + fence
     "appstate": "serve",
     "agent_activity": "serve",  # process-local authenticated harness-read observations, not liveness
+    "intake_notices": "serve",  # what the command intake did to authored text, said on the receipt
+    "runtime_params": "serve",  # a node attempt's configuration documents as a flat table (doc 77)
     "agent_events": "serve",    # the external agent's wake-up outbox, long poll and notification hook
     "command_identity": "serve",
     "command_receipt": "serve",

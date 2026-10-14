@@ -44,3 +44,25 @@ export function runtimeParamsView(value) {
     .filter(c => c && typeof c.param === 'string')
   return { carriers, params, comparisons, truncated: value.truncated === true }
 }
+
+// The attempt's own row of `GET /api/runs/{id}/code` (doc 79 §3, §6): its commit in the run-owned
+// repository, the base it was seeded from, the changed paths, and the effective configuration the
+// evaluation actually used. `null` when the run's repository has no row for this attempt.
+export function attemptCodeRow(code, nodeId, attempt) {
+  const rows = Array.isArray(code?.attempts) ? code.attempts : []
+  const mine = rows.filter(r => r && r.node_id === nodeId && r.generation === attempt)
+  return mine.find(r => r.current) || mine[mine.length - 1] || null
+}
+
+const scalar = value => value == null ? '' : typeof value === 'object'
+  ? (Object.hasOwn(value, 'value') ? String(value.value) : JSON.stringify(value)).slice(0, 200)
+  : String(value).slice(0, 200)
+
+export function effectiveConfigRows(config) {
+  const effective = config && typeof config.effective === 'object' && !Array.isArray(config.effective)
+    ? config.effective : {}
+  return Object.entries(effective).slice(0, 64).map(([key, value]) => ({
+    key, value: scalar(value),
+    source: value && typeof value === 'object' && typeof value.source === 'string' ? value.source.slice(0, 120) : '',
+  }))
+}

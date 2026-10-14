@@ -23,3 +23,14 @@ test('the runtime-params view keeps carrier statuses and comparisons', () => {
   assert.equal(view.comparisons[0].match, 'same')
   assert.equal(runtimeParamsView(null), null)
 })
+
+test('the attempt row of /code is picked by node and generation, current first', async () => {
+  const { attemptCodeRow, effectiveConfigRows } = await import('../src/sourceSnapshot.js')
+  const code = { attempts: [{ node_id: 3, generation: 0, current: false, commit: 'old' },
+    { node_id: 3, generation: 1, current: true, commit: 'abc', effective_config: { effective: { lr: { value: 2e-4, source: 'env' }, seed: 42 } } }] }
+  assert.equal(attemptCodeRow(code, 3, 1).commit, 'abc')
+  assert.equal(attemptCodeRow(code, 3, 0).commit, 'old')
+  assert.equal(attemptCodeRow(code, 4, 0), null)
+  assert.deepEqual(effectiveConfigRows(code.attempts[1].effective_config),
+    [{ key: 'lr', value: '0.0002', source: 'env' }, { key: 'seed', value: '42', source: '' }])
+})
