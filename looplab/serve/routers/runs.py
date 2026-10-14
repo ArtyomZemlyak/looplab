@@ -1100,9 +1100,11 @@ def build_router(srv) -> APIRouter:
         probe; agent connection is not measured. This read starts no work.
         language selects only next-step wording from the same decision branches;
         obligation identities, verdicts and read/action references are unchanged.
-        agent_activity records successful progress and checkpoint reads using the scoped
-        harness credential in this UI process. Owner/browser reads do not refresh
-        it. Two minutes of silence is quiet activity, not proof of agent death.
+        agent_activity records every successful run request (read or write) made with the
+        scoped harness credential in this UI process. Owner/browser reads do not refresh
+        it. Two minutes of silence is quiet activity, not proof of agent death;
+        attention=waiting_on_agent only when a question or the next-experiment decision
+        is pending and the agent has been quiet.
         """
         from looplab.harness.progress import snapshot
         if _RUN_GENERATION_RE.fullmatch(expected_generation) is None:
@@ -1115,7 +1117,9 @@ def build_router(srv) -> APIRouter:
                           language=language)
         if request_agent_token(request):
             srv.agent_activity.observe(rd, result["generation"])
-        result["agent_activity"] = srv.agent_activity.snapshot(rd, result["generation"])
+        from looplab.serve.agent_activity import waiting_for_agent
+        result["agent_activity"] = srv.agent_activity.snapshot(
+            rd, result["generation"], waiting=waiting_for_agent(result))
         if brief:
             from looplab.harness.progress_summary import brief as compact_progress
             return compact_progress(result)

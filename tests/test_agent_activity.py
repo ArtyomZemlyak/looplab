@@ -124,3 +124,86 @@ def test_failed_checkpoint_read_never_refreshes_activity(tmp_path, monkeypatch):
         params={'expected_generation': generation}, headers=AGENT)
     assert response.status_code == 503
     assert client.app.state.looplab.agent_activity.snapshot(rd, generation)['status'] == 'not_observed'
+
+
+def test_any_successful_agent_request_counts_reads_and_writes_alike(tmp_path, monkeypatch):
+    """Review 2026-10-14 §2: an agent busy POSTing (decisions, reviews, commands) or reading
+    `/state` looked silent because only the two progress/checkpoint GETs were counted."""
+    rd, store, client = _run(tmp_path, monkeypatch)
+    generation = run_generation_token(store.read_all())
+    now = [0]
+    client.app.state.looplab.agent_activity = AgentActivity(clock=lambda: now[0])
+    # Owner reads of the same routes never count.
+    assert client.get("/api/runs/demo/state", headers=OWNER).status_code == 200
+    assert _read(client, generation).json()["agent_activity"]["status"] == "not_observed"
+    assert client.get("/api/runs/demo/state", headers=AGENT).status_code == 200
+    activity = _read(client, generation).json()["agent_activity"]
+    assert activity["status"] == "recent_request"
+    assert (activity["read_kind"], activity["request_kind"]) == ("state", "read")
+    assert activity["source"] == "authenticated_harness_read"
+    now[0] = 500
+    assert _read(client, generation).json()["agent_activity"]["status"] == "quiet"
+    decision = {"expected_generation": generation, "phase_id": "novelty",
+                "action_id": "novelty-1", "idea": {"operator": "draft"},
+                "decision": "submit", "reason": "The idea differs from previous trials"}
+    response = client.post("/api/runs/demo/harness-decisions", json=decision, headers=AGENT)
+    assert response.status_code == 200, response.text
+    activity = _read(client, generation).json()["agent_activity"]
+    assert activity["status"] == "recent_request" and activity["age_seconds"] == 0
+    assert (activity["read_kind"], activity["request_kind"]) == ("harness-decisions", "write")
+    # A refused write (stale generation / invalid body) is not contact with this run.
+    now[0] = 1000
+    stale = client.post("/api/runs/demo/harness-decisions", headers=AGENT,
+                        json={**decision, "action_id": "novelty-2", "expected_generation": "0" * 64})
+    assert stale.status_code >= 400
+    assert client.post("/api/runs/demo/harness-decisions", json={}, headers=AGENT).status_code == 422
+    assert _read(client, generation).json()["agent_activity"]["status"] == "quiet"
+    # A request about ANOTHER run, or a non-run route, does not refresh this run.
+    assert client.get("/api/runs", headers=AGENT).status_code == 200
+    assert client.get("/api/runs/other/state", headers=AGENT).status_code >= 400
+    assert _read(client, generation).json()["agent_activity"]["status"] == "quiet"
+
+
+def test_silence_is_a_warning_only_while_looplab_waits_for_the_agent(tmp_path, monkeypatch):
+    from looplab.serve.agent_activity import waiting_for_agent
+    activity = AgentActivity(clock=lambda: 1000)
+    # Never observed and nothing pending: neutral, not a warning.
+    snap = activity.snapshot("rd", "gen")
+    assert snap["status"] == "not_observed" and snap["attention"] == "nothing_required"
+    assert snap["waiting_for"] is None and snap["request_kind"] is None
+    question = {"pending_checkpoint_count": 2, "next_step": {"code": "answer_checkpoint"},
+                "execution": {"engine_running": True}}
+    assert waiting_for_agent(question) == {"reason": "evaluation_question", "count": 2}
+    assert activity.snapshot("rd", "gen", waiting=waiting_for_agent(question))["attention"] == "waiting_on_agent"
+    idle = {"pending_checkpoint_count": 0, "next_step": {"code": "choose_direction"},
+            "execution": {"engine_running": True}}
+    assert waiting_for_agent(idle) == {"reason": "next_experiment", "count": 1}
+    # A stopped engine or a training run with no question waits on nobody the chip can name.
+    assert waiting_for_agent({**idle, "execution": {"engine_running": False}}) is None
+    assert waiting_for_agent({"pending_checkpoint_count": 0, "next_step": {"code": "inspect_pending"},
+                              "execution": {"engine_running": True}}) is None
+    assert waiting_for_agent({}) is None and waiting_for_agent({"pending_checkpoint_count": "x"}) is None
+    clock = [0]
+    activity = AgentActivity(clock=lambda: clock[0])
+    activity.observe("rd", "gen", read_kind="commands", write=True)
+    clock[0] = 30
+    assert activity.snapshot("rd", "gen", waiting=waiting_for_agent(question))["attention"] == "agent_has_work"
+    clock[0] = 400
+    quiet = activity.snapshot("rd", "gen")
+    assert quiet["status"] == "quiet" and quiet["attention"] == "nothing_required"
+    assert activity.snapshot("rd", "gen", waiting=waiting_for_agent(question))["attention"] == "waiting_on_agent"
+    # An unknown reason is ignored rather than trusted.
+    assert activity.snapshot("rd", "gen", waiting={"reason": "anything"})["waiting_for"] is None
+
+
+def test_progress_route_reports_the_idle_wait_for_the_next_experiment(tmp_path, monkeypatch):
+    rd, store, client = _run(tmp_path, monkeypatch)
+    generation = run_generation_token(store.read_all())
+    import looplab.engine.run_lifecycle as lifecycle
+    monkeypatch.setattr(lifecycle, "engine_liveness", lambda rd: True)
+    body = _read(client, generation).json()
+    assert body["next_step"]["code"] == "choose_direction"
+    assert body["agent_activity"]["waiting_for"] == {"reason": "next_experiment", "count": 1}
+    assert body["agent_activity"]["attention"] == "waiting_on_agent"
+    body = _read(client, generation, AGENT, brief=True).json()
+    assert body["agent_activity"]["attention"] == "agent_has_work"

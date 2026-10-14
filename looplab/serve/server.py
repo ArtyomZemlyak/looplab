@@ -582,6 +582,33 @@ def make_app(run_root: str | os.PathLike, *, bind_host: Optional[str] = None) ->
         supplied = request.headers.get("X-LoopLab-Token", "")
         return bool(harness_token) and hmac.compare_digest(supplied, harness_token)
 
+    _AGENT_RUN_PATH = re.compile(r"/api/runs/([^/]+)(?:/([^/]+))?.*")
+
+    async def _observe_agent_request(method: str, path: str) -> None:
+        """Count one SUCCESSFUL harness-credential request to a run as agent activity.
+
+        Any run route counts, read or write (`serve/agent_activity.py`): before this only the two
+        progress/checkpoint GETs did, so an agent publishing a report looked silent. The
+        generation is the first-event token (`run_commands.py::run_generation`, a one-line read,
+        off the event loop); a log with no generation records nothing."""
+        from fastapi import HTTPException
+        match = _AGENT_RUN_PATH.fullmatch(path)
+        if match is None:
+            return
+
+        def observe():
+            rd = srv.run_dir(match.group(1))
+            generation = srv.commands.run_generation(rd)
+            if generation:
+                srv.agent_activity.observe(rd, generation, read_kind=match.group(2) or "run",
+                                           write=method not in ("GET", "HEAD"))
+        try:
+            await anyio.to_thread.run_sync(observe)
+        except (HTTPException, OSError, ValueError):
+            # An activity observation must never fail the answered request: an unknown/deleted run
+            # (404/410) or an unreadable log simply records nothing.
+            pass
+
     def _review_denial(detail: str, kind: str, status_code: int) -> "JSONResponse":
         """A review denial is capability-specific and must never be reused for another bearer.
 
@@ -684,6 +711,8 @@ def make_app(run_root: str | os.PathLike, *, bind_host: Optional[str] = None) ->
                 # LoopLab's own model fulfils on an internal run (doc 70 70.8).
                 stamp_agent_token(request)
             response = await call_next(request)
+            if harness_auth and response.status_code < 400:
+                await _observe_agent_request(request.method, p)
             # Keep authenticated API responses out of shared/browser caches, but do not defeat the
             # immutable cache policy of Vite's content-hashed /assets.  The owner and review HTML
             # shells already carry their own stricter headers in the handlers below.

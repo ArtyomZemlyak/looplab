@@ -1,7 +1,7 @@
 {
   "schema": 1,
   "language": "ru",
-  "count": 7866,
+  "count": 7877,
   "messages": {
     "# LoopLab run report — {0}": "# Отчёт запуска LoopLab — {0}",
     "## Agent narrative (advisory)": "## Пояснения агента (рекомендации)",
@@ -7868,7 +7868,18 @@
     "the upload does not reproduce the metric LoopLab measured": "загрузка не воспроизводит метрику, измеренную LoopLab",
     "LoopLab evaluates candidates submitted by the external agent. The agent must check the current requirements and submit the next decision or candidate. Open Agent cycle to see what is due. The agent connection is not verified here.": "LoopLab оценивает кандидатов, которых присылает внешний агент. Агент должен проверить текущие требования и отправить следующее решение или кандидата. Что требуется сейчас — в обязательствах агента. Подключение агента здесь не проверяется.",
     "Table": "Таблица",
-    "tbl md-table": "tbl md-table"
+    "tbl md-table": "tbl md-table",
+    "{0} ago": "{0} назад",
+    "the next experiment decision": "решение о следующем эксперименте",
+    "a pending decision": "ожидающее решение",
+    "Waiting for the agent: {0} · last contact {1}": "Ждём агента: {0} · последнее обращение {1}",
+    "Waiting for the agent: {0} · no contact observed": "Ждём агента: {0} · обращений ещё не было",
+    "No agent contact observed yet · nothing required": "Обращений агента ещё не было · ничего не требуется",
+    "No agent contact observed yet": "Обращений агента ещё не было",
+    "Agent last contacted the API {0} · nothing required": "Последнее обращение агента к API: {0} · ничего не требуется",
+    "Agent last contacted the API {0}": "Последнее обращение агента к API: {0}",
+    "Counts successful requests (reads and writes) made with the harness credential in this UI process. Browser polling does not count. Silence does not prove agent death; inspect the client, questions and receipts. UI restart clears this observation.": "Учитываются успешные обращения агента с harness-токеном (чтение и запись) в этом процессе UI. Опрос из браузера не учитывается. Молчание не доказывает, что агент остановился; проверьте клиент, вопросы и квитанции. Перезапуск UI очищает наблюдение.",
+    "Last contact": "Последнее обращение"
   },
   "plurals": {
     "({0} paraphrases folded)": {
@@ -9648,6 +9659,11 @@
       "one": "Рассчитать {0} контраст",
       "few": "Рассчитать {0} контраста",
       "many": "Рассчитать {0} контрастов"
+    },
+    "{0} evaluation questions": {
+      "one": "{0} вопрос оценки",
+      "few": "{0} вопроса оценки",
+      "many": "{0} вопросов оценки"
     }
   }
 }
