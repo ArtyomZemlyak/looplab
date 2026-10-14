@@ -3019,6 +3019,14 @@ class RunCommandService:
                             raise normalization_error
                         normalized = dict(normalized_candidate or {})
                         record["data"] = normalized
+                        # WHAT THE INTAKE DID TO AUTHORED TEXT — truncation, masking, glued prose
+                        # — said back on the receipt instead of a silent `succeeded`
+                        # (`serve/intake_notices.py`). Advisory and record-only: the event stays
+                        # byte-identical, and a client that ignores the field loses nothing.
+                        from looplab.serve.intake_notices import intake_notices
+                        notices = intake_notices(event_type, raw_data, normalized)
+                        if notices:
+                            record["intake_notices"] = notices
                         if gate_field is not None:
                             record["approval_gate_field"] = gate_field
                             record["approval_gate_seq"] = gate_before

@@ -221,7 +221,32 @@ def run_obligations(task, settings, *, generation: str) -> dict:
                            "candidate explanations, research, reviews, lessons, reports and "
                            "result commentary. auto follows the user's task. Preserve schema keys, "
                            "IDs, code, commands, raw logs and measured evidence. This is a language "
-                           "preference, not a new admission or finish gate.",
+                           "preference, not a new admission or finish gate. Write complete "
+                           "sentences with normal spaces between words; never shorten prose by "
+                           "removing whitespace; put identifiers, paths and metric names in "
+                           "backticks; do not paste raw JSON or tables into findings.",
+        },
+        # WHAT THE INTAKE DOES TO AUTHORED TEXT, stated up front (review 2026-10-14 §8.3): the
+        # bounds below are applied at the durable boundary and every cut, mask or glued-prose
+        # suspicion is reported on the receipt (`serve/intake_notices.py`) — never silently.
+        "authored_text": {
+            "research_memo": {"summary": 4000, "reasoning": 12000,
+                              "findings": {"max_items": 32, "max_chars": 1200},
+                              "open_questions": {"max_items": 16, "max_chars": 1200},
+                              "recommended_directions": {"max_items": 16, "max_chars": 1200},
+                              "next_experiments": {"max_items": 16, "max_chars": 1200},
+                              "total_chars": 64000},
+            "report": {"headline": 800, "summary": 4000, "verdict": 4000,
+                       "champion_summary": 4000,
+                       "lists": {"max_items": 32, "max_chars": 1200}, "total_chars": 64000},
+            "receipt_notices": ("A POST /commands receipt carries intake_notices when the server "
+                                "truncated a field (truncated, original_chars/kept_chars), dropped "
+                                "list items (items_omitted), dropped text over the total budget "
+                                "(dropped) or masked credential-shaped text (redacted, reason). "
+                                "harness-decisions/reviews/lessons/skill-candidates/checkpoint and "
+                                "result-notice receipts carry readability_warnings when prose looks "
+                                "glued. Notices are advisory; resend a corrected command with a new "
+                                "idempotency key when the stored text lost meaning."),
         },
         "agent_choices": [phase.id for phase in PHASES],
         "choice_policy": {

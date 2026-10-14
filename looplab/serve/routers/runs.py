@@ -52,6 +52,8 @@ from looplab.events.traceview import (
     trace_file_revision, trace_projection_json_bytes, unavailable_projection)
 # Per-theme rollup for the cross-run map: {theme: {count, best_metric}}. Now lives in `digest` so the
 # Researcher's working-set digest and this UI endpoint share one definition.
+# Advisory readability notices on the harness POST receipts (review 2026-10-14 §8.3.3).
+from looplab.serve.intake_notices import with_readability
 from looplab.serve.artifacts import (
     _ART_MAX_BYTES, _LOG_TAIL_MAX, ART_RAW_MAX_BYTES, ArtifactPolicyUnavailable, artifact_meta,
     raster_mime, _artifact_exposure_policy, _artifact_file_identity, _artifact_node_id, _artifact_roots,
@@ -1151,7 +1153,7 @@ def build_router(srv) -> APIRouter:
         withdraws old commentary. Does not append owner chat or execute actions.
         """
         from looplab.serve.result_notices import publish
-        return publish(srv, _run_dir(run_id), body)
+        return with_readability(publish(srv, _run_dir(run_id), body), body)
 
     @router.get("/api/runs/{run_id}/harness-checkpoints")
     def get_harness_checkpoints(run_id: str, request: Request, response: Response,
@@ -1186,7 +1188,7 @@ def build_router(srv) -> APIRouter:
         # external agent answers checkpoints — stands.
         owner = bool(getattr(srv, "owner_auth_enabled", False)) and not request_agent_token(request)
         rd = _run_dir(run_id)
-        result = respond(srv, rd, body, answerer="human" if owner else "agent")
+        result = with_readability(respond(srv, rd, body, answerer="human" if owner else "agent"), body)
         if request_agent_token(request):
             srv.agent_activity.observe_authored(rd, body.expected_generation.lower(),
                                                 "checkpoint_answer")
@@ -1231,7 +1233,7 @@ def build_router(srv) -> APIRouter:
     def review_harness_hypotheses(run_id: str, body: ExternalHypothesisReview):
         """Record a duplicate review; a merge and its receipt append atomically."""
         from looplab.harness.hypotheses import review_board
-        return review_board(srv, _run_dir(run_id), body)
+        return with_readability(review_board(srv, _run_dir(run_id), body), body)
 
     @router.get("/api/runs/{run_id}/harness-selection")
     def get_harness_selection(run_id: str, expected_generation: str = Query(...)):
@@ -1262,20 +1264,20 @@ def build_router(srv) -> APIRouter:
         node lifecycle signatures; retry a lost response with the same action_id.
         """
         from looplab.harness.lessons import publish_lesson
-        return publish_lesson(srv, _run_dir(run_id), body)
+        return with_readability(publish_lesson(srv, _run_dir(run_id), body), body)
 
     @router.post("/api/runs/{run_id}/skill-candidates")
     def publish_external_skill(run_id: str, body: ExternalSkillBody):
         """Draft an auto-skill from a fresh supported lesson; promotion is server-derived."""
         from looplab.harness.skills import publish_skill_candidate
-        return publish_skill_candidate(srv, _run_dir(run_id), body)
+        return with_readability(publish_skill_candidate(srv, _run_dir(run_id), body), body)
 
     @router.post("/api/runs/{run_id}/harness-decisions")
     def record_harness_decision(run_id: str, body: ExternalDecisionBody, request: Request):
         """Record a reviewed choice for an enabled phase, bound to the submitted idea."""
         from looplab.harness.decisions import publish_decision
         rd = _run_dir(run_id)
-        result = publish_decision(srv, rd, body)
+        result = with_readability(publish_decision(srv, rd, body), body)
         _authored(request, rd, getattr(body, "expected_generation", None), "decision")
         return result
 
@@ -1284,7 +1286,7 @@ def build_router(srv) -> APIRouter:
         """Record a configured end-of-run review, including a reason for no action."""
         from looplab.harness.reviews import publish_review
         rd = _run_dir(run_id)
-        result = publish_review(srv, rd, body)
+        result = with_readability(publish_review(srv, rd, body), body)
         _authored(request, rd, getattr(body, "expected_generation", None), "review")
         return result
 

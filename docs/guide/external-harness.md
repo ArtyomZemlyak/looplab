@@ -1895,6 +1895,24 @@ identifiers, commands, code, verbatim evidence and measured numbers. This prefer
 no admission checkpoint or engine wait. It is fixed in the launched run snapshot; change it
 on resume or a new run. The UI language applies across the interface and owner generation.
 
+Write complete sentences with normal spaces between words. Never shorten prose by removing
+whitespace (`Следомc5w01оттогожеbase` is unreadable to the operator); put identifiers, paths
+and metric names in backticks and keep raw JSON or tables out of findings.
+
+### What the intake does to authored text
+
+The harness contract's `authored_text` block lists the bounds applied at the durable
+boundary: memo `findings` 32 × 1,200 characters, `open_questions`, `recommended_directions`
+and `next_experiments` 16 × 1,200, `summary` 4,000, `reasoning` 12,000 and 64,000 in total;
+report lists 32 × 1,200 and `verdict`/`summary` 4,000. Nothing is cut silently: the
+`POST /commands` receipt carries `intake_notices` — `truncated` (`original_chars`,
+`kept_chars`), `items_omitted`, `dropped` (total budget), `redacted` (`reason`:
+`credential_shape`, `env_value` or `entropy`) and `readability` (glued-prose samples). The
+harness-decisions, reviews, lessons, skill-candidates, checkpoint and result-notice receipts
+carry `readability_warnings`. Notices are advisory; the command is admitted as before. When
+stored text lost meaning, send a corrected command with a new idempotency key. LoopLab never
+inserts spaces itself, because a heuristic can corrupt identifiers.
+
 ### Reports and readable external research
 
 Publish narratives with `report_generated`; the Report tab renders them beside the measured
