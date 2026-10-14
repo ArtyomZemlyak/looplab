@@ -316,6 +316,9 @@ def test_every_control_event_has_one_explicit_engine_policy():
         "track_requested",
         # doc 73 §4.2 G2: the upstream automation's kill switch — a folded flag the live engine reads.
         "upstream_auto_set",
+        # doc 80 §11 (UI 4.3, e4ba04269): a declared concept-hierarchy edge on an external run —
+        # a folded overlay like `concept_tag_edited`, no compute.
+        "concept_edge",
     }
 
 

@@ -37,6 +37,7 @@ import orjson
 
 from looplab.core.atomicio import append_jsonl_bytes_locked, file_identity
 from looplab.core.errors import BudgetExceeded
+from looplab.core.run_identity import row_belongs_to_run
 from looplab.core.models import (
     NODE_CONCEPT_PROVENANCE_CLASSIFIER,
     RunState,
@@ -930,7 +931,7 @@ class LessonMemory(LessonPriorsMixin, LessonDistillMixin, LessonReconcileMixin,
             Path(self._e.memory_dir) / "authored_concept_capsules.jsonl")
         if not counts:
             run_uid = getattr(final, "run_uid", "")
-            if not any((row.get("run_uid") == run_uid if run_uid else row.get("run_id") == run_id)
+            if not any(row_belongs_to_run(row, run_uid=run_uid, run_id=run_id)
                        for row in store.all()):
                 return
             capsule["concepts"], capsule["concept_nodes"] = [], {}
