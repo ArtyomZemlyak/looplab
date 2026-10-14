@@ -1,7 +1,7 @@
 {
   "schema": 1,
   "language": "ru",
-  "count": 7864,
+  "count": 7866,
   "messages": {
     "# LoopLab run report — {0}": "# Отчёт запуска LoopLab — {0}",
     "## Agent narrative (advisory)": "## Пояснения агента (рекомендации)",
@@ -7866,7 +7866,9 @@
     "registered before the treatment result existed": "зарегистрирован до появления результата опытного плеча",
     "the node was reset after these arrays were uploaded": "узел сброшен после загрузки этих массивов",
     "the upload does not reproduce the metric LoopLab measured": "загрузка не воспроизводит метрику, измеренную LoopLab",
-    "LoopLab evaluates candidates submitted by the external agent. The agent must check the current requirements and submit the next decision or candidate. Open Agent cycle to see what is due. The agent connection is not verified here.": "LoopLab оценивает кандидатов, которых присылает внешний агент. Агент должен проверить текущие требования и отправить следующее решение или кандидата. Что требуется сейчас — в обязательствах агента. Подключение агента здесь не проверяется."
+    "LoopLab evaluates candidates submitted by the external agent. The agent must check the current requirements and submit the next decision or candidate. Open Agent cycle to see what is due. The agent connection is not verified here.": "LoopLab оценивает кандидатов, которых присылает внешний агент. Агент должен проверить текущие требования и отправить следующее решение или кандидата. Что требуется сейчас — в обязательствах агента. Подключение агента здесь не проверяется.",
+    "Table": "Таблица",
+    "tbl md-table": "tbl md-table"
   },
   "plurals": {
     "({0} paraphrases folded)": {

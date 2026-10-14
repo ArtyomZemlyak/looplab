@@ -10,6 +10,14 @@ const MARKDOWN_LINE_MAX = 2_048
 const MARKDOWN_BLOCK_MAX = 512
 const MARKDOWN_LIST_ITEM_MAX = 1_024
 const MARKDOWN_INLINE_TOKEN_MAX = 2_048
+// GFM pipe tables share the same instance budgets: every table is one block, every body row a line
+// already counted by MARKDOWN_LINE_MAX, and cells are bounded separately because a 24-column row
+// multiplies the React nodes one line can create. Inline formatting inside cells draws on the same
+// MARKDOWN_INLINE_TOKEN_MAX as paragraphs.
+const MARKDOWN_TABLE_ROW_MAX = 200
+const MARKDOWN_TABLE_COL_MAX = 24
+const MARKDOWN_TABLE_CELL_MAX = 4_096
+const MARKDOWN_TABLE_CELL_CHARS_MAX = 2_000
 const MARKDOWN_LIMIT_NOTICE = 'Some content was not rendered because this message exceeded the safe display limit.'
 
 const safePublicMarkdownHref = value => {
@@ -54,6 +62,9 @@ export function stripMd(text) {
     .replace(/^\s*([-*+]|\d+\.)\s+/gm, '')               // list bullets / ordered markers
     .replace(/^\s*>\s?/gm, '')                           // blockquotes
     .replace(/\[([^\]]+)\]\([^)]*\)/g, '$1')             // links → link text
+    .replace(/^[ \t]*\|?[ \t]*:?-+:?[ \t]*(\|[ \t]*:?-+:?[ \t]*)+\|?[ \t]*$/gm, '')  // GFM table delimiter rows
+    .replace(/^[ \t]*\|(.*?)\|?[ \t]*$/gm, (_, row) => row.replace(/\\\|/g, '\u0000').split('|')
+      .map(c => c.replace(/\u0000/g, '|').trim()).filter(Boolean).join(' · '))                     // table rows → cells joined by a middle dot
     .replace(/\s+/g, ' ').trim()                         // collapse whitespace to one line
 }
 
@@ -106,6 +117,42 @@ function inline(text, keyBase, externalOnly = false, maxTokens = MARKDOWN_INLINE
   return { nodes: out, used, truncated }
 }
 
+// --- GFM pipe tables -----------------------------------------------------------------------------
+// A row splits on `|` that is neither escaped (`\|`) nor inside inline code. One optional leading and
+// trailing pipe are row delimiters, not empty cells (GFM).
+function splitRow(line) {
+  let s = String(line).trim()
+  if (s.startsWith('|')) s = s.slice(1)
+  if (s.endsWith('|') && !s.endsWith('\\|')) s = s.slice(0, -1)
+  const cells = []
+  let cur = '', inCode = false
+  for (let k = 0; k < s.length; k++) {
+    const ch = s[k]
+    if (ch === '\\' && s[k + 1] === '|') { cur += '|'; k++; continue }
+    if (ch === '`') inCode = !inCode
+    if (ch === '|' && !inCode) { cells.push(cur.trim()); cur = ''; continue }
+    cur += ch
+  }
+  cells.push(cur.trim())
+  return cells
+}
+const TABLE_DELIM_CELL_RE = /^:?-+:?$/
+// GFM: a table starts with a header row and a delimiter row whose cell COUNT matches the header.
+// The delimiter must contain a pipe so a lone `---` stays a rule and `text\n---` stays prose.
+function isTableStart(lines, i) {
+  if (i + 1 >= lines.length) return false
+  const header = lines[i], delim = lines[i + 1]
+  if (!header.includes('|') || !delim.includes('|') || !delim.includes('-')) return false
+  if (/^\s*$/.test(header) || /^```/.test(header)) return false
+  const delimCells = splitRow(delim)
+  if (!delimCells.every(c => TABLE_DELIM_CELL_RE.test(c))) return false
+  return splitRow(header).length === delimCells.length
+}
+const cellAlign = c => {
+  const l = c.startsWith(':'), r = c.endsWith(':')
+  return l && r ? 'center' : r ? 'right' : l ? 'left' : null
+}
+
 // --- block: fold lines into headings / code fences / lists / quotes / paragraphs ---
 function parse(src) {
   const source = String(src || '')
@@ -117,7 +164,12 @@ function parse(src) {
     truncated = true
   }
   const blocks = []
-  let i = 0, listItemsUsed = 0
+  let i = 0, listItemsUsed = 0, tableCellsUsed = 0
+  const boundCell = c => {
+    if (c.length <= MARKDOWN_TABLE_CELL_CHARS_MAX) return c
+    truncated = true
+    return c.slice(0, MARKDOWN_TABLE_CELL_CHARS_MAX) + '…'
+  }
   while (i < lines.length && blocks.length < MARKDOWN_BLOCK_MAX) {
     const line = lines[i]
     // fenced code block
@@ -128,6 +180,28 @@ function parse(src) {
       while (i < lines.length && !/^```/.test(lines[i])) { buf.push(lines[i]); i++ }
       i++ // closing fence
       blocks.push({ t: 'code', lang, text: buf.join('\n') })
+      continue
+    }
+    // GFM table: header row + delimiter row (same column count), body rows until a blank or pipe-less
+    // line. Ragged rows are padded/cut to the header width, as GFM does.
+    if (isTableStart(lines, i)) {
+      const fullHeader = splitRow(line)
+      if (fullHeader.length > MARKDOWN_TABLE_COL_MAX) truncated = true
+      const header = fullHeader.slice(0, MARKDOWN_TABLE_COL_MAX).map(boundCell)
+      const align = splitRow(lines[i + 1]).slice(0, header.length).map(cellAlign)
+      tableCellsUsed += header.length
+      i += 2
+      const rows = []
+      while (i < lines.length && lines[i].includes('|') && !/^\s*$/.test(lines[i])) {
+        if (rows.length < MARKDOWN_TABLE_ROW_MAX && tableCellsUsed + header.length <= MARKDOWN_TABLE_CELL_MAX) {
+          const cells = splitRow(lines[i])
+          if (cells.length > header.length) truncated = true
+          rows.push(header.map((_, c) => boundCell(cells[c] ?? '')))
+          tableCellsUsed += header.length
+        } else truncated = true
+        i++
+      }
+      blocks.push({ t: 'table', header, align, rows })
       continue
     }
     // heading
@@ -162,7 +236,7 @@ function parse(src) {
     const buf = []
     while (i < lines.length && !/^\s*$/.test(lines[i]) && !/^```/.test(lines[i])
            && !/^(#{1,6})\s+/.test(lines[i]) && !/^\s*([-*+]|\d+\.)\s+/.test(lines[i])
-           && !/^\s*>\s?/.test(lines[i])) { buf.push(lines[i]); i++ }
+           && !/^\s*>\s?/.test(lines[i]) && !isTableStart(lines, i)) { buf.push(lines[i]); i++ }
     blocks.push({ t: 'p', text: buf.join('\n') })
   }
   if (i < lines.length) truncated = true
@@ -184,6 +258,19 @@ export default function Markdown({ text, className, externalOnly = false }) {
   const content = parsed.blocks.map((b, bi) => {
     if (b.t === 'code') return <pre key={bi} className="code md-code">{b.text}</pre>
     if (b.t === 'hr') return <hr key={bi} className="md-hr" />
+    if (b.t === 'table') {
+      const cellStyle = ci => (b.align[ci] ? { textAlign: b.align[ci] } : undefined)
+      // The wrapper scrolls on narrow screens; tabIndex lets a keyboard user scroll it too.
+      return <div key={bi} className="md-table-wrap" role="region" tabIndex={0}
+        aria-label={uiText('Table')}>
+        <table className="tbl md-table">
+          <thead><tr>{b.header.map((c, ci) =>
+            <th key={ci} scope="col" style={cellStyle(ci)}>{renderInline(c, `${bi}-h${ci}`)}</th>)}</tr></thead>
+          <tbody>{b.rows.map((r, ri) => <tr key={ri}>{r.map((c, ci) =>
+            <td key={ci} style={cellStyle(ci)}>{renderInline(c, `${bi}-${ri}-${ci}`)}</td>)}</tr>)}</tbody>
+        </table>
+      </div>
+    }
     if (b.t === 'h') { const H = `h${Math.min(b.level + 2, 6)}`; return <H key={bi} className="md-h">{renderInline(b.text, bi)}</H> }
     if (b.t === 'quote') return <blockquote key={bi} className="md-quote">{renderInline(b.text, bi)}</blockquote>
     if (b.t === 'list') {
