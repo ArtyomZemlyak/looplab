@@ -157,3 +157,16 @@ def test_the_renderer_still_masks_a_credential_inside_the_larger_budget():
     poisoned = f"The crash went away once the value {secret} was used. " + "padding. " * 20
     out = _renderer()._render_role_prior(_ctx(poisoned), "developer")
     assert secret not in out
+
+
+def test_the_read_budget_is_not_below_the_write_cap():
+    """THE STRUCTURAL HALF of the live-store check above: an external agent may publish a lesson
+    as long as `ExternalLessonBody.statement` admits, and every such lesson must reach a role whole.
+    A write cap above the read budget is the mid-sentence cut by construction (2026-10-14: 13 of 112
+    shared rows, all external MiniOneRec lessons of 462-873 characters)."""
+    pytest.importorskip("fastapi")
+    from looplab.serve.routers.runs import ExternalLessonBody
+    cap = next(m.max_length for m in ExternalLessonBody.model_fields["statement"].metadata
+               if getattr(m, "max_length", None) is not None)
+    assert cap <= LESSON_STATEMENT_CHARS
+    assert "redacted preview" not in _render("z" * cap)

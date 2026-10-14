@@ -196,6 +196,32 @@ def _leftover_the_profile_names() -> list:
     return sorted(_cpus(m.group(1)) | _cpus(m.group(2)))
 
 
+def _physical_cores_here():
+    """Distinct (package, core) pairs on this machine, or None when the kernel does not say."""
+    import glob
+    pairs = set()
+    for topo in glob.glob("/sys/devices/system/cpu/cpu[0-9]*/topology"):
+        try:
+            pairs.add((Path(topo, "physical_package_id").read_text().strip(),
+                       Path(topo, "core_id").read_text().strip()))
+        except OSError:
+            return None
+    return len(pairs) or None
+
+
+def _skip_unless_this_is_the_profiled_box():
+    """The sentence is a fact about ONE box ("44 of this box's 48 physical cores"); the planner runs
+    against WHATEVER box the suite is on. On a different topology (2026-10-14: a 2x48-core H200 pod
+    ran this file and the planner's sibling offset was +96, not +48) the comparison measures the
+    host, not the sentence — so it is skipped there, and still runs where the profile applies."""
+    m = re.search(r"of this box's (\d+) physical cores", _profile_prose())
+    assert m, "the box profile no longer states its physical core count beside the lanes"
+    here = _physical_cores_here()
+    if here is not None and here != int(m.group(1)):
+        pytest.skip(f"this machine has {here} physical cores; the profile describes a "
+                    f"{m.group(1)}-core box")
+
+
 def test_the_lanes_the_profile_names_are_the_ones_the_planner_produces():
     """The sentence beside METER_CPUS, re-derived rather than believed. Its four ranges are the
     campaign's own `lanes=4 cores_per_lane=22` allocation, cpu-for-cpu.
@@ -205,6 +231,7 @@ def test_the_lanes_the_profile_names_are_the_ones_the_planner_produces():
     21-31+69-79 and 32-42+80-90`) left the whole file green -- the copy was what was being checked,
     and the sentence an operator actually reads was free to say anything.
     """
+    _skip_unless_this_is_the_profiled_box()
     plan = _lane_plan(4, 22)
     if plan and plan[0] == "FALLBACK":
         pytest.skip("not enough physical cores here for the campaign's regime")

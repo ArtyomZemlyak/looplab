@@ -67,7 +67,15 @@ CASE_PARAMS_CHARS = 1_200
 #: The whole delivery chain was already correct: role scoping (untagged = shared), task scoping
 #: (exact match), the priors block reaching `card_build`/`plan`/`stages`/`inline_repair`, and top-5
 #: ranking, which that lesson WON. It was destroyed in the last inch.
-LESSON_STATEMENT_CHARS = 400
+#:
+#: RAISED 400 -> 1000 on 2026-10-14, to the WRITE cap. `POST /api/runs/{id}/lessons`
+#: (`serve/routers/runs.py::ExternalLessonBody.statement`) admits 1000 characters, and the external
+#: agent's MiniOneRec lessons run 462-873 — so 13 of 112 rows in the shared store reached every
+#: internal role cut mid-sentence, the exact defect above, and `test_the_budget_covers_the_whole_
+#: live_store` was red. A read budget below the write cap is that defect by construction; the two
+#: are now pinned together (`tests/test_lesson_prior_render_budget.py`). Cost: at most five priors
+#: per role, so <= ~5 KB of prompt in the worst case, against a store whose median row is far shorter.
+LESSON_STATEMENT_CHARS = 1000
 
 
 def _memoized_embed(embed):

@@ -787,7 +787,7 @@ def test_the_prior_keeps_the_clause_a_long_statements_cut_took(tmp_path):
     mem.mkdir()
     eng = _toy_engine(tmp_path, memory_dir=str(mem), reflection_priors=True)
     fp = [t for t in eng._task_fingerprint(eng._empty_state_for_fp()) if not t.startswith("param:")]
-    statement = "LONGLESSON " + _long("a wider margin separates the hard negatives", 20) + clause
+    statement = "LONGLESSON " + _long("a wider margin separates the hard negatives", 50) + clause
     assert len(statement) > LESSON_STATEMENT_CHARS + len(clause)
     note = "LONGNOTE " + _long("the margin won because the negatives were hard", 40) + clause
     (mem / "lessons.jsonl").write_text("".join(json.dumps({
