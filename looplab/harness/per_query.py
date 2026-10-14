@@ -1,4 +1,4 @@
-"""Per-query evaluation arrays, shared-test identity and LoopLab-computed paired comparisons (doc 79).
+"""Per-query evaluation arrays, shared-test identity and LoopLab-computed paired comparisons (doc 81).
 
 A node's scalar metric cannot answer "is T better than C on the same test?" with an honest
 interval: the agent of the 2026-10-13/14 MiniOneRec campaign therefore re-scored every model on a

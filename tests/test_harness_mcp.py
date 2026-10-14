@@ -15,7 +15,7 @@ def test_mcp_advertises_run_controls_and_full_settings_discovery():
             "operation_schema", "api_request", "run_progress", "result_notices", "command_receipt", "connection_check",
             "saved_commands", "saved_command", "saved_actions", "saved_action", "wait_for_next",
             "upstream_status", "upstream_request", "upstream_propose", "upstream_check", "upstream_advance",
-            # The campaign surface (doc 79, tests/test_campaign_composite.py).
+            # The campaign surface (doc 81, tests/test_campaign_composite.py).
             "amend_protocol", "run_protocol", "upload_per_query", "compare_experiment",
             "shared_test_leaderboard", "campaign_supertask", "campaign_report",
             "publish_campaign_narrative", "submit_experiment", "finish_run",

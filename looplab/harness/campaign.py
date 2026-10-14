@@ -1,4 +1,4 @@
-"""A research CAMPAIGN inside one run: pre-registered experiments and recorded amendments (doc 79).
+"""A research CAMPAIGN inside one run: pre-registered experiments and recorded amendments (doc 81).
 
 WHY. On 2026-10-12..14 an external agent ran a MiniOneRec campaign through LoopLab and created 22
 runs, mostly one experiment per run, because a run froze its protocol, its evaluation inputs and its

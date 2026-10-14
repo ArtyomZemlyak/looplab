@@ -1,4 +1,4 @@
-"""The composite MCP operations (doc 79) driven through the REAL routes: `submit_experiment`,
+"""The composite MCP operations (doc 81) driven through the REAL routes: `submit_experiment`,
 `finish_run`, `retry_node`, `upload_per_query` and `campaign_supertask` — each one call for what
 an external agent used to script as ~11, stopping at the first failed step and replaying on the
 same key."""
@@ -121,7 +121,7 @@ def test_submit_experiment_preregisters_files_and_injects_in_one_call(tmp_path, 
                                       experiment=EXPERIMENT, experiment_reason="plan before data")
     assert out["ok"], out
     assert [s["step"] for s in out["steps"]] == [
-        "read_progress", "register_experiment", "add_research_question", "inject_node"]
+        "read_progress", "register_experiment", "add_research_question", "inject"]
     events = store.read_all()
     inject = next(e for e in events if e.type == "inject_node")
     assert inject.data["idea"]["parent_card_id"] == "q-x"
@@ -145,7 +145,7 @@ def test_retry_node_is_a_new_attempt_of_the_same_node(tmp_path, monkeypatch):
     root, rd, store, api, server, spawns = _setup(tmp_path, monkeypatch)
     generation = run_generation_token(store.read_all())
     out = composite.retry_node(api, "camp", generation, node_id=0, key="retry")
-    assert any(s["step"] == "node_reset" for s in out["steps"]), out
+    assert any(s["step"] == "reset" for s in out["steps"]), out
     reset = [e for e in store.read_all() if e.type == "node_reset"]
     assert reset and reset[0].data["node_id"] == 0 and reset[0].data["generation"] == 0
     from looplab.events.replay import fold

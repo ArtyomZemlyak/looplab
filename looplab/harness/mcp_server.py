@@ -58,6 +58,7 @@ MCP_INSTRUCTIONS = (
     "Typed command_receipt also verifies v1 status/terminal consistency, control event, sequence, error_code and retryable fields. Incomplete HTTP 200 means unavailable without body, not a command verdict. Read again explicitly; a terminal rejected/failed receipt or succeeded inject still does not prove completed training. "
     "Typed run_progress and connection_check validate critical progress fields, source completeness, explicit expansion/finish gates and pending counts. Missing fields are unavailable, not empty obligations. A structurally valid complete=false read retains source diagnostics; read success does not grant admission. Refresh explicitly; no automatic retry or work. "
     "The stdio client durably saves original command and supported semantic action POSTs before HTTP in its private client store. On reconnect use saved_commands/saved_command or saved_actions/saved_action, verify hashes, then read original server receipts and fresh progress/checkpoints/source_health before any explicit exact retry. Semantic actions include decisions/reviews, checkpoints, hypotheses, selection verify/values, lessons/skill-candidates, result commentary and upstream operations. Preserve all original action IDs and evidence revisions/tokens. Local records are unobserved intentions, not applied verdicts; an empty/missing client store proves no absence of server effects. Other API routes still require retaining originals yourself. Client storage failure returns not_sent for that invocation, without HTTP or automatic repair. "
+    "A campaign of experiments stays in ONE run: submit_experiment pre-registers and injects; amend_protocol records experiment/task/files/budget changes with reason and diff (task/files need a paused, stopped engine); retry_node retries a failed setup as a new attempt; upload_per_query + compare_experiment give LoopLab's paired CIs and Holm — quote them; finish_run finalizes. Use campaign_supertask only when an incompatible task forces a new run. "
     "Use only the scoped harness credential; owner-only workflows require the operator. "
     "Between decisions, block on wait_for_next(after=<last id>) instead of polling: LoopLab "
     "derives node/stage/question/obligation/idle/GPU events itself. Order GPU work across runs "
@@ -309,7 +310,7 @@ class HarnessAPI:
         return self._result(response, method="GET")
 
     def post_large(self, path: str, body: dict, *, max_bytes: int = 32_000_000) -> dict:
-        """POST one bounded binary-carrying body (a per-query upload, doc 79) past the 1 MiB
+        """POST one bounded binary-carrying body (a per-query upload, doc 81) past the 1 MiB
         general cap; the server bounds the same route at the same size. Not saved in the client
         request store (its records are 1 MiB): keep the file and the action_id to retry exactly."""
         payload = json.dumps(body).encode("utf-8")
@@ -1039,7 +1040,7 @@ def build_server(api: HarnessAPI):
 
 
 def _campaign_tools(mcp, api, ToolAnnotations) -> None:
-    """The campaign surface (doc 79): protocol amendments, per-query uploads, LoopLab-computed
+    """The campaign surface (doc 81): protocol amendments, per-query uploads, LoopLab-computed
     comparisons, super-task grouping, and the composite submit/finish/retry operations."""
     from looplab.harness import composite
 

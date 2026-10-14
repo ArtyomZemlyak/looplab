@@ -89,7 +89,7 @@ _IMMUTABLE_ASSET_CACHE = "public, max-age=31536000, immutable"
 _REVALIDATE_ASSET_CACHE = "no-cache"
 _CONTENT_HASHED_ASSET = re.compile(r"-[A-Za-z0-9_-]{8,}\.[^/]+$")
 _API_REQUEST_BODY_MAX = 2_000_000
-# The ONE route that carries a binary payload: a node's per-query evaluation arrays (doc 79), base64
+# The ONE route that carries a binary payload: a node's per-query evaluation arrays (doc 81), base64
 # in JSON. A 40k-query `.npz` of four arrays is ~2 MB before encoding, so the general bound refused
 # every real upload; this route alone gets a larger envelope, and only for that path shape.
 _API_REQUEST_BODY_ROUTE_MAX = ((re.compile(r"/api/runs/[^/]+/per-query"), 32_000_000),)
@@ -661,7 +661,7 @@ def make_app(run_root: str | os.PathLike, *, bind_host: Optional[str] = None) ->
                          or re.fullmatch(r"/api/scope-report-actions/[^/]+/abandon", p)
                          or (p.startswith("/api/scope-report/") and p.endswith("/generate"))
                          or re.fullmatch(r"/api/runs/[^/]+/(reset|deletions)", p)
-                         # The operator's limits on what the agent may amend or add (doc 79): an
+                         # The operator's limits on what the agent may amend or add (doc 81): an
                          # agent that could write them would set its own ceiling.
                          or re.fullmatch(r"/api/runs/[^/]+/harness-policy", p)
                          # The owner's prompts, skills and knowledge: every live internal run

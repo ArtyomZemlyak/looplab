@@ -1,6 +1,6 @@
 """Composite harness operations: one MCP call for the steps an external agent otherwise scripts.
 
-The 2026-10-12..14 audit (doc 79) counted ~11 API calls per submitted experiment and 24 copies of a
+The 2026-10-12..14 audit (doc 81) counted ~11 API calls per submitted experiment and 24 copies of a
 `submit.py` an agent wrote to make them, and found the steps the agent skipped were exactly the
 ones with no script: filing the experiment under its research question, pre-registering its
 contrasts, finishing the run. These functions compose the EXISTING durable routes — nothing here
@@ -193,7 +193,7 @@ def submit_experiment(api, run_id: str, expected_generation: str, *, key: str, i
             data[name] = value
     result = _command(api, run_id, expected_generation, "inject_node", data, f"{key}:inject",
                       settle_seconds=5.0)
-    steps.add("inject_node", result)
+    steps.add("inject", result)
     return steps.done(message=("submitted: an inject receipt proves admission, not training; "
                                "read result_notices after the node is terminal"))
 
@@ -255,7 +255,7 @@ def retry_node(api, run_id: str, expected_generation: str, *, node_id: int, key:
     result = _command(api, run_id, expected_generation, "node_reset", {
         "node_id": int(node_id), "generation": int(generation), "from_stage": from_stage},
         f"{key}:reset:{node_id}:{generation}", settle_seconds=5.0)
-    steps.add("node_reset", result)
+    steps.add("reset", result)
     return steps.done(message=(f"node {node_id} queued for attempt {int(generation) + 1}; "
                                "earlier attempts stay in the event log and the attempt_logs/ archive"))
 

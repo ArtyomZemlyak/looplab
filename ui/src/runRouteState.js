@@ -16,6 +16,9 @@ export const RUN_ROUTE_PANELS = [
   'overview', 'queue', 'research', 'agent', 'failures', 'trust', 'pareto', 'data',
   'compare', 'sensitivity', 'importance', 'crossrun', 'artifacts', 'registry', 'memory',
   'collab', 'authoring', 'events', 'gpu', 'config', 'fork', 'inject',
+  // The run's campaign protocol (doc 81): pre-registered experiments, LoopLab's paired comparisons
+  // and the amendment audit trail. Owner-side only — it reads live sidecars, not the folded snapshot.
+  'protocol',
 ]
 // The Card board is no longer a panel: it is the `cards` workspace view. `?panel=hypotheses` was a
 // live deep link (and the run menu's own spelling), so it is MIGRATED rather than rejected —

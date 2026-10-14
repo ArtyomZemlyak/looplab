@@ -1,4 +1,4 @@
-"""A research campaign inside ONE run (doc 79): pre-registered experiments, recorded amendments of
+"""A research campaign inside ONE run (doc 81): pre-registered experiments, recorded amendments of
 the task / base files / budget, per-query uploads, LoopLab-computed paired comparisons, shared-test
 leaderboards across runs and the super-task campaign report.
 

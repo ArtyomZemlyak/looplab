@@ -1,4 +1,4 @@
-"""A bounded, pickle-free reader of NumPy ``.npy`` / ``.npz`` bytes, in pure Python (doc 79).
+"""A bounded, pickle-free reader of NumPy ``.npy`` / ``.npz`` bytes, in pure Python (doc 81).
 
 An external agent uploads per-query evaluation arrays (hits, denominators, user ids) so LoopLab can
 compute paired comparisons itself. The natural container is the ``.npz`` the agent's own analysis

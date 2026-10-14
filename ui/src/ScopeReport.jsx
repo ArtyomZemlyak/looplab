@@ -1,5 +1,5 @@
 import { uiText, uiMessage, uiPlural, useUILanguage } from './uiLanguage.js'
-import React, { useEffect, useRef, useState } from 'react'
+import React, { Suspense, lazy, useEffect, useRef, useState } from 'react'
 import {
   abandonScopeReportAction, createIdempotencyKey, getScopeReport, genScopeReport,
   reconcileScopeReportGeneration, fmt,
@@ -9,6 +9,9 @@ import {
   scopeReportKey, scopeReportPublicationUnconfirmed,
 } from './scopeReportModel.js'
 import { useDialogFocus } from './useDialogFocus.js'
+// A super-task's CAMPAIGN block (doc 81): the agent-authored narrative and the comparisons LoopLab
+// computed from per-query uploads. Free to read — unlike the paid model report below it.
+const CampaignReport = lazy(() => import('./CampaignReport.jsx'))
 
 const list = value => Array.isArray(value) ? value : []
 const text = value => typeof value === 'string' ? value : ''
@@ -468,6 +471,9 @@ export default function ScopeReport({ scope, onOpen, onClose }) {
         <button className="btn sm ghost" onClick={onClose} aria-label={uiText("Close report")}>✕</button>
       </div>
       <div className="panel-b">
+        {scope.type === 'supertask' && <Suspense fallback={null}>
+          <CampaignReport supertaskId={scope.id} />
+        </Suspense>}
         {err && <div className="notice resource-error" role="alert">
           <span>{uiText(err)}</span>{' '}
           <button type="button" className="btn sm ghost" disabled={busy}

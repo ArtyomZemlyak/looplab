@@ -179,7 +179,9 @@ def test_index_mentions_every_numbered_document():
     # 76 -> 77 (2026-10-14): doc 78, external-agent orchestration (waking, GPU order, forensics).
     # 77 -> 78 (2026-10-14): doc 79, attempt git identity and code export; index and nav together.
     # 78 -> 79 (2026-10-14): doc 80, the open-items triage; index and nav together.
-    assert len(numbered) == 79, "the derived numbered-document inventory changed"
+    # 79 -> 80 (2026-10-14): doc 81, the campaign-in-one-run contract (79 was taken in parallel);
+    #   index and nav together.
+    assert len(numbered) == 80, "the derived numbered-document inventory changed"
     #   51 -> 52 (2026-09-05): the development plan (doc 52). No collision — the number was
     #   claimed by checking the glob AND the index table together.
     #   52 -> 53 (2026-09-06): the agent guide's narratives, archived verbatim when `CLAUDE.md`

@@ -1,7 +1,7 @@
 """The CROSS-RUN campaign report of a super-task: comparisons LoopLab computed + the agent's narrative.
 
 A super-task (`serve/projects.py`) groups runs that attack one research campaign. Its report view
-(doc 79) is assembled here from three sources, each labelled with who produced it:
+(doc 81) is assembled here from three sources, each labelled with who produced it:
 
 * the runs assigned to the super-task, and for each run its registered experiments with their
   contrast tables — computed by LoopLab (`harness/per_query.py::compare_experiment`);

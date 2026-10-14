@@ -1,4 +1,4 @@
-"""Paired comparison of two models on ONE shared evaluation set, clustered by user (doc 79).
+"""Paired comparison of two models on ONE shared evaluation set, clustered by user (doc 81).
 
 The question a campaign asks is "is model T better than model C on the same frozen test, and by how
 much?". When both were scored on the SAME queries, the per-query difference removes the between-query

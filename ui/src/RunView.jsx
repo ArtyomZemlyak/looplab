@@ -123,6 +123,7 @@ const ResearchPanel = lazyNamed(loadPanels, 'ResearchPanel')
 const ArtifactsPanel = lazyNamed(loadPanels, 'ArtifactsPanel')
 const QueuePanel = lazyNamed(loadPanels, 'QueuePanel')
 const HarnessProgressPanel = lazyNamed(() => import('./HarnessProgressPanel.jsx'), 'HarnessProgressPanel')
+const ProtocolPanel = lazy(() => import('./ProtocolPanel.jsx'))
 
 // The panel bar, grouped by importance then process order (Report is the [Search|Report] toggle, and
 // the deep-research/policy/strategist "why" cards now live in the chat — so those panels are gone).
@@ -162,7 +163,7 @@ const HUBS = [
   ['Progress', [['queue', 'Queue'], ['research', 'Research'], ['agent', 'Agent cycle'], ['failures', 'Failures'],
     ['inject', 'Add experiment']]],
   ['Trust', [['trust', 'Trust'], ['pareto', 'Pareto / diversity'], ['data', 'Data quality']]],
-  ['Analysis', [['compare', 'Compare'], ['sensitivity', 'Sensitivity'], ['importance', 'Importance'], ['crossrun', 'Cross-run']]],
+  ['Analysis', [['compare', 'Compare'], ['protocol', 'Protocol & comparisons'], ['sensitivity', 'Sensitivity'], ['importance', 'Importance'], ['crossrun', 'Cross-run']]],
   ['Lab', [['artifacts', 'Files'], ['registry', 'Registry'], ['collab', 'Comments & sharing'], ['events', 'Events']]],
 ]
 const HUB_OF = Object.fromEntries(HUBS.flatMap(([label, items]) => items.map(([k]) => [k, label])))
@@ -184,7 +185,7 @@ const INSTALLATION_LINKS = GLOBAL_DESTINATIONS.filter(
 const HISTORY_SAFE_PANELS = new Set(['sensitivity', 'importance', 'failures', 'pareto', 'data', 'fork'])
 const START_OVER_SAFE_PANELS = new Set([
   'overview', 'trust', 'sensitivity', 'importance', 'failures', 'pareto', 'data',
-  'compare', 'crossrun', 'artifacts', 'registry', 'memory', 'events', 'gpu',
+  'compare', 'crossrun', 'artifacts', 'registry', 'memory', 'events', 'gpu', 'protocol',
 ])
 // The node menu a HISTORICAL snapshot offers: one item. Module-level and frozen because it is a
 // prop whose identity feeds a `useMemo` in `Dag.jsx` — rebuilt per render it would re-derive the
@@ -2758,6 +2759,7 @@ export default function RunView({ runId, onBack, reviewMode = false, reviewMeta 
         expectedGeneration={generation} reviewMode={reviewMode}
         onClose={() => { closePanel(); setComparePair(null) }} />}
       {panel === 'crossrun' && panelAllowed('crossrun') && <CrossRunPanel state={state} onClose={closePanel} />}
+      {panel === 'protocol' && panelAllowed('protocol') && <ProtocolPanel runId={runId} onClose={closePanel} />}
       {/* Everything this form sends comes from `hist`, the exact fold on screen — never `live2`,
           which is `hist || live` and would silently seed a LIVE idea into a branch the operator
           believes they read at seq N. `viewSeq` is the SERVER-resolved seq of that snapshot for the

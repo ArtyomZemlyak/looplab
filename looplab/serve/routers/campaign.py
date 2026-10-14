@@ -1,4 +1,4 @@
-"""Campaign routes (doc 79): the in-run protocol journal, per-query uploads, LoopLab-computed
+"""Campaign routes (doc 81): the in-run protocol journal, per-query uploads, LoopLab-computed
 paired comparisons, shared-test leaderboards and the super-task campaign report.
 
 Every write is idempotent on an `action_id` and stamps its AUTHOR from the credential (the scoped
@@ -96,11 +96,10 @@ def build_router(srv) -> APIRouter:
     async def post_amendment(run_id: str, body: AmendmentBody, request: Request):
         """Append an experiment, or record a task/file/budget amendment with its reason and diff."""
         from looplab.harness.campaign import publish_amendment
-        rd = _run_dir(run_id)
         agent = request_agent_token(request)
         body.request_payload()          # the kind/field pairing is a 400 before any lock
         return await anyio.to_thread.run_sync(
-            lambda: publish_amendment(srv, rd, body, agent_token=agent))
+            lambda: publish_amendment(srv, _run_dir(run_id), body, agent_token=agent))
 
     @router.get("/api/runs/{run_id}/harness-policy")
     def get_harness_policy(run_id: str):
@@ -119,10 +118,9 @@ def build_router(srv) -> APIRouter:
     async def post_per_query(run_id: str, body: PerQueryUploadBody, request: Request):
         """Upload a terminal node's per-query arrays; LoopLab derives the shared test id."""
         from looplab.harness.per_query import publish_upload
-        rd = _run_dir(run_id)
         agent = request_agent_token(request)
         return await anyio.to_thread.run_sync(
-            lambda: publish_upload(srv, rd, body, agent_token=agent))
+            lambda: publish_upload(srv, _run_dir(run_id), body, agent_token=agent))
 
     @router.get("/api/runs/{run_id}/per-query")
     def get_per_query(run_id: str):

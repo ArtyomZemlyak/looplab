@@ -3626,3 +3626,9 @@ body.asst-side-open .app-shell-main { margin-right: var(--asst-side-w, 440px); }
 .orchestration-panel tr.wake-bad td:nth-child(2) { color: var(--bad, #b00020); }
 .failure-forensics details { margin: 4px 0; }
 .failure-forensics summary { cursor: pointer; }
+/* Campaign protocol + super-task campaign report (doc 79). */
+.protocol-experiment { border: 1px solid var(--border, #d0d7de); border-radius: 6px; padding: 8px 10px; margin: 8px 0; display: grid; gap: 4px; }
+.protocol-experiment-head code, .protocol-experiment code { font-size: 11px; }
+.protocol-diff { max-height: 320px; overflow: auto; font-size: 11px; white-space: pre; margin: 4px 0; }
+.campaign-report { margin-bottom: 12px; }
+.campaign-narrative { border-left: 3px solid var(--border, #d0d7de); padding-left: 10px; margin: 6px 0 10px; }

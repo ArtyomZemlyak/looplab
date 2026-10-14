@@ -864,7 +864,9 @@ novelty, monitoring, review and report switches). Per-run config rejects changes
 fields, including changes made through the MCP bridge's harness token. The
 harness token cannot change global settings, launch through Genesis or `/api/start`,
 drive the owner assistant, or reset/delete a run. Start a
-new run to change those obligations. The search `policy` is a tactical choice:
+new run to change those obligations; the run's *protocol* — experiments, evaluation inputs,
+protected base files and the node budget — is amended inside the run (see
+[Running a campaign in one run](#running-a-campaign-in-one-run)). The search `policy` is a tactical choice:
 `set_strategy` is durably accepted when its command succeeds, then the live engine
 applies it at its next decision boundary and records `strategy_decision`. Before
 acting on the new policy, refresh `harness-progress.policy_preview` and wait for
@@ -888,6 +890,14 @@ next restart. Budget or
 leakage stops with outstanding external finish obligations pause the run; publish
 the due report and reviews, then explicitly finalize it. CLI `finalize` and HTTP
 `run_abort` apply the same preflight, including pending evaluations.
+
+## Running a campaign in one run
+
+Keep a multi-experiment campaign in **one run** while the task and scorer stay compatible. MCP
+`submit_experiment` pre-registers and injects; `amend_protocol` records experiment, input,
+protected-file and budget changes with author, reason and diff; `retry_node` retries a failed
+setup as a new attempt; `upload_per_query` + `compare_experiment` give LoopLab's paired CIs;
+`finish_run` finalizes. Contract, routes and limits: [doc 81](../81-campaign-in-one-run-2026-10-14.md).
 
 ## Novelty and cross-run knowledge
 

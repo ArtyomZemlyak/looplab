@@ -51,9 +51,9 @@ _LAYOUT = {
     "_runcache": "tools",
     "ablation": "engine",
     "activation": "engine",
-    "advisory_payloads": "core",
-    "npyio": "core",     # pickle-free .npy/.npz reader for per-query uploads (doc 79)
-    "paired": "trust",   # paired, user-clustered comparison statistics (doc 79)  # bounded canonical forms for untrusted advisory sidecars (memos/reports)
+    "advisory_payloads": "core",  # bounded canonical forms for untrusted advisory sidecars (memos/reports)
+    "npyio": "core",     # pickle-free .npy/.npz reader for per-query uploads (doc 81)
+    "paired": "trust",   # paired, user-clustered comparison statistics (doc 81)
     "agent": "agents",
     "external_harness": "agents",   # the external coding agent's brief (developer backend)
     "providers": "agents",  # the providers every agentic role shares (split out of factory 2026-09-06)

@@ -571,7 +571,7 @@ def _normalize_budget_extend(ctx: _ControlIntake) -> dict:
             raise HTTPException(400, "add_nodes must be between 1 and 1000000")
         data["add_nodes"] = value
         if ctx.agent_token:
-            # The operator's cap on the nodes the AGENT may add (doc 79, `harness_policy.json`), on
+            # The operator's cap on the nodes the AGENT may add (doc 81, `harness_policy.json`), on
             # the raw command as on the protocol-journal budget amendment — one rule, one counter.
             from looplab.harness.campaign import agent_budget_refusal
             refused = agent_budget_refusal(ctx.srv, ctx.rd, value)
