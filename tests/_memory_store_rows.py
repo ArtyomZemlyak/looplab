@@ -38,6 +38,10 @@ CASCADED_ROWS = {
         **_identity(rid, uid), "task_id": "t", "record_kind": "source_receipt"},
     "concept_capsules.jsonl": lambda rid, uid: {
         **_identity(rid, uid), "task_id": "t", "concepts": ["loss/contrastive"]},
+    # `engine/lessons.py::store_authored_concept_capsule`: the authored tier, coverage only.
+    "authored_concept_capsules.jsonl": lambda rid, uid: {
+        **_identity(rid, uid), "v": 1, "evidence_tier": "authored", "task_id": "t",
+        "concepts": ["replay"], "concept_nodes": {"replay": 2}, "fingerprint": []},
     # `events/prior_citations.py::utility_rows` is the writer: one row per lesson a run's prior
     # showed. "Shown 8, cited 0" is the row that makes `filter_useless` forget a lesson.
     "lesson_utility.jsonl": lambda rid, uid: {

@@ -112,3 +112,9 @@
   .pc-secondary { grid-template-columns: minmax(0, 1fr); }
   .pc-body.pc-has-selection .pc-tree-shell { display: none; }
 }
+
+/* Authored concept memory (doc 80 §9 item 7): coverage, labelled apart from measured evidence. */
+.pc-authored { margin: 8px 0; }
+.pc-authored > summary { cursor: pointer; font-weight: 600; }
+.pc-authored-list { columns: 2 220px; margin: 6px 0; padding-left: 18px; }
+.pc-authored-list li { break-inside: avoid; overflow-wrap: anywhere; }

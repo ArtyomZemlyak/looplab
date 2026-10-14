@@ -4292,6 +4292,7 @@ class Engine(ConfirmPhaseMixin, NoiseFloorMixin, AblationMixin, NoveltyGateMixin
         "_causal_meta_note": ("lessons", "enrichment"),
         "_store_case": ("lessons", None),
         "_store_concept_capsule": ("lessons", None),
+        "_store_authored_concept_capsule": ("lessons", None),
         "_store_research_claims": ("lessons", "enrichment"),
         # `_store_concept_curation` / `_store_claim_curation` / `_store_task_facets` left this
         # table on 2026-09-22 for the same reason `_write_reflection_note` did: each now opens its
@@ -4454,6 +4455,9 @@ class Engine(ConfirmPhaseMixin, NoiseFloorMixin, AblationMixin, NoveltyGateMixin
 
     def _store_concept_capsule(self, final: RunState) -> None:
         return self.lessons.store_concept_capsule(final)
+
+    def _store_authored_concept_capsule(self, final: RunState) -> None:
+        return self.lessons.store_authored_concept_capsule(final)
 
     @in_llm_lane("enrichment")
     def _store_research_claims(self, final: RunState) -> None:

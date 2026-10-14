@@ -791,6 +791,11 @@ def finalize_run(engine: "Engine", *, entry_finished: bool, start_time: float) -
                     store_research(final)
                 if getattr(engine, "_cross_run_concepts", False):    # §21.20 Step 2: cross-run concept capsule
                     engine._store_concept_capsule(final)             # idempotent upsert, sibling of the case
+                    # …and the AUTHORED tier beside it (doc 80 §9 item 7), a separate store no evidence
+                    # consumer reads. Compatibility engines may omit the hook.
+                    store_authored = getattr(engine, "_store_authored_concept_capsule", None)
+                    if callable(store_authored):
+                        store_authored(final)
                 _mark_finalize_step(engine, scope, FINALIZE_STEP_CASE)
             except Exception:  # noqa: BLE001 - case store is an idempotent upsert
                 pass

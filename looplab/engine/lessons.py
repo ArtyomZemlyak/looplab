@@ -879,6 +879,64 @@ class LessonMemory(LessonPriorsMixin, LessonDistillMixin, LessonReconcileMixin,
             raise RuntimeError(f"concept capsule for run {run_id!r} was rejected by the store")
 
 
+    def store_authored_concept_capsule(self, final: RunState) -> None:
+        """The AUTHORED tier beside the classifier capsule (UI review 2026-10-14 section 4.4).
+
+        `store_concept_capsule` publishes only classifier-proven memberships, so an external run —
+        whose every concept is authored — crossed into no cross-run store. This writes what those
+        authors said, as authored: per-concept experiment counts over the run's active nodes whose
+        provenance is `researcher-authored` or `operator-edited`, into a SEPARATE store
+        (`concept_capsules.py::AuthoredConceptCapsuleStore`) that carries no outcome and that no
+        evidence consumer reads. A run with nothing authored writes nothing (or supersedes its own
+        earlier row with an empty one, so a reset run does not keep stale concepts). The write
+        raises into finalize's retry handshake like its sibling."""
+        if not self._e.memory_dir:
+            return
+        from looplab.core.models import (NODE_CONCEPT_PROVENANCE_AUTHORED,
+                                         NODE_CONCEPT_PROVENANCE_OPERATOR)
+        from looplab.engine.concept_capsules import (AuthoredConceptCapsuleStore,
+                                                     build_authored_concept_capsule)
+        try:
+            provenance = getattr(final, "node_concept_provenance", None) or {}
+            node_concepts = getattr(final, "node_concepts", None) or {}
+            aborted = set(getattr(final, "aborted_nodes", None) or [])
+            authored_tiers = {NODE_CONCEPT_PROVENANCE_AUTHORED: "researcher-authored",
+                              NODE_CONCEPT_PROVENANCE_OPERATOR: "operator-edited"}
+            counts: dict[str, int] = {}
+            producers: set[str] = set()
+            nodes_total = 0
+            for nd in final.nodes.values():
+                tier = provenance.get(nd.id)
+                if tier not in authored_tiers or nd.id in aborted or getattr(nd, "tombstoned", False):
+                    continue
+                keys = {normalize_key(c) for c in node_concepts.get(nd.id) or []
+                        if valid_concept_id(c)} - {None, ""}
+                if not keys:
+                    continue
+                nodes_total += 1
+                producers.add(authored_tiers[tier])
+                for key in keys:
+                    counts[key] = counts.get(key, 0) + 1
+            run_id = final.run_id or final.task_id
+            best = final.best()
+            capsule = build_authored_concept_capsule(
+                run_id=run_id, run_uid=getattr(final, "run_uid", ""), task_id=final.task_id,
+                direction=final.direction,
+                fingerprint=self.task_fingerprint(final, best, goal=final.task_goal()),
+                concept_nodes=counts, nodes_total=nodes_total, producers=producers)
+        except (AttributeError, KeyError, TypeError, ValueError):
+            return          # BUILD is best-effort over a malformed fold, like store_concept_capsule's
+        store = AuthoredConceptCapsuleStore(
+            Path(self._e.memory_dir) / "authored_concept_capsules.jsonl")
+        if not counts:
+            run_uid = getattr(final, "run_uid", "")
+            if not any((row.get("run_uid") == run_uid if run_uid else row.get("run_id") == run_id)
+                       for row in store.all()):
+                return
+            capsule["concepts"], capsule["concept_nodes"] = [], {}
+        if not store.add(capsule):
+            raise RuntimeError(f"authored concept capsule for run {run_id!r} was rejected")
+
     def store_research_claims(self, final: RunState) -> None:
         """PART IV/§21.20 — persist this run's D8 deep-research claims (from the memo ledger) to the
         cross-run `research_claims.jsonl`, so evidence-backed research findings survive their run and can

@@ -1,7 +1,7 @@
 {
   "schema": 1,
   "language": "ru",
-  "count": 7995,
+  "count": 8000,
   "messages": {
     "# LoopLab run report — {0}": "# Отчёт запуска LoopLab — {0}",
     "## Agent narrative (advisory)": "## Пояснения агента (рекомендации)",
@@ -7997,7 +7997,12 @@
     "same as #{0}": "совпадает с #{0}",
     "{0} experiments": "экспериментов: {0}",
     "Only the most recent versions are listed.": "Показаны только последние версии.",
-    "The two versions could not be read.": "Не удалось прочитать две версии."
+    "The two versions could not be read.": "Не удалось прочитать две версии.",
+    "Authored concept memory (not measured)": "Память авторских концептов (не измерено)",
+    "Concepts that run authors tagged their experiments with, remembered across runs. This is coverage — which runs used a concept and on how many experiments — not evidence that it worked.": "Концепты, которыми авторы запусков пометили эксперименты, сохранённые между запусками. Это охват — какие запуски использовали концепт и на скольких экспериментах, — а не доказательство, что он сработал.",
+    "Authored concept memory could not be read.": "Не удалось прочитать память авторских концептов.",
+    "No run has recorded authored concepts yet.": "Ни один запуск ещё не сохранил авторские концепты.",
+    "{0} run(s) · {1} experiment(s)": "запусков: {0} · экспериментов: {1}"
   },
   "plurals": {
     "({0} paraphrases folded)": {

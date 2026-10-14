@@ -199,6 +199,36 @@ export function ConceptDetail({ forest, cooccurrence, id, runsById, onOpenRun, o
   </aside>
 }
 
+// The AUTHORED concept tier (doc 80 §9 item 7): what runs' authors — an external agent above all —
+// tagged their experiments with, kept by the server in a store apart from classifier evidence
+// (`GET /api/cross-run/authored-concepts`). Read on demand and labelled as coverage, never as an
+// outcome: no number here says a concept worked.
+function AuthoredConceptMemory() {
+  useUILanguage()
+  const [open, setOpen] = useState(false)
+  const [state, setState] = useState({ status: 'idle', body: null })
+  useEffect(() => {
+    if (!open || state.status !== 'idle') return undefined
+    const controller = new AbortController()
+    setState({ status: 'loading', body: null })
+    get('/api/cross-run/authored-concepts?limit=60', { signal: controller.signal })
+      .then(body => setState({ status: 'ready', body }))
+      .catch(error => { if (error?.name !== 'AbortError') setState({ status: 'unavailable', body: null }) })
+    return () => controller.abort()
+  }, [open])
+  const rows = Array.isArray(state.body?.concepts) ? state.body.concepts : []
+  return <details className="pc-authored" onToggle={event => setOpen(event.currentTarget.open)}>
+    <summary>{uiText('Authored concept memory (not measured)')}</summary>
+    <p className="muted">{uiText('Concepts that run authors tagged their experiments with, remembered across runs. This is coverage — which runs used a concept and on how many experiments — not evidence that it worked.')}</p>
+    {state.status === 'loading' && <p className="muted">{uiText('Loading…')}</p>}
+    {state.status === 'unavailable' && <p className="muted">{uiText('Authored concept memory could not be read.')}</p>}
+    {state.status === 'ready' && !rows.length && <p className="muted">{uiText('No run has recorded authored concepts yet.')}</p>}
+    {rows.length > 0 && <ul className="pc-authored-list">{rows.map(row => <li key={row.concept}>
+      <code>{row.concept}</code> <span className="muted">{uiMessage('{0} run(s) · {1} experiment(s)', [Array.isArray(row.runs) ? row.runs.length : 0, row.nodes])}</span>
+    </li>)}</ul>}
+  </details>
+}
+
 export default function PortfolioConcepts({
   runs = [], scopeLabel = 'All runs', selectedRuns = [], onOpenRun = () => {}, headingRef = null,
 }) {
@@ -387,6 +417,8 @@ export default function PortfolioConcepts({
     {policyState.status === 'ready' && governance.capsuleCoverageKnown
       && (governance.unrepresentedRuns > 0 || governance.capsuleIdsOmitted > 0)
       && <div className="notice resource-warning" role="status">{uiText("Durable cross-run concept memory does not cover this whole list: ")}{uiPlural(governance.unrepresentedRuns, '{0} visible run(s) have no retained capsule', '{0} visible run(s) have no retained capsule')}{governance.capsuleIdsOmitted > 0 && <>; {uiPlural(governance.capsuleIdsOmitted, '{0} capsule id(s) were omitted from the policy receipt', '{0} capsule id(s) were omitted from the policy receipt')}</>}{uiText(". The tree still shows their run-authored tags, but the agent priors may use a smaller population.")}</div>}
+
+    <AuthoredConceptMemory />
 
     {forest.truncated && <div className="notice resource-warning" role="status">{uiText("This scope carries more concepts than the tree renders. Narrow the scope to see the rest.")}</div>}
 

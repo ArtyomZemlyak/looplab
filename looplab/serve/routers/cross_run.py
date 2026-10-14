@@ -848,6 +848,27 @@ def build_router(srv) -> APIRouter:
         _assert_portfolio_current(memory_dir, portfolio_id)
         return payload
 
+    @router.get("/api/cross-run/authored-concepts")
+    def authored_concepts(limit: int = Query(100, ge=1, le=500)):
+        """The AUTHORED concept tier (doc 80 §9 item 7): which concepts runs' authors used and on how
+        many experiments — coverage, never an outcome. A separate store from the classifier capsules
+        (`engine/concept_capsules.py::AuthoredConceptCapsuleStore`), labelled `evidence_tier:
+        authored` on the wire so no reader can take it for measured evidence."""
+        from looplab.engine.concept_capsules import (AuthoredConceptCapsuleStore,
+                                                     authored_concept_overview)
+        memory_dir, portfolio_id = _portfolio()
+        path = Path(memory_dir) / "authored_concept_capsules.jsonl"
+        try:
+            rows = AuthoredConceptCapsuleStore(path).all() if path.exists() else []
+        except OSError as exc:
+            raise HTTPException(503, {"code": "authored_concepts_unavailable",
+                                      "message": "the authored concept store could not be read"},
+                                headers={"Cache-Control": "no-store"}) from exc
+        overview = authored_concept_overview(rows, limit=limit)
+        return sanitize_cross_run_projection(
+            {**overview, "portfolio_id": portfolio_id}, max_chars=500_000, max_items=2_048,
+            max_total_items=16_384)
+
     @router.get("/api/cross-run/task-facets", response_model=TaskFacetsResponse)
     def task_facets(offset: int = Query(0, ge=0), limit: int = Query(100, ge=1, le=200)):
         """Read strict governed task facets and the revision needed to update them."""

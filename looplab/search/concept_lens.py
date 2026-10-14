@@ -323,6 +323,58 @@ def project_hierarchy(concept_ids, *, graph: Optional[ConceptGraph] = None,
     return {"lens": lens, "roots": sorted(children.get(None, [])), "nodes": nodes}
 
 
+# The provenance an AUTHORED edge carries (`serve/control_validation.py::_normalize_concept_edge`).
+AUTHORED_EDGE_PROVENANCE = "authored"
+
+
+def apply_authored_parents(tree: dict, edges) -> dict:
+    """Nest a path ROOT under the parent an author DECLARED for it — the external-run hierarchy.
+
+    UI review 2026-10-14 section 4.3: an external agent's tags are flat ids (`data-composition`,
+    `rare-items`), so the path tree had six roots and depth 0 while an internal run showed depth 3.
+    The agent may now declare `is_a` edges (`concept_edge` with `provenance: "authored"`); this pass
+    re-parents only a concept the PATH leaves at the root, so a path-shaped id keeps its path parent
+    and every run without an authored edge — every run recorded before this — projects byte for
+    byte as before. A declared parent nothing tagged is materialized like a path ancestor
+    (`tagged: false`). The first parent in id order wins for a concept declared under two, and an
+    edge that would put a concept under its own subtree is ignored. Pure and deterministic."""
+    authored = sorted({(str(edge.get("src")), str(edge.get("dst")))
+                       for edge in (edges.values() if isinstance(edges, dict) else edges or ())
+                       if isinstance(edge, dict) and edge.get("rel") == "is_a"
+                       and edge.get("provenance") == AUTHORED_EDGE_PROVENANCE})
+    if not authored:
+        return tree
+    nodes = tree["nodes"]
+    moved = False
+    for src, dst in authored:
+        if src not in nodes or nodes[src]["parent"] is not None or src == dst:
+            continue
+        walk, cycle = dst, False
+        while walk is not None:
+            if walk == src:
+                cycle = True
+                break
+            walk = nodes[walk]["parent"] if walk in nodes else None
+        if cycle:
+            continue
+        if dst not in nodes:
+            nodes[dst] = {"parent": None, "depth": 0, "children": [], "tagged": False}
+        nodes[src]["parent"] = dst
+        nodes[dst]["children"] = sorted(set(nodes[dst]["children"]) | {src})
+        moved = True
+    if not moved:
+        return tree
+    roots = sorted(cid for cid, node in nodes.items() if node["parent"] is None)
+    frontier = [(cid, 0) for cid in roots]
+    while frontier:
+        cid, depth = frontier.pop()
+        nodes[cid]["depth"] = depth
+        frontier.extend((child, depth + 1) for child in nodes[cid]["children"])
+    tree["nodes"] = dict(sorted(nodes.items()))
+    tree["roots"] = roots
+    return tree
+
+
 def concept_touch_counts(node_concepts) -> dict:
     """Per-concept touch count from `node_concepts` (how many nodes carry each id) — the orientation
     signal a symmetric (co_occurs) lens needs (higher touch = the hub/parent). Multiple raw ids on one

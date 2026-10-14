@@ -520,6 +520,13 @@ def utility_keep_reason(row: dict, run: "RunIdentity") -> str:
     return "" if run.owns(row) else NOT_THIS_RUN
 
 
+def authored_capsule_keep_reason(row: dict, run: "RunIdentity") -> str:
+    """An authored concept capsule is one run's own record of the concepts its authors used
+    (`engine/concept_capsules.py::AuthoredConceptCapsuleStore`) — no consolidation folds another run
+    into it, so the run's deletion takes it whole."""
+    return "" if run.owns(row) else NOT_THIS_RUN
+
+
 def regime_keep_reason(row: dict, run: "RunIdentity") -> str:
     """A regime-contrast row is one finished run's measurement of the implementation regimes it
     tried (`engine/regime_contrast.py::run_contrast`) — unless it was SEEDED.
@@ -655,6 +662,7 @@ def _tier_rules(memory_dir: str | Path, run: "RunIdentity") -> list[tuple[str, s
             lambda row, ident: claim_keep_reason(row, ident, curated_tasks=curated),
         "concept_capsules.jsonl":
             lambda row, ident: capsule_keep_reason(row, ident, merged_concepts=merged),
+        "authored_concept_capsules.jsonl": authored_capsule_keep_reason,
         "lesson_utility.jsonl": utility_keep_reason,
         "regime_contrast.jsonl": regime_keep_reason,
     }

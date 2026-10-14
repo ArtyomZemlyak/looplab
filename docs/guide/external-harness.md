@@ -974,13 +974,13 @@ gate checks full tags or materialized base/parent plus delta and rejects an
 empty result. When all three are off, candidate concept tags are optional. Supply
 `idea.concepts`, or `concept_mode` with `concepts_added` and `concepts_removed`,
 in an `inject_node` command. `concept_tag_edited` updates an observed node's tags;
-`run_concepts` sets the run base. Inspect `/api/runs/{run_id}/concepts`,
+`run_concepts` sets the run base; `concept_edge` declares `is_a` parents. Inspect `/api/runs/{run_id}/concepts`,
 `/api/cross-run/atlas` and `/api/cross-run/concept-policy` before a cross-run
 decision. The governed `concept-merge`, `concept-alias-clear`, `concept-split`,
 `concept-split-clear` and `concept-purge` routes record reversible, revision-fenced
 taxonomy changes. `claim-decide` handles claim governance. The engine still
-produces deterministic case and concept-capsule projections from measured,
-authored evidence at run end; it does not call its internal concept or claim
+produces case and concept-capsule projections at run end (authored tags in a
+separate authored tier); it does not call its internal concept or claim
 stewards or automatically ratify concept merges in external mode. Use
 `operations` and `operation_schema` to get each route's live request shape.
 

@@ -57,7 +57,8 @@ from looplab.events.types import (
     EV_ANNOTATION, EV_APPROVAL_GRANTED, EV_BUDGET_EXTEND, EV_DEEP_RESEARCH,
     EV_CARD_DROPPED, EV_CARD_EDITED, EV_CARD_FILED, EV_CARD_REOPENED, EV_CARD_REPRIORITIZED,
     EV_CARD_RESOURCE_PINNED,
-    EV_COMMENT_CREATED, EV_COMMENT_EDITED, EV_COMMENT_RESOLUTION_CHANGED, EV_CONCEPT_TAG_EDITED,
+    EV_COMMENT_CREATED, EV_COMMENT_EDITED, EV_COMMENT_RESOLUTION_CHANGED, EV_CONCEPT_EDGE,
+    EV_CONCEPT_TAG_EDITED,
     EV_FORCE_ABLATE, EV_FORCE_CONFIRM, EV_FORK, EV_HINT, EV_HYPOTHESIS_ADDED,
     EV_HYPOTHESIS_UPDATED, EV_INJECT_NODE, EV_METRIC_RETARGET, EV_NODE_ABORT, EV_NODE_RESET,
     EV_TRACK_REQUESTED, EV_UPSTREAM_AUTO_SET,
@@ -1814,6 +1815,59 @@ def _normalize_concept_tag_edited(ctx: _ControlIntake) -> dict:
     return {"node_id": node_id, "node_generation": node_generation, "concepts": canonical}
 
 
+# Declared concept edges (UI review 2026-10-14 section 4.3). The fold already reads `concept_edge`
+# commutatively (`events/replay_concepts.py::_on_concept_edge`), so an authored edge needs no new
+# event type and no fold change: the intake bounds and validates it, stamps WHO declared it, and
+# refuses an edge that would close a cycle with the run's existing hierarchy.
+CONCEPT_EDGE_RELATIONS = ("is_a", "part_of")
+CONCEPT_EDGES_PER_COMMAND = 64
+
+
+def _normalize_concept_edge(ctx: _ControlIntake) -> dict:
+    from looplab.serve.concept_frame import concept_id
+    raw = ctx.data.get("edges")
+    if not isinstance(raw, list) or not raw:
+        raise HTTPException(400, "edges must be a non-empty list of {src, rel, dst}")
+    if len(raw) > CONCEPT_EDGES_PER_COMMAND:
+        raise HTTPException(400, f"edges exceeds {CONCEPT_EDGES_PER_COMMAND} per command")
+    edges, seen = [], set()
+    for index, row in enumerate(raw):
+        if not isinstance(row, dict):
+            raise HTTPException(400, f"edges[{index}] must be an object {{src, rel, dst}}")
+        src = concept_id(row.get("src")) if isinstance(row.get("src"), str) else None
+        dst = concept_id(row.get("dst")) if isinstance(row.get("dst"), str) else None
+        rel = row.get("rel", "is_a")
+        if src is None or dst is None:
+            raise HTTPException(400, f"edges[{index}] needs valid concept ids in src and dst")
+        if rel not in CONCEPT_EDGE_RELATIONS:
+            raise HTTPException(400, f"edges[{index}].rel must be one of {', '.join(CONCEPT_EDGE_RELATIONS)}")
+        if src == dst:
+            raise HTTPException(400, f"edges[{index}] names one concept as its own parent")
+        if (src, rel, dst) in seen:
+            continue
+        seen.add((src, rel, dst))
+        edges.append({"src": src, "rel": rel, "dst": dst, "provenance": "authored",
+                      "confidence": 1.0})
+    # A cycle (a concept its own ancestor) breaks every hierarchy projection; refuse it over the
+    # run's existing parent edges plus this batch.
+    parents: dict[str, set] = {}
+    for edge in list((getattr(ctx.state(), "concept_edges", None) or {}).values()) + edges:
+        if isinstance(edge, dict) and edge.get("rel") in CONCEPT_EDGE_RELATIONS:
+            parents.setdefault(str(edge.get("src")), set()).add(str(edge.get("dst")))
+    for edge in edges:
+        stack, visited = [edge["dst"]], set()
+        while stack:
+            node = stack.pop()
+            if node == edge["src"]:
+                raise HTTPException(400, f"edge {edge['src']} -> {edge['dst']} would make "
+                                         f"{edge['src']} its own ancestor")
+            if node in visited:
+                continue
+            visited.add(node)
+            stack.extend(parents.get(node, ()))
+    return {"edges": edges, "mode": "authored", "actor_kind": ctx.actor_kind()}
+
+
 def _normalize_run_concepts(ctx: _ControlIntake) -> dict:
     # PART V (D): operator/assistant sets the RUN's BASE concept set (last-write-wins; the fold flows it
     # through the DAG). No node fence — the subject is the run; the top-level expected_generation run
@@ -2284,6 +2338,7 @@ _CONTROL_NORMALIZERS: dict[str, Optional[Callable]] = {
     EV_COMMENT_RESOLUTION_CHANGED: _normalize_comment_revision,
     EV_CONCEPT_TAG_EDITED: _normalize_concept_tag_edited,
     EV_RUN_CONCEPTS: _normalize_run_concepts,
+    EV_CONCEPT_EDGE: _normalize_concept_edge,
     EV_PROMOTE: _normalize_promote,
     EV_HYPOTHESIS_ADDED: _normalize_hypothesis_added,
     EV_HYPOTHESIS_UPDATED: _normalize_hypothesis_updated,
@@ -2330,6 +2385,7 @@ _CONTROL_PRECONDITIONS: dict[str, Optional[Callable]] = {
     EV_COMMENT_RESOLUTION_CHANGED: _precondition_comment_revision,
     EV_CONCEPT_TAG_EDITED: _precondition_concept_tags,
     EV_RUN_CONCEPTS: _precondition_run_concepts,
+    EV_CONCEPT_EDGE: _precondition_run_concepts,
     EV_PROMOTE: None,
     EV_HYPOTHESIS_ADDED: None,
     EV_HYPOTHESIS_UPDATED: None,
@@ -2377,6 +2433,7 @@ _CONTROL_DECISIONS: dict[str, Optional[Callable]] = {
     EV_COMMENT_RESOLUTION_CHANGED: None,
     EV_CONCEPT_TAG_EDITED: None,
     EV_RUN_CONCEPTS: None,
+    EV_CONCEPT_EDGE: None,
     EV_PROMOTE: None,
     EV_HYPOTHESIS_ADDED: None,
     EV_HYPOTHESIS_UPDATED: None,
@@ -2444,6 +2501,7 @@ _CONTROL_POLICIES: dict[str, tuple[EnginePolicy, str]] = {
     EV_COMMENT_RESOLUTION_CHANGED: (EnginePolicy.NO_SPAWN, "folded_intent"),
     EV_CONCEPT_TAG_EDITED: (EnginePolicy.NO_SPAWN, "folded_intent"),
     EV_RUN_CONCEPTS: (EnginePolicy.NO_SPAWN, "folded_intent"),
+    EV_CONCEPT_EDGE: (EnginePolicy.NO_SPAWN, "folded_intent"),
     EV_PROMOTE: (EnginePolicy.NO_SPAWN, "folded_intent"),
     EV_HYPOTHESIS_ADDED: (EnginePolicy.NO_SPAWN, "folded_intent"),
     EV_HYPOTHESIS_UPDATED: (EnginePolicy.NO_SPAWN, "folded_intent"),

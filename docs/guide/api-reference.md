@@ -10,7 +10,7 @@ vocabulary a client may append is `serve/protocol.py::CONTROL_EVENTS`.
 
 <!-- generated: api routes -->
 
-198 routes on 172 paths; 10 deprecated; 27 with a declared response model.
+199 routes on 173 paths; 10 deprecated; 27 with a declared response model.
 
 ### `/api`
 
@@ -85,6 +85,7 @@ vocabulary a client may append is `serve/protocol.py::CONTROL_EVENTS`.
 | method | path | summary | response model | deprecated |
 |---|---|---|---|---|
 | `GET` | `/api/cross-run/atlas` | Live structured Research Atlas projection, bounded per section. | `CrossRunAtlasResponse` |  |
+| `GET` | `/api/cross-run/authored-concepts` | The AUTHORED concept tier (doc 80 §9 item 7): which concepts runs' authors used and on how | — |  |
 | `GET` | `/api/cross-run/claim-curation-log` | *Claim Curation Log* (no docstring) | `CurationLogResponse` |  |
 | `POST` | `/api/cross-run/claim-decide` | Ratify/reject/pin/clear exactly the claim ID and revision the operator observed. | `ClaimDecisionResponse` |  |
 | `POST` | `/api/cross-run/claim-steward` | Run a proposal-only claim review; typed operator actions apply selected proposals. | `StewardProposalResponse` |  |

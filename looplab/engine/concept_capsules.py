@@ -853,3 +853,111 @@ def portfolio_concept_overview_data(capsules: list[dict], *, aliases: Optional[d
     if len(cards) > len(result["runs"]):
         result["run_cards_omitted"] = len(cards) - len(result["runs"])
     return result, concepts
+
+
+# --- AUTHORED concept capsules (UI review 2026-10-14 section 4.4, doc 80 §9 item 7) ---------------
+#
+# The classifier capsule above is EVIDENCE: a concept membership a reviewed producer measured, with
+# per-concept outcomes that feed novelty and profit signs. An external agent's run has no
+# classifier, so its concepts — authored on every experiment (`researcher-authored` provenance) —
+# crossed into no cross-run store at all ("authored labels never cross this wall",
+# `engine/lessons.py::store_concept_capsule`), and the portfolio forgot which concepts those runs
+# explored. Lowering the wall would hand authored self-labels the authority of measured evidence.
+#
+# So the authored tier is a SEPARATE store with its own schema and an explicit
+# `evidence_tier: "authored"`: the vocabulary a run's authors used and how many active experiments
+# carried each concept (coverage), and NOTHING measured — no outcomes, no signs, no effects. No
+# reader of `concept_capsules.jsonl` sees these rows (a different file), so classifier evidence and
+# its consumers are unchanged by construction; the authored tier is read only where it is labelled
+# as authored.
+AUTHORED_CAPSULE_VERSION = 1
+AUTHORED_EVIDENCE_TIER = "authored"
+AUTHORED_CAPSULES_FILENAME = "authored_concept_capsules.jsonl"
+
+
+def build_authored_concept_capsule(*, run_id: str, run_uid: str = "", task_id: str = "",
+                                   direction: str = "", fingerprint=(), concept_nodes: dict,
+                                   nodes_total: int, producers=()) -> dict:
+    """One run's authored concept vocabulary + coverage. Bounded like the classifier capsule."""
+    from looplab.core.concepts import valid_concept_id
+    counts = {key: int(value) for key, value in sorted((concept_nodes or {}).items())
+              if valid_concept_id(key) and type(value) is int and value > 0}
+    kept = dict(list(counts.items())[:_MAX_CAPSULE_CONCEPTS])
+    return {
+        "v": AUTHORED_CAPSULE_VERSION,
+        "evidence_tier": AUTHORED_EVIDENCE_TIER,
+        "run_id": str(run_id or ""),
+        **({"run_uid": str(run_uid)} if isinstance(run_uid, str) and run_uid else {}),
+        "task_id": str(task_id or ""),
+        "direction": direction if direction in ("min", "max") else "",
+        "fingerprint": sorted({str(t) for t in fingerprint or () if isinstance(t, str) and t})[
+            :_MAX_CAPSULE_FINGERPRINT],
+        "concepts": sorted(kept),
+        "concept_nodes": kept,
+        "concepts_total": len(counts),
+        "nodes_total": int(nodes_total) if type(nodes_total) is int and nodes_total >= 0 else 0,
+        "producers": sorted({str(p) for p in producers or () if isinstance(p, str) and p})[:8],
+    }
+
+
+def valid_authored_capsule(row) -> bool:
+    """The authored schema, exactly; anything else is quarantined (kept on disk, never read)."""
+    from looplab.core.concepts import valid_concept_id
+    if not isinstance(row, dict) or row.get("v") != AUTHORED_CAPSULE_VERSION \
+            or row.get("evidence_tier") != AUTHORED_EVIDENCE_TIER:
+        return False
+    run_id, concepts, nodes = row.get("run_id"), row.get("concepts"), row.get("concept_nodes")
+    if (not isinstance(run_id, str) or not run_id or len(run_id) > _MAX_CAPSULE_ID_CHARS
+            or not isinstance(row.get("run_uid", ""), str)
+            or not isinstance(concepts, list) or len(concepts) > _MAX_CAPSULE_CONCEPTS
+            or not isinstance(nodes, dict) or set(nodes) != set(concepts)
+            or not isinstance(row.get("fingerprint", []), list)):
+        return False
+    # MEASURED fields may never ride on an authored row: a reader must not be able to mistake it.
+    if any(key in row for key in ("concept_outcomes", "concept_signs", "concept_effects",
+                                  "best_metric", "concept_evidence")):
+        return False
+    return all(valid_concept_id(c) and type(nodes[c]) is int and nodes[c] > 0 for c in concepts)
+
+
+class AuthoredConceptCapsuleStore:
+    """One current authored row per run incarnation (`run_uid`, else `run_id`), upserted under the
+    same interprocess lock + quarantine-preserving replace the classifier store uses."""
+
+    def __init__(self, path: str | Path):
+        self.path = Path(path)
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+
+    def all(self) -> list[dict]:
+        rows, _health = read_jsonl_lenient_with_health(self.path, loads=json.loads, dicts_only=True)
+        return [row for row in rows if valid_authored_capsule(row)]
+
+    def add(self, capsule: dict) -> bool:
+        from looplab.events.eventstore import interprocess_lock
+        if not valid_authored_capsule(capsule):
+            return False
+        rid, ruid = str(capsule.get("run_id") or ""), str(capsule.get("run_uid") or "")
+        with interprocess_lock(Path(str(self.path) + ".lock"), required=True):
+            replace_jsonl_rows_atomic_preserving_quarantine(
+                self.path, [capsule],
+                replace_if=lambda row: (valid_authored_capsule(row)
+                                        and row_belongs_to_run(row, run_uid=ruid, run_id=rid)),
+                loads=json.loads, dumps=json.dumps)
+        return True
+
+
+def authored_concept_overview(rows: list[dict], *, limit: int = 200) -> dict:
+    """concept -> the runs whose AUTHORS used it and on how many experiments. Coverage, not outcome."""
+    per: dict[str, dict] = {}
+    for row in rows:
+        if not valid_authored_capsule(row):
+            continue
+        for concept in row["concepts"]:
+            entry = per.setdefault(concept, {"concept": concept, "runs": [], "nodes": 0})
+            entry["nodes"] += row["concept_nodes"][concept]
+            if len(entry["runs"]) < 32:
+                entry["runs"].append({"run_id": row["run_id"], "task_id": row.get("task_id", ""),
+                                      "nodes": row["concept_nodes"][concept]})
+    ordered = sorted(per.values(), key=lambda e: (-len(e["runs"]), -e["nodes"], e["concept"]))
+    return {"evidence_tier": AUTHORED_EVIDENCE_TIER, "concepts": ordered[:limit],
+            "total": len(ordered), "runs": len({run_ref(r) for r in rows if valid_authored_capsule(r)})}

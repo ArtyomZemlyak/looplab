@@ -114,6 +114,10 @@ MEMORY_STORES: tuple[MemoryStore, ...] = (
         reason="kept when any of its concepts was merged into a shared concept family",
         writer="engine/lessons.py::LessonMemory.store_concept_capsule", governed_source=True),
     MemoryStore(
+        "authored_concept_capsules.jsonl", "authored concept capsules", CASCADED, key=_RUN,
+        names_run=True, reason="",
+        writer="engine/lessons.py::LessonMemory.store_authored_concept_capsule"),
+    MemoryStore(
         "lesson_utility.jsonl", "lesson utility", CASCADED, key=f"{_RUN}; lesson_id",
         names_run=True, reason="",
         writer="engine/lessons_distill.py::LessonDistillMixin.write_reflection_note"),

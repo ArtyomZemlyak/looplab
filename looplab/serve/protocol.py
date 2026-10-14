@@ -58,7 +58,8 @@ from looplab.events.types import (
     EV_ANNOTATION, EV_APPROVAL_GRANTED, EV_BUDGET_EXTEND, EV_DEEP_RESEARCH,
     EV_CARD_DROPPED, EV_CARD_EDITED, EV_CARD_FILED, EV_CARD_REOPENED, EV_CARD_REPRIORITIZED,
     EV_CARD_RESOURCE_PINNED, EV_COMMAND_ACK,
-    EV_COMMENT_CREATED, EV_COMMENT_EDITED, EV_COMMENT_RESOLUTION_CHANGED, EV_CONCEPT_TAG_EDITED,
+    EV_COMMENT_CREATED, EV_COMMENT_EDITED, EV_COMMENT_RESOLUTION_CHANGED, EV_CONCEPT_EDGE,
+    EV_CONCEPT_TAG_EDITED,
     EV_FORCE_ABLATE, EV_FORCE_CONFIRM, EV_FORK, EV_HINT, EV_HYPOTHESIS_ADDED,
     EV_HYPOTHESIS_UPDATED, EV_INJECT_NODE, EV_METRIC_RETARGET, EV_NODE_ABORT, EV_NODE_RESET,
     EV_PAUSE, EV_PROMOTE, EV_RESTART, EV_RESUME, EV_RESUME_REQUESTED, EV_RUN_ABORT,
@@ -392,6 +393,9 @@ CONTROL_EVENTS = frozenset({
     EV_COMMENT_CREATED, EV_COMMENT_EDITED, EV_COMMENT_RESOLUTION_CHANGED,
     EV_CONCEPT_TAG_EDITED,  # PART V Phase 2b: an operator re-tags one node's concepts (command-only)
     EV_RUN_CONCEPTS,  # PART V (D): operator/assistant sets the run's BASE concept set (last-write-wins)
+    # UI review 2026-10-14 section 4.3: an external agent (or the operator) declares concept
+    # HIERARCHY — `is_a` / `part_of` edges — which no classifier derives on an external run.
+    EV_CONCEPT_EDGE,
     # Layer 6 Card board controls (docs/23 §12.6 stage 10) are command-only and server-stamped. They
     # never wake a dead engine; live selection/scheduling observes their fold, and an exact operator
     # drop may cancel its running eval. New engine lifecycle drops use `card_auto_dropped`; only legacy
@@ -457,6 +461,7 @@ CONTROL_DATA_FIELDS: dict[str, frozenset[str]] = {
         {"comment_id", "node_id", "node_generation", "expected_version", "resolved"}),
     EV_CONCEPT_TAG_EDITED: frozenset({"node_id", "node_generation", "concepts"}),
     EV_RUN_CONCEPTS: frozenset({"concepts"}),
+    EV_CONCEPT_EDGE: frozenset({"edges"}),
     EV_PROMOTE: frozenset({"node_id", "generation", "alias"}),
     EV_HYPOTHESIS_ADDED: frozenset({"id", "statement", "source", "concepts"}),
     EV_HYPOTHESIS_UPDATED: frozenset({"id", "status"}),
@@ -476,6 +481,8 @@ assert set(CONTROL_DATA_FIELDS) == set(CONTROL_EVENTS), "every control event nee
 CONTROL_SERVER_DERIVED_FIELDS: dict[str, frozenset[str]] = {
     EV_RESEARCH_COMPLETED: frozenset({"at_node", "served_manual", "trigger"}),
     EV_REPORT_GENERATED: frozenset({"at_node", "trigger"}),
+    # A declared edge is always `mode: authored`; the server says so, the author cannot.
+    EV_CONCEPT_EDGE: frozenset({"mode"}),
 }
 
 # Versioned collaboration takes the strict-CAS append (the retired compatibility /control route
@@ -490,6 +497,8 @@ COLLABORATION_EVENTS = frozenset({
     # endpoint so a write formed against an old generation can't land on a
     # post-reset replacement run, exactly like its per-node sibling EV_CONCEPT_TAG_EDITED.
     EV_RUN_CONCEPTS,
+    # A declared concept edge is a run-level authored claim like the base set above.
+    EV_CONCEPT_EDGE,
 })
 
 POLL_SECONDS = 0.4   # SSE tail cadence — fast enough to feel live, light on the disk

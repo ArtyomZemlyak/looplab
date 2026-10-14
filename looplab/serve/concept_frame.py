@@ -619,7 +619,7 @@ def project_frame(core: dict, *, requested_lens: str, lens_pack: list[dict],
                   requested_spec: Optional[dict] = None,
                   lens_registration: str = "shipped") -> dict:
     """Pure lens-specific projection over one immutable-by-convention bounded core."""
-    from looplab.search.concept_lens import project_hierarchy, project_lens
+    from looplab.search.concept_lens import apply_authored_parents, project_hierarchy, project_lens
 
     registered = {item.get("name"): item for item in lens_pack
                   if isinstance(item, dict) and isinstance(item.get("name"), str)}
@@ -632,10 +632,10 @@ def project_frame(core: dict, *, requested_lens: str, lens_pack: list[dict],
                   if edge.get("rel") in requested_relations}
     if requested_spec.get("kind") == "path" and requested_relations == {"is_a"}:
         effective_lens = requested_lens
-        tree = project_hierarchy(concept_ids, lens=effective_lens)
+        tree = apply_authored_parents(project_hierarchy(concept_ids, lens=effective_lens), edges)
     elif not lens_edges:
         effective_lens = "is_a"
-        tree = project_hierarchy(concept_ids, lens=effective_lens)
+        tree = apply_authored_parents(project_hierarchy(concept_ids, lens=effective_lens), edges)
     else:
         effective_lens = requested_lens
         tree = project_lens(concept_ids, lens_edges, requested_spec, touch=touch)

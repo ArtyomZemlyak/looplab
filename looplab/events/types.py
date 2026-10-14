@@ -1736,7 +1736,7 @@ EVENT_PAYLOAD_KEYS: dict[str, PayloadContract] = {
     "concept_edge": PayloadContract(
         "Edges added to the concept graph, and the mode that derived them.",
         required=("edges", "mode"),
-        optional=(),
+        optional=("actor_kind",),
     ),
     "concept_lens_completed": PayloadContract(
         "A paid concept-lens projection's terminal: the validated spec, or an authoritative decline.",
