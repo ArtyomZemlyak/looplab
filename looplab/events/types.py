@@ -1611,12 +1611,12 @@ EVENT_PAYLOAD_KEYS: dict[str, PayloadContract] = {
     "card_dropped": PayloadContract(
         "The operator stopped a Card (server-stamped).",
         required=("id",),
-        optional=("by", "dropped_by", "reason"),
+        optional=("actor_kind", "by", "dropped_by", "reason"),
     ),
     "card_edited": PayloadContract(
         "The operator rewrote a Card's display statement or a research question's concepts.",
         required=("id",),
-        optional=("concepts", "source", "statement"),
+        optional=("actor_kind", "concepts", "source", "statement"),
     ),
     "card_enriched": PayloadContract(
         "A Card's novelty / cross-run / footprint delta (last write by seq wins).",
@@ -1655,22 +1655,22 @@ EVENT_PAYLOAD_KEYS: dict[str, PayloadContract] = {
     "card_filed": PayloadContract(
         "The operator filed one Card under a research question, or un-filed it (server-stamped).",
         required=("id", "parent_card_id"),
-        optional=("source",),
+        optional=("actor_kind", "source"),
     ),
     "card_reopened": PayloadContract(
         "The operator resumed a dropped Card (server-stamped).",
         required=("id",),
-        optional=("by", "dropped_by", "reason"),
+        optional=("actor_kind", "by", "dropped_by", "reason"),
     ),
     "card_reprioritized": PayloadContract(
         "The operator moved one Card's priority.",
         required=("id",),
-        optional=("pinned", "priority", "source"),
+        optional=("actor_kind", "pinned", "priority", "source"),
     ),
     "card_resource_pinned": PayloadContract(
         "The operator pinned one Card's GPU footprint.",
         required=("id",),
-        optional=("gpu_mem_mib", "gpus", "pinned", "source"),
+        optional=("actor_kind", "gpu_mem_mib", "gpus", "pinned", "source"),
     ),
     "command_ack": PayloadContract(
         "The engine folded one server command intent — the causal ack that closes it.",

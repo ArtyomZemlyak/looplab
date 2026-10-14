@@ -216,6 +216,17 @@ def _on_card_reprioritized(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> 
         st.card_priority_pins[card_id] = priority
 
 
+#: The principals a server-stamped card control may name (`control_validation.py::
+#: _ControlIntake.actor_kind`). Anything else — absent on every row written before 2026-10-14, or a
+#: forged value — folds as "not stated", never as a guess.
+_CARD_ACTOR_KINDS = frozenset({"deployment_owner", "local_operator", "harness_agent"})
+
+
+def _card_actor(d: dict):
+    value = d.get("actor_kind")
+    return value if isinstance(value, str) and value in _CARD_ACTOR_KINDS else None
+
+
 def _on_card_edited(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
     """Fold display text and optional question tags; seed/action receipts stay untouched."""
     card_id = _card_replay_id(d.get("id"))
@@ -224,6 +235,9 @@ def _on_card_edited(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
     if card_id is not None and statement is not None and d.get("source") == "operator":
         previous = st.card_operator_edits.pop(card_id, {})
         edit = {"statement": statement, "source": "operator"}
+        actor = _card_actor(d)
+        if actor is not None:
+            edit["actor_kind"] = actor
         # A later text-only edit must not undo an explicitly authored question membership.
         if "concepts" in previous:
             edit["concepts"] = list(previous["concepts"])
@@ -257,6 +271,9 @@ def _on_card_filed(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
     if raw_parent is not None and parent is None:
         return
     filing: dict = {"parent_card_id": parent, "source": "operator"}
+    actor = _card_actor(d)
+    if actor is not None:
+        filing["actor_kind"] = actor
     if type(e.seq) is int and e.seq >= 0:
         filing["event_seq"] = e.seq
     st.card_filings.pop(card_id, None)

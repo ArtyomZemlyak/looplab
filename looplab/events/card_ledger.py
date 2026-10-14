@@ -3211,6 +3211,8 @@ def _apply_card_operator_overlays(
             event_seq = edit.get("event_seq")
             if type(event_seq) is int and 0 <= event_seq <= (1 << 31) - 1:
                 c.statement_edit_seq = event_seq
+            c.statement_edit_actor = edit.get("actor_kind") if isinstance(
+                edit.get("actor_kind"), str) else None
     for raw_id, pri in (st.card_priority_pins or {}).items():
         bounded_id = _card_id(raw_id)
         c = cards.get(_canon(bounded_id)) if bounded_id is not None else None
@@ -3233,6 +3235,8 @@ def _apply_card_operator_overlays(
         parent = filing.get("parent_card_id")
         c.parent_card_id = parent if isinstance(parent, str) and parent else None
         c.filed_by = "operator"
+        c.filed_by_actor = filing.get("actor_kind") if isinstance(
+            filing.get("actor_kind"), str) else None
         event_seq = filing.get("event_seq")
         c.filed_seq = event_seq if type(event_seq) is int and 0 <= event_seq <= (1 << 31) - 1 else None
     for raw_id, pin in (st.card_resource_pins or {}).items():

@@ -9,6 +9,8 @@ const CONTROL_RE = /[\u0000-\u001f\u007f]/
 const ACTOR_LABELS = Object.freeze({
   deployment_owner: 'Deployment owner',
   local_operator: 'Local operator',
+  // The scoped harness credential: the external agent, not the owner (codex audit 2026-10-14 L-09).
+  harness_agent: 'External agent',
   legacy_unknown: 'Legacy note',
 })
 

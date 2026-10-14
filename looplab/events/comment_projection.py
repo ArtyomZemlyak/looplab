@@ -25,8 +25,14 @@ COMMENT_ID_RE = re.compile(r"^cmt_[0-9a-f]{32}$")
 ACTOR_LABELS = {
     "deployment_owner": "Deployment owner",
     "local_operator": "Local operator",
+    # The scoped harness credential — the external agent, not the owner (codex audit 2026-10-14
+    # L-09, doc 70 70.8b). Stamped by `control_validation.py::_ControlIntake.actor_kind`.
+    "harness_agent": "External agent",
     "legacy_unknown": "Legacy note (unattributed)",
 }
+#: The actor kinds a modern comment row may carry. A new kind is ADDITIVE: every row written before
+#: it folds exactly as before.
+MODERN_ACTOR_KINDS = frozenset({"deployment_owner", "local_operator", "harness_agent"})
 _GENERATION_RE = re.compile(r"^[0-9a-f]{64}$")
 
 
@@ -79,8 +85,7 @@ def _actor(value: object, *, legacy: bool = False) -> Optional[str]:
     # `apply_comment_event` into `replay.fold` and bricked every replay — violating this module's own
     # contract that a malformed record is a deterministic no-op, because the crash happened BEFORE
     # the later comment_id/shape checks could reject the row.
-    return value if isinstance(value, str) and value in {
-        "deployment_owner", "local_operator"} else None
+    return value if isinstance(value, str) and value in MODERN_ACTOR_KINDS else None
 
 
 def _history_row(comment: CommentState, event: Event, action: str,

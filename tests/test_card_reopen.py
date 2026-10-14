@@ -123,6 +123,9 @@ def test_the_normalizer_mirrors_the_drops_shape():
         def card(self):
             return "card-3", None
 
+        def actor_kind(self):
+            return "local_operator"
+
         def text(self, key, required=False, limit=0):
             return "second thoughts" if key == "reason" else ""
 

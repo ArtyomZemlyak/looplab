@@ -912,7 +912,7 @@ function CommentCard({
         : <button type="button" className="btn xs ghost comment-node-link"
             onClick={() => onOpenComment?.(comment)}>{uiText("Experiment #")}{comment.nodeId}{uiText(" · attempt ")}{comment.nodeGeneration}
           </button>)}
-      <span className="comment-actor"><OpIcon name={comment.actorKind === 'assistant' ? 'bot' : 'user'} size={12} /> {comment.actorLabel}</span>
+      <span className="comment-actor"><OpIcon name={comment.actorKind === 'assistant' || comment.actorKind === 'harness_agent' ? 'bot' : 'user'} size={12} /> {comment.actorLabel}</span>
       <time dateTime={new Date(comment.updatedAt * 1000).toISOString()}
         title={`${comment.updatedAt === comment.createdAt ? 'Created' : 'Updated'} ${fmtDate(comment.updatedAt)}`}>
         {fmtAgo(comment.updatedAt)}

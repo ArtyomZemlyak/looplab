@@ -47,8 +47,14 @@ function FilingControl({ card, options, onFile, locked }) {
   const current = typeof card.parent_card_id === 'string' ? card.parent_card_id : ''
   const provenance = inferred ? uiText('Suggested by concepts · not saved')
     : current ? uiText('Saved question link') : uiText('Not linked to a question')
+  // `filed_by` says "a control, not the proposal"; `filed_by_actor` says WHO sent it. The external
+  // agent's own filings read as the operator's before 2026-10-14 (codex audit L-09).
+  const byAgent = card.filed_by_actor === 'harness_agent'
   const attribution = card.filed_by === 'operator'
-    ? current ? uiText('filed by the operator') : uiText('un-filed by the operator') : ''
+    ? byAgent
+      ? current ? uiText('filed by the external agent') : uiText('un-filed by the external agent')
+      : current ? uiText('filed by the operator') : uiText('un-filed by the operator')
+    : ''
   if (!onFile) return <span className="sr-only">{provenance} {attribution}</span>
   return <div className={`research-filing${inferred ? ' suggested' : ''}`}>
     <details className="research-filing-change">

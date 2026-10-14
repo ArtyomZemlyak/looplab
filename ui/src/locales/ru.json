@@ -1,7 +1,7 @@
 {
   "schema": 1,
   "language": "ru",
-  "count": 7810,
+  "count": 7812,
   "messages": {
     "# LoopLab run report — {0}": "# Отчёт запуска LoopLab — {0}",
     "## Agent narrative (advisory)": "## Пояснения агента (рекомендации)",
@@ -7690,7 +7690,9 @@
     "Could not file the experiment": "Не удалось привязать эксперимент",
     "chip muted research-operator-chip": "chip muted research-operator-chip",
     "The operator filed this experiment here; it is on the run's record.": "Оператор привязал этот эксперимент к этому вопросу; это записано в журнале прогона.",
+    "filed by the external agent": "привязан внешним агентом",
     "filed by the operator": "привязан оператором",
+    "un-filed by the external agent": "отвязан внешним агентом",
     "un-filed by the operator": "отвязан оператором",
     "Record this question as the one this experiment answers": "Записать этот вопрос как тот, на который отвечает эксперимент",
     "Keep here": "Оставить здесь",

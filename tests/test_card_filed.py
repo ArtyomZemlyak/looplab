@@ -141,6 +141,9 @@ class _Ctx:
     def __init__(self, st, data):
         self._st, self.data = st, data
 
+    def actor_kind(self):
+        return "local_operator"
+
     def state(self):
         return self._st
 
@@ -162,7 +165,8 @@ def test_the_intake_stamps_the_operator_and_refuses_what_the_fold_would_not_hono
     st = fold(base)
     (qx, qy), exp = _ids(st)
     out = _normalize_card_filed(_Ctx(st, {"id": exp, "parent_card_id": qx}))
-    assert out == {"id": exp, "parent_card_id": qx, "source": "operator"}
+    assert out == {"id": exp, "parent_card_id": qx, "source": "operator",
+                   "actor_kind": "local_operator"}
 
     def refused(data, state=st):
         with pytest.raises(HTTPException) as err:
@@ -211,7 +215,7 @@ def test_the_real_intake_closes_the_payload_and_null_un_files(tmp_path):
     assert EV_CARD_FILED in COLLABORATION_EVENTS, "command-only and generation-fenced"
     assert CONTROL_SPECS[EV_CARD_FILED].engine_policy is EnginePolicy.NO_SPAWN
     assert normalize_control(_Srv(), rd, EV_CARD_FILED, {"id": exp, "parent_card_id": qx}) == {
-        "id": exp, "parent_card_id": qx, "source": "operator"}
+        "id": exp, "parent_card_id": qx, "source": "operator", "actor_kind": "local_operator"}
     with pytest.raises(HTTPException) as forged:
         normalize_control(_Srv(), rd, EV_CARD_FILED,
                           {"id": exp, "parent_card_id": qx, "source": "engine"})

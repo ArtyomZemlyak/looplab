@@ -240,15 +240,30 @@ class _ControlIntake:
     place) must write the new dict back through `ctx.data` before calling another helper.
     """
 
-    __slots__ = ("srv", "rd", "event_type", "data", "_state", "_tail_seq")
+    __slots__ = ("srv", "rd", "event_type", "data", "agent_token", "_state", "_tail_seq")
 
-    def __init__(self, srv, rd: Path, event_type: str, data: dict):
+    def __init__(self, srv, rd: Path, event_type: str, data: dict, *, agent_token: bool = False):
         self.srv = srv
         self.rd = rd
         self.event_type = event_type
         self.data = data
+        self.agent_token = bool(agent_token)
         self._state = None
         self._tail_seq = None
+
+    def actor_kind(self) -> str:
+        """WHO is writing this intent, stamped by the server and never accepted from the client.
+
+        The scoped harness credential (`LOOPLAB_HARNESS_TOKEN`) is the external agent, not the
+        owner: before 2026-10-14 its question filings, card edits and comments were stamped exactly
+        like the owner's, so the Research view read "filed by the operator" over Codex's own
+        filings (codex audit 2026-10-14 L-09, doc 70 70.8b). `source: "operator"` stays on the card
+        rows because the fold reads it as "a control-plane decision, not the engine's"; this field
+        says which principal made it."""
+        if self.agent_token:
+            return "harness_agent"
+        return ("deployment_owner" if getattr(self.srv, "owner_auth_enabled", False)
+                else "local_operator")
 
     def state(self):
         if self._state is None:
@@ -1485,7 +1500,6 @@ def _normalize_report_generated(ctx: _ControlIntake) -> dict:
 
 def _normalize_comment_created(ctx: _ControlIntake) -> dict:
     data = ctx.data
-    srv = ctx.srv
     current = ctx.state()
     node_id = ctx.node("node_id")
     node_generation = ctx.strict_integer(data.get("node_generation"), "node_generation")
@@ -1538,8 +1552,7 @@ def _normalize_comment_created(ctx: _ControlIntake) -> dict:
         "node_id": node_id,
         "node_generation": node_generation,
         "text": ctx.comment_text(data.get("text")),
-        "actor_kind": ("deployment_owner" if getattr(srv, "owner_auth_enabled", False)
-                       else "local_operator"),
+        "actor_kind": ctx.actor_kind(),
         "version": 1,
     }
 
@@ -1547,7 +1560,6 @@ def _normalize_comment_created(ctx: _ControlIntake) -> dict:
 def _normalize_comment_revision(ctx: _ControlIntake) -> dict:
     """comment_edited / comment_resolution_changed: one optimistic revision of an existing comment."""
     data = ctx.data
-    srv = ctx.srv
     event_type = ctx.event_type
     current = ctx.state()
     raw_comment_id = data.get("comment_id")
@@ -1603,8 +1615,7 @@ def _normalize_comment_revision(ctx: _ControlIntake) -> dict:
         "node_generation": comment.node_generation,
         "base_version": expected_version,
         "version": expected_version + 1,
-        "actor_kind": ("deployment_owner" if getattr(srv, "owner_auth_enabled", False)
-                       else "local_operator"),
+        "actor_kind": ctx.actor_kind(),
     }
     if event_type == EV_COMMENT_EDITED:
         text = ctx.comment_text(data.get("text"))
@@ -1699,14 +1710,15 @@ def _normalize_card_reprioritized(ctx: _ControlIntake) -> dict:
         raise HTTPException(400, "priority must be between 0 and 255")
     return {
         "id": card_id, "priority": priority,
-        "source": "operator", "pinned": True,
+        "source": "operator", "pinned": True, "actor_kind": ctx.actor_kind(),
     }
 
 
 def _normalize_card_edited(ctx: _ControlIntake) -> dict:
     card_id, card = ctx.card()
     statement = ctx.text("statement", limit=4_000)
-    result = {"id": card_id, "statement": statement, "source": "operator"}
+    result = {"id": card_id, "statement": statement, "source": "operator",
+              "actor_kind": ctx.actor_kind()}
     if "concepts" in ctx.data:
         # Experiment concepts are owned by the exact node lifecycle; never create a competing
         # source on its Card. Questions own no node and need their own editable membership.
@@ -1756,14 +1768,15 @@ def _normalize_card_resource_pinned(ctx: _ControlIntake) -> dict:
         raise HTTPException(400, "resource pin cannot form a schedulable footprint")
     return {
         "id": card_id, **requested,
-        "source": "operator", "pinned": True,
+        "source": "operator", "pinned": True, "actor_kind": ctx.actor_kind(),
     }
 
 
 def _normalize_card_dropped(ctx: _ControlIntake) -> dict:
     card_id, _card_value = ctx.card()
     reason = ctx.text("reason", required=False, limit=400) or "operator dropped"
-    return {"id": card_id, "reason": reason, "dropped_by": "operator"}
+    return {"id": card_id, "reason": reason, "dropped_by": "operator",
+            "actor_kind": ctx.actor_kind()}
 
 
 def _normalize_card_reopened(ctx: _ControlIntake) -> dict:
@@ -1776,7 +1789,7 @@ def _normalize_card_reopened(ctx: _ControlIntake) -> dict:
     """
     card_id, _card_value = ctx.card()
     reason = ctx.text("reason", required=False, limit=400) or "operator reopened"
-    return {"id": card_id, "reason": reason, "by": "operator"}
+    return {"id": card_id, "reason": reason, "by": "operator", "actor_kind": ctx.actor_kind()}
 
 
 def _card_filing_refusal(state, card_id: str, card, target: Optional[str]) -> Optional[dict]:
@@ -1831,7 +1844,8 @@ def _normalize_card_filed(ctx: _ControlIntake) -> dict:
     refusal = _card_filing_refusal(ctx.state(), card_id, card, target)
     if refusal is not None:
         raise HTTPException(409 if refusal["code"] == "card_filing_unchanged" else 400, refusal)
-    return {"id": card_id, "parent_card_id": target, "source": "operator"}
+    return {"id": card_id, "parent_card_id": target, "source": "operator",
+            "actor_kind": ctx.actor_kind()}
 
 
 # ------------------------------------------------------------------ append-time preconditions
@@ -2486,7 +2500,7 @@ def normalize_control(srv, rd: Path, event_type: str, data, *, agent_token: bool
     _external_mode_restriction(rd, event_type, data, agent_token=agent_token)
 
     if spec.normalize is not None:
-        data = spec.normalize(_ControlIntake(srv, rd, event_type, data))
+        data = spec.normalize(_ControlIntake(srv, rd, event_type, data, agent_token=agent_token))
         # …and AGAIN over what the normalizer made of it (critic crit_v60 F3, driven): an import's
         # `{source_run, source_node}` reads as ready-made above, and the import then resolves it into
         # the node it WILL carry — for a source node reset from `implement`, no code and no files,

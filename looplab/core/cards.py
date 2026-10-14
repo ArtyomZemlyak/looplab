@@ -1560,6 +1560,12 @@ class Card(BaseModel):
     # on this, and `filed_seq` names the event so the claim is checkable against the log.
     filed_by: Optional[str] = None
     filed_seq: Optional[int] = Field(default=None, ge=0)
+    # WHICH PRINCIPAL made that control-plane filing / display edit: "harness_agent" (the scoped
+    # external-agent credential), "deployment_owner" or "local_operator"; None on every row written
+    # before 2026-10-14, which named nobody. `filed_by` stays "operator" — it means "a control, not
+    # the proposal" and the browser's optimistic reconcile keys on it.
+    filed_by_actor: Optional[str] = None
+    statement_edit_actor: Optional[str] = None
     # Prospective parent anchor — the Layer-5 freshness gate re-derives improve/merge legality for a
     # not-yet-built card against state.best()/rank_by_metric[:2]/breedable_nodes().
     parent_id: Optional[int] = None

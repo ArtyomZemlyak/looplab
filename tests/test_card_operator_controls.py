@@ -86,19 +86,22 @@ def test_normalize_control_validates_card_and_server_stamps_authority(tmp_path, 
         "id": "card-1", "priority": 4,
     }) == {
         "id": "card-1", "priority": 4, "source": "operator", "pinned": True,
+        "actor_kind": "local_operator",
     }
     assert normalize_control(srv, rd, EV_CARD_EDITED, {
         "id": "card-1", "statement": "operator display",
-    }) == {"id": "card-1", "statement": "operator display", "source": "operator"}
+    }) == {"id": "card-1", "statement": "operator display", "source": "operator",
+           "actor_kind": "local_operator"}
     assert normalize_control(srv, rd, EV_CARD_RESOURCE_PINNED, {
         "id": "card-1", "gpus": 2, "gpu_mem_mib": 12_000,
     }) == {
         "id": "card-1", "gpus": 2, "gpu_mem_mib": 12_000,
-        "source": "operator", "pinned": True,
+        "source": "operator", "pinned": True, "actor_kind": "local_operator",
     }
     assert normalize_control(srv, rd, EV_CARD_DROPPED, {
         "id": "card-1", "reason": "owner decision",
-    }) == {"id": "card-1", "reason": "owner decision", "dropped_by": "operator"}
+    }) == {"id": "card-1", "reason": "owner decision", "dropped_by": "operator",
+           "actor_kind": "local_operator"}
 
     forged = [
         (EV_CARD_REPRIORITIZED, {"id": "card-1", "priority": 1, "source": "novelty"}),

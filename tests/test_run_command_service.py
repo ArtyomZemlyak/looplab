@@ -1724,7 +1724,7 @@ def test_card_drop_bypasses_active_driver_gate_and_cancels_live_work(tmp_path):
     drop = [event for event in events if event.type == "card_dropped"][-1]
     assert drop.data == {
         "id": "card-live", "reason": "operator cancelled", "dropped_by": "operator",
-        "_command_id": dropped.json()["id"],
+        "actor_kind": "local_operator", "_command_id": dropped.json()["id"],
     }
     assert fold(events).cards["card-live"].status == "dropped"
 

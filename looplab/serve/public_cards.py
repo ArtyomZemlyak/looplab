@@ -52,10 +52,11 @@ _FIELDS = (
     # from a card nobody looked at — and would re-infer a concept filing over the operator's "none".
     # No parentheses in this comment: `ui/test/questionLattice.test.js` reads this tuple up to the
     # first closing one.
-    "filed_by", "filed_seq",
+    "filed_by", "filed_seq", "filed_by_actor",
     "status", "status_nodes", "verdict", "actionable", "identity",
     "selection_provenance",
     "selection_blockers", "selection_ready", "concept_source", "statement", "statement_edit_seq",
+    "statement_edit_actor",
     "seed_statement", "source",
     "created_at_node", "rationale", "evidence", "discarded_nodes", "substituted_nodes", "withheld_by",
     "best_delta", "merged_into",
@@ -94,7 +95,7 @@ _TEXT_LIMITS = {
 _REF_FIELDS = {
     "id", "belief_id", "retry_of", "card_kind", "parent_card_id",
     "source", "status", "verdict", "merged_into", "dropped_by", "operator", "filed_by",
-    "eval_profile", "research_origin", "provenance_tier",
+    "filed_by_actor", "statement_edit_actor", "eval_profile", "research_origin", "provenance_tier",
 }
 _INT_FIELDS = {"created_at_node", "parent_id", "scored_against", "priority",
                "foresight_rank", "applied_params_node"}

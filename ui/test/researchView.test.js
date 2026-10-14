@@ -209,6 +209,23 @@ test('the filing control: Keep here records the concept suggestion, the menu fil
   assert.ok(readOnly.includes('Suggested by concepts · not saved'), 'the provenance chip stays')
 })
 
+test('a filing the external agent made says so, not "the operator" (codex audit L-09)', async () => {
+  const { default: ResearchView } = await loadView()
+  const cards = [
+    { id: 'q2', card_kind: 'direction', statement: 'does beam width matter', concept_tags: ['beam'] },
+    { id: 'e2', card_kind: 'experiment', parent_card_id: 'q2', filed_by: 'operator', filed_by_actor: 'harness_agent' },
+    { id: 'e3', card_kind: 'experiment', filed_by: 'operator', filed_by_actor: 'harness_agent', concept_tags: ['beam'] },
+    { id: 'e4', card_kind: 'experiment', parent_card_id: 'q2', filed_by: 'operator', filed_by_actor: 'deployment_owner' },
+  ]
+  const live = renderToStaticMarkup(React.createElement(ResearchView, {
+    cards, state: { nodes: {} }, onFile: () => {},
+    renderCard: card => React.createElement('span', { key: card.id, 'data-card': card.id }, card.id),
+  }))
+  assert.ok(live.includes('filed by the external agent'), 'the agent filing names the agent')
+  assert.ok(live.includes('un-filed by the external agent'), 'and so does its un-filing')
+  assert.ok(live.includes('filed by the operator'), "the owner's own filing still reads as the operator's")
+})
+
 test('only an edit icon is visible until the question chooser opens', async () => {
   const { default: ResearchView } = await loadView()
   const { JSDOM } = await import('jsdom')

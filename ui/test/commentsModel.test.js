@@ -147,3 +147,14 @@ test('node feeds accept only the exact non-legacy experiment attempt', () => {
   assert.equal(commentMatchesSubject(legacy, 7, 2), false)
   assert.equal(commentMatchesSubject(exact, null, null), true, 'the run-wide feed is intentionally global')
 })
+
+test('a comment written with the harness credential is labelled as the external agent', async () => {
+  const { normalizeComment } = await import('../src/commentsModel.js')
+  const comment = normalizeComment({
+    comment_id: 'cmt_' + 'a'.repeat(32), node_id: 0, node_generation: 0, version: 1,
+    created_at: 1, updated_at: 1, text: 'checked the stage log', resolved: false, editable: true,
+    actor_kind: 'harness_agent',
+  })
+  assert.equal(comment.actorKind, 'harness_agent')
+  assert.equal(comment.actorLabel, 'External agent')
+})

@@ -295,14 +295,18 @@ read-only*, источник *Process environment*. Это не ошибка д�
   F6). Пометка агента должна пройти валидаторы строк реестров управления, которые тотальны по всем
   поколениям строк (`engine/governance_health.py::_validate_curation_row`).
   proof:absent:agent_token@looplab/serve/routers/cross_run.py
-- **70.8b** OPEN[agent-token-comment-reads-as-owner] комментарий, который агентский токен добавляет во
-  внутренний ран, записан с `actor_kind: "deployment_owner"`
-  (`serve/control_validation.py::_normalize_comment_created`): все проекции (`/api/runs/{id}/comments`,
-  ссылки-ревью) показывают его как комментарий владельца, редактируемый; кто спросил, знает только
-  файл команды (`submitted_by: agent_token`), а его нет в переигрываемом логе (критик crit_v64 F2,
-  прогнано). В промпт он не попадает; исправление — отдельный `actor_kind` (`harness_agent`),
-  проставленный из `_ControlIntake`, с подписью в `events/comment_projection.py`.
-  proof:absent:harness_agent@looplab/events/comment_projection.py
+- **70.8b** *Закрыто 2026-10-14 (doc 80, ветка `fix/backlog-triage-20261014`) — маркер
+  `agent-token-comment-reads-as-owner` стоял здесь.* Комментарий, отправленный агентским токеном,
+  раньше писался с `actor_kind: "deployment_owner"` и показывался как комментарий владельца. Теперь
+  принципал ставит сервер (`serve/control_validation.py::_ControlIntake.actor_kind` →
+  `harness_agent`), фолд его принимает (`events/comment_projection.py::MODERN_ACTOR_KINDS`), подпись
+  — «External agent» / «Внешний агент» (`ui/src/commentsModel.js`). Тем же способом помечаются
+  карточные команды агента (`card_filed`, `card_edited`, `card_reprioritized`,
+  `card_resource_pinned`, `card_dropped`, `card_reopened`): `Card.filed_by_actor` /
+  `statement_edit_actor`, Research view пишет «привязан внешним агентом» (аудит Codex 2026-10-14,
+  L-09). Старые строки без `actor_kind` фолдятся как раньше и никого не называют. Проверка:
+  `tests/test_agent_actor_attribution.py`, `ui/test/researchView.test.js`,
+  `ui/test/commentsModel.test.js`.
 - **70.8c** OPEN[harness-token-mints-share-links] харнесс-токен может создать ссылку-ревью на
   внутренний ран владельца (`POST /api/runs/{id}/reviews`, с доказательствами, срок около недели), по
   которой читает третья сторона, но не может её отозвать, и ротация `LOOPLAB_HARNESS_TOKEN` её не
