@@ -34,8 +34,11 @@ def next_step(progress: dict, language: str = "en") -> dict:
                                "Это записанный вопрос остановленного движка. Перед явным восстановлением или отменой прочитайте состояние и сохранённые квитанции команд. Возобновление может повторить оценку прерванной попытки и заменить этот вопрос; после возобновления обновите данные перед ответом. ")
                           + step["detail"])
         step["reads"].append(f"GET {_RUN}/command-receipt?expected_generation=TOKEN&command_id={{command_id}}")
-    step["detail"] += text(f" Engine last observed: {label}. Agent connection: not measured.",
-                           f" Последнее наблюдение движка: {label}. Подключение агента не измеряется.")
+    # The agent's own requests are reported beside this text (`agent_activity`), so the summary no
+    # longer says "Agent connection: not measured" under a chip saying "Agent read 0s ago" — the
+    # contradiction an operator saw on one screen (review 2026-10-14 §1, §10.2).
+    step["detail"] += text(f" Engine last observed: {label}. Agent requests are shown separately.",
+                           f" Последнее наблюдение движка: {label}. Обращения агента показаны отдельно.")
     if progress["complete"] and progress["finish_pending_nodes"]:
         counts = execution["recorded_node_counts"]
         step["detail"] += text(f" Recorded activity: {counts['evaluating']} admitted, "

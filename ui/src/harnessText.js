@@ -43,7 +43,7 @@ const russian = {
   'Reconnect or recover a lost response': 'Продолжить работу после потери подключения или ответа',
   'Keep this run. Read current state and generation; connecting MCP does not restart a stopped engine.': 'Продолжайте этот запуск. Прочитайте состояние и generation; подключение MCP не перезапускает остановленный движок.',
   'Observe the original command receipt, then inspect events and node results. The command may already have applied.': 'Прочитайте исходную квитанцию команды, затем события и результаты. Команда могла уже выполниться.',
-  'Read Agent cycle and checkpoints, including questions opened after the evaluator exits.': 'Прочитайте Agent cycle и вопросы оценки, включая появившиеся после завершения процесса оценки.',
+  'Read the agent obligations and checkpoints, including questions opened after the evaluator exits.': 'Прочитайте обязательства агента и вопросы оценки, включая появившиеся после завершения процесса оценки.',
   'Choose an explicit continuation, pause or finish. A quiet log does not prove that an agent died.': 'Явно выберите продолжение, паузу или завершение. Тишина в журнале не доказывает гибель агента.',
   'Find original command by': 'Найти исходную команду по',
   'Original Idempotency-Key': 'Исходный Idempotency-Key',

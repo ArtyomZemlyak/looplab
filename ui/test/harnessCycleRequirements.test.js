@@ -36,7 +36,7 @@ test('full Russian cycle preserves evidence and hides actionable requirements on
     await until(() => view.container.textContent.includes('Перед следующим экспериментом'), 'Russian requirements')
     assert.match(view.container.textContent, /Незавершённые эксперименты: 2/)
     assert.match(view.container.textContent, /Ответ монитору должен быть разрешён конкретным вопросом/)
-    assert.match(view.container.textContent, /novelty: вариантов для разбора: 2/)
+    assert.match(view.container.textContent, /novelty: нужно разобрать 2 варианта/)
     assert.match(view.container.textContent, /report.*command:report_generated/)
     assert.match(view.container.textContent, /skills, lessons/)
     assert.match(view.container.textContent, /original-question/)
@@ -111,7 +111,7 @@ test('incomplete full envelopes and inconsistent pages are unavailable, not empt
     for (const value of [bad[0], bad[3], bad.at(-1)]) {
       payload = value
       const view = await harness.mount(HarnessProgressPanel, props)
-      await until(() => view.container.textContent.includes('Agent cycle: Unavailable'), 'invalid full envelope')
+      await until(() => view.container.textContent.includes('Agent obligations: Unavailable'), 'invalid full envelope')
       assert.ok(!view.container.textContent.includes('No knowledge reviews due'))
       assert.ok(!view.container.textContent.includes('Before another candidate'))
       await view.unmount()

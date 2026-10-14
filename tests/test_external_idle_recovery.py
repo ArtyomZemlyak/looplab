@@ -22,7 +22,7 @@ def test_idle_run_requires_observed_recovery_when_engine_is_unavailable(tmp_path
     assert label in step["title"].lower()
     assert step["phase_id"] == "recovery" and step["action"] is None
     assert "before submitting" in step["detail"]
-    assert "Agent connection: not measured" in step["detail"]
+    assert "Agent requests are shown separately" in step["detail"]
     assert phase_detail(step["phase_id"]) is not None
     assert any("/command-receipt?" in ref for ref in step["reads"])
     assert not any("/commands/{command_id}" in ref for ref in step["reads"])

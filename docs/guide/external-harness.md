@@ -34,7 +34,7 @@ operator starts the server and run, while the coding agent proposes candidates.
    `looplab run task.json --out runs/my-run --backend toy -s external_harness=true`.
    Keep this process running. The external agent, not LoopLab's built-in Researcher,
    chooses the next candidate; the task's evaluator still runs inside LoopLab.
-3. In **Progress → Agent cycle → Connect external agent**, inspect the server/root
+3. In **Progress → Agent obligations → Audit and connection → Connect external agent**, inspect the server/root
    and copy the instruction for this run. Configure the coding client's stdio MCP
    server as `looplab harness-mcp`, passing only `LOOPLAB_HARNESS_TOKEN` and the UI
    URL. Supply the credential separately; client-specific examples are below.
@@ -54,7 +54,7 @@ operator starts the server and run, while the coding agent proposes candidates.
    > result and checkpoints, then decide what to do next. Explicitly pause or
    > finalize when done. Do not claim a score before LoopLab evaluates it.
 
-4. Watch the run in the UI. Before its first candidate, **Progress → Agent cycle**
+4. Watch the run in the UI. Before its first candidate, **Progress → Agent obligations**
    shows what the external agent owes. A live server or engine does not prove
    that the agent is connected. If the agent stops, reconnect it to the **same**
    run, read current generation and receipts, and continue; do not blindly
@@ -251,7 +251,7 @@ its bounded latest-results view; this API recovery procedure is for the agent.
 
 ### Connect from the UI
 
-For an already launched external run, open **Progress → Agent cycle → Connect
+For an already launched external run, open **Progress → Agent obligations → Connect
 external agent**. Opening this block performs an authenticated read of
 `GET /api/runs/{run_id}/harness-handoff?expected_generation=TOKEN`. The server
 checks the run generation, external mode, event history and saved task/config.
@@ -565,17 +565,17 @@ different candidate. The event timeline is the separate source for commands,
 node lifecycle, research, concepts, reports, selection and measured outcomes.
 Unsubmitted private agent planning cannot be reconstructed; publish material
 choices through the appropriate domain action. In the UI, open **Progress →
-Agent cycle** to inspect this view and its source health.
+Agent obligations** to inspect this view and its source health.
 
 ### A short next step
 
 After reading the current `/state` generation and the run contract, call MCP
 `run_progress(run_id, expected_generation)`. It performs one read of
 `harness-progress?expected_generation=TOKEN&brief=true`; HTTP failures retain
-their original status, with no hidden retry or resume. The UI **Agent cycle**
+their original status, with no hidden retry or resume. The UI **Agent obligations**
 shows the same server-authored `next_step`. The owner run workspace also shows
 a compact status above its views; expand its title for the explanation or open
-**Agent cycle** for the full requirements. History and review omit live advice.
+**Agent obligations** for the full requirements. History and review omit live advice.
 
 For Russian guidance, call `run_progress(run_id, expected_generation, language="ru")`
 or add `language=ru` to either full or compact HTTP progress read. `en` is the
@@ -646,7 +646,7 @@ at most **256** run/generation entries and stores no credential or request body.
 Restarting the UI, eviction or a new generation loses the observation. Nothing
 is added to events or sidecar journals. It never blocks evaluation/finalization,
 answers a checkpoint, pauses/resumes compute or invokes an internal replacement.
-The compact workspace and Agent cycle show the signal separately, with Russian
+The compact workspace and Agent obligations show the signal separately, with Russian
 labels when Russian is selected. Failed/stale reads withdraw it; malformed optional
 activity is unavailable without hiding the authoritative obligations. Inspect
 your client, current checkpoints and original receipts when the signal is quiet.
@@ -1121,7 +1121,7 @@ from their saved configuration. A live engine is labelled **engine active**; thi
 does not prove that the external agent is connected or choosing experiments.
 
 Unanswered stage, training monitor, ASHA and deadline questions appear in the UI's
-**Attention center → Needs action**. **Open Agent cycle** opens that run with its
+**Attention center → Needs action**. **Open agent obligations** opens that run with its
 generation fence. Read the full question and allowed responses through MCP before
 answering. Opening the inbox or cycle sends no answer and does not resume the engine.
 These questions do not generate desktop notifications.
@@ -1209,7 +1209,7 @@ Old writes made before this client feature cannot be reconstructed retrospective
    reconnecting MCP by itself does not restart search.
 2. Read `harness-progress` using that generation. Inspect `source_health` before
    interpreting a missing decision or receipt. Check pending checkpoints and
-   candidate/finish requirements. **Agent cycle** in the UI shows the same
+   candidate/finish requirements. **Agent obligations** in the UI shows the same
    obligations and links to the event timeline.
    Check the engine probe even if there are no pending nodes: a process can die
    between experiments without recording pause. Stopped or unknown idle engines
@@ -1242,7 +1242,7 @@ resume search). A stopped, paused run stays paused until an explicit `resume`; i
 engine died before the evaluation settled, resume may re-run the same attempt and its
 old question becomes superseded (an answer to it is refused with 409).
 
-In the UI, open **Agent cycle → Connect external agent → Reconnect or recover a
+In the UI, open **Agent obligations → Connect external agent → Reconnect or recover a
 lost response**. Read by original key or command ID. Typing submits nothing;
 **Read saved receipt** sends a GET. The form keeps its identity only in memory,
 and a failed refresh hides the previous status. No resume, retry or candidate

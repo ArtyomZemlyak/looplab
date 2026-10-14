@@ -70,7 +70,7 @@ const COPY = Object.freeze({
   // says which request and how many slots are taken; this row is for a payload that carries none.
   request_parked: ['Operator request waiting for node budget', 'A queued experiment waits for a node slot: the node budget is spent. Extend it with budget_extend add_nodes.', 'Open Events'],
   artifact_sync_unfinished: ['Artifact copy-out did not finish', 'A copy-out of this experiment started and has no receipt: the engine stopped first. Run the eval.artifact_sync command for it again.', 'Inspect experiment'],
-  external_checkpoint: ['External agent answer needed', 'Read the current evaluation question and allowed responses in Agent cycle. Agent connection is not measured.', 'Open Agent cycle'],
+  external_checkpoint: ['External agent answer needed', 'Open the agent obligations to read the current evaluation question and its allowed answers.', 'Open agent obligations'],
   assistant_permission: ['Assistant approval needed', 'Open Assistant to review the exact action and scope.', 'Open Assistant'],
 })
 

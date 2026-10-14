@@ -10,6 +10,9 @@ const journalNames = { decisions: 'Решения', reviews: 'Разборы', c
 const statuses = { recorded: 'записано', pending: 'ожидает ответа', answered: 'ответ записан',
   superseded: 'устарело', current: 'актуально', current_evidence_for_idea: 'актуально для этой идеи' }
 
+const isSuperseded = row => row?.lifecycle === 'superseded'
+  || (row?.status || row?.validity) === 'superseded'
+
 export default function HarnessCycleBody({ progress, fresh, runId, offset, setOffset, onOpenEvents }) {
   useUILanguage()
 
@@ -50,18 +53,13 @@ export default function HarnessCycleBody({ progress, fresh, runId, offset, setOf
         'В журнале событий, решений, разборов или вопросов оценки есть повреждённые записи. История ниже может быть неполной. Проверьте источники перед выводом, что отсутствующая квитанция никогда не записывалась.')}
       <pre>{JSON.stringify(progress.source_health, null, 2)}</pre>
     </div>}
-    <p className="muted">{t('Measured prefix:', 'Прочитанная часть истории: экспериментов —')} {progress.at_node} {t('nodes, event', ', событие')} #{progress.event_seq}.
-      {' '}{t('This is a read of several durable journals; refresh after a new event or response.', 'Данные прочитаны из нескольких журналов. Обновите их после нового события или ответа.')}</p>
     <HarnessNextStep step={progress.next_step} runId={runId} fresh={fresh} />
     <AgentActivity activity={progress.agent_activity} fresh={fresh} />
-    <p className="muted">{t('Journal rows: decisions', 'Записей в журналах: решения')} {progress.source_health.decisions.accepted_rows},
-      {' '}{t('reviews', 'разборы')} {progress.source_health.reviews.accepted_rows}, {t('checkpoints', 'вопросы оценки')} {progress.source_health.checkpoints.accepted_rows}.
-      {' '}{t('The event timeline records node and command transitions separately.', 'Переходы экспериментов и команд записаны отдельно в событиях.')} {' '}
-      <button type="button" className="btn sm ghost" onClick={onOpenEvents}>{t('Open events', 'Открыть события')}</button></p>
     {!current && <p role="status" className="report-inline-state">{t('Current requirements unavailable. Refresh a complete source read before deciding; recorded history below grants no permission.',
       'Актуальные требования недоступны. Перед решением обновите чтение полных источников; записанная история ниже не даёт разрешения на действие.')}</p>}
     {current && <>
-      <h3>{t('Before another candidate', 'Перед следующим экспериментом')}</h3>
+      <h3>{t('Required from the agent now', 'Что сейчас требуется от агента')}</h3>
+      <h4>{t('Before another candidate', 'Перед следующим экспериментом')}</h4>
       {blockers.length ? <ul>{blockers.map((item, index) => <li key={`${item.phase_id}-${index}`}>
         <b>{item.phase_id}</b> · {item.action.replaceAll('{run_id}', runId)}
       </li>)}</ul> : <p>{t("No current external-cycle gate. Candidate-specific checks, budgets and the task's edit surface still apply.",
@@ -86,18 +84,39 @@ export default function HarnessCycleBody({ progress, fresh, runId, offset, setOf
         {progress.finish_reviews_due.length ? `${t('Reviews due', 'Нужны разборы')}: ${progress.finish_reviews_due.join(', ')}`
           : t('No knowledge reviews due at this measured prefix.', 'В прочитанной части истории разбор знаний не требуется.')}</p>
     </>}
-    <h3>{t('Recorded intermediate actions', 'Записанные действия')}</h3>
-    <p className="muted">{t('A current decision is still bound to its exact Idea and implementation. Superseded receipts remain visible for audit.',
-      'Актуальное решение связано с конкретной идеей и реализацией. Устаревшие квитанции сохраняются для проверки истории.')}</p>
-    {['decisions', 'reviews', 'checkpoints'].map(kind => <section key={kind}>
-      <h4>{ru ? journalNames[kind] : kind} · {history[kind].total}</h4>
-      {history[kind].items.length ? <ul>{history[kind].items.map((row, index) => historyRow(kind, row, index))}</ul>
-        : <p className="muted">{t('No entries on this page.', 'На этой странице нет записей.')}</p>}
-    </section>)}
-    <div className="panel-actions">
-      <button type="button" className="btn sm" disabled={offset === 0} onClick={() => setOffset(Math.max(0, offset - 20))}>{t('Newer', 'Более новые')}</button>
-      <button type="button" className="btn sm" disabled={!hasMore} onClick={() => setOffset(offset + 20)}>{t('Older', 'Более ранние')}</button>
-      <span className="muted">{t('Page', 'Страница')} {Math.floor(offset / 20) + 1} {t('of each journal', 'каждого журнала')}</span>
-    </div>
+    {/* AUDIT AND CONNECTION (review 2026-10-14 §1): journals, superseded receipts, the measured
+        prefix and the connection instructions are for debugging the contract, not for deciding
+        what the agent owes now — so they sit folded below the obligations. */}
+    <details className="harness-audit">
+      <summary>{t('Audit: journals and history', 'Аудит: журналы и история')}</summary>
+      <p className="muted">{t('Measured prefix:', 'Прочитанная часть истории: экспериментов —')} {progress.at_node} {t('nodes, event', ', событие')} #{progress.event_seq}.
+        {' '}{t('This is a read of several durable journals; refresh after a new event or response.', 'Данные прочитаны из нескольких журналов. Обновите их после нового события или ответа.')}</p>
+      <p className="muted">{t('Journal rows: decisions', 'Записей в журналах: решения')} {progress.source_health.decisions.accepted_rows},
+        {' '}{t('reviews', 'разборы')} {progress.source_health.reviews.accepted_rows}, {t('checkpoints', 'вопросы оценки')} {progress.source_health.checkpoints.accepted_rows}.
+        {' '}{t('The event timeline records node and command transitions separately.', 'Переходы экспериментов и команд записаны отдельно в событиях.')} {' '}
+        <button type="button" className="btn sm ghost" onClick={onOpenEvents}>{t('Open events', 'Открыть события')}</button></p>
+      <h3>{t('Recorded intermediate actions', 'Записанные действия')}</h3>
+      <p className="muted">{t('A current decision is still bound to its exact Idea and implementation. Superseded receipts remain visible for audit.',
+        'Актуальное решение связано с конкретной идеей и реализацией. Устаревшие квитанции сохраняются для проверки истории.')}</p>
+      {['decisions', 'reviews', 'checkpoints'].map(kind => {
+        const rows = history[kind].items.map((row, index) => ({ row, index }))
+        const old = rows.filter(({ row }) => isSuperseded(row))
+        const live = rows.filter(({ row }) => !isSuperseded(row))
+        return <section key={kind}>
+          <h4>{ru ? journalNames[kind] : kind} · {history[kind].total}</h4>
+          {live.length ? <ul>{live.map(({ row, index }) => historyRow(kind, row, index))}</ul>
+            : <p className="muted">{t('No current entries on this page.', 'На этой странице нет актуальных записей.')}</p>}
+          {old.length > 0 && <details>
+            <summary>{uiPlural(old.length, '{0} superseded entry', '{0} superseded entries')}</summary>
+            <ul>{old.map(({ row, index }) => historyRow(kind, row, index))}</ul>
+          </details>}
+        </section>
+      })}
+      <div className="panel-actions">
+        <button type="button" className="btn sm" disabled={offset === 0} onClick={() => setOffset(Math.max(0, offset - 20))}>{t('Newer', 'Более новые')}</button>
+        <button type="button" className="btn sm" disabled={!hasMore} onClick={() => setOffset(offset + 20)}>{t('Older', 'Более ранние')}</button>
+        <span className="muted">{t('Page', 'Страница')} {Math.floor(offset / 20) + 1} {t('of each journal', 'каждого журнала')}</span>
+      </div>
+    </details>
   </>
 }

@@ -26,7 +26,7 @@ export default function HarnessNextStep({ step, runId, fresh }) {
   const ru = language === 'ru'
   if (!step) return null
   if (!fresh) return <p role="status" className="report-inline-state">
-    {((ru ? 'Следующий шаг недоступен до успешного обновления Agent cycle. Ниже показаны журналы последнего чтения.' : uiText('Next step unavailable until Agent cycle refresh succeeds. The journals below are the last read.')))}
+    {((ru ? 'Следующий шаг недоступен, пока не обновится список обязательств. Ниже — журналы на момент последнего чтения.' : uiText('Next step unavailable until the agent obligations refresh. The journals below are the last read.')))}
   </p>
   const ref = value => value.replaceAll('{run_id}', runId)
   return <section className="harness-next-step" aria-label={((ru ? 'Следующий шаг внешнего агента' : uiText('External agent next step')))}>

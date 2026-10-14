@@ -86,7 +86,7 @@ test('Russian next-step labels preserve server reads and actions; legacy wording
     assert.match(view.container.textContent, /Подсказка старого сервера приведена на исходном языке/)
     assert.match(view.container.textContent, /Inspect recorded finish/)
     await view.rerender({ step: advice, runId: 'demo', fresh: false })
-    assert.match(view.container.textContent, /недоступен до успешного обновления/)
+    assert.match(view.container.textContent, /недоступен, пока не обновится список обязательств/)
     assert.ok(!view.container.textContent.includes('Проверьте завершённый запуск'))
     assert.deepEqual(harness.fetch.calls, [])
   } finally {

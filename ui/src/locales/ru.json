@@ -1,7 +1,7 @@
 {
   "schema": 1,
   "language": "ru",
-  "count": 7898,
+  "count": 7913,
   "messages": {
     "# LoopLab run report — {0}": "# Отчёт запуска LoopLab — {0}",
     "## Agent narrative (advisory)": "## Пояснения агента (рекомендации)",
@@ -7900,7 +7900,22 @@
     "new": "новое",
     "refined": "уточнено",
     "refuted": "опровергнуто",
-    "unchanged": "без изменений"
+    "unchanged": "без изменений",
+    "Required from the agent now": "Что сейчас требуется от агента",
+    "Audit and connection": "Аудит и подключение",
+    "No current entries on this page.": "На этой странице нет актуальных записей.",
+    "Next step unavailable until the agent obligations refresh. The journals below are the last read.": "Следующий шаг недоступен, пока не обновится список обязательств. Ниже — журналы на момент последнего чтения.",
+    "Agent obligations": "Обязательства агента",
+    "External agent obligations": "Обязательства внешнего агента",
+    "What the external agent must do now, before another experiment and before finalization: research, novelty, evaluation questions and reports. Journals and connection details are folded under Audit and connection. This panel does not start an agent or control training.": "Что внешний агент должен сделать сейчас, перед следующим экспериментом и перед завершением: исследования, новизна идеи, вопросы оценки и отчёт. Журналы и подключение — в свёрнутом разделе «Аудит и подключение». Панель сама не запускает агента и не управляет обучением.",
+    "Read the agent obligations and checkpoints, including questions opened after the evaluator exits.": "Прочитайте обязательства агента и вопросы оценки, включая появившиеся после завершения процесса оценки.",
+    "Open the agent obligations to read the current evaluation question and its allowed answers.": "Откройте обязательства агента: там текущий вопрос оценки и допустимые ответы.",
+    "Open agent obligations": "Открыть обязательства агента",
+    "LoopLab evaluates candidates submitted by the external agent. The agent must check the current requirements and submit the next decision or candidate. Open the agent obligations to see what is due.": "LoopLab оценивает кандидатов, которых присылает внешний агент. Агент должен проверить текущие требования и отправить следующее решение или кандидата. Что требуется сейчас — в обязательствах агента.",
+    "External agent connection": "Подключение внешнего агента",
+    "Audit: journals and history": "Аудит: журналы и история",
+    "What the external agent must do now, before another experiment and before finalization: research, novelty, evaluation questions and reports. Journals and the agent connection are folded below. This panel does not start an agent or control training.": "Что внешний агент должен сделать сейчас, перед следующим экспериментом и перед завершением: исследования, новизна идеи, вопросы оценки и отчёт. Журналы и подключение агента — в свёрнутых разделах ниже. Панель сама не запускает агента и не управляет обучением.",
+    "harness-audit harness-connection-details": "harness-audit harness-connection-details"
   },
   "plurals": {
     "({0} paraphrases folded)": {
@@ -9715,6 +9730,11 @@
       "one": "{0} вывод предыдущей записки больше не указан",
       "few": "{0} вывода предыдущей записки больше не указаны",
       "many": "{0} выводов предыдущей записки больше не указаны"
+    },
+    "{0} superseded entries": {
+      "one": "{0} устаревшая запись",
+      "few": "{0} устаревшие записи",
+      "many": "{0} устаревших записей"
     }
   }
 }

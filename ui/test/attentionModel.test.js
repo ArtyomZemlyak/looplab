@@ -32,7 +32,7 @@ test('external questions open the current Agent cycle without exposing private p
     title: 'PRIVATE stage expectation', detail: 'PRIVATE training log', browser: true }))
   assert.ok(item.needsAction)
   assert.equal(item.notifyEligible, false)
-  assert.equal(item.actionLabel, 'Open Agent cycle')
+  assert.equal(item.actionLabel, 'Open agent obligations')
   const route = parseRunRouteState(item.href)
   assert.deepEqual(route.issues, [])
   assert.equal(route.state.panel, 'agent')

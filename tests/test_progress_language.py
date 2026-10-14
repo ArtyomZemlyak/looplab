@@ -26,7 +26,7 @@ def _pair(progress):
     assert en["title"] != ru["title"] and en["detail"] != ru["detail"]
     assert {k: v for k, v in en.items() if k not in ("title", "detail", "language")} == {
         k: v for k, v in ru.items() if k not in ("title", "detail", "language")}
-    assert "Подключение агента не измеряется" in ru["detail"]
+    assert "Обращения агента показаны отдельно" in ru["detail"]
     return en, ru
 
 

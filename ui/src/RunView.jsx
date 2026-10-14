@@ -160,7 +160,7 @@ const ProtocolPanel = lazy(() => import('./ProtocolPanel.jsx'))
 // `?panel=hypotheses` links still work — `runRouteState.js::LEGACY_PANEL_VIEWS` migrates them to
 // `?view=cards` rather than reporting an unknown panel.
 const HUBS = [
-  ['Progress', [['queue', 'Queue'], ['research', 'Research'], ['agent', 'Agent cycle'], ['failures', 'Failures'],
+  ['Progress', [['queue', 'Queue'], ['research', 'Research'], ['agent', 'Agent obligations'], ['failures', 'Failures'],
     ['inject', 'Add experiment']]],
   ['Trust', [['trust', 'Trust'], ['pareto', 'Pareto / diversity'], ['data', 'Data quality']]],
   ['Analysis', [['compare', 'Compare'], ['protocol', 'Protocol & comparisons'], ['sensitivity', 'Sensitivity'], ['importance', 'Importance'], ['crossrun', 'Cross-run']]],

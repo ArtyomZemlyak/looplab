@@ -56,7 +56,7 @@ test('main status refreshes engine observations without events and withdraws fai
     failure = false
     await click([...view.container.querySelectorAll('button')].find(x => x.textContent === 'Retry'))
     await until(() => view.container.textContent.includes('Engine stopped'), 'explicit read retry')
-    await click([...view.container.querySelectorAll('button')].find(x => x.textContent === 'Agent cycle'))
+    await click([...view.container.querySelectorAll('button')].find(x => x.textContent === 'Agent obligations'))
     assert.equal(opened, 1)
     await view.rerender({ ...props, seq: 13 })
     await until(() => requests.length >= 4, 'new event read')
@@ -162,7 +162,7 @@ test('malformed next step cannot become a successful read', async () => {
     } })
     const view = await harness.mount(HarnessProgressPanel, { runId: 'mnist',
       expectedGeneration: generation, externalMode: true, configStatus: 'ready' })
-    await until(() => view.container.textContent.includes('Agent cycle: Unavailable'), 'invalid payload')
+    await until(() => view.container.textContent.includes('Agent obligations: Unavailable'), 'invalid payload')
     assert.ok(!view.container.textContent.includes('Everything is ready'))
   } finally { await harness.close() }
 })

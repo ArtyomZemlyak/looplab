@@ -58,26 +58,32 @@ export function HarnessProgressPanel({ runId, expectedGeneration, seq, externalM
       <AgentActivity activity={progress?.agent_activity} fresh={fresh} />
       {!fresh && <button type="button" className="btn sm ghost"
         onClick={() => resource.retry({ supersede: true })}>{((ru ? 'Повторить чтение' : uiText('Retry')))}</button>}
-      <button type="button" className="btn sm" onClick={onOpen}>{((ru ? 'Цикл агента' : uiText('Agent cycle')))}</button>
+      <button type="button" className="btn sm" onClick={onOpen}>{((ru ? 'Обязательства агента' : uiText('Agent obligations')))}</button>
     </section>
   }
   const fresh = resource.status === 'ready' && !(seq > progress?.event_seq)
-  return <Panel title={((ru ? 'Цикл внешнего агента' : uiText('External agent cycle')))} sub={progress ? `${ru ? 'событие' : 'event'} #${progress.event_seq}` : runId}
+  return <Panel title={((ru ? 'Обязательства внешнего агента' : uiText('External agent obligations')))} sub={progress ? `${ru ? 'событие' : 'event'} #${progress.event_seq}` : runId}
     onClose={onClose} wide>
     {configStatus === 'ready' && externalMode !== true && <p role="status">{((ru ? 'В этом запуске работает встроенный цикл LoopLab. Журналы внешнего агента применяются к запускам с external_harness=true.' : uiText("This run uses LoopLab's built-in agent cycle. The external agent journals apply to runs launched with external_harness=true.")))}</p>}
     {configStatus !== 'ready' && <p role="status">{((ru ? 'Ожидаем настройки запуска…' : uiText('Waiting for run settings…')))}</p>}
     {!validGeneration && <p className="muted" role="status">{((ru ? 'Ожидаем сохранённую generation запуска…' : uiText('Waiting for a durable run generation…')))}</p>}
-    {scope && <PanelResourceNotice resource={resource} label={((ru ? 'Цикл агента' : uiText('Agent cycle')))} language={readLanguage}
+    {scope && <PanelResourceNotice resource={resource} label={((ru ? 'Обязательства агента' : uiText('Agent obligations')))} language={readLanguage}
       onRetry={() => resource.retry()} />}
     {scope && <p className="report-section-intro">{ru
-      ? 'Здесь показано, что внешний агент должен проверить перед следующим экспериментом и завершением работы: исследования, новизну идеи, вопросы обучения и отчёт. Эта панель сама не запускает агента и не управляет обучением.'
-      : uiText('This panel lists what the external agent must review before another experiment and finalization: research, novelty, training questions and reports. It does not start an agent or control training.')}</p>}
-    {scope && <HarnessConnection runId={runId} generation={expectedGeneration} seq={seq} />}
+      ? 'Что внешний агент должен сделать сейчас, перед следующим экспериментом и перед завершением: исследования, новизна идеи, вопросы оценки и отчёт. Журналы и подключение агента — в свёрнутых разделах ниже. Панель сама не запускает агента и не управляет обучением.'
+      : uiText('What the external agent must do now, before another experiment and before finalization: research, novelty, evaluation questions and reports. Journals and the agent connection are folded below. This panel does not start an agent or control training.')}</p>}
     {scope && <LazyBoundary label={((ru ? 'Требования и история' : uiText('Requirements and history')))}
       resetKey={`${runId}:${expectedGeneration}`} language={readLanguage} focusOnFailure={false}
       loadingFallback={<p role="status">{((ru ? 'Загружаем требования и историю…' : uiText('Loading requirements and history…')))}</p>}
       failureContent={<p>{((ru ? 'Требования не показаны. Перед решением прочитайте актуальный harness-progress через внешнего агента или перезагрузите LoopLab.' : uiText('Requirements are not displayed. Before deciding, read current harness-progress through the external agent or reload LoopLab.')))}</p>}>
       {progress && <CycleBody progress={progress} fresh={fresh} runId={runId} offset={offset} setOffset={setOffset} onOpenEvents={onOpenEvents} />}
     </LazyBoundary>}
+    {/* The connection instructions stay in the panel SHELL, outside the lazily loaded body, so a
+        failed body never takes the reconnect controls with it — but below the obligations and
+        folded: the agent is usually already connected (review 2026-10-14 §1). */}
+    {scope && <details className="harness-audit harness-connection-details">
+      <summary>{((ru ? 'Подключение внешнего агента' : uiText('External agent connection')))}</summary>
+      <HarnessConnection runId={runId} generation={expectedGeneration} seq={seq} />
+    </details>}
   </Panel>
 }

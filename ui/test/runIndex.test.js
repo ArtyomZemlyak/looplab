@@ -180,7 +180,7 @@ test('external run with no candidate names the agent as next actor', () => {
   assert.equal(external.kind, 'awaiting-agent')
   assert.equal(external.tone, 'attention')
   assert.match(external.title, /External agent/)
-  assert.match(external.body, /connection is not verified/)
+  assert.match(external.body, /agent obligations/)
   assert.deepEqual(external.actions.map(item => item.id), ['agent', 'events'])
   assert.equal(dagEmptyPresentation({ displayed: live }).kind, 'preparing')
   assert.equal(dagEmptyPresentation({ displayed: live, externalMode: true,

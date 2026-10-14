@@ -66,7 +66,7 @@ def external_checkpoint_attention(run_id: str, rd: Path, events) -> list[dict]:
                              "external_checkpoint:" + question["checkpoint_id"]),
             "kind": "external_checkpoint", "severity": "action",
             "title": "External agent answer needed",
-            "detail": "Read the current evaluation question in Agent cycle before responding.",
+            "detail": "Read the current evaluation question in the agent obligations before responding.",
             "run_id": run_id, "generation": generation, "seq": seq,
             "created": _timestamp(question.get("created_at", 0)),
             "browser": False, "active": True, "derived": False,

@@ -51,7 +51,7 @@ function ReceiptForm({ runId, generation }) {
     <ol>
       <li>{t('Keep this run. Read current state and generation; connecting MCP does not restart a stopped engine.')}</li>
       <li>{t('Observe the original command receipt, then inspect events and node results. The command may already have applied.')}</li>
-      <li>{t('Read Agent cycle and checkpoints, including questions opened after the evaluator exits.')}</li>
+      <li>{t('Read the agent obligations and checkpoints, including questions opened after the evaluator exits.')}</li>
       <li>{t('Choose an explicit continuation, pause or finish. A quiet log does not prove that an agent died.')}</li>
     </ol>
     <form onSubmit={read}>

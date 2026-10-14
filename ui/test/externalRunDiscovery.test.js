@@ -48,7 +48,7 @@ test('mounted attention routes an external question to the fenced cycle without 
     const view = await harness.mount(AttentionCenter)
     await until(() => view.container.querySelector('.attention-trigger')?.textContent.includes('1'))
     await click(view.container.querySelector('.attention-trigger'))
-    const link = [...document.querySelectorAll('a')].find(a => a.textContent === 'Open Agent cycle')
+    const link = [...document.querySelectorAll('a')].find(a => a.textContent === 'Open agent obligations')
     assert.ok(link)
     assert.match(link.getAttribute('href'), /panel=agent/)
     assert.ok(link.getAttribute('href').includes(generation))

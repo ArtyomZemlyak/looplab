@@ -27,7 +27,7 @@ first-run example, see the [Assistant quickstart](quickstart.md#assistant-in-the
 engine without a model, the [CLI walkthrough](cli-walkthrough.md).
 
 For a run controlled by Codex or Claude Code, the first experiment can wait for that
-agent's decision. The empty Lineage view links to **Agent cycle**, which lists current
+agent's decision. The empty Lineage view links to **Agent obligations**, which lists current
 admission and finish requirements. A live UI or engine alone does not show whether an
 external agent is connected; see the [external harness guide](external-harness.md).
 
@@ -1074,7 +1074,7 @@ about *that run's event log*, and every panel behind it reads `/api/runs/<id>/�
 
 | Hub | Panels |
 |---|---|
-| **Progress** | Queue · Research · Agent cycle · Failures · Add experiment |
+| **Progress** | Queue · Research · Agent obligations · Failures · Add experiment |
 | **Trust** | Trust · Pareto / diversity · Data quality |
 | **Analysis** | Compare · Sensitivity · Importance · Cross-run |
 | **Lab** | Files · Registry · Comments & sharing · Events |
@@ -1500,11 +1500,11 @@ Concepts and result components. Boolean/unknown-number minifier guards remain se
 in the initial static closure; `main.jsx` keeps its separate bootstrap entry. The pure
 connection, payload, preference, provenance, recovery and draft helpers share `run-support`
 to reduce separate compression streams. This makes some route closures larger; it does not
-recursively capture their dependencies or load owner controls/full Agent cycle content.
+recursively capture their dependencies or load owner controls/full Agent obligations content.
 `ui/test/productionSplitRuntime.test.js` builds the real minified client and natively imports
 its non-bootstrap chunks to catch initialization-order failures hidden by SSR/dev runners.
 Only the built SVG icon sprite may be fetched during initialization; API requests fail the test.
-Owner controls and full Agent cycle content retain their lazy boundaries. A failed Agent cycle requirements/history import or
+Owner controls and full Agent obligations content retain their lazy boundaries. A failed Agent obligations requirements/history import or
 render leaves the dialog, connection instructions and Close/Escape available. Its RU/EN
 error does not mean obligations are empty: read current `harness-progress` before deciding.
 Language and progress refreshes do not retry a failed body; recovery reloads explicitly.
