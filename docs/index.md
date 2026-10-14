@@ -23,8 +23,16 @@ The usual path is **describe → review → launch → inspect measured results*
 control, your coding agent proposes the next candidate; LoopLab validates, executes, and records it.
 The [full architecture](guide/architecture.md) explains the internal loop and replay model.
 
+## Who does what
+
+| Mode | Proposes and writes the candidate | Runs and records the evaluation |
+|---|---|---|
+| Built-in | LoopLab's Researcher and Developer (your configured model) | LoopLab |
+| External agent | Your agent (Codex, Claude Code) via commands | LoopLab |
+
 ## The loop in one picture
 
+The picture is the built-in loop; in external mode your agent replaces the first two boxes.
 A candidate solution is a **node**. Each turn expands one node into a child; the color-coded roles
 hand work around the wheel, and every arrow also appends one event to `events.jsonl`.
 
