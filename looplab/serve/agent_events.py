@@ -83,6 +83,9 @@ ACTIONABLE_KINDS = (
     "node_evaluated", "node_failed", "stage_failed", "monitor_question", "obligation_due",
     "run_idle", "run_paused", "run_finished", "gpu_free",
 )
+# Kinds that describe a CONDITION that can stop holding (re-checked at delivery), as opposed to a
+# FACT the log recorded (a node evaluated, a stage failed), which stays true once true.
+CONDITION_KINDS = frozenset({"monitor_question", "obligation_due", "run_idle"})
 # The outbox is a bounded tail: past this many bytes it is rotated to `outbox.jsonl.1` (one
 # generation kept), and a reader whose cursor fell off the retained window is told so.
 _OUTBOX_MAX_BYTES = 4 * 1024 * 1024
@@ -581,6 +584,42 @@ def _append_ledger(root, row: dict) -> None:
         append_jsonl_bytes_locked(d / LEDGER, json.dumps(row, sort_keys=True).encode() + b"\n")
 
 
+def _question_row(rd: Path, checkpoint_id) -> Optional[dict]:
+    """The question row `checkpoint_id` names in the run's checkpoint journal, or None."""
+    if not checkpoint_id:
+        return None
+    for row in reversed(_read_jsonl(Path(rd) / "harness_checkpoints.jsonl")):
+        if row.get("type") == "question" and row.get("checkpoint_id") == checkpoint_id:
+            return row
+    return None
+
+
+def coalesce(rows: list[dict]) -> list[dict]:
+    """One `monitor_question` per run in a batch: the newest, its summary saying how many it
+    stands for — a burst of ticks is ONE reason to look, not N wake-up lines."""
+    latest: dict[str, dict] = {}
+    counts: dict[str, int] = {}
+    for row in rows:
+        if row.get("kind") == "monitor_question":
+            run = str(row.get("run_id"))
+            counts[run] = counts.get(run, 0) + 1
+            latest[run] = row
+    out = []
+    for row in rows:
+        if row.get("kind") != "monitor_question":
+            out.append(row)
+            continue
+        run = str(row.get("run_id"))
+        if latest.get(run) is not row:
+            continue
+        if counts[run] > 1:
+            row = {**row, "summary": _clip(f"{counts[run]} monitor questions; latest: "
+                                           f"{row.get('summary', '')}"),
+                   "coalesced": counts[run]}
+        out.append(row)
+    return out
+
+
 # ------------------------------------------------------------------------------------- the pump
 class AgentEventPump:
     """The server-owned producer of the outbox and deliverer of notifications. One thread."""
@@ -596,6 +635,8 @@ class AgentEventPump:
         self.thread = None
         self._run_marks: dict[str, tuple] = {}
         self._gpu_free_since: Optional[float] = None
+        self._rule_progress: dict[tuple, float] = {}
+        self._routine_seen: dict[str, bool] = {}
         self._lock = threading.Lock()
 
     # lifecycle
@@ -711,6 +752,19 @@ class AgentEventPump:
         else:
             new_events = [ev for ev in events if ev.seq > int(last_seq)]
         candidates = derive_log_events(rd.name, run_uid, new_events)
+        conditions = self._conditions(rd, settings, state, events, run_uid)
+        if conditions is not None:
+            candidates += conditions
+        appended = append_events(self.root, candidates,
+                                 run_state={rd.name: {"seq": events[-1].seq, "run_uid": run_uid}})
+        self._run_marks[rd.name] = (self._signature(rd), now)
+        return appended
+
+    def _conditions(self, rd: Path, settings, state, events, run_uid: str) -> Optional[list]:
+        """The run's actionable CONDITIONS right now (questions, obligations, idle), or None when
+        the progress source is unreadable. Questions the agent's DECLARED monitor rules call
+        routine are left out (see `_routine_by_rules`)."""
+        from looplab.events.run_generation import run_generation_token
         try:
             from looplab.harness.progress import snapshot as progress_snapshot
             from looplab.serve.node_activity import public_node_activity
@@ -719,16 +773,87 @@ class AgentEventPump:
             max_nodes = int(getattr(settings, "max_nodes", 0) or 0)
             add = int((getattr(state, "budget_overrides", {}) or {}).get("add_nodes", 0) or 0)
             budget_left = (max_nodes + add - len(state.nodes)) if max_nodes > 0 else None
-            candidates += derive_condition_events(rd.name, run_uid, progress,
-                                                  budget_left=budget_left)
+            rows = derive_condition_events(rd.name, run_uid, progress, budget_left=budget_left)
         except (HTTPException, OSError, ValueError, KeyError, TypeError):
             # An incomplete source (a damaged sidecar, a generation race) yields log events only;
             # the agent's own progress read reports the source health.
             _log.debug("agent events: progress for %s unavailable", rd.name, exc_info=True)
-        appended = append_events(self.root, candidates,
-                                 run_state={rd.name: {"seq": events[-1].seq, "run_uid": run_uid}})
-        self._run_marks[rd.name] = (self._signature(rd), now)
-        return appended
+            return None
+        return [row for row in rows
+                if not (row["kind"] == "monitor_question" and self._routine_by_rules(rd, row))]
+
+    def _routine_by_rules(self, rd: Path, row: dict) -> bool:
+        """Is this pending question ROUTINE under the agent's declared monitor rules?
+
+        Live check 2026-10-14 (run minionerec-new-all-two-epochs-e7): an engine started BEFORE the
+        rules shipped never applies them, so every train_monitor tick reached the agent as a wake-up
+        although the agent had declared it routine. The pump evaluates the SAME rules
+        (`harness/monitor_rules.py::evaluate`) on the question's observation and does not wake
+        anyone for a routine one. It answers nothing — the question stays for the engine's own
+        deadline or a newer engine's rule answer; this only decides whether waking is warranted.
+        `progress_advances` compares against the last progress this pump accepted for the same
+        node lifecycle and phase (in memory: a restarted pump re-accepts once)."""
+        from looplab.harness.monitor_rules import evaluate, read_rules
+        rules = read_rules(rd)
+        if not rules:
+            return False
+        cid = (row.get("details") or {}).get("checkpoint_id")
+        if cid in self._routine_seen:           # judged once: its own progress is not "previous"
+            return self._routine_seen[cid]
+        question = _question_row(rd, cid)
+        if question is None:
+            return False
+        lifecycle = (rd.name, question.get("node_id"), question.get("node_generation"),
+                     question.get("phase_id"))
+        try:
+            verdict = evaluate(rules, question, previous_progress=self._rule_progress.get(lifecycle))
+        except Exception:  # noqa: BLE001 — an unevaluable rule leaves the question to the agent
+            verdict = None
+        if verdict is not None:
+            progress = (verdict.get("facts") or {}).get("progress")
+            if isinstance(progress, (int, float)):
+                self._rule_progress[lifecycle] = progress
+        self._routine_seen[cid] = verdict is not None
+        if len(self._routine_seen) > 4096:
+            for key in list(self._routine_seen)[:1024]:
+                del self._routine_seen[key]
+        return verdict is not None
+
+    def _still_actionable(self, rows: list[dict]) -> tuple[list[dict], list[dict]]:
+        """`(keep, stale)`: re-derive each run's CONDITIONS at delivery time and drop condition
+        events (question, obligation, idle) that no longer hold — a question already answered or
+        closed, an obligation met, an engine no longer idle. Facts from the log (a node evaluated
+        or failed, a stage failed, a pause/finish) and host events always stay."""
+        from looplab.core.config import read_config_snapshot
+        from looplab.core.errors import OperatorRefusal
+        from looplab.events.eventstore import EventStore
+        from looplab.events.replay import fold
+        current: dict[str, Optional[set]] = {}
+        keep, stale = [], []
+        for row in rows:
+            run_id = row.get("run_id")
+            if row.get("kind") not in CONDITION_KINDS or not run_id:
+                keep.append(row)
+                continue
+            if run_id not in current:
+                keys = None
+                rd = self.root / run_id
+                try:
+                    settings = read_config_snapshot(rd / "config.snapshot.json")
+                    events = EventStore(rd / "events.jsonl").read_all()
+                    state = fold(events)
+                    run_uid = str(getattr(state, "run_uid", "") or run_id)
+                    rows_now = self._conditions(rd, settings, state, events, run_uid)
+                    keys = None if rows_now is None else {r["key"] for r in rows_now}
+                except (OperatorRefusal, OSError, ValueError):
+                    keys = None
+                current[run_id] = keys
+            keys = current[run_id]
+            if keys is None or row.get("key") in keys:
+                keep.append(row)          # unknowable now: deliver rather than silently drop
+            else:
+                stale.append(row)
+        return keep, stale
 
     def _scan_gpu(self) -> list[dict]:
         from looplab.engine import resources
@@ -790,6 +915,26 @@ class AgentEventPump:
                 and now - oldest_ts < float(config.get("max_delay_s", 120))
                 and not page["has_more"]):
             return None
+        # NOTHING STALE WAKES AN AGENT (live check 2026-10-14): a condition is re-derived NOW, and a
+        # question answered or closed during the debounce, an obligation met or an engine no
+        # longer idle is dropped (recorded in the ledger, never sent); a burst of questions of one
+        # run is ONE line. A retry is re-checked too: a question that closed while the hook was
+        # failing is not worth a wake-up either.
+        fresh, stale = self._still_actionable(rows)
+        if stale and int(delivery.get("attempts", 0)) == 0:      # logged once, not per retry
+            _append_ledger(self.root, {
+                "ts": now, "attempt": 0, "status": "dropped_stale",
+                "event_ids": [r["id"] for r in stale],
+                "runs": sorted({r.get("run_id") for r in stale if r.get("run_id")}),
+                "kinds": sorted({r["kind"] for r in stale}),
+                "error": "no longer actionable at delivery (answered, closed or no longer due)",
+                **({"hook": hook} if hook != DEFAULT_HOOK else {})})
+        if not fresh:
+            self._save_delivery(state, through=rows[-1]["id"], attempts=0, next_try=0,
+                                failed=delivery.get("failed", 0), hook=hook)
+            return None
+        last_seen = rows[-1]["id"]
+        rows = coalesce(fresh)
         # Per-run variables: a run may name its own thread; one delivery per distinct var set.
         groups: dict[str, list[dict]] = {}
         merged_vars: dict[str, dict] = {}
@@ -831,7 +976,7 @@ class AgentEventPump:
                 record["hook"] = hook
             all_ok &= bool(result["ok"])
             _append_ledger(self.root, record)
-        last_id = rows[-1]["id"]
+        last_id = last_seen
         if all_ok:
             self._save_delivery(state, through=last_id, attempts=0, next_try=0, failed=0,
                                 hook=hook)

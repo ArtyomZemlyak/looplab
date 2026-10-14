@@ -390,3 +390,115 @@ def test_named_connection_routes(tmp_path, monkeypatch):
     assert tested["hook"] == "claude" and tested["status"] in ("delivered", "failed")
     assert client.delete("/api/agent-notify?hook=claude", headers=owner).json()["ok"] is True
     assert "claude" not in client.get("/api/agent-notify", headers=owner).json()["hooks"]
+
+
+def _question(rd, cid, *, observation="step 10 loss 1.20", node_id=0, answered=False):
+    rows = [{"type": "question", "checkpoint_id": cid, "run_uid": "u", "node_id": node_id,
+             "node_generation": 0, "phase_id": "train_monitor", "stage": "train",
+             "observation": observation, "created_at": time.time()}]
+    if answered:
+        rows.append({"type": "answer", "checkpoint_id": cid, "verdict": "continue",
+                     "answerer": "agent", "answered_at": time.time()})
+    with open(rd / "harness_checkpoints.jsonl", "a") as fh:
+        for row in rows:
+            fh.write(json.dumps(row) + "\n")
+
+
+class _ConditionPump(ae.AgentEventPump):
+    """The pump with its progress read replaced by the checkpoint journal: a question is a
+    condition exactly while it has no answer (what `harness-progress` derives)."""
+
+    def _conditions(self, rd, settings, state, events, run_uid):
+        rows = ae._read_jsonl(rd / "harness_checkpoints.jsonl")
+        answered = {r["checkpoint_id"] for r in rows if r.get("type") == "answer"}
+        out = [{"run_id": rd.name, "run_uid": run_uid, "kind": "monitor_question",
+                "key": f"{run_uid}:checkpoint:{r['checkpoint_id']}",
+                "details": {"checkpoint_id": r["checkpoint_id"]}, "summary": "q"}
+               for r in rows if r.get("type") == "question" and r["checkpoint_id"] not in answered]
+        return [row for row in out if not self._routine_by_rules(rd, row)]
+
+
+def test_a_question_answered_before_delivery_wakes_nobody(tmp_path):
+    """Live check 2026-10-14 (minionerec-new-all-two-epochs-e7): the hook woke Codex for
+    train_monitor questions that were already closed when the message arrived."""
+    root = tmp_path / "runs"
+    rd, _store = _external_run(root)
+    _question(rd, "c1")
+    calls = []
+    pump = _ConditionPump(SimpleNamespace(root=root), clock=_Clock(),
+                          runner=lambda argv, t: calls.append(argv) or {"ok": True, "exit_code": 0})
+    ae.write_notify_config(root, {"command": ["wake", "{message}"], "debounce_s": 0})
+    from looplab.events.replay import fold
+    uid = fold(EventStore(rd / "events.jsonl").read_all()).run_uid or "demo"
+    ae.append_events(root, [{"run_id": "demo", "kind": "monitor_question",
+                             "key": f"{uid}:checkpoint:c1", "summary": "q1",
+                             "details": {"checkpoint_id": "c1"}}])
+    _question(rd, "c1", answered=True)                 # the agent (or the engine) closed it
+    _rewrite_outbox_ts(root, pump.clock() - 1)
+    assert pump.deliver() is None and calls == []
+    assert ae.ledger_rows(root)[0]["status"] == "dropped_stale"
+    # A still-open question IS delivered, and a burst of them is one line.
+    for cid in ("c2", "c3", "c4"):
+        _question(rd, cid)
+    ae.append_events(root, [{"run_id": "demo", "kind": "monitor_question",
+                             "key": f"{uid}:checkpoint:{cid}", "summary": f"q {cid}",
+                             "details": {"checkpoint_id": cid}} for cid in ("c2", "c3", "c4")])
+    _rewrite_outbox_ts(root, pump.clock() - 1)
+    record = pump.deliver()
+    assert record["status"] == "delivered" and len(calls) == 1
+    assert "3 monitor questions; latest: q c4" in calls[0][1]
+    assert calls[0][1].count("monitor_question") == 1
+
+
+def test_a_question_the_declared_rules_call_routine_wakes_nobody(tmp_path):
+    """An engine started before the rules shipped cannot apply them; the pump does not wake the
+    agent for what the agent itself declared routine (and answers nothing)."""
+    from looplab.harness.monitor_rules import write_rules
+    root = tmp_path / "runs"
+    rd, _store = _external_run(root)
+    write_rules(rd, {"train_monitor": {"routine_if": {"loss_finite": True,
+                                                       "progress_advances": True}}})
+    _question(rd, "r1", observation="step 10 loss 1.20")
+    _question(rd, "r2", observation="step 20 loss nan")       # not routine: loss not finite
+    pump = _ConditionPump(SimpleNamespace(root=root), clock=_Clock())
+    from looplab.events.replay import fold
+    state = fold(EventStore(rd / "events.jsonl").read_all())
+    rows = pump._conditions(rd, None, state, None, state.run_uid or "demo")
+    assert [r["details"]["checkpoint_id"] for r in rows] == ["r2"]
+    # Judged once: re-deriving does not compare the question's progress with itself.
+    rows = pump._conditions(rd, None, state, None, state.run_uid or "demo")
+    assert [r["details"]["checkpoint_id"] for r in rows] == ["r2"]
+    assert not any(r.get("type") == "answer"
+                   for r in ae._read_jsonl(rd / "harness_checkpoints.jsonl"))
+
+
+def test_coalesce_keeps_one_question_per_run_and_every_fact():
+    rows = [{"id": 1, "run_id": "a", "kind": "monitor_question", "summary": "x"},
+            {"id": 2, "run_id": "a", "kind": "node_failed", "summary": "boom"},
+            {"id": 3, "run_id": "b", "kind": "monitor_question", "summary": "y"},
+            {"id": 4, "run_id": "a", "kind": "monitor_question", "summary": "z"}]
+    out = ae.coalesce(rows)
+    assert [r["id"] for r in out] == [2, 3, 4] and out[2]["coalesced"] == 2
+
+
+def test_the_real_progress_path_drops_a_closed_question(tmp_path):
+    """Through the pump's own condition read (harness-progress), not a stand-in."""
+    from looplab.harness import checkpoints
+    root = tmp_path / "runs"
+    rd, store = _external_run(root)
+    store.append("node_created", {"node_id": 0, "parent_ids": [], "operator": "draft",
+                                  "idea": {"operator": "draft"}, "code": "", "files": {}})
+    q = checkpoints.ask(rd, 0, 0, "train_monitor", stage="train", observation="step 5 loss 2.0")
+    calls = []
+    pump = ae.AgentEventPump(SimpleNamespace(root=root), clock=_Clock(),
+                             runner=lambda argv, t: calls.append(argv) or {"ok": True,
+                                                                         "exit_code": 0})
+    pump.clock.t = time.time()
+    appended = pump._scan_run(rd)
+    assert "monitor_question" in [r["kind"] for r in appended]
+    ae.write_notify_config(root, {"command": ["wake", "{message}"], "debounce_s": 0,
+                                  "kinds": ["monitor_question"]})
+    checkpoints.close_unanswered(rd, [q["checkpoint_id"]], "the evaluation ended")
+    pump.clock.t += 5
+    assert pump.deliver() is None and calls == []
+    assert ae.ledger_rows(root)[0]["status"] == "dropped_stale"
