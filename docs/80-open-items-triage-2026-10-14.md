@@ -277,3 +277,28 @@ L-15 и UI 7.5. Ещё три изменения этого прохода ст�
 - **72.O7, 72.O12**: перенос возможности через диалог и приёмка стоимости — не UI отчёта/доски; O12 ждёт приёмки, продление бюджета агентом сделано кампанией.
 - **OB-02** (установка на чистых Windows/Linux) и **BACKLOG #14/#18** (AutoML-адаптеры, межпроцессная оценка) — не UI: действие владельца/CI и движок.
 - **UI 6.3 `report-brief`** и кэш платной генерации: внешний агент пишет отчёт сам; платная генерация уже идёт через receipts-протокол, отдельный кэш не нужен до измеренного повторного платежа.
+
+## 12. Закрыто после сортировки: движок (ветка `fix/engine-remaining-20261014`)
+
+Остатки docs 78, 79, 81 и движковая часть §9. Строки §3–§9 не переписываются (§10).
+
+| Пункт | Что сделано | Проверка |
+|---|---|---|
+| 4. CX §7 — durable-зеркало каталога рана | `looplab run-mirror` / `run-mirror-status` / `run-mirror-restore` (`events/run_mirror.py`): только изменённые файлы, `*.jsonl` до последнего `\n`, манифест SHA-256 на ран, ограничение байт/с и операций/с, ни одного листинга назначения за проход, дедлайн на каждый вызов FUSE (зависание — `stuck`, `--exit-on-stuck` → код 3), восстановление через staging со сверкой и без перезаписи. Пропускает блокировки, SQLite read-model, `code/repo.git`, `code/worktrees`, `canary/`. Заменяет `restart-control/run-mirror.py` | `tests/test_run_mirror.py`; на S3-скретче бокса: 762 файла / 27 МБ за 95 с при 10 файл/с, повторный проход 0,0 с, восстановленная копия даёт тот же `RunState` |
+| Тесты под `/dev/shm` | 11 падений полного прогона с `--basetemp` в `/dev/shm`: xattr-замеры идут на ФС, где user xattr есть (`tests/_fs_capabilities.py`), мир зонда — свой temp-корень, landlock-тест снимает все гранты-предки. Причина `ProbeRefusal` была реальной дырой: дочерний процесс зонда разрешал `/dev` целиком, а там `/dev/shm` с ранами. Теперь `/dev` разрешается поэлементно без `shm`/`mqueue`, родитель `/dev` не передаёт, `.pth`-каталоги интерпретатора разрешены (кроме лежащих внутри огороженного корня) | `tests/test_dev_probe.py`, `tests/test_read_fence.py`, `tests/test_metric_subject.py`, `tests/test_the_probe_runs_where_the_candidate_runs.py` в обоих basetemp |
+| doc 78: статус упавшей стадии | Закрывающий `phase_progress` стадии несёт `outcome` (`ok`/`failed`/`timeout`/`error`) и `exit_code` | `tests/test_eval_stage_cursor.py` |
+| doc 78: хук на подключение агента | Именованные подключения `?hook=` / `--hook`: своя команда, vars, kinds, водяной знак, повторы; переопределение на ран по хуку | `tests/test_agent_events.py` |
+| doc 78: `start_after` по событию и `drain` | `until: node_evaluated / stage_done / gpu_released`, `drain` как удержание «доделать текущее»; старый движок читает такой gate как HOLD | `tests/test_gpu_queue.py` |
+| doc 78: канарейка без `eval.canary` | Песочница-smoke по политике оператора (`implicit_canary: sandboxed`), запись только в scratch (Landlock), отказ записи — `inconclusive`; `canary_preflight` с предупреждением контракта | `tests/test_implicit_sandboxed_canary.py` |
+| doc 81: версия протокола в свёртке | `node_created.protocol_version` → `Node.protocol_version`; оговорка сравнения | `tests/test_protocol_version_binding.py` |
+| doc 81: содержимое data-mount | Отпечаток содержимого в поправке `task`, новое `data_refresh` | `tests/test_data_mount_content_amendments.py` |
+| doc 81: загрузка per-query на стороне клиента | Спул тела запроса до ответа, `resume_per_query_upload` | `tests/test_per_query_upload_spool.py` |
+| doc 79: бинарные файлы в оверлее | Хранилище `code/blobs` + маркер, проверка хеша при материализации | `tests/test_binary_overlay.py` |
+| doc 79: upstream без блока | `code_status.upstream.readiness` — какие обязательства не объявлены и что делать; умолчаний гейта нет сознательно | `tests/test_binary_overlay.py::test_upstream_readiness_names_each_missing_obligation` |
+| doc 79: сквозной многостадийный тест | prepare→train→score, фиктивный пул из 2 GPU, коммиты и фактический конфиг | `tests/test_code_identity_multistage.py` |
+| 9. BACKLOG #7 landlock по умолчанию | Подготовлено, НЕ переключено: `looplab landlock-check RUN --gpu-smoke --python <eval python>` прогоняет torch/CUDA/DataLoader/NCCL/sysfs/монтирования под allow-list рана. На CPU с env MiniOneRec все шаги `ok`; CUDA и NCCL — проверка владельца на свободных GPU. Переключение — default `enforce` + строка `"landlock": "off"` в `LEGACY_CONFIG_SNAPSHOT_DEFAULTS` | `tests/test_landlock_gpu_smoke.py` |
+
+Осталось движковое: CPU-подготовка вне GPU-лиза внутри одного узла (пер-стадийный footprint, P3 M —
+меняет допуск ресурсов движка, отложено до окна без живого GPU-прогона); 72.O7, 72.O12, OB-02,
+BACKLOG #14 и #18 — эпики, приёмка людьми или действие владельца/CI, кодом в этом проходе не
+закрываются.

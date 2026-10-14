@@ -300,3 +300,32 @@ a message argument works as the command).
 * Files: `<run-root>/.agent-events/{outbox.jsonl,state.json,notify.json,deliveries.jsonl}`,
   `<run>/gpu_gate.json`, `<run>/agent_notify.json`, `<run>/harness_monitor_rules.json`,
   `<run>/attempt_logs/`, `<lease>.queue/`, `<lease>.holder.json`.
+
+## 8. Follow-up the same day (engine pass 2)
+
+Four leftovers of this document, closed in `fix/engine-remaining-20261014`:
+
+* **A failed stage says so on its beacon.** The eval-stage cursor's closing `phase_progress` row
+  carries `outcome` (`ok` / `failed` / `timeout` / `error`) and `exit_code`; `status` stays
+  `finished`, so every reader of the open/closed pair is unchanged
+  (`runtime/command_eval.py::BEACON_OUTCOMES`).
+* **One hook per agent connection.** `looplab agent-notify --hook codex …` /
+  `PUT /api/agent-notify?hook=codex` configures a named connection beside the default hook: its own
+  command, vars, kinds, run filter, delivery watermark (a new connection starts at the outbox's end)
+  and retry state. A run overrides vars or opts out per hook
+  (`PUT /api/runs/{run_id}/agent-notify {"hook": "codex", "vars": {...}}`); ledger rows name the hook.
+* **Finer `start_after`, and drain.** A gate entry may be
+  `{"run": A, "until": "node_evaluated"|"stage_done"|"gpu_released", "node_id"?, "stage"?}`
+  (CLI `--after-node A[:N]`, `--after-stage A[:N]:STAGE`, `--after-release A`), read incrementally
+  off A's event log; every condition also opens when A's engine exits. `{"drain": true}` /
+  `looplab gpu-gate A --drain` lets A's running GPU work finish and admits no new one — the state a
+  successor's `gpu_released` waits for. An old engine reads an object entry as a malformed gate,
+  i.e. a HOLD: it never starts GPUs early.
+* **A canary without `eval.canary`.** The operator may enable a SANDBOXED smoke per run
+  (`PUT /api/runs/{run_id}/harness-policy {"implicit_canary": "sandboxed"}`): the chain runs in the
+  canary scratch tree under a Landlock ruleset that lets it write only there (`TMPDIR` and compiler
+  caches pointed inside). A refused write is `inconclusive` — the full eval decides; a crash without
+  one (an unknown flag, an ImportError) fails the canary. Without Landlock nothing runs.
+  `harness-progress.canary_preflight` states which preflight a candidate gets and, when none, the
+  contract warning.
+

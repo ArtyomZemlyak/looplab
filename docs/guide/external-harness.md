@@ -1142,6 +1142,11 @@ seconds; it adds no evaluation wait of its own.
 | `node_failed.failure_forensics` | Original exception under a wrapper, signals per rank, exit codes, log tails; `GET /api/runs/{run_id}/attempt-logs` keeps earlier attempts' logs. |
 | `PUT /api/runs/{run_id}/harness-monitor-rules` | Routine checkpoint answers LoopLab gives itself (`answerer: rule`); a failed evaluation never waits for an answer. |
 | `eval.canary` (`slice` / `smoke`) | On by default for external runs when declared: a broken CLI flag fails in seconds. |
+| `harness-progress.canary_preflight` | Which preflight your candidates get; without `eval.canary` the operator may enable a sandboxed smoke (`harness-policy` `implicit_canary`), else a warning says none runs. |
+| `looplab agent-notify --hook NAME` / `?hook=NAME` | A named wake-up connection per agent (own command, vars, watermark, retries); `PUT /api/runs/{run_id}/agent-notify {"hook": NAME, ...}` per run. |
+| `gpu-gate` `{"run", "until": "node_evaluated" \| "stage_done" \| "gpu_released"}`, `drain` | Start after a node or stage of another run, or after it drains; `drain` finishes running GPU work and takes no new. |
+| `resume_per_query_upload(run_id, action_id)` | Resend a spooled per-query upload exactly, without the file; `pending_per_query_uploads` lists unanswered ones. |
+| `Node.protocol_version`, `data_refresh` | Each node's campaign protocol version (comparisons flag mixed versions); `amend_protocol kind=task` records data-mount CONTENT fingerprints. |
 
 ## Reconnect and recovery
 
