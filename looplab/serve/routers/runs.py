@@ -1181,7 +1181,12 @@ def build_router(srv) -> APIRouter:
         # (token-less) UI the two parties are indistinguishable and the historical reading — the
         # external agent answers checkpoints — stands.
         owner = bool(getattr(srv, "owner_auth_enabled", False)) and not request_agent_token(request)
-        return respond(srv, _run_dir(run_id), body, answerer="human" if owner else "agent")
+        rd = _run_dir(run_id)
+        result = respond(srv, rd, body, answerer="human" if owner else "agent")
+        if request_agent_token(request):
+            srv.agent_activity.observe_authored(rd, body.expected_generation.lower(),
+                                                "checkpoint_answer")
+        return result
 
     @router.get("/api/runs/{run_id}/harness-monitor-rules")
     def get_harness_monitor_rules(run_id: str, response: Response):
@@ -1262,16 +1267,26 @@ def build_router(srv) -> APIRouter:
         return publish_skill_candidate(srv, _run_dir(run_id), body)
 
     @router.post("/api/runs/{run_id}/harness-decisions")
-    def record_harness_decision(run_id: str, body: ExternalDecisionBody):
+    def record_harness_decision(run_id: str, body: ExternalDecisionBody, request: Request):
         """Record a reviewed choice for an enabled phase, bound to the submitted idea."""
         from looplab.harness.decisions import publish_decision
-        return publish_decision(srv, _run_dir(run_id), body)
+        rd = _run_dir(run_id)
+        result = publish_decision(srv, rd, body)
+        _authored(request, rd, getattr(body, "expected_generation", None), "decision")
+        return result
 
     @router.post("/api/runs/{run_id}/harness-reviews")
-    def record_harness_review(run_id: str, body: ExternalReviewBody):
+    def record_harness_review(run_id: str, body: ExternalReviewBody, request: Request):
         """Record a configured end-of-run review, including a reason for no action."""
         from looplab.harness.reviews import publish_review
-        return publish_review(srv, _run_dir(run_id), body)
+        rd = _run_dir(run_id)
+        result = publish_review(srv, rd, body)
+        _authored(request, rd, getattr(body, "expected_generation", None), "review")
+        return result
+
+    def _authored(request, rd, generation, kind):
+        if request_agent_token(request) and isinstance(generation, str):
+            srv.agent_activity.observe_authored(rd, generation.lower(), kind)
 
     @router.post("/api/runs/{run_id}/novelty-preview")
     def novelty_preview(run_id: str, body: NoveltyPreviewBody):

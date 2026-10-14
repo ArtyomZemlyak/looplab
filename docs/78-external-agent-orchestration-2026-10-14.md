@@ -227,8 +227,11 @@ PUT /api/runs/{run_id}/harness-monitor-rules
   ended without a measurement, the engine closes its open live questions (`answerer: "engine"`,
   "moot") and writes the terminal at once, and no final-pass question is asked about it.
 
-Agent activity: rule answers and long-poll reads are not agent writes. Report "the agent is alive"
-from authored actions (commands, decisions, answers with `answerer: agent`), not from reads.
+Agent activity: `harness-progress.agent_activity` now carries, beside the read observation,
+`authored_status` / `last_authored_at` / `authored_kind` — the last AUTHORED action of the harness
+credential (a command, a checkpoint answer, a decision or review). Rule and engine answers and reads
+(progress, checkpoints, the long poll) never refresh it, so a polling bot cannot make a dead agent
+look alive. Report liveness from authored actions, not from reads.
 
 ## 5. The eval canary for external runs
 

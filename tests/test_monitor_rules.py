@@ -153,3 +153,39 @@ def test_attempt_failed_truth_table():
     assert answer_source({"answerer": "rule"}) == "rule"
     assert answer_source({"answerer": "human"}) == "operator"
     assert answer_source({}) == "external_agent"
+
+
+def test_agent_activity_separates_authored_actions_from_reads():
+    from looplab.serve.agent_activity import AgentActivity
+
+    t = {"now": 1000.0}
+    activity = AgentActivity(clock=lambda: t["now"], timestamp=lambda: "ts")
+    activity.observe("rd", "g", read_kind="harness-checkpoints")      # a polling bot
+    snap = activity.snapshot("rd", "g")
+    assert snap["status"] == "recent_request" and snap["authored_status"] == "not_observed"
+    activity.observe_authored("rd", "g", "checkpoint_answer")
+    t["now"] += 500
+    activity.observe("rd", "g", read_kind="harness-checkpoints")
+    snap = activity.snapshot("rd", "g")
+    assert snap["status"] == "recent_request" and snap["authored_status"] == "quiet"
+    assert snap["authored_kind"] == "checkpoint_answer" and snap["authored_age_seconds"] == 500
+
+
+def test_an_agent_checkpoint_answer_counts_as_authored_but_a_rule_answer_does_not(tmp_path,
+                                                                                    monkeypatch):
+    monkeypatch.setenv("LOOPLAB_UI_TOKEN", "owner-token-123456")
+    monkeypatch.setenv("LOOPLAB_HARNESS_TOKEN", "agent-token-654321")
+    rd, store = seeded(tmp_path)
+    app = make_app(tmp_path / "runs")
+    client = TestClient(app)
+    agent = {"X-LoopLab-Token": "agent-token-654321"}
+    generation = run_generation_token(store.read_all())
+    mr.write_rules(rd, RULES)
+    ask(rd, 0, 0, "train_monitor", stage="train", observation="step 1 loss=1")   # rule-answered
+    activity = app.state.looplab.agent_activity
+    assert activity.snapshot(rd, generation)["authored_status"] == "not_observed"
+    q = ask(rd, 0, 0, "stage_check", stage="train", observation="no save line")
+    body = {"expected_generation": generation, "checkpoint_id": q["checkpoint_id"],
+            "action_id": "a1", "verdict": "proceed", "failure_kind": "", "reason": "checked"}
+    assert client.post("/api/runs/demo/harness-checkpoints", json=body, headers=agent).status_code == 200
+    assert activity.snapshot(rd, generation)["authored_kind"] == "checkpoint_answer"

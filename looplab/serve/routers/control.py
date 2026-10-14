@@ -201,10 +201,16 @@ def build_router(srv) -> APIRouter:
         # WHICH credential asks: the agent token is refused an intent LoopLab's own model
         # fulfils on an internal run (doc 70 70.8, `control_validation.py::agent_token_refusal`).
         agent_token = request_agent_token(request)
-        return await anyio.to_thread.run_sync(lambda: srv.commands.submit(
+        result = await anyio.to_thread.run_sync(lambda: srv.commands.submit(
             rd, idem, body.get("type"), body.get("data"),
             expected_generation=body.get(EXPECTED_RUN_GENERATION_FIELD),
             drain_only=body.get("drain_only"), agent_token=agent_token))
+        generation = body.get(EXPECTED_RUN_GENERATION_FIELD)
+        if agent_token and isinstance(generation, str):
+            # An AUTHORED action, kept apart from reads (doc 78 §4, `serve/agent_activity.py`).
+            srv.agent_activity.observe_authored(rd, generation.lower(),
+                                                f"command:{body.get('type')}")
+        return result
 
     @router.get(
         "/api/runs/{run_id}/command-receipt",
