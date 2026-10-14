@@ -19,7 +19,8 @@ def test_mcp_advertises_run_controls_and_full_settings_discovery():
             "amend_protocol", "run_protocol", "upload_per_query", "compare_experiment",
             "shared_test_leaderboard", "campaign_supertask", "campaign_report",
             "publish_campaign_narrative", "submit_experiment", "finish_run",
-            "retry_node"} == {tool.name for tool in tools}
+            "retry_node", "resume_per_query_upload",
+            "pending_per_query_uploads"} == {tool.name for tool in tools}
     for tool in (t for t in tools if t.name.startswith("upstream_")):
         hints = tool.annotations.model_dump(by_alias=True)
         assert hints["idempotentHint"]

@@ -11,7 +11,7 @@ import json
 import os
 import re
 from pathlib import Path
-from typing import Literal
+from typing import Literal, Optional
 from urllib.parse import quote, unquote, urlencode, urlsplit
 
 import httpx
@@ -83,9 +83,12 @@ class HarnessAPI:
         except httpx.InvalidURL:
             raise ValueError("LOOPLAB_HARNESS_URL must be a valid HTTP(S) server URL") from None
         self.requests = None
+        self.uploads = None
         if request_dir is not None:
             from looplab.harness.client_requests import ClientRequests
+            from looplab.harness.upload_spool import UploadSpool
             self.requests = ClientRequests(request_dir, str(self.client.base_url))
+            self.uploads = UploadSpool(request_dir, str(self.client.base_url))
 
     @staticmethod
     def _path(path: str) -> str:
@@ -309,19 +312,47 @@ class HarnessAPI:
                                "wait_for_next again with the same after cursor; no event was lost."}
         return self._result(response, method="GET")
 
-    def post_large(self, path: str, body: dict, *, max_bytes: int = 32_000_000) -> dict:
+    def post_large(self, path: str, body: dict, *, max_bytes: int = 32_000_000,
+                   spool: Optional[tuple] = None, source: str = "") -> dict:
         """POST one bounded binary-carrying body (a per-query upload, doc 81) past the 1 MiB
-        general cap; the server bounds the same route at the same size. Not saved in the client
-        request store (its records are 1 MiB): keep the file and the action_id to retry exactly."""
+        general cap; the server bounds the same route at the same size. `spool=(run_id,
+        action_id)` keeps the exact request bytes in the client's upload spool until a definite
+        answer (`harness/upload_spool.py`), so `resume_per_query_upload` can resend them without
+        the original file; the server is idempotent on the action_id."""
         payload = json.dumps(body).encode("utf-8")
         if len(payload) > max_bytes:
             raise ValueError(f"body must be at most {max_bytes} bytes")
+        note = None
+        if spool is not None:
+            note = ("client upload spool disabled (no LOOPLAB_HARNESS_REQUEST_DIR)"
+                    if self.uploads is None else self.uploads.save(*spool, payload, source=source))
+        result = self._send_spoolable(path, payload, spool)
+        if spool is not None:
+            result["spool"] = {"spooled": note is None, **({"note": note} if note else {})}
+        return result
+
+    def _send_spoolable(self, path: str, payload: bytes, spool: Optional[tuple]) -> dict:
         try:
             response = self.client.request("POST", self._path(path), content=payload,
                                            headers={"Content-Type": "application/json"})
         except httpx.TransportError:
             return self._unknown_write({"status": None}, "transport_error")
-        return self._result(response, method="POST")
+        result = self._result(response, method="POST")
+        if (spool is not None and self.uploads is not None
+                and isinstance(result.get("status"), int) and result["status"] < 500):
+            self.uploads.settle(*spool, http_status=result["status"])
+        return result
+
+    def resume_upload(self, path: str, run_id: str, action_id: str) -> Optional[dict]:
+        """Resend a spooled upload body exactly; None when nothing is pending for it."""
+        if self.uploads is None:
+            return None
+        payload = self.uploads.load(run_id, action_id)
+        if payload is None:
+            return None
+        result = self._send_spoolable(path, payload, (run_id, action_id))
+        result["spool"] = {"resumed": True}
+        return result
 
     def saved_commands(self, run_id, expected_generation, offset=0, limit=20):
         """Private local records only; not a server receipt or an automatic recovery."""
@@ -1077,7 +1108,8 @@ def _campaign_tools(mcp, api, ToolAnnotations) -> None:
                          query_key: str = "keys", cluster_key: str | None = "users",
                          measured_check: dict | None = None) -> dict:
         """Send a TERMINAL node's per-query arrays (local .npz or .json, <=24 MB) so LoopLab can
-        compare models itself. metrics: {name: {kind: mean, array, columns?} | {kind: ratio, num,
+        compare models itself. The request is spooled client-side until answered; an empty path
+        resends the spooled body for this action_id. metrics: {name: {kind: mean, array, columns?} | {kind: ratio, num,
         den, columns?}}; columns selects 2-D columns before the row sum. LoopLab derives the shared
         test id from query ids + clusters (users), and measured_check={metric, node_metric?}
         compares the upload's mean with the metric LoopLab measured. experiment_id+arm binds the
@@ -1086,6 +1118,21 @@ def _campaign_tools(mcp, api, ToolAnnotations) -> None:
             api, run_id, expected_generation, node_id=node_id, path=path, metrics=metrics,
             action_id=action_id, test_label=test_label, experiment_id=experiment_id, arm=arm,
             query_key=query_key, cluster_key=cluster_key, measured_check=measured_check)
+
+    @mcp.tool()
+    def resume_per_query_upload(run_id: str, action_id: str) -> dict:
+        """Resend a per-query upload this client spooled (the exact request bytes, kept until
+        LoopLab answered) — after a transport error, a 5xx or a lost turn — without the file.
+        LoopLab is idempotent on action_id: a body it already accepted returns its receipt."""
+        return composite.resume_per_query_upload(api, run_id, action_id)
+
+    @mcp.tool(annotations=ToolAnnotations(readOnlyHint=True, destructiveHint=False,
+                                        idempotentHint=True, openWorldHint=False))
+    def pending_per_query_uploads(run_id: str = "") -> dict:
+        """Per-query uploads this client spooled that have no definite answer yet."""
+        if api.uploads is None:
+            return {"source": "client", "outcome": "unavailable", "code": "client_requests_disabled"}
+        return {"source": "client", "pending": api.uploads.pending(run_id or None)}
 
     @mcp.tool(annotations=ToolAnnotations(readOnlyHint=True, destructiveHint=False,
                                         idempotentHint=True, openWorldHint=False))

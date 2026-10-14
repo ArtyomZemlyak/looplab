@@ -180,10 +180,22 @@ def protocol_view(rd: Path) -> dict:
         "amendment_id", "version", "kind", "author", "reason", "recorded_at", "at_event_seq",
         "at_node_count", "generation", "summary", "action_id")} | {"payload": _trail_payload(row)}
         for row in current]
+    # The latest recorded CONTENT fingerprint per data mount (amendment rows only; a mount never
+    # amended has none — the engine's own `workspace_fingerprint` covers it shallowly).
+    data_content: dict = {}
+    for row in current:
+        content = (row.get("payload") or {}).get("data_content") if row.get("kind") == "task" else None
+        if isinstance(content, dict):
+            for name, pair in content.items():
+                if isinstance(pair, dict):
+                    data_content[name] = {"fingerprint": pair.get("after"),
+                                          "amendment_id": row.get("amendment_id"),
+                                          "version": row.get("version")}
     return {"version": 1, "run_uid": run_uid, "generation": generation,
             "protocol_version": len(current),
             "experiments": list(experiments_of(current).values()),
-            "amendments": trail, "policy": read_policy(rd), "source_health": health}
+            "amendments": trail, "data_content": data_content, "policy": read_policy(rd),
+            "source_health": health}
 
 
 def _trail_payload(row: dict) -> dict:
@@ -452,6 +464,101 @@ def publish_amendment(srv, rd: Path, body, *, agent_token: bool) -> dict:
         raise HTTPException(503, "protocol journal unavailable") from exc
 
 
+# ------------------------------------------------------------------------------- data content
+# A bounded CONTENT fingerprint of a data mount (doc 81 §8 leftover). Bounded three ways because a
+# mount can be a multi-GB tree on a slow FUSE mount: at most `_FP_MAX_FILES` entries, at most
+# `_FP_HASH_BYTES` of file content hashed in full (larger files contribute their size, mtime and
+# the SHA-256 of their first and last MiB — `sampled`), and at most `_FP_SECONDS` of wall time. A
+# bound that was hit is stated (`truncated`), never hidden: such a fingerprint still changes when
+# the listed part changes, and says it may miss a change past the bound.
+_FP_MAX_FILES = 20_000
+_FP_HASH_BYTES = 256 * 1024 * 1024
+_FP_SAMPLE = 1024 * 1024
+_FP_SECONDS = 30.0
+
+
+def _mount_path(spec) -> Optional[str]:
+    path = spec.get("path") if isinstance(spec, dict) else spec
+    return os.path.expanduser(os.path.expandvars(path)) if isinstance(path, str) else None
+
+
+def content_fingerprint(path: Optional[str]) -> dict:
+    """`{method, digest, files, bytes, hashed_bytes, sampled_files, truncated, missing}` for the file
+    or directory tree at `path` (symlinks are recorded by target, never followed)."""
+    out = {"method": "lfp1", "digest": None, "files": 0, "bytes": 0, "hashed_bytes": 0,
+           "sampled_files": 0, "truncated": False, "missing": False}
+    if not path or not os.path.exists(path):
+        out["missing"] = True
+        return out
+    deadline = time.monotonic() + _FP_SECONDS
+    digest = hashlib.sha256()
+    root = Path(path)
+
+    def entries():
+        if root.is_file():
+            yield "", root
+            return
+        for dirpath, dirnames, filenames in os.walk(root):
+            dirnames.sort()
+            for name in sorted(filenames):
+                full = Path(dirpath) / name
+                yield full.relative_to(root).as_posix(), full
+
+    for rel, full in entries():
+        if out["files"] >= _FP_MAX_FILES or time.monotonic() > deadline:
+            out["truncated"] = True
+            break
+        try:
+            st = full.lstat()
+        except OSError:
+            continue
+        out["files"] += 1
+        if full.is_symlink():
+            digest.update(f"L\0{rel}\0{os.readlink(full)}\n".encode("utf-8", "surrogateescape"))
+            continue
+        out["bytes"] += st.st_size
+        digest.update(f"F\0{rel}\0{st.st_size}\0".encode("utf-8", "surrogateescape"))
+        whole = out["hashed_bytes"] + st.st_size <= _FP_HASH_BYTES
+        h = hashlib.sha256()
+        try:
+            with open(full, "rb") as fh:
+                if whole:
+                    for chunk in iter(lambda: fh.read(1 << 20), b""):
+                        h.update(chunk)
+                    out["hashed_bytes"] += st.st_size
+                else:
+                    h.update(fh.read(_FP_SAMPLE))
+                    fh.seek(max(0, st.st_size - _FP_SAMPLE))
+                    h.update(fh.read(_FP_SAMPLE))
+                    digest.update(f"{st.st_mtime_ns}\0".encode())
+                    out["sampled_files"] += 1
+        except OSError:
+            digest.update(b"unreadable\0")
+            continue
+        digest.update(h.hexdigest().encode() + b"\n")
+    out["digest"] = digest.hexdigest()
+    return out
+
+
+def _recorded_data_fingerprints(rd: Path) -> dict:
+    """The latest content fingerprint the journal recorded per data mount name (this run only)."""
+    rows, _health = read_journal(rd)
+    try:
+        from looplab.events.eventstore import EventStore
+        uid = fold(EventStore(Path(rd) / "events.jsonl").read_all()).run_uid
+    except (OSError, ValueError):
+        uid = None
+    rows = [r for r in rows if not uid or r.get("run_uid") == uid]
+    latest: dict = {}
+    for row in rows:
+        content = (row.get("payload") or {}).get("data_content") if row.get("kind") == "task" else None
+        if isinstance(content, dict):
+            for name, pair in content.items():
+                if isinstance(pair, dict):
+                    latest[name] = pair.get("after")
+    return latest
+
+
 # ------------------------------------------------------------------------------- task amendments
 def _apply_task_amendment(rd: Path, changes) -> tuple[dict, Any]:
     from looplab.adapters.tasks import validate_task
@@ -460,7 +567,7 @@ def _apply_task_amendment(rd: Path, changes) -> tuple[dict, Any]:
     if not isinstance(changes, dict) or not changes:
         raise HTTPException(400, "task changes are required")
     allowed = {"inputs_add", "inputs_remove", "protect_add", "protect_remove", "data_add",
-               "data_remove"}
+               "data_remove", "data_refresh"}
     if set(changes) - allowed:
         raise HTTPException(400, f"task changes may only be {', '.join(sorted(allowed))}")
     snap = Path(rd) / "task.snapshot.json"
@@ -503,6 +610,13 @@ def _apply_task_amendment(rd: Path, changes) -> tuple[dict, Any]:
             protect.append(p)
     task["protect"] = protect
     data_add, data_remove = changes.get("data_add", {}), changes.get("data_remove", [])
+    data_refresh = changes.get("data_refresh", [])
+    if not isinstance(data_refresh, list) or not all(isinstance(n, str) for n in data_refresh):
+        raise HTTPException(400, "data_refresh is a list of data mount names")
+    mounts_before = dict(task.get("data") or {})
+    for name in data_refresh:
+        if name not in mounts_before:
+            raise HTTPException(400, f"data_refresh: no data mount {name!r}")
     if data_add or data_remove:
         if not isinstance(data_add, dict) or not isinstance(data_remove, list):
             raise HTTPException(400, "data_add is {name: path|spec}, data_remove a list of names")
@@ -525,18 +639,38 @@ def _apply_task_amendment(rd: Path, changes) -> tuple[dict, Any]:
     before_text = json.dumps(json.loads(before_bytes), indent=2)
     diff = "".join(difflib.unified_diff(before_text.splitlines(True), after_text.splitlines(True),
                                         "task.snapshot.json (before)", "task.snapshot.json (after)"))
-    if not diff:
+    # THE CONTENT of every mount this amendment touches, not only its declaration (doc 81 §8
+    # leftover): a fingerprint of what the path held when the amendment was recorded, and for a
+    # refreshed or removed mount the fingerprint the journal last recorded for it — so "the data
+    # changed under the same name" is a recorded protocol version, not an invisible one.
+    data_content = {}
+    previous = _recorded_data_fingerprints(rd)
+    for name in sorted(set(data_add) | set(data_refresh)):
+        spec = (task.get("data") or {}).get(name)
+        data_content[name] = {"before": previous.get(name),
+                              "after": content_fingerprint(_mount_path(spec))}
+    for name in data_remove:
+        data_content[name] = {"before": previous.get(name), "after": None}
+    refreshed = [n for n in data_refresh
+                 if (data_content[n]["before"] or {}).get("digest")
+                 != data_content[n]["after"].get("digest")]
+    if not diff and not data_refresh:
         raise HTTPException(400, "the task changes leave the task unchanged")
-    atomic_write_text(snap, after_text)
+    if diff:
+        atomic_write_text(snap, after_text)
 
     def undo():
         atomic_write_bytes(snap, before_bytes)
     summary = ", ".join(f"{k}: {len(v)}" for k, v in changes.items() if v)
-    return ({"changes": changes, "before_identity": before_identity,
-             "after_identity": after_identity, "diff": diff[:MAX_DIFF_CHARS],
-             "diff_truncated": len(diff) > MAX_DIFF_CHARS, "applied": True,
-             "effective": "the next engine start (resume) reads the amended snapshot",
-             "summary": f"task amended ({summary})"}, undo)
+    out = {"changes": changes, "before_identity": before_identity,
+           "after_identity": after_identity, "diff": diff[:MAX_DIFF_CHARS],
+           "diff_truncated": len(diff) > MAX_DIFF_CHARS, "applied": True,
+           "effective": "the next engine start (resume) reads the amended snapshot",
+           "summary": f"task amended ({summary})"}
+    if data_content:
+        out["data_content"] = data_content
+        out["data_content_changed"] = refreshed
+    return (out, undo)
 
 
 # ------------------------------------------------------------------------------- file amendments

@@ -436,7 +436,8 @@ def _resolve_arm(cache: _Root, home_run: str, exp: dict, label: str, test: dict)
     if node is not None and node.terminal_event_seq is not None:
         terminal_ts = next((e.ts for e in events if e.seq == node.terminal_event_seq), None)
     return {"rd": rd, "run_id": run_id, "node_id": node_id, "upload": upload,
-            "terminal_seq": getattr(node, "terminal_event_seq", None), "terminal_ts": terminal_ts}
+            "terminal_seq": getattr(node, "terminal_event_seq", None), "terminal_ts": terminal_ts,
+            "protocol_version": getattr(node, "protocol_version", None)}
 
 
 def compare_experiment(root: Path, run_id: str, experiment_id: str, *,
@@ -505,7 +506,16 @@ def compare_experiment(root: Path, run_id: str, experiment_id: str, *,
                     "control_value": stats["control_value"],
                     "treatment_source": _upload_provenance(t["run_id"], tu),
                     "control_source": _upload_provenance(c["run_id"], cu),
-                    "registered_before_result": _before_result(registration, run_id, t)})
+                    "registered_before_result": _before_result(registration, run_id, t),
+                    # doc 81 §8 leftover: the protocol version each arm's node was CREATED under
+                    # (`Node.protocol_version`, folded from its `node_created` row). Differing
+                    # versions in one run are a caveat, never a refusal: the reader decides.
+                    "treatment_protocol_version": t.get("protocol_version"),
+                    "control_protocol_version": c.get("protocol_version"),
+                    "same_protocol": (None if t["run_id"] != c["run_id"]
+                                      or t.get("protocol_version") is None
+                                      or c.get("protocol_version") is None
+                                      else t["protocol_version"] == c["protocol_version"])})
         if replicates:
             row["bootstrap"] = paired.cluster_bootstrap(kind, boot_in, clusters,
                                                         replicates=replicates, seed=seed)
@@ -546,6 +556,9 @@ def _caveats(rows: list[dict]) -> list[str]:
     out = []
     if any(r.get("registered_before_result") is False for r in rows):
         out.append("some contrasts were registered AFTER their treatment result existed (post hoc)")
+    if any(r.get("same_protocol") is False for r in rows):
+        out.append("some contrasts compare nodes created under DIFFERENT protocol versions of the "
+                   "run (a task/files amendment landed between them): see the protocol journal")
     if any((r.get(side) or {}).get("stale") for r in rows for side in ("treatment_source", "control_source")):
         out.append("some uploads describe a node lifecycle that was later reset (stale)")
     if any((r.get(side) or {}).get("consistency") == "differs_from_measured"

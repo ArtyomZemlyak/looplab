@@ -265,9 +265,15 @@ def upload_per_query(api, run_id: str, expected_generation: str, *, node_id: int
                      experiment_id: Optional[str] = None, arm: Optional[str] = None,
                      query_key: str = "keys", cluster_key: Optional[str] = "users",
                      measured_check: Optional[dict] = None) -> dict:
-    source = Path(path).expanduser()
-    if not source.is_file():
-        raise ValueError("path must be a readable local file")
+    source = Path(path).expanduser() if path else None
+    if source is None or not source.is_file():
+        # RESUME (doc 81 §8 leftover): the file is gone or was never passed again, but this client
+        # spooled the exact request under (run_id, action_id) — resend that.
+        resumed = api.resume_upload(_run_path(run_id, "/per-query"), run_id, action_id)
+        if resumed is not None:
+            return resumed
+        raise ValueError("path must be a readable local file (and no spooled upload is pending "
+                         "for this action_id)")
     size = source.stat().st_size
     if size > MAX_UPLOAD_FILE_BYTES:
         raise ValueError(f"per-query files are at most {MAX_UPLOAD_FILE_BYTES} bytes")
@@ -279,7 +285,20 @@ def upload_per_query(api, run_id: str, expected_generation: str, *, node_id: int
             **{k: v for k, v in (("test_label", test_label), ("experiment_id", experiment_id),
                                  ("arm", arm), ("measured_check", measured_check))
                if v is not None}}
-    return api.post_large(_run_path(run_id, "/per-query"), body)
+    return api.post_large(_run_path(run_id, "/per-query"), body, spool=(run_id, action_id),
+                          source=str(source))
+
+
+def resume_per_query_upload(api, run_id: str, action_id: str) -> dict:
+    resumed = api.resume_upload(_run_path(run_id, "/per-query"), run_id, action_id)
+    if resumed is None:
+        entry = api.uploads.entry(run_id, action_id) if api.uploads is not None else None
+        return {"ok": False, "code": "no_pending_upload",
+                "message": ("this upload was already answered (status "
+                            f"{entry.get('http_status')}); read the run's per-query view"
+                            if entry and entry.get("status") == "settled" else
+                            "no spooled body for this run_id/action_id on this client")}
+    return resumed
 
 
 def campaign_supertask(api, name: str, run_ids: list, supertask_id: Optional[str] = None) -> dict:
@@ -322,5 +341,5 @@ def campaign_supertask(api, name: str, run_ids: list, supertask_id: Optional[str
                       supertask_id=supertask_id)
 
 
-__all__ = ["campaign_supertask", "finish_run", "retry_node", "submit_experiment",
-           "upload_per_query"]
+__all__ = ["campaign_supertask", "finish_run", "resume_per_query_upload", "retry_node",
+           "submit_experiment", "upload_per_query"]

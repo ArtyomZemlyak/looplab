@@ -20,9 +20,11 @@ from __future__ import annotations
 
 import dataclasses
 import functools
+import json
 import logging
 import threading
 from collections.abc import Mapping
+from pathlib import Path
 from types import MappingProxyType
 from typing import NamedTuple, Optional
 
@@ -252,6 +254,38 @@ def inherited_use_pins(state, parent_ids) -> dict:
         out[key] = producer.attempt if live else parent_pin
     return out
 
+
+
+_PROTOCOL_JOURNAL = "protocol_amendments.jsonl"     # `harness/campaign.py::JOURNAL`, the sidecar
+
+
+def _protocol_version_now(engine) -> Optional[int]:
+    """How many protocol amendments this run had recorded (its campaign protocol VERSION), or None
+    when it keeps no journal. Rows of another incarnation of the directory (another `run_uid`) do
+    not count. Read without the harness package (it imports the server stack): a JSONL count."""
+    run_dir = getattr(engine, "run_dir", None)
+    if run_dir is None:
+        return None
+    path = Path(run_dir) / _PROTOCOL_JOURNAL
+    if not path.is_file():
+        return None
+    try:
+        events = engine.store.read_all()
+        uid = next((e.data.get("run_uid") for e in events
+                    if e.type == "run_started" and isinstance(e.data, dict)
+                    and e.data.get("run_uid")), None)
+        count = 0
+        with open(path, "rb") as fh:
+            for line in fh:
+                try:
+                    row = json.loads(line)
+                except ValueError:
+                    continue
+                if isinstance(row, dict) and (uid is None or row.get("run_uid") == uid):
+                    count += 1
+        return count
+    except OSError:
+        return None
 
 class _RerunCardCommit(NamedTuple):
     """What a node-reset re-proposal's main-task Card commit decided (`Engine._commit_rerun_card`).
@@ -927,6 +961,12 @@ class NodeBuildMixin:
         # ruling) for every row whose files no Developer call produced, and while the lane is off.
         if isinstance(base_selector, dict):
             data["base_selector"] = dict(base_selector)
+        # doc 81 §8 leftover: the protocol version this lifecycle is created under, from the run's
+        # amendment journal — absent (never None-filled) for a run that has no journal, so every
+        # run without a campaign protocol writes byte-identical rows.
+        protocol_version = _protocol_version_now(self)
+        if protocol_version is not None:
+            data["protocol_version"] = protocol_version
         append_kwargs = (
             {} if expected_last_seq is _OMIT
             else {"expected_last_seq": expected_last_seq}

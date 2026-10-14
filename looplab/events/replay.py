@@ -622,6 +622,8 @@ def _on_node_created(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
             # that promise may later be REFUNDED on the absence of one; an old log carries no promise
             # and is charged. Additive + reader-defaulted -> old logs fold byte-identically.
             eval_start_boundary=d.get("eval_start_boundary") is True,
+            protocol_version=(d["protocol_version"] if type(d.get("protocol_version")) is int
+                              and d["protocol_version"] >= 0 else None),
         )
     except (MemoryError, RecursionError):
         # A RESOURCE glitch is NOT a corrupt-data error: it must fail LOUD, not be swallowed.

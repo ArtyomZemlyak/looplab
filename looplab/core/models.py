@@ -2221,6 +2221,12 @@ class Node(BaseModel):
     # fold-internal (`exclude=True`) and reader-defaulted, so an old log folds byte-identically — and,
     # carrying no boundary promise, is refused a refund rather than granted one on no evidence.
     eval_start_boundary: bool = Field(default=False, exclude=True)
+    # THE PROTOCOL VERSION this lifecycle was created under (doc 81 §8 leftover, 2026-10-14): the
+    # number of `protocol_amendments.jsonl` rows of this run when its `node_created` was written,
+    # recorded ON that row by the engine (`node_build.py::_protocol_version_now`) so the fold reads
+    # it from the log, never from the mutable sidecar. None = a run with no protocol journal, or a
+    # row written before the field existed (reader-defaulted; old logs fold byte-identically).
+    protocol_version: Optional[int] = None
     # Durable budget receipt: at least one sandbox admission happened in this lifecycle. It stays
     # true across an engine crash/resume so already-spent compute can never be refunded as "unused".
     eval_started: bool = Field(default=False, exclude=True)
