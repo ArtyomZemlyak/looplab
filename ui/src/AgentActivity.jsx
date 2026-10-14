@@ -31,7 +31,7 @@ export default function AgentActivity({ activity, fresh }) {
     ? (ru ? 'Обращений агента ещё не наблюдалось' : 'No agent reads observed')
     : activity.status === 'quiet'
       ? (ru ? `Нет новых обращений агента · ${ago}` : `No recent agent reads · ${ago}`)
-      : (ru ? `Агент обращался ${ago} назад` : `Agent read ${ago} ago`)
+      : (ru ? (activity.age_seconds < 5 ? 'Агент обращался только что' : `Агент обращался ${ago} назад`) : `Agent read ${ago} ago`)
   const explanation = ru
     ? 'Учитываются успешные проверки требований и вопросов обучения внешним агентом в этом процессе UI. Опрос браузера не учитывается. Отсутствие обращений не доказывает гибель агента; проверьте клиент, вопросы и квитанции. Перезапуск UI очищает наблюдение.'
     : 'Successful progress and training-checkpoint reads with the harness credential in this UI process. Browser polling does not count. Silence does not prove agent death; inspect the client, questions and receipts. UI restart clears this observation.'

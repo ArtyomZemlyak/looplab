@@ -415,9 +415,9 @@ export function dagEmptyPresentation({
   )
   if (externalMode === true && state.engine_running === true) return result(
     'awaiting-agent', 'attention', 'External agent controls the next experiment',
-    'LoopLab evaluates candidates submitted by the external agent. The agent must check the current '
-      + 'requirements and submit the next decision or candidate. Open Agent cycle to see what is due. '
-      + 'The agent connection is not verified here.',
+    // One literal, not a `+` chain: the catalogue is keyed by whole phrases, so a concatenated
+    // sentence never matched and always rendered in English under the Russian UI.
+    'LoopLab evaluates candidates submitted by the external agent. The agent must check the current requirements and submit the next decision or candidate. Open Agent cycle to see what is due. The agent connection is not verified here.',
     [action('agent', 'Open Agent cycle', 'primary'), action('events', 'Show events')],
   )
   if (state.engine_running === true) {
