@@ -3296,13 +3296,14 @@ applies. **This is the documented validation path for [`Settings.landlock`](conf
 ships `off`** — read it before you flip that default, not after.
 
 ```bash
-looplab landlock-check RUN_DIR [--no-probe]
+looplab landlock-check RUN_DIR [--no-probe] [--gpu-smoke [--python EVAL_PYTHON]]
 ```
 
 | Option | Default | Description |
 |---|---|---|
 | `RUN_DIR` | *(required)* | Run dir; the allow-list is derived from its own `task.snapshot.json` |
 | `--probe / --no-probe` | `--probe` | Fork a child, apply the ruleset, and prove a read inside the allow-list succeeds while one outside it is refused. The fork is why the irreversible `restrict_self` cannot touch your shell. |
+| `--gpu-smoke` | off | Under this run's allow-list (plus a scratch workdir), in `--python` (the eval's interpreter, e.g. the task's conda env), run: import torch, a CUDA matmul, a 2-worker DataLoader (`/dev/shm`), `torch.distributed` over loopback (NCCL with CUDA, else gloo), `/sys/class` + `/proc/driver/nvidia` reads, a workdir write and a read of every declared mount. Absent libraries are `skipped`, never `ok`; any `failed` step exits 1. Uses one GPU for seconds — run it when the GPUs are free (`runtime/landlock_smoke.py`). |
 
 What it prints, in order: the Landlock ABI this kernel offers; **the mounts the task declares**, each
 marked if it is not present on this box; the full allow-list (workdir readwrite, run dir READ — it is the run's record — plus its
@@ -3323,8 +3324,15 @@ The procedure before anyone flips the default:
 
 ```bash
 looplab landlock-check RUN_DIR          # read the mounts + list, confirm `skipped: 0`
+looplab landlock-check RUN_DIR --gpu-smoke --python <eval python>   # GPUs free: every surface ok
 LOOPLAB_LANDLOCK=enforce looplab run …  # then ONE real eval, and check it completed
 ```
+
+Measured on the MiniOneRec box 2026-10-14 with `CUDA_VISIBLE_DEVICES=""` (GPUs busy): torch
+2.10 import, the 2-worker DataLoader, gloo `all_reduce`, `/sys/class` and `/proc/driver/nvidia`
+all `ok` under the derived list; the CUDA matmul and NCCL steps are the owner's to run. The flip is
+then two lines: the `landlock` default to `"enforce"` and `"landlock": "off"` in
+`LEGACY_CONFIG_SNAPSHOT_DEFAULTS`, so every run launched before it resumes unchanged.
 
 The evidence that justifies the flip is that eval, not this command — this only tells you the ruleset
 is well-formed, contains your declarations, and applies.

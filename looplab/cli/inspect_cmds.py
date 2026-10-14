@@ -649,7 +649,14 @@ def tensorboard(
 def landlock_check(run_dir: Path = typer.Argument(..., help=_RUN_DIR_HINT),
                    probe: bool = typer.Option(
                        True, help="Also fork a child, apply the ruleset, and prove that a read "
-                                  "inside the allow-list succeeds and one outside it is refused.")):
+                                  "inside the allow-list succeeds and one outside it is refused."),
+                   gpu_smoke: bool = typer.Option(
+                       False, "--gpu-smoke", help="Run torch/CUDA/DataLoader/NCCL/sysfs/mount "
+                       "steps under this run's allow-list in --python (the owner's check before "
+                       "landlock defaults to enforce; uses one GPU briefly)."),
+                   python: Optional[str] = typer.Option(
+                       None, "--python", help="The EVAL interpreter for --gpu-smoke (default: this "
+                                              "one).")):
     """Print and test the kernel read allow-list a run would get.\fPrint the KERNEL read allow-list this run would grant, and prove the ruleset applies.
 
     THIS IS THE VALIDATION PATH FOR `Settings.landlock`, which ships `off`. The one unretired unknown
@@ -744,6 +751,22 @@ def landlock_check(run_dir: Path = typer.Argument(..., help=_RUN_DIR_HINT),
         typer.echo(f"  SKIPPED {path}: {why}  <- this path would be DENIED")
     if skipped:
         raise typer.Exit(1)
+    if gpu_smoke:
+        # The surfaces a real GPU eval touches, in the eval's own interpreter, under this ruleset
+        # (`runtime/landlock_smoke.py`): what stands between `off` and an `enforce` default.
+        import sys as _sys
+
+        from looplab.runtime.landlock_smoke import mount_paths, run_smoke
+        result = run_smoke(allow, python=python or _sys.executable, mounts=mount_paths(mounts))
+        for name, row in result["steps"].items():
+            detail = row.get("error") or row.get("why") or row.get("detail") or ""
+            typer.echo(f"gpu-smoke {name:<17} {row.get('status', '?'):<8} {detail}")
+        if not result["ok"]:
+            typer.echo("gpu-smoke: FAILED — a surface above is refused by this ruleset; do NOT "
+                       "flip landlock to enforce. stderr tail:\n" + result["stderr_tail"])
+            raise typer.Exit(1)
+        typer.echo("gpu-smoke: every exercised surface works under the allow-list "
+                   "(skipped steps were NOT exercised)")
     if not probe:
         return
     # The probe forks so the irreversible `restrict_self` cannot touch this CLI process.
