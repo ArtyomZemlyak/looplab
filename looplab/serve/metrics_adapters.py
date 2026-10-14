@@ -16,6 +16,7 @@ import re
 import stat
 from typing import Protocol
 
+from looplab.core.atomicio import file_identity
 from looplab.core.pathsafe import is_reparse
 
 # A logging framework that RE-RUNS training in the SAME node workdir (an inline-repair retrain, or any
@@ -210,7 +211,9 @@ def _finite(value) -> bool:
 def _cached_parse(path: str, info: os.stat_result, max_bytes: int, parse) -> dict:
     if info.st_size > max_bytes:
         return {}
-    key = (path, info.st_size, info.st_mtime_ns)
+    # `file_identity` (dev, ino, size, mtime_ns, …): a REPLACED file with the same size and mtime is
+    # still a miss, which a hand-rolled (size, mtime) pair would serve stale.
+    key = (path, file_identity(info))
     hit = _PARSE_CACHE.get(key)
     if hit is not None:
         return hit

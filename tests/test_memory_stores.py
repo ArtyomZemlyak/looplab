@@ -40,6 +40,8 @@ REGISTRY_FILE = PKG / "engine" / "memory_stores.py"
 # a name here the tree no longer spells is a stale row.
 NOT_MEMORY_JSONL = {
     "events.jsonl": "the run's event log (run directory)",
+    ".metrics.jsonl": "a training script's own metric curves in a node workdir, read by "
+                      "`serve/metrics_adapters.py::FileMetricsAdapter`",
     "outbox.jsonl": "the external-agent event outbox (`<run root>/.agent-events/`, doc 78)",
     "deliveries.jsonl": "the agent wake-up hook's delivery ledger (`<run root>/.agent-events/`)",
     "spans.jsonl": "the run's trace spans (run directory)",

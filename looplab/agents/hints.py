@@ -16,22 +16,11 @@ the proposal used to steer WHAT to try but not HOW it was built or which action 
 from __future__ import annotations
 
 
-# The literal every deep-research hint's text begins with. Shared with the writer
-# (`engine/research_cadence.py`) rather than spelled twice: it is the fallback identity of a row
-# whose `source` stamp predates the field, so a reworded writer that left this filter behind would
-# put model output back inside the operator-authority block.
-DEEP_RESEARCH_HINT_PREFIX = "deep-research directions: "
-
-
-def operator_directive_texts(pending_hints) -> list[str]:
-    """The standing OPERATOR directives, oldest first — the one filter both the internal roles'
-    prompt block (`render_hint_directives`) and the external agent's progress read use, so the two
-    cannot disagree about which hints carry operator authority (deep-research rows never do)."""
-    rows = [h for h in (pending_hints or [])
-            if isinstance(h, dict) and h.get("source") != "deep_research"
-            and not str(h.get("text") or "").lstrip().startswith(DEEP_RESEARCH_HINT_PREFIX)]
-    hints = [str(h.get("text", "")).strip() for h in rows if h.get("text")]
-    return [h for h in hints if h]
+# The deep-research prefix and the operator-only filter live in `core/hint_directives.py` so the
+# external agent's progress read (`harness/progress.py`) can use the SAME filter without a
+# harness -> agents edge; both names are re-exported here as the same objects.
+from looplab.core.hint_directives import (  # noqa: E402,F401 — re-export
+    DEEP_RESEARCH_HINT_PREFIX, operator_directive_texts)
 
 
 def render_hint_directives(pending_hints, *, max_shown: int = 6) -> str:

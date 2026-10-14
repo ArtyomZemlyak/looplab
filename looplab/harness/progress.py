@@ -76,7 +76,7 @@ def _operator_directions(state) -> dict:
     the agent — the steer was accepted, folded and read by nobody. Advisory and read-only: it is
     the operator's wish, not an obligation the candidate gate checks, and the newest wins on
     conflict exactly as it does for the internal roles."""
-    from looplab.agents.hints import operator_directive_texts
+    from looplab.core.hint_directives import operator_directive_texts
     texts = operator_directive_texts(getattr(state, "pending_hints", None))
     shown = texts[-OPERATOR_DIRECTIONS_SHOWN:]
     return {"items": [text[:2_000] for text in shown], "total": len(texts),
