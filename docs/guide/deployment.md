@@ -314,6 +314,41 @@ This is per-*plane*, not per-user: `LOOPLAB_UI_TOKEN` is a per-deployment creden
 two people sharing one token share one `owner` scope. Real per-user separation still needs a private
 origin per user.
 
+## Run directories in tmpfs: the durable mirror
+
+A box whose durable storage is a slow network/FUSE mount (S3 through geesefs on the MiniOneRec box)
+keeps the run root in tmpfs (`/dev/shm/looplab-runs`), so the engine's appends, locks and mkdirs
+never wait on the mount — and a pod restart then wipes every run. `looplab run-mirror` keeps a
+durable copy and `looplab run-mirror-restore` brings it back:
+
+```bash
+export LOOPLAB_RUN_MIRROR_DST=/home/jovyan/data/looplab/runs-mirror
+looplab run-mirror --src /dev/shm/looplab-runs --loop --interval 300 --max-mbps 16 --exit-on-stuck
+looplab run-mirror-status --src /dev/shm/looplab-runs        # last pass, lag per run, errors
+# after a restart, before resuming anything:
+looplab run-mirror-restore --src /dev/shm/looplab-runs --all-missing
+looplab resume /dev/shm/looplab-runs/<run>
+```
+
+What it guarantees (`looplab/events/run_mirror.py`):
+
+* only changed files are copied (state in `<src>/.looplab-mirror/state.json`, re-seeded from the
+  destination manifests when tmpfs lost it), throttled in bytes and file operations per second;
+* `*.jsonl` is cut at its last newline, so a copy taken mid-append is never a torn log;
+* each run's `.looplab-mirror.json` manifest lists every file's SHA-256; a restore verifies it,
+  stages into a hidden directory and renames into place only when the event log and snapshots
+  verified, and never overwrites an existing run;
+* a pass never lists or `stat`s the destination; every destination call has a deadline, and a hung
+  one stops the pass (recorded as `stuck`; `--exit-on-stuck` exits 3 for a supervisor to restart).
+  The mirror is its own process and takes no lock the engine takes, so a hung mount cannot stall a
+  run;
+* not copied: lock files, SQLite read models (rebuilt from the log), `code/` (rebuilt by
+  `looplab code-status --sync`), `canary/`, and files over `--max-file-mb` (listed as `skipped`).
+
+Measured on the MiniOneRec box (S3 via geesefs, 2026-10-14): a 762-file, 27 MB run copy mirrored in
+95 s at `--max-files-per-s 10`, the next pass took 0.0 s with no destination access, and the
+restored copy folded to the identical `RunState`.
+
 ## Observability export
 
 Spans are always written to `spans.jsonl` (files-as-truth, zero-dep). To forward the *same* spans to

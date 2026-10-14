@@ -74,6 +74,7 @@ _LAYOUT = {
     "mlebench_extras": "adapters",  # the two official MLE-bench extras as post-run instruments (doc 52 row 22)
     "mlebench_campaign": "adapters",  # the ≥3-seed mean ± SEM campaign table (doc 52 row 23)
     "prior_citations": "events",  # the prior citation-rate instrument over prior_injected + memory_read
+    "run_mirror": "events",  # durable copy of tmpfs run dirs + verified restore (`looplab run-mirror`)
     # The three CORPUS instruments behind `looplab/cli/corpus_cmds.py`: each is the READ a backlog
     # marker says must exist before its decision may be taken, and each decides nothing itself.
     "belief_key_split": "events",  # concept-equal card groups the seed-TEXT belief key splits

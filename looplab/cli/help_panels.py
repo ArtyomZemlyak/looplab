@@ -74,6 +74,9 @@ HELP_PANELS: tuple[tuple[str, tuple[tuple[str, str], ...]], ...] = (
     )),
     ("Maintenance", (
         ("build-ui", "Build the React UI bundle that `looplab ui` serves."),
+        ("run-mirror", "Mirror tmpfs run directories to durable storage, throttled."),
+        ("run-mirror-status", "Show the run mirror's last pass, lag per run and errors."),
+        ("run-mirror-restore", "Restore a mirrored run directory, verified, after a restart."),
         ("evaluate-track", "Run a declared evaluation track over finished nodes."),
         ("import-metrics", "Import metrics measured after the run, beside the live ones."),
         ("backfill-applied-params", "Record what parameters each node actually ran with."),

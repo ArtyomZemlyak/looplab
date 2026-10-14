@@ -90,6 +90,9 @@ looplab agent-notify    Agent wake-up hook (doc 78)
 looplab agent-events    Agent event outbox
 looplab gpu-gate        Hold/order a run's GPUs
 looplab gpu-queue       GPU queue
+looplab run-mirror      Mirror tmpfs run dirs to durable storage, throttled (doc 80)
+looplab run-mirror-status Mirror's last pass, per-run lag and errors (read-only)
+looplab run-mirror-restore Restore a mirrored run, verified against its manifest
 ```
 
 Engine settings from `run -s/--set` (and typed overrides) may also come from `LOOPLAB_*` variables
@@ -3410,3 +3413,15 @@ looplab harness-mcp
 ## `gpu-queue`
 
 | `(no options)` | Who holds the host GPU lease and who waits for it, in FIFO order (read-only). |
+
+## `run-mirror`
+
+| `--src ROOT --dst DIR [--loop] [--interval S] [--max-mbps M] [--max-files-per-s N] [--max-file-mb M] [--op-timeout S] [--run R]... [--exclude GLOB]... [--exit-on-stuck]` | Copies the run directories under `--src` (e.g. tmpfs `/dev/shm/looplab-runs`) to `--dst` (default `$LOOPLAB_RUN_MIRROR_DST`, e.g. an S3 FUSE mount): only changed files, `*.jsonl` cut at the last newline, one SHA-256 manifest per run, throttled, never listing the destination during a pass; a hung destination call stops the pass (exit 3 with `--exit-on-stuck`). Skips locks, SQLite read models, `code/` and `canary/`. [Doc 80](../80-open-items-triage-2026-10-14.md) |
+
+## `run-mirror-status`
+
+| `--src ROOT [--dst DIR]` | The mirror's last pass, a stuck destination, recent errors and each run's lag behind its source (reads the state file and the source only). |
+
+## `run-mirror-restore`
+
+| `[RUN] --src ROOT [--dst DIR] [--as NAME] [--all-missing] [--no-verify]` | Restores a mirrored run (or every mirrored run absent from `--src`) into a staging directory, verifies each file against the manifest, then renames it into place; refuses an existing run. Then `looplab resume`. |

@@ -1254,7 +1254,7 @@ def _exit_nonzero_if_the_run_produced_nothing(state, run_dir, *, wrap_up_only: b
 # need is already defined by this point.
 from looplab.cli import (audit_cmds, code_cmds, concept_cmds, corpus_cmds,  # noqa: E402,F401
                          export_cmds, governance_cmds, maintenance_cmds, memory_cmds,
-                         harness_cmds, inspect_cmds, run_cmds, ui_cmds)
+                         harness_cmds, inspect_cmds, mirror_cmds, run_cmds, ui_cmds)
 
 # The `--help` LIST is ordered and grouped by `help_panels.HELP_PANELS`, not by the import order
 # above (doc 74 EB-08): that order is chosen for import safety and put `run` 63rd of 74.
