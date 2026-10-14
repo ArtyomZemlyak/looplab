@@ -2220,8 +2220,9 @@ EVENT_PAYLOAD_KEYS: dict[str, PayloadContract] = {
             "trials", "violations"
         ),
         optional=(
-            "activation", "attempt", "extra_metrics_direction", "extra_metrics_provenance",
-            "metric_provenance", "resource_curve", "self_metric", "stderr_tail"
+            "activation", "attempt", "extra_metrics_direction", "extra_metrics_omitted",
+            "extra_metrics_provenance", "metric_provenance", "resource_curve", "self_metric",
+            "stderr_tail"
         ),
     ),
     "node_failed": PayloadContract(

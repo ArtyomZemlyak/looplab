@@ -78,7 +78,8 @@ from looplab.core.models import (DEVELOPER_ERROR_PREFIX, DEVELOPER_STUCK_PREFIX,
                                  developer_artifact_footprint,
                                  EXTRA_METRIC_DECLARED, authenticated_extra_metrics_only,
                                  normalize_extra_metric_directions,
-                                 normalize_extra_metric_channels, normalize_extra_metrics)
+                                 normalize_extra_metric_channels, normalize_extra_metrics,
+                                 extra_metrics_overflow)
 from looplab.core.node_evidence import begin_metrics_attempt, read_bounded_regular_file
 from looplab.core.run_identity import run_ref
 from looplab.engine.asha_monitor import extract_resource_curve
@@ -6782,7 +6783,16 @@ class EvaluateMixin:
                 # (`tests/test_auto_extra_metrics.py`), which is what keeps invariant #6 honest
                 # without adding a key to the `run_started` payload whose exact key SET
                 # `search/speculation_quality.py` compares for equality.
-                _extras = normalize_extra_metrics(a.res.extra_metrics)
+                # The DECLARED names survive the map's bound whatever their position, and what
+                # the bound left out is COUNTED on the row (`extra_metrics_omitted`) rather than
+                # vanishing (review 2026-10-14 §7: ~615 stdout keys, 3 of 4 key metrics lost).
+                _declared_extras = [
+                    k for k, c in (a.res.extra_metrics_provenance or {}).items()
+                    if c == EXTRA_METRIC_DECLARED] if isinstance(
+                        a.res.extra_metrics_provenance, dict) else []
+                _extras = normalize_extra_metrics(a.res.extra_metrics, priority=_declared_extras)
+                _extras_omitted = extra_metrics_overflow(
+                    a.res.extra_metrics, priority=_declared_extras)
                 _extra_channels = normalize_extra_metric_channels(a.res.extra_metrics_provenance)
                 _extra_dirs = normalize_extra_metric_directions(a.res.extra_metrics_direction)
                 if not bool(getattr(self, "auto_extra_metrics", True)):
@@ -6841,6 +6851,11 @@ class EvaluateMixin:
                 # of every log written before this shipped.
                 if _extra_dirs:
                     _eval_payload["extra_metrics_direction"] = _extra_dirs
+                # Same rule: absent == the bound dropped nothing. A count plus the first names,
+                # so the record SAYS a metric is missing instead of looking complete.
+                if _extras_omitted:
+                    _eval_payload["extra_metrics_omitted"] = {
+                        "count": len(_extras_omitted), "names": _extras_omitted[:32]}
                 if _curve:                     # computed above, outside the write-lock (see the #7 note)
                     _eval_payload["resource_curve"] = _curve
                 # THE ROW'S VIOLATIONS AND ITS PROVENANCE — the salvage account and its enforcement

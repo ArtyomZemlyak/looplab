@@ -129,19 +129,16 @@ concept_materialization_reason = _concept_materialization_reason
 normalized_concept_materialization_receipt = _normalized_concept_materialization_receipt
 
 
-def normalize_extra_metrics(value, *, max_items: int = 256) -> dict[str, float]:
-    """Normalize the public multi-objective metric map to finite scalar JSON numbers.
+EXTRA_METRICS_MAX_ITEMS = 256
 
-    Evaluation stdout and old event logs are untrusted JSON.  Bookkeeping objects/lists occasionally landed
-    in ``extra_metrics`` even though every consumer (Pareto UI, MLflow, schemas) treats values as scalars;
-    Pydantic then warned on every API serialization.  The append-only raw event retains those values for
-    audit, while the folded/public model exposes only its documented numeric contract.
-    """
+
+def _extra_metric_entries(value) -> list[tuple[str, float]]:
+    """Every finite scalar entry of an untrusted metric map, in its own order, keys made safe."""
     if not isinstance(value, dict):
-        return {}
-    out: dict[str, float] = {}
+        return []
+    out: list[tuple[str, float]] = []
     for key, raw in value.items():
-        if len(out) >= max_items or isinstance(raw, bool) or not isinstance(raw, (int, float)):
+        if isinstance(raw, bool) or not isinstance(raw, (int, float)):
             continue
         try:
             number = float(raw)
@@ -150,8 +147,52 @@ def normalize_extra_metrics(value, *, max_items: int = 256) -> dict[str, float]:
         if math.isfinite(number):
             # Surrogate-safe KEY too: a name parsed off candidate stdout can hold a lone surrogate,
             # which orjson refuses — a metric map the event store cannot encode fails the terminal.
-            out[surrogate_safe(str(key)[:200])] = number
+            out.append((surrogate_safe(str(key)[:200]), number))
     return out
+
+
+def _kept_extra_metrics(value, max_items: int, priority) -> tuple[dict[str, float], list[str]]:
+    entries = _extra_metric_entries(value)
+    wanted = {surrogate_safe(str(k)[:200]) for k in (priority or ()) if isinstance(k, str)}
+    # PRIORITY FIRST, then the rest in order until the map is full — and the result keeps the
+    # map's OWN order, so a map under the bound normalizes exactly as it always did.
+    keep: set[str] = {k for k, _ in entries if k in wanted}
+    for key, _ in entries:
+        if len(keep) >= max_items:
+            break
+        keep.add(key)
+    out: dict[str, float] = {}
+    omitted: list[str] = []
+    for key, number in entries:
+        if key in keep:
+            out[key] = number
+        elif key not in out:
+            omitted.append(key)
+    return out, omitted
+
+
+def normalize_extra_metrics(value, *, max_items: int = EXTRA_METRICS_MAX_ITEMS,
+                            priority=()) -> dict[str, float]:
+    """Normalize the public multi-objective metric map to finite scalar JSON numbers.
+
+    Evaluation stdout and old event logs are untrusted JSON.  Bookkeeping objects/lists occasionally landed
+    in ``extra_metrics`` even though every consumer (Pareto UI, MLflow, schemas) treats values as scalars;
+    Pydantic then warned on every API serialization.  The append-only raw event retains those values for
+    audit, while the folded/public model exposes only its documented numeric contract.
+
+    ``priority`` names keys that survive the bound whatever their position: the task's DECLARED
+    metrics. Until 2026-10-14 the bound kept the first 256 keys in map order, the auto-captured
+    stdout keys came first, and a MiniOneRec eval printing ~615 numbers kept its primary and lost
+    three of the four declared key metrics (review 2026-10-14 §7) — silently.
+    `extra_metrics_overflow` names what the bound left out, so a writer can say so.
+    """
+    return _kept_extra_metrics(value, max_items, priority)[0]
+
+
+def extra_metrics_overflow(value, *, max_items: int = EXTRA_METRICS_MAX_ITEMS,
+                           priority=()) -> list[str]:
+    """The finite metric names `normalize_extra_metrics` (same arguments) leaves out, in map order."""
+    return _kept_extra_metrics(value, max_items, priority)[1]
 
 
 # WHICH CHANNEL PUT A VALUE IN `extra_metrics` — the SUBJECT question one rung down from
@@ -1980,6 +2021,11 @@ class Node(BaseModel):
     # `normalize_extra_metric_backfill` for the shape, the argument for one field rather than a
     # per-key map, and why the reader-side default is MEASURED rather than unknown.
     extra_metrics_backfill: dict = Field(default_factory=dict)
+    # HOW MANY finite numbers the eval reported that the map's bound did NOT keep, and the first
+    # names (`node_evaluated.extra_metrics_omitted`, written only when the bound dropped something).
+    # Reader-side default `{}`: a log written before 2026-10-14 cannot say, and a node whose bound
+    # dropped nothing has nothing to say.
+    extra_metrics_omitted: dict = Field(default_factory=dict)
     violations: list[dict] = Field(default_factory=list)
     feasible: bool = True
     # WHERE THIS NODE'S METRIC CAME FROM, when it was not simply measured. `None` for every ordinary
