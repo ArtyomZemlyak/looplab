@@ -1,7 +1,7 @@
 {
   "schema": 1,
   "language": "ru",
-  "count": 7959,
+  "count": 7973,
   "messages": {
     "# LoopLab run report — {0}": "# Отчёт запуска LoopLab — {0}",
     "## Agent narrative (advisory)": "## Пояснения агента (рекомендации)",
@@ -5932,7 +5932,7 @@
     "Test outcome unknown. Review Settings.": "Результаты теста неизвестны. Просмотр параметров.",
     "Testing active LLM…": "Проверяем связь…",
     "That direction was already queued": "Это направление уже было определено",
-    "That hypothesis was already tracked": "Эта гипотеза уже была найдена",
+    "That hypothesis was already tracked": "Эта гипотеза уже отслеживается",
     "That merge was already satisfied": "Это слияние уже было удовлетворено",
     "That metric is optimized the other way from this run": "Эта метрика оптимизирована по-другому с этого момента",
     "That owner token was not accepted.": "Этот токен владельца не принят.",
@@ -7961,7 +7961,21 @@
     "The run's code repository could not be read.": "Репозиторий кода запуска не удалось прочитать.",
     "No commit is recorded for this attempt.": "Для этой попытки коммит не записан.",
     "Effective configuration (what the evaluation used)": "Фактическая конфигурация (с ней шла оценка)",
-    "created by the external agent": "создана внешним агентом"
+    "created by the external agent": "создана внешним агентом",
+    "Question filed on the board": "Вопрос добавлен на доску",
+    "That question is already on the board": "Этот вопрос уже на доске",
+    "Question requested — waiting for the run": "Вопрос отправлен — ждём запуск",
+    "Could not file the question": "Не удалось добавить вопрос",
+    "Research memo questions not on the board": "Вопросы из записок, которых нет на доске",
+    "Only filed questions are on the board, and only a filed question can have experiments attached. Filing adds the question with the concepts its memo gave it; nothing else in the run changes.": "На доске только добавленные вопросы, и привязать эксперименты можно только к ним. Вопрос добавляется с концептами из его записки; больше в запуске ничего не меняется.",
+    "Hide questions": "Скрыть вопросы",
+    "Show questions": "Показать вопросы",
+    "muted memo-question-meta": "muted memo-question-meta",
+    "asked in {0} memo(s), {1} time(s)": "в записках: {0}, упоминаний: {1}",
+    "narrows: {0}": "уточняет: {0}",
+    "Filing…": "Добавляем…",
+    "File on the board": "Добавить на доску",
+    "Only the {0} most recently asked are listed.": "Показаны только {0} последних вопросов."
   },
   "plurals": {
     "({0} paraphrases folded)": {
@@ -9791,6 +9805,16 @@
       "one": "{0} изменённый файл",
       "few": "{0} изменённых файла",
       "many": "{0} изменённых файлов"
+    },
+    "{0} open questions from research memos are not on the question board": {
+      "one": "Нет на доске вопросов: {0} открытый вопрос из исследовательских записок",
+      "few": "Нет на доске вопросов: {0} открытых вопроса из исследовательских записок",
+      "many": "Нет на доске вопросов: {0} открытых вопросов из исследовательских записок"
+    },
+    "File {0} questions on the board": {
+      "one": "Добавить {0} вопрос на доску",
+      "few": "Добавить {0} вопроса на доску",
+      "many": "Добавить {0} вопросов на доску"
     }
   }
 }

@@ -1900,8 +1900,8 @@ truncation, masking and glued text (`intake_notices`, `readability_warnings`; bo
 Publish narratives with `report_generated`; the Report tab renders them beside the measured
 results with no model call (**Generate with model** is the separate paid action). Each
 `research_completed` memo is a snapshot: keep it concise, name changed conclusions, cite earlier
-evidence instead of copying it, and write in the user's language with normal spacing. The UI shows
-five findings first. An experiment answers a Research question through `idea.parent_card_id` or
+evidence, write in the user's language with normal spacing. Unfiled memo questions are listed
+in `/state` `memo_questions`. An experiment answers a Research question through `idea.parent_card_id` or
 `card_filed`; concept tags only suggest filing. `hypothesis_added` and `card_edited` may declare a
 question's `concepts` (an empty list clears them, omission keeps them); a question's own tags set
 its lattice level, filed experiments' tags only when it has none. Experiment tags stay

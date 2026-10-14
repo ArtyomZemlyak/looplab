@@ -14,6 +14,7 @@ import React, { useMemo, useState } from 'react'
 import { cardIsDirection, childrenByParent, descendantsOf } from './cardLineageModel.js'
 import { isRecord } from './panelPrimitives.js'
 import { OpIcon } from './icons.jsx'
+import MemoQuestionsBanner from './MemoQuestionsBanner.jsx'
 import { UNGROUPED_ID, inferQuestionFiling, latticeRollups, latticeRows, questionClosure,
   offPageParentExperiments, questionFilingOptions, unfiledExperiments } from './questionLattice.js'
 import { COMPARABILITY_REFUSAL_TEXT } from './runIndex.js'
@@ -98,7 +99,7 @@ function branchKeys(rows) {
 }
 
 export default function ResearchView({ cards, state, renderCard, onShowLanes, onDiscuss,
-  onFile = null, filingLocked = false }) {
+  onFile = null, filingLocked = false, onFileQuestion = null }) {
   useUILanguage()
 
   const [collapsed, setCollapsed] = useState(() => new Set())
@@ -226,8 +227,14 @@ export default function ResearchView({ cards, state, renderCard, onShowLanes, on
       onClick={() => setCollapsed(new Set())}>{uiText("Expand branches")}</button>
   </div>
 
+  // Memo questions the board does not hold (server-derived, `state.memo_questions`). Drawn on BOTH
+  // branches: the empty board is exactly where an external run's 200 memo questions went missing.
+  const memoBanner = <MemoQuestionsBanner projection={state?.memo_questions}
+    onFile={onFileQuestion} locked={filingLocked} />
+
   if (!questions.length) {
     return <div className="card-research has-no-questions" role="region" aria-label={uiText("Research questions")}>
+      {memoBanner}
       <div className="research-empty">
         <div className="research-empty-symbol" aria-hidden="true">?</div>
         <h2>{uiText("No research questions yet")}</h2>
@@ -250,6 +257,7 @@ export default function ResearchView({ cards, state, renderCard, onShowLanes, on
   }
 
   return <div className="card-research" role="region" aria-label={uiText("Research questions")}>
+    {memoBanner}
     <div className="research-overview">
       <h2>{uiText("Research questions ")}<span>{questions.length}</span></h2>
       <p>{uiText("Each indented question narrows a broader one. Open experiments under a question to inspect its evidence.")}</p>

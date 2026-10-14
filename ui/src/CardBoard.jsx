@@ -1280,8 +1280,16 @@ function _CardKanban({
     ? (card, parentCardId) => control(card, 'file', { parent_card_id: parentCardId ?? null },
       { parent_card_id: parentCardId ?? null, filed_by: 'operator' })
     : null
+  // A memo question the board lacks is filed by the SAME hypothesis_added command, carrying the
+  // memo's concepts (`MemoQuestionsBanner.jsx`); the row leaves the banner when the card folds.
+  const fileQuestion = control && !readOnly && canAdd
+    ? payload => submitCommand(CONTROL.fileMemoQuestion(runId, payload), {
+      success: 'Question filed on the board', noop: 'That question is already on the board',
+      executing: 'Question requested — waiting for the run', failure: 'Could not file the question',
+    }, onToast)
+    : null
   const researchBoard = <ResearchView cards={visibleCards} state={state} renderCard={renderCard}
-    onFile={fileCard} filingLocked={globalPending}
+    onFile={fileCard} filingLocked={globalPending} onFileQuestion={fileQuestion}
     onShowLanes={() => setGrouping('lanes')}
     onDiscuss={() => window.dispatchEvent(new CustomEvent('ll:focus-assistant', {
       detail: { text: 'Help me frame the first research question for this run. Review the existing experiment Cards and propose a question that organizes the evidence.' },

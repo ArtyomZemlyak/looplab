@@ -728,7 +728,9 @@ node workspaces.
   authored edge, marked **filed by the operator** — and "not under a question" un-files it (the
   view then never re-infers that card). Only a recorded filing reaches the engine: the question
   board the Researcher reads, the question's rollup and the open-question cap, which counts only
-  questions with no experiment filed under them. Below the ladder, **Not
+  questions with no experiment filed under them. Memo questions that are not on the board yet
+  are listed in a banner above the ladder; **File on the board** sends `hypothesis_added` with the
+  memo's concepts. Below the ladder, **Not
   filed under any question** holds the experiments no question claims and no concept matches:
   they have no position in a concept lattice, so they are a section beside it rather than a row
   inside it, and the section is rendered only when occupied. Between the ladder and that section
