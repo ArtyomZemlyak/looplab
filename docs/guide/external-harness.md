@@ -1228,31 +1228,18 @@ Old writes made before this client feature cannot be reconstructed retrospective
    may remain open after the evaluator command has finished; answer it before
    treating the node as terminal. Finalization can owe a report or reviews.
 
-If checkpoint reads or answers return **503**, inspect `source_health`. Damaged,
-duplicate, orphaned or invalid checkpoint records cannot supply a current question
-or an answer to the engine. A missing, empty or incomplete event history also
-refuses checkpoint reads, publication and answer consumption. The engine keeps the existing question
-unresolved; reconnecting does not repair journals or approve the stage. An operator
-must recover the source explicitly, then the agent must refresh state and progress.
-Question kinds must belong to the implemented checkpoint vocabulary and
-`kill_enabled` must be a boolean. A string such as `"false"`, an integer or an
-unknown kind makes the source incomplete; truthiness never supplies stop authority.
-Keep a lost checkpoint answer's exact body and `action_id`: after a healthy source
-is available, an identical retry returns `replayed`, even after the node is terminal.
-That receipt proves prior acceptance. The engine consumes a verdict only while its
-run generation/UID, node attempt and latest evaluator claim are still current and
-the node is pending. Reset or evaluator reclaim requires a fresh question and answer.
-Pause itself does not supersede an in-flight question: an evaluation draining after
-pause can still require its answer. Progress names that remaining checkpoint;
-answering it does not resume search. An explicit `resume` while the engine is
-still waiting retains that engine and question. Reconnecting to a stopped,
-paused run leaves it paused until an explicit durable `resume` succeeds.
-If the engine died before the evaluation settled, explicit resume can claim that
-same node attempt with a new evaluator and run the protected command again.
-Its old unanswered checkpoint becomes superseded; an answer to it is refused
-with 409. Answer the freshly observed question. This differs from reconnecting
-to a live waiting engine, where the original question remains current. A score
-command's completion alone does not make its interrupted attempt a terminal result.
+If checkpoint reads or answers return **503**, inspect `source_health`: damaged,
+duplicate, orphaned or invalid checkpoint records (an unknown kind, a non-boolean
+`kill_enabled`) or an incomplete event history supply no question or answer, and the
+engine keeps the question unresolved until an operator recovers the source; then
+refresh state and progress. Keep a lost answer's exact body and `action_id`: an
+identical retry returns `replayed`, even after the node is terminal. The engine
+consumes a verdict only while the run generation/UID, node attempt and latest
+evaluator claim are current and the node is pending; a reset or reclaim needs a
+fresh question. Pause does not supersede an in-flight question (answering it does not
+resume search). A stopped, paused run stays paused until an explicit `resume`; if the
+engine died before the evaluation settled, resume may re-run the same attempt and its
+old question becomes superseded (an answer to it is refused with 409).
 
 In the UI, open **Agent cycle → Connect external agent → Reconnect or recover a
 lost response**. Read by original key or command ID. Typing submits nothing;
@@ -1909,32 +1896,12 @@ on resume or a new run. The UI language applies across the interface and owner g
 
 ### Reports and readable external research
 
-External agents publish structured narratives with the durable `report_generated` command.
-The Report tab renders that narrative with the measured results, without a LoopLab model
-connection or a second provider request. The optional **Generate with model** action uses
-the separate model connection in Settings and retains its paid-action receipt protocol.
-
-Each `research_completed` memo is a new historical snapshot, not an instruction to append
-all old findings to the next memo. Keep the latest summary and findings concise, name
-changed conclusions and cite prior evidence instead of copying datasets or full JSON.
-The UI shows five findings first and preserves the rest in a disclosure. Write summaries,
-hypotheses and next actions in the user's language, with normal spacing. Concept ids and
-metric names can retain their exact technical spelling. Experiments answer a Research
-question through `idea.parent_card_id`; concept tags alone do not create that relation.
-
-Research questions can declare `concepts` in `hypothesis_added`, using the same
-validated concept ids as experiments. For an existing question, `card_edited` accepts
-`id`, `statement` and optional `concepts`; an explicit empty list clears its membership,
-while omitting it preserves earlier edits. This changes authored question membership
-and display text, not the immutable belief/action identity or measured node tags.
-Experiment tags remain generation-fenced through `concept_tag_edited`.
-
-The Research question lattice uses a question's explicit concept set to determine
-its level of specificity. Tags derived from filed experiments are a fallback only
-when the question has no valid authored tags. Implementation details must not
-turn the broad question into a narrower child. Concept-based filing is a visible
-suggestion; an explicit `parent_card_id` or `card_filed` records the experiment link.
-
-In the Research view, an experiment’s pencil icon opens its question chooser.
-The question title is already the section heading and is not repeated on each card.
-Filing provenance and confirmation of a concept suggestion appear inside the chooser.
+Publish narratives with `report_generated`; the Report tab renders them beside the measured
+results with no model call (**Generate with model** is the separate paid action). Each
+`research_completed` memo is a snapshot: keep it concise, name changed conclusions, cite earlier
+evidence instead of copying it, and write in the user's language with normal spacing. The UI shows
+five findings first. An experiment answers a Research question through `idea.parent_card_id` or
+`card_filed`; concept tags only suggest filing. `hypothesis_added` and `card_edited` may declare a
+question's `concepts` (an empty list clears them, omission keeps them); a question's own tags set
+its lattice level, filed experiments' tags only when it has none. Experiment tags stay
+generation-fenced through `concept_tag_edited`.

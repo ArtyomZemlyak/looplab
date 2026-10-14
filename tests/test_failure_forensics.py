@@ -8,7 +8,7 @@ import os
 from types import SimpleNamespace
 
 from looplab.engine.attempt_logs import archive_attempt_logs, list_attempt_logs
-from looplab.runtime.failure_forensics import (failure_forensics, parse_exceptions,
+from looplab.core.failure_forensics import (failure_forensics, parse_exceptions,
                                                parse_torchrun, signal_name)
 
 G0_LOG = """\

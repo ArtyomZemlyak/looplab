@@ -6,7 +6,7 @@ from typing import Optional
 
 import typer
 
-from looplab.cli import app
+from looplab.cli import CliRefusal, app
 from looplab.core.errors import OperatorRefusal
 # The manifest lives in the harness package (the MCP server serves it too); re-exported here as the
 # SAME object, so `looplab.cli.harness_cmds.harness_manifest` keeps working for every caller.
@@ -70,7 +70,7 @@ def gpu_gate(
         after = ([str(Path(p).expanduser().resolve()) for p in start_after]
                  if start_after else current.get("start_after", []))
         if any(Path(p) == rd for p in after):
-            raise typer.BadParameter("a run cannot start after itself")
+            raise CliRefusal("a run cannot start after itself")
         write_gate(rd, hold=current.get("hold", False) if hold is None else hold,
                    start_after=after, reason=reason or current.get("reason", ""),
                    updated_by="cli")
@@ -116,12 +116,12 @@ def agent_notify(
         if command:
             body["command"] = command
         if not body.get("command"):
-            raise typer.BadParameter("--command is required for a new hook")
+            raise CliRefusal("--command is required for a new hook")
         variables = dict(body.get("vars") or {})
         for item in var:
             name, sep, value = item.partition("=")
             if not sep:
-                raise typer.BadParameter(f"--var {item!r} must be NAME=VALUE")
+                raise CliRefusal(f"--var {item!r} must be NAME=VALUE")
             variables[name] = value
         body["vars"] = variables
         if debounce is not None:
@@ -132,7 +132,7 @@ def agent_notify(
         try:
             write_notify_config(root, body)
         except ValueError as exc:
-            raise typer.BadParameter(str(exc)) from exc
+            raise CliRefusal(str(exc)) from exc
     typer.echo(json.dumps(notify_status(root), ensure_ascii=False, indent=1))
 
 

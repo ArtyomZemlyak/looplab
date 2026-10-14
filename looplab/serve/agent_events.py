@@ -60,7 +60,7 @@ from typing import Any, Iterable, Optional
 
 from fastapi import HTTPException
 
-from looplab.core.atomicio import append_jsonl_bytes_locked
+from looplab.core.atomicio import append_jsonl_bytes_locked, file_identity
 from looplab.events.eventstore import interprocess_lock
 
 _log = logging.getLogger("looplab.server")
@@ -569,7 +569,7 @@ class AgentEventPump:
                      "harness_decisions.jsonl", "engine.lock"):
             try:
                 st = (rd / name).stat()
-                sig.append((st.st_size, st.st_mtime_ns))
+                sig.append(file_identity(st))
             except OSError:
                 sig.append(None)
         return tuple(sig)

@@ -86,19 +86,16 @@ looplab tensorboard     Serve TensorBoard over per-experiment training logs
 looplab build-ui        Build the React UI bundle (ui/dist)
 looplab harness         Print the external-agent capability contract as JSON (read-only)
 looplab harness-mcp     Serve the live UI API to a coding agent over stdio MCP
+looplab agent-notify    Agent wake-up hook (doc 78)
+looplab agent-events    Agent event outbox
+looplab gpu-gate        Hold/order a run's GPUs
+looplab gpu-queue       GPU queue
 ```
 
-| `looplab agent-notify` | The command the UI server runs to wake an external agent ([doc 78](../78-external-agent-orchestration-2026-10-14.md)) |
-|---|---|
-| `looplab agent-events` | The actionable events LoopLab derived for external agents |
-| `looplab gpu-gate` | Hold a run's GPU work, or start it after other runs' engines exit |
-| `looplab gpu-queue` | Who holds the host GPU pool and who waits, in FIFO order |
-
-Every engine setting supplied through `run -s/--set` (and the typed setting overrides) can come
-from a `LOOPLAB_*` environment variable or the `settings:` block of a config file — see
-[Configuration](configuration.md). Task inputs (`--goal`, `--kind`, `--data`) and command-specific
-options such as `--out` are CLI/file concerns, not `Settings` fields. Precedence for engine settings is
-CLI over file over environment. Add `--version` to print the version.
+Engine settings from `run -s/--set` (and typed overrides) may also come from `LOOPLAB_*` variables
+or a config file's `settings:` block ([Configuration](configuration.md)); precedence is CLI over file
+over environment. Task inputs (`--goal`, `--kind`, `--data`) and options like `--out` are not
+`Settings` fields. `--version` prints the version.
 
 ## Exit codes: a refusal is not a crash
 
@@ -3390,10 +3387,26 @@ looplab harness [--settings]
 ## `harness-mcp`
 
 Serve every live UI API operation to a coding agent over stdio MCP (`harness/mcp_server.py`). Needs
-`pip install 'looplab[harness,ui]'` and a running `looplab ui`; `LOOPLAB_HARNESS_URL` points it at
-another local or proxied UI, and `LOOPLAB_HARNESS_TOKEN` is the scoped agent credential (it must
-differ from `LOOPLAB_UI_TOKEN`, which remains full owner authority). No options.
+`pip install 'looplab[harness,ui]'` and a running `looplab ui`. `LOOPLAB_HARNESS_URL` names another
+UI; `LOOPLAB_HARNESS_TOKEN` is the scoped agent credential, distinct from the owner's
+`LOOPLAB_UI_TOKEN`. No options.
 
 ```bash
 looplab harness-mcp
 ```
+
+## `agent-notify`
+
+| `[--run-root R] [--command 'ARGV {message}'] [--var K=V] [--debounce S] [--kinds a,b] [--disable] [--clear]` | The command the UI server runs, without a shell, to wake an external agent on new events; debounced, retried, every attempt in a ledger. No option prints the hook and ledger. [Doc 78](../78-external-agent-orchestration-2026-10-14.md) |
+
+## `agent-events`
+
+| `[--run-root R] [--after ID] [--run RUN] [--limit N]` | The actionable-event outbox the UI server derives for external agents (read-only). |
+
+## `gpu-gate`
+
+| `RUN_DIR [--hold\|--release] [--start-after DIR]... [--reason T] [--clear]` | `RUN_DIR/gpu_gate.json`: no GPU admission while held or until those runs' engines exit. Works before the run exists. |
+
+## `gpu-queue`
+
+| `(no options)` | Who holds the host GPU lease and who waits for it, in FIFO order (read-only). |

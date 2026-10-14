@@ -157,7 +157,7 @@ for ordering separate runs. Prefer one run per campaign where the task allows it
 
 ### 3.1 `failure_forensics` on `node_failed` / `node_repaired`
 
-`looplab/runtime/failure_forensics.py` parses what the failed attempt printed (stdout/stderr tails,
+`looplab/core/failure_forensics.py` parses what the failed attempt printed (stdout/stderr tails,
 the failed stage's log tail, `eval.log`) — deterministically, no model:
 
 ```json

@@ -77,7 +77,8 @@ def build_router(srv) -> APIRouter:
             if bad:
                 raise HTTPException(400, f"unknown kinds {bad}; choose from {list(ACTIONABLE_KINDS)}")
         if run_id is not None:
-            srv.run_dir(run_id)          # 404 for an unknown run, before any wait
+            # 404 for an unknown run, before any wait — off the loop (a lookup touches the disk).
+            await anyio.to_thread.run_sync(srv.run_dir, run_id)
         if after is None:
             page = await anyio.to_thread.run_sync(
                 lambda: read_outbox(srv.root, after=10**18, run_id=run_id, kinds=wanted, limit=1))
@@ -107,11 +108,10 @@ def build_router(srv) -> APIRouter:
         every name in `vars` (a run may override vars via its own agent-notify)."""
         from looplab.serve.agent_events import write_notify_config
 
+        from looplab.serve.http import json_object
+
         _owner_only(request, "configure the notification command")
-        try:
-            body = await request.json()
-        except ValueError as exc:
-            raise HTTPException(400, "body must be JSON") from exc
+        body = await json_object(request, "notification hook")
         try:
             return {"ok": True, "config": await anyio.to_thread.run_sync(
                 lambda: write_notify_config(srv.root, body))}
@@ -128,7 +128,7 @@ def build_router(srv) -> APIRouter:
         return {"ok": True}
 
     @router.post("/api/agent-notify/test")
-    async def test_agent_notify(request: Request):
+    def test_agent_notify(request: Request):
         """Run the configured command once with a test message; the result lands in the ledger."""
         from looplab.serve.agent_events import (_append_ledger, read_notify_config, render_argv)
         import time as _time
@@ -149,8 +149,7 @@ def build_router(srv) -> APIRouter:
             argv = render_argv(config["command"], fields)
         except (KeyError, ValueError) as exc:
             raise HTTPException(400, f"template: {exc}") from exc
-        result = await anyio.to_thread.run_sync(
-            lambda: runner(argv, float(config.get("timeout_s", 60))))
+        result = runner(argv, float(config.get("timeout_s", 60)))
         row = {"ts": _time.time(), "attempt": 1, "event_ids": [], "runs": [], "kinds": ["test"],
                "status": "delivered" if result["ok"] else "failed",
                "exit_code": result.get("exit_code"), "error": str(result.get("error") or "")[:400],

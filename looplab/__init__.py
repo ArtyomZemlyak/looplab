@@ -403,7 +403,7 @@ _LAYOUT = {
     "reset_transaction": "serve",
     "resources": "engine",  # resource-envelope and Card footprint scheduling helpers
     "gpu_queue": "engine",
-    "failure_forensics": "runtime",
+    "failure_forensics": "core",
     "attempt_logs": "engine",  # the earlier attempts' logs, kept aside when a node's workdir is rebuilt  # the parsed root exception / signals / exit codes of a failed eval
     "reposcout": "tools",
     "retrieval": "tools",

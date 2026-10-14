@@ -1694,7 +1694,7 @@ class EvalAttempt:
     watchdog_reason: Any = None
     watchdog_err: str = ""
     err_evidence: Any = None
-    # THE FORENSIC RECORD of this attempt's failure (`runtime/failure_forensics.py`): root
+    # THE FORENSIC RECORD of this attempt's failure (`core/failure_forensics.py`): root
     # exception, signals, per-rank exit codes and log tails. Bound beside `err_evidence`; a RECORD
     # on `node_repaired`/`node_failed`, read by nothing that decides.
     failure_forensics: Any = None
@@ -2668,12 +2668,12 @@ class EvaluateMixin:
                               _DURABLE_EVIDENCE_CHARS)
 
     def _failure_forensics(self, a: "EvalAttempt") -> Optional[dict]:
-        """The forensic record of this attempt's failure (`runtime/failure_forensics.py`, doc 78
+        """The forensic record of this attempt's failure (`core/failure_forensics.py`, doc 78
         §3): the ORIGINAL exception under any wrapper, deaths by signal per rank, exit codes and
         the failed stage's log tail — parsed, never judged. Every string goes through the engine's
         one redaction funnel. Best-effort: a record that cannot be built is simply absent."""
         from looplab.core.node_evidence import open_untrusted_regular
-        from looplab.runtime.failure_forensics import failure_forensics
+        from looplab.core.failure_forensics import failure_forensics
 
         res = a.res
         if res is None:

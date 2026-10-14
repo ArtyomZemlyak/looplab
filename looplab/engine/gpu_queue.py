@@ -44,6 +44,8 @@ import time
 from pathlib import Path
 from typing import Optional
 
+from looplab.core.atomicio import file_identity
+
 _LOG = logging.getLogger(__name__)
 
 QUEUE_SUFFIX = ".queue"
@@ -461,7 +463,7 @@ class GateReader:
         path = gate_path(self.run_dir)
         try:
             st = path.stat()
-            stamp = (st.st_mtime_ns, st.st_size, st.st_ino)
+            stamp = file_identity(st)
         except OSError:
             stamp = None
         if stamp != self._stamp:
