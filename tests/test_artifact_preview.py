@@ -167,6 +167,40 @@ def test_pure_readers_are_total_over_malformed_input():
     assert art.raster_mime("a.svg", b"<svg") is None
 
 
+def _npy(header: bytes) -> bytes:
+    return b"\x93NUMPY\x01\x00" + struct.pack("<H", len(header)) + header
+
+
+def test_meta_is_total_over_candidate_written_tensor_headers(tmp_path):
+    """Review 2026-10-15: `/artifact/meta` 500'd on three candidate-written headers — a `.npy`
+    `shape` that is not iterable (TypeError), a `.npy` hex literal of any size and a safetensors
+    shape whose product is unbounded (both: the JSON encoder refuses an int past 4 300 digits).
+    Each now answers 200 with the unknown said, never guessed."""
+    _rd, repo = _run(tmp_path)
+    (repo / "scalar.npy").write_bytes(_npy(b"{'descr': '<f4', 'shape': 5}"))
+    (repo / "huge.npy").write_bytes(_npy(
+        b"{'descr': 0x" + b"f" * 5000 + b", 'shape': (0x" + b"f" * 5000 + b",)}"))
+    big = _safetensors({f"w{i}": {"dtype": "F32", "shape": [2 ** 62] * 4000,
+                                  "data_offsets": [0, 0]} for i in range(2)})
+    (repo / "big.safetensors").write_bytes(big)
+    client = TestClient(make_app(tmp_path))
+    for name in ("scalar.npy", "huge.npy"):
+        r = _get(client, "meta", name)
+        assert r.status_code == 200, (name, r.text)
+        assert r.json()["npy"]["shape"] is None
+    r = _get(client, "meta", "big.safetensors")
+    assert r.status_code == 200, r.text
+    summary = r.json()["safetensors"]
+    assert summary["tensor_count"] == 2
+    assert summary["parameter_count"] is None and summary["parameter_count_overflow"] is True
+    # A real count is unchanged and carries no overflow flag; a zero dimension is zero elements.
+    ok = _safetensors({"a": {"dtype": "F32", "shape": [2, 3], "data_offsets": [0, 24]},
+                       "b": {"dtype": "F32", "shape": [2 ** 62, 0], "data_offsets": [24, 24]},
+                       "s": {"dtype": "F32", "shape": [], "data_offsets": [24, 28]}})
+    plain = art.safetensors_summary(io.BytesIO(ok), len(ok))
+    assert plain["parameter_count"] == 7 and "parameter_count_overflow" not in plain
+
+
 def test_raw_serves_a_real_pdf_under_the_same_sandbox(tmp_path):
     """UI review 2026-10-14 section 7.4 / doc 77 §3: a PDF is previewed by the browser's own viewer from
     an object URL — `.pdf` suffix and `%PDF-` magic agreeing, nosniff and the sandboxing CSP."""

@@ -556,6 +556,13 @@ def _normalize_spec_approved(ctx: _ControlIntake) -> dict:
     return ctx.data
 
 
+# The `budget_extend` fields that only move concurrency INSIDE the budget. Every other field of the
+# registry's allow-list EXTENDS a budget (nodes, run wall-clock, eval clocks) and needs the operator's
+# policy level from an agent token — derived by subtraction, so a budget field added to the registry
+# later is policy-bound by default rather than silently exempt.
+_BUDGET_WIDTH_FIELDS = frozenset({"eval_parallel", "max_parallel", "llm_parallel", "parallel_build"})
+
+
 def _normalize_budget_extend(ctx: _ControlIntake) -> dict:
     data = ctx.data
     # ONE allow-list, the registry's own (doc 25 SC-02): this tuple used to be a verbatim second copy
@@ -564,6 +571,16 @@ def _normalize_budget_extend(ctx: _ControlIntake) -> dict:
     allowed = CONTROL_DATA_FIELDS[EV_BUDGET_EXTEND]
     if not any(data.get(name) is not None for name in allowed):
         raise HTTPException(400, "budget_extend needs at least one budget field")
+    if ctx.agent_token and any(data.get(name) is not None
+                               for name in allowed - _BUDGET_WIDTH_FIELDS):
+        # The operator's policy LEVEL binds every field that EXTENDS a budget, not only `add_nodes`
+        # (review 2026-10-15: under `amendments: off` the agent could still raise `max_seconds` or
+        # a per-eval clock). The node CAP below stays specific to `add_nodes`. The width fields are
+        # not here: they move concurrency inside the budget, never the budget.
+        from looplab.harness.campaign import agent_budget_level_refusal
+        refused = agent_budget_level_refusal(ctx.rd)
+        if refused is not None:
+            raise refused
     if data.get("add_nodes") is not None:
         value = ctx.integer("add_nodes")
         # Upper bound too: a huge extension (or a 400-digit int) is not a valid budget and would
@@ -971,6 +988,14 @@ def _import_cross_run_source(ctx: _ControlIntake) -> None:
     # with the new-run launch form (`Settings.seed_from_run`, doc 67 67.2): the concept rule, the
     # rationale note and the attempt-stamped `origin` receipt all moved there verbatim.
     data.update(node_import_payload(sst, sn, sr))
+    # The snapshot keeps an artifact producer's `node_kind` INSIDE the idea (the new-run seed appends
+    # the idea as built), but this intake takes it only at the TOP LEVEL, where
+    # `_normalize_artifact_fields` validates it; an in-idea copy is refused below with a remediation
+    # the operator cannot apply to a server-built idea. Hoisted, never dropped: it is what the
+    # imported code IS. (The source-run graph references are already gone: `node_import_payload`.)
+    node_kind = data["idea"].pop("node_kind", None)
+    if node_kind == "artifact":
+        data["node_kind"] = node_kind
 
 
 def _relative_file_name(value, field: str) -> str:
@@ -1556,13 +1581,20 @@ def _normalize_research_completed(ctx: _ControlIntake) -> dict:
         # still stand and the server carries its content forward, marked `reaffirms`, so the due
         # research window closes without the author re-sending — and growing — the same findings.
         # Anything the author does send (a new summary, a refined finding) replaces that field.
+        #
+        # "Sends" is KEY PRESENCE, not truthiness (review 2026-10-15): an explicit `[]` / `""` CLEARS
+        # the carried field — truthiness dropped it, so a stale field could never be retracted — and
+        # sending a base field clears its positionally ALIGNED fields even when it is sent empty,
+        # or they would describe questions/findings that are no longer there. Only `null` reads as
+        # "not stated", the way every optional field of this intake reads it.
+        sent = {key: value for key, value in raw.items() if value is not None}
         carried = {key: reaffirmed[key] for key in _REAFFIRM_FIELDS if reaffirmed.get(key)}
-        if raw.get("findings"):
+        if "findings" in sent:
             carried.pop("finding_meta", None)     # it described the findings being replaced
-        if raw.get("open_questions"):
+        if "open_questions" in sent:
             carried.pop("question_concepts", None)
             carried.pop("question_parents", None)
-        raw = {**carried, **{key: value for key, value in raw.items() if value}}
+        raw = {**carried, **sent}
         raw["reaffirms"] = reaffirmed["memo_id"]
     raw = _split_finding_objects(raw)
     if not any(raw.get(key) for key in ("summary", "findings", "claims", "open_questions",
@@ -1848,24 +1880,36 @@ def _normalize_concept_edge(ctx: _ControlIntake) -> dict:
         seen.add((src, rel, dst))
         edges.append({"src": src, "rel": rel, "dst": dst, "provenance": "authored",
                       "confidence": 1.0})
-    # A cycle (a concept its own ancestor) breaks every hierarchy projection; refuse it over the
-    # run's existing parent edges plus this batch.
+    cycle = _concept_edge_cycle(ctx.state(), edges)
+    if cycle is not None:
+        raise HTTPException(400, cycle)
+    return {"edges": edges, "mode": "authored", "actor_kind": ctx.actor_kind()}
+
+
+def _concept_edge_cycle(state, edges: list) -> Optional[str]:
+    """Why `edges` would make a concept its own ancestor over `state`'s parent edges, or None.
+
+    A cycle breaks every hierarchy projection. Asked at intake AND again at append time
+    (`_precondition_concept_edge`) over a fresh fold: two concurrent commands each clean against the
+    state their intake folded — `a -> b` and `b -> a` — would otherwise both land."""
     parents: dict[str, set] = {}
-    for edge in list((getattr(ctx.state(), "concept_edges", None) or {}).values()) + edges:
+    for edge in list((getattr(state, "concept_edges", None) or {}).values()) + list(edges):
         if isinstance(edge, dict) and edge.get("rel") in CONCEPT_EDGE_RELATIONS:
             parents.setdefault(str(edge.get("src")), set()).add(str(edge.get("dst")))
     for edge in edges:
-        stack, visited = [edge["dst"]], set()
+        if not isinstance(edge, dict):
+            continue
+        src, dst = str(edge.get("src")), str(edge.get("dst"))
+        stack, visited = [dst], set()
         while stack:
             node = stack.pop()
-            if node == edge["src"]:
-                raise HTTPException(400, f"edge {edge['src']} -> {edge['dst']} would make "
-                                         f"{edge['src']} its own ancestor")
+            if node == src:
+                return f"edge {src} -> {dst} would make {src} its own ancestor"
             if node in visited:
                 continue
             visited.add(node)
             stack.extend(parents.get(node, ()))
-    return {"edges": edges, "mode": "authored", "actor_kind": ctx.actor_kind()}
+    return None
 
 
 def _normalize_run_concepts(ctx: _ControlIntake) -> dict:
@@ -2132,6 +2176,18 @@ def _precondition_run_concepts(state, event_type: str, data: dict, envelope) -> 
     return None
 
 
+def _precondition_concept_edge(state, event_type: str, data: dict, envelope) -> Optional[dict]:
+    # The run's generation fence (rechecked by the caller) does not move when ANOTHER concept_edge
+    # lands, so the intake's acyclicity check is stale by the time two concurrent commands append:
+    # each is clean against the fold it was validated on, and together they are a 2-cycle in the log
+    # (review 2026-10-15). Re-asked here over the fresh fold, under the strict append lock.
+    cycle = _concept_edge_cycle(state, data.get("edges") or [])
+    if cycle is not None:
+        return _error("concept_edge_cycle", cycle,
+                      "refresh the run's concept edges; another edge landed since this was checked")
+    return None
+
+
 def _precondition_comment_created(state, event_type: str, data: dict, envelope) -> Optional[dict]:
     node_id = data.get("node_id")
     generation = data.get("node_generation")
@@ -2385,7 +2441,7 @@ _CONTROL_PRECONDITIONS: dict[str, Optional[Callable]] = {
     EV_COMMENT_RESOLUTION_CHANGED: _precondition_comment_revision,
     EV_CONCEPT_TAG_EDITED: _precondition_concept_tags,
     EV_RUN_CONCEPTS: _precondition_run_concepts,
-    EV_CONCEPT_EDGE: _precondition_run_concepts,
+    EV_CONCEPT_EDGE: _precondition_concept_edge,
     EV_PROMOTE: None,
     EV_HYPOTHESIS_ADDED: None,
     EV_HYPOTHESIS_UPDATED: None,

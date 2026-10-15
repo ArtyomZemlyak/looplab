@@ -370,6 +370,29 @@ def test_agent_budget_extension_is_capped_by_the_operator(tmp_path, monkeypatch)
     assert policy["agent_added_nodes"] == 2 and policy["max_agent_added_nodes"] == 3
 
 
+def test_the_policy_level_binds_every_agent_budget_field(tmp_path, monkeypatch):
+    """Review 2026-10-15: the policy level was checked only when `add_nodes` was sent, so under
+    `amendments: off` the agent token could still extend the wall-clock and eval budgets. The level
+    now binds every budget-EXTENDING field; widths and the operator are untouched."""
+    from fastapi import HTTPException
+
+    from looplab.serve.control_validation import normalize_control
+    root, client = _client(tmp_path, monkeypatch)
+    rd, _store = _make_run(root, "camp", _repo(tmp_path), nodes=(0,), metrics={0: 0.1})
+    srv = client.app.state.looplab
+    assert client.put("/api/runs/camp/harness-policy", json={"amendments": "off"},
+                      headers=OWNER).status_code == 200
+    for field, value in (("max_seconds", 3600), ("max_eval_seconds", 3600), ("timeout", 600),
+                         ("eval_timeout", 600), ("add_nodes", 1)):
+        with pytest.raises(HTTPException) as info:
+            normalize_control(srv, rd, "budget_extend", {field: value}, agent_token=True)
+        assert info.value.status_code == 403, field
+        assert info.value.detail["code"] == "amendment_not_permitted", field
+        assert normalize_control(srv, rd, "budget_extend", {field: value})[field] == value
+    assert normalize_control(srv, rd, "budget_extend", {"eval_parallel": 2},
+                             agent_token=True)["eval_parallel"] == 2
+
+
 def test_old_runs_read_an_empty_protocol(tmp_path, monkeypatch):
     root, client = _client(tmp_path, monkeypatch)
     rd, store = _make_run(root, "old", _repo(tmp_path), nodes=(0,), metrics={0: 1.0})

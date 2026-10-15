@@ -53,6 +53,11 @@ test('the filing command is the board command with the memo concepts, and no emp
   })
   const bare = memoQuestionRows({ rows: [{ statement: 'Bare?' }] })[0]
   assert.deepEqual(memoQuestionCommand(bare), { statement: 'Bare?', source: 'research_memo' })
+  // A memo question may be 1 200 chars: the command files ALL of it, or the filed card's belief key
+  // is the cut text's and the question never leaves the banner (review 2026-10-15).
+  const long = `Does replay recover recall ${'x'.repeat(1100)}?`
+  const [row] = memoQuestionRows({ rows: [{ statement: long }] })
+  assert.equal(memoQuestionCommand(row).statement, long)
 })
 
 let _server = null

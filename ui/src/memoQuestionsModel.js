@@ -12,6 +12,11 @@ const _text = (value, max = 500) => (typeof value === 'string' ? value.trim().sl
 const _count = value => (Number.isInteger(value) && value >= 0 ? value : 0)
 
 export const MEMO_QUESTION_BANNER_ROWS = 64
+// A row's statement is what "File on the board" SENDS, so it is never cut below the filing intake's
+// bound (`core/cards.py::CARD_STATEMENT_MAX_CHARS`; the server's `MEMO_QUESTION_FILED_CHARS`). Cut at
+// 500 — while a memo question may be 1 200 chars — the filed card's belief key was the cut text's and
+// the question stayed "not on the board" however often it was filed (review 2026-10-15).
+export const MEMO_QUESTION_STATEMENT_CHARS = 4_000
 
 export function memoQuestionRows(projection) {
   const rows = projection && typeof projection === 'object' && Array.isArray(projection.rows)
@@ -20,7 +25,7 @@ export function memoQuestionRows(projection) {
   const seen = new Set()
   for (const row of rows) {
     if (!row || typeof row !== 'object') continue
-    const statement = _text(row.statement)
+    const statement = _text(row.statement, MEMO_QUESTION_STATEMENT_CHARS)
     if (!statement) continue
     const key = statement.toLowerCase().split(/\s+/).join(' ')
     if (seen.has(key)) continue

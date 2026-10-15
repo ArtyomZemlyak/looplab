@@ -295,13 +295,16 @@ def _parse_metrics_jsonl(raw: bytes, mtime: float, stem: str) -> dict:
 def _newest_trainer_state(files) -> dict:
     """`Trainer` writes one `trainer_state.json` into the output dir AND into every
     `checkpoint-N/`, each holding the WHOLE history so far — merging them would plot every point
-    several times. Only the file with the largest logged step is read (newest mtime on a tie), the
-    same "newest re-run wins" rule the TensorBoard adapter applies to Lightning's `version_N`."""
+    several times. Only the NEWEST-written file is read (the largest logged step on an mtime tie),
+    the same "newest re-run wins" rule the TensorBoard adapter applies to Lightning's `version_N`.
+    Not the largest step first (review 2026-10-15): a crashed or earlier run's `checkpoint-1000/`
+    then outranked the live retrain's `checkpoint-200/` and the view plotted the stale curve. Within
+    one training run the newest checkpoint is also its largest step, so nothing is lost."""
     best = None
     for path, info in files:
         parsed = _cached_parse(path, info, _TRAINER_STATE_MAX_BYTES, _parse_trainer_state)
         last = max((p["step"] for pts in parsed.values() for p in pts), default=-1)
-        rank = (last, info.st_mtime)
+        rank = (info.st_mtime, last)
         if parsed and (best is None or rank > best[0]):
             best = (rank, parsed)
     return {tag: list(points) for tag, points in (best[1] if best else {}).items()}

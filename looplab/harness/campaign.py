@@ -814,16 +814,29 @@ def agent_added_nodes(srv, rd: Path) -> int:
     return total
 
 
+def agent_budget_level_refusal(rd: Path, policy: Optional[dict] = None
+                               ) -> Optional[HTTPException]:
+    """The operator's policy LEVEL for any agent budget extension — nodes, wall-clock or eval
+    clocks alike. Spelled apart from the node cap below because it binds every budget field: while it
+    lived inside `agent_budget_refusal` it ran only when `add_nodes` was sent, so an agent under
+    `amendments: off` could still extend `max_seconds` / `timeout` (review 2026-10-15)."""
+    policy = read_policy(rd) if policy is None else policy
+    if POLICY_LEVELS.index(policy["amendments"]) < POLICY_LEVELS.index(_LEVEL_FOR_KIND["budget"]):
+        return HTTPException(403, {"code": "amendment_not_permitted",
+                                   "message": "the operator's policy refuses agent budget extensions",
+                                   "retryable": False})
+    return None
+
+
 def agent_budget_refusal(srv, rd: Path, add_nodes) -> Optional[HTTPException]:
     """The operator's cap on agent-added nodes, for the raw command and the amendment alike."""
     if not isinstance(add_nodes, int) or isinstance(add_nodes, bool) or add_nodes <= 0:
         return None
     policy = read_policy(rd)
     cap = policy.get("max_agent_added_nodes")
-    if POLICY_LEVELS.index(policy["amendments"]) < POLICY_LEVELS.index("experiments"):
-        return HTTPException(403, {"code": "amendment_not_permitted",
-                                   "message": "the operator's policy refuses agent budget extensions",
-                                   "retryable": False})
+    refused = agent_budget_level_refusal(rd, policy)
+    if refused is not None:
+        return refused
     if cap is None:
         return None
     used = agent_added_nodes(srv, rd)

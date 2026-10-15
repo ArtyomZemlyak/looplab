@@ -87,6 +87,23 @@ def test_projection_withholds_secret_named_files_and_refuses_bad_documents():
     assert out["params"] == []
 
 
+def test_an_unprintable_integer_is_a_carrier_status_not_a_raise():
+    """Review 2026-10-15: YAML and TOML read a hex literal of any size, and `str()` of an int past
+    the 4 300-digit limit raises ValueError — as a value, inside a list, or as a YAML key. It escaped
+    `runtime_params` (a 500 on the route); the module's contract is "every failure is a carrier
+    status". The other carriers are still read."""
+    huge = "0x" + "f" * 5000
+    node = _node({"a.yaml": f"lr: 1\nbig: {huge}\n", "b.toml": f"big = {huge}\n",
+                  "c.yaml": f"layers: [1, {huge}]\n", "d.yaml": f"{huge}: 1\n",
+                  "ok.env": "EPOCHS=3\n"})
+    out = rp.runtime_params(node, workdir=None)
+    status = {c["path"]: c["status"] for c in out["carriers"]}
+    assert status == {"a.yaml": "unparsed", "b.toml": "unparsed", "c.yaml": "unparsed",
+                      "d.yaml": "unparsed", "ok.env": "read"}
+    assert [r["key"] for r in out["params"]] == ["EPOCHS"]
+    json.dumps(out)
+
+
 def test_projection_reads_literal_edit_surface_from_the_workdir(tmp_path):
     (tmp_path / "cfg").mkdir()
     (tmp_path / "cfg" / "base.env").write_text("EPOCHS=3\n", encoding="utf-8")

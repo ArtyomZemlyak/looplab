@@ -65,7 +65,10 @@
 (`PUT /api/runs/{id}/harness-policy`; агенту 403): `amendments` = `off` < `experiments` <
 `inputs` < `all` (по умолчанию `all`) и `max_agent_added_nodes` (по умолчанию без лимита).
 Лимит действует и на «сырую» команду `budget_extend` от агента, и на поправку `budget`;
-счётчик — durable-записи команд агента.
+счётчик — durable-записи команд агента. Уровень `amendments` (`off` запрещает) действует на
+любое поле `budget_extend` от агента, которое расширяет бюджет — `add_nodes`, `max_seconds`,
+`max_eval_seconds`, `timeout`, `eval_timeout` (`harness/campaign.py::agent_budget_level_refusal`);
+поля ширины (`eval_parallel` и т. п.) бюджет не расширяют и под него не попадают.
 
 ## 4. Повтор упавшего узла — новая попытка того же узла
 

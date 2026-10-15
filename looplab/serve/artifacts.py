@@ -340,6 +340,12 @@ ART_RAW_MAX_BYTES = 16 * 1024 * 1024          # one image inline; a bigger one i
 ART_HASH_MAX_BYTES = 512 * 1024 * 1024        # sha256 is skipped (and SAID) over this size
 SAFETENSORS_HEADER_MAX = 16 * 1024 * 1024     # the format's own readers refuse ~100 MB; 16 is ample
 _META_LIST_CAP = 200
+# A tensor dimension and a summed parameter count are bounded to int64. The headers are
+# candidate-written: a `.npy` header's `0xfff…` literal is an int of any size, and a product over a
+# safetensors shape is unbounded, while the JSON response encoder refuses an int past 4 300 digits —
+# so an unbounded one turned `/artifact/meta` into a 500 (review 2026-10-15). Over the bound the
+# count is REPORTED as unknown (`parameter_count_overflow`), never wrapped or guessed.
+_TENSOR_INT_MAX = 2 ** 63 - 1
 
 ART_IMAGE_MIME = {".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg",
                   ".gif": "image/gif", ".webp": "image/webp"}
@@ -393,6 +399,36 @@ def preview_mime(path: str, head: bytes) -> Optional[str]:
     return None
 
 
+def _tensor_shape(value) -> Optional[list]:
+    """A header's `shape` as a list of int64-bounded non-negative ints, else None (malformed)."""
+    if not isinstance(value, (list, tuple)):
+        return None
+    if not all(type(d) is int and 0 <= d <= _TENSOR_INT_MAX for d in value):
+        return None
+    return list(value)
+
+
+def _element_count(shape: list) -> Optional[int]:
+    """`prod(shape)`, or None once it passes `_TENSOR_INT_MAX` — the multiply stops there, so a
+    million-dimension header costs a bounded loop, never an arbitrarily large integer."""
+    if 0 in shape:
+        return 0
+    total = 1
+    for d in shape:
+        total *= d
+        if total > _TENSOR_INT_MAX:
+            return None
+    return total
+
+
+def _header_text(value, limit: int) -> str:
+    # `str()` of a value holding a huge int raises ValueError (the int-to-str digit limit).
+    try:
+        return str(value)[:limit]
+    except ValueError:
+        return "?"
+
+
 def safetensors_summary(f, size: int) -> Optional[dict]:
     """The safetensors header as a bounded summary, read from an open binary file at offset 0.
 
@@ -400,7 +436,6 @@ def safetensors_summary(f, size: int) -> Optional[dict]:
     name -> {dtype, shape, data_offsets}, plus an optional `__metadata__` string map. None when the
     bytes are not that shape."""
     import json as _json
-    import math as _math
     f.seek(0)
     raw_len = f.read(8)
     if len(raw_len) != 8:
@@ -423,17 +458,21 @@ def safetensors_summary(f, size: int) -> Optional[dict]:
     for name, spec in doc.items():
         if name == "__metadata__" or not isinstance(spec, dict):
             continue
-        shape = spec.get("shape")
-        dtype = str(spec.get("dtype") or "?")[:16]
-        if not isinstance(shape, list) or not all(isinstance(d, int) and d >= 0 for d in shape):
+        shape = _tensor_shape(spec.get("shape"))
+        dtype = _header_text(spec.get("dtype") or "?", 16)
+        if shape is None:
             return None
         tensors += 1
         dtypes[dtype] = dtypes.get(dtype, 0) + 1
-        params += _math.prod(shape) if shape else 1
+        count = _element_count(shape)
+        params = None if params is None or count is None else params + count
+        if params is not None and params > _TENSOR_INT_MAX:
+            params = None
         if len(sample) < 50:
             sample.append({"name": str(name)[:200], "dtype": dtype, "shape": shape[:8]})
     return {
         "header_bytes": n, "tensor_count": tensors, "parameter_count": params, "dtypes": dtypes,
+        **({"parameter_count_overflow": True} if params is None else {}),
         "metadata": ({str(k)[:100]: str(v)[:300] for k, v in list(meta.items())[:32]}
                      if isinstance(meta, dict) else None),
         "tensors_sample": sample, "tensors_truncated": tensors > len(sample),
@@ -480,7 +519,11 @@ def npy_summary(f) -> Optional[dict]:
         return None
     if not isinstance(header, dict):
         return None
-    return {"dtype": str(header.get("descr"))[:64], "shape": list(header.get("shape") or ())[:16],
+    # `shape` is None when the header's is not a tuple of int64-bounded dims (`_tensor_shape`): a
+    # scalar raised TypeError and a set or a huge literal 500'd the JSON encoder (review 2026-10-15).
+    shape = _tensor_shape(header.get("shape"))
+    return {"dtype": _header_text(header.get("descr"), 64),
+            "shape": shape[:16] if shape is not None else None,
             "fortran_order": bool(header.get("fortran_order"))}
 
 

@@ -23,13 +23,19 @@ from __future__ import annotations
 
 from typing import Any
 
-from looplab.core.cards import hypothesis_id
+from looplab.core.cards import CARD_STATEMENT_MAX_CHARS, hypothesis_id
 from looplab.engine.research_cadence import (
     normalized_belief_key, question_concept_rows, question_parent_rows)
 
 # Bounds of the published projection. The board itself is capped at 256 cards on the wire; the
 # banner is a to-do list, so its rows are the most recently asked first and the count is exact.
 MEMO_QUESTION_ROWS_MAX = 64
+# A row's `statement` is what the banner FILES (`hypothesis_added`), so it is never cut below the
+# filing intake's own bound: a cut statement files a card whose belief key is not the question's,
+# and the question then reads "not on the board" forever (review 2026-10-15 — the cut was 500
+# while a memo question may be 1 200 chars, `core/advisory_payloads.py`). The row `id` is derived
+# from the same uncut text. `MEMO_QUESTION_STATEMENT_CHARS` bounds DISPLAY-only text (the parent).
+MEMO_QUESTION_FILED_CHARS = CARD_STATEMENT_MAX_CHARS
 MEMO_QUESTION_STATEMENT_CHARS = 500
 MEMO_QUESTION_MEMO_IDS_MAX = 8
 MEMO_QUESTION_CONCEPTS_MAX = 16
@@ -83,7 +89,7 @@ def memo_question_projection(state) -> dict:
             row = by_key.get(key)
             if row is None:
                 row = by_key[key] = {
-                    "statement": statement[:MEMO_QUESTION_STATEMENT_CHARS],
+                    "statement": statement[:MEMO_QUESTION_FILED_CHARS],
                     "on_board": key in board_keys, "memo_ids": [], "times_asked": 0,
                     "first_at_node": at_node, "last_at_node": at_node,
                     "_last": index}

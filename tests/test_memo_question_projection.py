@@ -100,6 +100,23 @@ def test_the_projection_is_not_folded_and_filing_retires_the_row(tmp_path):
         "rows": [], "asked": 1, "on_board": 1, "not_on_board": 0, "truncated": False}
 
 
+def test_filing_a_long_question_from_its_row_retires_the_row(tmp_path):
+    """Review 2026-10-15: a memo question may be 1 200 chars, the row's `statement` was cut to 500,
+    and the banner files `row.statement` — so the filed card's belief key was the CUT text's and the
+    question stayed "not on the board" however often it was filed. The row carries the full text,
+    and its `id` is the id that full text files under."""
+    from looplab.core.cards import hypothesis_id
+    long_question = "Does replay of the old-user cohort recover recall " + "x" * 1100 + "?"
+    assert len(long_question) > 1000
+    rd = _run(tmp_path, [_memo("m1", [long_question])])
+    row = memo_question_projection(_state(rd))["rows"][0]
+    assert row["statement"] == long_question and row["id"] == hypothesis_id(long_question)
+    EventStore(rd / "events.jsonl").append("hypothesis_added", {
+        "statement": row["statement"], "source": "research_memo"})
+    after = memo_question_projection(_state(rd))
+    assert (after["not_on_board"], after["on_board"], after["rows"]) == (0, 1, [])
+
+
 def test_the_receipt_notice_and_the_board_share_one_identity(tmp_path):
     rd = _run(tmp_path, [], filed=["Does replay help?"])
     memo = {"open_questions": ["does replay   help?", "New one?", "", 7]}

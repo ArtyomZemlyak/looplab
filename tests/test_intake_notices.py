@@ -149,6 +149,30 @@ def test_reaffirm_carries_the_named_memo_and_finding_objects_keep_their_status(
     assert bad.json()["error"]["code"] == "reaffirmed_memo_not_found"
 
 
+def test_a_reaffirm_clears_a_field_sent_empty_and_its_aligned_fields(tmp_path, monkeypatch):
+    """Review 2026-10-15: the carry merged only TRUTHY sent fields, so an explicit `[]` could not
+    retract a carried list, and the aligned `question_concepts` / `finding_meta` stayed beside it."""
+    client, rd = _client(tmp_path, monkeypatch)
+    first = {"summary": "Week 6 regresses.",
+             "findings": [{"id": "f-1", "text": "New users lose recall.", "status": "new"}],
+             "open_questions": ["Does replay recover recall?"],
+             "question_concepts": [["replay"]]}
+    assert post_command(client, "research_completed", {"memo": first}, key="memo-a",
+                        headers=AGENT).status_code == 200
+    memo = _research(rd)[-1]
+    assert memo["question_concepts"] == [["replay"]] and memo["finding_meta"]
+    response = post_command(client, "research_completed", {"memo": {
+        "reaffirm_memo_id": memo["memo_id"], "open_questions": [],
+        "findings": ["Old users are unchanged."], "next_experiments": None}},
+        key="memo-b", headers=AGENT)
+    assert response.status_code == 200, response.text
+    again = _research(rd)[-1]
+    assert again["reaffirms"] == memo["memo_id"] and again["summary"] == memo["summary"]
+    assert again["open_questions"] == [] and again["question_concepts"] == []
+    assert again["findings"] == ["Old users are unchanged."]
+    assert not any(again.get("finding_meta") or []), "the replaced findings' meta is not carried"
+
+
 def test_an_unfiled_experiment_is_reminded_only_while_questions_are_open():
     from types import SimpleNamespace
     from looplab.serve.intake_notices import board_notices

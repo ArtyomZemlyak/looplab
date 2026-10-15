@@ -75,6 +75,35 @@ def test_declared_edges_fold_as_authored_and_nest_flat_ids(tmp_path, monkeypatch
         assert refused.status_code == 400 or refused.json()["status"] == "rejected", refused.text
 
 
+def test_a_cycle_completed_by_a_concurrent_command_is_refused_at_append_time(tmp_path, monkeypatch):
+    """Review 2026-10-15: the cycle check ran only at intake, and the append-time recheck for
+    `concept_edge` returned None. The run's generation fence does not move when another edge lands,
+    so `b -> a` validated against a fold without `a -> b`, then appended after it, wrote a 2-cycle.
+    Driven through the service's own append path: intake on the old fold, the other edge lands, the
+    append re-folds."""
+    from looplab.events.run_generation import run_generation_token
+    from looplab.serve.control_validation import normalize_control
+
+    rd = _run(tmp_path, monkeypatch)
+    srv = make_app(tmp_path).state.looplab
+    data = normalize_control(srv, rd, "concept_edge",
+                             {"edges": [{"src": "data-composition", "dst": "replay"}]})
+    store = EventStore(rd / "events.jsonl")
+    store.append("concept_edge", {"edges": [{"src": "replay", "rel": "is_a",
+                                             "dst": "data-composition", "provenance": "authored",
+                                             "confidence": 1.0}], "mode": "authored"})
+    events = store.read_all()
+    record = {"event_type": "concept_edge", "run_generation": run_generation_token(events)}
+    intent, _baseline, error = srv.commands._append_collaboration_intent(rd, record, data)
+    assert intent is None and error is not None and error["code"] == "concept_edge_cycle", error
+    assert len(store.read_all()) == len(events), "nothing was appended"
+    # An edge that closes no cycle still appends through the same path.
+    ok = normalize_control(srv, rd, "concept_edge",
+                           {"edges": [{"src": "rare-items", "dst": "data-composition"}]})
+    intent, _baseline, error = srv.commands._append_collaboration_intent(rd, record, ok)
+    assert error is None and intent is not None
+
+
 def test_the_is_a_projection_moves_only_roots_and_only_for_authored_edges():
     tree = project_hierarchy(["data-composition", "replay", "loss/contrastive"])
     asserted = {"k": {"src": "replay", "rel": "is_a", "dst": "data-composition",

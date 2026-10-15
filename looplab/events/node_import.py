@@ -86,6 +86,20 @@ def node_import_payload(source_state, node_id: int, source_run_id: str) -> dict:
         # envelope. The experiment/code import remains useful; taxonomy stays genuinely absent.
         for field in ("concept_mode", "concepts", "concepts_added", "concepts_removed"):
             sidea.pop(field, None)
+    # SOURCE-GRAPH REFERENCES DO NOT CROSS RUNS. `parent_card_id` names a research question on the
+    # SOURCE run's board and `uses` names artifact nodes by the SOURCE run's ids: on the target both
+    # are either dangling or, worse, a different card / node that happens to share the id. The live
+    # import used to carry them inside the idea, where the inject intake (rightly) refuses an unknown
+    # question as `inject_question_invalid` and an in-idea `uses` with "put node_kind and uses at the
+    # top level" — so every import of a filed or artifact-consuming node was refused with a
+    # remediation the operator could not apply to a server-built idea. They are dropped here; the
+    # operator files the import on THIS board (`card_filed`) if it answers one of its questions.
+    # `node_kind` is NOT a graph reference but what the imported code IS (an artifact producer), so
+    # it stays: the new-run seed appends the idea as built (the fold reads `Idea.node_kind`), and the
+    # live import hoists it to the top-level field its intake validates
+    # (`serve/control_validation.py::_import_cross_run_source`).
+    sidea.pop("parent_card_id", None)
+    sidea.pop("uses", None)
     note = f"imported from run {source_run_id} #{node_id}"
     base = (sidea.get("rationale") or "").strip()
     sidea["rationale"] = f"{base} | {note}" if base else note

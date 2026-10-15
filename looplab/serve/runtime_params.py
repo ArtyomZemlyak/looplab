@@ -165,9 +165,16 @@ def parse_carrier(path: str, text: str) -> tuple[Optional[list[dict]], str]:
             return None, STATUS_UNPARSED
         if not isinstance(doc, dict):
             return None, STATUS_UNPARSED
-        for key, value in _flatten(doc):
-            shown, numeric = _display(value)
-            rows.append({"key": key, "value": shown, "numeric": numeric, "line": None})
+        try:
+            for key, value in _flatten(doc):
+                shown, numeric = _display(value)
+                rows.append({"key": key, "value": shown, "numeric": numeric, "line": None})
+        except ValueError:
+            # YAML and TOML both read a hex/octal/binary literal of ANY size (the int-to-str digit
+            # limit binds only decimal parsing), and `str()` of one past 4 300 digits raises — as a
+            # value or as a YAML mapping key. That escaped as a 500; it is a document this
+            # projection cannot show, which the contract spells as a carrier status, never a raise.
+            return None, STATUS_UNPARSED
     for row in rows:
         row["masked"] = _masked(row["key"], row["value"])
         if row["masked"]:

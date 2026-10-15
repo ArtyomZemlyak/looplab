@@ -33,6 +33,24 @@ def test_trainer_state_reads_the_newest_history_once(tmp_path):
     assert "trainer/step" not in series
 
 
+def test_a_live_retrain_outranks_a_stale_checkpoint_with_more_steps(tmp_path):
+    """Review 2026-10-15: ranking by the largest logged step let a crashed earlier run's
+    `checkpoint-1000/` win over the retrain now writing `checkpoint-200/`; the docstring promised
+    the newest re-run. The newest-written file wins; an mtime tie still prefers more steps."""
+    stale = tmp_path / "out" / "checkpoint-1000" / "trainer_state.json"
+    live = tmp_path / "out" / "checkpoint-200" / "trainer_state.json"
+    _state(stale, list(range(0, 1001, 100)))
+    _state(live, [0, 100, 200])
+    now = time.time()
+    os.utime(stale, (now - 3600, now - 3600))
+    os.utime(live, (now, now))
+    series = FileMetricsAdapter().read(str(tmp_path))
+    assert [p["step"] for p in series["trainer/loss"]] == [0, 100, 200]
+    os.utime(stale, (now, now))
+    series = FileMetricsAdapter().read(str(tmp_path))
+    assert [p["step"] for p in series["trainer/loss"]][-1] == 1000
+
+
 def test_jsonl_rows_become_per_file_tags_and_skip_torn_lines(tmp_path):
     path = tmp_path / "logs" / "stage1.metrics.jsonl"
     path.parent.mkdir()
