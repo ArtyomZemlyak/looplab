@@ -142,6 +142,26 @@ def test_effective_config_flags_a_declared_value_the_run_did_not_use(tmp_path):
     assert canonical_key("SFT_TOKENIZE_BATCH_SIZE") is None and canonical_key("Eval steps") is None
 
 
+def test_effective_config_reads_no_progress_line_as_the_epoch_budget(tmp_path):
+    """Review 2026-10-15 (driven): any two-token name with `epoch` in it mapped to `epochs`, so the
+    training loop's own progress (`Epoch 1: loss 0.52`, `Epoch time: 12.3`) became
+    `effective.epochs` and a declared `epochs` read as a false `mismatch`. A genuine configuration
+    line still reads, and a numeric coordinate never takes a word as its value."""
+    wd = tmp_path / "wd"
+    wd.mkdir()
+    (wd / "train.log").write_text("Epoch 1: loss 0.52\nEpoch 2: loss 0.41\nEpoch time: 12.3\n"
+                                  "train epoch: 2\nEpoch: 3/10\nLR: warm\n")
+    rec = capture(wd, stage_names=["train"], declared={"epochs": 10})
+    assert rec["values"].get("epochs") is None and rec["values"].get("lr") is None, rec["values"]
+    assert rec["mismatches"] == [] and rec["unknown"] == ["epochs"]
+    (wd / "train.log").write_text("num_train_epochs: 10\nmax_epoch = 10\nEPOCHS=10\nEpoch: 10\n"
+                                  "scheduler: cosine\n")
+    rec = capture(wd, stage_names=["train"], declared={"epochs": 10})
+    assert rec["effective"] == {"epochs": 10.0, "scheduler": "cosine"}, rec["effective"]
+    assert rec["checked"] == 1 and rec["mismatches"] == []
+    assert canonical_key("EPOCH") == "epochs" and canonical_key("Epoch 1") is None
+
+
 def _target_repo(tmp_path, files: dict) -> Path:
     target = tmp_path / "taskrepo"
     target.mkdir()

@@ -48,7 +48,8 @@ from looplab.search.policy import make_policy, parse_model_arms, policy_knobs
 from looplab.search.speculation_calibration import speculation_runtime_scope_digest
 from looplab.runtime.sandbox import (docker_tier_kwargs, install_launch_timeout_ceiling,
                                      make_sandbox)
-from looplab.adapters.tasks import TaskAdapter, kinds, load_task, make_llm_client, make_roles
+from looplab.adapters.tasks import (TaskAdapter, kinds, load_task, load_task_file, make_llm_client,
+                                     make_roles)
 from looplab.tools.vectorstore import make_embedder as _make_embedder
 from looplab.adapters.tasks import _make_abstractor as _make_lesson_abstractor
 _TASK_KINDS = tuple(kinds())
@@ -341,14 +342,21 @@ def _choice(value: str, choices: tuple[str, ...], param: str) -> str:
     return value
 
 
-def _load_task(task_file: Path, *, existing_run: bool = False) -> TaskAdapter:
+def _load_task(task_file: Path, *, existing_run: bool = False,
+               user_file_for: Optional[Path] = None) -> TaskAdapter:
     """Load a task JSON with friendly CLI errors: a missing file or malformed/invalid task becomes a
     one-line BadParameter (exit 2), not a raw multi-frame Python traceback dumped at the user.
 
     `existing_run=True` when the file is the snapshot of a run that already has history (`resume`,
     `finalize`, wrap-up recovery): a validation rule added after that snapshot was written must not
-    make the run unresumable. See `adapters/repo_task.py::_grandfathered`."""
+    make the run unresumable. See `adapters/repo_task.py::_grandfathered`.
+
+    `user_file_for=<run_dir>` when the file is the OPERATOR's own task file rather than that run's
+    snapshot (`resume --task-file`): its relative paths are read against the file's directory, as
+    `run` reads the same file (`adapters/tasks.py::load_task_file`)."""
     try:
+        if user_file_for is not None:
+            return load_task_file(task_file, existing_run=existing_run, run_dir=user_file_for)
         return load_task(task_file, existing_run=existing_run)
     except FileNotFoundError:
         raise CliRefusal(f"task file not found: {task_file}") from None
@@ -1069,7 +1077,7 @@ def declared_metric_name(run_dir) -> Optional[str]:
 _DIRECTION_WORDS = {"min": "lower is better", "max": "higher is better"}
 
 
-def _print_result(state, run_dir=None) -> None:
+def _print_result(state, run_dir=None, *, max_nodes=None) -> None:
     """The run summary every entry point closes with, and `looplab inspect` re-prints.
 
     WHY THE STOP LINE IS HERE AND UNCONDITIONAL. `finished={state.finished}` was the whole of what
@@ -1089,7 +1097,7 @@ def _print_result(state, run_dir=None) -> None:
     # lines, not nine), and the result in the reader's words below it.
     typer.echo(f"run={state.run_id} task={state.task_id} finished={state.finished} "
                f"nodes={len(state.nodes)} evaluated={len(state.evaluated_nodes())}")
-    account = stop_account(state, node_budget=_engine_node_budget(state, run_dir))
+    account = stop_account(state, node_budget=_engine_node_budget(state, run_dir, max_nodes))
     typer.echo(f"stop: {account.line}")
     if best is not None:
         m = best.robust_metric
@@ -1163,19 +1171,34 @@ def offline_baseline_note(state, backend, *, external_harness=False, events=(),
             "this task.")
 
 
-def _engine_node_budget(state, run_dir):
+def _engine_node_budget(state, run_dir, max_nodes=None):
     """`engine/run_capacity.py::node_budget` for the summary's stop line, or None to let the stop
-    account fall back to the plan. The base is the launch's `max_nodes` (`config.snapshot.json`) —
-    the arithmetic adds `budget_extend` and refunded reservations itself, exactly as `resume` does."""
+    account fall back to the plan. The arithmetic adds `budget_extend` and refunded reservations
+    itself, exactly as `resume` does; the BASE is the one question.
+
+    `max_nodes` is the base the engine this command just drove was BUILT with — `resume` passes its
+    own `settings.max_nodes`. Without it the base is the launch's (`config.snapshot.json`), and that
+    is not always what the last engine ran with: `resume --max-nodes 9` raises the budget for that
+    engine only and never rewrites the snapshot, so the summary of a demo resumed from 6 to 9 said
+    "node budget spent (6/6 experiments)" and `inspect` kept saying it (review 2026-10-15, driven).
+    A run that has used MORE ids than the snapshot admits is proof the snapshot is not the base the
+    last engine ran with, so that reading is withheld (None) and the stop account falls back to the
+    engine's own recorded plan (`events/stop_account.py::_node_budget_spent`), whose re-cut row
+    carries the budget that engine actually planned against."""
     if run_dir is None:
         return None
     try:
         from looplab.engine.run_capacity import node_budget
         from looplab.events.eventstore import EventStore
-        base = snapshot_settings(Path(run_dir) / "config.snapshot.json").get("max_nodes")
+        explicit = isinstance(max_nodes, int) and not isinstance(max_nodes, bool)
+        base = (max_nodes if explicit else
+                snapshot_settings(Path(run_dir) / "config.snapshot.json").get("max_nodes"))
         if not isinstance(base, int):
             return None
-        return node_budget(state, EventStore(Path(run_dir) / "events.jsonl").read_all(), base)
+        budget = node_budget(state, EventStore(Path(run_dir) / "events.jsonl").read_all(), base)
+        if not explicit and budget.used > budget.limit:
+            return None
+        return budget
     except (OSError, ValueError):
         return None
 

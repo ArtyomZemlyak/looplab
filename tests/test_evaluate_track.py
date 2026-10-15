@@ -269,3 +269,26 @@ def test_live_refuses_more_ids_than_one_request_may_name(tmp_path):
     rd, _store = _run(tmp_path)
     out = _cli(rd, "--live", "--nodes", ",".join(str(i) for i in range(257)))
     assert out.exit_code == 2 and "at most 256" in out.output, out.output
+
+
+def test_live_and_apply_refuse_a_run_dir_with_no_event_log(tmp_path):
+    """Review 2026-10-15: `--live` appended its intent through an `EventStore` that CREATES a
+    missing log, so a directory holding only a task snapshot gained an `events.jsonl` with one
+    orphan `track_requested`. Both appending forms take the gate every other intent writer takes."""
+    rd, _store = _run(tmp_path)
+    (rd / "events.jsonl").unlink()
+    for extra in (("--live", "--nodes", "0"), ("--apply",)):
+        out = _cli(rd, *extra)
+        assert out.exit_code == 2 and "no run found" in out.output, out.output
+        assert not (rd / "events.jsonl").exists()
+
+
+def test_live_refuses_a_log_with_a_mid_file_divergence(tmp_path):
+    rd, _store = _run(tmp_path)
+    lines = (rd / "events.jsonl").read_text().splitlines(keepends=True)
+    lines[1] = "{not json}\n"
+    (rd / "events.jsonl").write_text("".join(lines))
+    before = (rd / "events.jsonl").read_text()
+    out = _cli(rd, "--live", "--nodes", "0")
+    assert out.exit_code == 2 and "repair-log" in out.output, out.output
+    assert (rd / "events.jsonl").read_text() == before

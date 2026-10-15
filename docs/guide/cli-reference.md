@@ -328,7 +328,7 @@ looplab resume RUN_DIR [OPTIONS]
 | Option | Default | Description |
 |---|---|---|
 | `RUN_DIR` | *(required)* | Existing run directory to resume |
-| `--task-file PATH` | the run's `task.snapshot.json` | The task file the run was started with |
+| `--task-file PATH` | the run's `task.snapshot.json` | The run's task file; relative paths read against its directory |
 | `--max-nodes N` | from the snapshot | Override the node budget on resume |
 | `--drain-only` | off | Evaluate only what a reset or an interruption left owed, then pause (see below) |
 

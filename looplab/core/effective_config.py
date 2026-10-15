@@ -20,7 +20,9 @@ whether anything declared it, from three sources it can name exactly:
 Raw names are mapped to a small CANONICAL vocabulary (`lr`, `batch_size`, `micro_batch_size`,
 `grad_accum`, `world_size`, `seed`, `max_steps`, `epochs`, `warmup_steps`, `warmup_ratio`,
 `scheduler`, `weight_decay`) by `canonical_key`; a name about evaluation, tokenization or caching
-(`SFT_TOKENIZE_BATCH_SIZE`, `Eval steps`) is not a training coordinate and maps to nothing.
+(`SFT_TOKENIZE_BATCH_SIZE`, `Eval steps`) is not a training coordinate and maps to nothing, and
+neither is a progress label (`Epoch 1: loss 0.52` — a bare-number token is an index, not a name). A
+numeric key is never given a word as its value; only `scheduler` holds a name.
 
 THEN THE RECONCILIATION. Each declared numeric `Idea.params` entry whose name maps to a canonical
 key (a `stage2_` prefix scopes it to that stage's log) is `checked` when some observed value equals
@@ -74,6 +76,12 @@ def canonical_key(raw) -> Optional[str]:
     _, toks = split_stage(raw)
     if not toks:
         return None
+    # A bare number among the tokens is an INDEX, not part of a configuration name: `Epoch 1: loss
+    # 0.52` and `Step 200: lr=…` are progress lines whose label is "epoch 1", and reading them as
+    # names recorded `effective.epochs` and a false `mismatch` (review 2026-10-15, driven). A real
+    # name keeps its digits inside a token (`stage2_lr` is split off above, `adam_beta1` stays one).
+    if any(t.isdigit() for t in toks):
+        return None
     joined = "_".join(toks)
     tset = set(toks)
     if tset & _DENY and not ("seed" in tset and len(tset) <= 3):
@@ -96,7 +104,11 @@ def canonical_key(raw) -> Optional[str]:
         return "batch_size"
     if ("world" in tset and "size" in tset) or tset & {"gpus", "nproc", "ngpus"}:
         return "world_size"
-    if "epochs" in tset or ("epoch" in tset and ("num" in tset or "train" in tset or len(toks) <= 2)):
+    # The plural, or the singular ALONE or with a count qualifier (`EPOCH=3`, `num_epoch`,
+    # `max_epoch`). Not any two-token name with `epoch` in it — `Epoch time: 12.3`, `cur epoch: 4`
+    # and `train epoch: 2` are progress, and the old `len(toks) <= 2` read each as the budget.
+    if "epochs" in tset or toks == ["epoch"] or (
+            "epoch" in tset and tset & {"num", "n", "max", "total"}):
         return "epochs"
     if "steps" in tset or "iters" in tset or "iterations" in tset:
         if tset & {"max", "train", "total", "num"} or toks in (["steps"], ["iters"]):
@@ -114,8 +126,16 @@ def parse_value(raw):
     return value if math.isfinite(value) else text[:80]
 
 
+# The one canonical key whose value is a NAME (`cosine`), not a number.
+_TEXT_KEYS = frozenset({"scheduler"})
+
+
 def _offer(values: dict, key: str, value, *, source: str, where: str, raw: str,
            stage: Optional[str]) -> None:
+    # A numeric coordinate with a non-numeric value is not an observation of it: `Epoch: 3/10` or a
+    # label followed by prose (`loss`) would otherwise stand as the value and read as a mismatch.
+    if key not in _TEXT_KEYS and not isinstance(value, float):
+        return
     rows = values.setdefault(key, [])
     if len(rows) < MAX_VALUES_PER_KEY:
         rows.append({"value": value, "source": source, "where": where, "key": raw[:64],

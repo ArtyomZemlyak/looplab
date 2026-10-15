@@ -81,7 +81,14 @@ def nothing_left_sentence(state, events, max_nodes, *, run_dir, verb: str) -> Op
     """The one line a re-entering command prints instead of reopening, or None to reopen.
 
     `verb` is the command the operator typed (`resume` / `run`); the remedy names the flag that
-    raises the budget on that same command, with the number one budget higher."""
+    raises the budget on that same command, with the number one budget higher.
+
+    "Higher" is counted from what the run has USED, not from the limit alone: `--max-nodes` on
+    `resume` is not written back to the snapshot, so a demo resumed from 6 to 9 and then resumed
+    plainly reads limit 6 with 9 ids used, and `limit + limit` named `--max-nodes 12` — and a run
+    pushed further (20 used) was told a budget the same check then refused again (review
+    2026-10-15, driven). `max(used, limit) + max(1, limit)` always admits at least one node. The
+    head says the same thing: past the budget, it names both numbers instead of "9/6"."""
     if not getattr(state, "finished", False) or work_queued_after_finish(state, events):
         return None
     budget = node_budget(state, events, max_nodes)
@@ -89,9 +96,13 @@ def nothing_left_sentence(state, events, max_nodes, *, run_dir, verb: str) -> Op
         return None
     evaluated = sum(1 for node in state.nodes.values()
                     if getattr(node, "status", "") in ("evaluated", "failed"))
-    more = budget.limit + max(1, budget.limit)
-    head = (f"already finished: {evaluated}/{budget.limit} experiments, the node budget is spent; "
-            f"nothing to continue.")
+    more = max(budget.used, budget.limit) + max(1, budget.limit)
+    if budget.used > budget.limit:
+        head = (f"already finished: {evaluated} experiments, past this command's node budget of "
+                f"{budget.limit}; nothing to continue.")
+    else:
+        head = (f"already finished: {evaluated}/{budget.limit} experiments, the node budget is "
+                f"spent; nothing to continue.")
     if verb == "run":
         return (f"{head}\n  To continue it: looplab resume {run_dir} --max-nodes {more}"
                 f"\n  Or start a fresh run: pass a new --out (e.g. --out {run_dir}-2)")

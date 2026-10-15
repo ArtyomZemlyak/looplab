@@ -88,9 +88,16 @@ def evaluate_track_cmd(
     `track_requested` intent instead, which the RUNNING engine serves on its own GPU pool
     (`engine/track_lane.py`); a stopped run keeps it queued for its next engine.
     """
+    from looplab.cli import _require_run_dir
     from looplab.core.errors import ConfigRefusal
     from looplab.maintenance.evaluate_track import evaluate_track, request_live_track
     from looplab.maintenance.import_metrics import MetricsInputRefusal
+    if live or apply:
+        # Both forms APPEND (a `track_requested` intent, or `extra_metrics_imported` rows), so they
+        # take the gate every other CLI intent writer takes: a run that exists and a log with no
+        # mid-file divergence. Without it `--live` on a mistyped run dir that held a task snapshot
+        # CREATED an `events.jsonl` holding one orphan intent (review 2026-10-15).
+        _require_run_dir(Path(run_dir), healthy=True)
     try:
         typer.echo(request_live_track(run_dir, track, nodes) if live
                    else evaluate_track(run_dir, track, nodes, apply=apply))

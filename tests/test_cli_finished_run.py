@@ -284,3 +284,77 @@ def test_unknown_comparability_names_only_what_this_task_can_declare(tmp_path, t
     assert line.endswith(remedy), line
     if absent:
         assert absent not in line, line
+
+
+def test_a_budget_raised_on_resume_is_the_one_the_summary_and_the_remedy_count(demo):
+    """Review 2026-10-15 (driven): `resume --max-nodes` raises the budget for that engine only and
+    never rewrites `config.snapshot.json`, so the summary of a demo resumed from 6 to 13 said "node
+    budget spent (6/6 experiments)", `inspect` kept saying it, and a plain `resume` then said "13/6"
+    and suggested `--max-nodes 12` — a budget the same check refuses, since 13 ids are already used."""
+    run_dir, _ = demo
+    raised = _invoke("resume", run_dir, "--max-nodes", "13")
+    assert raised.exit_code == 0, raised.output
+    assert "stop: finished — node budget spent (13/13 experiments)." in raised.output, raised.output
+    inspected = _invoke("inspect", run_dir)
+    assert "stop: finished — node budget spent (13/13 experiments)." in inspected.output, \
+        inspected.output
+    before = _rows(run_dir)
+    plain = _invoke("resume", run_dir)
+    assert plain.exit_code == 0 and _rows(run_dir) == before, plain.output
+    assert "13 experiments, past this command's node budget of 6" in plain.output, plain.output
+    assert f"looplab resume {run_dir} --max-nodes 19" in plain.output, plain.output
+    # …and the remedy it names is one the check admits: the run continues.
+    continued = _invoke("resume", run_dir, "--max-nodes", "19")
+    assert continued.exit_code == 0 and "nodes=19" in continued.output, continued.output
+
+
+def test_resume_reads_a_task_files_relative_paths_against_its_directory(tmp_path, monkeypatch):
+    """Review 2026-10-15 (driven): `run` reads a task file's relative paths against the file's
+    directory (`core/appconfig.py::resolve_task_paths`), but `resume --task-file` loaded the same
+    file through the snapshot loader, against the current directory — refused from anywhere else."""
+    import shutil
+    work = tmp_path / "work"
+    work.mkdir()
+    shutil.copytree(ROOT / "examples" / "dataset_example", work / "dataset_example")
+    task_file = work / "dataset_task.json"
+    shutil.copy(ROOT / "examples" / "dataset_task.json", task_file)
+    run_dir = tmp_path / "run"
+    started = _invoke("run", task_file, "--backend", "toy", "--max-nodes", "1", "--out", run_dir)
+    assert started.exit_code == 0, started.output
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    monkeypatch.chdir(elsewhere)
+    resumed = _invoke("resume", run_dir, "--task-file", task_file, "--max-nodes", "2")
+    assert resumed.exit_code == 0, resumed.output
+    assert "nodes=2 evaluated=2" in resumed.output, resumed.output
+
+
+@pytest.mark.posix_only("fcntl advisory locks (flock)")
+def test_a_refused_runs_cleanup_unlinks_engine_lock_while_it_still_holds_it(tmp_path, monkeypatch):
+    """Review 2026-10-15: `engine.lock` was unlinked AFTER the re-taken singleton was released, so
+    a concurrent `run` could take the lock on that inode in between and lose it to the unlink. At
+    the moment of the unlink, nobody else may be able to take the lock."""
+    import fcntl
+    from looplab.cli.run_cmds import _remove_if_only_locks
+    out = tmp_path / "new"
+    out.mkdir()
+    (out / "engine.lock").touch()
+    lockable_at_unlink = []
+    real_unlink = Path.unlink
+
+    def _probing_unlink(self, *args, **kwargs):
+        if self.name == "engine.lock":
+            with open(self, "a+") as probe:
+                try:
+                    fcntl.flock(probe.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                except BlockingIOError:
+                    lockable_at_unlink.append(False)
+                else:
+                    fcntl.flock(probe.fileno(), fcntl.LOCK_UN)
+                    lockable_at_unlink.append(True)
+        return real_unlink(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "unlink", _probing_unlink)
+    _remove_if_only_locks(out)
+    assert lockable_at_unlink == [False], lockable_at_unlink
+    assert not out.exists()

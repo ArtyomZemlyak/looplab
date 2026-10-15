@@ -198,13 +198,24 @@ def load_task(path: str | Path, *, existing_run: bool = False) -> TaskAdapter:
     return adapter
 
 
-def load_task_file(path: str | Path) -> TaskAdapter:
+def load_task_file(path: str | Path, *, existing_run: bool = False,
+                   run_dir: str | Path | None = None) -> TaskAdapter:
     """A USER's task file (`examples/dataset_task.json`, a hand-written `task.yaml`), its relative
     paths read against the file's own directory exactly as `looplab run` reads them (doc 75 UX-04;
-    `core/appconfig.py::resolve_task_paths`). Never a run's own snapshot — that is `load_task`."""
+    `core/appconfig.py::resolve_task_paths`). Never a run's own snapshot — that is `load_task`.
+
+    `existing_run` / `run_dir`: the file is handed to `looplab resume --task-file` for a run that
+    already has history — the same waiver of later validation rules `load_task` grants a snapshot,
+    and a repo task bound to the RUN directory (`run_dir`), never to wherever the file lives. Before
+    this, `resume --task-file` read the file through `load_task`, so the same file `run` had read
+    against its own directory was read against the current one (review 2026-10-15, driven)."""
     from looplab.core.appconfig import load_document, resolve_task_paths
     task, _settings, _out = load_document(Path(path))
-    return validate_task(resolve_task_paths(task, Path(path).parent))
+    task = resolve_task_paths(task, Path(path).parent)
+    adapter = validate_task(task, existing_run=True) if existing_run else validate_task(task)
+    if existing_run and run_dir is not None and isinstance(adapter, RepoTask):
+        adapter.bind_run_directory(Path(run_dir))
+    return adapter
 
 
 # Re-export: the factory moved to its dependency-true home (core/llm.py — it only ever needed

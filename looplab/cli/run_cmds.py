@@ -456,6 +456,14 @@ def _eval_activity_needs_owner_boundary(state) -> bool:
     )
 
 
+def _is_same_file(a: Path, b: Path) -> bool:
+    """`a` and `b` name one existing file (a link or another spelling of the path included)."""
+    try:
+        return os.path.samefile(a, b)
+    except OSError:
+        return False
+
+
 def _record_engine_owner_boundary(eng) -> bool:
     """Acknowledge resume intent and retire stale live-eval ownership in one exact lock owner."""
 
@@ -886,8 +894,16 @@ def _remove_if_only_locks(out: Path) -> None:
     and a concurrent `run` on the same new `--out` may have taken it and still be in setup with no
     other file yet. Unlinking its lock then let a third process create a fresh one — two engines on
     one event log (code review of doc 75 UX-33). So the singleton is taken AGAIN, non-blocking; held
-    elsewhere, nothing is touched. The other lock files go while we hold it; `engine.lock` itself
-    after release (Windows cannot unlink an open file), then the now-empty directory."""
+    elsewhere, nothing is touched. The other lock files go while we hold it, then the now-empty
+    directory.
+
+    `engine.lock` ITSELF IS UNLINKED WHILE HELD on POSIX (review 2026-10-15). Unlinking it after the
+    release reopened the very race above: between our release and our unlink a concurrent `run`
+    could take the lock on that inode, and our unlink then orphaned it — a third process creates a
+    fresh `engine.lock` and two engines own one log. Held, no other process can hold it, and an
+    unlinked flocked inode is legal. Windows cannot unlink an open file, so there it still goes
+    after the release, with that window — the cost of leaving it instead is the used-`--out` defect
+    UX-33 fixed."""
     try:
         with _engine_singleton(out) as ours:
             if not ours:
@@ -896,9 +912,10 @@ def _remove_if_only_locks(out: Path) -> None:
             if not all(entry.is_file() and entry.name.endswith(".lock") for entry in entries):
                 return
             for entry in entries:
-                if entry.name != "engine.lock":
+                if entry.name != "engine.lock" or os.name != "nt":
                     entry.unlink()
-        (out / "engine.lock").unlink()
+        if os.name == "nt":
+            (out / "engine.lock").unlink()
         out.rmdir()
     except (OSError, EnvironmentRefusal):
         pass   # a leftover lock file is the old, harmless outcome; never mask the refusal itself
@@ -1381,6 +1398,9 @@ def resume(
     # Called as a plain function too (see the `max_nodes` note below): an omitted option is Typer's
     # `OptionInfo` sentinel there, which must read as "off", never as a truthy object.
     drain_only = drain_only is True
+    # …and an omitted `--task-file` is "use the snapshot", never a path-shaped sentinel object.
+    if not isinstance(task_file, (str, os.PathLike)):
+        task_file = None
     # `healthy=True` fails closed on a MID-FILE log corruption before re-entering the loop: iter_jsonl
     # stops at the first bad line, so a byte flipped mid-log (FUSE/NFS/S3 only) would replay just the
     # prefix, drop a valid tail, and — worse — resume would append MORE records behind the boundary (an
@@ -1401,7 +1421,11 @@ def resume(
     # started must not be able to refuse it. The rules that CAN be waived this way report themselves
     # as warnings below instead — the diagnosis survives, only the refusal is dropped (invariant #6:
     # what the run recorded at `run_started` wins on resume).
-    task = _load_task(task_file, existing_run=True)
+    # An operator's OWN task file is read as `run` reads it — relative paths against the file's
+    # directory — and the run's snapshot (which the server also passes as `--task-file`) as a
+    # snapshot, never re-resolved (`adapters/tasks.py::load_task` says why).
+    task = _load_task(task_file, existing_run=True,
+                      user_file_for=None if _is_same_file(task_file, snap) else run_dir)
     for _warn in eval_reader_path_errors(task):
         typer.echo(f"warning: {_warn}", err=True)
     # Restore the ORIGINAL run's settings from the snapshot `run` wrote — a fresh Settings()
@@ -1553,7 +1577,9 @@ def resume(
             typer.echo(f"waiting for the engine lock on {run_dir} "
                        f"({_handoff_deadline - now:.0f}s left) — the previous owner is finishing up")
         time.sleep(0.05)
-    _print_result(state, run_dir=run_dir)
+    # The base this command's engine ran with — `--max-nodes` included, which the snapshot the
+    # stop line would otherwise read does not record (`cli/__init__.py::_engine_node_budget`).
+    _print_result(state, run_dir=run_dir, max_nodes=settings.max_nodes)
     _offline = offline_baseline_note(state, settings.backend,
                                      external_harness=bool(settings.external_harness),
                                      events=eng.store.read_all(), run_dir=run_dir)
