@@ -392,3 +392,151 @@ def test_experiment_declarations_are_validated(tmp_path, monkeypatch, bad):
     rd, store = _make_run(root, "camp", _repo(tmp_path), nodes=())
     assert _amend(client, "camp", store, "experiment",
                   experiment=_experiment(**bad)).status_code == 400
+
+
+# ----------------------------------------------------------------- review 2026-10-15 (g6 findings)
+def test_an_upload_with_one_cluster_is_refused_before_it_is_written(tmp_path, monkeypatch):
+    """A clustered SE over ONE user is NaN; stored, it made the upload's own response and every
+    later comparison over the test unrenderable (Starlette renders JSON with allow_nan=False)."""
+    root, client = _client(tmp_path, monkeypatch)
+    rd, store = _make_run(root, "camp", _repo(tmp_path), nodes=(0,), metrics={0: 0.5})
+    payload = write_npz({"keys": write_npy(["q0", "q1", "q2"], dtype="<U4"),
+                         "users": write_npy(["u", "u", "u"], dtype="<U2"),
+                         "v": write_npy([1.0, 0.0, 1.0], dtype="<f8")})
+    body = {"expected_generation": _gen(store), "action_id": "one", "node_id": 0, "format": "npz",
+            "content_b64": base64.b64encode(payload).decode(), "metrics": {"m": {"array": "v"}}}
+    r = client.post("/api/runs/camp/per-query", json=body, headers=AGENT)
+    assert r.status_code == 400 and "clusters" in r.text
+    assert not (rd / "per_query").exists() or not any((rd / "per_query").rglob("*.json.gz"))
+
+
+def test_holm_counts_the_declared_family_not_the_computed_subset(tmp_path, monkeypatch):
+    root, client = _client(tmp_path, monkeypatch)
+    rd, store = _make_run(root, "camp", _repo(tmp_path), nodes=())
+    assert _amend(client, "camp", store, "experiment", experiment=_experiment()).status_code == 200
+    datasets = {nid: _arrays(nid, lift=0.04 * nid) for nid in (0, 2)}
+    for nid, arm in ((0, "A0"), (2, "A2")):
+        store.append("node_created", {"node_id": nid, "parent_ids": [], "operator": "draft",
+                                      "idea": {"operator": "draft"}, "files": {"exp.env": "A\n"}})
+        store.append("node_evaluated", {"node_id": nid, "metric": 0.5})
+        assert _upload(client, "camp", store, nid, datasets[nid][0], experiment_id="D4",
+                       arm=arm).status_code == 200
+    comp = client.get("/api/runs/camp/experiments/D4/comparison", headers=OWNER).json()
+    rows = {(c["treatment"], c["metric"]): c for c in comp["contrasts"]}
+    computed = rows[("A2", "FUR@200")]
+    assert rows[("A1", "FUR@200")]["status"] == "unavailable"     # A1 never uploaded
+    # The primary family declares two contrasts: the missing one enters as p = 1.
+    assert computed["family_size"] == 2 and computed["family_computed"] == 1
+    assert computed["p_adjusted"] == paired.holm([computed["p_two_sided"], 1.0])[0]
+    assert any("families are incomplete" in c for c in comp["caveats"])
+
+
+def test_same_protocol_reads_only_task_and_files_amendments(tmp_path, monkeypatch):
+    root, client = _client(tmp_path, monkeypatch)
+    rd, store = _make_run(root, "camp", _repo(tmp_path), nodes=())
+    exp = _experiment(arms={"A0": {"node_id": 0}, "A2": {"node_id": 2}},
+                      contrasts=[{"treatment": "A2", "control": "A0"}])
+    assert _amend(client, "camp", store, "experiment", experiment=exp).status_code == 200
+    datasets = {nid: _arrays(nid) for nid in (0, 2)}
+    # Node 0 under version 1, node 2 under version 2 — the step between them is an EXPERIMENT
+    # registration, not a task/files amendment.
+    for nid, version in ((0, 1), (2, 2)):
+        store.append("node_created", {"node_id": nid, "parent_ids": [], "operator": "draft",
+                                      "idea": {"operator": "draft"}, "files": {"exp.env": "A\n"},
+                                      "protocol_version": version})
+        store.append("node_evaluated", {"node_id": nid, "metric": 0.5})
+        assert _upload(client, "camp", store, nid, datasets[nid][0]).status_code == 200
+        if nid == 0:
+            other = _experiment(experiment_id="E2", arms={"A0": {"node_id": 0}, "A1": {}},
+                                contrasts=[{"treatment": "A1", "control": "A0"}])
+            assert _amend(client, "camp", store, "experiment", action="e2",
+                          experiment=other).status_code == 200
+    row = client.get("/api/runs/camp/experiments/D4/comparison",
+                     headers=OWNER).json()["contrasts"][0]
+    assert row["status"] == "computed", row
+    assert row["same_protocol"] is True
+    # A task amendment between them IS a protocol change.
+    assert _amend(client, "camp", store, "task", action="t1",
+                  task={"protect_add": ["x.py"]}).status_code == 200
+    store.append("node_created", {"node_id": 4, "parent_ids": [], "operator": "draft",
+                                  "idea": {"operator": "draft"}, "files": {"exp.env": "A\n"},
+                                  "protocol_version": 3})
+    store.append("node_evaluated", {"node_id": 4, "metric": 0.5})
+    assert _upload(client, "camp", store, 4, datasets[2][0]).status_code == 200
+    exp3 = _experiment(experiment_id="E3", arms={"A0": {"node_id": 0}, "A2": {"node_id": 4}},
+                       contrasts=[{"treatment": "A2", "control": "A0"}])
+    assert _amend(client, "camp", store, "experiment", action="e3",
+                  experiment=exp3).status_code == 200
+    late = client.get("/api/runs/camp/experiments/E3/comparison", headers=OWNER).json()
+    assert late["contrasts"][0]["same_protocol"] is False
+
+
+def test_file_amendment_refuses_a_file_the_surface_glob_makes_editable(tmp_path, monkeypatch):
+    """`edit_surface` holds globs; the literal membership test let `model.py` under `**/*.py` be
+    rewritten in the BASE. A protected file under the same glob stays amendable."""
+    import hashlib
+    root, client = _client(tmp_path, monkeypatch)
+    repo = _repo(tmp_path)
+    (repo / "model.py").write_text("x = 1\n")
+    rd, store = _make_run(root, "camp", repo, nodes=())
+    task = json.loads((rd / "task.snapshot.json").read_text())
+    task["edit_surface"] = ["**/*.py"]
+    (rd / "task.snapshot.json").write_text(json.dumps(task, indent=2))
+    sha = lambda p: hashlib.sha256((repo / p).read_bytes()).hexdigest()
+    editable = {"path": "model.py", "content": "x = 2\n", "expected_sha256": sha("model.py")}
+    r = _amend(client, "camp", store, "files", action="f1", files=[editable])
+    assert r.status_code == 400 and r.json()["detail"]["code"] == "edit_surface_file"
+    protected = {"path": "train.py", "content": "lr = 2e-4\n", "expected_sha256": sha("train.py")}
+    assert _amend(client, "camp", store, "files", action="f2",
+                  files=[protected]).status_code == 200
+
+
+def test_data_refresh_follows_a_mount_that_is_a_link_to_a_file(tmp_path, monkeypatch):
+    from looplab.harness.campaign import content_fingerprint
+    target = tmp_path / "v1.parquet"
+    target.write_bytes(b"one")
+    link = tmp_path / "train.parquet"
+    link.symlink_to(target)
+    before = content_fingerprint(str(link))["digest"]
+    target.write_bytes(b"two")
+    assert content_fingerprint(str(link))["digest"] != before
+
+
+def test_one_mount_refreshed_and_removed_is_a_400_not_a_500(tmp_path, monkeypatch):
+    root, client = _client(tmp_path, monkeypatch)
+    rd, store = _make_run(root, "camp", _repo(tmp_path), nodes=())
+    data = tmp_path / "train.csv"
+    data.write_text("a\n")
+    task = json.loads((rd / "task.snapshot.json").read_text())
+    task["data"] = {"train": str(data)}
+    (rd / "task.snapshot.json").write_text(json.dumps(task, indent=2))
+    r = _amend(client, "camp", store, "task", task={"data_refresh": ["train"],
+                                                    "data_remove": ["train"]})
+    assert r.status_code == 400, r.text
+
+
+def test_shared_test_leaderboard_ranks_by_direction(tmp_path, monkeypatch):
+    root, client = _client(tmp_path, monkeypatch)
+    repo = _repo(tmp_path)
+    data = {nid: _arrays(nid, lift=0.03 * nid) for nid in (0, 1)}
+    means = {nid: sum(d[1]) / len(d[1]) for nid, d in data.items()}
+    _rd, store = _make_run(root, "run-a", repo, nodes=(0, 1), metrics=means)
+    for nid in (0, 1):
+        r = _upload(client, "run-a", store, nid, data[nid][0])
+        assert r.status_code == 200, r.text
+    test_id = r.json()["upload"]["test_id"]
+    url = f"/api/shared-tests/{test_id}"
+    best_first = client.get(url, params={"metric": "FUR@200"}, headers=AGENT).json()
+    assert best_first["direction"] == "max" and best_first["direction_source"] == "default"
+    assert [e["node_id"] for e in best_first["entries"]] == [1, 0]
+    low = client.get(url, params={"metric": "FUR@200", "direction": "min"}, headers=AGENT).json()
+    assert [e["node_id"] for e in low["entries"]] == [0, 1]
+    assert client.get(url, params={"direction": "up"}, headers=AGENT).status_code == 400
+    # An experiment declaring the metric lower-is-better decides the default.
+    exp = _experiment(metrics=[{"name": "FUR@200", "kind": "mean", "direction": "min"}],
+                      arms={"A0": {"node_id": 0}, "A2": {"node_id": 1}},
+                      contrasts=[{"treatment": "A2", "control": "A0"}])
+    assert _amend(client, "run-a", store, "experiment", experiment=exp).status_code == 200
+    inferred = client.get(url, params={"metric": "FUR@200"}, headers=AGENT).json()
+    assert inferred["direction"] == "min" and inferred["direction_source"] == "experiments"
+    assert [e["node_id"] for e in inferred["entries"]] == [0, 1]

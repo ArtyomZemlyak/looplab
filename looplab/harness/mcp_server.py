@@ -1147,11 +1147,14 @@ def _campaign_tools(mcp, api, ToolAnnotations) -> None:
     @mcp.tool(annotations=ToolAnnotations(readOnlyHint=True, destructiveHint=False,
                                         idempotentHint=True, openWorldHint=False))
     def shared_test_leaderboard(test_id: str, metric: str | None = None,
-                                reference: str | None = None) -> dict:
+                                reference: str | None = None,
+                                direction: str | None = None) -> dict:
         """Every node of every run under this root scored on one shared test id; reference=
-        'run_id:node_id' adds paired deltas against that node."""
+        'run_id:node_id' adds paired deltas against that node. direction='min' ranks a
+        lower-is-better metric (default: what the runs' experiments declare, else max)."""
         from urllib.parse import urlencode as _urlencode
-        params = {k: v for k, v in (("metric", metric), ("reference", reference)) if v}
+        params = {k: v for k, v in (("metric", metric), ("reference", reference),
+                                    ("direction", direction)) if v}
         return api.request("GET", f"/api/shared-tests/{quote(test_id, safe='')}"
                                   + (f"?{_urlencode(params)}" if params else ""))
 

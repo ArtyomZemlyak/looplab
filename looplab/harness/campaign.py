@@ -484,7 +484,8 @@ def _mount_path(spec) -> Optional[str]:
 
 def content_fingerprint(path: Optional[str]) -> dict:
     """`{method, digest, files, bytes, hashed_bytes, sampled_files, truncated, missing}` for the file
-    or directory tree at `path` (symlinks are recorded by target, never followed)."""
+    or directory tree at `path` (a link at the ROOT is followed — it is the declared mount; links
+    inside a tree are recorded by target, never followed)."""
     out = {"method": "lfp1", "digest": None, "files": 0, "bytes": 0, "hashed_bytes": 0,
            "sampled_files": 0, "truncated": False, "missing": False}
     if not path or not os.path.exists(path):
@@ -496,7 +497,11 @@ def content_fingerprint(path: Optional[str]) -> dict:
 
     def entries():
         if root.is_file():
-            yield "", root
+            # The mount's own path is what the operator declared: a link AT the root (a common
+            # `train.parquet -> /mnt/v1/train.parquet` layout) is followed, else the refresh
+            # this fingerprint exists for hashed only the link text and an in-place overwrite of
+            # the target read as "unchanged". Links INSIDE a tree stay recorded by target.
+            yield "", root.resolve()
             return
         for dirpath, dirnames, filenames in os.walk(root):
             dirnames.sort()
@@ -617,6 +622,8 @@ def _apply_task_amendment(rd: Path, changes) -> tuple[dict, Any]:
     for name in data_refresh:
         if name not in mounts_before:
             raise HTTPException(400, f"data_refresh: no data mount {name!r}")
+    if isinstance(data_remove, list) and set(data_refresh) & set(data_remove):
+        raise HTTPException(400, "a mount is either refreshed or removed, not both")
     if data_add or data_remove:
         if not isinstance(data_add, dict) or not isinstance(data_remove, list):
             raise HTTPException(400, "data_add is {name: path|spec}, data_remove a list of names")
@@ -692,6 +699,7 @@ def _editable_root(rd: Path) -> tuple[Path, dict]:
 
 def _apply_file_amendment(rd: Path, files) -> tuple[dict, Any]:
     from looplab.core.pathsafe import contained_member
+    from looplab.tools.patch import SurfacePolicy
 
     if not isinstance(files, list) or not 1 <= len(files) <= 16:
         raise HTTPException(400, "files must list 1..16 file changes")
@@ -707,7 +715,12 @@ def _apply_file_amendment(rd: Path, files) -> tuple[dict, Any]:
         if not isinstance(rel, str) or not rel or len(rel) > 1024:
             raise HTTPException(400, "file path must be a relative path")
         rel = rel.replace("\\", "/")
-        if rel in surface:
+        # `edit_surface` holds GLOBS (repo default `**/*.py`, composable `**/*`), so a literal
+        # membership test matched almost nothing and a candidate-editable file could be rewritten
+        # in the BASE. What the candidate may edit is the surface MINUS protect, under the same
+        # rule the write gate uses (`tools/patch.py::SurfacePolicy`): a protected file (the
+        # trainer, the scorer's harness) is exactly what this amendment exists to change.
+        if SurfacePolicy(sorted(surface), sorted(protect), check_escapes=False).check(rel) is None:
             raise HTTPException(400, {
                 "code": "edit_surface_file",
                 "message": f"{rel!r} is on the candidate's edit surface; change it in a node, "

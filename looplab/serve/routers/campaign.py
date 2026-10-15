@@ -144,7 +144,8 @@ def build_router(srv) -> APIRouter:
     @router.get("/api/shared-tests/{test_id}")
     def get_shared_test(test_id: str, metric: Optional[str] = None,
                         reference: Optional[str] = None,
-                        supertask_id: Optional[str] = None):
+                        supertask_id: Optional[str] = None,
+                        direction: Optional[str] = None):
         """Every node, in every run under this root, scored on one shared test id."""
         from looplab.harness.per_query import shared_test_leaderboard
         run_ids = None
@@ -152,7 +153,7 @@ def build_router(srv) -> APIRouter:
             assignments = srv.projects.load()["supertask_assignments"]
             run_ids = sorted(r for r, s in assignments.items() if s == supertask_id)
         return shared_test_leaderboard(srv.root, test_id, metric=metric, reference=reference,
-                                       run_ids=run_ids)
+                                       run_ids=run_ids, direction=direction)
 
     def _supertask(sid: str) -> dict:
         data = srv.projects.load()

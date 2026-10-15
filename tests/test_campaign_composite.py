@@ -198,3 +198,21 @@ def test_upload_compare_campaign_and_finish(tmp_path, monkeypatch):
     assert out["steps"][1]["ok"]
     assert "report_generated" in _types(store)
     assert any(s["step"] == "finalize" for s in out["steps"])
+
+
+def test_retry_node_repeated_after_the_reset_landed_replays_instead_of_resetting_again(
+        tmp_path, monkeypatch):
+    """Review 2026-10-15: the inferred-generation step key read the attempt counter the reset
+    itself moves, so the same call repeated after a lost response refused or reset AGAIN."""
+    root, rd, store, api, server, spawns = _setup(tmp_path, monkeypatch)
+    generation = run_generation_token(store.read_all())
+    # (No engine acknowledges the intent in this harness, so the command itself settles
+    # `timed_out` after its fold — the reset row is written either way.)
+    first = composite.retry_node(api, "camp", generation, node_id=0, key="retry")
+    assert first["steps"][-1]["step"] == "reset", first
+    assert [e.type for e in store.read_all()].count("node_reset") == 1
+    again = composite.retry_node(api, "camp", generation, node_id=0, key="retry")
+    assert [s["step"] for s in again["steps"]] == ["reset"], again       # no read_node: replay
+    assert again["steps"][0].get("replayed") is True
+    assert again["steps"][0].get("id") == first["steps"][-1].get("id")
+    assert [e.type for e in store.read_all()].count("node_reset") == 1

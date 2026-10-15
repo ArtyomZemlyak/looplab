@@ -237,6 +237,27 @@ def retry_node(api, run_id: str, expected_generation: str, *, node_id: int, key:
     """Retry a node's setup/launch as a new ATTEMPT of the same node. The engine keeps the earlier
     attempt's terminal row and archives its stage logs (`attempt_logs/node_<id>/`, doc 78)."""
     steps = _Steps()
+    # The step key must not depend on what THIS call reads: the attempt counter moves the moment
+    # the reset lands, so a key derived from it made a repeat after a lost response either refuse
+    # (`node_terminal`, the node is now pending) or reset the node a SECOND time under a new key.
+    # An explicit `generation=` keys as before; an inferred one keys on (key, node) alone and the
+    # original receipt is looked up FIRST, so the repeat replays it instead of reading the node.
+    inferred = generation is None
+    step_key = (f"{key}:reset:{node_id}" if inferred
+                else f"{key}:reset:{node_id}:{generation}")
+    if inferred:
+        prior = api.command_receipt(run_id, expected_generation, idempotency_key=step_key)
+        record = (prior.get("body") or {}).get("command") if _ok(prior) else None
+        if isinstance(record, dict) and record.get("id"):
+            status = record.get("status")
+            out = {"status": 200, "body": {"id": record.get("id"), "status": status,
+                                           "event_type": "node_reset",
+                                           "event_seq": record.get("event_seq"), "replayed": True,
+                                           "error": record.get("error") or record.get("error_code")}}
+            if status in ("failed", "rejected", "timed_out"):
+                out["code"] = f"command_{status}"
+            steps.add("reset", out)
+            return steps.done(message=f"node {node_id}: this key's reset was already submitted")
     if generation is None:
         node = api.request("GET", _run_path(
             run_id, f"/nodes/{int(node_id)}?expected_generation={expected_generation}"))
@@ -254,7 +275,7 @@ def retry_node(api, run_id: str, expected_generation: str, *, node_id: int, key:
             return steps.done(message="")
     result = _command(api, run_id, expected_generation, "node_reset", {
         "node_id": int(node_id), "generation": int(generation), "from_stage": from_stage},
-        f"{key}:reset:{node_id}:{generation}", settle_seconds=5.0)
+        step_key, settle_seconds=5.0)
     steps.add("reset", result)
     return steps.done(message=(f"node {node_id} queued for attempt {int(generation) + 1}; "
                                "earlier attempts stay in the event log and the attempt_logs/ archive"))

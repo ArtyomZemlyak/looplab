@@ -196,6 +196,11 @@ def publish_upload(srv, rd: Path, body, *, agent_token: bool) -> dict:
     if len(set(queries)) != n:
         raise HTTPException(400, "query ids must be unique within an upload")
     clusters = _labels(arrays, body.cluster_key, n) if body.cluster_key else list(queries)
+    # A cluster-robust SE over ONE cluster is undefined (NaN): stored, it would make this response
+    # and every later comparison/leaderboard over the test unrenderable as JSON. Refuse it here,
+    # before anything is written — the cluster set is part of the test id, so every arm shares it.
+    if len(set(clusters)) < 2:
+        raise HTTPException(400, "an upload needs at least 2 distinct clusters (cluster_key values)")
     order = sorted(range(n), key=lambda i: queries[i])
     test_id = test_id_for(queries, clusters)
     metrics: dict[str, dict] = {}
@@ -512,24 +517,30 @@ def compare_experiment(root: Path, run_id: str, experiment_id: str, *,
                     # versions in one run are a caveat, never a refusal: the reader decides.
                     "treatment_protocol_version": t.get("protocol_version"),
                     "control_protocol_version": c.get("protocol_version"),
-                    "same_protocol": (None if t["run_id"] != c["run_id"]
-                                      or t.get("protocol_version") is None
-                                      or c.get("protocol_version") is None
-                                      else t["protocol_version"] == c["protocol_version"])})
+                    "same_protocol": _same_protocol(proto, state.run_uid, run_id, t, c)})
         if replicates:
             row["bootstrap"] = paired.cluster_bootstrap(kind, boot_in, clusters,
                                                         replicates=replicates, seed=seed)
         rows.append(row)
+    # The family is the one PRE-REGISTERED, not the contrasts that happen to be computable now:
+    # adjusting over the computed subset alone made one early arm of a declared 4-contrast family
+    # a family of 1 (no correction at all). A contrast still unavailable enters Holm as p = 1 —
+    # ranked last, which hands every computed p-value the largest multiplier it could get, so a
+    # `significant` verdict here cannot be withdrawn by the arms that are still missing.
     families: dict[str, list[int]] = {}
     for i, row in enumerate(rows):
-        if row.get("status") == "computed":
-            families.setdefault(row["family"], []).append(i)
+        families.setdefault(row["family"], []).append(i)
     for family, indices in families.items():
-        adjusted = paired.holm([rows[i]["p_two_sided"] for i in indices]) \
-            if exp["correction"] == "holm" else [rows[i]["p_two_sided"] for i in indices]
+        raw = [rows[i]["p_two_sided"] if rows[i].get("status") == "computed" else 1.0
+               for i in indices]
+        adjusted = paired.holm(raw) if exp["correction"] == "holm" else raw
+        computed = sum(1 for i in indices if rows[i].get("status") == "computed")
         for i, p in zip(indices, adjusted):
+            if rows[i].get("status") != "computed":
+                continue
             rows[i]["p_adjusted"] = p
             rows[i]["family_size"] = len(indices)
+            rows[i]["family_computed"] = computed
             rows[i]["significant"] = bool(p is not None and p < exp["alpha"])
     return {"version": 1, "run_id": run_id, "experiment": exp, "contrasts": rows,
             "computed_by": {"engine": "looplab", "method": paired.METHOD_VERSION,
@@ -538,6 +549,22 @@ def compare_experiment(root: Path, run_id: str, experiment_id: str, *,
                             "bootstrap_replicates": replicates, "seed": seed,
                             "computed_at": time.time()},
             "caveats": _caveats(rows)}
+
+
+def _same_protocol(proto: list[dict], run_uid: Optional[str], home_run: str, t: dict,
+                   c: dict) -> Optional[bool]:
+    """Were both arms' nodes created under the same TASK/FILES protocol? `Node.protocol_version`
+    counts EVERY amendment of the run (experiment registrations and budget extensions too), so a
+    differing count alone does not mean the task or the base files moved between them — only a
+    `task`/`files` row numbered inside (lower, higher] does. None when either side is unknown or
+    the arms are not both in the home run (`proto` is the home run's journal)."""
+    tv, cv = t.get("protocol_version"), c.get("protocol_version")
+    if (t["run_id"] != home_run or c["run_id"] != home_run
+            or not isinstance(tv, int) or not isinstance(cv, int)):
+        return None
+    low, high = min(tv, cv), max(tv, cv)
+    return not any(row.get("kind") in ("task", "files") and low < row["version"] <= high
+                   and (run_uid is None or row.get("run_uid") == run_uid) for row in proto)
 
 
 def _before_result(registration: dict, home_run: str, arm: dict) -> Optional[bool]:
@@ -556,6 +583,10 @@ def _caveats(rows: list[dict]) -> list[str]:
     out = []
     if any(r.get("registered_before_result") is False for r in rows):
         out.append("some contrasts were registered AFTER their treatment result existed (post hoc)")
+    if any(r.get("status") == "computed" and r.get("family_computed", 0) < r.get("family_size", 0)
+           for r in rows):
+        out.append("some families are incomplete: their unavailable contrasts are counted as "
+                   "p = 1 in the correction (conservative until every arm is uploaded)")
     if any(r.get("same_protocol") is False for r in rows):
         out.append("some contrasts compare nodes created under DIFFERENT protocol versions of the "
                    "run (a task/files amendment landed between them): see the protocol journal")
@@ -579,18 +610,28 @@ def run_ids_under(root: Path) -> list[str]:
 
 
 def shared_test_leaderboard(root: Path, test_id: str, *, metric: Optional[str] = None,
-                            reference: Optional[str] = None, run_ids: Optional[list] = None) -> dict:
+                            reference: Optional[str] = None, run_ids: Optional[list] = None,
+                            direction: Optional[str] = None) -> dict:
     """Every (run, node) under `root` with an upload for `test_id`: absolute values with clustered
-    intervals and, against a reference `run:node`, paired deltas."""
+    intervals and, against a reference `run:node`, paired deltas. Ranked best-first by
+    `direction` — given, else the one every registered experiment of these runs declares for the
+    metric, else `max` (stated as `direction_source: default`): an upload declares no direction,
+    and a loss ranked descending put the worst model on top."""
     if not re.fullmatch(r"qs1-[0-9a-f]{32}", test_id or ""):
         raise HTTPException(400, "test_id must be a shared test id (qs1-…)")
+    if direction not in (None, "max", "min"):
+        raise HTTPException(400, "direction must be max or min")
     cache = _Root(root)
     entries = []
+    declared: dict[str, set] = {}
     for rid in (run_ids if run_ids is not None else run_ids_under(root)):
         loaded = cache.run(rid)
         if loaded is None:
             continue
-        rd, state, _events, uploads, _proto = loaded
+        rd, state, _events, uploads, proto = loaded
+        for exp in experiments_of(proto, state.run_uid).values():
+            for m in exp.get("metrics") or ():
+                declared.setdefault(m.get("name"), set()).add(m.get("direction"))
         for upload in uploads:
             if upload["test_id"] == test_id:
                 node = state.nodes.get(upload["node_id"])
@@ -630,8 +671,15 @@ def shared_test_leaderboard(root: Path, test_id: str, *, metric: Optional[str] =
                 row["vs_reference"] = {k: d[k] for k in ("estimate", "se", "ci95_low",
                                                          "ci95_high", "p_two_sided")}
         rows.append(row)
-    rows.sort(key=lambda r: (r["value"] is None, -(r["value"] or 0.0)))
+    source = "request"
+    if direction is None:
+        found = declared.get(chosen) or set()
+        direction, source = ((next(iter(found)), "experiments") if len(found) == 1
+                             and next(iter(found)) in ("max", "min") else ("max", "default"))
+    sign = -1.0 if direction == "max" else 1.0
+    rows.sort(key=lambda r: (r["value"] is None, sign * (r["value"] or 0.0)))
     return {"version": 1, "test_id": test_id, "metric": chosen, "metrics": metric_names,
+            "direction": direction, "direction_source": source,
             "reference": reference, "entries": rows,
             "computed_by": {"engine": "looplab", "method": paired.METHOD_VERSION,
                             "ci": "normal approximation, user-clustered", "computed_at": time.time()}}
