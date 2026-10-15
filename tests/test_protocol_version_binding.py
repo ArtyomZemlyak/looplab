@@ -65,6 +65,10 @@ def test_a_comparison_across_protocol_versions_is_a_caveat(tmp_path, monkeypatch
     root, client = _client(tmp_path, monkeypatch)
     rd, store = _make_run(root, "camp", _repo(tmp_path), nodes=())
     assert _amend(client, "camp", store, "experiment", experiment=_experiment()).status_code == 200
+    # Version 2 is a TASK amendment — the kind of row that changes the protocol (an experiment
+    # registration or a budget extension also bumps the count but changes nothing the arms ran).
+    assert _amend(client, "camp", store, "task", action="t1",
+                  task={"protect_add": ["x.py"]}).status_code == 200
     datasets = {nid: _arrays(nid, lift=0.04 * nid) for nid in (0, 1, 2)}
     for nid, version in ((0, 1), (1, 1), (2, 2)):
         store.append("node_created", {"node_id": nid, "parent_ids": [], "operator": "draft",

@@ -809,12 +809,9 @@ fold. A consumer whose artifact can never be produced again — deleted, aborted
 current lifecycle — is not bred from at all: every turn's selected builds pass
 `artifact_fence.py::refuse_unrunnable_builds`, which drops such a build before anything is paid and,
 when that leaves the turn empty, builds the best runnable alternative instead (an improve of the
-best breedable parent whose children can run, else a draft; inside an endgame reserve, the plan's
-own next action whenever its child can run), its `policy_decision` naming the
-artifact. The lanes that re-derive the policy's action before paying for it — a Card-inventory
-turn's staging, the occupancy lane and the isolated raw proposer — drop such a build too
-(`drop_unrunnable_builds`), and every Card election leaves out a live Card bred from such a consumer
-(`unrunnable_card_ids`, beside the plan's refusals). Before every launch the consumer's eval checks each
+best breedable parent whose children can run, else a draft; in an endgame reserve, the plan's
+own runnable action), its `policy_decision` naming the
+artifact; Card and raw lanes drop it too (`engine/artifact_fence.py`). Before every launch the consumer's eval checks each
 pinned artifact through the same rule `LOOPLAB_PARENT_WORKDIRS` uses
 (`eval_dispatch.py::produced_workdir`): evaluated in exactly that lifecycle, not deleted, and its
 workdir's `.looplab-manifest` stamp intact. If one is not — the artifact was reset, rebuilt, deleted
@@ -828,12 +825,8 @@ bought for a candidate that is not at fault, and the owner alert shows it (it is
 lifecycle never comes back, so the remedy is the operator's: rebuild the consumer (`node_reset` from
 implement re-pins it to each artifact as it is now) or inject a new one. A log written before the
 pin keeps the old existence-only rule. A confirmation or noise-floor seed whose pinned artifact moved
-launches nothing and is not a measured seed. While the producer is still producing the pinned
-lifecycle, confirm records a `confirm_eval` with reason `artifact_unavailable`, which the fold keeps
-out of the per-seed memo (the seed retries, and the pass auto-pauses after repeated refusals saying
-so); once the pin can never clear (the producer was reset, deleted, aborted or failed in it) the seed
-is finished as a FAILED one, reason `artifact_gone`, memoized with no metric, so the pass completes
-instead of re-pausing on every resume. The noise floor abstains for that seed either way.
+launches nothing and is not a measured seed: confirm retries `artifact_unavailable` while the
+pinned lifecycle is still produced, else fails the seed `artifact_gone`; the noise floor abstains.
 
 **The Researcher may propose them too**, under `Settings.researcher_artifacts` (off by default;
 `agents/artifact_ideas.py`). On, its emit schema shows `node_kind` and `uses` and its user turn

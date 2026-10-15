@@ -1335,10 +1335,7 @@ eval seconds.
 - **Canary passes**: the full evaluation runs in the same attempt. The canary's own metric is
   discarded — it is never the node's metric and never reaches selection. A pass that used 75 % or
   more of its cap is marked `near_cap` on its `eval_canary_finished` row and logged at WARNING: the
-  next candidate may not fit, and raising `timeout` is your call — the engine never grows it. A
-  `smoke` canary is never marked: it passes by being stopped at its cap, on purpose — and it passes
-  only when the sandbox actually stopped a still-running process (or the chain exited 0), so a chain
-  that crashed seconds under the cap is the failure it is.
+  next candidate may not fit, and raising `timeout` is your call — the engine never grows it.
 - **Resume**: `eval_canary_started` / `eval_canary_finished` rows (diagnostic) are keyed on the
   node's code digest, so a resumed run does not re-run a canary that already passed for the same
   code (the retry's two rows carry `retry: 1`); a repaired node is canaried again, because its code
