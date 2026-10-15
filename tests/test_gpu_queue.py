@@ -12,6 +12,7 @@ import subprocess
 import sys
 import threading
 import time
+from pathlib import Path
 
 import pytest
 
@@ -326,3 +327,202 @@ def test_gpu_gate_api_and_cli_take_conditions_and_drain(tmp_path):
     assert out["gate"]["drain"] is True and out["gate"]["hold"] is True
     out = json.loads(CliRunner().invoke(app, ["gpu-gate", str(other), "--undrain"]).output)
     assert out["gate"]["drain"] is False and out["gate"]["hold"] is False
+
+
+# ------------------------------------------------------------------------- review g5 (2026-10-15)
+@FLOCK
+def test_drain_admits_no_new_gpu_while_the_run_already_holds_the_lease(tmp_path):
+    """g5 #1: the gate was asked only by the acquisition that had to TAKE the host lease, so a run
+    with one evaluation on GPU 0 kept admitting new GPU work on GPU 1 after `drain` / `hold`."""
+    lease, run = tmp_path / "gpu-pool.lock", tmp_path / "run"
+    engine = _Pool(lease, run_dir=run)
+    engine._gpu_gate_reader = GateReader(run, liveness=lambda p: True, clock=_Clock())
+    assert engine._acquire_gpus(1) == [0]                    # the run now holds the host lease
+    assert engine._gpu_host_lease_handle is not None
+    write_gate(run, hold=False, start_after=[], drain=True, reason="hand over")
+    assert engine._acquire_gpus(1) is None, "a draining run took a NEW GPU"
+    assert engine._free_gpus == [1]                           # the running work kept GPU 0
+    write_gate(run, hold=True, start_after=[])
+    assert engine._acquire_gpus(1) is None, "a held run took a NEW GPU"
+    gpu_queue.clear_gate(run)
+    assert engine._acquire_gpus(1) == [1]
+    engine._release_gpus([0, 1])
+
+
+def _event_log(run_dir):
+    from looplab.events.eventstore import EventStore
+
+    run_dir.mkdir(parents=True, exist_ok=True)
+    return EventStore(run_dir / "events.jsonl")
+
+
+def test_write_gate_pins_after_seq_to_the_tail_of_a_log_longer_than_one_scan_chunk(
+        tmp_path, monkeypatch):
+    """g5 #2: `after_seq` was the incremental scan's cursor, which a FRESH process has advanced by
+    one chunk only — so every terminal past the first chunk counted as "later" and the gate opened
+    the moment it was written. The chunk is shrunk here; the real one is 8 MB."""
+    monkeypatch.setattr(gpu_queue, "_LOG_SCAN_CHUNK", 2048)
+    monkeypatch.setattr(gpu_queue, "_LOG_SCANS", {})          # a fresh process: nothing cached
+    a, b = tmp_path / "a", tmp_path / "b"
+    store = _event_log(a)
+    for i in range(40):
+        store.append("node_evaluated", {"node_id": i, "pad": "x" * 200})
+    last = store.read_all()[-1].seq
+    write_gate(b, hold=False, start_after=[{"run": str(a), "until": "node_evaluated"}])
+    gate = read_gate(b)
+    assert gate["conditions"][0]["after_seq"] == last
+    alive = lambda p: True                                     # noqa: E731
+    for _ in range(10):                                        # the scan catches up, chunk by chunk
+        assert gate_blockers(gate, liveness=alive), "history opened the gate"
+    store.append("node_evaluated", {"node_id": 40})
+    for _ in range(10):
+        if not gate_blockers(gate, liveness=alive):
+            break
+    assert gate_blockers(gate, liveness=alive) == []
+
+
+def test_a_row_longer_than_a_chunk_does_not_stall_the_scan(tmp_path, monkeypatch):
+    """g5 #2: a chunk with no newline left the cursor where it was, forever. A row longer than a
+    chunk is now read whole; one longer than `_LOG_ROW_MAX` is skipped — either way the rows after
+    it are reached."""
+    monkeypatch.setattr(gpu_queue, "_LOG_SCAN_CHUNK", 1024)
+    monkeypatch.setattr(gpu_queue, "_LOG_ROW_MAX", 8192)
+    a, b = tmp_path / "a", tmp_path / "b"
+    store = _event_log(a)
+    store.append("node_failed", {"node_id": 1, "pad": "y" * 3000})     # > chunk, < row max
+    store.append("run_note", {"pad": "z" * 20000})                     # > row max: skipped
+    store.append("node_failed", {"node_id": 2})
+    alive = lambda p: True                                              # noqa: E731
+    for node in (1, 2):
+        write_gate(b, hold=False, start_after=[{"run": str(a), "until": "node_evaluated",
+                                                "node_id": node}])
+        gate = read_gate(b)
+        for _ in range(60):
+            if not gate_blockers(gate, liveness=alive):
+                break
+        assert gate_blockers(gate, liveness=alive) == [], f"node {node}'s terminal never seen"
+    assert gpu_queue._tail_last_seq(a / "events.jsonl") == store.read_all()[-1].seq
+
+
+def test_stage_done_opens_on_the_stage_s_live_closing_beacon(tmp_path):
+    """g5 #3: `stage_finished` rows land together when the whole ATTEMPT settles, so "after
+    `train`" waited for `score` too. The closing beacon the stage loop writes the moment `train`'s
+    process ends (`eval_stages.py::_stage_progress_fn`, the real producer here) opens it."""
+    from looplab.engine.orchestrator import Engine
+
+    a, b = tmp_path / "a", tmp_path / "b"
+    engine = Engine.__new__(Engine)
+    engine.store = _event_log(a)
+    engine.store.append("run_started", {"run_id": "a"})
+    write_gate(b, hold=False, start_after=[{"run": str(a), "until": "stage_done", "node_id": 4,
+                                            "stage": "train"}])
+    gate = read_gate(b)
+    alive = lambda p: True                                      # noqa: E731
+    stages = [{"name": "train", "command": ["t"]}, {"name": "score", "command": ["s"]}]
+    emit = engine._stage_progress_fn(4, 0, stages)
+    emit({"name": "train", "index": 0, "total": 2, "status": "started"})
+    assert gate_blockers(gate, liveness=alive), "a RUNNING stage is not done"
+    emit({"name": "train", "index": 0, "total": 2, "status": "finished", "outcome": "ok",
+          "exit_code": 0})
+    emit({"name": "score", "index": 1, "total": 2, "status": "started"})
+    assert gate_blockers(gate, liveness=alive) == []
+    # A floor-pinned condition (no node) counts only a stage that ends AFTER the gate.
+    write_gate(b, hold=False, start_after=[{"run": str(a), "until": "stage_done", "stage": "train"}])
+    gate = read_gate(b)
+    assert gate_blockers(gate, liveness=alive)
+    emit({"name": "train", "index": 0, "total": 2, "status": "finished", "outcome": "failed",
+          "exit_code": 1})
+    assert gate_blockers(gate, liveness=alive) == []
+
+
+def test_a_terminal_inside_a_batch_envelope_counts(tmp_path):
+    """`append_many` writes one physical envelope whose own type is the batch marker; the scan read
+    only the envelope's type, so a `node_failed` written that way (`speculation.py`) never counted."""
+    a, b = tmp_path / "a", tmp_path / "b"
+    store = _event_log(a)
+    store.append("run_started", {"run_id": "a"})
+    write_gate(b, hold=False, start_after=[{"run": str(a), "until": "node_evaluated",
+                                            "node_id": 7}])
+    gate = read_gate(b)
+    store.append_many([("node_failed", {"node_id": 7, "error": "x"}),
+                       ("run_note", {"text": "after"})])
+    assert gate_blockers(gate, liveness=lambda p: True) == []
+
+
+def test_concurrent_scans_never_skip_rows(tmp_path, monkeypatch):
+    """g5 #5: the scan cache is process-global and the server asks from several sync-handler
+    threads. Two unlocked advances read the same offset and BOTH added their byte count, so the
+    cursor jumped past rows nobody parsed. A slow row parse holds both threads inside one advance."""
+    monkeypatch.setattr(gpu_queue, "_LOG_SCAN_CHUNK", 4096)
+    a = tmp_path / "a"
+    store = _event_log(a)
+    # Long enough that the threads' summed over-advance stays INSIDE the file: an overshoot past
+    # EOF reads as a shrunk log and restarts the scan, which would hide the skip.
+    for i in range(400):
+        store.append("node_evaluated", {"node_id": i, "pad": "p" * 100})
+    real_row = gpu_queue._LogScan._row
+
+    def slow_row(self, line):
+        time.sleep(0.002)
+        return real_row(self, line)
+
+    monkeypatch.setattr(gpu_queue._LogScan, "_row", slow_row)
+    start = threading.Barrier(4)
+    errors: list = []
+
+    def worker():
+        try:
+            start.wait()
+            for _ in range(40):
+                gpu_queue._scan_log(a)
+        except Exception as exc:  # noqa: BLE001 — surfaced by the assertion below
+            errors.append(exc)
+
+    threads = [threading.Thread(target=worker) for _ in range(4)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    assert not errors
+    view = gpu_queue._scan_log(a)
+    assert sorted(view.terminals) == list(range(400))
+
+
+@FLOCK
+@pytest.mark.parametrize("planted", ["link", "loose_mode"])
+def test_a_queue_dir_that_is_not_ours_falls_back_to_the_unordered_lease(tmp_path, planted,
+                                                                          caplog):
+    """g5 #6: the queue directory sits in the shared /tmp, and `mkdir(exist_ok=True)` accepted a
+    name another user created first — a link elsewhere, or a directory open to others."""
+    lease = tmp_path / "gpu-pool.lock"
+    qdir = gpu_queue.queue_dir(lease)
+    elsewhere = tmp_path / "elsewhere"
+    if planted == "link":
+        elsewhere.mkdir(mode=0o700)
+        qdir.symlink_to(elsewhere, target_is_directory=True)
+    else:
+        qdir.mkdir()
+        os.chmod(qdir, 0o777)
+    ticket = GpuQueueTicket(lease, run_id="r")
+    with caplog.at_level("WARNING", logger=gpu_queue.__name__):
+        assert ticket.ensure() is False
+    assert ticket.disabled and ticket.is_head()
+    assert "falling back to the unordered host lease" in caplog.text
+    if planted == "link":
+        assert list(elsewhere.iterdir()) == []                  # nothing written through it
+
+
+@FLOCK
+def test_write_holder_never_writes_through_a_planted_link(tmp_path):
+    """g5 #6: the holder description's temporary name was `<holder>.<pid>.tmp`, predictable, and
+    written with a link-following `write_text`: a squatter's link aimed our write at any file."""
+    lease = tmp_path / "gpu-pool.lock"
+    victim = tmp_path / "victim.txt"
+    victim.write_text("precious")
+    holder = gpu_queue.holder_path(lease)
+    Path(f"{holder}.{os.getpid()}.tmp").symlink_to(victim)
+    holder.symlink_to(victim)
+    gpu_queue.write_holder(lease, run_dir=tmp_path / "run")
+    assert victim.read_text() == "precious"
+    assert not holder.is_symlink()
+    assert json.loads(holder.read_text())["pid"] == os.getpid()

@@ -457,6 +457,19 @@ def parse_requirements(text: str) -> tuple[dict[str, str], list[str]]:
     version specifier."""
     pins: dict[str, str] = {}
     directives: list[str] = []
+    for name, line in _requirement_lines(text):
+        if name is None:
+            directives.append(line)
+            continue
+        pins.setdefault(name, line)
+    return pins, directives
+
+
+def _requirement_lines(text: str):
+    """Every logical line of a requirements file as `(canonical name | None, stripped line)`, in
+    file order — None for a directive or a line we cannot key on. The ONE reading both
+    `parse_requirements` and `requirement_markers` take, so the two never disagree about which
+    line names which distribution."""
     for line in _join_continuations(text):
         # Only a `#` at line start or after whitespace is a comment: `pkg @ https://h/p#egg=pkg`
         # carries a fragment that is part of the URL, and stripping it would corrupt the requirement.
@@ -464,14 +477,45 @@ def parse_requirements(text: str) -> tuple[dict[str, str], list[str]]:
         if not line:
             continue
         if line.startswith("-"):
-            directives.append(line)
+            yield None, line
             continue
         m = _REQ_NAME_RE.match(line)
         if not m:
-            directives.append(line)   # not a name we can key on; still a fact about the file
+            yield None, line          # not a name we can key on; still a fact about the file
             continue
-        pins.setdefault(_canon_dist(m.group(1)), line)
-    return pins, directives
+        yield _canon_dist(m.group(1)), line
+
+
+def requirement_markers(text: str) -> dict[str, Optional[str]]:
+    """`{canonical dist name -> the environment marker under which the file REQUIRES it}`, None when
+    some line requires it unconditionally.
+
+    EVERY line naming the distribution counts, not only the first one `parse_requirements` keeps
+    (review g5 #4): the common split
+
+        numpy==1.21; python_version < "3.10"
+        numpy==1.26; python_version >= "3.10"
+
+    makes pip install numpy on EVERY interpreter, yet reading only the first line's marker said
+    "not needed on 3.12", so a numpy wiped from the env was never reported absent and the
+    run-setup re-verification vouched for an install that was gone. The lines are OR-ed —
+    `(m1) or (m2)` is one PEP 508 marker — so the probe asks the eval interpreter whether ANY of
+    them applies, and a line among them the probe cannot evaluate makes the whole expression
+    unevaluable, which `absent_distributions` already reads as APPLYING (it never hides a
+    distribution it could not rule out)."""
+    seen: dict[str, list] = {}
+    for name, line in _requirement_lines(text):
+        if name is not None:
+            seen.setdefault(name, []).append(requirement_marker(line))
+    out: dict[str, Optional[str]] = {}
+    for name, markers in seen.items():
+        if any(m is None for m in markers):
+            out[name] = None
+        elif len(set(markers)) == 1:
+            out[name] = markers[0]
+        else:
+            out[name] = " or ".join(f"({m})" for m in dict.fromkeys(markers))
+    return out
 
 
 @dataclass(frozen=True)
@@ -488,10 +532,23 @@ class Declaration:
     pins: dict = field(default_factory=dict)
     directives: tuple = ()
     observed: tuple = ()
+    # `requirement_markers` of the same bytes: the marker under which ANY of a name's lines applies
+    # (`pins` keeps only the first line, which is the wrong question for a marker split).
+    markers: dict = field(default_factory=dict)
 
     @property
     def found(self) -> bool:
         return bool(self.filename)
+
+    def marker_for(self, name: str) -> Optional[str]:
+        """The environment marker under which this declaration requires `name` (None = always).
+
+        Off `markers` when the declaration was read from a file; a Declaration built by hand with
+        `pins` only falls back to that one line's own marker."""
+        if name in self.markers:
+            return self.markers[name]
+        line = self.pins.get(name)
+        return requirement_marker(line) if line else None
 
 
 def find_declaration(root) -> Declaration:
@@ -521,10 +578,12 @@ def find_declaration(root) -> Declaration:
             # Present but not read: say so through `observed` so the receipt does not claim the
             # tree declares nothing, and leave `filename` empty so nothing installs from it.
             return Declaration(root=str(base), observed=(name,) + observed)
-        pins, directives = parse_requirements(raw.decode("utf-8", errors="replace"))
+        text = raw.decode("utf-8", errors="replace")
+        pins, directives = parse_requirements(text)
         return Declaration(root=str(base), filename=name,
                            digest=hashlib.sha256(raw).hexdigest()[:12],
-                           pins=pins, directives=tuple(directives), observed=observed)
+                           pins=pins, directives=tuple(directives), observed=observed,
+                           markers=requirement_markers(text))
     return Declaration(root=str(base), observed=observed)
 
 

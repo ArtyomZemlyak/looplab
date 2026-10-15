@@ -97,3 +97,51 @@ def test_a_resume_does_not_reinstall_lines_this_box_never_needed(tmp_path, monke
                if e.type == "run_setup_started"]
     assert len(calls) == 1 and len(started) == 1, (
         f"the install re-ran on resume: {[s.get('reverified_missing') for s in started]}")
+
+
+# A distribution split across markers (review g5 #4): pip installs it on EVERY interpreter — one of
+# the two lines always applies — but `pins` keeps only the FIRST line, whose marker is false here.
+_SPLIT = ('looplab-no-such-dist-g5==1.0; python_version < "3"\n'
+          'looplab-no-such-dist-g5==2.0; python_version >= "3"\n')
+
+
+def test_every_line_of_a_split_requirement_is_asked_not_only_the_first():
+    markers = deps.requirement_markers(_SPLIT)
+    assert markers == {"looplab-no-such-dist-g5":
+                       '(python_version < "3") or (python_version >= "3")'}
+    assert deps.requirement_markers("a; python_version < '3'\na\n") == {"a": None}
+    # The first line alone says "not needed here"; the declaration as a whole says "needed".
+    pins, _directives = deps.parse_requirements(_SPLIT)
+    first_only = deps.requirement_marker(pins["looplab-no-such-dist-g5"])
+    assert deps.absent_distributions(["looplab-no-such-dist-g5"],
+                                     markers={"looplab-no-such-dist-g5": first_only}) == []
+    assert deps.absent_distributions(["looplab-no-such-dist-g5"], markers=markers) == [
+        "looplab-no-such-dist-g5"]
+
+
+def test_a_resume_reinstalls_a_split_requirement_the_env_lost(tmp_path, monkeypatch):
+    """Driven through `_ensure_run_setup` over two Engines with the REAL interpreter probe: the
+    declared distribution is absent from the eval interpreter, so the resume must re-run the
+    install — it did not, because only the first (false) marker was asked."""
+    calls: list = []
+
+    def fake_run_argv(argv, cwd, timeout, log_path=None):
+        calls.append(list(argv))
+        return (0, "ok", "", False)
+
+    monkeypatch.setattr("looplab.runtime.sandbox._run_argv", fake_run_argv)
+    repo = _repo(tmp_path, _SPLIT)
+
+    def _make():
+        eng = _engine(tmp_path / "run", auto_install_deps=True)
+        eng._repo_spec = {"editables": [{"name": ".", "path": str(repo)}]}
+        eng._eval_spec = {"run_setup": [], "run_setup_timeout": 60.0}
+        return eng
+
+    _make()._ensure_run_setup()
+    assert len(calls) == 1
+    _make()._ensure_run_setup()
+    started = [e.data for e in EventStore(Path(tmp_path) / "run" / "events.jsonl").read_all()
+               if e.type == "run_setup_started"]
+    assert len(calls) == 2, "the resume vouched for an install whose distribution is gone"
+    assert started[-1].get("reverified_missing") == ["looplab-no-such-dist-g5"]

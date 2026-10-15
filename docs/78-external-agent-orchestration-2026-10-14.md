@@ -332,10 +332,18 @@ Four leftovers of this document, closed in `fix/engine-remaining-20261014`:
 * **Finer `start_after`, and drain.** A gate entry may be
   `{"run": A, "until": "node_evaluated"|"stage_done"|"gpu_released", "node_id"?, "stage"?}`
   (CLI `--after-node A[:N]`, `--after-stage A[:N]:STAGE`, `--after-release A`), read incrementally
-  off A's event log; every condition also opens when A's engine exits. `{"drain": true}` /
-  `looplab gpu-gate A --drain` lets A's running GPU work finish and admits no new one — the state a
-  successor's `gpu_released` waits for. An old engine reads an object entry as a malformed gate,
-  i.e. a HOLD: it never starts GPUs early.
+  off A's event log; every condition also opens when A's engine exits. `stage_done` opens on the
+  stage's live closing beacon (`phase_progress` eval/stage `finished`, written the moment that
+  stage's process ends, whatever its outcome) or on its `stage_finished` row — the rows alone land
+  together when the whole attempt settles, so "after `train`" would have waited for `score`; a
+  REUSED stage has no beacon and opens at that settle. A condition with no `node_id` is pinned to
+  the seq of A's last complete row when the gate is written, read off the log's tail.
+  `{"drain": true}` / `looplab gpu-gate A --drain` lets A's running GPU work finish and admits no
+  new one — the gate is asked on EVERY GPU acquisition, including while A already holds the host
+  lease — the state a successor's `gpu_released` waits for. An old engine reads an object entry as
+  a malformed gate, i.e. a HOLD: it never starts GPUs early. The queue directory beside the lease
+  must be a plain directory owned by this user with mode `0700`; anything else is refused with a
+  warning and the run falls back to the unordered lease.
 * **A canary without `eval.canary`.** The operator may enable a SANDBOXED smoke per run
   (`PUT /api/runs/{run_id}/harness-policy {"implicit_canary": "sandboxed"}`): the chain runs in the
   canary scratch tree under a Landlock ruleset that lets it write only there (`TMPDIR` and compiler

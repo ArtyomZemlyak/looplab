@@ -497,7 +497,11 @@ class EvalDispatchMixin:
         # 2026-10-08).
         # Passed only when a line carries one, like `reverified_missing` below: a stand-in for the
         # probe written before the keyword existed keeps answering every marker-free declaration.
-        markers = {n: m for n in wanted if (m := deps.requirement_marker(decl.pins[n]))}
+        # EVERY line naming the distribution, OR-ed (`Declaration.marker_for`), not just the first
+        # line `pins` keeps: a name split across markers (`numpy==1.21; python_version < "3.10"`
+        # then `numpy==1.26; python_version >= "3.10"`) is required on every interpreter, and the
+        # first line's marker alone hid a wiped numpy from this probe (review g5 #4).
+        markers = {n: m for n in wanted if (m := decl.marker_for(n))}
         absent = deps.absent_distributions(
             wanted, python=getattr(self.sandbox, "python", None),
             **({"markers": markers} if markers else {}))

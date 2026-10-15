@@ -40,9 +40,11 @@ import errno
 import json
 import logging
 import os
+import stat
+import threading
 import time
 from pathlib import Path
-from typing import Optional
+from typing import NamedTuple, Optional
 
 from looplab.core.atomicio import file_identity, same_file_entry
 
@@ -78,6 +80,34 @@ def queue_dir(lease_path) -> Path:
 
 def holder_path(lease_path) -> Path:
     return Path(f"{lease_path}{HOLDER_SUFFIX}")
+
+
+def _ensure_private_dir(directory: Path) -> None:
+    """Create the queue directory 0700, or verify that an existing one is OURS; OSError otherwise.
+
+    The directory sits beside the lease in the shared `/tmp`, so another local user can create the
+    name first — as a directory they own (and could fill with tickets that jam our queue), or as a
+    link to somewhere else (review g5 #6). `mkdir(exist_ok=True)` accepted either. Now the name must
+    be a plain directory (`lstat`, never followed), owned by this effective uid and closed to group
+    and other; anything else raises, and `GpuQueueTicket.ensure` turns that into its logged fallback
+    to the unordered lease — the queue is a courtesy, the lease is the safety property. A directory
+    of ours with loose bits is refused rather than tightened: whatever was dropped into it while it
+    was open is not ours to trust. No uid on Windows, where the queue is off anyway."""
+    try:
+        os.mkdir(directory, 0o700)
+    except FileExistsError:
+        pass
+    st = os.lstat(directory)
+    if not stat.S_ISDIR(st.st_mode):
+        raise OSError(errno.ENOTDIR, f"{directory} is not a plain directory (a link or a file)")
+    geteuid = getattr(os, "geteuid", None)
+    if geteuid is None:
+        return
+    if st.st_uid != geteuid():
+        raise OSError(errno.EPERM, f"{directory} belongs to uid {st.st_uid}, not to this user")
+    if st.st_mode & 0o077:
+        raise OSError(errno.EPERM, f"{directory} is open to other users "
+                                   f"(mode {stat.S_IMODE(st.st_mode):o})")
 
 
 def _flock(fd: int, flags: int) -> bool:
@@ -246,7 +276,7 @@ class GpuQueueTicket:
         tmp = None
         fd = None
         try:
-            directory.mkdir(mode=0o700, exist_ok=True)
+            _ensure_private_dir(directory)
             _sweep_tmp(directory)
             name = f"{time.time_ns():020d}-{os.getpid()}-{os.urandom(3).hex()}.json"
             tmp = directory / f".tmp-{name}"
@@ -312,11 +342,26 @@ def write_holder(lease_path, *, run_dir=None, run_id: str = "") -> None:
             "run_id": run_id or (Path(str(run_dir)).name if run_dir else ""),
             "acquired_at": time.time()}
     path = holder_path(lease_path)
-    tmp = Path(f"{path}.{os.getpid()}.tmp")
+    # The description lives in the shared `/tmp` beside the lease, so its temporary name must not be
+    # one another user can predict and pre-plant as a link: `<path>.<pid>.tmp` + a link-following
+    # `write_text` let a squatter aim our write at any file we can write (review g5 #6). A random
+    # suffix, created EXCLUSIVELY and never through a link, then `os.replace` (which renames over a
+    # planted link at `path` itself rather than following it).
+    tmp = Path(f"{path}.{os.getpid()}-{os.urandom(4).hex()}.tmp")
+    fd = None
     try:
-        tmp.write_text(json.dumps(body), encoding="utf-8")
+        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0)
+                     | getattr(os, "O_BINARY", 0), 0o600)
+        os.write(fd, json.dumps(body).encode("utf-8"))
+        os.close(fd)
+        fd = None
         os.replace(tmp, path)
     except OSError:
+        if fd is not None:
+            try:
+                os.close(fd)
+            except OSError:
+                pass
         try:
             tmp.unlink()
         except OSError:
@@ -377,7 +422,12 @@ def gate_path(run_dir) -> Path:
 # for something finer, read off the predecessor's own event log:
 #   * `node_evaluated` — a terminal (`node_evaluated` / `node_failed`) for `node_id`, or for any node
 #     after the gate was written when no `node_id` is named;
-#   * `stage_done`     — a `stage_finished` row of `stage` (of `node_id` when named) after the gate;
+#   * `stage_done`     — `stage` (of `node_id` when named) finished after the gate: its LIVE
+#     closing beacon (`phase_progress` eval/stage/finished, written by the sandbox's stage loop the
+#     moment that stage's process ends, whatever its outcome) or its `stage_finished` row. The row
+#     alone was not enough (review g5 #3): the engine appends an attempt's `stage_finished` rows
+#     together when the WHOLE attempt settles, so "after `train`" opened only after `score` too.
+#     A stage the attempt REUSED runs no process and has no beacon: its row opens it, at the settle;
 #   * `gpu_released`   — the predecessor takes no new GPU work (its own gate holds or DRAINS) and
 #     does not hold the host lease now: "start B as soon as A's current evaluation lets go".
 # Every condition is also met when the predecessor's engine has EXITED: an engine that is gone
@@ -386,6 +436,13 @@ def gate_path(run_dir) -> Path:
 # direction (it never starts GPUs early); only an engine that understands the condition opens it.
 START_CONDITIONS = ("engine_exit", "node_evaluated", "stage_done", "gpu_released")
 _LOG_SCAN_CHUNK = 8 * 1024 * 1024
+# One event row longer than this is skipped by the incremental scan (named in a warning) instead
+# of being held whole: past it a row is no terminal or stage beacon anyone wrote, and holding it
+# would make a gate poll's memory a function of whatever one writer put in one row.
+_LOG_ROW_MAX = 64 * 1024 * 1024
+# The tail read `write_gate` pins `after_seq` with: starts here and doubles until a complete row
+# parses, so a long last row costs its own length, never the log's.
+_TAIL_WINDOW = 64 * 1024
 
 
 def _normalize_condition(item) -> Optional[dict]:
@@ -463,8 +520,13 @@ def write_gate(run_dir, *, hold: bool, start_after: list, reason: str = "",
         if cond["stage"] is not None:
             out["stage"] = cond["stage"]
         if cond["until"] in ("node_evaluated", "stage_done") and cond["node_id"] is None:
+            # The predecessor's seq NOW, read off its log's TAIL. It was the incremental scan's
+            # cursor, which reads at most `_LOG_SCAN_CHUNK` per call: in a fresh process (the CLI,
+            # a just-started server) the first call had seen only the log's first 8 MB, so the
+            # floor sat far behind the tail, every terminal already written counted as "later",
+            # and the gate opened at once — the hand-off race the gate exists to close (g5 #2).
             out["after_seq"] = (cond["after_seq"] if cond["after_seq"] is not None
-                                else _scan_log(Path(run)).last_seq)
+                                else _tail_last_seq(Path(run) / "events.jsonl"))
         entries.append(out)
     body = {"version": 1, "hold": bool(hold or drain), "drain": bool(drain),
             "start_after": entries,
@@ -486,57 +548,146 @@ def clear_gate(run_dir) -> None:
         pass
 
 
+def _row_seq(line: bytes) -> Optional[int]:
+    try:
+        row = json.loads(line)
+    except ValueError:
+        return None
+    seq = row.get("seq") if isinstance(row, dict) else None
+    return seq if type(seq) is int else None
+
+
+def _tail_last_seq(path: Path) -> int:
+    """The seq of `path`'s last COMPLETE row (-1 when it has none), read from the TAIL.
+
+    Only rows ended by a newline count, exactly as the incremental scan counts them: the bytes after
+    the last newline are a row still being written. The window doubles while the last complete row
+    does not fit in it, so the cost is the length of the last row or two, never the log's."""
+    try:
+        with open(path, "rb") as fh:
+            end = fh.seek(0, os.SEEK_END)
+            window = _TAIL_WINDOW
+            while end > 0:
+                start = max(0, end - window)
+                fh.seek(start)
+                data = fh.read(end - start)
+                cut = data.rfind(b"\n")
+                if cut >= 0:
+                    lines = data[:cut].split(b"\n")
+                    if start > 0:
+                        lines = lines[1:]          # may begin mid-row: never judge a cut row
+                    for line in reversed(lines):
+                        seq = _row_seq(line)
+                        if seq is not None:
+                            return seq
+                if start == 0:
+                    return -1
+                window *= 2
+    except OSError:
+        return -1
+    return -1
+
+
+class _ScanView(NamedTuple):
+    """An immutable copy of what a `_LogScan` had seen, taken under its lock: a caller iterates it
+    while another thread may be advancing the scan."""
+    last_seq: int
+    terminals: dict
+    stages: tuple
+
+
 class _LogScan:
     """What a predecessor's log said so far: terminals by node, finished stages, last seq.
 
     Read INCREMENTALLY (only bytes appended since the last scan, complete lines only, at most
-    `_LOG_SCAN_CHUNK` per call) and cached per path in this process, because the engine asks on
-    every admission poll and a predecessor's log can be hundreds of MB."""
+    `_LOG_SCAN_CHUNK` per call unless one row is longer) and cached per path in this process,
+    because the engine asks on every admission poll and a predecessor's log can be hundreds of MB.
+
+    `lock` serializes `advance` and the snapshot: the cache is process-global and the server asks
+    from SYNC route handlers, i.e. from several worker threads at once; two unlocked advances read
+    the same offset and both added their byte count, so the cursor jumped past rows nobody parsed
+    (review g5 #5)."""
 
     def __init__(self):
-        self.identity = None
+        self.lock = threading.Lock()
+        self._reset(None)
+
+    def _reset(self, identity) -> None:
+        self.identity = identity
         self.offset = 0
         self.last_seq = -1
         self.terminals: dict[int, int] = {}            # node_id -> seq of its LATEST terminal
         self.stages: list[tuple] = []                  # (node_id, stage name, seq)
+        self._skipping = False                         # inside a row longer than `_LOG_ROW_MAX`
+
+    def view(self) -> _ScanView:
+        return _ScanView(self.last_seq, dict(self.terminals), tuple(self.stages))
 
     def advance(self, path: Path) -> None:
+        """Parse what was appended since the last call. The caller holds `self.lock`."""
         try:
             st = path.stat()
         except OSError:
             return
         ident = same_file_entry(st)          # a REPLACED log (new inode) restarts the scan
         if ident != self.identity or st.st_size < self.offset:
-            self.__init__()
-            self.identity = ident
+            self._reset(ident)
         if st.st_size <= self.offset:
             return
+        remaining = st.st_size - self.offset
         try:
             with open(path, "rb") as fh:
                 fh.seek(self.offset)
-                data = fh.read(min(_LOG_SCAN_CHUNK, st.st_size - self.offset))
+                data = bytearray(fh.read(min(_LOG_SCAN_CHUNK, remaining)))
+                if self._skipping:
+                    nl = data.find(b"\n")
+                    if nl < 0:
+                        self.offset += len(data)
+                        return
+                    self.offset += nl + 1
+                    remaining -= nl + 1
+                    del data[:nl + 1]
+                    self._skipping = False
+                cut = data.rfind(b"\n")
+                # ONE ROW LONGER THAN A CHUNK (review g5 #2): with no newline in the chunk the
+                # cursor never moved, and the scan stalled on that row for good. Read on until the
+                # row ends, up to `_LOG_ROW_MAX`; a longer row is skipped, never held.
+                while cut < 0 and len(data) < remaining and len(data) < _LOG_ROW_MAX:
+                    more = fh.read(min(_LOG_SCAN_CHUNK, remaining - len(data),
+                                       _LOG_ROW_MAX - len(data)))
+                    if not more:
+                        break
+                    nl = more.find(b"\n")
+                    if nl >= 0:
+                        cut = len(data) + nl
+                    data += more
         except OSError:
             return
-        cut = data.rfind(b"\n")
         if cut < 0:
-            return
-        lines = data[:cut + 1].splitlines()
+            if len(data) >= _LOG_ROW_MAX:
+                _LOG.warning("skipping an event row of more than %d bytes at offset %d of %s "
+                             "while reading it for a GPU gate condition", _LOG_ROW_MAX,
+                             self.offset, path)
+                self.offset += len(data)
+                self._skipping = True
+            return                                      # else: a row still being written
+        lines = bytes(data[:cut + 1]).splitlines()
         for line in lines:
             self._row(line)
         for line in reversed(lines):                    # the seq cursor: the last complete row
-            try:
-                seq = json.loads(line).get("seq")
-            except (ValueError, AttributeError):
-                continue
-            if type(seq) is int:
+            seq = _row_seq(line)
+            if seq is not None:
                 self.last_seq = max(self.last_seq, seq)
                 break
         self.offset += cut + 1
 
     def _row(self, line: bytes) -> None:
-        # Only the three row types a condition reads are parsed; the rest is skipped on bytes.
+        # Only the row types a condition reads are parsed; the rest is skipped on bytes. A batch
+        # envelope (`eventstore.append_many`, which also writes `node_failed`) carries its members'
+        # type strings in its bytes, so the same filter admits it; it used to be parsed and then
+        # dropped, because its own `type` is the batch marker, not a member's.
         if not (b'"node_evaluated"' in line or b'"node_failed"' in line
-                or b'"stage_finished"' in line):
+                or b'"stage_finished"' in line or b'"phase_progress"' in line):
             return
         try:
             row = json.loads(line)
@@ -547,27 +698,55 @@ class _LogScan:
         seq = row.get("seq")
         if type(seq) is int:
             self.last_seq = max(self.last_seq, seq)
-        etype, data = row.get("type"), row.get("data")
+        from looplab.events.eventstore import is_event_batch_record
+
+        if is_event_batch_record(row):
+            data = row.get("data")
+            members = data.get("events") if isinstance(data, dict) else None
+            for member in members if isinstance(members, list) else ():
+                if isinstance(member, dict):
+                    self._event(member)
+            return
+        self._event(row)
+
+    def _event(self, row: dict) -> None:
+        from looplab.events.types import (EV_NODE_EVALUATED, EV_NODE_FAILED, EV_PHASE_PROGRESS,
+                                          EV_STAGE_FINISHED, PROGRESS_STAGE_EVAL)
+
+        seq, etype, data = row.get("seq"), row.get("type"), row.get("data")
         if not isinstance(data, dict) or type(seq) is not int:
             return
         node = data.get("node_id")
-        if etype in ("node_evaluated", "node_failed") and type(node) is int:
+        node = node if type(node) is int else None
+        if etype in (EV_NODE_EVALUATED, EV_NODE_FAILED) and node is not None:
             self.terminals[node] = seq
-        elif etype == "stage_finished":
+            return
+        if etype == EV_STAGE_FINISHED:
             name = data.get("stage") or data.get("name")
-            if isinstance(name, str):
-                self.stages.append((node if type(node) is int else None, name, seq))
-                del self.stages[:-4096]
+        elif (etype == EV_PHASE_PROGRESS and data.get("stage") == PROGRESS_STAGE_EVAL
+              and data.get("phase") == "stage" and data.get("status") == "finished"):
+            # The stage cursor's CLOSING beacon (`eval_stages.py::_stage_progress_fn`): written
+            # from the eval worker the moment that stage's process ends — from a `finally`, so a
+            # crashed or killed stage closes too — while `stage_finished` waits for the attempt.
+            name = data.get("name")
+        else:
+            return
+        if isinstance(name, str) and name:
+            self.stages.append((node, name, seq))
+            del self.stages[:-4096]
 
 
 _LOG_SCANS: dict[str, _LogScan] = {}
+_LOG_SCANS_LOCK = threading.Lock()
 
 
-def _scan_log(run_dir: Path) -> _LogScan:
+def _scan_log(run_dir: Path) -> _ScanView:
     key = str(Path(run_dir) / "events.jsonl")
-    scan = _LOG_SCANS.setdefault(key, _LogScan())
-    scan.advance(Path(key))
-    return scan
+    with _LOG_SCANS_LOCK:
+        scan = _LOG_SCANS.setdefault(key, _LogScan())
+    with scan.lock:
+        scan.advance(Path(key))
+        return scan.view()
 
 
 def _holds_lease(run_dir: Path) -> Optional[bool]:

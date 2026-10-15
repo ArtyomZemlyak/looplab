@@ -772,6 +772,16 @@ class ResourceSchedulingMixin:
                        or self._gpu_mem.get(gpu, -1) >= requested_mem]
             if len(fitting) < count:
                 return None
+            # THE GPU GATE (`engine/gpu_queue.py`, audit 2026-10-14 L-02) is asked on EVERY
+            # acquisition, not only the one that has to take the host lease: a run that already
+            # holds the lease (one evaluation on GPU 0) used to admit new GPU work on GPU 1 after
+            # a `hold` or `drain`, so a drain never drained and a successor's `gpu_released`
+            # waited on a pool its predecessor kept refilling (review g5 #1). What already runs
+            # keeps its devices; only new devices wait — including an inline repair taking back
+            # devices it YIELDED (`_reclaim_eval_devices`), exactly as it already waited whenever
+            # that yield had released the lease.
+            if self._gpu_gate_blocked():
+                return None
             lease_path = self._gpu_host_lease_path
             if lease_path is not None and self._gpu_host_lease_handle is None:
                 # KNOWN LIMITATION (accepted tradeoff, not a bug): this is ONE pool-wide lease, so
@@ -790,12 +800,10 @@ class ResourceSchedulingMixin:
                 # `admission_unpinnable` reservation marker, so `_resource_eval_env` re-raises it into
                 # each caller's existing node-terminal / retry contract instead of aborting the run mid
                 # task-group with no terminal and re-crashing on every resume.
-                # THE GPU GATE and THE QUEUE (`engine/gpu_queue.py`, audit 2026-10-14 L-02) come
-                # before the lease: a gated run does not even take a place in the queue, and only
-                # the queue's HEAD may try the lease, so a release hands the pool to the run that
-                # waited longest — never to whichever process happened to poll first.
-                if self._gpu_gate_blocked():
-                    return None
+                # THE GPU GATE (asked above) and THE QUEUE (`engine/gpu_queue.py`, audit
+                # 2026-10-14 L-02) come before the lease: a gated run does not even take a place in
+                # the queue, and only the queue's HEAD may try the lease, so a release hands the
+                # pool to the run that waited longest — never to whichever process polled first.
                 ticket = self._gpu_queue_place(lease_path)
                 if ticket is not None and not ticket.is_head():
                     self._note_gpu_host_lease_contention(lease_path)
