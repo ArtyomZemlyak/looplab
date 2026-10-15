@@ -44,7 +44,8 @@ from looplab.events.types import (BACKGROUND_APPENDABLE, DIAGNOSTIC_EVENTS,
     EV_RUNG_PROMOTED,
     EV_SPEC_APPROVAL_REQUESTED,
     EV_SPEC_APPROVED, EV_SPEC_PROPOSED, PAUSE_REASON_EXTERNAL_OBLIGATIONS)
-from looplab.engine.artifact_fence import defer_waiting_consumers, refuse_unrunnable_builds
+from looplab.engine.artifact_fence import (defer_waiting_consumers, drop_unrunnable_builds,
+                                           refuse_unrunnable_builds, unrunnable_card_ids)
 from looplab.engine.track_lane import (cancel_track_lane, drain_track_requests,
                                        refuse_finish_over_track_queue, serve_track_requests,
                                        track_drain_due)
@@ -2257,7 +2258,10 @@ class Engine(ConfirmPhaseMixin, NoiseFloorMixin, AblationMixin, NoveltyGateMixin
             # bought at all: its child could only end `artifact_unavailable`. The turn gets the best
             # runnable alternative instead, recorded as its `policy_decision`
             # (`engine/artifact_fence.py::refuse_unrunnable_builds`). A no-op without artifacts.
-            actions, _unrunnable = refuse_unrunnable_builds(state, actions)
+            # It runs AFTER `_plan_gate`, so inside an endgame reserve its replacement is the plan's
+            # own action whenever that one can run (`sweep` is the gate's own switch).
+            actions, _unrunnable = refuse_unrunnable_builds(
+                state, actions, sweep=getattr(self, "_endgame_sweep", True))
             if _unrunnable:
                 _LOG.warning("artifact fence: refused %d build(s) whose child could only end "
                              "artifact_unavailable", len(_unrunnable))
@@ -2836,7 +2840,10 @@ class Engine(ConfirmPhaseMixin, NoiseFloorMixin, AblationMixin, NoveltyGateMixin
             scoring=getattr(self, "_card_scoring", None),
             ignored_pending_node_ids=running,
             resource_envelope=self._resource_envelope(),
-            refused_card_ids=endgame_refused_card_ids(state, state.plan),
+            # …and the Cards whose build could only end `artifact_unavailable`
+            # (`engine/artifact_fence.py::unrunnable_card_ids`; empty without artifacts).
+            refused_card_ids=endgame_refused_card_ids(state, state.plan)
+            | unrunnable_card_ids(state),
         )
         owned = speculative_card_actions(
             state, self.policy, self.policy.max_nodes, context=context)
@@ -2847,8 +2854,7 @@ class Engine(ConfirmPhaseMixin, NoiseFloorMixin, AblationMixin, NoveltyGateMixin
         # A build whose child could only end `artifact_unavailable` is not staged here either
         # (`engine/artifact_fence.py::refuse_unrunnable_builds`); this lane takes no replacement —
         # the next selection turn makes the runnable choice.
-        lane = [action for action in lane
-                if not refuse_unrunnable_builds(state, [action])[1]]
+        lane = drop_unrunnable_builds(state, lane)
         return [action for action in lane
                 if action.get("kind") in ("draft", "improve", "merge")][:free]
 
@@ -3154,6 +3160,14 @@ class Engine(ConfirmPhaseMixin, NoiseFloorMixin, AblationMixin, NoveltyGateMixin
                 # staged, the endgame gate's sweep then built serially), which `endgame_admitted`
                 # closed for the reserve. The gate's own action is built by the serial path below.
                 gate_decided = any(action.get(META_EXPLOIT) for action in creates)
+                #
+                # …AND NOTHING THE ARTIFACT FENCE REFUSED IS STAGED (review 2026-10-15). This turn's
+                # `creates` already passed `refuse_unrunnable_builds`, but this lane re-derives the
+                # POLICY's action — a greedy improve of the champion, the very consumer whose
+                # artifact is gone — and staged it as a paid Card, every turn. Filtered here
+                # (`drop_unrunnable_builds`) and the dead Cards leave the election
+                # (`unrunnable_card_ids`), so a refused lane is empty and the serial path below
+                # builds the fence's runnable replacement. Identity without artifacts.
                 stageable = [] if gate_decided else endgame_admitted(state, speculative_raw_actions(
                     state,
                     self.policy,
@@ -3162,9 +3176,11 @@ class Engine(ConfirmPhaseMixin, NoiseFloorMixin, AblationMixin, NoveltyGateMixin
                         scoring=getattr(self, "_card_scoring", None),
                         ignored_pending_node_ids=self._running_eval_node_ids(),
                         resource_envelope=self._resource_envelope(),
-                        refused_card_ids=endgame_refused_card_ids(state, state.plan),
+                        refused_card_ids=endgame_refused_card_ids(state, state.plan)
+                        | unrunnable_card_ids(state),
                     ),
                 ), sweep=getattr(self, "_endgame_sweep", True))
+                stageable = drop_unrunnable_builds(state, stageable)
                 if stageable:
                     # WITH PREFETCH: author one work item at a time. The live depth is filled by the
                     # isolated steady-state proposer while eval runs; staging an unreserved wide seed
@@ -3873,8 +3889,11 @@ class Engine(ConfirmPhaseMixin, NoiseFloorMixin, AblationMixin, NoveltyGateMixin
             # every Card this elects and `_claim_existing_card_builds` revalidates the same question.
             # Passed only when there is a refusal, so every turn outside a reserve makes exactly the
             # historical call (the seam tests pin its keywords).
+            # …and a Card whose build could only end `artifact_unavailable` leaves it too
+            # (`engine/artifact_fence.py::unrunnable_card_ids`; empty without artifacts): elected,
+            # the fence below refused it and the SAME Card was re-elected every turn.
             from looplab.engine.plan import endgame_refused_card_ids
-            refused = endgame_refused_card_ids(state, state.plan)
+            refused = endgame_refused_card_ids(state, state.plan) | unrunnable_card_ids(state)
             return card_next_actions(
                 state, self.policy, self.policy.max_nodes,
                 scoring=getattr(self, "_card_scoring", None),

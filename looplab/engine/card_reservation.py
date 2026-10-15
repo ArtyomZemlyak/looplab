@@ -2260,8 +2260,11 @@ class CardReservationMixin:
                 # (`_select_actions`, `_occupancy_paced_creates`) excluded before ranking. Without it
                 # the revalidation ranks a refused Card the election never saw and reads a lane the
                 # gate kept as "selection moved"; empty outside an endgame reserve.
+                # …and the artifact fence's (`artifact_fence.py::unrunnable_card_ids`), which both
+                # elections exclude beside them.
+                from looplab.engine.artifact_fence import unrunnable_card_ids
                 from looplab.engine.plan import endgame_refused_card_ids
-                refused = endgame_refused_card_ids(state, state.plan)
+                refused = endgame_refused_card_ids(state, state.plan) | unrunnable_card_ids(state)
                 if ignored_pending_node_ids:
                     # ONE query, the same one the occupancy-paced turn asked, through the same
                     # production entry point the speculative producer uses. Not a second rule: the

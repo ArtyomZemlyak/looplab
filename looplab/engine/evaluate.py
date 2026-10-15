@@ -91,8 +91,8 @@ from looplab.engine.comparability import comparability_record, protocol_record
 from looplab.engine.eval_attempt_rules import (  # noqa: F401 — the ladder's rungs, re-exported
     _REPAIR_ANSWER_EDIT, _REPAIR_ANSWER_PROVIDER_FAILURE, _REPAIR_ANSWER_STUCK,
     RepairGateContext, _classify_repair_answer, _repair_change_set, _repair_provider_failure,
-    coerce_judge_deferred, deferred_triage_verdict, evaluated_terminal, repair_gate,
-    triage_verdict_outcome)
+    attempt_succeeded, coerce_judge_deferred, deferred_triage_verdict, evaluated_terminal,
+    repair_gate, triage_verdict_outcome)
 from looplab.engine.crash_repair import developer_repair_history
 from looplab.engine.eval_stages import STAGE_MANIFEST_NAME
 from looplab.engine.shared import (canary_failure_account, host_refusal_deferral,
@@ -5132,7 +5132,7 @@ class EvaluateMixin:
         if (self.external_harness and getattr(self, "_eval_spec", None) and not a._seen.get("kind")
                 # A FAILED evaluation is not asked about after the fact (doc 78 §4): the question
                 # would only delay its terminal while it waits for a moot answer.
-                and not _attempt_failed(getattr(a, "res", None))):
+                and not _attempt_failed(getattr(a, "res", None), a.node)):
             # A short command evaluation can finish before the first live-monitor tick.
             # Inspect its final attributed log once so enabled monitoring cannot vanish merely
             # because the configured cadence was longer than the evaluation. A phase already
@@ -5172,8 +5172,7 @@ class EvaluateMixin:
         # deadlock / wedged CUDA op) still counts: the metric is real, the non-zero exit is only
         # the kill. Self-gating — `res.metric is not None` on a stall means the value WAS emitted
         # before the silence. NOT for a real deadline timeout (that is still mid-training).
-        a.ok = (a.res.metric is not None and not a.res.timed_out
-              and (a.res.exit_code == 0 or getattr(a.res, "stalled", False)))
+        a.ok = attempt_succeeded(a.res, artifact=False)
         # AN ARTIFACT NODE (doc 73 §1.4) succeeds on a CLEAN pipeline with no metric: the engine's own
         # classifier says the run exited 0, broke no stage contract and only printed no number
         # (`triage._failure_reason == "no_metric"`). Any other reason — a crash, a timeout, a missing
@@ -5185,7 +5184,7 @@ class EvaluateMixin:
         # metric is None (`feasible_nodes` then excludes it).
         if getattr(a.node, "kind", None) == "artifact":
             a.res.metric = None
-            a.ok = _failure_reason(a.res) == "no_metric"
+            a.ok = attempt_succeeded(a.res, artifact=True)
         # THE NODE'S OWN ACTIVATION CONTRACT (`engine/activation.py`). Asked of a SUCCESS, before the
         # invocation settles, because a success is exactly what it can overturn: a declared marker
         # that nothing printed means the number measured the path this node meant to replace. The

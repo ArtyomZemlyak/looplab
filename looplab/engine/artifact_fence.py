@@ -33,7 +33,9 @@ WHAT THIS MODULE ADDS, and only that:
   champion's (`RunState.best()` is drawn from it and GreedyTree improves `best()` directly), the
   surrogate's training set and the fold's Card readiness; and over a refusal at the build, which
   would leave the policy re-selecting the same parent every turn. A producer being RE-produced is
-  not dead: its children are pinned to the new lifecycle and wait for it.
+  not dead: its children are pinned to the new lifecycle and wait for it. The lanes that re-derive
+  the POLICY's action before they pay (`drop_unrunnable_builds`) and every Card election
+  (`unrunnable_card_ids`) ask the same rule, or the turn's refusal was bought one lane over.
 
 An UNPINNED use (a log written before pins) keeps the historical existence-only rule; nothing here
 waits on it, and nothing here refuses to breed from it.
@@ -157,7 +159,48 @@ def unproducible_uses(state, parent_ids) -> list[int]:
     return sorted(out)
 
 
-def refuse_unrunnable_builds(state, actions: list) -> tuple[list, list]:
+def unrunnable(state, action) -> bool:
+    """`action` is a build whose child could only end `artifact_unavailable`: a breeding kind whose
+    parents pin an artifact that can never be produced again (`unproducible_uses`)."""
+    return (isinstance(action, dict) and action.get("kind") in _BREEDING_KINDS
+            and bool(unproducible_uses(state, _action_parents(action))))
+
+
+def drop_unrunnable_builds(state, actions: list) -> list:
+    """`actions` less every `unrunnable` build, with NO replacement — what a lane that STAGES or
+    BUYS work asks before it pays (a Card-inventory turn's `stageable` re-derivation, the occupancy
+    lane, the isolated raw proposer). Each of those re-derives the POLICY's raw action, which on a
+    greedy run is an improve of the champion — the consumer whose artifact is gone — so without
+    this the turn's own refusal (`refuse_unrunnable_builds`) was undone one lane over: the refused
+    build was proposed, paid for and staged as a Card (review 2026-10-15). The next selection turn
+    makes the runnable choice. Identity on every run without artifacts."""
+    return [a for a in actions or [] if not unrunnable(state, a)]
+
+
+def unrunnable_card_ids(state) -> frozenset[str]:
+    """The LIVE Cards on the board whose action is `unrunnable` — what every Card election leaves
+    out BEFORE ranking, beside the plan's refusals (`engine/plan.py::endgame_refused_card_ids`) and
+    through the same `SpeculativeSelectionContext.refused_card_ids`. A Card minted while its parent's
+    artifact was alive outlives it; elected, it was a paid isolated build guaranteed to end
+    `artifact_unavailable`, and on the selection turn it was re-elected (and refused) every turn
+    (review 2026-10-15). Not a drop: the Card stays on the board. Empty without artifacts."""
+    from looplab.engine.plan import _LIVE_CARD_STATUSES
+    from looplab.search.card_selection import card_action
+    nodes = getattr(state, "nodes", None) or {}
+    if not any(getattr(n, "uses", None) for n in nodes.values()):
+        return frozenset()
+    out: set[str] = set()
+    for card in (getattr(state, "cards", None) or {}).values():
+        if (card.status not in _LIVE_CARD_STATUSES or card.merged_into is not None
+                or card.dropped_reason is not None):
+            continue
+        action = card_action(card)
+        if action is not None and unrunnable(state, action):
+            out.add(card.id)
+    return frozenset(out)
+
+
+def refuse_unrunnable_builds(state, actions: list, *, sweep: bool = True) -> tuple[list, list]:
     """`(actions, refused)`: the turn's actions less every build whose child could only end
     `artifact_unavailable` (`unproducible_uses` of its parents), and the refused ones.
 
@@ -168,22 +211,35 @@ def refuse_unrunnable_builds(state, actions: list) -> tuple[list, list]:
     only to an otherwise EMPTY turn, because a Card lane may not mix with a raw action
     (`engine/orchestrator.py::Engine._handle_create_actions`). Its `_reason` names what was refused
     and why, and `_scores` makes the create loop record it as the turn's `policy_decision`.
-    Everything else passes through untouched, in order."""
+    Everything else passes through untouched, in order.
+
+    INSIDE AN ENDGAME RESERVE the replacement is the PLAN's (review 2026-10-15): this runs after
+    `_plan_gate`, so an ordinary improve here spent a reserve slot on exactly what the gate exists
+    to displace. The reserve's own next action (`engine/plan.py::endgame_own_action`, `sweep` the
+    run's `Settings.endgame_sweep`) is the replacement when its child can run. When it cannot — the
+    champion IS the consumer whose artifact is gone, so its sweeps, its ensemble and its refine are
+    all dead — the reserve has nothing runnable of its own, and the turn takes the ordinary
+    replacement, as the gate itself passes a turn through when the reserve has nothing of its own
+    (`endgame_admits`)."""
     kept, refused = [], []
     for a in actions or []:
-        if (isinstance(a, dict) and a.get("kind") in _BREEDING_KINDS
-                and unproducible_uses(state, _action_parents(a))):
+        if unrunnable(state, a):
             refused.append(a)
             continue
         kept.append(a)
     if not refused or kept:
         return kept, refused
+    from looplab.engine.plan import endgame_own_action
     from looplab.search.policy import rank_by_metric
     dead = sorted({u for a in refused for u in unproducible_uses(state, _action_parents(a))})
     reason = (f"artifact_unavailable: artifact(s) {', '.join(f'#{u}' for u in dead)} can no longer "
               f"be produced (deleted, aborted or failed), so a child of "
               f"{', '.join(f'#{p}' for a in refused for p in _action_parents(a))} could only end "
               f"artifact_unavailable; building a runnable alternative instead")
+    own = endgame_own_action(state, sweep=sweep)
+    if own is not None and not unrunnable(state, own):
+        return [{**own, "_scores": {},
+                 "_reason": f"{reason} ({own.get('_reason') or 'the endgame reserve'})"}], refused
     blocked = {p for a in refused for p in _action_parents(a)}
     for node in rank_by_metric(state, state.breedable_nodes()):
         if node.id not in blocked and not unproducible_uses(state, [node.id]):

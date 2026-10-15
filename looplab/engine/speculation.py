@@ -2200,9 +2200,16 @@ class SpeculationMixin:
         the claim's re-election and both freshness questions carry it as
         `SpeculativeSelectionContext.refused_card_ids` — NOT in `_election_excluded_card_ids`, whose
         members `_reserved_speculative_slots` charges as reservations, which a refused Card is not.
-        A fresh mutable set, like its sibling, so a caller can `.discard` the one it is claiming."""
+        A fresh mutable set, like its sibling, so a caller can `.discard` the one it is claiming.
+
+        …and the ARTIFACT FENCE's refusals beside them (`artifact_fence.py::unrunnable_card_ids`,
+        review 2026-10-15): a Card whose build could only end `artifact_unavailable` is never
+        elected for a paid build either. Empty without artifacts. The request-start close below
+        (`plan_refused`) asks the plan alone, so its reason stays the plan's."""
+        from looplab.engine.artifact_fence import unrunnable_card_ids
         from looplab.engine.plan import endgame_refused_card_ids
-        return set(endgame_refused_card_ids(state, getattr(state, "plan", None)))
+        return (set(endgame_refused_card_ids(state, getattr(state, "plan", None)))
+                | set(unrunnable_card_ids(state)))
 
     def _card_requires_serial_fallback(self, card_id: object) -> bool:
         state = fold(self.store.read_all())
@@ -3342,7 +3349,8 @@ class SpeculationMixin:
         # by a restart) would otherwise start a paid build the gate refuses. No producer has run, so
         # the close bills nothing and the Card stays on the board. A result already in hand (above)
         # is kept: the plan refuses purchases, not builds.
-        if key[0] in self._plan_refused_card_ids(current):
+        from looplab.engine.plan import endgame_refused_card_ids
+        if key[0] in endgame_refused_card_ids(current, getattr(current, "plan", None)):
             return self._append_card_build_done(
                 head, skipped="stale", skipped_reason="plan_refused")
         roles = self._producer_pair_for(key, width)
@@ -3964,6 +3972,10 @@ class SpeculationMixin:
                 # action, which the gate would displace unless it is the reserve's own. A refused
                 # lane is empty, and the `else` below yields to the outer loop, whose gate builds the
                 # reserve's own action; outside a reserve the lane is unchanged.
+                # …and nothing the artifact fence refuses is proposed for (`artifact_fence.py::
+                # drop_unrunnable_builds`, review 2026-10-15): the policy's raw action is an improve
+                # of the champion, which may be the consumer whose artifact is gone.
+                from looplab.engine.artifact_fence import drop_unrunnable_builds
                 from looplab.engine.plan import endgame_admitted
                 raw_actions = endgame_admitted(proposal_state, speculative_raw_actions(
                     proposal_state,
@@ -3979,6 +3991,7 @@ class SpeculationMixin:
                         refused_card_ids=self._plan_refused_card_ids(proposal_state),
                     ),
                 ), sweep=getattr(self, "_endgame_sweep", True))
+                raw_actions = drop_unrunnable_builds(proposal_state, raw_actions)
                 roles = (self._producer_pair_for(
                     "raw", self._speculative_producer_width(proposal_state) if wide
                     else self._producer_capacity(proposal_state)) if raw_actions else None)

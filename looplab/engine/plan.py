@@ -850,6 +850,18 @@ def endgame_admitted(state, actions: list[dict], *, sweep: bool = True) -> list[
             if not isinstance(action, dict) or view.admits(action, sweep=sweep)]
 
 
+def endgame_own_action(state, *, sweep: bool = True) -> Optional[dict]:
+    """The reserve's own next action on this fold (`_EndgameView.own`) — the ensemble while it is
+    owed, else the champion's sweep or refine — or None outside the reserve or with nothing of its
+    own to spend. What `endgame_actions` hands a turn it displaces, asked by a lane that must REPLACE
+    a turn's action without leaving the reserve (`artifact_fence.py::refuse_unrunnable_builds`)."""
+    plan = getattr(state, "plan", None)
+    if not in_endgame(plan, len(state.nodes)):
+        return None
+    own = _EndgameView(state, plan).own(sweep=sweep)
+    return dict(own) if own is not None else None
+
+
 def endgame_refused_card_ids(state, plan: Optional[dict]) -> frozenset[str]:
     """The LIVE Cards on the board whose action the gate would refuse right now — what every election
     excludes BEFORE ranking, so no build is bought that the gate then displaces. Only a Card that

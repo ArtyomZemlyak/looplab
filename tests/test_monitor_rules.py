@@ -143,6 +143,25 @@ def test_a_failed_evaluation_closes_its_live_questions_instead_of_waiting(tmp_pa
     assert close_unanswered(rd, [q["checkpoint_id"]], "again") == []   # idempotent
 
 
+def test_a_stall_salvaged_evaluation_keeps_its_live_questions_open(tmp_path):
+    """Review 2026-10-15: a stall-salvaged attempt is an engine SUCCESS, so its open question is
+    not closed as "ended without a measurement" — the settle waits for its answer as for any
+    success (here the watcher reports an intervention, which ends the wait)."""
+    from looplab.engine.external_watch import settle_external_observations
+
+    rd, store = seeded(tmp_path)
+    q = ask(rd, 0, 0, "train_monitor", stage="train", observation="step 5 loss=1")
+    waited = []
+    engine = SimpleNamespace(run_dir=rd, _eval_intervention_seen=lambda *a: waited.append(1) or True)
+    attempt = SimpleNamespace(_seen={}, _live_questions=[q["checkpoint_id"]], node_id=0,
+                              generation=0, start_seq=0, node=SimpleNamespace(idea=None),
+                              res=SimpleNamespace(exit_code=-9, timed_out=False, metric=0.4,
+                                                  stalled=True))
+    anyio.run(settle_external_observations, engine, attempt)
+    assert waited, "a success waits for its answer"
+    assert answer_for(rd, q["checkpoint_id"]) is None, "never closed as moot"
+
+
 def test_attempt_failed_truth_table():
     from looplab.engine.external_watch import answer_source, attempt_failed
 
@@ -150,6 +169,16 @@ def test_attempt_failed_truth_table():
     assert not attempt_failed(ok) and not attempt_failed(None)
     assert attempt_failed(SimpleNamespace(exit_code=0, timed_out=False, metric=None))
     assert attempt_failed(SimpleNamespace(exit_code=0, timed_out=True, metric=0.1))
+    # The ENGINE's success rule (review 2026-10-15): a stall-salvaged attempt — the metric printed
+    # before the watchdog's kill, so a non-zero exit — is a success, a stall without one is not …
+    assert not attempt_failed(SimpleNamespace(exit_code=-9, timed_out=False, metric=0.4,
+                                              stalled=True))
+    assert attempt_failed(SimpleNamespace(exit_code=-9, timed_out=False, metric=None, stalled=True))
+    # … and an ARTIFACT succeeds clean with no metric, and fails on a crash.
+    artifact = SimpleNamespace(kind="artifact")
+    assert not attempt_failed(SimpleNamespace(exit_code=0, timed_out=False, metric=None), artifact)
+    assert attempt_failed(SimpleNamespace(exit_code=0, timed_out=False, metric=None))
+    assert attempt_failed(SimpleNamespace(exit_code=1, timed_out=False, metric=None), artifact)
     assert answer_source({"answerer": "rule"}) == "rule"
     assert answer_source({"answerer": "human"}) == "operator"
     assert answer_source({}) == "external_agent"

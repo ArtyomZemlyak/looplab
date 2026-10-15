@@ -423,6 +423,18 @@ def test_no_worker_thread_never_drains_the_queue_on_the_caller(tmp_path, monkeyp
         assert artifact_sync._WORKERS == 0, "the slot is given back"
         assert [r["sync_id"] for r in artifact_sync.unfinished_syncs(engine.store.read_all())] \
             == [sync_id]
+        # …and the ENDING engine does not wait on a backlog no worker will ever drain (review
+        # 2026-10-15): `retire_tracer`'s drain held `engine.lock` for the whole `FINAL_DRAIN_S`.
+        started = time.monotonic()
+        assert artifact_sync.drain_before_release(engine) is False
+        assert time.monotonic() - started < 5, "returned at once, not after FINAL_DRAIN_S"
+        assert ran == [] and artifact_sync._WORKERS == 0
+        assert [r["sync_id"] for r in artifact_sync.unfinished_syncs(engine.store.read_all())] \
+            == [sync_id], "the copy that never started keeps its open row"
+        # A thread to be had again: the drain itself starts the worker the queue was owed.
+        monkeypatch.setattr(threading.Thread, "start", real_start)
+        assert artifact_sync.drain_before_release(engine, timeout=30) is True
+        assert ran == [1]
     finally:
         monkeypatch.undo()
         with artifact_sync._COND:          # leave the module queue as the next test expects it

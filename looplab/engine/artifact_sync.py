@@ -437,11 +437,22 @@ def append_tool_log(path, argv, out, err, env=None) -> None:
 
 def wait_for_inflight(timeout: Optional[float] = None, engine=None) -> bool:
     """Wait until every copy this process accepted — or, given `engine`, every copy THAT engine
-    accepted — has finished; True when none is pending."""
+    accepted — has finished; True when none is pending.
+
+    Given `engine`, the wait also ENDS (False) as soon as the queue is stranded — copies queued and
+    no worker alive to take them (`_stranded`) — since nothing would ever finish them
+    (`drain_before_release`)."""
     with _COND:
         if engine is None:
             return _COND.wait_for(lambda: _PENDING == 0, timeout)
-        return _COND.wait_for(lambda: not _PENDING_BY_OWNER.get(id(engine)), timeout)
+        _COND.wait_for(lambda: not _PENDING_BY_OWNER.get(id(engine)) or _stranded(), timeout)
+        return not _PENDING_BY_OWNER.get(id(engine))
+
+
+def _stranded() -> bool:
+    """Copies are queued and no worker is alive to take them (`_spawn` found no thread). Asked
+    under `_COND`; `_spawn`'s failure and every exiting worker notify it."""
+    return bool(_QUEUE) and _WORKERS == 0
 
 
 def drain_before_release(engine, timeout: Optional[float] = None) -> bool:
@@ -451,11 +462,26 @@ def drain_before_release(engine, timeout: Optional[float] = None) -> bool:
     accepted it instead of being skipped by `engine_owns_run` the moment the barrier closes. True
     when nothing of it is pending; on the bound, what is left keeps its open start row
     (`unfinished_syncs`), and a copy already running still closes its own. No copy accepted, no
-    wait."""
+    wait.
+
+    A BACKLOG NO WORKER WILL EVER DRAIN is not waited on (review 2026-10-15). When `_spawn` could
+    not start a thread it leaves the copy queued and counted, by design — but with no worker alive
+    nothing would ever take it, and this wait held the run's `engine.lock` for the whole
+    `FINAL_DRAIN_S` (30 minutes) over a copy that could not start. So the drain first tries ONCE
+    more to start a worker (the next `_submit` would have; at the end of a run there is none), then
+    waits for the owner's copies OR for the pool to have no worker left beside a non-empty queue —
+    `_spawn`'s failure and every exiting worker notify the condition, so that is noticed at once.
+    What is left then keeps its open start row, exactly as past the bound."""
+    global _WORKERS
     with _COND:
         pending = _PENDING_BY_OWNER.get(id(engine), 0)
+        respawn = bool(pending) and _stranded()
+        if respawn:
+            _WORKERS += 1
     if not pending:
         return True
+    if respawn:
+        _spawn()
     timeout = FINAL_DRAIN_S if timeout is None else timeout
     _LOG.info("waiting up to %.0fs for %d artifact copy-out(s) before the run is released",
               timeout, pending)
@@ -469,7 +495,13 @@ def drain_before_release(engine, timeout: Optional[float] = None) -> bool:
                      "a queued copy will not start (its artifact_sync_started row stays open)",
                      pending)
         raise
-    if not done:
+    with _COND:
+        stranded = not done and _stranded()
+    if stranded:
+        _LOG.warning("artifact sync: no worker thread can be started for the queued copy-out(s); "
+                     "the run is released without waiting and a queued copy will not start (its "
+                     "artifact_sync_started row stays open)")
+    elif not done:
         _LOG.warning("artifact sync: copy-outs still pending after %.0fs; the run is released and "
                      "a queued copy will not start (its artifact_sync_started row stays open)",
                      timeout)

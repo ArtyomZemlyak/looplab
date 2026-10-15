@@ -48,7 +48,29 @@ from looplab.core.models import developer_stuck_reason, is_developer_error, is_d
 from looplab.engine.failure_diagnosis import REASON_SOURCE_ENGINE
 from looplab.engine.metric_salvage import unbound_subject_violation_rows
 from looplab.engine.triage import (UNANSWERABLE_TRIAGE_ACTION, UNREADABLE_TRIAGE_ACTION,
-                                   repair_artifact_defect)
+                                   _failure_reason, repair_artifact_defect)
+
+
+# ---------------------------------------------------- did the attempt SUCCEED, by the engine's rule?
+
+def attempt_succeeded(res, *, artifact: bool) -> bool:
+    """THE ENGINE's success rule for one evaluated attempt — what SETTLE_OUTCOME binds `a.ok` to
+    before the activation contract may overturn it (`engine/evaluate.py::_eval_settle_outcome`),
+    and what the external harness's monitor asks to know whether a live question is moot
+    (`engine/external_watch.py::attempt_failed`). One function, because the second reader
+    re-spelled it as "non-zero exit or no metric" and so called two engine successes failures
+    (review 2026-10-15): a STALL-SALVAGED attempt (the metric printed before the stall watchdog's
+    tree-kill, so a non-zero exit) and an ARTIFACT node (exit 0, no metric by design).
+
+    An ordinary node: a metric, no deadline timeout, and exit 0 — or a stall, whose non-zero exit
+    is only the kill (a real deadline `timed_out` is still mid-training, never salvaged). An
+    ARTIFACT (doc 73 §1.4): a CLEAN pipeline with no metric, which the engine's own classifier
+    names `no_metric` (`triage._failure_reason`, which never reads the metric); any other reason —
+    a crash, a timeout, a missing declared output — is a failure."""
+    if artifact:
+        return _failure_reason(res) == "no_metric"
+    return bool(res.metric is not None and not res.timed_out
+                and (res.exit_code == 0 or getattr(res, "stalled", False)))
 
 # ---------------------------------------------------- was the repair's answer a repair at all?
 # Moved VERBATIM from `engine/evaluate.py` (ENG2-06), private spellings and all: the attempt

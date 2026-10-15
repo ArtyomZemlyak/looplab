@@ -215,15 +215,21 @@ def answer_source(answer: dict) -> str:
         str(answer.get("answerer") or ""), "external_agent")
 
 
-def attempt_failed(res) -> bool:
-    """Did the evaluation this attempt ran END WITHOUT a measurement (non-zero exit, timeout, no
-    metric)? Then every live monitor question about it is moot."""
+def attempt_failed(res, node=None) -> bool:
+    """Did the evaluation this attempt ran FAIL, by the engine's own success rule
+    (`eval_attempt_rules.py::attempt_succeeded`)? Then every live monitor question about it is moot.
+
+    `node` says whether it is an ARTIFACT, which succeeds clean with no metric. The rule used to be
+    re-spelled here as "non-zero exit, timeout or no metric", which called two engine successes
+    failures (review 2026-10-15) — a stall-salvaged attempt (metric printed, non-zero exit from the
+    watchdog's kill) and every artifact — so RUN_ATTEMPT skipped their final monitor observation
+    and closed their open checkpoints as "ended without a measurement", which was false."""
     if res is None:
         return False
+    from looplab.engine.eval_attempt_rules import attempt_succeeded
     try:
-        return bool(getattr(res, "timed_out", False) or int(getattr(res, "exit_code", 0) or 0) != 0
-                    or getattr(res, "metric", None) is None)
-    except (TypeError, ValueError):
+        return not attempt_succeeded(res, artifact=getattr(node, "kind", None) == "artifact")
+    except (AttributeError, TypeError, ValueError):
         return True
 
 
@@ -236,7 +242,7 @@ async def settle_external_observations(engine, a) -> None:
 
     if a._seen.get("kind"):
         return  # explicit operator abort/reset owns the lifecycle
-    if attempt_failed(getattr(a, "res", None)):
+    if attempt_failed(getattr(a, "res", None), getattr(a, "node", None)):
         # A FAILED EVALUATION DOES NOT WAIT FOR AN ADVISORY ANSWER (audit 2026-10-14 L-05, incident
         # C2: the failed stage sat 139 s on a `train_monitor` question). The question asked whether
         # to stop a process that has already ended; the engine closes it, saying so, and the

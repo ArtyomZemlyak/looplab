@@ -35,17 +35,19 @@ from looplab.trust.cv import cv_summary
 
 
 _CONFIRM_RETRYABLE = object()
-# …and its sibling for a seed `_run_eval` never launched because a pinned ARTIFACT moved (doc 73
-# §1.4): retried and paced the same way, and told apart only so the auto-pause names the artifact
-# rather than a GPU (`_pace_confirm_refusal`).
+# …and its sibling for a seed `_run_eval` never launched because a pinned ARTIFACT is not readable
+# YET (doc 73 §1.4) — its producer is still producing the pinned lifecycle: retried and paced the
+# same way, and told apart only so the auto-pause names the artifact rather than a GPU
+# (`_pace_confirm_refusal`). A pin that can never clear is a finished, failed seed instead
+# (`_run_confirm_seed`, reason `artifact_gone`).
 _CONFIRM_ARTIFACT_REFUSED = object()
 # The auto-pause's two sentences, one per refusal the pace counts.
 _CONFIRM_PAUSE_GPU = ("auto-paused: confirmation could not secure the pinned GPU resource after "
                       "repeated attempts (zero-device inventory or an unenforceable durable pin). "
                       "Repair the runtime or re-pin the Card, then resume.")
 _CONFIRM_PAUSE_ARTIFACT = ("auto-paused: confirmation could not read the artifact a confirmed node "
-                           "is pinned to after repeated attempts (its producer was reset, deleted or "
-                           "failed). Re-produce the artifact or rebuild the consumer, then resume.")
+                           "is pinned to after repeated attempts (its producer is still producing "
+                           "the pinned lifecycle). Let the producer settle, then resume.")
 # "Any objective": the snapshot check a caller makes when it measures nothing a retarget retires.
 _ANY_OBJECTIVE = object()
 # Each confirmation row below carries `objective_key` — the key it was measured on (doc 68 68.2) —
@@ -296,8 +298,33 @@ class ConfirmPhaseMixin:
             # 2026-10-08). Audited ONCE per (node, seed) under its own reason, which the fold keeps out
             # of `confirm_seed_results` exactly like the GPU refusals, so the seed retries once the
             # artifact is produced again; the pass stays open and paces like them.
+            # …but ONLY while the pinned lifecycle can still be produced — the producer is still IN it
+            # and still producing (`artifact_fence.py::uses_waiting`, the one rule for that). A pin to
+            # a lifecycle the producer has LEFT (reset/rebuilt), or that was deleted, aborted, failed
+            # or re-materialized, can never clear: a lifecycle generation only grows. Retrying it held
+            # the pass open forever, auto-paused the run after `_CONFIRM_REFUSAL_PAUSE_AFTER` passes,
+            # re-paused it on every resume, and left every top-k node behind it unconfirmed (review
+            # 2026-10-15). That seed is FINISHED — it can never be measured — so it is memoized as a
+            # failed seed under its own memoized reason (`artifact_gone`, not in the fold's retryable
+            # set), exactly as the eval-path refusal is a terminal and not a wait
+            # (`evaluate.py::EvaluateMixin._refuse_unusable_artifacts`). Still not a number: the
+            # memo holds None, so the node simply has no confirmed mean from it.
+            from looplab.engine.artifact_fence import uses_waiting
             from looplab.engine.eval_dispatch import artifact_refusal, artifact_unavailable_text
             if artifact_refusal(res):
+                _now = fold(self.store.read_all())
+                _cur = _now.nodes.get(nd.id)
+                if _cur is None or not uses_waiting(_now, _cur):
+                    current = self._confirmation_node_current(nd.id, generation)
+                    async with self._write_lock:
+                        self.store.append(EV_CONFIRM_EVAL, {
+                            "node_id": nd.id, "generation": generation, "seed": s,
+                            "eval_seconds": 0.0, "metric": None,
+                            "reason": "artifact_gone",
+                            "error": artifact_unavailable_text(artifact_refusal(res)),
+                            **({"superseded": True} if not current else {}),
+                            **({"objective_key": objective} if objective else {})})
+                    return None
                 if not self._confirm_refusal_recorded(nd.id, generation, s, "artifact_unavailable"):
                     async with self._write_lock:
                         self.store.append(EV_CONFIRM_EVAL, {

@@ -84,6 +84,51 @@ def test_a_consumer_whose_artifact_is_gone_is_never_bred_from_in_a_real_run(tmp_
     assert any(r.startswith("artifact_unavailable: artifact(s) #0") for r in reasons), reasons
 
 
+def test_a_card_run_never_stages_or_elects_a_build_from_a_dead_consumer(tmp_path):
+    """Review 2026-10-15, DRIVEN through `Engine.run` on a Card-inventory run: the turn's refusal
+    replaced the dead build, but the inventory lane re-derived the POLICY's action — the greedy
+    improve of the champion, the consumer whose artifact is gone — and staged it as a paid Card
+    every turn. No Card may name #1 as a parent, and no node may be built from it."""
+    engine = make_engine(tmp_path / "run", policy=GreedyTree(n_seeds=1, max_nodes=4),
+                         card_driven_selection=True)
+    _append(engine.store,
+            ("run_started", {"run_id": "r", "task_id": "toy", "direction": "min",
+                             "card_driven_selection": True}),     # the pin wins on re-entry
+            _nc(0, node_kind="artifact"), _ev(0),
+            _nc(1, idea={"params": {"x": 3.0, "y": -1.0}}, uses=[0], uses_attempts={"0": 0}),
+            _ev(1, metric=0.0),
+            ("node_tombstoned", {"node_ids": [0]}))
+    anyio.run(engine.run)
+    events = engine.store.read_all()
+    final = fold(events)
+    built = [n for n in final.nodes.values() if n.id > 1]
+    assert built, "the run kept searching instead of stopping on the dead lineage"
+    assert all(1 not in n.parent_ids for n in built), [(n.id, n.parent_ids) for n in built]
+    assert final.cards, "the Card inventory lane never ran"
+    dead_cards = [c.id for c in final.cards.values() if 1 in (c.parent_ids or [])]
+    assert dead_cards == [], f"staged a paid Card bred from the dead consumer: {dead_cards}"
+
+
+def test_a_live_card_bred_from_a_dead_consumer_leaves_every_election():
+    """A Card minted while #1's artifact was alive outlives it: it is named for every election to
+    leave out (`unrunnable_card_ids`) — on a run without artifacts nothing is."""
+    from looplab.engine.artifact_fence import drop_unrunnable_builds, unrunnable_card_ids
+    card = {"id": "card-1", "operator": "improve", "parent_ids": [1],
+            "idea": {"operator": "improve", "rationale": "r"}}
+    rows = [_nc(0, node_kind="artifact"), _ev(0),
+            _nc(1, uses=[0], uses_attempts={"0": 0}), _ev(1, metric=1.0),
+            _nc(2), _ev(2, metric=2.0)]
+    alive = fold(_rows(*rows, (EV_CARD_ADDED, card)))
+    assert alive.cards["card-1"].status == "proposed"
+    assert unrunnable_card_ids(alive) == frozenset()
+    dead = fold(_rows(*rows, (EV_CARD_ADDED, card), ("node_tombstoned", {"node_ids": [0]})))
+    assert unrunnable_card_ids(dead) == frozenset({"card-1"})
+    lane = [{"kind": "improve", "parent_id": 1}, {"kind": "improve", "parent_id": 2},
+            {"kind": "draft"}]
+    assert drop_unrunnable_builds(dead, lane) == lane[1:]
+    assert drop_unrunnable_builds(alive, lane) == lane
+
+
 def test_the_refusal_rule_spares_live_lineages_and_picks_a_runnable_parent():
     st = fold(_rows(
         _nc(0, node_kind="artifact"), _ev(0),
@@ -117,6 +162,41 @@ def test_the_refusal_rule_spares_live_lineages_and_picks_a_runnable_parent():
     plain = fold(_rows(_nc(1), _ev(1, metric=1.0)))
     actions = [{"kind": "improve", "parent_id": 1}]
     assert refuse_unrunnable_builds(plain, actions) == (actions, [])
+
+
+def _endgame_board(*, consumer_metric):
+    """Inside an endgame reserve (`build_plan`: endgame at node 3): artifact #0 deleted, its
+    consumer #1, and two plain nodes #2 (2.0) and #3 (1.0) on a `max` run."""
+    from looplab.engine.plan import build_plan
+    from looplab.events.types import EV_PLAN
+    return fold(_rows(
+        ("run_started", {"run_id": "r", "task_id": "toy", "direction": "max"}),
+        _nc(0, node_kind="artifact"), _ev(0),
+        _nc(1, uses=[0], uses_attempts={"0": 0}), _ev(1, metric=consumer_metric),
+        _nc(2), _ev(2, metric=2.0), _nc(3), _ev(3, metric=1.0),
+        ("node_tombstoned", {"node_ids": [0]}),
+        (EV_PLAN, build_plan(max_nodes=6, n_seeds=1, reserve_frac=0.5, at_node=0))))
+
+
+def test_inside_an_endgame_reserve_the_replacement_is_the_plans_own_action():
+    """Review 2026-10-15: the fence runs AFTER `_plan_gate`, and its plain improve replacement spent
+    a reserve slot on exactly what the gate displaces. Now the replacement is the reserve's own
+    next action (here the ensemble of #2 and #3) whenever its child can run — which the plan's
+    one predicate admits."""
+    from looplab.engine.plan import endgame_admits, in_endgame
+    st = _endgame_board(consumer_metric=0.5)
+    assert in_endgame(st.plan, len(st.nodes)) and st.best().id == 2
+    kept, refused = refuse_unrunnable_builds(st, [{"kind": "merge", "parent_ids": [1, 3]}])
+    assert refused == [{"kind": "merge", "parent_ids": [1, 3]}]
+    assert [(a["kind"], a.get("parent_ids")) for a in kept] == [("merge", [2, 3])], kept
+    assert endgame_admits(st, st.plan, kept[0]), "the replacement must pass the plan gate"
+    assert kept[0]["_reason"].startswith("artifact_unavailable") and kept[0]["_scores"] == {}
+    # The CHAMPION is the dead consumer: every action of the reserve's own (its ensemble, its
+    # sweep) is dead too, so the reserve has nothing runnable and the turn takes the ordinary one.
+    dead_champion = _endgame_board(consumer_metric=5.0)
+    assert dead_champion.best().id == 1
+    kept, _ = refuse_unrunnable_builds(dead_champion, [{"kind": "improve", "parent_id": 1}])
+    assert [(a["kind"], a.get("parent_id")) for a in kept] == [("improve", 2)]
 
 
 # ------------------------------------------------------------- 2 + 10. the fold's uses rule
@@ -267,13 +347,17 @@ def test_a_child_of_a_consumer_is_told_where_its_inherited_artifacts_are(tmp_pat
 
 # ------------------------------------------------------------- 7. a refused seed is not a measured one
 
-def _confirm_engine(tmp_path):
+def _confirm_engine(tmp_path, *, producing=False):
+    """Consumer #1 (evaluated, metric 1.0) pinned to artifact #0's lifecycle 0. By default #0 is then
+    RESET — the pin can never clear again (a lifecycle generation only grows). `producing`: #0 is
+    instead still pending IN lifecycle 0, the one refusal that can still clear."""
     engine = make_engine(tmp_path / "run", confirm_top_k=1, confirm_seeds=1, max_nodes=2)
     _append(engine.store,
             ("run_started", {"run_id": "r", "task_id": "toy", "direction": "min"}),
-            _nc(0, node_kind="artifact"), _ev(0),
+            _nc(0, node_kind="artifact"), *(() if producing else (_ev(0),)),
             _nc(1, uses=[0], uses_attempts={"0": 0}), _ev(1, metric=1.0))
-    engine.store.append(EV_NODE_RESET, {"node_id": 0, "from_stage": "eval"})   # the pin moves
+    if not producing:
+        engine.store.append(EV_NODE_RESET, {"node_id": 0, "from_stage": "eval"})   # the pin moves
 
     async def reserve(nd, *, resource_pin=None, wait_once=False):
         return {**engine._resource_request_for_node(nd, resource_pin=resource_pin), "gpu_ids": []}
@@ -284,8 +368,9 @@ def _confirm_engine(tmp_path):
 
 
 def test_confirm_and_the_noise_floor_never_record_a_seed_nothing_ran(tmp_path):
+    """The pinned artifact is still being produced: the seed is not memoized, retries, is deduped."""
     from looplab.engine.confirm_phase import _CONFIRM_ARTIFACT_REFUSED
-    engine = _confirm_engine(tmp_path)
+    engine = _confirm_engine(tmp_path, producing=True)
     node = fold(engine.store.read_all()).nodes[1]
     spawned = []
     engine.sandbox.run = lambda *a, **k: spawned.append(1)
@@ -298,6 +383,28 @@ def test_confirm_and_the_noise_floor_never_record_a_seed_nothing_ran(tmp_path):
     assert len([e for e in engine.store.read_all() if e.type == EV_CONFIRM_EVAL]) == 1, "deduped"
     assert anyio.run(engine._run_noise_seed, node, 0) is None
     assert not [e for e in engine.store.read_all() if e.type == EV_EVAL_NOISE_SEED]
+
+
+def test_confirm_completes_when_the_pinned_artifact_can_never_be_produced_again(tmp_path):
+    """Review 2026-10-15: the producer was RESET, so the consumer's pin to lifecycle 0 can never
+    clear. That refusal used to be retried like a transient one — the pass never completed, the run
+    auto-paused after five passes and re-paused on every resume. Now the seed is a FINISHED failed
+    seed (memoized None, nothing launched) and the pass writes `best_confirmed`, with no pause."""
+    from looplab.events.types import EV_BEST_CONFIRMED, EV_PAUSE
+    engine = _confirm_engine(tmp_path)
+    spawned = []
+    engine.sandbox.run = lambda *a, **k: spawned.append(1)
+    for _ in range(7):     # more passes than the auto-pause cap: none may pause
+        anyio.run(engine._confirm_phase, fold(engine.store.read_all()))
+        if fold(engine.store.read_all()).confirmed_done:
+            break
+    events = engine.store.read_all()
+    assert spawned == [], "nothing may launch without the artifact"
+    assert not [e for e in events if e.type == EV_PAUSE]
+    assert [e.data["reason"] for e in events if e.type == EV_CONFIRM_EVAL] == ["artifact_gone"]
+    final = fold(events)
+    assert final.confirm_seed_results.get(1) == {engine.confirm_seed_base: None}
+    assert final.confirmed_done and [e for e in events if e.type == EV_BEST_CONFIRMED]
 
 
 # ------------------------------------------------------------- 8. an artifact is never host-scored

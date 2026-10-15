@@ -1140,7 +1140,7 @@ seconds; it adds no evaluation wait of its own.
 | `looplab agent-notify --command '…{message}…'` | Operator's wake-up command: debounced, retried, recorded in a ledger. `PUT /api/runs/{run_id}/agent-notify` sets your run's `vars` (thread). |
 | `PUT /api/runs/{run_id}/gpu-gate` | `hold` or `start_after` other runs' engines; the host GPU lease is served FIFO (`GET /api/gpu-queue`). `looplab gpu-gate` writes it before the run exists. |
 | `node_failed.failure_forensics` | Original exception under a wrapper, signals per rank, exit codes, log tails; `GET /api/runs/{run_id}/attempt-logs` keeps earlier attempts' logs. |
-| `PUT /api/runs/{run_id}/harness-monitor-rules` | Routine checkpoint answers LoopLab gives itself (`answerer: rule`); a failed evaluation never waits for an answer. |
+| `PUT /api/runs/{run_id}/harness-monitor-rules` | Routine checkpoint answers LoopLab gives itself (`answerer: rule`); a failed evaluation (by the engine's own success rule — a stall-salvaged attempt or a clean artifact is not one) never waits for an answer. |
 | `eval.canary` (`slice` / `smoke`) | On by default for external runs when declared: a broken CLI flag fails in seconds. |
 | `harness-progress.canary_preflight` | Which preflight your candidates get; without `eval.canary` the operator may enable a sandboxed smoke (`harness-policy` `implicit_canary`), else a warning says none runs. |
 | `looplab agent-notify --hook NAME` / `?hook=NAME` | A named wake-up connection per agent (own command, vars, watermark, retries); `PUT /api/runs/{run_id}/agent-notify {"hook": NAME, ...}` per run. |
