@@ -6831,7 +6831,11 @@ class EvaluateMixin:
                 _extras = normalize_extra_metrics(a.res.extra_metrics, priority=_declared_extras)
                 _extras_omitted = extra_metrics_overflow(
                     a.res.extra_metrics, priority=_declared_extras)
-                _extra_channels = normalize_extra_metric_channels(a.res.extra_metrics_provenance)
+                # The TAGS of the kept values survive the bound too, or a declared value kept
+                # past it would read `unknown` (the channel map is built auto-first) and the
+                # gate below would drop it (review g8, 2026-10-15).
+                _extra_channels = normalize_extra_metric_channels(
+                    a.res.extra_metrics_provenance, priority=_extras)
                 _extra_dirs = normalize_extra_metric_directions(a.res.extra_metrics_direction)
                 if not bool(getattr(self, "auto_extra_metrics", True)):
                     _extras, _extra_channels = authenticated_extra_metrics_only(

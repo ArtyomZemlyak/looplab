@@ -1534,8 +1534,11 @@ class EvalDispatchMixin:
             # declaration they could satisfy. Tagged here rather than left absent so they read as
             # `auto` and not as the weaker `unknown`, which is reserved for logs written before the
             # channel was recorded at all.
+            # `priority=`: the tags of the values just kept survive the bound (the channel map
+            # is built auto-first; review g8, 2026-10-15).
             res.extra_metrics_provenance = {
-                **normalize_extra_metric_channels(res.extra_metrics_provenance),
+                **normalize_extra_metric_channels(res.extra_metrics_provenance,
+                                                  priority=res.extra_metrics),
                 **{k: EXTRA_METRIC_AUTO for k in extra}}
 
     def _skip_if_aborted(self, a: dict, cur: RunState) -> bool:

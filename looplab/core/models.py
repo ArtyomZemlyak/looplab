@@ -381,7 +381,8 @@ def task_measurement(node, objective_key) -> Optional[float]:
     return node.task_metric
 
 
-def normalize_extra_metric_channels(value, *, max_items: int = 256) -> dict[str, str]:
+def normalize_extra_metric_channels(value, *, max_items: int = 256,
+                                    priority=()) -> dict[str, str]:
     """Normalize the `extra_metrics` channel map to `{name: "declared"|"auto"}`.
 
     Same untrusted-input discipline as `normalize_extra_metrics` (this arrives from an old or
@@ -389,15 +390,26 @@ def normalize_extra_metric_channels(value, *, max_items: int = 256) -> dict[str,
     value outside the WRITER vocabulary is dropped rather than coerced. A dropped entry is not
     silently upgraded — it simply reads back as `EXTRA_METRIC_UNKNOWN` through
     `extra_metric_channel`, which is the safe direction.
+
+    ``priority`` names keys whose tag survives the bound whatever its position — the VALUES the
+    caller kept (pass the normalized `extra_metrics` map itself). Without it the bound cut the
+    TAGS at the first 256 in map order while `normalize_extra_metrics(priority=…)` kept the
+    declared VALUES past it, and `command_eval` builds the channel map auto-first: a declared key
+    kept its value, lost its `declared` tag, read `unknown` and was then dropped by
+    `authenticated_extra_metrics_only` (review g8, 2026-10-15). Under the bound the result is
+    byte-identical to the old rule — order included.
     """
     if not isinstance(value, dict):
         return {}
-    out: dict[str, str] = {}
-    for key, raw in value.items():
-        if len(out) >= max_items or not isinstance(key, str) or raw not in EXTRA_METRIC_CHANNELS:
-            continue
-        out[key[:200]] = str(raw)
-    return out
+    entries = [(key[:200], str(raw)) for key, raw in value.items()
+               if isinstance(key, str) and raw in EXTRA_METRIC_CHANNELS]
+    wanted = {k[:200] for k in (priority or ()) if isinstance(k, str)}
+    keep: set[str] = {k for k, _ in entries if k in wanted}
+    for key, _ in entries:
+        if len(keep) >= max_items:
+            break
+        keep.add(key)
+    return {key: raw for key, raw in entries if key in keep}
 
 
 # WAS THIS VALUE MEASURED, OR RECONSTRUCTED AFTERWARDS — the THIRD subject question, and the one

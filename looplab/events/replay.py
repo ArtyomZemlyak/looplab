@@ -871,8 +871,11 @@ def _on_node_evaluated(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None
             # extra metrics preserved in `runs/` came from the UNDECLARED auto-capture channel, so
             # reading an untagged historical value as operator-declared would state the one thing
             # that is provably false about it.
+            # `priority=`: the tags of the values the fold KEPT survive the map's bound whatever
+            # their position (a row written before the writer applied the same rule carries the
+            # full auto-first map, review g8 2026-10-15).
             n.extra_metrics_provenance = normalize_extra_metric_channels(
-                d.get("extra_metrics_provenance"))
+                d.get("extra_metrics_provenance"), priority=n.extra_metrics)
             # ...and WHICH WAY IS BETTER on each, folded the same way and defaulting the same way:
             # absent -> `{}` -> every key answers `EXTRA_METRIC_DIRECTION_UNKNOWN`. Not defaulting
             # to a direction is the same discipline as not defaulting to `declared` one line up —
@@ -1527,7 +1530,8 @@ def _on_extra_metrics_imported(st: RunState, e: Event, d: dict, ctx: "_FoldCtx")
         decimals.update({k: v for k, v in raw_decimals.items() if k in added})
     node.extra_metrics = {**live, **added}
     node.extra_metrics_provenance = normalize_extra_metric_channels(
-        {**(node.extra_metrics_provenance or {}), **{k: EXTRA_METRIC_DECLARED for k in added}})
+        {**(node.extra_metrics_provenance or {}), **{k: EXTRA_METRIC_DECLARED for k in added}},
+        priority=node.extra_metrics)
     # WHO measured each added key (critic 2026-10-08): the import's own `source`, kept per key so
     # two imports from two services stay told apart. The FIRST reconstruction's time stands — a
     # later import must not re-date an earlier score-log backfill.

@@ -15,9 +15,11 @@ WHAT. `mirror_pass` copies each run directory under `src_root` to `dst_root/<run
     missing, so the first pass after a restore does not re-upload everything);
   * an append-only `*.jsonl` is copied up to its LAST NEWLINE, so a copy taken while the engine
     appends never carries a torn line (`looplab resume` would refuse it, `repair-log` exists for it);
-  * a file at most `atomic_max_bytes` is written to `<name>.mirror-tmp` and renamed over the copy,
-    so a reader of the destination never sees half a file; a larger one is written in place and is
-    only trusted through the manifest below;
+  * every file is written to a sibling `<name>.<pid>.<n>.mirror-tmp`, unique per ATTEMPT, and
+    renamed over the copy, so a reader of the destination never sees half a file and the last good
+    copy is never truncated by the next one; a file at most `atomic_max_bytes` is buffered in memory
+    first, a larger one is streamed into its temp file. An attempt abandoned on its deadline never
+    publishes (see `copy_one`);
   * the PER-RUN MANIFEST `dst_root/<run>/.looplab-mirror.json` (written last, atomically) lists every
     mirrored file with its size, mtime and SHA-256 computed while copying. It is what a restore
     trusts: a file the manifest does not vouch for, or whose bytes do not hash to the manifest, is
@@ -50,6 +52,7 @@ from __future__ import annotations
 
 import fnmatch
 import hashlib
+import itertools
 import json
 import os
 import shutil
@@ -79,6 +82,10 @@ SLOW_FILES = frozenset({"spans.jsonl", ".spans-append.jsonl", "trace.json"})
 # Copied first: without these a mirrored run cannot be resumed at all.
 _FIRST = ("events.jsonl", "task.snapshot.json", "config.snapshot.json")
 _ERRORS_KEPT = 20
+# One temp name per copy ATTEMPT (`_attempt_tmp`): a writer abandoned on its deadline still holds its
+# descriptor, and with one shared `<name>.mirror-tmp` the next pass reopened that same inode, renamed
+# it over the copy, and the late writer then wrote stale bytes into the PUBLISHED file (review g8).
+_TMP_SEQ = itertools.count()
 
 
 class MirrorStuck(RuntimeError):
@@ -238,8 +245,12 @@ def plan_run(run_dir: Path, cfg: MirrorConfig, copied: dict, pass_no: int) -> tu
             prior = copied.get(rel)
             # (size, mtime) is deliberately the WEAK change tier: the mirror re-copies what moved,
             # and a same-size same-mtime rewrite is caught by the next manifest SHA mismatch only
-            # at restore. `st` itself rides along; the copy reads its two fields.
-            if prior and prior.get("size") == st.st_size and prior.get("mtime_ns") == st.st_mtime_ns:
+            # at restore. `st` itself rides along; the copy reads its two fields. The SOURCE's size
+            # is compared: a `*.jsonl` cut at its last newline records the cut as `size` and the
+            # source's own as `source_size`, and comparing the cut re-copied a torn-tailed log on
+            # every pass forever (review g8).
+            prior_size = prior.get("source_size", prior.get("size")) if prior else None
+            if prior and prior_size == st.st_size and prior.get("mtime_ns") == st.st_mtime_ns:
                 continue
             todo.append([rel, st])
     todo.sort(key=lambda row: _priority(row[0]))
@@ -288,16 +299,50 @@ def _read_source(path: Path, size: int, bucket: _Bucket, chunk: int = 1 << 20):
             yield data
 
 
+def _attempt_tmp(dst: Path) -> Path:
+    """`dst`'s temp sibling for ONE copy attempt (`_TMP_SEQ`). Still ends in `TMP_SUFFIX`, so a
+    destination mirrored back as a source skips it. A temp file an abandoned attempt never got to
+    remove stays behind unreferenced: no manifest lists it, so no restore reads it, and removing it
+    would mean LISTING the destination, which a pass never does (the metadata-storm rule)."""
+    return dst.with_name(f"{dst.name}.{os.getpid()}.{next(_TMP_SEQ)}{TMP_SUFFIX}")
+
+
 def copy_one(src: Path, dst: Path, *, size: int, mtime_ns: int, cfg: MirrorConfig,
              bytes_bucket: _Bucket) -> dict:
     """Copy one file and return its manifest row `{size, mtime_ns, sha256}`.
 
     The SOURCE is read in this thread (tmpfs, cannot hang); every DESTINATION operation goes through
-    `_deadline_call`. A `*.jsonl` is cut at its last newline."""
+    `_deadline_call`. A `*.jsonl` is cut at its last newline. Every attempt writes its OWN temp
+    file and renames it over `dst`, so the copy a previous pass published stays whole until the new
+    one is complete. An attempt abandoned on its deadline is flagged and, if its worker ever wakes,
+    removes its temp file instead of publishing stale bytes over a later pass's copy (the flag is
+    read just before the rename, so only a worker waking inside that one check can still race)."""
     cut = _jsonl_cut(src, size) if src.name.endswith(".jsonl") else size
     digest = hashlib.sha256()
     timeout = cfg.op_timeout_s + cut / max(1.0, cfg.max_bytes_per_s or 1.0) * 4
-    if cut <= cfg.atomic_max_bytes:
+    tmp = _attempt_tmp(dst)
+    abandoned = threading.Event()
+
+    def publish():
+        if abandoned.is_set():
+            raise MirrorStuck(f"writing {dst} was abandoned on its deadline")
+        os.replace(tmp, dst)
+        os.utime(dst, ns=(mtime_ns, mtime_ns))
+
+    def removing_tmp_on_failure(fn):
+        def run():
+            try:
+                fn()
+            except BaseException:
+                try:
+                    os.unlink(tmp)
+                except OSError:
+                    pass                   # never created, or the destination is failing anyway
+                raise
+        return run
+
+    streamed = cut > cfg.atomic_max_bytes
+    if not streamed:
         chunks = []
         for data in _read_source(src, cut, bytes_bucket):
             digest.update(data)
@@ -305,25 +350,34 @@ def copy_one(src: Path, dst: Path, *, size: int, mtime_ns: int, cfg: MirrorConfi
         payload = b"".join(chunks)
 
         def write():
-            tmp = dst.with_name(dst.name + TMP_SUFFIX)
             with open(tmp, "wb") as fh:
                 fh.write(payload)
-            os.replace(tmp, dst)
-            os.utime(dst, ns=(mtime_ns, mtime_ns))
-        _deadline_call(write, timeout, f"writing {dst}")
-        cut = len(payload)
+            publish()
+        work, cut = write, len(payload)
     else:
-        # Too big to hold: stream it straight into place; the manifest is the only trust anchor.
+        # Too big to hold in memory: STREAMED into the temp file, then renamed like the small path.
+        # Until 2026-10-15 this opened `dst` itself with "wb", truncating the only durable copy for
+        # the whole throttled transfer (minutes at the default 16 MiB/s). Nothing avoided the rename
+        # on purpose — the split was about memory; on an S3 mount the rename is a server-side copy
+        # of one changed file under `max_file_bytes` (review g8).
         written = [0]
 
         def write_stream():
-            with open(dst, "wb") as fh:
+            with open(tmp, "wb") as fh:
                 for data in _read_source(src, cut, bytes_bucket):
+                    if abandoned.is_set():
+                        raise MirrorStuck(f"writing {dst} was abandoned on its deadline")
                     digest.update(data)
                     fh.write(data)
                     written[0] += len(data)
-            os.utime(dst, ns=(mtime_ns, mtime_ns))
-        _deadline_call(write_stream, timeout, f"writing {dst}")
+            publish()
+        work = write_stream
+    try:
+        _deadline_call(removing_tmp_on_failure(work), timeout, f"writing {dst}")
+    except MirrorStuck:
+        abandoned.set()
+        raise
+    if streamed:
         cut = written[0]
     return {"size": cut, "mtime_ns": mtime_ns, "sha256": digest.hexdigest(),
             **({"source_size": size} if cut != size else {})}
@@ -420,6 +474,12 @@ def mirror_run(run_dir: Path, cfg: MirrorConfig, state: dict, *, pass_no: int,
             errors.append({"run": run, "path": rel, "error": f"{type(exc).__name__}: {exc}"[:300]})
             continue
         copied[rel] = row
+        # The state now vouches for bytes the destination MANIFEST does not list yet. Flagged in the
+        # state itself, so a pass that dies (stuck, crashed) between this copy and the manifest
+        # write still rewrites the manifest next time: the row makes the file "unchanged", and
+        # without the flag no later pass rewrote the manifest at all — `restore_run` then refused
+        # that file's old SHA forever (review g8).
+        rstate["manifest_stale"] = True
         n += 1
         nbytes += row["size"]
     # Rows for files that no longer exist at the source are dropped from the manifest (their stale
@@ -428,7 +488,8 @@ def mirror_run(run_dir: Path, cfg: MirrorConfig, state: dict, *, pass_no: int,
     for rel in list(copied):
         if rel not in present:
             copied.pop(rel, None)
-    if n or not rstate.get("manifest_written") or skipped != rstate.get("skipped", {}):
+    if (n or rstate.get("manifest_stale") or not rstate.get("manifest_written")
+            or skipped != rstate.get("skipped", {})):
         manifest = {"version": 1, "run": run, "source": str(run_dir), "updated_at": time.time(),
                     "files": copied, "skipped": skipped}
         ops_bucket.take(1)
@@ -438,6 +499,7 @@ def mirror_run(run_dir: Path, cfg: MirrorConfig, state: dict, *, pass_no: int,
                        cfg.op_timeout_s, f"writing {dst_run / MANIFEST}")
         rstate["changed"] = True
         rstate["manifest_written"] = True
+        rstate.pop("manifest_stale", None)
         rstate["skipped"] = skipped
     newest = max((row.get("mtime_ns", 0) for row in copied.values()), default=0)
     rstate.update({"last_mirrored_at": time.time(), "newest_copied_mtime_ns": newest,

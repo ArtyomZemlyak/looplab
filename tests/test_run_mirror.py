@@ -163,6 +163,131 @@ def test_restore_refuses_a_corrupted_event_log_and_an_existing_run(tmp_path):
     assert not any(p.name.startswith(".r1-copy") for p in cfg.src_root.iterdir())
 
 
+# ------------------------------------------------------------------ review g8: the four write faults
+
+def test_a_torn_tailed_jsonl_is_not_recopied_every_pass(tmp_path):
+    """The row records the CUT as `size` and the source's own as `source_size`; the change check
+    compared the cut with the source's `st_size`, so a torn tail meant a re-copy on every pass."""
+    rd = _fake_run(tmp_path / "src")
+    with open(rd / "events.jsonl", "a", encoding="utf-8") as fh:
+        fh.write('{"seq":1,"type":"pa')                         # a writer that died mid-line
+    cfg = _cfg(tmp_path)
+    assert mirror_pass(cfg).runs["r1"]["copied"] == 3
+    assert mirror_pass(cfg).runs["r1"]["copied"] == 0
+    with open(rd / "events.jsonl", "a", encoding="utf-8") as fh:
+        fh.write('use"}\n')                                      # ...and it moves again
+    assert mirror_pass(cfg).runs["r1"]["copied"] == 1
+
+
+def test_a_pass_that_dies_before_the_manifest_rewrites_it_on_the_next_pass(tmp_path, monkeypatch):
+    """The state recorded the new copy, the manifest kept the old SHA, and no later pass rewrote
+    the manifest (nothing had "changed"): `run-mirror-restore` refused that file forever."""
+    rd = _fake_run(tmp_path / "src")
+    cfg = _cfg(tmp_path, op_timeout_s=0.2)
+    mirror_pass(cfg)
+    with open(rd / "events.jsonl", "a", encoding="utf-8") as fh:
+        fh.write('{"seq":1,"type":"pause","data":{}}\n')
+    gate = threading.Event()
+    real = run_mirror._write_json_atomic
+
+    def manifest_never_lands(path, data):
+        if str(path).startswith(str(cfg.dst_root)):
+            gate.wait(5)                                         # a FUSE call that never returns
+            return None                                          # ...and the write is lost
+        return real(path, data)
+
+    monkeypatch.setattr(run_mirror, "_write_json_atomic", manifest_never_lands)
+    assert mirror_pass(cfg).stuck
+    gate.set()
+    monkeypatch.setattr(run_mirror, "_write_json_atomic", real)
+    mirror_pass(cfg)
+    report = restore_run(cfg.dst_root, "r1", cfg.src_root, as_name="r1-back")
+    assert not report["failures"]
+    assert ((cfg.src_root / "r1-back" / "events.jsonl").read_bytes()
+            == (rd / "events.jsonl").read_bytes())
+
+
+class _FaultyWrite:
+    """A destination file handle whose `write` runs `fault` first (hang or raise)."""
+
+    def __init__(self, fh, fault):
+        self.fh, self.fault = fh, fault
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return self.fh.__exit__(*exc)
+
+    def write(self, data):
+        self.fault()
+        return self.fh.write(data)
+
+
+def _fault_dst_writes(monkeypatch, cfg, name: str, fault, *, once: bool = True):
+    """Route `open(<dst file whose name starts with name>, "wb")` inside `run_mirror` through
+    `_FaultyWrite`. Patches the module's own `open` (a global lookup), never the builtin."""
+    real_open, hits = open, []
+
+    def faulty_open(path, mode="r", *a, **kw):
+        fh = real_open(path, mode, *a, **kw)
+        p = Path(path)
+        if ("w" in mode and str(p).startswith(str(cfg.dst_root)) and p.name.startswith(name)
+                and not (once and hits)):
+            hits.append(p)
+            return _FaultyWrite(fh, fault)
+        return fh
+
+    monkeypatch.setattr(run_mirror, "open", faulty_open, raising=False)
+    return hits
+
+
+def test_an_abandoned_writer_never_lands_its_stale_bytes_on_a_later_copy(tmp_path, monkeypatch):
+    """Pass 1's writer hangs inside `write` and is abandoned; pass 2 copies the NEWER file. With one
+    shared `<name>.mirror-tmp` pass 2 reopened the inode the abandoned writer still held, renamed it
+    into place, and the late write then landed stale bytes in the published copy."""
+    rd = _fake_run(tmp_path / "src")
+    cfg = _cfg(tmp_path, op_timeout_s=0.3)
+    cfg.max_bytes_per_s = 1e12            # the copy deadline is then op_timeout_s, not 4 s per byte
+    gate = threading.Event()
+    _fault_dst_writes(monkeypatch, cfg, "train.py", lambda: gate.wait(5))
+    assert mirror_pass(cfg).stuck
+    (rd / "nodes" / "node_0" / "train.py").write_text("print(22222)\n", encoding="utf-8")
+    assert mirror_pass(cfg).stuck is None
+    gate.set()                                                   # the abandoned writer wakes
+    for t in threading.enumerate():
+        if t.name == "looplab-mirror-op":
+            t.join(5)
+    out = cfg.dst_root / "r1" / "nodes" / "node_0" / "train.py"
+    assert out.read_text(encoding="utf-8") == "print(22222)\n"
+    assert not [p for p in out.parent.iterdir() if p.name.endswith(run_mirror.TMP_SUFFIX)]
+    assert not restore_run(cfg.dst_root, "r1", cfg.src_root, as_name="r1-back")["failures"]
+
+
+def test_a_streamed_large_file_never_truncates_the_last_good_copy(tmp_path, monkeypatch):
+    """Over `atomic_max_bytes` the copy was streamed with `open(dst, "wb")`: a transfer that failed
+    part-way left the ONLY durable copy truncated, under a manifest still vouching for it."""
+    rd = _fake_run(tmp_path / "src")
+    cfg = _cfg(tmp_path, atomic_max_bytes=4)
+    mirror_pass(cfg)
+    out = cfg.dst_root / "r1" / "nodes" / "node_0" / "train.py"
+    assert out.read_text(encoding="utf-8") == "print(1)\n"      # the streamed path, healthy
+    (rd / "nodes" / "node_0" / "train.py").write_text("print(22222)\n", encoding="utf-8")
+
+    def disk_full():
+        raise OSError(28, "No space left on device")
+
+    _fault_dst_writes(monkeypatch, cfg, "train.py", disk_full)
+    report = mirror_pass(cfg)
+    assert [e["path"] for e in report.errors] == ["nodes/node_0/train.py"]
+    assert out.read_text(encoding="utf-8") == "print(1)\n"      # the good copy is untouched
+    assert not [p for p in out.parent.iterdir() if p.name.endswith(run_mirror.TMP_SUFFIX)]
+    assert not restore_run(cfg.dst_root, "r1", cfg.src_root, as_name="r1-back")["failures"]
+    monkeypatch.undo()
+    mirror_pass(cfg)
+    assert out.read_text(encoding="utf-8") == "print(22222)\n"
+
+
 def test_a_real_run_survives_mirror_wipe_restore_and_folds_identically(tmp_path):
     src = tmp_path / "src"
     eng = make_engine(src / "run", n_seeds=2, max_nodes=3)

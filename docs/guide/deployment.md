@@ -335,6 +335,9 @@ What it guarantees (`looplab/events/run_mirror.py`):
 * only changed files are copied (state in `<src>/.looplab-mirror/state.json`, re-seeded from the
   destination manifests when tmpfs lost it), throttled in bytes and file operations per second;
 * `*.jsonl` is cut at its last newline, so a copy taken mid-append is never a torn log;
+* every file, large ones included, is written to a temp file unique to that copy attempt and
+  renamed over the previous copy, so the last good copy is never truncated, and a writer abandoned
+  on a hung call never publishes over a later copy;
 * each run's `.looplab-mirror.json` manifest lists every file's SHA-256; a restore verifies it,
   stages into a hidden directory and renames into place only when the event log and snapshots
   verified, and never overwrites an existing run;
