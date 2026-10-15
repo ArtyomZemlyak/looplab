@@ -167,7 +167,9 @@ class UpstreamLane:
         None — and so today's answers, byte for byte — when the task declares no upstream, when no
         engine is alive, when the lane is SERVED `off` (`served_mode`: a live engine's armed mode
         wins over the snapshot's), and when this action id already has lane rows (its exact ACK,
-        which `_mutation` returns). Otherwise one `lane_op_requested` row carries it — the propose
+        which `_mutation` returns) — unless those rows are the claim the live engine took off this
+        queue and is still working, whose exact retry is the queued receipt again. Otherwise one
+        `lane_op_requested` row carries it — the propose
         body retained durably first, as the stopped lane does before claiming work — and the receipt
         says `queued`: the engine appends the lane's own rows and the positional `lane_op_done`
         between turns, without a pause. An exact retry of an action the engine already REFUSED on
@@ -185,23 +187,29 @@ class UpstreamLane:
         # a conflicting body) is `_mutation`'s, and asking `engine_alive` first would make a read of a
         # settled action depend on the engine's state.
         current = self._current(body.get("expected_generation"))
-        if any((e.type.startswith("upstream_") or e.type == "base_advanced")
-               and e.data.get("action_id") == body["action_id"] for e in current):
-            return None
-        # …and neither does a lane that is `off` whoever serves it: the snapshot resolves `off` and
-        # no engine ever armed another mode, so `_mutation` alone asks whether one is running.
-        armed = armed_row(current)
-        if ((armed is None or armed.data.get("mode") == "off")
-                and resolve_upstream_mode(self.settings, self.task.upstream)[0] == "off"):
-            return None
-        if not engine_alive(self.rd):
-            return None
-        if served_mode(current, self.settings, self.task.upstream, alive=True)[0] == "off":
-            return None
+        if self._has_lane_rows(current, body["action_id"]):
+            # …EXCEPT the one row set that is no answer yet: the claim the live engine took off THIS
+            # queue and is still working (review 2026-10-15). `_mutation` would see an unresolved
+            # claim beside a live engine and answer "Pause, wait for engine exit, and retry" — the
+            # opposite of the live lane's contract — so an exact retry then is the queued receipt
+            # it was given, and the operation's own result arrives on its `lane_op_done`.
+            if not self._claimed_off_queue(current, body["action_id"]) or not engine_alive(self.rd):
+                return None
+        else:
+            # …and neither does a lane that is `off` whoever serves it: the snapshot resolves `off`
+            # and no engine ever armed another mode, so `_mutation` alone asks whether one is running.
+            armed = armed_row(current)
+            if ((armed is None or armed.data.get("mode") == "off")
+                    and resolve_upstream_mode(self.settings, self.task.upstream)[0] == "off"):
+                return None
+            if not engine_alive(self.rd):
+                return None
+            if served_mode(current, self.settings, self.task.upstream, alive=True)[0] == "off":
+                return None
         with interprocess_lock(self.rd / ".upstream.lock", required=True):
             events = self._current(body.get("expected_generation"))
-            if any((e.type.startswith("upstream_") or e.type == "base_advanced")
-                   and e.data.get("action_id") == body["action_id"] for e in events):
+            if (self._has_lane_rows(events, body["action_id"])
+                    and not self._claimed_off_queue(events, body["action_id"])):
                 return None
             queued = [e for e in events if e.type == "lane_op_requested"
                       and e.data.get("action_id") == body["action_id"]]
@@ -230,6 +238,18 @@ class UpstreamLane:
                 "op": op, "action_id": body["action_id"],
                 **({"proposal_id": row.data["proposal_id"]} if "proposal_id" in row.data else {}),
                 "message": "The live engine serves this operation between turns; read upstream history for its result"}
+
+    @staticmethod
+    def _has_lane_rows(events, action_id) -> bool:
+        return any((e.type.startswith("upstream_") or e.type == "base_advanced")
+                   and e.data.get("action_id") == action_id for e in events)
+
+    def _claimed_off_queue(self, events, action_id) -> bool:
+        """This action was QUEUED for the live engine and its claim (`upstream_*_started`) stands
+        unresolved: the engine is working it, and its receipt is not written yet."""
+        return (any(e.type == EV_LANE_OP_REQUESTED and e.data.get("action_id") == action_id
+                    for e in events)
+                and any(e.data.get("action_id") == action_id for e in self._unresolved(events)))
 
     @staticmethod
     def _queued_refusal(events, row):

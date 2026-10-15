@@ -46,6 +46,9 @@ _LOG = logging.getLogger(__name__)
 MAX_HINTS_PER_SESSION = 3
 HINT_TEXT_CAP = 700
 _SUMMARY_CAP = 300
+# What an over-long head (paths, flag fields) must leave the fenced summary in `hint_text`: the two
+# markers (40 characters) and a sentence of the summary.
+_SUMMARY_FLOOR = 120
 
 
 def hint_id_for(proposal_id: str) -> str:
@@ -83,7 +86,26 @@ def hint_text(*, kind: Optional[str], source_node_id, summary: str, flag, paths)
                 "base, where a recipe can switch the flag on instead of re-implementing it. No action "
                 "is required now.")
     text = head + "\n" + fence_untrusted(said, "upstream summary") + "\n" + tail
-    return text[:HINT_TEXT_CAP]
+    if len(text) <= HINT_TEXT_CAP:
+        return text
+    # OVER THE CAP, cut by COMPONENT and never the whole notice (review 2026-10-15): `text[:CAP]` fell
+    # inside the fence or the engine's closing sentence — a 300-character summary with three 64-char
+    # flag fields already cut the instruction mid-word, and long paths could cut the `END` marker,
+    # leaving model-written words with no close. The engine's sentence is kept whole; the head
+    # (model-named paths and flag) is trimmed to leave the summary a floor; the SUMMARY is cut before
+    # it is fenced, until its fenced form fits what remains — the rule `core/evidence.py::fenced_head`
+    # applies to a cut inside a block, here on the raw words so a forged marker is folded once, not
+    # twice. A room too small for one character of it drops the block, never the markers' close.
+    room = HINT_TEXT_CAP - len(tail) - 2
+    if len(head) > room - _SUMMARY_FLOOR:
+        head = head[:max(0, room - _SUMMARY_FLOOR - 1)] + "…"
+    budget, block, keep = room - len(head), "", len(said)
+    while keep > 0:
+        block = fence_untrusted(said[:keep], "upstream summary")
+        if len(block) <= budget:
+            break
+        keep, block = keep - (len(block) - budget), ""
+    return head + "\n" + block + "\n" + tail
 
 
 class UpstreamHintBoard:

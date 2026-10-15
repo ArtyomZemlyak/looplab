@@ -497,7 +497,12 @@ class UpstreamServe:
         # The mode this engine armed with, recorded once on the diagnostic `lane_armed` row.
         self.announced = False
         # A search-ended finish is waiting for the operation in flight
-        # (`refuse_finish_over_upstream_job`): settle it, start nothing new.
+        # (`refuse_finish_over_upstream_job`): settle it, start nothing new. CLEARED on the first
+        # turn that finds the held job gone (`serve_upstream_requests`) and by the finish retry that
+        # passes the gate: a flag that outlived its hold silenced the lane for the rest of the
+        # process whenever the run went on instead of finishing — a `budget_extend`, an inject, a
+        # finish another gate refused (review 2026-10-15). `track_lane.py` clears `drain_requested`
+        # the same way, once the queue it held for was served.
         self.finishing = False
 
 
@@ -774,7 +779,12 @@ async def _settle(engine, lane, job: UpstreamJob, *, stopping: bool = False) -> 
                 for_good = (isinstance(job.error, UpstreamRefusal)
                             and receipt["code"] not in TRANSIENT_REFUSALS)
             elif job.out[0] == "ack":
-                receipt = {"outcome": "succeeded", "seq": job.out[1].get("seq")}
+                # The settled action's OWN verdict (`UpstreamLane.receipt`): a failed proposal or a
+                # gate that did not pass is `failed` here too. A flat `succeeded` made the queue's
+                # receipt contradict the lane's history (review 2026-10-15).
+                acked = job.out[1]
+                receipt = {"outcome": "failed" if acked.get("status") == "failed" else "succeeded",
+                           "seq": acked.get("seq")}
             elif job.op == "advance":
                 receipt = _advance_settle(engine, lane, job.out[1])
             else:
@@ -1004,7 +1014,14 @@ async def serve_upstream_requests(engine, state) -> bool:
     if not requests and getattr(engine, "_repo_spec", {}).get("upstream") is None:
         return False
     armed = _arm(engine)
-    if state.halted or serve.finishing:
+    if state.halted:
+        return False
+    if serve.finishing:
+        # The job a search-ended finish was held for has settled. THIS turn still starts nothing, so
+        # the finish the loop retries next is not refused again over a job started under it; the
+        # hold is then over, and a run that went on (an extended budget, an operator's inject, a
+        # finish another gate refused) has a live lane from the next turn on.
+        serve.finishing = False
         return False
     if not serve.announced:
         # What THIS engine serves, once per process (`upstream_live_view` reads it): diagnostic, so
@@ -1099,6 +1116,8 @@ def refuse_finish_over_upstream_job(engine, state, data) -> bool:
     from looplab.engine.track_lane import _search_ended
     serve = getattr(engine, "_upstream_serve", None)
     if serve is None or serve.job is None or state.halted or not _search_ended((data or {}).get("reason")):
+        if serve is not None and serve.job is None:
+            serve.finishing = False             # the hold, if any, is served: this finish proceeds
         return False
     serve.finishing = True
     return True

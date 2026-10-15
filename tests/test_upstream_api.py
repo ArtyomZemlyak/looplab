@@ -59,3 +59,22 @@ def test_malformed_successful_write_never_certifies_or_reexecutes():
     result = api.upstream_write("run", "check", {"expected_generation": "a" * 64, "action_id": "claim", "proposal_id": "up_" + "b" * 24})
     assert result["outcome"] == "unknown" and len(calls) == 1
     api.client.close()
+
+
+def test_a_rebased_proposal_reaches_the_lane_over_http(tmp_path, monkeypatch):
+    """Review 2026-10-15: the lane accepts an optional `rebase {from_digest, files, deleted}` (doc 73
+    §4.3) and the route's model forbade it, so every rebased proposal over HTTP was a 422 before the
+    lane could judge it. It now reaches the lane, which refuses this one on its own rule (the source
+    was measured on the current base), and a malformed one is still the model's 422."""
+    monkeypatch.delenv("LOOPLAB_UI_TOKEN", raising=False)
+    lane, store, generation, proposal = fixture(tmp_path)
+    before = store.path.read_bytes()
+    rebase = {"from_digest": "0" * 64, "files": {}, "deleted": []}
+    with TestClient(make_app(tmp_path)) as client:
+        response = client.post("/api/runs/run/upstream/proposals", json={**proposal, "rebase": rebase})
+        assert response.status_code == 409, response.text
+        assert response.json()["detail"]["code"] == "upstream_rebase_invalid"
+        malformed = client.post("/api/runs/run/upstream/proposals",
+                                json={**proposal, "rebase": {**rebase, "extra": 1}})
+        assert malformed.status_code == 422
+    assert store.path.read_bytes() == before, "an admission refusal claims nothing"

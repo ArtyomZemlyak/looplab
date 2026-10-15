@@ -119,14 +119,17 @@ def test_a_switch_already_in_place_appends_nothing_and_says_so(tmp_path):
 
 class _RacingStore:
     """The run's store, with ANOTHER writer's row landing between the switch's read and its append —
-    the window the compare-and-swap closes."""
+    the window the compare-and-swap closes. ONE rival write, after the switch's first read: a re-read
+    the switch makes to see what landed (its neutral-row retry) must not mint another."""
 
     def __init__(self, store, rival):
         self._store, self._rival = store, rival
 
     def read_all(self):
         events = self._store.read_all()
-        self._rival()
+        if self._rival is not None:
+            rival, self._rival = self._rival, None
+            rival()
         return events
 
     def __getattr__(self, name):
@@ -148,6 +151,29 @@ def test_a_write_between_the_read_and_the_append_refuses_the_switch(tmp_path):
         set_upstream_auto(lane.rd, False, "from the CLI", store=racing)
     rows = [e.data for e in store.read_all() if e.type == "upstream_auto_set"]
     assert rows == [{"enabled": False, "reason": "from the UI"}], "only the rival's row landed"
+
+
+def test_rows_that_cannot_move_the_switch_do_not_refuse_it(tmp_path):
+    """Review 2026-10-15: the CAS fenced on the whole-log tail, so a live engine's diagnostic rows and
+    `llm_usage` — appended all the time, while the switch folds a long log — refused it on every busy
+    run. Fence-neutral rows (`events/types.py::FENCE_NEUTRAL_EVENTS`) are stepped over; the switch
+    lands after them."""
+    from looplab.engine.upstream_switch import set_upstream_auto
+    from looplab.events.eventstore import EventStore
+    from looplab.events.types import FENCE_NEUTRAL_EVENTS
+    lane, store, generation, body = fixture(tmp_path)
+    rival = EventStore(store.path)
+    assert {"lane_armed", "llm_usage"} <= FENCE_NEUTRAL_EVENTS
+
+    def busy_engine():
+        rival.append("lane_armed", {"mode": "auto", "reason": "", "author": False})
+        rival.append("llm_usage", {"prompt_tokens": 1, "completion_tokens": 1})
+    said = set_upstream_auto(lane.rd, False, "from the CLI",
+                             store=_RacingStore(store, busy_engine))
+    assert "upstream automation OFF" in said
+    events = store.read_all()
+    assert [e.type for e in events[-3:]] == ["lane_armed", "llm_usage", "upstream_auto_set"]
+    assert fold(events).upstream_auto_paused is True
 
 
 def test_the_switch_refusal_is_an_operator_refusal_the_cli_prints_as_one_line(tmp_path, monkeypatch):

@@ -27,6 +27,9 @@ from typing import Optional
 from looplab.core.errors import ConfigRefusal
 
 REASON_LIMIT = 300
+# How many times `set_upstream_auto` re-asks its CAS past rows that cannot move its decision
+# (`FENCE_NEUTRAL_EVENTS`) before it says the log kept moving.
+_NEUTRAL_RETRIES = 16
 
 
 class UpstreamSwitchRefusal(ConfigRefusal):
@@ -64,8 +67,10 @@ def set_upstream_auto(run_dir, enabled: bool, reason: Optional[str] = None, *, s
     only on the tail this function READ (`expected_last_seq`): the state it says "was" is the state the
     row was written against, and a write that slipped in between — the UI's switch, an engine's
     advance — refuses this one rather than being silently overwritten by an intent raised on a view
-    that no longer holds. A switch already in the requested position appends nothing and says so:
-    a second identical row is noise in the upstream history every reader pages through."""
+    that no longer holds; a row that cannot move the view (`events/types.py::FENCE_NEUTRAL_EVENTS`,
+    a live engine's diagnostics and cost rows) does not. A switch already in the requested position
+    appends nothing and says so: a second identical row is noise in the upstream history every
+    reader pages through."""
     from looplab.events.eventstore import EventStoreConcurrencyError
     from looplab.engine.shared import engine_fold as fold
     from looplab.events.run_generation import run_generation_token
@@ -91,18 +96,34 @@ def set_upstream_auto(run_dir, enabled: bool, reason: Optional[str] = None, *, s
                 + ".")
     from looplab.core.run_deletion import RunDeletionFenceError, RunDeletionStorageError
     from looplab.core.run_reset import RunResetFenceError, RunResetStorageError
+    from looplab.events.types import FENCE_NEUTRAL_EVENTS
+    payload = {"enabled": data["enabled"], **({"reason": data["reason"]} if "reason" in data else {})}
+    decided = events[-1].seq if events else -1
+    tail, row = decided, None
     try:
-        row = store.append(EV_UPSTREAM_AUTO_SET, {
-            "enabled": data["enabled"], **({"reason": data["reason"]} if "reason" in data else {})},
-            expected_last_seq=events[-1].seq if events else -1)
-    except EventStoreConcurrencyError:
-        raise ConfigRefusal(f"upstream-auto: {run_dir.name} changed while the switch was being set; "
-                            "nothing was appended — re-run the command against the new state") from None
+        for _attempt in range(_NEUTRAL_RETRIES):
+            try:
+                row = store.append(EV_UPSTREAM_AUTO_SET, payload, expected_last_seq=tail)
+                break
+            except EventStoreConcurrencyError:
+                # FENCED ON WHAT CAN MOVE THE DECISION, not on the whole-log tail (review 2026-10-15):
+                # a live engine appends diagnostic rows (`agent_phase_*`, `memory_read`, its trace
+                # receipts) and `llm_usage` all the time, and a fold of a long log sits between this
+                # read and the append — on a busy run the CAS failed on every attempt. Rows of
+                # `events/types.py::FENCE_NEUTRAL_EVENTS` cannot move the fold's switch, so the CAS
+                # is re-asked at the new tail; any other row since the read still refuses.
+                since = [e for e in store.read_all() if e.seq > decided]
+                if not since or any(e.type not in FENCE_NEUTRAL_EVENTS for e in since):
+                    break
+                tail = since[-1].seq
     except (RunResetFenceError, RunResetStorageError, RunDeletionFenceError,
             RunDeletionStorageError) as exc:
         # A Replay or a deletion fences the log (and a fence that cannot be read is not an absent
         # one): the operator's one-line refusal, never a traceback (critic 2026-10-08).
         raise ConfigRefusal(f"upstream-auto: refusing to switch {run_dir.name}: {exc}") from None
+    if row is None:
+        raise ConfigRefusal(f"upstream-auto: {run_dir.name} changed while the switch was being set; "
+                            "nothing was appended — re-run the command against the new state")
     if data["enabled"]:
         said = "ON — the live engine authors, checks and advances on its own again"
     else:

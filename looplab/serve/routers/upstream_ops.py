@@ -18,6 +18,16 @@ class UpstreamAction(BaseModel):
     action_id: str = Field(pattern=r"^[A-Za-z0-9_.:-]{1,128}$")
 
 
+class UpstreamRebase(BaseModel):
+    """A source measured on an OLDER base, carried with its overlay three-way merged onto the current
+    one (doc 73 §4.3); the lane recomputes the merge and refuses one that differs
+    (`UpstreamLane._rebased_source`). Bounds as `engine/upstream_spec.py::normalize_request`."""
+    model_config = ConfigDict(extra="forbid")
+    from_digest: str = Field(pattern=r"^[0-9a-f]{64}$")
+    files: dict[str, str] = Field(max_length=128)
+    deleted: list[str] = Field(max_length=128)
+
+
 class UpstreamProposal(UpstreamAction):
     source_node_id: int = Field(ge=0, strict=True)
     expected_base_revision: str = Field(pattern=r"^[0-9a-f]{64}$")
@@ -30,6 +40,10 @@ class UpstreamProposal(UpstreamAction):
     flag: dict[str, str]
     documentation_path: str = Field(min_length=1, max_length=1024)
     critic: dict[str, str]
+    # OPTIONAL, and ABSENT from the lane's body when not given (`propose` dumps without it): every
+    # body written before it normalizes, digests and retries exactly as it did. It was missing here
+    # while the lane accepted it, so a rebased proposal over HTTP was a 422 (review 2026-10-15).
+    rebase: Optional[UpstreamRebase] = None
 
 
 class UpstreamCheck(UpstreamAction):
@@ -112,7 +126,9 @@ def build_router(srv):
     @router.post("/api/runs/{run_id}/upstream/proposals")
     def propose(run_id: str, body: UpstreamProposal, request: Request):
         """Author a generalized capability in a run-owned Maintainer git worktree; no base switch."""
-        return call(run_id, "propose", body.model_dump(), credential=request)
+        return call(run_id, "propose",
+                    body.model_dump(exclude={"rebase"} if body.rebase is None else None),
+                    credential=request)
 
     @router.post("/api/runs/{run_id}/upstream/check")
     def check(run_id: str, body: UpstreamCheck, request: Request):

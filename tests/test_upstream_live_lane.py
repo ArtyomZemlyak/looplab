@@ -165,6 +165,29 @@ def test_an_operation_asked_of_a_live_run_is_queued_and_served_with_a_receipt(tm
     assert lane.check(check)["event_type"] == "upstream_gate_finished", "the ACK is the lane's own row"
 
 
+def test_a_queued_retry_of_a_failed_check_is_acknowledged_as_failed(tmp_path):
+    """Review 2026-10-15: the live engine's ACK of an action that already settled wrote
+    `lane_op_done {outcome: succeeded}` whatever the lane's own receipt said — a gate that did not
+    pass read as a success on the queue's receipt."""
+    from looplab.engine.upstream_state import digest
+    lane, store, generation, body = fixture(tmp_path)          # the fixture ends paused: stopped lane
+    body["files"]["train.py"] = body["files"]["train.py"].replace("range(30)", "range(10)")
+    proposed = lane.propose(body)
+    check = {"expected_generation": generation, "action_id": "bad-check",
+             "proposal_id": proposed["proposal_id"]}
+    assert lane.check(check)["status"] == "failed"
+    lane.settings = lane.settings.model_copy(update={"upstream_mode": "propose"})
+    (lane.rd / "config.snapshot.json").write_text(lane.settings.model_dump_json(), encoding="utf8")
+    store.append("resume", {})
+    # The exact body queued again (a retry that reached the queue): the engine ACKs the settled check.
+    store.append("lane_op_requested", {"op": "check", "action_id": "bad-check",
+                                       "request_hash": digest(check), "body": dict(check)})
+    _serve(_engine(lane, store))
+    done = [e for e in store.read_all() if e.type == "lane_op_done"][-1].data
+    finished = [e for e in store.read_all() if e.type == "upstream_gate_finished"][-1]
+    assert done["outcome"] == "failed" and done["seq"] == finished.seq, done
+
+
 def test_a_queued_operation_on_a_run_that_resolved_off_is_refused_on_its_receipt(tmp_path):
     lane, store, generation, body, made = _live(tmp_path)
     snapshot = lane.rd / "config.snapshot.json"

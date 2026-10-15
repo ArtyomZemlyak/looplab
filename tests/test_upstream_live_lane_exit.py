@@ -18,6 +18,7 @@ from __future__ import annotations
 import shutil
 
 import anyio
+import pytest
 
 from looplab.core.errors import UpstreamRefusal
 from looplab.engine import upstream
@@ -282,3 +283,67 @@ def test_a_search_ended_finish_waits_for_the_operation_in_flight_and_starts_noth
     store.append("run_finished", {"reason": "time_budget"})
     anyio.run(drain_upstream_job, engine)                           # returns, never waits on `stuck`
     assert store.read_all()[-1].type == "run_finished", "nothing written inside the finish"
+
+
+def _held_finish(tmp_path):
+    """A live engine whose search-ended finish was refused over an operation that has since settled."""
+    from types import SimpleNamespace
+
+    from looplab.engine.upstream_serve import UpstreamJob, refuse_finish_over_upstream_job
+    lane, store, generation, body, made = _live(tmp_path)
+    engine = _engine(lane, store)
+    stuck = UpstreamJob(op="check", body={"action_id": "x"}, idx=None)
+    stuck.thread = SimpleNamespace(is_alive=lambda: True)
+    engine._upstream_serve.job = stuck
+    state = fold(store.read_all())
+    assert refuse_finish_over_upstream_job(engine, state, {"reason": "no_actions"}) is True
+    engine._upstream_serve.job = None               # the held operation settled
+    return engine, store, state
+
+
+def test_a_finish_hold_ends_once_its_job_settled_and_the_run_goes_on(tmp_path):
+    """Review 2026-10-15: `UpstreamServe.finishing` was set by a refused finish and never cleared, so
+    a run that went ON after it (a `budget_extend`, an inject, a finish another gate refused) served
+    no live upstream operation for the rest of the process. The hold now lasts until its job settled
+    plus the one turn the finish retry is made on; after that the lane serves again."""
+    engine, store, _state = _held_finish(tmp_path)
+    before = store.path.read_bytes()
+    _turn(engine)                                   # the turn the finish retry is made on
+    assert store.path.read_bytes() == before and engine._upstream_serve.job is None, (
+        "the finish retry's own turn starts nothing")
+    _turn(engine)                                   # no finish was taken: the run went on
+    assert engine._upstream_serve.job is not None, (
+        "a hold that outlived its job silenced the live lane for good")
+
+
+def test_a_finish_retry_past_the_settled_hold_releases_the_lane(tmp_path):
+    from looplab.engine.upstream_serve import refuse_finish_over_upstream_job
+    engine, store, state = _held_finish(tmp_path)
+    assert refuse_finish_over_upstream_job(engine, state, {"reason": "no_actions"}) is False
+    # The retried finish proceeds; were a later gate to refuse it, the lane must not stay held.
+    _turn(engine)
+    assert engine._upstream_serve.job is not None, "the automatic check starts at once"
+
+
+def test_an_exact_retry_while_the_live_engine_works_its_claim_is_the_queued_receipt(tmp_path, monkeypatch):
+    """Review 2026-10-15: once the live engine had CLAIMED a queued operation, an exact retry found
+    the action's lane rows, took the stopped-lane path, saw an unresolved claim beside a live engine
+    and answered `upstream_engine_running` — "Pause, wait for engine exit, and retry" — which is the
+    one thing the live lane exists to make unnecessary. The retry is the queued receipt again."""
+    lane, store, generation, body, made = _live(tmp_path)
+    monkeypatch.setattr(upstream, "engine_alive", lambda rd: True)
+    check = {"expected_generation": generation, "action_id": "operator-check",
+             "proposal_id": made["proposal_id"]}
+    queued = lane.check(check)
+    assert queued["status"] == "queued"
+    engine = _engine(lane, store)
+    _turn(engine)                                   # the queued check's admission
+    _turn(engine)                                   # its claim lands; the bought gate runs
+    assert "upstream_gate_started" in _types(store) and claims_unresolved(store.read_all())
+    assert lane.check(check) == queued, "the claim in flight is still the queued operation"
+    with pytest.raises(UpstreamRefusal) as conflict:
+        lane.check({**check, "proposal_id": "up_" + "0" * 24})
+    assert conflict.value.code == "upstream_action_conflict", "a different body is still refused"
+    _turn(engine)                                   # the verdict and the receipt land
+    assert not claims_unresolved(store.read_all())
+    assert lane.check(check)["event_type"] == "upstream_gate_finished", "settled: the lane's own ACK"
