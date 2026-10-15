@@ -47,8 +47,14 @@ git -C ~/src/my-task log --stat looplab/my-run
 
 The branch holds, in order: the code the run started from (edits that were never committed in
 your repository, or were made in a copy), each upstream base advance with its gate evidence, and the
-champion's change (`--node <id>` or `--node none` to choose). It starts from the commit your source
-was at when the run started, if your repository has it, else `HEAD` (`--onto` to choose). Your
+champion's change (`--node <id>` or `--node none` to choose). The node step uses only that
+experiment's own commit (recorded, or built from the log for an older run); when it has none the
+step is skipped and says so — an earlier champion's commit is never exported under its name. It
+starts from the commit your editable source was at when the run started (never a data or reference
+mount's), if your repository has it, else `HEAD` (`--onto` to choose). Files are placed at the
+editable's path inside your repository, read from the task the way the run read it (`repo`,
+`editable_path` or `editables`, `~` expanded); a run whose named editables do not sit together under
+one directory of the repository is refused until you pass `--prefix`. Your
 `HEAD`, index, working tree, other branches and remotes are not touched and nothing is pushed —
 open the merge request yourself, or apply the `--patches` series. A conflict stops the export and
 names the paths; nothing is created.
@@ -65,6 +71,8 @@ looplab code-worktree runs/my-run fix-lr        # RUN_DIR/code/worktrees/fix-lr,
 #   inject_node {"idea": {...}, "code_from": {"patch": "--- a/x.py\n+++ b/x.py\n..."}}
 ```
 
-The worktree is checked out from the run's private repository at the active base, never from your
-repository. `POST /api/runs/{run_id}/code/overlay` previews the files a worktree or patch becomes;
+The worktree is checked out from the run's private repository at the active base (or
+`node:<id>`), never from your repository. The submitted overlay is always the whole change over the
+seed base, so a worktree started from `node:<id>` carries that experiment's change plus yours.
+`POST /api/runs/{run_id}/code/overlay` previews the files a worktree or patch becomes;
 paths outside the task's edit surface or protected files are refused, as in any inject.

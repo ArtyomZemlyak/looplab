@@ -221,19 +221,94 @@ def _delta_step(repo: CodeRepo, builder: _Builder, old: str, new: str, message: 
     return {"kind": kind, "commit": sha, "changed": len(rows), "already_present": already}
 
 
-def _default_prefix(target_top: Path, run_dir: Path) -> str:
-    """The editable's path inside the target repo when the run's single editable lives there."""
+def _editable_sources(run_dir: Path) -> Optional[list]:
+    """`[(mount name, source path)]` of the run's editables, read through the task ADAPTER — so the
+    composable `repo` alias, a multi-editable `editables` list and a `~`/`$VAR` spelling all mean
+    what the run meant (review 2026-10-15: the raw `editable_path` key read none of them). A pinned
+    `seed_base` points `path` at the archive; `origin_path` is the operator's source. None when the
+    snapshot cannot be read as a task."""
+    from looplab.core.errors import OperatorRefusal
     try:
-        import json
-        task = json.loads((run_dir / "task.snapshot.json").read_text(encoding="utf-8"))
-        src = task.get("editable_path")
-        if isinstance(src, str) and src:
-            rel = os.path.relpath(os.path.realpath(src), os.path.realpath(target_top))
-            if not rel.startswith(".."):
-                return "" if rel == "." else Path(rel).as_posix()
-    except (OSError, ValueError):
-        pass
-    return ""
+        from looplab.adapters.tasks import load_task
+        task = load_task(run_dir / "task.snapshot.json", existing_run=True)
+        spec = task.repo_spec() if hasattr(task, "repo_spec") else None
+    except (OperatorRefusal, OSError, ValueError, TypeError, KeyError, AttributeError):
+        return None                          # unreadable or invalid snapshot: said in the report
+    return [(str(ed.get("name") or "."), str(ed.get("origin_path") or ed.get("path") or ""))
+            for ed in (spec or {}).get("editables") or [] if ed.get("origin_path") or ed.get("path")]
+
+
+def _relative_inside(src: str, target_top: Path) -> Optional[str]:
+    """`src` relative to the target's top ("" for the top itself), or None when outside it."""
+    try:
+        rel = os.path.relpath(os.path.realpath(os.path.expanduser(src)),
+                              os.path.realpath(target_top))
+    except ValueError:                       # Windows: another drive
+        return None
+    if rel == os.pardir or rel.startswith(os.pardir + os.sep) or os.path.isabs(rel):
+        return None
+    return "" if rel == os.curdir else Path(rel).as_posix()
+
+
+def _default_prefix(target_top: Path, run_dir: Path) -> tuple:
+    """`(prefix, note)`: where the run's tree sits inside the target repository, and — when the
+    choice was not the obvious one — the sentence saying how it was made.
+
+    The run's tree is the WORKDIR layout: the root editable (`.`) at the top, every named editable
+    under its name. So the root editable decides the prefix when there is one; with only named
+    editables, the prefix is the one directory P with every editable's source at `P/<name>` inside
+    the target, and anything else is ambiguous and REFUSED rather than exported at the root."""
+    eds = _editable_sources(run_dir)
+    if not eds:
+        return "", ("the task snapshot names no readable editable source; paths are exported at "
+                    "the repository root (pass --prefix to place them)")
+    root = [src for name, src in eds if name in (".", "")]
+    others = sorted(name for name, _ in eds if name not in (".", ""))
+    if root:
+        rel = _relative_inside(root[0], target_top)
+        note = None
+        if rel is None:
+            rel, note = "", ("the run's editable is not inside the target repository; its paths are "
+                             "exported at the repository root (a clone of the same repository)")
+        if others:
+            note = ((note + "; ") if note else "") + (
+                "the root editable decides the prefix; the other editables keep their mount names "
+                "under it: " + ", ".join(others))
+        return rel, note
+    parents = set()
+    for name, src in eds:
+        rel, name = _relative_inside(src, target_top), name.strip("/")
+        if rel is not None and rel == name:
+            parents.add("")
+        elif rel is not None and rel.endswith("/" + name):
+            parents.add(rel[:-len(name) - 1])
+        else:
+            parents.add(None)
+    if len(parents) == 1 and None not in parents:
+        return parents.pop(), None
+    raise ExportRefusal("export_prefix_ambiguous",
+                        "the run's editables (" + ", ".join(others) + ") are mounted under their "
+                        "names and no single target directory holds them that way; pass --prefix "
+                        "(exported paths keep each editable's mount name under it)")
+
+
+def _recorded_source_commit(workspace: dict) -> Optional[str]:
+    """The source commit the run's EXPORTED tree started from, off `run_started.workspace`.
+
+    That dict holds the editables first and the `data:*` / `ref:*` mounts after them
+    (`engine/workspace.py::workspace_fingerprint`), so the LAST `git:` value was a data or reference
+    repository's HEAD whenever one was git-backed (review 2026-10-15). Only an `editable:` entry
+    counts: the root editable's when the run has one (git or not — another editable's commit is
+    another repository), else the one commit every named editable agrees on."""
+    editables = {k[len("editable:"):]: v for k, v in (workspace or {}).items()
+                 if isinstance(k, str) and k.startswith("editable:")}
+    for root in (".", ""):
+        if root in editables:
+            value = editables[root]
+            return value[4:] if isinstance(value, str) and value.startswith("git:") else None
+    commits = {v[4:] if isinstance(v, str) and v.startswith("git:") else None
+               for v in editables.values()}
+    return commits.pop() if len(commits) == 1 else None
 
 
 def export_code(run_dir, target, *, branch: Optional[str] = None, onto: Optional[str] = None,
@@ -244,7 +319,7 @@ def export_code(run_dir, target, *, branch: Optional[str] = None, onto: Optional
 
     `node` is `"champion"`, a node id, or None for bases only. `onto` defaults to the source commit
     the run recorded at start when the target has it, else the target's HEAD."""
-    from looplab.engine.code_identity import (BASE_REF, CHAMPION_BRANCH, _read_events, base_lineage,
+    from looplab.engine.code_identity import (BASE_REF, _read_events, base_lineage,
                                               active_base_digest, recorded_snapshots,
                                               _latest_by_lifecycle, sync_run, _run_meta)
     from looplab.engine.shared import engine_fold as fold
@@ -254,7 +329,11 @@ def export_code(run_dir, target, *, branch: Optional[str] = None, onto: Optional
     if node is not None and node != "champion" and not str(node).isdigit():
         raise ExportRefusal("export_node_invalid", f"node must be 'champion', an id or 'none': {node}")
     events = _read_events(run_dir)
-    sync_run(run_dir, events)
+    # What the sync BUILT counts as much as what the log RECORDED (review 2026-10-15): a run with no
+    # `code_snapshot` rows (every run before doc 79, a kill between seed and record) has its attempt
+    # commits only here — `sync_run` appends no event — and a named node's export was skipped.
+    synced = [b for b in (sync_run(run_dir, events).get("built") or [])
+              if b.get("status") == "recorded" and b.get("commit")]
     repo = CodeRepo(run_dir)
     if not repo.exists():
         raise ExportRefusal("export_nothing", "this run has no code repository (no repo-task seed)")
@@ -270,18 +349,18 @@ def export_code(run_dir, target, *, branch: Optional[str] = None, onto: Optional
              check=False).returncode == 0:
         raise ExportRefusal("export_branch_exists",
                             f"branch {branch} already exists in {target}; choose another --branch")
-    recorded = None
     workspace = started.get("workspace") if isinstance(started.get("workspace"), dict) else {}
-    for value in workspace.values():
-        if isinstance(value, str) and value.startswith("git:"):
-            recorded = value[4:]
+    recorded = _recorded_source_commit(workspace)
     if not (recorded and _tgit(target, "cat-file", "-e", recorded + "^{commit}",
                                check=False).returncode == 0):
         recorded = None
     if onto is None:
         onto = recorded or "HEAD"
     onto_sha = _tgit(target, "rev-parse", "--verify", onto + "^{commit}").stdout.decode().strip()
-    prefix = (prefix if prefix is not None else _default_prefix(target, run_dir)).strip("/")
+    prefix_note = None
+    if prefix is None:
+        prefix, prefix_note = _default_prefix(target, run_dir)
+    prefix = prefix.strip("/")
     if prefix and safe_path(prefix) is None:
         raise ExportRefusal("export_prefix_invalid", f"not a repository-relative path: {prefix}")
     lineage = base_lineage(events)
@@ -296,6 +375,8 @@ def export_code(run_dir, target, *, branch: Optional[str] = None, onto: Optional
     steps: list = []
     report = {"target": str(target), "branch": branch, "onto": onto_sha, "prefix": prefix,
               "run": run_id, "steps": steps, "status": "created"}
+    if prefix_note:
+        report["prefix_note"] = prefix_note
     if not chain:
         raise ExportRefusal("export_nothing", "the run recorded no base to export")
     first = repo.rev(BASE_REF + chain[0])
@@ -338,17 +419,20 @@ def export_code(run_dir, target, *, branch: Optional[str] = None, onto: Optional
         prev = sha
     if report["status"] == "created" and node is not None:
         state = fold(events)
-        snaps = _latest_by_lifecycle(recorded_snapshots(events))
+        snaps = _latest_by_lifecycle({
+            **recorded_snapshots(events),
+            **{(b["node_id"], b["generation"], b["seed_event_seq"]): b for b in synced}})
         if node == "champion":
             best = state.best()
             target_node = best.id if best is not None else None
         else:
             target_node = int(node)
         n = state.nodes.get(target_node) if target_node is not None else None
+        # ONLY the target lifecycle's own commit. `refs/heads/champion` is NOT a fallback: it moves
+        # only when the current champion HAS a commit, so with none it still names an EARLIER
+        # champion, and exporting it put node 3's diff under node 7's id, title and metric (review
+        # 2026-10-15). No commit for this lifecycle is a skipped step that says so.
         row = snaps.get((n.id, int(n.attempt))) if n is not None else None
-        if row is None and node == "champion":
-            champion = repo.rev(CHAMPION_BRANCH)
-            row = {"commit": champion, "base": {}} if champion else None
         if row is not None and row.get("commit"):
             node_commit = row["commit"]
             node_base = (row.get("base") or {}).get("commit") or repo.git(

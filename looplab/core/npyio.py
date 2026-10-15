@@ -14,10 +14,12 @@ The header is a Python literal, parsed with ``ast.literal_eval`` (no evaluation 
 from __future__ import annotations
 
 import ast
+import functools
 import io
 import struct
 import sys
 import zipfile
+import zlib
 from array import array
 
 MAGIC = b"\x93NUMPY"
@@ -33,6 +35,33 @@ class NpyFormatError(ValueError):
     """The bytes are not a supported, pickle-free .npy/.npz array."""
 
 
+# What the standard library raises on MALFORMED bytes below the checks this module makes itself
+# (review 2026-10-15): a bad CRC or truncated member (`zipfile.BadZipFile`, `EOFError`), a corrupt
+# deflate stream (`zlib.error`), an encrypted member (`RuntimeError`), an unknown compression method
+# (`NotImplementedError`), a `<U` body that is not UTF-32 (`UnicodeDecodeError`), a header literal
+# nested past the parser (`RecursionError`, a `RuntimeError`) or one that is not hashable
+# (`TypeError`). Each is "not a supported array", so each becomes `NpyFormatError` — the one
+# exception the module promises and the one its caller (`harness/per_query.py`) turns into a 400
+# instead of a 500. `MemoryError` is deliberately absent: it is the box, not the bytes.
+_MALFORMED = (zipfile.BadZipFile, zlib.error, EOFError, RuntimeError, NotImplementedError,
+              UnicodeDecodeError, ValueError, TypeError, struct.error, OverflowError, OSError,
+              IndexError)
+
+
+def _refusing_malformed(read):
+    """Wrap a reader so every malformed-input exception arrives as `NpyFormatError`."""
+    @functools.wraps(read)
+    def wrapper(*args, **kwargs):
+        try:
+            return read(*args, **kwargs)
+        except NpyFormatError:
+            raise
+        except _MALFORMED as exc:
+            detail = f"{type(exc).__name__}: {str(exc)[:200]}"
+            raise NpyFormatError(f"malformed payload ({detail})") from None
+    return wrapper
+
+
 def _array_code(kind: str, width: int) -> str:
     table = {"i": _INT_CODES, "u": _UINT_CODES, "f": _FLOAT_CODES}.get(kind)
     code = table.get(width) if table else None
@@ -41,6 +70,7 @@ def _array_code(kind: str, width: int) -> str:
     return code
 
 
+@_refusing_malformed
 def read_npy(data: bytes, *, max_elements: int = DEFAULT_MAX_ELEMENTS) -> tuple[tuple, list]:
     """Return ``(shape, values)`` for one ``.npy`` payload: ``values`` is a flat row-major list
     (``int``/``float``/``bool``/``str``) — a 2-D array of shape (n, k) is ``n * k`` values."""
@@ -114,6 +144,7 @@ def _need(body: bytes, size: int) -> None:
         raise NpyFormatError(".npy payload is shorter than its header declares")
 
 
+@_refusing_malformed
 def read_npz(data: bytes, *, max_elements: int = DEFAULT_MAX_ELEMENTS,
              max_members: int = DEFAULT_MAX_MEMBERS) -> dict[str, tuple[tuple, list]]:
     """``{name: (shape, values)}`` for every member of an ``.npz`` (zip of ``.npy``) payload.

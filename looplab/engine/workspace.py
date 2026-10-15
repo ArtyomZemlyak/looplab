@@ -27,6 +27,21 @@ if TYPE_CHECKING:  # engine type hint only — no runtime import of the orchestr
     from looplab.engine.orchestrator import Engine
 
 
+def _run_relative(workdir, run_dir):
+    """`workdir` as a POSIX path relative to `run_dir`, or None (no run dir, or outside it). As
+    given first, then resolved: `materialize` hands both settled, a direct seed may not."""
+    if run_dir is None:
+        return None
+    for resolve in (False, True):
+        try:
+            wd, rd = Path(workdir), Path(run_dir)
+            rel = (wd.resolve().relative_to(rd.resolve()) if resolve else wd.relative_to(rd))
+        except (ValueError, OSError, RuntimeError):   # outside the run, or an unresolvable path
+            continue
+        return rel.as_posix() if rel.parts else None
+    return None
+
+
 # THE NODE'S OWN BUILT SOURCE, and it is deliberately NOT one of the two fingerprints below.
 # `_dir_fingerprint` (triage.py) answers "git HEAD, else (relpath, size, mtime_ns)", and BOTH of its
 # branches are wrong for comparing a built node against the parent it claims to modify:
@@ -404,6 +419,13 @@ class WorkspaceSeeder:
             payload = {"node_id": nid, "materialized": seeded}
             if node is not None:
                 payload["generation"] = node.attempt
+            # WHICH tree this seed built, run-relative (review 2026-10-15): the node's own lifecycle
+            # (`nodes/node_<id>`) and its canary / confirm / noise-floor re-runs all carry the same
+            # node_id + generation + base receipt, and only the path tells them apart. A reader that
+            # asks "which seeds are LIFECYCLES?" (`code_identity.py::lifecycle_seeds`) needs it.
+            rel = _run_relative(wd, archive_run)
+            if rel is not None:
+                payload["workdir"] = rel
             if editable_bytes and all(type(b) is int and b >= 0 for b in editable_bytes):
                 payload["workspace_bytes"] = sum(editable_bytes)
             base_revision = next((row["base_revision"] for row in rows if "base_revision" in row), None)

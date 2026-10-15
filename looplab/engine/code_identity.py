@@ -46,6 +46,12 @@ def node_branch(node_id: int) -> str:
     return f"refs/heads/nodes/n{int(node_id)}"
 
 
+# The in-place repair commit's ref is a SIBLING of the lifecycle's first commit, never a child: the
+# ref store holds `.../s5` as a FILE, so `.../s5/repair` would need it to be a directory and every
+# repair commit failed with "cannot lock ref" (review 2026-10-15). `-` is legal in a ref component.
+REPAIR_SUFFIX = "-repair"
+
+
 def attempt_ref(node_id: int, generation: int, seed_seq, suffix: str = "") -> str:
     return f"{ATTEMPT_REF}n{int(node_id)}/g{int(generation)}/s{seed_seq}{suffix}"
 
@@ -353,7 +359,8 @@ def record_attempt(run_dir, events, *, node_id: int, generation: int, seed_event
                 return {**payload, "status": "unavailable", "reason": "base_archive_unavailable",
                         "base": {"digest": base_digest}}
             parent = repair_of or base_sha
-            ref = attempt_ref(node_id, generation, seed_event_seq, "/repair" if repair_of else "")
+            ref = attempt_ref(node_id, generation, seed_event_seq,
+                              REPAIR_SUFFIX if repair_of else "")
             run_id, _ = _run_meta(events)
             message = _attempt_message(run_id, node_id, generation, seed_event_seq, base_digest,
                                        idea, source=source, repair=repair_of is not None)
@@ -494,6 +501,40 @@ def recorded_snapshots(events) -> dict:
     return out
 
 
+def lifecycle_seeds(events) -> list:
+    """`[(event, node_id, generation, digest)]` for the `workspace_seeded` rows that built a node's
+    OWN lifecycle workdir — the same population `record_materialized` records.
+
+    The eval canary (`canary/node_N`), the confirm phase and the noise floor materialize the SAME
+    node again with the same node_id, generation and base receipt (review 2026-10-15: `sync_run`
+    turned each into a phantom attempt commit that moved `refs/heads/nodes/n<id>`, and `code_status`
+    listed it as a second attempt). A row carrying `workdir` (written since then) answers by path; a
+    legacy row cannot, so per lifecycle only the FIRST is kept — the node's own seed precedes every
+    re-run of it (prepare_workdir runs before the canary, and confirm/noise follow the terminal). A
+    legacy re-seed of the same lifecycle after a resume is dropped with them: same overlay, same
+    lifecycle, and a record that cannot tell the two apart says less rather than something false."""
+    out: list = []
+    legacy_seen: set = set()
+    for e in events or ():
+        if _etype(e) != "workspace_seeded":
+            continue
+        d = _edata(e)
+        nid = d.get("node_id")
+        if type(nid) is not int:
+            continue
+        gen = d.get("generation") if type(d.get("generation")) is int else 0
+        workdir = d.get("workdir")
+        if isinstance(workdir, str):
+            if workdir != f"nodes/node_{nid}":
+                continue
+        elif (nid, gen) in legacy_seen:
+            continue
+        else:
+            legacy_seen.add((nid, gen))
+        out.append((e, nid, gen, _digest(d.get("base_revision"))))
+    return out
+
+
 def sync_run(run_dir, events=None) -> dict:
     """Build the commits the log implies but no `code_snapshot` recorded (old runs, a kill between
     the seed and its record). Writes ONLY the run's code repository; appends no event."""
@@ -505,17 +546,16 @@ def sync_run(run_dir, events=None) -> dict:
     superseded, _ = node_lifecycles(events)
     rebased: dict = {}
     built: list = []
+    lifecycles = {id(row[0]): row for row in lifecycle_seeds(events)}
     for e in events:
         kind, d = _etype(e), _edata(e)
         if kind == "node_overlay_rebased":
             rebased[(d.get("node_id"), d.get("generation"))] = d
-        if kind != "workspace_seeded":
+        if kind != "workspace_seeded" or id(e) not in lifecycles:
+            continue                       # a canary / confirm / noise re-run is not an attempt
+        _, nid, gen, digest = lifecycles[id(e)]
+        if digest is None:
             continue
-        nid, gen = d.get("node_id"), d.get("generation")
-        digest = _digest(d.get("base_revision"))
-        if type(nid) is not int or digest is None:
-            continue
-        gen = int(gen) if type(gen) is int else 0
         if (nid, gen, e.seq) in recorded:
             continue
         overlay = rebased.get((nid, gen))
@@ -677,12 +717,7 @@ def code_status(run_dir, events=None, *, task=None, settings=None, nominations: 
             configs[(d.get("node_id"), d.get("generation"))] = {
                 k: d.get(k) for k in ("effective", "by_stage", "mismatches", "conflicts", "unknown",
                                       "checked", "declared", "sources_read")}
-    seeded = []
-    for e in events:
-        d = _edata(e)
-        if _etype(e) == "workspace_seeded" and type(d.get("node_id")) is int:
-            gen = d.get("generation") if type(d.get("generation")) is int else 0
-            seeded.append((d["node_id"], gen, e.seq, _digest(d.get("base_revision"))))
+    seeded = [(nid, gen, e.seq, digest) for e, nid, gen, digest in lifecycle_seeds(events)]
     best = state.best()
     attempts = []
     for nid, gen, seq, digest in seeded:
@@ -691,7 +726,7 @@ def code_status(run_dir, events=None, *, task=None, settings=None, nominations: 
         current = node is not None and int(node.attempt) == gen
         ref = attempt_ref(nid, gen, seq)
         row = {"node_id": nid, "generation": gen, "seed_event_seq": seq, "base_digest": digest,
-               "current": current, "commit": refs.get(ref + "/repair") or refs.get(ref),
+               "current": current, "commit": refs.get(ref + REPAIR_SUFFIX) or refs.get(ref),
                "recorded": snap is not None and snap.get("status") == "recorded",
                "source": (snap or {}).get("source"),
                "status": (node.status.value if current and node is not None else "superseded"),

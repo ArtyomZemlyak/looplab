@@ -147,3 +147,58 @@ def test_hostile_npz_payloads_are_refused_not_executed():
     with pytest.raises(NpyFormatError):
         read_npz(b"not a zip")
     assert read_npz(write_npz({"x": write_npy([1, 2], dtype="<i4")}))["x"] == ((2,), [1, 2])
+
+
+def _stored_npz(payload: bytes) -> bytearray:
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(buffer, "w", zipfile.ZIP_STORED) as archive:
+        archive.writestr("x.npy", payload)
+    return bytearray(buffer.getvalue())
+
+
+def test_malformed_bytes_below_the_format_checks_are_refused_as_npy_format_errors():
+    """Review 2026-10-15: the standard library's own errors on corrupt bytes (a bad CRC, a corrupt
+    deflate stream, an encrypted member, an unknown compression method, a `<U` body that is not
+    UTF-32) leaked past the module's one promised exception, and the per-query upload route — which
+    catches `NpyFormatError` alone — answered them with a 500."""
+    import struct
+    good = write_npy([1, 2, 3, 4], dtype="<i4")
+    cases = {}
+    crc = _stored_npz(good)
+    crc[crc.find(good) + len(good) - 1] ^= 0xFF                 # zipfile.BadZipFile (Bad CRC-32)
+    cases["bad_crc"] = crc
+    encrypted = _stored_npz(good)                               # RuntimeError (password required)
+    encrypted[6:8] = struct.pack("<H", 0x1)                     # the local and central flag bits
+    central = encrypted.find(b"PK\x01\x02")
+    encrypted[central + 8:central + 10] = struct.pack("<H", 0x1)
+    cases["encrypted"] = encrypted
+    method = _stored_npz(good)                                  # NotImplementedError (method 99)
+    method[8:10] = struct.pack("<H", 99)
+    central = method.find(b"PK\x01\x02")
+    method[central + 10:central + 12] = struct.pack("<H", 99)
+    cases["unknown_method"] = method
+    deflated = io.BytesIO()
+    with zipfile.ZipFile(deflated, "w", zipfile.ZIP_DEFLATED) as archive:
+        archive.writestr("x.npy", write_npy(list(range(400)), dtype="<i8"))
+    corrupt = bytearray(deflated.getvalue())                    # zlib.error (invalid stream)
+    start = corrupt.find(b"x.npy") + len(b"x.npy")
+    corrupt[start + 2:start + 40] = b"\xff" * 38
+    cases["corrupt_deflate"] = corrupt
+    for name, data in cases.items():
+        # The unwrapped reader shows each case reaches a NON-format exception (the leak) ...
+        with pytest.raises(Exception) as raw:
+            read_npz.__wrapped__(bytes(data))
+        assert not isinstance(raw.value, NpyFormatError), (name, raw.value)
+        # ... and the public reader refuses it as the one exception the module promises.
+        with pytest.raises(NpyFormatError):
+            read_npz(bytes(data))
+    utf32 = bytearray(write_npy(["ab"], dtype="<U2"))
+    utf32[-4:] = b"\xff\xff\xff\xff"                            # UnicodeDecodeError (not UTF-32)
+    with pytest.raises(UnicodeDecodeError):
+        read_npy.__wrapped__(bytes(utf32))
+    with pytest.raises(NpyFormatError):
+        read_npy(bytes(utf32))
+    with pytest.raises(NpyFormatError):
+        read_npz(write_npz({"x": bytes(utf32)}))
+    # The well-formed payload beside them still reads.
+    assert read_npz(write_npz({"x": good}))["x"] == ((4,), [1, 2, 3, 4])

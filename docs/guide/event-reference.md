@@ -23,7 +23,7 @@ The event type itself is the contract's identity and is never renamed or reused;
 
 <!-- generated: event types -->
 
-189 event types — 130 folded into `RunState`, 59 diagnostic; 1276 declared payload keys; 32 types whose whole payload is stored by the fold.
+189 event types — 130 folded into `RunState`, 59 diagnostic; 1277 declared payload keys; 32 types whose whole payload is stored by the fold.
 
 | type | fold | records | required keys | optional keys |
 |---|---|---|---|---|
@@ -215,6 +215,6 @@ The event type itself is the contract's identity and is never renamed or reused;
 | `upstream_proposed` | folded · whole | Generalized capability with immutable candidate archive and separate source recipe. | `action_id`, `base_revision`, `capability_paths`, `commit`, `critic`, `expected_base_revision`, `flag`, `hunk_hashes`, `manifest_hash`, `old_selector`, `proposal_id`, `repair_trigger_nodes`, `request_hash`, `selector`, `source_node_id`, `source_recipe`, `source_signature`, `summary` | `rebased_from`, `repair_only`, `source_overlay_hash` |
 | `verifier_group_scored` | folded | One verifier round over a GROUP of nodes, keyed on the contract and evidence digests. | `contract`, `members`, `requested_samples`, `v` | `action_id`, `request_sha256` |
 | `workspace_changed` | folded | A re-entry read a workspace source unlike the last recorded reading of its kind, or a way it was never read before. | `now`, `was` | — |
-| `workspace_seeded` | diagnostic | A workspace was seeded: actual node/lifecycle, copied base bytes and materialized inputs. | `materialized`, `node_id` | `base_revision`, `generation`, `workspace_bytes` |
+| `workspace_seeded` | diagnostic | A workspace was seeded: actual node/lifecycle, copied base bytes and materialized inputs. | `materialized`, `node_id` | `base_revision`, `generation`, `workdir`, `workspace_bytes` |
 
 <!-- /generated -->

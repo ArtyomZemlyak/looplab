@@ -2668,6 +2668,6 @@ EVENT_PAYLOAD_KEYS: dict[str, PayloadContract] = {
     "workspace_seeded": PayloadContract(
         "A workspace was seeded: actual node/lifecycle, copied base bytes and materialized inputs.",
         required=("materialized", "node_id"),
-        optional=("base_revision", "generation", "workspace_bytes"),
+        optional=("base_revision", "generation", "workdir", "workspace_bytes"),
     ),
 }

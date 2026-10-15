@@ -7,8 +7,11 @@ An external agent (Codex, Claude Code, a script) proposes code three ways, all e
   * a WORKTREE LoopLab provides: `add_worktree` checks out the run's active base (or a node's
     attempt) from the PRIVATE run repository into `RUN_DIR/code/worktrees/<name>` on branch
     `agent/<name>`; the agent edits, runs, commits as it likes, and `overlay_from_worktree` turns
-    "start commit -> worktree now" (commits, uncommitted edits and new files alike) into the overlay;
-  * a unified PATCH against the active base: `overlay_from_patch` applies it to a private index.
+    "seed base -> worktree now" (commits, uncommitted edits and new files alike) into the overlay —
+    from `node:<id>` that is the start node's own change PLUS the agent's, because the overlay is
+    materialized over the base, not over the node (`_seed_base_of`);
+  * a unified PATCH against the active base (or a node): `overlay_from_patch` applies it to a
+    private index, and the overlay is again the whole change over the start's seed base.
 
 Why a worktree is safe HERE when doc 37 declined it for node workspaces: the worktree is wired to the
 run's own repository, never to the operator's object database (doc 37 §5c), and its start commit
@@ -125,6 +128,26 @@ def _digest_of(repo: CodeRepo, commit: str) -> Optional[str]:
     return m.group(1) if m else None
 
 
+def _seed_base_of(repo: CodeRepo, commit: str) -> str:
+    """The nearest BASE commit `commit` descends from (itself when it is one), else `commit`.
+
+    An overlay is materialized OVER A BASE (`engine/workspace.py::write_node_files` on the seed),
+    so it must be the whole change from that base. Diffing against the START commit was right only
+    for `start=base`: from `node:<id>` the start is that node's attempt commit, the overlay held the
+    agent's edits alone, and the injected node silently reverted every change of the node it was
+    built from (review 2026-10-15). Nearest by topological order: bases form one parent chain, and
+    an attempt or agent commit sits on exactly one of them."""
+    from looplab.engine.code_identity import BASE_REF
+    bases = set(repo.refs(BASE_REF).values())
+    if not bases or commit in bases:
+        return commit
+    out = repo.git("rev-list", "--topo-order", commit, check=False)
+    for sha in out.stdout.decode("ascii", "replace").split():
+        if sha in bases:
+            return sha
+    return commit
+
+
 def add_worktree(run_dir, name: str, *, start: str = "base") -> dict:
     """Create `RUN_DIR/code/worktrees/<name>` on branch `agent/<name>` at `start`."""
     from looplab.engine.code_identity import sync_run
@@ -183,7 +206,10 @@ def _surface_check(run_dir, paths) -> list:
 
 def _overlay_between(repo: CodeRepo, run_dir, start: str, tree_or_commit: str, *,
                      allow_outside_surface: bool = False) -> dict:
-    changed = repo.changed(start, tree_or_commit) if tree_or_commit != start else []
+    # The WHOLE change over the seed base the start sits on (`_seed_base_of`), never over the start
+    # itself: the overlay replaces the start node's overlay rather than stacking on it.
+    base = _seed_base_of(repo, start)
+    changed = repo.changed(base, tree_or_commit) if tree_or_commit != base else []
     files, deleted, total, binary_total, binaries = {}, [], 0, 0, []
     if len(changed) > MAX_OVERLAY_FILES:
         raise OverlayRefusal("code_overlay_too_large",
@@ -216,6 +242,22 @@ def _overlay_between(repo: CodeRepo, run_dir, start: str, tree_or_commit: str, *
                                  f"binary files exceed {MAX_OVERLAY_BINARY_BYTES} bytes in one overlay")
         binaries.append((path, data))
     refused = _surface_check(run_dir, [*files, *(p for p, _ in binaries), *deleted])
+    inherited: list = []
+    if refused and base != start:
+        # A start node's attempt commit holds what its materialization WROTE, task assets included
+        # (`code_identity.py::record_materialized` reads them off disk), and those are outside the
+        # surface. A refused path the agent left exactly as the start had it is that inheritance,
+        # not an edit: the materializer writes it anyway, so it is dropped, not refused.
+        start_e, now_e = repo.entries(start), repo.entries(tree_or_commit)
+        inherited = sorted(r["path"] for r in refused
+                           if start_e.get(r["path"]) == now_e.get(r["path"]))
+        if inherited:
+            drop = set(inherited)
+            refused = [r for r in refused if r["path"] not in drop]
+            files = {p: t for p, t in files.items() if p not in drop}
+            deleted = [p for p in deleted if p not in drop]
+            binaries = [(p, d) for p, d in binaries if p not in drop]
+            changed = [r for r in changed if r["path"] not in drop]
     if refused and not allow_outside_surface:
         raise OverlayRefusal("code_overlay_outside_surface",
                              "outside the task's edit surface or protected: "
@@ -223,9 +265,12 @@ def _overlay_between(repo: CodeRepo, run_dir, start: str, tree_or_commit: str, *
     # Stored only after the surface check: a refused overlay leaves nothing behind.
     for path, data in binaries:
         files[path] = store_blob(run_dir, data)
-    return {"files": files, "deleted": deleted, "changed": changed, "start_commit": start,
-            "base_digest": _digest_of(repo, start), "outside_surface": refused,
-            "binary_files": sorted(p for p, _ in binaries)}
+    out = {"files": files, "deleted": deleted, "changed": changed, "start_commit": start,
+           "overlay_base": base, "base_digest": _digest_of(repo, base), "outside_surface": refused,
+           "binary_files": sorted(p for p, _ in binaries)}
+    if inherited:
+        out["inherited_outside_surface"] = inherited
+    return out
 
 
 def _stale(repo: CodeRepo, start: str) -> bool:
@@ -238,7 +283,7 @@ def _stale(repo: CodeRepo, start: str) -> bool:
 
 
 def overlay_from_worktree(run_dir, name: str, **kw) -> dict:
-    """Committed AND uncommitted changes of worktree `name` against its start commit."""
+    """Committed AND uncommitted changes of worktree `name` against its start's seed base."""
     if not isinstance(name, str) or not NAME.match(name):
         raise OverlayRefusal("code_worktree_name", "unknown worktree name")
     meta_file = _meta_path(run_dir, name)
