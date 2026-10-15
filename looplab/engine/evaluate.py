@@ -2451,7 +2451,7 @@ class EvaluateMixin:
             from looplab.trust.leakage import code_leakage_findings
             sigs += code_leakage_findings(scan_src)
         if TRUST_DETECTOR_CRITIC in detectors:
-            from looplab.trust.critic import (candidate_only_configuration,
+            from looplab.trust.critic import (candidate_only_configuration, candidate_only_dotenv,
                                               critic_findings, scorer_is_in_tree)
             # Host-graded tasks (MLE-bench &c.) score a submission file out-of-process,
             # so the critic's in-code `metric` checks don't apply — hand it the expected
@@ -2478,7 +2478,10 @@ class EvaluateMixin:
                                         and not configuration_only),
                                     configuration_only=configuration_only,
                                     metric_key=metric_key,
-                                    source_units=source_units)
+                                    source_units=source_units,
+                                    dotenv_only=candidate_only_dotenv(
+                                        getattr(node, "code", None),
+                                        getattr(node, "files", None)))
         return sigs
 
     def _trust_scan_surface(self, node) -> str:

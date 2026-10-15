@@ -1108,6 +1108,17 @@ class CanarySpec(BaseModel):
     # there too: declare `env` that redirects such outputs, or use `slice`.
     mode: Literal["slice", "smoke"] = "slice"
 
+    @model_serializer(mode="wrap")
+    def _omit_default_mode(self, handler):
+        # `mode` arrived 2026-10-14, after `eval.canary` itself (2026-10-07): at its default it
+        # leaves the dump in its pre-field shape, so a task that declared a canary before the field
+        # existed keeps its `task.model_dump()` — and so its `setup_phase` config hash, its setup
+        # manifest digest and every stage input key built over the dump — across the upgrade.
+        payload = handler(self)
+        if self.mode == "slice" and isinstance(payload, dict):
+            payload.pop("mode", None)
+        return payload
+
     @field_validator("env")
     @classmethod
     def _env_valid(cls, v):
@@ -1269,6 +1280,15 @@ class ArtifactSyncSpec(BaseModel):
     # this one command; values are never stored in the task or the receipt.
     env_passthrough: list[str] = Field(default_factory=list)
 
+    @model_serializer(mode="wrap")
+    def _omit_empty_passthrough(self, handler):
+        # As `CanarySpec._omit_default_mode`: `env_passthrough` (2026-10-08) postdates
+        # `eval.artifact_sync` (2026-10-07), so empty it keeps the pre-field dump.
+        payload = handler(self)
+        if not self.env_passthrough and isinstance(payload, dict):
+            payload.pop("env_passthrough", None)
+        return payload
+
     @field_validator("env_passthrough")
     @classmethod
     def _env_names(cls, value):
@@ -1310,6 +1330,18 @@ class TrackSpec(BaseModel):
     # Devices a LIVE engine leases for it from the run's own pool (`engine/track_lane.py`), waiting
     # while evaluations hold them; 0 runs it with no device visible. The offline command ignores it.
     gpus: int = Field(default=0, ge=0, le=64)
+
+    @model_serializer(mode="wrap")
+    def _omit_absent_track_fields(self, handler):
+        # As `CanarySpec._omit_default_mode`: `env_passthrough` and `gpus` (2026-10-08) postdate
+        # `eval.tracks` (2026-10-07), so at their defaults a track keeps its pre-field dump.
+        payload = handler(self)
+        if isinstance(payload, dict):
+            if not self.env_passthrough:
+                payload.pop("env_passthrough", None)
+            if self.gpus == 0:
+                payload.pop("gpus", None)
+        return payload
 
     @field_validator("env_passthrough")
     @classmethod

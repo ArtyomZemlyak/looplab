@@ -18,7 +18,8 @@ def critique(idea: Idea, code: str, *, submission_file: str | None = None,
              scorer_in_tree: bool = True,
              configuration_only: bool = False,
              metric_key: str = "metric",
-             source_units: tuple[str, ...] | None = None) -> list[dict]:
+             source_units: tuple[str, ...] | None = None,
+             dotenv_only: bool = False) -> list[dict]:
     """Return a list of {issue, detail} the critic flags (empty == looks fine).
 
     `submission_file`: set when the run is graded OUT-OF-PROCESS by a host grader (MLE-bench, and
@@ -53,6 +54,9 @@ def critique(idea: Idea, code: str, *, submission_file: str | None = None,
 
     `source_units`: each authored file separately, so one YAML file cannot make
     a neighboring Python scorer unparseable to the direct-output check.
+
+    `dotenv_only`: every authored file is a dotenv file (`candidate_only_dotenv`) — the one
+    configuration shape whose keys the `params_ignored` grep cannot read (see that check).
     """
     code = code or ""
     metric_key = metric_key if isinstance(metric_key, str) and metric_key else "metric"
@@ -130,14 +134,19 @@ def critique(idea: Idea, code: str, *, submission_file: str | None = None,
     # its params describe a diagnostic or repair (e.g. verify_cuda, test_gru_forward) or are
     # inherited from the parent node being fixed — they are NOT modeling knobs that must be threaded
     # into the solution, so demanding they appear in the code is a category error.
-    # A CONFIGURATION-ONLY candidate (`candidate_only_configuration`) is the declarative config and
-    # nothing else, so a param either names one of its keys — in whatever case the carrier spells
-    # it, `lr` against a dotenv `LR=`, which this grep would miss — or it is a LABEL the proposer
-    # gave the arm (`arm_index`, `model_week`: every external MiniOneRec node, review 2026-10-14
-    # section 10.1). Neither is an ignored proposal. Whether a declared value was APPLIED is
+    # A DOTENV-ONLY candidate (`candidate_only_dotenv`) is the declarative config and nothing else,
+    # so a param either names one of its keys — in whatever case the carrier spells it, `lr`
+    # against a dotenv `LR=`, which this grep would miss — or it is a LABEL the proposer gave the
+    # arm (`arm_index`, `model_week`: every external MiniOneRec node, review 2026-10-14 section
+    # 10.1). Neither is an ignored proposal. Whether a declared value was APPLIED is
     # `runtime/applied_params.py`'s question, answered by reading the carrier rather than grepping
     # it, so this advisory text check does not run in that mode.
-    if (idea.operator or "") != "debug" and not configuration_only:
+    # DOTENV, not every configuration-only candidate (review 2026-10-15): the upper-case spelling
+    # is what makes the grep blind, and that is a dotenv convention. A `config.yaml`-only candidate
+    # spells its keys as the params do — `_param_is_referenced`'s leaf rule was built for exactly
+    # that nested YAML (rubertlite-dr-unified-v6) — so one that mentions none of them is the
+    # ignored proposal this advisory exists to name, and it keeps the check.
+    if (idea.operator or "") != "debug" and not dotenv_only:
         pnames = [str(k) for k in (idea.params or {})]
         if pnames and not any(_param_is_referenced(p, code) for p in pnames):
             issues.append({"issue": "params_ignored",
@@ -419,19 +428,49 @@ def candidate_only_configuration(code: str | None, files: dict | None) -> bool:
 # `experiment.env`, and without this every external node carried `critic:no_metric_output`, shown
 # as "hack?" on every run).
 _CONFIG_SUFFIXES = (".json", ".yaml", ".yml", ".toml", ".ini", ".cfg", ".env")
+# ...but `.env.<x>` is a dotenv VARIANT only while `<x>` is not a program's suffix: `.env.sh`,
+# `.env.py`, `.env.bash` are scripts that merely start with the same four characters (review
+# 2026-10-15), and counting one as configuration would drop `no_metric_output` from a candidate
+# whose authored file is executable code.
+_SCRIPT_SUFFIXES = frozenset((
+    ".sh", ".bash", ".zsh", ".ksh", ".csh", ".fish", ".py", ".pyw", ".pyx", ".ipynb", ".js",
+    ".mjs", ".cjs", ".ts", ".rb", ".pl", ".php", ".lua", ".r", ".jl", ".ps1", ".bat", ".cmd",
+    ".exe", ".so", ".dll"))
+
+
+def _base_name(path) -> str:
+    return str(path).replace("\\", "/").rsplit("/", 1)[-1].lower()
+
+
+def is_dotenv_path(path) -> bool:
+    """Whether an authored file is a dotenv file by its NAME: `.env`, `<x>.env`, or a `.env.<x>`
+    variant whose `<x>` is not a script's suffix."""
+    name = _base_name(path)
+    if name == ".env" or name.endswith(".env"):
+        return True
+    # `.env.yaml` / `.env.json` are THAT format's file, not dotenv text.
+    return (name.startswith(".env.") and os.path.splitext(name)[1] not in _SCRIPT_SUFFIXES
+            and not name.endswith(_CONFIG_SUFFIXES))
 
 
 def is_declarative_config_path(path) -> bool:
     """Whether an authored file is declarative configuration by its NAME (suffix or dotenv form)."""
-    name = str(path).replace("\\", "/").rsplit("/", 1)[-1].lower()
-    return name.endswith(_CONFIG_SUFFIXES) or name == ".env" or name.startswith(".env.")
+    return _base_name(path).endswith(_CONFIG_SUFFIXES) or is_dotenv_path(path)
+
+
+def candidate_only_dotenv(code: str | None, files: dict | None) -> bool:
+    """A configuration-only candidate (`candidate_only_configuration`) whose every authored file
+    is a dotenv file — the mode in which `critique` does not grep for the idea's param names."""
+    return (candidate_only_configuration(code, files)
+            and all(is_dotenv_path(path) for path in files))
 
 
 def critic_findings(idea, code: str, *, submission_file: str | None = None,
                     scorer_in_tree: bool = True,
                     configuration_only: bool = False,
                     metric_key: str = "metric",
-                    source_units: tuple[str, ...] | None = None) -> list[dict]:
+                    source_units: tuple[str, ...] | None = None,
+                    dotenv_only: bool = False) -> list[dict]:
     """`critique`'s issues as gate-visible trust findings (doc 25 CT-10).
 
     The `critic:` namespace decides gating, not presentation: `critic:hardcoded_metric` EXCLUDES a
@@ -445,5 +484,6 @@ def critic_findings(idea, code: str, *, submission_file: str | None = None,
                                 scorer_in_tree=scorer_in_tree,
                                 configuration_only=configuration_only,
                                 metric_key=metric_key,
-                                source_units=source_units)
+                                source_units=source_units,
+                                dotenv_only=dotenv_only)
             if row.get("issue")]

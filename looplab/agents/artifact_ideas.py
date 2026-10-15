@@ -81,10 +81,15 @@ def artifact_cue(state) -> str:
     lifecycle) and the two fields — every line derived from the fold, nothing from model text but the
     bounded rationale the node was proposed with."""
     produced = []
+    # An operator `node_abort` is admitted on a SETTLED lifecycle too and leaves its status
+    # `evaluated` (`events/replay.py::_on_node_abort`), while the engine counts an aborted producer
+    # as one that can never be produced (`engine/artifact_fence.py::unproducible_uses`) — so a cue
+    # advertising it invites a `uses` whose children are refused (review 2026-10-15).
+    aborted = set(getattr(state, "aborted_nodes", None) or ())
     for node in sorted((getattr(state, "nodes", None) or {}).values(), key=lambda n: n.id):
         status = getattr(getattr(node, "status", None), "value", getattr(node, "status", ""))
         if (getattr(node, "kind", None) == "artifact" and status == "evaluated"
-                and not getattr(node, "tombstoned", False)):
+                and not getattr(node, "tombstoned", False) and node.id not in aborted):
             produced.append(node)
     lines = ["\n\nPRODUCED ARTIFACTS (preparation nodes later experiments can read):"]
     if not produced:

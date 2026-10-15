@@ -74,6 +74,22 @@ def test_the_cue_lists_only_produced_artifacts():
     assert "none yet" in artifact_cue(RunState(direction="max", goal="g"))
 
 
+def test_the_cue_does_not_advertise_an_artifact_the_operator_aborted():
+    """Review 2026-10-15: `node_abort` folds onto an EVALUATED lifecycle without moving its status,
+    and the engine then counts the producer as unproducible (`artifact_fence.unproducible_uses`).
+    MUTATION: drop the aborted filter -> `#0` is still listed after the abort."""
+    rows = [_created(0, 0, {"node_kind": "artifact", "rationale": "tokenize the corpus once"}),
+            Event(seq=1, ts=0.0, type="node_evaluated",
+                  data={"node_id": 0, "generation": 0, "metric": None})]
+    before = fold(rows)
+    assert before.nodes[0].status is NodeStatus.evaluated
+    assert "#0: tokenize the corpus once" in artifact_cue(before)
+    after = fold(rows + [Event(seq=2, ts=0.0, type="node_abort",
+                               data={"node_id": 0, "generation": 0})])
+    assert after.nodes[0].status is NodeStatus.evaluated and 0 in after.aborted_nodes
+    assert "#0" not in artifact_cue(after) and "none yet" in artifact_cue(after)
+
+
 # ------------------------------------------------------------------------------- the fold
 def test_an_idea_declared_artifact_folds_to_an_artifact_node_and_uses_keep_real_producers():
     rows = [_created(0, 0, {"node_kind": "artifact", "rationale": "prepare"}),

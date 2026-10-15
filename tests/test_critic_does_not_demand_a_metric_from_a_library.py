@@ -18,7 +18,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from looplab.core.models import Idea  # noqa: E402
-from looplab.trust.critic import (candidate_only_configuration, critique,
+from looplab.trust.critic import (candidate_only_configuration, candidate_only_dotenv, critique,
                                   scorer_is_in_tree)  # noqa: E402
 
 # A real AlgoTune champion in miniature: a library, no printing, no `metric` anywhere.
@@ -297,3 +297,35 @@ def test_a_dotenv_literal_metric_is_still_the_hard_gate(tmp_path):
     source = eng._trust_scan_surface(node)
     signals = {row["signal"] for row in eng._trust_gate_signals(node, source)}
     assert "critic:hardcoded_metric" in signals
+
+
+def test_a_script_named_like_a_dotenv_variant_is_not_configuration():
+    """Review 2026-10-15: `.env.<x>` counted as declarative for ANY `<x>`, so `.env.sh` / `.env.py`
+    / `.env.bash` — executable code — dropped `no_metric_output` like a KEY=VALUE file.
+    MUTATION: drop the script-suffix exclusion -> every name below reads as configuration."""
+    for name in (".env.sh", "scripts/.env.py", ".env.bash", ".ENV.PS1"):
+        assert not candidate_only_configuration("", {name: "export LR=2e-4\n"}), name
+    # The dotenv variants it was written for still count.
+    for name in (".env.local", ".env.production", "conf/.env.test", "experiment.env"):
+        assert candidate_only_dotenv("", {name: "LR=2e-4\n"}), name
+    assert not candidate_only_dotenv("", {"config.yaml": "lr: 0.1\n"})
+    assert not candidate_only_dotenv("", {".env.yaml": "lr: 0.1\n"})
+
+
+def test_a_yaml_only_candidate_that_ignores_every_param_is_still_flagged(tmp_path):
+    """Review 2026-10-15: the config-only `params_ignored` skip was written for dotenv (`lr` vs
+    `LR=` is invisible to the grep; external labels like `arm_index`) but covered every
+    declarative suffix. A `config.yaml` spells its keys as the params do, so one that mentions
+    none of them is the ignored proposal the advisory exists for.
+    MUTATION: skip on `configuration_only` again -> the YAML node loses `params_ignored`."""
+    eng = _critic_only_engine(tmp_path / "yaml", _Eval(command=["python", "score.py"]))
+    node = types.SimpleNamespace(
+        idea=Idea(operator="improve", params={"train.learning_rate": 1e-3, "dropout": 0.2}),
+        code="", files={"config.yaml": "train:\n  batch_size: 64\n  epochs: 3\n"})
+    signals = {row["signal"] for row in eng._trust_gate_signals(node, eng._trust_scan_surface(node))}
+    assert "critic:params_ignored" in signals
+    assert "critic:no_metric_output" not in signals          # still configuration-only
+    # The same YAML carrier naming a param's leaf is NOT accused.
+    node.files = {"config.yaml": "train:\n  learning_rate: 0.001\n"}
+    signals = {row["signal"] for row in eng._trust_gate_signals(node, eng._trust_scan_surface(node))}
+    assert "critic:params_ignored" not in signals
