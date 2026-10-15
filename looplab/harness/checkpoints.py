@@ -11,6 +11,7 @@ from __future__ import annotations
 import time
 import uuid
 from pathlib import Path
+from typing import Optional
 
 import orjson
 from fastapi import HTTPException
@@ -124,23 +125,36 @@ def ask(rd: Path, node_id: int, node_generation: int, phase_id: str,
     return row
 
 
+def rule_previous_progress(rows: list[dict], question: dict) -> Optional[float]:
+    """The `progress` a RULE answer last recorded for `question`'s lifecycle (same node, node
+    generation and phase) among journal `rows` — what `progress_advances` compares against.
+
+    `rows` are the journal rows that PRECEDED the question (what `ask` saw when it decided). The
+    ONE reading: `ask` decides with it, and the agent-event pump judges whether an open question is
+    routine with it (`serve/agent_events.py::AgentEventPump._routine_by_rules`) — a pump that kept
+    its own memory instead called "routine" a question `ask` had left open because progress
+    stalled (review 2026-10-15)."""
+    previous = None
+    questions = {r["checkpoint_id"]: r for r in rows if r.get("type") == "question"}
+    for r in rows:
+        if r.get("type") != "answer" or not isinstance(r.get("rule_facts"), dict):
+            continue
+        q = questions.get(r.get("checkpoint_id"))
+        if (q is not None and q.get("node_id") == question.get("node_id")
+                and q.get("node_generation") == question.get("node_generation")
+                and q.get("phase_id") == question.get("phase_id")
+                and isinstance(r["rule_facts"].get("progress"), (int, float))):
+            previous = r["rule_facts"]["progress"]
+    return previous
+
+
 def _answer_by_rule(rd: Path, path: Path, question: dict, rows: list[dict]) -> None:
     from looplab.harness.monitor_rules import evaluate, read_rules
 
     rules = read_rules(rd)
     if not rules:
         return
-    previous = None
-    questions = {r["checkpoint_id"]: r for r in rows if r.get("type") == "question"}
-    for r in rows:
-        if r.get("type") != "answer" or not isinstance(r.get("rule_facts"), dict):
-            continue
-        q = questions.get(r["checkpoint_id"])
-        if (q is not None and q.get("node_id") == question["node_id"]
-                and q.get("node_generation") == question["node_generation"]
-                and q.get("phase_id") == question["phase_id"]
-                and isinstance(r["rule_facts"].get("progress"), (int, float))):
-            previous = r["rule_facts"]["progress"]
+    previous = rule_previous_progress(rows, question)
     try:
         verdict = evaluate(rules, question, previous_progress=previous)
     except Exception:  # noqa: BLE001 — a rule that cannot be evaluated leaves the question to the agent

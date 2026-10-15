@@ -100,7 +100,10 @@ _MIN_RUN_INTERVAL_S = 3.0
 MAX_WAIT_S = 600
 
 _VAR_NAME = re.compile(r"^[A-Za-z_][A-Za-z0-9_]{0,31}$")
-_VAR_VALUE = re.compile(r"^[A-Za-z0-9._:@/+=,-]{0,256}$")
+# A var value never STARTS with `-`: a run's vars are writable by the harness token and land as a
+# whole argv element of the operator's command, so `--thread {thread}` with `thread=--exec=x` would
+# hand the agent an OPTION of the operator's program, not a value (review 2026-10-15).
+_VAR_VALUE = re.compile(r"^(?!-)[A-Za-z0-9._:@/+=,-]{0,256}$")
 _BUILTIN_FIELDS = frozenset({"message", "run_id", "runs", "kinds", "count", "after", "last_id",
                              "first_id"})
 NOTIFY_DEFAULTS = {"enabled": True, "debounce_s": 15.0, "max_delay_s": 120.0, "max_batch": 20,
@@ -427,7 +430,8 @@ def _check_vars(variables) -> None:
         if not isinstance(name, str) or not _VAR_NAME.match(name) or name in _BUILTIN_FIELDS:
             raise ValueError(f"invalid var name {name!r}")
         if not isinstance(value, str) or not _VAR_VALUE.match(value):
-            raise ValueError(f"var {name!r} must be a short token ([A-Za-z0-9._:@/+=,-])")
+            raise ValueError(f"var {name!r} must be a short token ([A-Za-z0-9._:@/+=,-]) "
+                             "that does not start with '-'")
 
 
 def _template_fields(command: list[str]) -> set[str]:
@@ -451,29 +455,56 @@ def write_notify_config(root, body: dict, hook: Optional[str] = None) -> dict:
     path = _hook_path(root, hook)
     name = check_hook_name(hook)
     with _lock(root):
+        previous = _read_json(path, {})
         path.parent.mkdir(parents=True, exist_ok=True)
         _write_json(path, config)
+        state_path = events_dir(root) / STATE
+        state = _read_json(state_path, {})
+        hooks = state.get("delivery_hooks") if isinstance(state.get("delivery_hooks"), dict) else {}
+        # A hook that was NOT delivering — removed, or switched off — resumes FROM NOW when it is
+        # (re)configured to deliver: its old watermark sits behind every event that landed while it
+        # was gone, and resuming there is a burst of old events past the debounce (each older than
+        # `max_delay_s`), not a wake-up (review 2026-10-15). A reconfiguration of a hook that was
+        # delivering keeps its position.
+        was_delivering = bool(previous) and previous.get("enabled", True) is not False
+        resumes = bool(config.get("enabled", True)) and not was_delivering
         if name != DEFAULT_HOOK:
             # A new connection is woken for what happens FROM NOW: pin its watermark at the
             # outbox's end when it is first configured (a reconfiguration keeps its position).
-            state_path = events_dir(root) / STATE
-            state = _read_json(state_path, {})
-            hooks = state.get("delivery_hooks") if isinstance(state.get("delivery_hooks"), dict) else {}
-            if name not in hooks:
-                hooks[name] = {"through": int(state.get("next_id", 0) or 0) - 1, "attempts": 0,
-                               "next_try": 0, "failed": 0}
+            pin = name not in hooks or resumes
+        else:
+            # The default hook's FIRST configuration keeps its historical start (the retained
+            # outbox); only a default hook that had a watermark and stopped delivering is re-pinned.
+            pin = resumes and isinstance(state.get("delivery"), dict)
+        if pin:
+            row = {"through": int(state.get("next_id", 0) or 0) - 1, "attempts": 0,
+                   "next_try": 0, "failed": 0}
+            if name == DEFAULT_HOOK:
+                state["delivery"] = row
+            else:
+                hooks[name] = row
                 state["delivery_hooks"] = hooks
-                _write_json(state_path, state)
+            _write_json(state_path, state)
     return config
 
 
 def clear_notify_config(root, hook: Optional[str] = None) -> None:
+    """Remove a hook. A named connection's delivery watermark goes with it (per-connection state
+    nothing else reads); a re-added hook is pinned FROM NOW by `write_notify_config`."""
     path = _hook_path(root, hook)
+    name = check_hook_name(hook)
     with _lock(root):
         try:
             path.unlink()
         except FileNotFoundError:
             pass
+        if name != DEFAULT_HOOK:
+            state_path = events_dir(root) / STATE
+            state = _read_json(state_path, {})
+            hooks = state.get("delivery_hooks")
+            if isinstance(hooks, dict) and name in hooks:
+                del hooks[name]
+                _write_json(state_path, state)
 
 
 def _run_entry(data: dict) -> dict:
@@ -584,14 +615,36 @@ def _append_ledger(root, row: dict) -> None:
         append_jsonl_bytes_locked(d / LEDGER, json.dumps(row, sort_keys=True).encode() + b"\n")
 
 
-def _question_row(rd: Path, checkpoint_id) -> Optional[dict]:
-    """The question row `checkpoint_id` names in the run's checkpoint journal, or None."""
+def _question_row(rd: Path, checkpoint_id) -> tuple[Optional[dict], list[dict]]:
+    """The question row `checkpoint_id` names in the run's checkpoint journal and the journal rows
+    that PRECEDED it (what `checkpoints.ask` saw when it decided), or `(None, [])`."""
     if not checkpoint_id:
-        return None
-    for row in reversed(_read_jsonl(Path(rd) / "harness_checkpoints.jsonl")):
+        return None, []
+    rows = _read_jsonl(Path(rd) / "harness_checkpoints.jsonl")
+    for index in range(len(rows) - 1, -1, -1):
+        row = rows[index]
         if row.get("type") == "question" and row.get("checkpoint_id") == checkpoint_id:
-            return row
-    return None
+            return row, rows[:index]
+    return None, []
+
+
+def _condition_identity(row: dict) -> tuple:
+    """WHAT a condition event says holds, for the delivery-time re-check — not its dedupe key.
+
+    The dedupe key also names WHEN the condition was seen (`run_idle` the log's seq,
+    `obligation_due` the node count and evidence revision), so it answers "is this the same
+    sighting?", which is the outbox's question. Delivery asks "does it still hold?": an engine
+    still idle after an unrelated diagnostic row, or a finish report still due after a new
+    evidence revision, is still worth the wake-up — compared by key, every such append made a true
+    condition read stale, dropped it and restarted the debounce, possibly forever (review
+    2026-10-15). A question stays its own checkpoint id (the key already is exactly that)."""
+    kind = row.get("kind")
+    run_uid = row.get("run_uid")
+    if kind == "run_idle":
+        return (kind, run_uid)
+    if kind == "obligation_due":
+        return (kind, run_uid, (row.get("details") or {}).get("phase_id"))
+    return (kind, row.get("key"))
 
 
 def coalesce(rows: list[dict]) -> list[dict]:
@@ -757,7 +810,11 @@ class AgentEventPump:
             candidates += conditions
         appended = append_events(self.root, candidates,
                                  run_state={rd.name: {"seq": events[-1].seq, "run_uid": run_uid}})
-        self._run_marks[rd.name] = (self._signature(rd), now)
+        # The signature taken BEFORE the read, never a fresh one: a row appended between
+        # `read_all` and here is not in `events`, and a signature that already covered it would
+        # read "nothing moved" on every later tick — for a stopped engine, forever (review
+        # 2026-10-15). An append in that window now costs one more scan, which is the point.
+        self._run_marks[rd.name] = (sig, now)
         return appended
 
     def _conditions(self, rd: Path, settings, state, events, run_uid: str) -> Optional[list]:
@@ -791,8 +848,14 @@ class AgentEventPump:
         (`harness/monitor_rules.py::evaluate`) on the question's observation and does not wake
         anyone for a routine one. It answers nothing — the question stays for the engine's own
         deadline or a newer engine's rule answer; this only decides whether waking is warranted.
-        `progress_advances` compares against the last progress this pump accepted for the same
-        node lifecycle and phase (in memory: a restarted pump re-accepts once)."""
+        `progress_advances` compares against the progress the journal's RULE answers recorded for
+        the same node lifecycle and phase before this question (`checkpoints.
+        rule_previous_progress`, the reading `ask` decides with), and against the last progress
+        this pump itself accepted (in memory: the only record when the engine applies no rules) —
+        the HIGHER of the two, so the pump never calls routine a question whose progress `ask`
+        already judged stalled (review 2026-10-15: with only its own memory, a question `ask`
+        left open was routine here at `previous=None`, and nobody was woken)."""
+        from looplab.harness.checkpoints import rule_previous_progress
         from looplab.harness.monitor_rules import evaluate, read_rules
         rules = read_rules(rd)
         if not rules:
@@ -800,13 +863,16 @@ class AgentEventPump:
         cid = (row.get("details") or {}).get("checkpoint_id")
         if cid in self._routine_seen:           # judged once: its own progress is not "previous"
             return self._routine_seen[cid]
-        question = _question_row(rd, cid)
+        question, before = _question_row(rd, cid)
         if question is None:
             return False
         lifecycle = (rd.name, question.get("node_id"), question.get("node_generation"),
                      question.get("phase_id"))
+        known = [p for p in (rule_previous_progress(before, question),
+                             self._rule_progress.get(lifecycle)) if p is not None]
+        previous = max(known) if known else None
         try:
-            verdict = evaluate(rules, question, previous_progress=self._rule_progress.get(lifecycle))
+            verdict = evaluate(rules, question, previous_progress=previous)
         except Exception:  # noqa: BLE001 — an unevaluable rule leaves the question to the agent
             verdict = None
         if verdict is not None:
@@ -844,12 +910,13 @@ class AgentEventPump:
                     state = fold(events)
                     run_uid = str(getattr(state, "run_uid", "") or run_id)
                     rows_now = self._conditions(rd, settings, state, events, run_uid)
-                    keys = None if rows_now is None else {r["key"] for r in rows_now}
+                    keys = None if rows_now is None else {_condition_identity(r)
+                                                          for r in rows_now}
                 except (OperatorRefusal, OSError, ValueError):
                     keys = None
                 current[run_id] = keys
             keys = current[run_id]
-            if keys is None or row.get("key") in keys:
+            if keys is None or _condition_identity(row) in keys:
                 keep.append(row)          # unknowable now: deliver rather than silently drop
             else:
                 stale.append(row)
@@ -934,7 +1001,13 @@ class AgentEventPump:
                                 failed=delivery.get("failed", 0), hook=hook)
             return None
         last_seen = rows[-1]["id"]
-        rows = coalesce(fresh)
+        # A RETRY sends only what has not been delivered: with several per-run var groups (one
+        # thread per run), one failing group keeps `through` where it was, and before this every
+        # retry re-sent the groups that had already succeeded — the duplicates the hook exists to
+        # end (review 2026-10-15). `delivered` is the ids sent within the pending window; it is
+        # cleared whenever the window closes (all sent, abandoned, or nothing left to send).
+        delivered = {i for i in (delivery.get("delivered") or []) if isinstance(i, int)}
+        rows = [r for r in coalesce(fresh) if r["id"] not in delivered]
         # Per-run variables: a run may name its own thread; one delivery per distinct var set.
         groups: dict[str, list[dict]] = {}
         merged_vars: dict[str, dict] = {}
@@ -975,6 +1048,8 @@ class AgentEventPump:
             if hook != DEFAULT_HOOK:
                 record["hook"] = hook
             all_ok &= bool(result["ok"])
+            if result["ok"]:
+                delivered.update(r["id"] for r in grows)
             _append_ledger(self.root, record)
         last_id = last_seen
         if all_ok:
@@ -995,7 +1070,7 @@ class AgentEventPump:
             backoff = float(config.get("retry_base_s", 30)) * (2 ** (attempts - 1))
             self._save_delivery(state, through=through, attempts=attempts,
                                 next_try=now + min(backoff, 3600), failed=failed_before,
-                                hook=hook)
+                                hook=hook, delivered=delivered)
         return record
 
     def _run_wanted(self, config, run_id) -> bool:
@@ -1003,9 +1078,11 @@ class AgentEventPump:
         return runs is None or run_id is None or run_id in runs
 
     def _save_delivery(self, _state, *, through, attempts, next_try, failed,
-                       hook: str = DEFAULT_HOOK):
+                       hook: str = DEFAULT_HOOK, delivered=()):
         d = events_dir(self.root)
         row = {"through": through, "attempts": attempts, "next_try": next_try, "failed": failed}
+        if delivered:
+            row["delivered"] = sorted(delivered)
         with _lock(self.root):
             state = _read_json(d / STATE, {})
             if hook == DEFAULT_HOOK:
@@ -1065,20 +1142,29 @@ def run_event_summary(root, run_id: str, *, limit: int = 20) -> dict:
             "ledger": ledger_rows(root, limit=limit, run_id=run_id)}
 
 
-def wait_for_events(pump: Optional[AgentEventPump], root, *, after: int, timeout: float,
-                    run_id: Optional[str], kinds: Optional[list[str]], limit: int,
-                    sleep=time.sleep, clock=time.monotonic) -> dict:
-    """Blocking helper (run in a worker thread by the route): return as soon as something past
-    `after` exists, else after `timeout` with an empty page."""
+async def wait_for_events(pump: Optional[AgentEventPump], root, *, after: int, timeout: float,
+                          run_id: Optional[str], kinds: Optional[list[str]], limit: int,
+                          sleep=None, clock=time.monotonic) -> dict:
+    """The long poll: return as soon as something past `after` exists, else after `timeout` with
+    an empty page.
+
+    The WAIT is on the event loop and only each outbox READ borrows a worker thread (review
+    2026-10-15): the whole poll used to run in one `anyio.to_thread.run_sync`, so each waiting
+    agent held one of the threadpool's 40 tokens for up to `MAX_WAIT_S`, and 40 idle polls starved
+    every sync route of the server."""
+    import anyio
+
+    sleep = sleep or anyio.sleep
     deadline = clock() + max(0.0, min(float(timeout), MAX_WAIT_S))
     if pump is not None:
         pump.kick()
     while True:
-        page = read_outbox(root, after=after, run_id=run_id, kinds=kinds, limit=limit)
+        page = await anyio.to_thread.run_sync(
+            lambda: read_outbox(root, after=after, run_id=run_id, kinds=kinds, limit=limit))
         if page["events"] or clock() >= deadline:
             page["timed_out"] = not page["events"]
             return page
-        sleep(min(1.0, max(0.05, deadline - clock())))
+        await sleep(min(1.0, max(0.05, deadline - clock())))
 
 
 def describe_event_kinds() -> dict[str, Any]:

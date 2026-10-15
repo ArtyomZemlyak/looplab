@@ -54,6 +54,8 @@ GET /api/agent-events?after=<last id>&timeout=<s ≤ 600>[&run_id=…][&kinds=a,
   history (the outbox keeps ~4 MB plus one rotated file — `gap: true` means older rows rotated away).
 * The call returns as soon as an event past the cursor exists, else after `timeout` with
   `timed_out: true`. `stale_cursor: true` means the outbox was rebuilt; continue from `next_after`.
+  The wait is asynchronous on the server (only each 1 s outbox read borrows a worker thread), so
+  any number of waiting agents never starve the server's synchronous routes.
 * An event is a nudge, never a permission: read `run_progress` for that run before acting.
 
 MCP: `wait_for_next(after=None, timeout_s=120, run_id="", kinds="", limit=50)` performs exactly
@@ -92,7 +94,15 @@ the server executes). Semantics:
 * a failed delivery (non-zero exit, timeout, missing binary) is **retried** with exponential
   backoff (`retry_base_s` 30 → 60 → …) up to `max_attempts` (5); then it is recorded as
   `abandoned`, the cursor moves on, and the next message says how many notifications were lost — the
-  events stay in the outbox;
+  events stay in the outbox; when a batch splits into several per-run var groups (one thread per
+  run), a retry re-sends only the groups that failed;
+* a condition event (`monitor_question`, `obligation_due`, `run_idle`) is re-checked at delivery and
+  dropped (`dropped_stale` in the ledger) only when the CONDITION no longer holds — the question
+  answered, the obligation's phase no longer due, the engine no longer idle — never merely because
+  an unrelated row moved the seq or evidence revision its dedupe key names;
+* a hook that was removed (`--clear` / `DELETE`) or switched off (`enabled: false`) resumes FROM NOW
+  when it is configured or switched on again — never from its old watermark, which would be a burst
+  of everything that landed meanwhile;
 * every attempt is a row in `.agent-events/deliveries.jsonl` (`GET /api/agent-notify`, the UI's
   *Agent wake-ups* panel): time, attempt, event ids, runs, kinds, status, exit code, stderr tail;
 * the message is composed by LoopLab from ids, kinds and short summaries, passed through the secret
@@ -100,7 +110,9 @@ the server executes). Semantics:
   `LOOPLAB_UI_TOKEN`, `LOOPLAB_HARNESS_TOKEN` or any `LOOPLAB_*TOKEN*`;
 * a run may override variables (e.g. its own thread) or opt out:
   `PUT /api/runs/{run_id}/agent-notify {"vars": {"thread": "…"}, "enabled": true}` — the harness
-  token may do this; values are short tokens (`[A-Za-z0-9._:@/+=,-]`).
+  token may do this; values are short tokens (`[A-Za-z0-9._:@/+=,-]`) that never start with `-`
+  (a value lands as a whole argv element of the operator's command, so a leading dash would be an
+  option the agent injected).
 
 `POST /api/agent-notify/test` runs the command once with a test message (owner only).
 
@@ -219,7 +231,10 @@ PUT /api/runs/{run_id}/harness-monitor-rules
 * When every declared condition holds, `ask` writes the answer in the same breath: `continue`
   (monitors) or `proceed` (stage check), with `answerer: "rule"`, `rule_id` and the facts it read
   (`rule_facts`). Rules never abort, fail or extend — anything else stays open and is what the agent
-  is woken for (`monitor_question`). `deadline_grace` is always the agent's.
+  is woken for (`monitor_question`). `deadline_grace` is always the agent's. The UI server's event
+  pump judges an open question routine with the same rules and the same `previous` progress (the
+  journal's rule answers before the question), so a question `ask` left open because progress
+  stalled always wakes the agent.
 * `{}` clears the rules; `GET` reads them. A damaged rules file answers nothing.
 * Every answer now names its author: `answerer` ∈ `rule`, `agent` (harness token), `human` (owner
   token), `engine`. Diagnostic `train_monitor_alert` rows carry `source: rule|engine|operator|external_agent`.

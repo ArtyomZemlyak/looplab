@@ -1110,6 +1110,26 @@ def test_set_directive_appends_hint(tmp_path):
     assert st.pending_hints and st.pending_hints[-1]["text"] == "use only sklearn"
 
 
+@pytest.mark.parametrize("raw, expected", [("false", False), ("False", False), ("0", False),
+                                            ("true", True), ("yes", True), (True, True),
+                                            (False, False)])
+def test_set_directive_reads_a_stringified_replace_as_a_flag(tmp_path, raw, expected):
+    """A provider that stringifies booleans sends `"false"`; truthiness read that as REPLACE, so
+    the card said "replaces all prior directives" and the event wiped them. The card and the
+    recorded event read the SAME parsed flag."""
+    rd = tmp_path / "d2"
+    _run(rd)
+    seen = []
+    commands = _RecordingCommands(tmp_path)
+    t = RunControlTools(tmp_path, alive_fn=lambda _rd: False, mode="default",
+                        approver=lambda action: (seen.append(action), "allow_once")[1],
+                        command_service=commands)
+    out = t.execute("set_directive", {"run_id": "d2", "text": "prefer linear", "replace": raw})
+    assert "directive recorded" in out
+    assert commands.calls[-1][2]["replace"] is expected
+    assert ("replace: yes" if expected else "replace: no") in seen[0]["preview"]
+
+
 def test_set_trust_gate_applies(tmp_path):
     rd = tmp_path / "g1"
     _run(rd)

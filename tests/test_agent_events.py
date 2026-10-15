@@ -502,3 +502,203 @@ def test_the_real_progress_path_drops_a_closed_question(tmp_path):
     pump.clock.t += 5
     assert pump.deliver() is None and calls == []
     assert ae.ledger_rows(root)[0]["status"] == "dropped_stale"
+
+
+# --------------------------------------------------------------------- review 2026-10-15 (g7)
+def test_a_question_ask_left_open_for_stalled_progress_is_not_routine_to_the_pump(tmp_path):
+    """`ask` answers by rule only when progress ADVANCED past the last rule answer of the same
+    lifecycle; a question it left open because progress stalled must wake the agent. The pump read
+    `previous` from its own memory only, so a fresh pump called it routine at `previous=None`."""
+    from looplab.harness import checkpoints
+    from looplab.harness.monitor_rules import write_rules
+    root = tmp_path / "runs"
+    rd, store = _external_run(root)
+    store.append("node_created", {"node_id": 0, "parent_ids": [], "operator": "draft",
+                                  "idea": {"operator": "draft"}, "code": "", "files": {}})
+    write_rules(rd, {"train_monitor": {"routine_if": {"loss_finite": True,
+                                                       "progress_advances": True}}})
+    checkpoints.ask(rd, 0, 0, "train_monitor", stage="train", observation="step 10 loss 1.2")
+    stalled = checkpoints.ask(rd, 0, 0, "train_monitor", stage="train",
+                              observation="step 10 loss 1.1")
+    answered = {r["checkpoint_id"] for r in ae._read_jsonl(rd / "harness_checkpoints.jsonl")
+                if r.get("type") == "answer"}
+    assert stalled["checkpoint_id"] not in answered        # ask left it to the agent
+    pump = _ConditionPump(SimpleNamespace(root=root), clock=_Clock())
+    from looplab.events.replay import fold
+    state = fold(EventStore(rd / "events.jsonl").read_all())
+    rows = pump._conditions(rd, None, state, None, state.run_uid or "demo")
+    assert [r["details"]["checkpoint_id"] for r in rows] == [stalled["checkpoint_id"]]
+
+
+def test_a_row_appended_while_the_pump_reads_is_reported_on_a_later_tick(tmp_path, monkeypatch):
+    """The run's signature was taken AFTER the read: a row landing in that window was covered by
+    the signature but absent from `events`, and for an engine that is not live the scan then said
+    "nothing moved" forever."""
+    import looplab.events.replay as replay
+    root = tmp_path / "runs"
+    rd, store = _external_run(root)
+    pump = ae.AgentEventPump(SimpleNamespace(root=root), clock=_Clock())
+    pump._scan_run(rd)                                     # first sight: the watermark
+    store.append("node_created", {"node_id": 0, "parent_ids": [], "operator": "draft",
+                                  "idea": {"operator": "draft"}, "code": "print(1)"})
+    real_fold = replay.fold
+    landed = []
+
+    def fold_then_append(events):
+        if not landed:                                    # the window between read and record
+            landed.append(store.append("node_evaluated",
+                                       {"node_id": 0, "generation": 0, "metric": 1.0}))
+        return real_fold(events)
+
+    monkeypatch.setattr(replay, "fold", fold_then_append)
+    pump.clock.t += 5
+    assert "node_evaluated" not in [r["kind"] for r in pump._scan_run(rd)]
+    monkeypatch.setattr(replay, "fold", real_fold)
+    seen = []
+    for _ in range(3):                                    # past the recheck interval
+        pump.clock.t += 40
+        seen += [r["kind"] for r in pump._scan_run(rd)]
+    assert seen.count("node_evaluated") == 1
+
+
+def test_a_retry_resends_only_the_var_groups_that_failed(tmp_path):
+    root = tmp_path / "runs"
+    for name in ("a", "b"):
+        (root / name).mkdir(parents=True)
+    calls = []
+    fail_b = [True]
+
+    def runner(argv, timeout):
+        calls.append(argv[1])
+        if argv[1] == "thread-b" and fail_b[0]:
+            fail_b[0] = False
+            return {"ok": False, "exit_code": 1, "error": "busy"}
+        return {"ok": True, "exit_code": 0}
+
+    pump = ae.AgentEventPump(SimpleNamespace(root=root), clock=_Clock(), runner=runner)
+    ae.write_notify_config(root, {"command": ["q", "{thread}", "{message}"],
+                                  "vars": {"thread": "thread-a"}, "debounce_s": 0,
+                                  "retry_base_s": 10})
+    ae.write_run_notify(root / "b", variables={"thread": "thread-b"})
+    ae.append_events(root, [{"run_id": n, "kind": "node_failed", "key": f"k{n}", "summary": n}
+                            for n in ("a", "b")])
+    _rewrite_outbox_ts(root, pump.clock() - 1)
+    pump.deliver()
+    assert sorted(calls) == ["thread-a", "thread-b"]
+    pump.clock.t += 11
+    assert pump.deliver()["status"] == "delivered"
+    assert sorted(calls) == ["thread-a", "thread-b", "thread-b"]   # a is not sent twice
+    pump.clock.t += 11
+    assert pump.deliver() is None and len(calls) == 3
+    assert ae.notify_status(root)["delivery"].get("delivered") is None
+
+
+class _NowPump(ae.AgentEventPump):
+    """Conditions read from a settable list (what harness-progress would derive right now)."""
+
+    now_rows: list = []
+
+    def _conditions(self, rd, settings, state, events, run_uid):
+        return [{**r, "run_uid": run_uid} for r in self.now_rows]
+
+
+def test_a_still_true_condition_with_a_newer_sighting_key_is_delivered(tmp_path):
+    """`run_idle` is keyed on the log's seq and `obligation_due` on the node count and evidence
+    revision; an unrelated append changed the key and the delivery re-check called a condition
+    that still held STALE, dropped it and restarted the debounce."""
+    root = tmp_path / "runs"
+    rd, _store = _external_run(root)
+    from looplab.events.replay import fold
+    uid = fold(EventStore(rd / "events.jsonl").read_all()).run_uid or "demo"
+    calls = []
+    pump = _NowPump(SimpleNamespace(root=root), clock=_Clock(),
+                    runner=lambda argv, t: calls.append(argv) or {"ok": True, "exit_code": 0})
+    pump.now_rows = [{"kind": "run_idle", "key": f"{uid}:idle:20", "details": {}},
+                     {"kind": "obligation_due", "key": f"{uid}:obligation:finish_report:3:r2",
+                      "details": {"phase_id": "finish_report"}}]
+    ae.write_notify_config(root, {"command": ["wake", "{message}"], "debounce_s": 0})
+    ae.append_events(root, [
+        {"run_id": "demo", "run_uid": uid, "kind": "run_idle", "key": f"{uid}:idle:12",
+         "summary": "idle", "details": {}},
+        {"run_id": "demo", "run_uid": uid, "kind": "obligation_due",
+         "key": f"{uid}:obligation:finish_report:2:r1", "summary": "report due",
+         "details": {"phase_id": "finish_report"}},
+        {"run_id": "demo", "run_uid": uid, "kind": "obligation_due",
+         "key": f"{uid}:obligation:research:2:r1", "summary": "met already",
+         "details": {"phase_id": "research"}}])
+    _rewrite_outbox_ts(root, pump.clock() - 1)
+    record = pump.deliver()
+    assert record["status"] == "delivered" and len(calls) == 1
+    assert record["event_ids"] == [0, 1]                       # the met research one dropped
+    assert "report due" in calls[0][1] and "met already" not in calls[0][1]
+    stale = [r for r in ae.ledger_rows(root) if r["status"] == "dropped_stale"]
+    assert [r["event_ids"] for r in stale] == [[2]]
+
+
+def test_a_removed_or_disabled_hook_resumes_from_now_not_from_its_old_watermark(tmp_path):
+    root = tmp_path / "runs"
+    (root / "r").mkdir(parents=True)
+    calls = []
+    pump = ae.AgentEventPump(SimpleNamespace(root=root), clock=_Clock(),
+                             runner=lambda argv, t: calls.append(argv) or {"ok": True,
+                                                                         "exit_code": 0})
+    command = {"command": ["wake", "{message}"], "debounce_s": 0}
+    for hook in ("codex", None):
+        ae.write_notify_config(root, command, hook)
+    ae.append_events(root, [{"run_id": "r", "kind": "node_failed", "key": "k0", "summary": "x"}])
+    _rewrite_outbox_ts(root, pump.clock() - 1)
+    pump.deliver()
+    assert len(calls) == 2                                  # both delivered: watermarks exist
+    ae.clear_notify_config(root, "codex")                   # removed ...
+    ae.write_notify_config(root, {**command, "enabled": False})   # ... and switched off
+    ae.append_events(root, [{"run_id": "r", "kind": "node_failed", "key": f"k{i}",
+                             "summary": "old"} for i in range(1, 4)])
+    _rewrite_outbox_ts(root, pump.clock() - 1000)            # far past max_delay_s
+    ae.write_notify_config(root, command, "codex")
+    ae.write_notify_config(root, command)
+    pump.deliver()
+    assert len(calls) == 2                                  # no burst of what landed meanwhile
+    ae.append_events(root, [{"run_id": "r", "kind": "node_failed", "key": "k9", "summary": "new"}])
+    _rewrite_outbox_ts(root, pump.clock() - 1)
+    pump.deliver()
+    assert len(calls) == 4
+    assert all("#4 node_failed" in c[1] and "#1 " not in c[1] for c in calls[2:])
+
+
+def test_a_run_var_cannot_start_with_a_dash(tmp_path):
+    """Run vars are writable by the harness token and land as whole argv elements of the
+    operator's command: `--thread {thread}` with `thread=--exec=x` would be an injected option."""
+    for bad in ("--exec=x", "-x", "-"):
+        with pytest.raises(ValueError, match="start with '-'"):
+            ae.validate_notify_config({"command": ["x", "{t}"], "vars": {"t": bad}})
+        with pytest.raises(ValueError, match="start with '-'"):
+            ae.write_run_notify(tmp_path, variables={"thread": bad})
+    assert ae.validate_notify_config({"command": ["x", "{t}"], "vars": {"t": "a-b=c"}})
+    assert ae.write_run_notify(tmp_path, variables={"thread": "T-1"})["vars"] == {"thread": "T-1"}
+
+
+def test_waiting_long_polls_hold_no_worker_thread(tmp_path):
+    """Each waiting poll used to hold a threadpool token for its whole timeout; with every token
+    held, every sync route of the server waited behind them."""
+    import anyio
+
+    root = tmp_path / "runs"
+    root.mkdir()
+
+    async def poll():
+        return await ae.wait_for_events(None, root, after=-1, timeout=30, run_id=None,
+                                        kinds=None, limit=10)
+
+    async def main():
+        anyio.to_thread.current_default_thread_limiter().total_tokens = 2
+        async with anyio.create_task_group() as tg:
+            for _ in range(4):
+                tg.start_soon(poll)
+            await anyio.sleep(0.3)
+            with anyio.fail_after(5):
+                assert await anyio.to_thread.run_sync(lambda: "served") == "served"
+            tg.cancel_scope.cancel()
+
+    started = time.monotonic()
+    anyio.run(main)
+    assert time.monotonic() - started < 10

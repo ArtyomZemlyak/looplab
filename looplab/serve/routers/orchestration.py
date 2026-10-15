@@ -106,11 +106,10 @@ def build_router(srv) -> APIRouter:
                 lambda: read_outbox(srv.root, after=10**18, run_id=run_id, kinds=wanted, limit=1))
             return {"events": [], "next_after": page["newest_id"], "newest_id": page["newest_id"],
                     "has_more": False, "timed_out": False, "subscribed_from_now": True}
-        page = await anyio.to_thread.run_sync(
-            lambda: wait_for_events(_pump(), srv.root, after=after, timeout=timeout,
-                                    run_id=run_id, kinds=wanted, limit=limit),
-            abandon_on_cancel=True)
-        return page
+        # The wait itself is ASYNC (`wait_for_events`): only each outbox read takes a worker
+        # thread, so a long poll never holds a threadpool token for its whole timeout.
+        return await wait_for_events(_pump(), srv.root, after=after, timeout=timeout,
+                                     run_id=run_id, kinds=wanted, limit=limit)
 
     # ------------------------------------------------------------------ notification hook
     @router.get("/api/agent-notify")

@@ -21,6 +21,7 @@ from typing import Callable, Optional
 
 from looplab.core.models import RunState
 from looplab.tools._base import fn_spec
+from looplab.tools.machine_runs_tools import _flag
 from looplab.tools.node_purge_receipt import purge_operation_id
 from looplab.tools.run_command_adapter import (
     _deletion_operation_id, _render_command_result, _render_deletion_result, _RunCommandAdapter)
@@ -622,19 +623,24 @@ class RunControlTools:
         text = " ".join(str(args.get("text") or "").split())
         if not text:
             return "(set_directive needs a non-empty text)"
+        # ONE reading of `replace`, shared by the approval card and the recorded event: a provider
+        # that stringifies booleans sends `"false"`, which truthiness read as REPLACE — the card
+        # then said "replaces all prior directives" and the run lost them. `_flag` is the same
+        # parse `machine_runs_tools` applies to its boolean arguments.
+        replace = _flag(args.get("replace"))
         blocked, formed_generation = self._gate(
             name, rid, rd, f"directive for {rid}: {_label_head(text)}",
             scope={"run_id": rid,
                    "text_digest": hashlib.sha256(text.encode("utf-8")).hexdigest(),
-                   "replace": bool(args.get("replace"))},
+                   "replace": replace},
             preview="\n".join([
                 f"{name}({rid})",
-                ("replace: yes — replaces all prior directives" if args.get("replace")
+                ("replace: yes — replaces all prior directives" if replace
                  else "replace: no — appended to prior directives"),
                 "text:", text]))
         if blocked:
             return blocked
-        data = {"text": text, "replace": bool(args.get("replace"))}
+        data = {"text": text, "replace": replace}
         with self._mutation_intent(
                 name, rid, rd, {"event_type": EV_HINT, "data": data},
                 command_backed=True,
