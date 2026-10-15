@@ -1059,6 +1059,51 @@ def test_a_pass_close_to_its_cap_is_recorded_and_said(tmp_path, caplog, share, n
     assert term.type == "node_evaluated" and term.data["metric"] == 0.9
 
 
+def test_a_smoke_that_crashed_just_under_its_cap_is_not_a_survivor(tmp_path):
+    """`CanaryClock.expired` only says the deadline passed before the clock was STOPPED — after
+    `_run_eval`'s post-processing — so a chain that exited 2 a moment under the cap came back
+    `expired` with nothing killed (`timed_out` False). That is the crash the smoke exists to catch,
+    never a pass remembered for the code digest."""
+    ledger = tmp_path / "ledger.txt"
+    code = _script(ledger, canary="0.1", full="0.9")
+    researcher = _Researcher(repairs=0)
+    eng = _engine(tmp_path / "run", _Dev(code), researcher=researcher,
+                  canary={"mode": "smoke", "timeout": 60.0})
+    _seed(eng, code)
+
+    def _crashed_late(a, spec, scratch, cancel):
+        return RunResult(exit_code=2, stdout="", metric=None, timed_out=False,
+                         stderr="error: unrecognized arguments: --max_steps 5\n"), True
+
+    eng._run_canary_in_scratch = _crashed_late
+    evs = _evaluate(eng)
+    assert [f.data["passed"] for f in _of(evs, EV_EVAL_CANARY_FINISHED)][0] is False
+    assert not any(f.data["passed"] for f in _of(evs, EV_EVAL_CANARY_FINISHED))
+    (term,) = _terminals(evs)
+    assert term.type == "node_failed"
+
+
+def test_a_smoke_that_survived_its_cap_is_never_marked_near_cap(tmp_path, caplog):
+    """A smoke passes by being STOPPED at its cap: "used >= 75 % of the cap" is its design, and the
+    WARNING told the operator to raise a cap that is meant to bind."""
+    ledger = tmp_path / "ledger.txt"
+    code = _script(ledger, canary="0.1", full="0.9")
+    eng = _engine(tmp_path / "run", _Dev(code), canary={"mode": "smoke", "timeout": 0.2})
+    _seed(eng, code)
+
+    def _survived(a, spec, scratch, cancel):
+        import time
+        time.sleep(spec["timeout"])
+        return RunResult(exit_code=-15, stdout="", stderr="", metric=None, timed_out=True), True
+
+    eng._run_canary_in_scratch = _survived
+    with caplog.at_level("WARNING", logger="looplab.engine.evaluate"):
+        evs = _evaluate(eng)
+    (finished,) = _of(evs, EV_EVAL_CANARY_FINISHED)
+    assert finished.data["passed"] is True and "near_cap" not in finished.data
+    assert not [r for r in caplog.records if "eval canary for node 0 passed" in r.getMessage()]
+
+
 class _Kill(BaseException):
     """A process death: a BaseException, so `_evaluate`'s containment cannot absorb it."""
 

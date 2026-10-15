@@ -121,13 +121,21 @@ def canary_spec(eval_spec) -> Optional[dict]:
     return out
 
 
-def smoke_canary_passed(res, *, expired: bool, interrupted: bool) -> bool:
+def smoke_canary_passed(res, *, interrupted: bool) -> bool:
     """A SMOKE canary's pass rule (doc 78 §5): the chain SURVIVED its cap (the clock stopped a
     still-running process) or exited 0 before it. A non-zero exit, or a stage that died before the
-    clock, is the failure it exists to catch — in seconds rather than after hours of preparation."""
+    clock, is the failure it exists to catch — in seconds rather than after hours of preparation.
+
+    "Survived" is read off the SANDBOX's own kill flag (`RunResult.timed_out`: the drain tree-killed
+    a still-running process on the canary clock's event or a stage's cap), never off
+    `CanaryClock.expired`. That flag only says the deadline passed before the clock was stopped, and
+    the clock is stopped after `_run_eval`'s post-processing — seconds of metric reading and stage
+    bookkeeping after the process is gone — so a chain that CRASHED a few seconds under the cap read
+    as a survivor, passed, and was remembered as passed for its code digest
+    (`canary_already_passed`). A clock that fired after the process exited killed nothing."""
     if res is None or interrupted:
         return False
-    if expired or getattr(res, "timed_out", False):
+    if getattr(res, "timed_out", False):
         return True
     return getattr(res, "exit_code", 1) == 0
 
@@ -445,8 +453,7 @@ IMPLICIT_CANARY_MODES = ("off", "sandboxed")
 IMPLICIT_CANARY_TIMEOUT_S = 120.0
 _POLICY_FILE = "harness_policy.json"
 _DENIAL_MARKERS = ("Permission denied", "PermissionError", "EACCES", "[Errno 13]",
-                   "Read-only file system", "Operation not permitted", "[Errno 30]",
-                   "LOOPLAB landlock:")      # the launcher could not build the sandbox at all
+                   "Read-only file system", "Operation not permitted", "[Errno 30]")
 
 
 def implicit_canary_policy(run_dir) -> dict:
@@ -524,7 +531,55 @@ def sandboxed_env(env: Optional[dict], scratch) -> dict:
     return out
 
 
+# With no Python traceback in its output, how many of a stream's last non-empty lines may carry the
+# denial: a shell tool's own refusal (`cp: cannot create regular file 'x': Permission denied`) is its
+# last word, and a denial further up is something the run went on past.
+_DENIAL_TAIL_LINES = 3
+_LAUNCHER_DENIAL = "LOOPLAB landlock:"
+
+
+def _death_chain(exceptions: list) -> list:
+    """The exceptions the process DIED of: the last one printed, every one it was raised while
+    handling (`chained`), and — when all of those are wrappers (torchrun's `ChildFailedError`, a
+    `CalledProcessError`) — the chain printed just before them, which is what the wrapper reports."""
+    from looplab.core.failure_forensics import WRAPPER_TYPES
+
+    chain: list = []
+    i = len(exceptions) - 1
+    while i >= 0:
+        chain.append(exceptions[i])
+        while i > 0 and exceptions[i]["chained"]:
+            i -= 1
+            chain.append(exceptions[i])
+        if not all(e["type"] in WRAPPER_TYPES for e in chain):
+            break
+        i -= 1
+    return chain
+
+
 def sandbox_denied(res) -> bool:
-    """Did the sandboxed smoke die on a REFUSED WRITE (inconclusive) rather than on its own code?"""
-    text = f"{getattr(res, 'stdout', '') or ''}\n{getattr(res, 'stderr', '') or ''}"
-    return any(marker in text for marker in _DENIAL_MARKERS)
+    """Did the sandboxed smoke die OF a REFUSED WRITE (inconclusive) rather than of its own code?
+
+    The denial must be the CAUSE, not merely somewhere in the output: a smoke that logged a
+    `Permission denied` from a probe it recovered from (a cache it could not write, a lock file it
+    fell back from) and then died of an `ImportError` or an unknown CLI flag is exactly the defect the
+    canary exists to catch, and reading the marker anywhere in either stream turned it into an
+    inconclusive PASS. So: with a Python traceback, the denial is in the chain the process died of
+    (`_death_chain`, over `core/failure_forensics.py::parse_exceptions`) — a `PermissionError`, or
+    an exception whose line names the refusal (`_DENIAL_MARKERS`); without one, it is in the last
+    `_DENIAL_TAIL_LINES` non-empty lines of stderr (stdout when stderr is empty). The launcher's own
+    sentence (it could not build the sandbox at all) is the sandbox's by construction, wherever it is."""
+    from looplab.core.failure_forensics import parse_exceptions
+
+    stdout = str(getattr(res, "stdout", "") or "")
+    stderr = str(getattr(res, "stderr", "") or "")
+    if _LAUNCHER_DENIAL in stderr or _LAUNCHER_DENIAL in stdout:
+        return True
+    for text in (stderr, stdout):
+        exceptions = parse_exceptions(text, source="")
+        if exceptions:
+            return any(any(marker in f"{e['qualified_type']}: {e['message']}"
+                           for marker in _DENIAL_MARKERS)
+                       for e in _death_chain(exceptions))
+    tail = [line for line in (stderr or stdout).splitlines() if line.strip()][-_DENIAL_TAIL_LINES:]
+    return any(marker in line for line in tail for marker in _DENIAL_MARKERS)

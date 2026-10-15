@@ -193,13 +193,21 @@ messages ("Segmentation fault", "Killed"). Every string goes through the engine'
 the record is bounded (≤ 24 000 chars). It is a record: nothing that decides reads it. The
 `node_failed` agent event carries its headline/signals/exit codes; the UI shows it on the node.
 
+Whose bytes: a stage log APPENDS across the repair attempts of one lifecycle, so the log tails are
+read from THIS attempt's byte floor (the attempt-start snapshot the watchdogs and the triage's log
+tools read at); with no snapshot no log is read and the record is built from the attempt's own
+streams. A failed canary's record reads the canary's scratch tree (`<run>/canary/node_<id>`), at
+the stage the canary failed in. The reads run in a worker thread, bounded at 30 s: a record that
+does not arrive (a hung mount) is absent, and the evaluation goes on.
+
 A wrapper script that runs the real trainer in a subprocess should tee the child's output to its own
 stdout/stderr (or a stage log): LoopLab can only parse what the stage printed.
 
 ### 3.2 Earlier attempts' logs are kept
 
-Before a node's workdir is rebuilt for a new lifecycle (reset, retry), its top-level `*.log` files
-are moved to `<run>/attempt_logs/node_<id>/before-gen<N>-<UTC>/` (≤ 20 archives per node).
+Before a node's workdir (`<run>/nodes/node_<id>`, and only that tree — not a canary scratch, confirm
+or noise-floor seed directory) is rebuilt for a new lifecycle (reset, retry), its top-level `*.log`
+files are moved to `<run>/attempt_logs/node_<id>/before-gen<N>-<UTC>/` (≤ 20 archives per node).
 `GET /api/runs/{run_id}/attempt-logs[?node_id=]` lists them; read a file with
 `GET /api/runs/{run_id}/artifact?root=run&path=<listed path>&expected_generation=…`.
 
@@ -257,7 +265,8 @@ For an **external-harness run it is on by default** whenever the task declares `
 * `slice` (default): the chain must finish on the slice and print a number. Make your scripts honour
   `LOOPLAB_CANARY=1` (or declared `env`) by running e.g. one step on a few hundred rows.
 * `smoke`: for scripts that cannot run a slice — the chain only has to **survive** `timeout` seconds
-  (or exit 0 sooner); a crash before that (an unknown CLI flag such as `max_steps`, an import or
+  (the sandbox stopped it still running) or exit 0 sooner; a crash before that — even one a moment
+  under the cap (an unknown CLI flag such as `max_steps`, an import or
   missing-file error) fails the canary in seconds. Smoke runs the real command in a scratch directory
   with the real environment: redirect absolute output paths through `canary.env`.
 
@@ -347,8 +356,11 @@ Four leftovers of this document, closed in `fix/engine-remaining-20261014`:
 * **A canary without `eval.canary`.** The operator may enable a SANDBOXED smoke per run
   (`PUT /api/runs/{run_id}/harness-policy {"implicit_canary": "sandboxed"}`): the chain runs in the
   canary scratch tree under a Landlock ruleset that lets it write only there (`TMPDIR` and compiler
-  caches pointed inside). A refused write is `inconclusive` — the full eval decides; a crash without
-  one (an unknown flag, an ImportError) fails the canary. Without Landlock nothing runs.
+  caches pointed inside). A smoke that DIED of a refused write is `inconclusive` — the full eval
+  decides; a crash of anything else (an unknown flag, an ImportError) fails the canary, even when an
+  earlier, recovered `Permission denied` is in its output (`eval_canary.sandbox_denied` reads the
+  exception chain the process died of, or the last lines of a run with no traceback). Without
+  Landlock nothing runs.
   `harness-progress.canary_preflight` states which preflight a candidate gets and, when none, the
   contract warning.
 

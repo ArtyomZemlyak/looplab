@@ -30,6 +30,17 @@ MAX_ARCHIVES_PER_NODE = 20
 _SUFFIXES = (".log",)
 
 
+def is_lifecycle_workdir(workdir, node_id) -> bool:
+    """Is `workdir` the node's OWN lifecycle workdir (`<run>/nodes/node_<id>`)? The only directory
+    whose logs are the node's earlier attempts; every other tree `materialize` builds (the canary
+    scratch, a confirm or noise-floor seed) re-runs the same code somewhere else. The same rule
+    `code_identity.record_materialized` records a code snapshot by."""
+    if node_id is None:
+        return False
+    wd = Path(workdir)
+    return wd.name == f"node_{node_id}" and wd.parent.name == "nodes"
+
+
 def node_archive_root(run_dir, node_id: int) -> Path:
     return Path(run_dir) / ARCHIVE_DIR / f"node_{int(node_id)}"
 

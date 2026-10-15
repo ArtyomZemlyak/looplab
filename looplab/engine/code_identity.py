@@ -412,8 +412,9 @@ def record_materialized(engine, node, workdir, seed) -> Optional[dict]:
     confirm seed is the same code evaluated again, not a new attempt."""
     if not isinstance(seed, dict) or node is None:
         return None
+    from looplab.engine.attempt_logs import is_lifecycle_workdir
     wd = Path(workdir)
-    if wd.name != f"node_{node.id}" or wd.parent.name != "nodes":
+    if not is_lifecycle_workdir(wd, node.id):
         return None
     try:
         events = engine.store.read_all()

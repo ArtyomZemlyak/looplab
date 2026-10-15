@@ -219,6 +219,50 @@ _JUDGE_ERROR_CHARS = 300
 # ten times that load for the last seven of twenty-three OOMs.
 _DURABLE_EVIDENCE_CHARS = 16_000
 
+# How long SALVAGE waits for the forensic record's worker (`_failure_forensics_job`) before it
+# goes on without one. The worker opens two logs in the workdir — on a geesefs/S3 run root a lookup
+# costs 0.1-1 s, and on a HUNG mount it never returns — so the record is bounded like the box probe
+# (`runtime/infra_probe.py::DEFAULT_TIMEOUT_S`, per target), and an abandoned worker's answer is
+# dropped: a missing record is the same "no record" every other failure of it already reads as.
+_FORENSICS_TIMEOUT_S = 30.0
+_FORENSICS_LOG_BYTES = 65536
+
+
+def _attempt_failure_forensics(root, names, snapshot, *, redact, **record) -> Optional[dict]:
+    """The blocking half of `EvaluateMixin._failure_forensics`: read each named log under `root`
+    from THIS attempt's byte floor (`eval_log_plan.attempt_byte_floor` against `snapshot`; `None`
+    = the whole file is this attempt's), at most its last 64 KB, then build the record. A log whose
+    floor cannot be established is left out, never read from zero. Returns only a record that FOUND
+    something."""
+    from looplab.core.failure_forensics import failure_forensics
+    from looplab.core.node_evidence import open_untrusted_regular
+    from looplab.engine.eval_log_plan import attempt_byte_floor
+
+    logs: dict = {}
+    for name in names:
+        if root is None or name in logs:
+            continue
+        path = os.path.join(root, name)
+        try:
+            with open_untrusted_regular(path) as fh:
+                size = os.fstat(fh.fileno()).st_size
+                floor = attempt_byte_floor(fh, path, snapshot) if snapshot is not None else 0
+                if floor is None:
+                    continue
+                fh.seek(max(floor, size - _FORENSICS_LOG_BYTES))
+                text = fh.read(_FORENSICS_LOG_BYTES).decode("utf-8", "replace")
+        except OSError:
+            continue
+        if text:
+            logs[name] = text
+    rec = failure_forensics(logs=logs, redact=lambda text: redact(text), **record)
+    # Only a record that FOUND something rides the row: a bare "exit code 1" with no exception,
+    # signal or crash dump says nothing `error`/`error_evidence` do not already say.
+    found = any(rec.get(key) for key in ("root_exception", "signals", "ranks",
+                                         "faulthandler", "hints"))
+    return rec if found else None
+
+
 def _redacted_tail(redact, raw, chars: int) -> str:
     """The ONE order for a durable output tail: REDACT THE WHOLE STREAM, THEN CAP IT.
 
@@ -1747,6 +1791,11 @@ class EvalAttempt:
     # recover a number from a canary — and by APPLY_REPAIR, which must not reuse a stage the node's
     # workdir never ran.
     canary_failed: bool = False
+    # The stage THAT canary failed in (its own `RunResult.failed_stage`), which the failure result
+    # deliberately does not carry (`canary_failure_result`: no reuse decision may stand on it). Bound
+    # and reset beside `canary_failed`; read only by the forensic record, whose log is that stage's
+    # in the canary's scratch tree (`_failure_forensics_job`).
+    canary_failed_stage: Any = None
     # True once THIS attempt's eval canary RAN in THIS process and let the full eval start — it passed,
     # or it failed open on an engine fault (`_eval_run_canary` answers True for both): bound by
     # RUN_ATTEMPT (reset at its top, set as the canary answers — before the pause rule may still
@@ -2696,45 +2745,71 @@ class EvaluateMixin:
         """The forensic record of this attempt's failure (`core/failure_forensics.py`, doc 78
         §3): the ORIGINAL exception under any wrapper, deaths by signal per rank, exit codes and
         the failed stage's log tail — parsed, never judged. Every string goes through the engine's
-        one redaction funnel. Best-effort: a record that cannot be built is simply absent."""
-        from looplab.core.node_evidence import open_untrusted_regular
-        from looplab.core.failure_forensics import failure_forensics
+        one redaction funnel. Best-effort: a record that cannot be built is simply absent.
 
+        Synchronous on purpose (it opens files and runs the parsers): SALVAGE runs it OFF the loop
+        through `_failure_forensics_job`, which this is the inline form of."""
+        job = self._failure_forensics_job(a)
+        return job() if job is not None else None
+
+    def _failure_forensics_job(self, a: "EvalAttempt"):
+        """Everything `_failure_forensics` needs, captured NOW off the attempt record, as a zero-
+        argument callable that does the file I/O and the parsing — so SALVAGE can hand it to a
+        worker thread that never reads `a` again (an abandoned read can outlive the attempt whose
+        record it would otherwise be reading). None = there is nothing to build a record from.
+
+        WHOSE BYTES. A stage log APPENDS across the repair attempts of one lifecycle (the workdir is
+        reused), so a raw tail of `<failed_stage>.log` handed attempt N's record attempt N-1's
+        exceptions, signals and hints as its own. The read starts at THIS attempt's byte floor —
+        `eval_log_plan.attempt_byte_floor` over the attempt-start snapshot, the one boundary the
+        watchdogs, the triage's log tools and the activation check already read at. With no
+        snapshot (no reader asked for one, `train_monitor.needs_log_snapshot`) there is no floor to
+        read at, and no log is read: the record is then built from this attempt's own stdout and
+        stderr alone — the floor's own fail-closed answer (`None` -> nothing), never a guess.
+
+        A FAILED CANARY ran in its own scratch tree (`_canary_scratch`), never in the node's
+        workdir — the workdir's logs are an EARLIER attempt's — and its result carries no
+        `failed_stage` by design (`eval_canary.canary_failure_result`). Its logs are read from the
+        scratch tree, at the stage the canary itself failed in (`a.canary_failed_stage`); the tree
+        is rebuilt fresh for every canary round, so all of it is this attempt's (floor 0)."""
         res = a.res
         if res is None:
             return None
-        logs: dict = {}
-        workdir = getattr(a, "workdir", None)
-        names = []
-        if getattr(res, "failed_stage", None):
-            names.append(f"{res.failed_stage}.log")
+        canary = bool(getattr(a, "canary_failed", False))
+        if canary:
+            root = self._canary_scratch(a.node_id)
+            failed_stage = getattr(a, "canary_failed_stage", None)
+            snapshot, fresh = None, True
+        else:
+            root = getattr(a, "workdir", None)
+            failed_stage = getattr(res, "failed_stage", None)
+            snapshot = getattr(a, "_log_snapshot", None)
+            if snapshot is None:
+                snapshot = getattr(a, "_marker_snapshot", None)
+            fresh = False
+        names = [f"{failed_stage}.log"] if failed_stage else []
         names.append("eval.log")
-        for name in names:
-            if workdir is None or name in logs:
-                continue
+        if root is None or (snapshot is None and not fresh):
+            names = []
+        root = None if root is None else str(root)
+        exit_code = getattr(res, "exit_code", None)
+        timed_out = bool(getattr(res, "timed_out", False))
+        stdout = str(getattr(res, "stdout", "") or "")[-65536:]
+        stderr = str(getattr(res, "stderr", "") or "")[-65536:]
+        # A failed canary's result carries no stage rows (see above), so its record names the stage
+        # through `failed_stage` alone — the canary's own, which is what its log tail was read at.
+        stage_rows = list(getattr(res, "stages", None) or ())
+        redact = self._redact
+
+        def job() -> Optional[dict]:
             try:
-                with open_untrusted_regular(os.path.join(str(workdir), name)) as fh:
-                    size = os.fstat(fh.fileno()).st_size
-                    fh.seek(max(0, size - 65536))
-                    logs[name] = fh.read(65536).decode("utf-8", "replace")
-            except OSError:
-                continue
-        try:
-            record = failure_forensics(
-                exit_code=getattr(res, "exit_code", None),
-                timed_out=bool(getattr(res, "timed_out", False)),
-                stdout=str(getattr(res, "stdout", "") or "")[-65536:],
-                stderr=str(getattr(res, "stderr", "") or "")[-65536:],
-                logs=logs, failed_stage=getattr(res, "failed_stage", None),
-                stage_rows=getattr(res, "stages", None) or (),
-                redact=lambda text: self._redact(text))
-        except Exception:  # noqa: BLE001 — a forensic record is optional; the failure itself stands
-            return None
-        # Only a record that FOUND something rides the row: a bare "exit code 1" with no exception,
-        # signal or crash dump says nothing `error`/`error_evidence` do not already say.
-        found = any(record.get(key) for key in ("root_exception", "signals", "ranks",
-                                                "faulthandler", "hints"))
-        return record if found else None
+                return _attempt_failure_forensics(
+                    root, names, snapshot, exit_code=exit_code, timed_out=timed_out,
+                    stdout=stdout, stderr=stderr, failed_stage=failed_stage,
+                    stage_rows=stage_rows, redact=redact)
+            except Exception:  # noqa: BLE001 — a forensic record is optional; the failure itself stands
+                return None
+        return job
 
     def _scored_stdout_tail(self, res) -> str:
         """The `stdout_tail` column of a scored terminal. A method rather than an inline call since
@@ -3493,11 +3568,17 @@ class EvaluateMixin:
                             # to triage or repair: the terminal is the candidate's `crash`, carrying
                             # the evidence, and no box pause — the next launch's probe still sees the
                             # disk full and pauses naming whose workdir holds it.
+                            # The RAISE is kept whole and the blame note gives way: the note is
+                            # already cut at 400 on its own (`_infra_blame_note`), so appending the
+                            # exception after it and cutting at 400 again dropped the exception on
+                            # every row. The note's tail is its least informative part (the probe's
+                            # own sentence), so that is what the shared 400 takes.
+                            _raised = self._redact(
+                                f" — the engine's own write then raised {detail}")[:160]
                             self.store.append(EV_NODE_FAILED, {
                                 "node_id": node_id, "generation": generation,
-                                "error": self._redact(
-                                    f"{self._infra_blame_note(verdict, 'raised')} — the engine's "
-                                    f"own write then raised {detail}")[:400],
+                                "error": (self._infra_blame_note(verdict, 'raised')
+                                          [:400 - len(_raised)] + _raised),
                                 "reason": "crash",
                                 "eval_seconds": _durable_prior_seconds(events, node_id, generation)})
                             _LOG.warning("evaluation of node %s raised on a run directory its own "
@@ -4165,6 +4246,7 @@ class EvaluateMixin:
             res, detail=detail, log_dir=str(scratch), env_names=spec["env"], expired=expired,
             account_redact=self._redact if canary_failure_account(self) else None)
         a.canary_failed = True
+        a.canary_failed_stage = getattr(res, "failed_stage", None)
         return False
 
     async def _eval_canary_round(self, a: "EvalAttempt", spec: dict, digest: str, scratch, cancel,
@@ -4195,8 +4277,7 @@ class EvaluateMixin:
         inconclusive = None
         if spec.get("mode") == "smoke":
             # A SMOKE canary passes by SURVIVING its cap (`eval_canary.smoke_canary_passed`).
-            passed = fault is None and smoke_canary_passed(res, expired=expired,
-                                                           interrupted=interrupted)
+            passed = fault is None and smoke_canary_passed(res, interrupted=interrupted)
             if (not passed and fault is None and not interrupted and spec.get("sandbox")
                     and res is not None and sandbox_denied(res)):
                 # A refused WRITE is the sandbox, not the candidate: the implicit smoke cannot say
@@ -4230,7 +4311,11 @@ class EvaluateMixin:
             row["timed_out"] = bool(getattr(res, "timed_out", False) or expired)
             if getattr(res, "failed_stage", None):
                 row["failed_stage"] = str(res.failed_stage)
-        if passed and canary_near_cap(seconds, spec["timeout"]):
+        # Not for a SMOKE: it passes by being stopped AT its cap on purpose, so "this pass used most
+        # of the cap" is its design rather than a warning about the next candidate — every surviving
+        # smoke stamped it, and the WARNING told the operator to raise a cap that is meant to bind.
+        if (passed and spec.get("mode") != "smoke"
+                and canary_near_cap(seconds, spec["timeout"])):
             row["near_cap"] = True
             _LOG.warning("eval canary for node %s passed in %.0fs of its %gs cap (>= %.0f%%): the "
                          "next candidate may not fit it — consider raising eval.canary.timeout",
@@ -4861,6 +4946,7 @@ class EvaluateMixin:
         # measured", wrote that stale result as this lifecycle's terminal.
         a.res = None
         a.canary_failed = False
+        a.canary_failed_stage = None
         a.canary_ran = False
         a.infra_note = ""
         a.infra_verdict = None
@@ -5345,7 +5431,19 @@ class EvaluateMixin:
         # so the two windows onto the same bytes are visibly siblings rather than one being
         # discovered later at a write site. See `_durable_failure_evidence`.
         a.err_evidence = self._durable_failure_evidence(a.res)
-        a.failure_forensics = self._failure_forensics(a)
+        # The forensic record, OFF THE LOOP THREAD and bounded: it opens the failed stage's log and
+        # `eval.log` and runs the parsers over them, and on the geesefs/S3 mounts a run root lives on
+        # a lookup costs 0.1-1 s — or never returns on a hung mount — which on the loop thread stalls
+        # every concurrent eval, both watchdogs and the run loop. The inputs are captured HERE
+        # (`_failure_forensics_job`), so an abandoned worker never reads this record again; a record
+        # that does not arrive within `_FORENSICS_TIMEOUT_S` is simply absent, like any other failure
+        # to build one. `abandon_on_cancel=True`: a pure read that spends and appends nothing.
+        a.failure_forensics = None
+        _forensics_job = self._failure_forensics_job(a)
+        if _forensics_job is not None:
+            with anyio.move_on_after(_FORENSICS_TIMEOUT_S):
+                a.failure_forensics = await anyio.to_thread.run_sync(
+                    _forensics_job, abandon_on_cancel=True)
         if a.canary_failed:
             # A FAILED CANARY IS NEVER SALVAGED: the only numbers and files it produced measured a
             # slice, in a scratch directory, and no rung may turn them into this node's metric

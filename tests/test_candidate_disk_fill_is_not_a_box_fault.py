@@ -334,6 +334,10 @@ def test_an_engine_write_failing_on_a_disk_the_candidate_filled_ends_in_a_termin
     assert _cycle == 1 and st.nodes[0].status.value == "failed", (_cycle, st.nodes[0].status)
     assert st.nodes[0].error_reason == "crash", "the candidate's doing, not an engine_error"
     assert "already filled it once" in st.nodes[0].error, st.nodes[0].error
+    # …and WHAT the engine's write raised survives the 400-character cut: the blame note is itself
+    # up to 400 characters, and appending the exception after it dropped it on every such row.
+    assert "No space left on device" in st.nodes[0].error, st.nodes[0].error
+    assert len(st.nodes[0].error) <= 400
     assert _withheld(events) == [("before_launch", "infra_unavailable", "run_dir_full")]
     assert len(runs) == 2
 

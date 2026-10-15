@@ -90,6 +90,34 @@ def test_a_permission_denial_is_inconclusive_and_a_code_defect_is_not():
     assert eval_canary.sandbox_denied(denied) and not eval_canary.sandbox_denied(flag)
 
 
+_TB = "Traceback (most recent call last):\n  File \"train.py\", line 3, in <module>\n"
+
+
+@pytest.mark.parametrize("stderr, stdout, denied", [
+    # a recovered denial early on, then death by the candidate's own defect: NOT inconclusive
+    ("WARNING: could not write /root/.cache/x: [Errno 13] Permission denied\n" * 3
+     + _TB + "    import nosuchmod\nModuleNotFoundError: No module named 'nosuchmod'\n", "", False),
+    ("", "mkdir: cannot create directory '/data/out': Permission denied\nfalling back\n"
+     "step 1\nstep 2\nstep 3\n", False),
+    ("PermissionError: [Errno 13] Permission denied: '/root/.cache'\n" + _TB
+     + "    parse()\nusage: train.py\nerror: unrecognized arguments: --max_steps 5\n", "", False),
+    # the denial IS what it died of
+    (_TB + "    open('/data/out.bin', 'wb')\nPermissionError: [Errno 13] Permission denied: "
+     "'/data/out.bin'\n", "", True),
+    (_TB + "    os.makedirs(p)\nOSError: [Errno 30] Read-only file system: '/data/out'\n"
+     "\nDuring handling of the above exception, another exception occurred:\n\n" + _TB
+     + "    raise RuntimeError('cannot save')\nRuntimeError: cannot save\n", "", True),
+    ("step 9\ncp: cannot create regular file '/data/x': Permission denied\n", "", True),
+    ("", "LOOPLAB landlock: could not add a rule for /data\n" + "noise\n" * 10, True),
+])
+def test_only_a_denial_the_smoke_DIED_of_is_inconclusive(stderr, stdout, denied):
+    """A `Permission denied` ANYWHERE in the output turned any failing sandboxed smoke into an
+    inconclusive pass; the denial must be the cause — the exception chain it died of, or the last
+    lines of a run with no traceback."""
+    res = SimpleNamespace(stdout=stdout, stderr=stderr)
+    assert eval_canary.sandbox_denied(res) is denied
+
+
 def test_the_operator_policy_route_carries_the_switch(tmp_path):
     from looplab.harness.campaign import read_policy, write_policy
     out = write_policy(tmp_path, {"amendments": "all", "implicit_canary": "sandboxed",

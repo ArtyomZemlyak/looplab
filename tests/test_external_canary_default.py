@@ -26,12 +26,11 @@ def test_smoke_pass_rule_is_survival_or_a_clean_exit():
     alive = SimpleNamespace(exit_code=-15, timed_out=True, metric=None)
     clean = SimpleNamespace(exit_code=0, timed_out=False, metric=None)
     crashed = SimpleNamespace(exit_code=2, timed_out=False, metric=None)  # argparse: unknown args
-    assert smoke_canary_passed(alive, expired=True, interrupted=False)
-    assert smoke_canary_passed(alive, expired=False, interrupted=False)   # a stage's own cap
-    assert smoke_canary_passed(clean, expired=False, interrupted=False)
-    assert not smoke_canary_passed(crashed, expired=False, interrupted=False)
-    assert not smoke_canary_passed(alive, expired=True, interrupted=True)
-    assert not smoke_canary_passed(None, expired=True, interrupted=False)
+    assert smoke_canary_passed(alive, interrupted=False)     # the canary clock or a stage's own cap
+    assert smoke_canary_passed(clean, interrupted=False)
+    assert not smoke_canary_passed(crashed, interrupted=False)
+    assert not smoke_canary_passed(alive, interrupted=True)
+    assert not smoke_canary_passed(None, interrupted=False)
 
 
 @pytest.mark.parametrize("external,setting,declared,due", [

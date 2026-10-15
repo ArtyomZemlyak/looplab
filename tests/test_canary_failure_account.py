@@ -584,4 +584,8 @@ def test_a_run_with_the_switch_off_pays_no_whole_stream_pass(tmp_path):
     _seed(eng, code)
     _evaluate(eng)
     assert seen, "the historical tail still goes through the funnel"
-    assert not any("Address already in use" in text for text in seen)
+    # The STREAM never reaches the funnel whole (the whole stdout `print` wrote ends in its newline).
+    # A single clipped LINE of it does, and must: the failed canary's forensic record reads the
+    # canary's own scratch logs (`evaluate.py::EvaluateMixin._failure_forensics_job`) and redacts
+    # each kept log line — a record the account switch does not govern.
+    assert not any("Address already in use" in text and "\n" in text for text in seen)

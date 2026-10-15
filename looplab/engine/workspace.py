@@ -518,9 +518,15 @@ class WorkspaceSeeder:
         if wd.exists():
             # The previous lifecycle's logs survive the rebuild (`engine/attempt_logs.py`, doc 78
             # §3): a reset used to delete the only record of why the earlier attempt failed.
-            from looplab.engine.attempt_logs import archive_attempt_logs
-            archive_attempt_logs(run_dir, wd, getattr(authored_node, "id", 0),
-                                 getattr(authored_node, "attempt", None))
+            # ONLY the node's own lifecycle workdir, by the rule `code_identity.record_materialized`
+            # applies below: a canary scratch (`canary/node_<id>`), a confirm or noise-floor seed
+            # dir is materialized through this same method, and archiving its logs filed them as
+            # the NODE's earlier attempts — each one counted toward `MAX_ARCHIVES_PER_NODE` and
+            # pruned a real archive of the node's own failure.
+            from looplab.engine.attempt_logs import archive_attempt_logs, is_lifecycle_workdir
+            if is_lifecycle_workdir(wd, getattr(authored_node, "id", None)):
+                archive_attempt_logs(run_dir, wd, getattr(authored_node, "id", 0),
+                                     getattr(authored_node, "attempt", None))
             # Read-only-aware: a workdir seeded from a git clone holds read-only pack files, which
             # Windows refuses to unlink — a second materialization of the same node failed there.
             rmtree_readonly_aware(wd)
