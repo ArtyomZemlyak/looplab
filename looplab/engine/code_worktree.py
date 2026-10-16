@@ -39,6 +39,7 @@ import tempfile
 from pathlib import Path
 from typing import Optional
 
+from looplab.core.atomicio import atomic_write_text
 from looplab.engine.code_repo import CodeRepo, CodeRepoError, WORKTREES_REL, run_git
 
 NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$")
@@ -265,7 +266,9 @@ def add_worktree(run_dir, name: str, *, start: str = "base", path=None) -> dict:
             # disk) and `restore_agent_worktrees` (re-link the directory, never re-create it).
             meta["outside_run"] = True
         _meta_path(run_dir, name).parent.mkdir(parents=True, exist_ok=True)
-        _meta_path(run_dir, name).write_text(json.dumps(meta, indent=1), encoding="utf-8")
+        # Atomic: `list_worktrees` skips a torn row, which would drop the worktree from the
+        # backup, the overlay and the listing — the loss the backup exists to prevent.
+        atomic_write_text(_meta_path(run_dir, name), json.dumps(meta, indent=1))
     return meta
 
 
@@ -508,9 +511,9 @@ def overlay_from_patch(run_dir, patch: str, *, start: str = "base", **kw) -> dic
 #
 # LARGE FILES ARE NOT GIT'S. A checkpoint, a dataset shard or any other file git is told to ignore
 # (the repository's excludes) and every dirty file over `LARGE_FILE_BYTES` is kept OUT of the bundle
-# and copied as a PLAIN file to `files/<worktree>/<path>.v<version>`, the version a digest of its
-# (size, mtime) — a path with its version in its name, no content store, no DVC. A changed file is a
-# new name (the old one is dropped from the spool, so the mirror drops it too), an unchanged one is
+# and mirrored as a PLAIN file `files/<worktree>/<path>.v<version>` straight from the worktree, the
+# version a digest of its (size, mtime) — a path with its version in its name, no content store, no
+# DVC. A changed file is a new name (the mirror deletes the old one's copy), an unchanged one is
 # never re-copied, and the restore lays each back at `<path>` after the dirty tree. If the small
 # files alone would still exceed `MAX_BACKUP_DIRTY_BYTES` (what an overlay can carry), the largest
 # move to the plain store until they fit. Bounded by `MAX_BACKUP_FILES` / `MAX_BACKUP_FILES_BYTES`;
@@ -645,13 +648,13 @@ def _capture_dirty(repo: CodeRepo, wt: Path, scratch: Path, head: str, row: dict
 
 
 def _copy_plain(wt: Path, out_dir: Path, rows: list) -> dict:
-    """Copy each row's `plain` paths to `files/<name>/<path>.v<version>` (only what is not there
-    yet), drop every stored file no row wants any more, and return `{rel: path}` for the mirror.
-    Rewrites each row's `plain` into `files` (`{path, stored, size, mtime_ns}`) and
-    `files_skipped`."""
-    import os
+    """Name each row's `plain` paths `files/<name>/<path>.v<version>` and return `{rel: path}` for
+    the mirror — the path is the worktree's OWN file: the mirror copies it straight to the
+    destination under the versioned name. (It used to be copied into the spool first, which on the
+    tmpfs run root this exists for held every checkpoint twice in RAM and read it twice.) Rewrites
+    each row's `plain` into `files` (`{path, stored, size, mtime_ns}`) and `files_skipped`, and
+    removes what an older build left in the spool's `files/`."""
     import shutil
-    root = out_dir / AGENT_FILES_DIR
     wanted: dict = {}
     count, total = 0, 0
     for row in rows:
@@ -666,39 +669,14 @@ def _copy_plain(wt: Path, out_dir: Path, rows: list) -> dict:
                 skipped.append({"path": rel, "reason": "backup_bound"})
                 continue
             stored = f"{AGENT_FILES_DIR}/{row['name']}/{rel}.v{_plain_version(st)}"
-            dest = out_dir / stored
-            if not dest.is_file():
-                dest.parent.mkdir(parents=True, exist_ok=True)
-                tmp = dest.with_name(dest.name + ".part")
-                try:
-                    shutil.copyfile(base / rel, tmp)
-                    # The copy keeps the source's mtime (the restore sets it back from the row);
-                    # one value for both times, so this is a timestamp carry, not a signature.
-                    mtime = st.st_mtime_ns
-                    os.utime(tmp, ns=(mtime, mtime))
-                    os.replace(tmp, dest)
-                except OSError:
-                    try:
-                        tmp.unlink()
-                    except OSError:
-                        pass               # never created
-                    skipped.append({"path": rel, "reason": "unreadable"})
-                    continue
             count, total = count + 1, total + st.st_size
-            wanted[stored] = dest
+            wanted[stored] = base / rel
             files.append({"path": rel, "stored": stored, "size": st.st_size,
                           "mtime_ns": st.st_mtime_ns})
         row["files"] = files
         if skipped:
             row["files_skipped"] = skipped
-    # An older version (or a file the agent deleted) leaves the spool, so it leaves the mirror.
-    if root.is_dir():
-        for path in sorted(root.rglob("*"), reverse=True):
-            rel = path.relative_to(out_dir).as_posix()
-            if path.is_file() and rel not in wanted:
-                path.unlink()
-            elif path.is_dir() and not any(path.iterdir()):
-                path.rmdir()
+    shutil.rmtree(out_dir / AGENT_FILES_DIR, ignore_errors=True)
     return {f"{AGENT_BACKUP_REL}/{rel}": path for rel, path in wanted.items()}
 
 
@@ -825,7 +803,7 @@ def _write_restored_meta(meta_file: Path, row: dict, path: Path, dirty) -> None:
         **({"dirty_skipped": row["dirty_skipped"]} if row.get("dirty_skipped") else {}),
         **({"files_skipped": row["files_skipped"]} if row.get("files_skipped") else {})})
     meta_file.parent.mkdir(parents=True, exist_ok=True)
-    meta_file.write_text(json.dumps(meta, indent=1), encoding="utf-8")
+    atomic_write_text(meta_file, json.dumps(meta, indent=1))
 
 
 def _relink_outside_worktree(repo: CodeRepo, run_dir: Path, path: Path, name: str,

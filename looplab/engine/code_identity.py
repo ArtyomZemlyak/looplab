@@ -426,21 +426,21 @@ def merged_node_commits(repo: CodeRepo, head: Optional[str]) -> list:
     one taken from the submitter: `head` itself is server-derived (`inject_node.code_commit`)."""
     if not isinstance(head, str) or repo.rev(head) is None:
         return []
+    # ONE call answers "which attempt commits does `head` contain": `--merged` keeps exactly the
+    # refs whose commit is an ancestor of `head` (it used to be a 200k-commit `rev-list` of the
+    # whole history intersected in Python, then an `--is-ancestor` per tip that could not fail).
     attempts = {}
-    for ref, sha in repo.refs(ATTEMPT_REF).items():
+    out = repo.git("for-each-ref", f"--merged={head}", "--format=%(objectname) %(refname)",
+                   ATTEMPT_REF).stdout.decode("utf-8", "replace")
+    for line in out.splitlines():
+        sha, _, ref = line.partition(" ")
         parsed = _parse_attempt_ref(ref)
         if parsed is not None:
             attempts.setdefault(sha, parsed)
     if not attempts:
         return []
-    reach = set(repo.git("rev-list", "--max-count=200000", head).stdout.decode("ascii").split())
-    hits = sorted(reach & set(attempts))
-    if not hits:
-        return []
-    tips = repo.git("merge-base", "--independent", *hits).stdout.decode("ascii").split()
-    verified = [t for t in tips if t in attempts and repo.git(
-        "merge-base", "--is-ancestor", t, head, check=False).returncode == 0]
-    verified.sort(key=lambda t: attempts[t])
+    tips = repo.git("merge-base", "--independent", *sorted(attempts)).stdout.decode("ascii").split()
+    verified = sorted((t for t in tips if t in attempts), key=lambda t: attempts[t])
     return [{"node_id": attempts[t][0], "generation": attempts[t][1], "commit": t}
             for t in verified[:MAX_MERGE_PARENTS]]
 

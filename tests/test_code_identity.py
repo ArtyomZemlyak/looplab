@@ -815,18 +815,20 @@ def test_large_and_ignored_agent_files_ride_as_versioned_plain_files_and_heads_c
     cfg = MirrorConfig(src_root=tmp_path / "src", dst_root=tmp_path / "dst", max_bytes_per_s=0,
                        max_files_per_s=0, run_extras=cw.agent_backup)
     assert not mirror_pass(cfg).errors
-    spool = tmp_path / "src" / ".looplab-mirror" / "spool" / "run" / "files" / "draft"
-    stored = sorted(p.relative_to(spool).as_posix() for p in spool.rglob("*") if p.is_file())
+    # Mirrored straight from the worktree (no spool copy) under versioned names.
+    spool = tmp_path / "src" / ".looplab-mirror" / "spool" / "run" / "files"
+    assert not spool.exists()
+    dst_files = cfg.dst_root / "run" / "code" / "agent_backup" / "files" / "draft"
+    listing = lambda: sorted(p.relative_to(dst_files).as_posix()
+                             for p in dst_files.rglob("*") if p.is_file())
+    stored = listing()
     assert [s.rsplit(".v", 1)[0] for s in stored] == ["checkpoint-1/model.pt", "shard.npy",
                                                       "train.py"], stored
-    # A new version of the checkpoint is a new name; the old one leaves the spool and the mirror.
+    # A new version of the checkpoint is a new name; the old one's copy leaves the destination.
     (wt / "checkpoint-1" / "model.pt").write_bytes(b"\x03" * 301)
     assert not mirror_pass(cfg).errors
-    now = sorted(p.relative_to(spool).as_posix() for p in spool.rglob("*") if p.is_file())
+    now = listing()
     assert len(now) == 3 and set(now) != set(stored)
-    dst_files = cfg.dst_root / "run" / "code" / "agent_backup" / "files" / "draft"
-    assert sorted(p.relative_to(dst_files).as_posix()
-                  for p in dst_files.rglob("*") if p.is_file()) == now
 
     shutil.rmtree(tmp_path / "src")
     os.makedirs(tmp_path / "src")
