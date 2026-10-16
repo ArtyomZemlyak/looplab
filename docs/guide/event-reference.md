@@ -23,7 +23,7 @@ The event type itself is the contract's identity and is never renamed or reused;
 
 <!-- generated: event types -->
 
-189 event types — 130 folded into `RunState`, 59 diagnostic; 1277 declared payload keys; 32 types whose whole payload is stored by the fold.
+189 event types — 130 folded into `RunState`, 59 diagnostic; 1281 declared payload keys; 32 types whose whole payload is stored by the fold.
 
 | type | fold | records | required keys | optional keys |
 |---|---|---|---|---|
@@ -61,7 +61,7 @@ The event type itself is the contract's identity and is never renamed or reused;
 | `card_reopened` | folded | The operator resumed a dropped Card (server-stamped). | `id` | `actor_kind`, `by`, `dropped_by`, `reason` |
 | `card_reprioritized` | folded | The operator moved one Card's priority. | `id` | `actor_kind`, `pinned`, `priority`, `source` |
 | `card_resource_pinned` | folded | The operator pinned one Card's GPU footprint. | `id` | `actor_kind`, `gpu_mem_mib`, `gpus`, `pinned`, `source` |
-| `code_snapshot` | diagnostic | A materialized lifecycle's code as a commit in the run's private code repository, with its base commit and changed paths (doc 79). | `generation`, `node_id`, `repo`, `seed_event_seq`, `source`, `status`, `version` | `base`, `changed`, `changed_count`, `commit`, `message`, `reason`, `ref`, `repair_of`, `stats` |
+| `code_snapshot` | diagnostic | A materialized lifecycle's code as a commit in the run's private code repository, with its base commit and changed paths (doc 79). | `generation`, `node_id`, `repo`, `seed_event_seq`, `source`, `status`, `version` | `base`, `changed`, `changed_count`, `co_parents`, `commit`, `merge_parents`, `message`, `reason`, `ref`, `repair_of`, `stats` |
 | `command_ack` | diagnostic | The engine folded one server command intent — the causal ack that closes it. | `command_id`, `event_seq` | `deferred`, `drain_only` |
 | `comment_created` | folded | An operator comment on one node, at that node's generation. | `node_id` | `actor_kind`, `comment_id`, `node_generation`, `text`, `version` |
 | `comment_edited` | folded | A new revision of one comment, compare-and-swapped against the version the author saw. | `comment_id` | `actor_kind`, `base_version`, `node_generation`, `node_id`, `text`, `version` |
@@ -118,7 +118,7 @@ The event type itself is the contract's identity and is never renamed or reused;
 | `hypothesis_updated` | folded | One hypothesis's status moved. | `id` | `status` |
 | `inject_done` | folded | The fulfillment receipt for one `inject_node` request. | `idx` | — |
 | `inject_failed` | diagnostic | An `inject_node` request that could not be materialized, with the reason. | `error`, `idx`, `reason` | — |
-| `inject_node` | folded · whole | An operator-authored node: its idea and code, or a branch of an existing (possibly foreign) node. | — | `code`, `deleted`, `files`, `forked_from`, `idea`, `node_kind`, `origin`, `parent_generations`, `parent_id`, `parent_ids`, `uses`, `uses_attempts` |
+| `inject_node` | folded · whole | An operator-authored node: its idea and code, or a branch of an existing (possibly foreign) node. | — | `code`, `code_commit`, `deleted`, `files`, `forked_from`, `idea`, `node_kind`, `origin`, `parent_generations`, `parent_id`, `parent_ids`, `uses`, `uses_attempts` |
 | `lane_armed` | diagnostic | A live engine armed the upstream lane: the mode it serves until it restarts, and why, with the caps it enforces. | `author`, `mode`, `reason` | `advances_per_hour`, `author_usd_cap` |
 | `lane_authored` | diagnostic | The upstream author settled one source lifecycle: drafted, declined, skipped, failed, or its rebase conflicted. | `action_id`, `outcome`, `source_node_id`, `track` | `code`, `conflicts`, `cost_usd`, `hunk_hashes`, `reason`, `rebased_from`, `source_action_id` |
 | `lane_held` | diagnostic | An automatic upstream step held back: at a cap (hourly advances, the author's budget) or for good (`refused:<code>`). | `op`, `reason` | `proposal_id` |
@@ -139,7 +139,7 @@ The event type itself is the contract's identity and is never renamed or reused;
 | `node_building` | folded | A node id was reserved and its build started; `node_created` clears the marker. | `node_id`, `operator`, `parent_ids` | `attempt`, `card_build_generation`, `card_id`, `generation`, `speculative` |
 | `node_concepts` | folded | The concept ids one node was tagged with, by which mode, against a named vocabulary. | `at_vocab`, `concepts`, `generation`, `mode`, `node_id` | `at_pending`, `attempt` |
 | `node_confirmed` | folded | A node's confirmation statistics over its seeds (mean, std). | `generation`, `mean`, `node_id`, `seeds`, `std` | `attempt`, `objective_key`, `protocol_mixed`, `protocol_profile` |
-| `node_created` | folded | A node exists: its idea, the code and files the Developer wrote, and its parents. | `code`, `files`, `idea`, `node_id`, `operator`, `parent_ids` | `attempt`, `base_selector`, `card_build_generation`, `deleted`, `eval_start_boundary`, `footprint_finalized`, `forked_from`, `generation`, `materialize_aborted_intent`, `model_arm`, `node_kind`, `origin`, `parent_generations`, `protocol_version`, `research_origin`, `seed`, `simplified`, `speculative`, `uses`, `uses_attempts` |
+| `node_created` | folded | A node exists: its idea, the code and files the Developer wrote, and its parents. | `code`, `files`, `idea`, `node_id`, `operator`, `parent_ids` | `attempt`, `base_selector`, `card_build_generation`, `code_commit`, `deleted`, `eval_start_boundary`, `footprint_finalized`, `forked_from`, `generation`, `materialize_aborted_intent`, `model_arm`, `node_kind`, `origin`, `parent_generations`, `protocol_version`, `research_origin`, `seed`, `simplified`, `speculative`, `uses`, `uses_attempts` |
 | `node_eval_started` | folded | A node's evaluation was dispatched — the promise `node_created`'s eval-start boundary made. | `generation`, `node_id` | `attempt` |
 | `node_evaluated` | folded | A node's terminal: its metric, the trials behind it, its secondary metrics and any trust violations. | `eval_seconds`, `extra_metrics`, `generation`, `metric`, `node_id`, `stdout_tail`, `trials`, `violations` | `activation`, `attempt`, `extra_metrics_direction`, `extra_metrics_omitted`, `extra_metrics_provenance`, `metric_provenance`, `resource_curve`, `self_metric`, `stderr_tail` |
 | `node_failed` | folded | A node's other terminal: why the evaluation produced no number, and who said so. | — | `attempt`, `card_id`, `engine_reason`, `error`, `error_evidence`, `eval_seconds`, `failed_stage`, `failure_forensics`, `failure_signature`, `finish_data`, `finish_report_planned`, `generation`, `never_evaluated`, `node_id`, `reason`, `reason_evidence`, `reason_evidence_resolved`, `reason_evidence_root`, `reason_findings`, `reason_hypotheses`, `reason_override_refused`, `reason_source`, `reason_summary`, `repair_stop`, `scope`, `step`, `triage_action`, `triage_rationale`, `withheld_metric` |

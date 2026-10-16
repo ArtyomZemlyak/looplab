@@ -9,9 +9,17 @@ Design and measurements: [doc 79](../79-node-git-identity-and-code-upstream-2026
 
 | Commit | Tree | Parent |
 |---|---|---|
-| base | exactly what LoopLab seeded: your working tree, uncommitted edits and untracked protected files included | the base it replaced (an upstream advance), or none |
-| attempt | the base plus the experiment's own file changes, read after materialization | the base it ran on |
+| base | exactly what LoopLab seeded: your working tree, uncommitted edits and untracked protected files included | the first base: the commit your editable was at when the run started; later: the base it replaced (an upstream advance) |
+| attempt | the base plus the experiment's own file changes, read after materialization | the base it ran on (first parent); experiments an agent really `git merge`d (see below) |
 | repair | the attempt after an in-place repair during its evaluation | the attempt |
+
+Your history is the first base's history: `git log` and `git blame` in a worktree show your
+commits, and `git diff <your HEAD> base` is exactly what you had not committed. The commit and up to
+200 commits behind it are fetched from your repository, which is only read; the commit itself is
+also kept in `RUN_DIR/code/origin/`, so a restored run rebuilds the same base without your
+repository. The first base has no parent when the editable is a subdirectory of its repository,
+there are several editables, the source is not git or `seed_base` is pinned (`base.origin.reason` on
+the `code_snapshot` row says which). Runs recorded before 2026-10-16 keep their parentless bases.
 
 Branches: `base` (the active base), `nodes/n<id>` (latest attempt of each node), `champion`,
 `agent/<name>` (external-agent worktrees). Each attempt also gets an `effective_config` record: the
@@ -82,7 +90,11 @@ them. On a tmpfs run root, `--path` (route/MCP `path`) puts it on persistent dis
 your source tree or another part of the run directory; the mirror then backs up its branch but not
 its files, and a restore re-links the same directory. The submitted overlay is always the whole
 change over the seed base, so a worktree started from `node:<id>` carries that experiment's change
-plus yours, and one that merged `nodes/n<id>` carries both. A `git` source (e.g. Claude Code's
+plus yours. Combining experiments is an ordinary `git merge nodes/n<id>` in the worktree: the
+injected experiment's commit then has those experiments as git parents (each checked against the
+worktree's history), so merging it elsewhere brings all of them. An ensemble LoopLab builds itself
+only names its other parents in a `Looplab-Co-Parents` trailer — it keeps one git parent, because
+its code is a new change, not a merge git could vouch for. A `git` source (e.g. Claude Code's
 `worktree-agent-<id>` branch of your repository) is fetched read-only into
 `refs/looplab/foreign/<commit>` and three-way merged onto the active base from where it left the
 source (git >= 2.38): your uncommitted edits stay, an overlap is `409 code_from_merge_conflict`

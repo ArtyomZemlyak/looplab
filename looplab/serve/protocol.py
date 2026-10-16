@@ -448,7 +448,11 @@ CONTROL_DATA_FIELDS: dict[str, frozenset[str]] = {
         # foreign branch merged onto the run's base, `engine/code_foreign.py`) — an external agent's
         # code in the run's private code repository, converted to `files`/`deleted` and consumed at intake
         # (`control_validation._apply_code_from`), so no inject_node row carries it.
-        "code_from"}),
+        "code_from",
+        # …and the worktree's committed HEAD it came from, SERVER-STAMPED there (a submitted one is
+        # refused as `code_commit_forged`): the history whose node commits become the attempt
+        # commit's real merge parents (`engine/code_identity.py::merged_node_commits`).
+        "code_commit"}),
     EV_DEEP_RESEARCH: frozenset(),
     EV_RESEARCH_COMPLETED: frozenset({"memo"}),
     EV_REPORT_GENERATED: frozenset({"content"}),

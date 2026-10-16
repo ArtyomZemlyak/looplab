@@ -1846,8 +1846,8 @@ EVENT_PAYLOAD_KEYS: dict[str, PayloadContract] = {
         "A materialized lifecycle's code as a commit in the run's private code repository, with its "
         "base commit and changed paths (doc 79).",
         required=("generation", "node_id", "repo", "seed_event_seq", "source", "status", "version"),
-        optional=("base", "changed", "changed_count", "commit", "message", "reason", "ref",
-                  "repair_of", "stats"),
+        optional=("base", "changed", "changed_count", "co_parents", "commit", "merge_parents",
+                  "message", "reason", "ref", "repair_of", "stats"),
     ),
     "effective_config": PayloadContract(
         "Hyperparameter values one evaluation actually ran with, by source, and their mismatches "
@@ -2095,8 +2095,8 @@ EVENT_PAYLOAD_KEYS: dict[str, PayloadContract] = {
         # were declared from the request allow-list, the same misreading as the comment rows
         # (review 2026-09-22, EVT-05).
         optional=(
-            "code", "deleted", "files", "forked_from", "idea", "node_kind", "origin",
-            "parent_generations", "parent_id", "parent_ids", "uses", "uses_attempts"
+            "code", "code_commit", "deleted", "files", "forked_from", "idea", "node_kind",
+            "origin", "parent_generations", "parent_id", "parent_ids", "uses", "uses_attempts"
         ),
         stored_whole=True,
     ),
@@ -2206,7 +2206,8 @@ EVENT_PAYLOAD_KEYS: dict[str, PayloadContract] = {
         "A node exists: its idea, the code and files the Developer wrote, and its parents.",
         required=("code", "files", "idea", "node_id", "operator", "parent_ids"),
         optional=(
-            "attempt", "base_selector", "card_build_generation", "deleted", "eval_start_boundary",
+            "attempt", "base_selector", "card_build_generation", "code_commit", "deleted",
+            "eval_start_boundary",
             "footprint_finalized", "forked_from", "generation", "materialize_aborted_intent",
             "model_arm", "node_kind", "origin", "parent_generations", "protocol_version",
             "research_origin", "seed", "simplified", "speculative", "uses", "uses_attempts"

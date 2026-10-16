@@ -144,13 +144,20 @@ def _seed_base_of(repo: CodeRepo, commit: str) -> str:
     so it must be the whole change from that base. Diffing against the START commit was right only
     for `start=base`: from `node:<id>` the start is that node's attempt commit, the overlay held the
     agent's edits alone, and the injected node silently reverted every change of the node it was
-    built from (review 2026-10-15). Nearest by topological order: bases form one parent chain, and
-    an attempt or agent commit sits on exactly one of them."""
+    built from (review 2026-10-15).
+
+    Nearest along the FIRST-PARENT chain (2026-10-16). The old walk was `rev-list --topo-order`,
+    which lists a merge's second-parent side before its first: an agent worktree from `node:A` that
+    ran `git merge nodes/nB` (B seeded on a LATER base) answered B's base, and the overlay — A's
+    change plus B's, diffed against the wrong base — dropped whatever that later base had moved. Every
+    commit LoopLab writes keeps its base as first parent (attempts, repairs on them, real merges
+    included: `code_identity.py::record_attempt`), and `git merge` keeps the branch the agent stood
+    on first, so the first-parent chain reaches the base the start was seeded on."""
     from looplab.engine.code_identity import BASE_REF
     bases = set(repo.refs(BASE_REF).values())
     if not bases or commit in bases:
         return commit
-    out = repo.git("rev-list", "--topo-order", commit, check=False)
+    out = repo.git("rev-list", "--first-parent", commit, check=False)
     for sha in out.stdout.decode("ascii", "replace").split():
         if sha in bases:
             return sha
@@ -441,6 +448,13 @@ def overlay_from_worktree(run_dir, name: str, **kw) -> dict:
         tree = run_git("-C", str(path), "write-tree", env_extra=env).stdout.decode().strip()
     out = _overlay_between(repo, run_dir, meta["start_commit"], tree, **kw)
     out.update(worktree=name, branch=meta.get("branch"), stale_base=_stale(repo, meta["start_commit"]))
+    # The worktree's committed HEAD: the history a REAL merge (`git merge nodes/n<id>`) left there.
+    # Intake stamps it on the inject (`inject_node.code_commit`), and the attempt commit takes the
+    # node commits it verifiably contains as git parents (`code_identity.py::merged_node_commits`).
+    head = run_git("-C", str(path), "rev-parse", "--verify", "--quiet", "HEAD^{commit}",
+                   check=False).stdout.decode().strip()
+    if len(head) == 40:
+        out["head_commit"] = head
     return out
 
 
@@ -714,6 +728,13 @@ def agent_backup(run_dir, out_dir) -> dict:
         (scratch / "objects" / "info").mkdir(parents=True, exist_ok=True)
         (scratch / "objects" / "info" / "alternates").write_text(
             str((repo.path / "objects").resolve()) + "\n", encoding="utf-8")
+        shallow = repo.shallow()
+        if shallow:
+            # The run repository is SHALLOW where the operator's history was fetched to a depth
+            # (`code_origin.py`, 2026-10-16). The scratch store walks that history through its
+            # alternate and must stop where the run repository stops: without the same cut,
+            # `bundle create` fails reading a parent that was never fetched (measured).
+            (scratch / "shallow").write_text("".join(f"{c}\n" for c in shallow), encoding="ascii")
         for meta in list_worktrees(run_dir):
             name = meta.get("name") if isinstance(meta, dict) else None
             if not isinstance(name, str) or not NAME.match(name):
@@ -745,13 +766,17 @@ def agent_backup(run_dir, out_dir) -> dict:
         extra = {r["head_ref"]: r["head"] for r in rows
                  if (r.get("head_ref") or "").startswith("refs/heads/")
                  and r["head_ref"] not in refs}
+        # The shallow cut rides in the index (only when there is one, so an unshallow run's keys
+        # are unchanged): a restore lays it back, so the bundle's history is walkable even where
+        # the bases could not be rebuilt first.
+        cut = {"shallow": shallow} if shallow else {}
         bundle_key = hashlib.sha256(canonical_json(
             {"version": _BACKUP_VERSION, "refs": refs, "extra": extra,
-             "worktrees": [{k: v for k, v in r.items() if k != "plain"} for r in rows]}
+             "worktrees": [{k: v for k, v in r.items() if k != "plain"} for r in rows], **cut}
         )).hexdigest()
         extras = _copy_plain(run_dir / WORKTREES_REL, out_dir, rows)
         index = {"version": _BACKUP_VERSION, "refs": refs, "worktrees": rows,
-                 "bundle_key": bundle_key}
+                 "bundle_key": bundle_key, **cut}
         key = hashlib.sha256(canonical_json(index)).hexdigest()
         try:
             prior_index = json.loads(index_path.read_text(encoding="utf-8"))
@@ -902,6 +927,12 @@ def restore_agent_worktrees(run_dir) -> Optional[dict]:
             sha, _, ref = line.strip().partition(" ")
             if sha and ref:
                 listed[ref] = sha
+        # The source repository's shallow cut the backup was taken under (see `agent_backup`):
+        # each listed commit that is here and whose parents are not becomes a cut again.
+        cuts = [c for c in index.get("shallow") or () if isinstance(c, str) and len(c) == 40
+                and repo.has_object(c)
+                and any(not repo.has_object(p) for p in repo.commit_parents(c))]
+        repo.add_shallow(cuts)
         current = repo.refs(AGENT_BRANCH_PREFIX)
         diverged = set()
         for ref, sha in sorted(listed.items()):

@@ -908,7 +908,7 @@ class NodeBuildMixin:
                            materialize_aborted_intent=_OMIT, model_arm=_OMIT,
                            simplified=_OMIT, node_kind=_OMIT, uses=_OMIT,
                            uses_attempts=_OMIT, base_selector=_OMIT,
-                           expected_last_seq=_OMIT) -> None:
+                           expected_last_seq=_OMIT, code_commit=_OMIT) -> None:
         """The single `node_created` emitter for every creation site (`_create_node`,
         `_create_injected_node`, `_ablate`, `_ablate_code`, and doc 67 67.5's `_simplify` and
         `_rebuild_simplification` — the two that pass `simplified`). Optional keys default to the
@@ -938,7 +938,10 @@ class NodeBuildMixin:
                      # doc 73 §1.4: an operator inject's artifact kind and the artifacts it reads.
                      ("node_kind", node_kind), ("uses", uses),
                      # round 3: the producer lifecycle each use is pinned to.
-                     ("uses_attempts", uses_attempts)):
+                     ("uses_attempts", uses_attempts),
+                     # doc 79 (2026-10-16): an inject's server-stamped agent worktree HEAD, read
+                     # by the attempt commit's real merge parents (`code_identity.py`).
+                     ("code_commit", code_commit)):
             if v is not _OMIT:
                 data[k] = v
         # A CHILD OF A CONSUMER carries its pins EXPLICITLY (critic c3 item 4): `uses` itself stays
@@ -2717,6 +2720,11 @@ class NodeBuildMixin:
                     # intake (round 3); OMITTED for a request that carries none (queued before the
                     # key), which keeps the historical existence-only rule for it.
                     **inject_use_pins(req),
+                    # doc 79 (2026-10-16): the agent worktree HEAD intake stamped from
+                    # `code_from.worktree`; OMITTED otherwise, so every other inject keeps its shape.
+                    **({"code_commit": req["code_commit"]}
+                       if isinstance(req.get("code_commit"), str)
+                       and len(req["code_commit"]) == 40 else {}),
             ):
                 return
             # Mirror _create_node / _rerun_node: a Developer session that CRASHED returns the

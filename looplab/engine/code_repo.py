@@ -217,7 +217,8 @@ class CodeRepo:
         self.git("fast-import", "--quiet", "--date-format=raw", "--force", input=stream, timeout=300)
 
     @staticmethod
-    def _commit_header(ref: str, when: int, message: str, parent: Optional[str]) -> bytes:
+    def _commit_header(ref: str, when: int, message: str, parent: Optional[str],
+                       merges: Iterable = ()) -> bytes:
         msg = message.encode("utf-8", "replace")
         head = (b"commit %s\n" % ref.encode("utf-8")
                 + b"author %s %d +0000\n" % (IDENTITY, int(when))
@@ -225,6 +226,11 @@ class CodeRepo:
                 + b"data %d\n" % len(msg) + msg + b"\n")
         if parent:
             head += b"from %s\n" % parent.encode("ascii")
+            # Further git parents AFTER the first (doc 79, 2026-10-16): only ever node commits a
+            # REAL merge in an agent worktree brought in (`code_identity.py::merged_node_commits`),
+            # so the first parent stays the base every first-parent walk lands on.
+            for sha in merges:
+                head += b"merge %s\n" % sha.encode("ascii")
         return head
 
     def write_tree_commit(self, ref: str, files: Iterable, *, message: str, when: int,
@@ -245,9 +251,10 @@ class CodeRepo:
         return sha
 
     def write_overlay_commit(self, ref: str, parent: str, changes: dict, *, message: str,
-                             when: int) -> str:
-        """A commit on top of `parent`: `changes[path]` is (bytes, executable) or None (delete)."""
-        body = [self._commit_header(ref, when, message, parent)]
+                             when: int, merges: Iterable = ()) -> str:
+        """A commit on top of `parent`: `changes[path]` is (bytes, executable) or None (delete).
+        `merges` are further git parents; the tree is still `parent`'s plus `changes`."""
+        body = [self._commit_header(ref, when, message, parent, merges)]
         for path in sorted(changes):
             safe = safe_path(path)
             if safe is None:
@@ -265,6 +272,41 @@ class CodeRepo:
         if sha is None:
             raise CodeRepoError("git_failed", f"fast-import did not create {ref}")
         return sha
+
+    def has_object(self, sha: str) -> bool:
+        return self.exists() and self.git("cat-file", "-e", sha, check=False).returncode == 0
+
+    def commit_parents(self, commit: str) -> list:
+        """The parent ids a commit OBJECT names, read off its header — never a walk, so a parent
+        that is absent (or cut by `shallow`) is still named."""
+        out = self.git("cat-file", "commit", commit, check=False)
+        if out.returncode != 0:
+            return []
+        parents = []
+        for line in out.stdout.split(b"\n\n", 1)[0].splitlines():
+            if line.startswith(b"parent "):
+                parents.append(line[7:].decode("ascii", "replace").strip())
+        return parents
+
+    def shallow(self) -> list:
+        """The commits `$GIT_DIR/shallow` cuts history at (sorted); [] when there is no file."""
+        try:
+            text = (self.path / "shallow").read_text(encoding="ascii")
+        except (OSError, UnicodeDecodeError):
+            return []
+        return sorted({line.strip() for line in text.splitlines() if len(line.strip()) == 40})
+
+    def add_shallow(self, commits: Iterable) -> None:
+        """Merge `commits` into `$GIT_DIR/shallow`, written whole (temp + rename). Only for a commit
+        that IS present and whose parents are NOT: the line is what lets git stop at a commit whose
+        history was never fetched (`code_origin.py`). Callers hold `lock()`."""
+        have = set(self.shallow())
+        want = {c for c in commits if isinstance(c, str) and len(c) == 40} - have
+        if not want:
+            return
+        from looplab.core.atomicio import atomic_write_bytes
+        atomic_write_bytes(self.path / "shallow",
+                           "".join(f"{c}\n" for c in sorted(have | want)).encode("ascii"))
 
     def tree(self, commit: str) -> Optional[str]:
         out = self.git("rev-parse", "--verify", "--quiet", commit + "^{tree}", check=False)

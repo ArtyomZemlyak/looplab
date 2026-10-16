@@ -7,6 +7,13 @@ saves a sub-second per node against a node that trains for 40 minutes, and *brea
 correctness today* on the v1 testbed. The disk problem the proposal was reaching for turns out to be
 a different mechanism entirely, and §6 names it.
 
+> **Status update (2026-10-16).** The decision for NODE workspaces stands: a node still runs on a
+> materialized copy, never a `git worktree` of the source repository, and the operator's repository
+> is still only READ. What changed is beside it ([doc 79](79-node-git-identity-and-code-upstream-2026-10-14.md)
+> §10): each attempt is a commit of the run's PRIVATE repository, whose first base commit — its tree
+> still the seeded working tree (§5d) — is now parented on the operator's HEAD, its objects fetched
+> read-only into that private repository (§5c's object database is never shared or written).
+
 > **Status update (2026-08-14).** §7's requested doc-29 edit landed:
 > `docs/29-operator-backlog-2026-08-11.md` §F3 now reads **MEASURED AND DECLINED (2026-08-13)**.
 > None of §8's three rungs has shipped: the event registry still carries only

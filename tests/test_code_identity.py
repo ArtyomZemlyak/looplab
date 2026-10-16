@@ -844,3 +844,264 @@ def test_large_and_ignored_agent_files_ride_as_versioned_plain_files_and_heads_c
     assert _git(side, "rev-parse", "HEAD").strip() == exp_head
     assert subprocess.run(["git", "symbolic-ref", "-q", "HEAD"], cwd=loose).returncode == 1
     assert _git(loose, "rev-parse", "HEAD").strip() == loose_head          # detached, as it was
+
+
+# ------------------------------------------------- 2026-10-16: base parented on the operator's HEAD
+
+def _history_repo_task(tmp_path):
+    """`_repo_task` with HISTORY: two operator commits under the uncommitted edit, so a worktree's
+    `git log` has something of the operator's to show."""
+    repo, task = _repo_task(tmp_path)
+    (repo / "recipe.env").write_text("SEED=1\nWARMUP=10\n")
+    _git(repo, "commit", "-qm", "operator: add warmup to the recipe", "--", "recipe.env")
+    return repo, task
+
+
+def _git_dir_snapshot(repo: Path) -> dict:
+    """Every file under the operator's `.git` (refs, objects, config, index, logs …) by bytes."""
+    out = {}
+    for p in sorted((repo / ".git").rglob("*")):
+        if p.is_file():
+            out[p.relative_to(repo).as_posix()] = p.read_bytes()
+    return out
+
+
+def test_the_first_base_is_parented_on_the_operators_head_and_the_operator_repo_is_untouched(
+        tmp_path):
+    from looplab.engine.code_origin import ORIGIN_REL
+    repo, task = _history_repo_task(tmp_path)
+    head = _git(repo, "rev-parse", "HEAD").strip()
+    before, count = _git_dir_snapshot(repo), _git(repo, "rev-list", "--count", "--all").strip()
+    status_before = _git(repo, "status", "--porcelain")
+    anyio.run(_engine(tmp_path, task).run)
+    rd = tmp_path / "run"
+    code = CodeRepo(rd)
+    base = code.rev(BASE_BRANCH)
+    assert code.commit_parents(base) == [head]
+    snap = [e["data"] for e in _events(rd) if e["type"] == "code_snapshot"][0]
+    assert snap["version"] == 2 and snap["base"]["origin_parent"] == head
+    origin = snap["base"]["origin"]
+    assert (origin["status"], origin["via"], origin["depth"]) == ("parented", "fetched", 200), origin
+    assert origin["sidecar"] == "written"
+    assert (rd / ORIGIN_REL / f"{head}.pack").is_file()
+    # The tree is still EXACTLY the seed (materialization reads the archive, never this tree) ...
+    assert code.blob(base, "train.py") == b"print('LR: 0.02')\nprint('Batch: 32 (micro=8)')\n"
+    # ... and the diff from the operator's HEAD is exactly what was never committed (doc 37 §5d).
+    assert code.changed(head, base) == [{"path": "score.py", "status": "A"},
+                                        {"path": "train.py", "status": "M"}]
+    assert "-print('LR: 0.01')\n+print('LR: 0.02')" in code.diff(head, base, paths=["train.py"])[0]
+    # A worktree of the private repository shows the operator's history, and blame reaches it.
+    wt = Path(add_worktree(rd, "hist")["path"])
+    log = _git(wt, "log", "--format=%s")
+    assert "operator: add warmup to the recipe\ninit\n" in log, log
+    assert "\nsummary init\n" in _git(wt, "blame", "--porcelain", "-L", "2,2", "train.py")
+    assert subprocess.run(["git", "--git-dir", str(code.path), "fsck", "--no-dangling"],
+                          capture_output=True).returncode == 0
+    # The operator's repository: byte-identical .git, the same commits, still dirty as left.
+    assert _git_dir_snapshot(repo) == before
+    assert _git(repo, "rev-list", "--count", "--all").strip() == count == "2"
+    assert _git(repo, "status", "--porcelain") == status_before
+
+
+def test_a_rebuild_reproduces_the_parented_base_with_or_without_the_operator_repo(tmp_path):
+    """The run mirror skips `code/repo.git`: a restore rebuilds it with `sync_run`. The base id is a
+    function of the log and the run's own files (`code/origin/<sha>.pack` carries the parent), so it
+    is the SAME with the operator's repository gone — measured: a `shallow` line naming an ABSENT
+    parent leaves `log`/`rev-list`/`fsck`/`bundle` failing, so the parent's objects must be there."""
+    import shutil
+    repo, task = _history_repo_task(tmp_path)
+    head = _git(repo, "rev-parse", "HEAD").strip()
+    anyio.run(_engine(tmp_path, task).run)
+    rd = tmp_path / "run"
+    (rd / "task.snapshot.json").write_text(task.model_dump_json(), encoding="utf-8")  # as the CLI
+    base = CodeRepo(rd).rev(BASE_BRANCH)
+    # The operator moved on since: the recorded commit is no ref tip any more, and is still fetched
+    # (by sha over protocol v2; v0 refuses an unadvertised object).
+    _git(repo, "commit", "--allow-empty", "-qm", "operator: later work")
+    for name, keep_source in (("restored", True), ("restored-offline", False)):
+        other = tmp_path / name
+        shutil.copytree(rd, other, ignore=shutil.ignore_patterns("repo.git", "worktrees"))
+        if not keep_source:
+            repo.rename(tmp_path / "moved-away")
+        sync_run(other)
+        code = CodeRepo(other)
+        assert code.rev(BASE_BRANCH) == base, name
+        assert subprocess.run(["git", "--git-dir", str(code.path), "fsck", "--no-dangling"],
+                              capture_output=True).returncode == 0, name
+        log = code.git("log", "--format=%H", BASE_BRANCH).stdout.decode().split()
+        # With the source: its history fetched again; without: the parent alone, a shallow cut.
+        assert log[:2] == [base, head] and len(log) == (3 if keep_source else 2), (name, log)
+        assert (code.shallow() == [head]) is (not keep_source)
+
+
+def test_an_agent_backup_of_a_shallow_run_repository_bundles_and_restores(tmp_path, monkeypatch):
+    """A history fetched to a depth leaves the run repository SHALLOW; the agent backup's scratch
+    store walks it through an alternate and failed `bundle create` on the never-fetched parent until
+    it carried the same cut. Restored with the operator's repository gone, the worktree's history
+    still reads: the bases rebuild first (the sidecar), the cut is laid back from the backup."""
+    import shutil
+    from looplab.engine import code_origin
+    from looplab.engine.code_worktree import AGENT_BACKUP_REL, agent_backup, list_worktrees
+    monkeypatch.setattr(code_origin, "HISTORY_DEPTH", 1)
+    repo, task = _history_repo_task(tmp_path)
+    head = _git(repo, "rev-parse", "HEAD").strip()
+    anyio.run(_engine(tmp_path, task).run)
+    rd = tmp_path / "run"
+    assert CodeRepo(rd).shallow() == [head]
+    wt = Path(add_worktree(rd, "draft")["path"])
+    (wt / "train.py").write_text("print('LR: 0.05')\n")
+    _git(wt, "commit", "-qam", "agent: lr 0.05")
+    proposal = _git(wt, "rev-parse", "HEAD").strip()
+    spool = tmp_path / "spool"
+    files = agent_backup(rd, spool)
+    assert json.loads((spool / "agents.json").read_text())["shallow"] == [head]
+    restored = tmp_path / "restored"
+    shutil.copytree(rd, restored, ignore=shutil.ignore_patterns("repo.git", "worktrees"))
+    for rel, src in files.items():
+        (restored / rel).parent.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(src, restored / rel)
+    repo.rename(tmp_path / "moved-away")
+    assert sync_run(restored)["agent_worktrees"]["restored"] == ["draft"]
+    assert not (restored / AGENT_BACKUP_REL).exists()
+    back = Path(list_worktrees(restored)[0]["path"])
+    assert _git(back, "log", "--format=%H").split() == [proposal, CodeRepo(rd).rev(BASE_BRANCH),
+                                                        head]
+
+
+def test_a_version_1_run_rebuilds_its_root_base_byte_for_byte(tmp_path):
+    """Per-version: a run whose rows are version 1 (every run before 2026-10-16) rebuilds the ROOT
+    base it always had — same message, same tree, no parent, the same id — although its source is a
+    git repository the new rule would parent on."""
+    import shutil
+    from looplab.engine.code_identity import _base_message, _run_meta, archive_files
+    _, task = _history_repo_task(tmp_path)
+    anyio.run(_engine(tmp_path, task).run)
+    rd = tmp_path / "run"
+    old = tmp_path / "v1"
+    shutil.copytree(rd, old, ignore=shutil.ignore_patterns("code"))
+
+    def as_v1(row):
+        if row["type"] == "code_snapshot":
+            row["data"]["version"] = 1
+            for key in ("origin_parent", "origin"):
+                row["data"].get("base", {}).pop(key, None)
+        return row
+    _rewrite_rows(old, as_v1)
+    sync_run(old)
+    code = CodeRepo(old)
+    base = code.rev(BASE_BRANCH)
+    assert base and code.commit_parents(base) == []
+    events = EventStore(old / "events.jsonl").read_all()
+    lineage = base_lineage(events)
+    digest = next(iter(lineage))
+    run_id, started = _run_meta(events)
+    expected = CodeRepo(tmp_path / "expected").ensure().write_tree_commit(
+        "refs/looplab/bases/" + digest, archive_files(old, events, digest),
+        message=_base_message(run_id, digest, lineage[digest], started),
+        when=int(lineage[digest]["ts"] or 0))
+    assert base == expected                              # the version-1 algorithm, byte for byte
+    assert "Looplab-Source-Commit" not in code.git("log", "-1", "--format=%B", base).stdout.decode()
+
+
+def test_seed_base_of_follows_the_first_parent_through_a_merge(tmp_path):
+    """`rev-list --topo-order` lists a merge's second-parent side first, so a start that is a merge
+    of node A (on base X) and node B (on base Y) answered Y — the overlay was then diffed against the
+    wrong base. The first-parent chain lands on X."""
+    from looplab.engine.code_identity import BASE_REF
+    from looplab.engine.code_worktree import _seed_base_of
+    code = CodeRepo(tmp_path / "run").ensure()
+    x = code.write_tree_commit(BASE_REF + "a" * 64, [("a.py", b"x\n", False)], message="X\n", when=1)
+    y = code.write_tree_commit(BASE_REF + "b" * 64, [("a.py", b"y\n", False)], message="Y\n", when=2)
+    a = code.write_overlay_commit("refs/looplab/attempts/n1/g0/s1", x,
+                                  {"b.py": (b"A\n", False)}, message="A\n", when=3)
+    b = code.write_overlay_commit("refs/looplab/attempts/n2/g0/s2", y,
+                                  {"c.py": (b"B\n", False)}, message="B\n", when=4)
+    merge = code.write_overlay_commit("refs/heads/agent/m", a, {"c.py": (b"B\n", False)},
+                                      message="merge\n", when=5, merges=[b])
+    assert code.commit_parents(merge) == [a, b]
+    topo = code.git("rev-list", "--topo-order", merge).stdout.decode().split()
+    assert [s for s in topo if s in (x, y)][0] == y      # the defect this guards against
+    assert _seed_base_of(code, merge) == x
+    assert _seed_base_of(code, b) == y and _seed_base_of(code, x) == x
+
+
+def _inject(rd: Path, data: dict) -> dict:
+    """The real intake (`normalize_control`), then the durable append the command service makes."""
+    from looplab.serve.control_validation import normalize_control
+    srv = SimpleNamespace(run_dir=lambda run_id: rd.parent / run_id,
+                          state=lambda path: fold(EventStore(Path(path) / "events.jsonl").read_all()))
+    out = normalize_control(srv, rd, "inject_node", data)
+    EventStore(rd / "events.jsonl").append("inject_node", out)
+    return out
+
+
+def _injected(rd: Path, files: dict) -> int:
+    nodes = fold(EventStore(rd / "events.jsonl").read_all()).nodes
+    return next(n.id for n in nodes.values() if n.operator == "manual" and n.files == files)
+
+
+def test_a_real_merge_becomes_git_parents_and_an_ensemble_only_a_trailer(tmp_path):
+    """Merge parents, honestly. An agent that ran `git merge nodes/nB` in a worktree from `node:A`
+    and injected it: the attempt commit's parents are [base, A, B], each verified in the worktree's
+    history, so `git merge` of that node elsewhere knows both are merged. A node that only NAMES
+    several parents (an ensemble, a merge operator, an inject with `parent_ids`) keeps ONE git
+    parent and names the others in `Looplab-Co-Parents` — a synthesized merge would tell git the
+    other branch is merged when its change may have been dropped."""
+    from fastapi import HTTPException
+    _, task = _repo_task(tmp_path)
+    rd = tmp_path / "run"
+    store = EventStore(rd / "events.jsonl")
+    one = {"recipe.env": "SEED=2\n"}
+    two = {"train.py": "print('LR: 0.03')\nprint('Batch: 32 (micro=8)')\n"}
+    for files in (one, two):
+        store.append("inject_node", {"idea": {"operator": "manual", "params": {}}, "files": files})
+    anyio.run(_engine(tmp_path, task, max_nodes=3).run)
+    a, b = _injected(rd, one), _injected(rd, two)
+    code = CodeRepo(rd)
+    base = code.rev(BASE_BRANCH)
+    a_commit, b_commit = code.rev(f"refs/heads/nodes/n{a}"), code.rev(f"refs/heads/nodes/n{b}")
+    wt = Path(add_worktree(rd, "merger", start=f"node:{a}")["path"])
+    _git(wt, "merge", "-q", "--no-edit", f"nodes/n{b}")
+    merge_head = _git(wt, "rev-parse", "HEAD").strip()
+    store.append("run_reopened", {})
+    store.append("budget_extend", {"add_nodes": 2})
+    with pytest.raises(HTTPException) as forged:          # server-stamped, never submitted
+        _inject(rd, {"idea": {"operator": "manual"}, "code_from": {"worktree": "merger"},
+                     "code_commit": a_commit})
+    assert forged.value.detail["code"] == "code_commit_forged"
+    sent = _inject(rd, {"idea": {"operator": "manual", "params": {}},
+                        "code_from": {"worktree": "merger"}, "parent_ids": [a, b]})
+    assert sent["code_commit"] == merge_head and "code_from" not in sent
+    both = {**one, **two}
+    assert sent["files"] == both
+    ensemble = {"recipe.env": "SEED=4\n"}
+    store.append("inject_node", {"idea": {"operator": "manual", "params": {}}, "files": ensemble,
+                                 "parent_ids": [a, b]})
+    anyio.run(_engine(tmp_path, task, max_nodes=3).run)
+    c, d = _injected(rd, both), _injected(rd, ensemble)
+    created = [e.data for e in store.read_all() if e.type == "node_created"
+               and e.data["node_id"] == c]
+    assert created[0]["code_commit"] == merge_head
+    rows = {e.data["node_id"]: e.data for e in store.read_all() if e.type == "code_snapshot"}
+    c_commit, d_commit = rows[c]["commit"], rows[d]["commit"]
+    assert code.commit_parents(c_commit) == [base, a_commit, b_commit]
+    assert [m["node_id"] for m in rows[c]["merge_parents"]] == [a, b]
+    for parent in (a_commit, b_commit):
+        assert code.git("merge-base", "--is-ancestor", parent, c_commit,
+                        check=False).returncode == 0
+    # A fresh worktree from the base: merging that node brings BOTH changes, as git understands it.
+    fresh = Path(add_worktree(rd, "fresh")["path"])
+    _git(fresh, "merge", "-q", "--no-edit", f"nodes/n{c}")
+    assert (fresh / "recipe.env").read_text() == "SEED=2\n"
+    assert (fresh / "train.py").read_text().startswith("print('LR: 0.03')")
+    # ... and from node A it is a fast-forward: A is already in it.
+    side = Path(add_worktree(rd, "side", start=f"node:{a}")["path"])
+    assert "Fast-forward" in _git(side, "merge", "--no-edit", f"nodes/n{c}")
+    # The ensemble: one git parent, the co-parent named — with the commit the log recorded.
+    assert code.commit_parents(d_commit) == [base]
+    message = code.git("log", "-1", "--format=%B", d_commit).stdout.decode()
+    assert f"Looplab-Co-Parents: n{b}={b_commit}\n" in message, message
+    assert rows[d]["co_parents"] == [{"node_id": b, "commit": b_commit}]
+    assert "merge_parents" not in rows[d]
+    # A worktree started on that real merge still diffs against its FIRST parent's base.
+    assert overlay_from_worktree(rd, "side")["overlay_base"] == base

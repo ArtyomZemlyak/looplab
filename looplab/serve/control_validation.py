@@ -1202,6 +1202,10 @@ def _apply_code_from(ctx: _ControlIntake) -> None:
         status = 503 if exc.code.startswith("git_") else 400
         raise HTTPException(status, {"code": exc.code, "message": str(exc)}) from exc
     data["files"], data["deleted"] = overlay["files"], overlay["deleted"]
+    if isinstance(overlay.get("head_commit"), str):
+        # SERVER-STAMPED (2026-10-16): the worktree history a real `git merge` left, read by the
+        # attempt commit's merge parents. A submitted one is refused in `_normalize_inject_node`.
+        data["code_commit"] = overlay["head_commit"]
 
 
 def _normalize_inject_node(ctx: _ControlIntake) -> dict:
@@ -1216,6 +1220,11 @@ def _normalize_inject_node(ctx: _ControlIntake) -> dict:
             "remediation": ("seed from another run with source_run/source_node and let the server "
                             "record where it came from"),
         })
+    if "code_commit" in data:
+        # Server-derived like `origin`: it names node commits as REAL merge parents of the attempt,
+        # so a caller that supplies one claims a merge it did not make.
+        raise HTTPException(400, {"code": "code_commit_forged", "message":
+                                  "code_commit is stamped by the server from code_from.worktree"})
     if data.get("source_run") and data.get("source_node") is not None:
         _import_cross_run_source(ctx)
     if "code_from" in data:
