@@ -241,14 +241,19 @@ class _ControlIntake:
     place) must write the new dict back through `ctx.data` before calling another helper.
     """
 
-    __slots__ = ("srv", "rd", "event_type", "data", "agent_token", "_state", "_tail_seq")
+    __slots__ = ("srv", "rd", "event_type", "data", "agent_token", "code_from_overlay", "_state",
+                 "_tail_seq")
 
-    def __init__(self, srv, rd: Path, event_type: str, data: dict, *, agent_token: bool = False):
+    def __init__(self, srv, rd: Path, event_type: str, data: dict, *, agent_token: bool = False,
+                 code_from_overlay=None):
         self.srv = srv
         self.rd = rd
         self.event_type = event_type
         self.data = data
         self.agent_token = bool(agent_token)
+        # `code_from` converted BEFORE the command sequencer (`_apply_code_from`): the overlay, the
+        # 4xx it was refused with, or None (convert here).
+        self.code_from_overlay = code_from_overlay
         self._state = None
         self._tail_seq = None
 
@@ -1159,48 +1164,39 @@ def _check_inject_question(ctx: _ControlIntake, question_id: Optional[str]) -> N
         })
 
 
-_CODE_FROM_SOURCES = frozenset({"worktree", "patch", "git"})
-
-
-def _code_from_git(rd: Path, git) -> dict:
-    """`code_from: {"git": {...}}` — a foreign repository's branch merged onto the run's base
-    (`engine/code_foreign.py`). Its one refusal of its own SHAPE is the conflict: 409 with the
-    paths, so an agent resolves exactly those; every other refusal is the shared mapping."""
-    from looplab.engine.code_foreign import OverlayConflict, overlay_from_git
-    try:
-        return overlay_from_git(rd, git)
-    except OverlayConflict as exc:
-        raise HTTPException(409, {"code": exc.code, "message": str(exc),
-                                  "paths": exc.paths}) from exc
-
-
 def _apply_code_from(ctx: _ControlIntake) -> None:
-    """Doc 79: turn `code_from` — a LoopLab-provided worktree or a unified patch against the run's
-    active base — into the `files`/`deleted` overlay every other inject carries, held to the task's
-    edit surface (`engine/code_worktree.py`). Consumed here; never written to the event."""
+    """Doc 79: turn `code_from` — a LoopLab-provided worktree, a unified patch against the run's
+    active base or a foreign branch merged onto it — into the `files`/`deleted` overlay every other
+    inject carries, held to the task's edit surface. Consumed here; never written to the event.
+
+    The conversion and its refusals are `serve/code_from.py::compute_overlay`, the same one the
+    `/code/overlay` preview runs. The command service computes it BEFORE taking the run's command
+    sequencer (a foreign fetch can take minutes) and hands it in as `ctx.code_from_overlay` — the
+    overlay, or the 4xx it was refused with — so only the base check is repeated here, under the
+    lock, against the log as it is NOW (the base may have advanced in between)."""
+    from looplab.engine.code_repo import CodeRepoError
+    from looplab.serve.code_from import code_http_error, compute_overlay, require_current_base
+    from looplab.serve.protocol import code_from_shape_error
     data = ctx.data
     spec = data.pop("code_from")
-    if not isinstance(spec, dict) or len(_CODE_FROM_SOURCES & set(spec)) != 1 or (
-            set(spec) - _CODE_FROM_SOURCES - {"start"}):
-        raise HTTPException(400, {"code": "code_from_invalid", "message":
-                                  "code_from must be {\"worktree\": name}, {\"patch\": text, \"start\"?: "
-                                  "\"base\"|\"node:<id>\"} or {\"git\": {\"repo\": path, \"ref\": "
-                                  "branch|commit}}"})
-    if data.get("files") or data.get("deleted"):
+    problem = code_from_shape_error(spec)
+    if problem:
+        raise HTTPException(400, {"code": "code_from_invalid", "message": problem})
+    # `code` too (review 2026-10-16): the composite refused it beside code_from, the intake did not.
+    if data.get("files") or data.get("deleted") or data.get("code"):
         raise HTTPException(400, {"code": "code_from_conflict", "message":
-                                  "give either code_from or files/deleted, not both"})
-    from looplab.engine.code_repo import CodeRepoError
-    from looplab.engine.code_worktree import overlay_from_patch, overlay_from_worktree
-    try:
-        if "worktree" in spec:
-            overlay = overlay_from_worktree(ctx.rd, spec["worktree"])
-        elif "git" in spec:
-            overlay = _code_from_git(ctx.rd, spec["git"])
-        else:
-            overlay = overlay_from_patch(ctx.rd, spec["patch"], start=str(spec.get("start") or "base"))
-    except CodeRepoError as exc:
-        status = 503 if exc.code.startswith("git_") else 400
-        raise HTTPException(status, {"code": exc.code, "message": str(exc)}) from exc
+                                  "give either code_from or files/code/deleted, not both"})
+    computed = ctx.code_from_overlay
+    if isinstance(computed, HTTPException):
+        raise computed
+    if isinstance(computed, dict):
+        overlay = computed
+        try:
+            require_current_base(ctx.rd, overlay)
+        except (CodeRepoError, OSError) as exc:
+            raise code_http_error(exc) from exc
+    else:
+        overlay = compute_overlay(ctx.rd, spec, agent_token=ctx.agent_token)
     data["files"], data["deleted"] = overlay["files"], overlay["deleted"]
     if isinstance(overlay.get("head_commit"), str):
         # SERVER-STAMPED (2026-10-16): the worktree history a real `git merge` left, read by the
@@ -2759,12 +2755,14 @@ def _external_mode_restriction(rd: Path, event_type: str, data: dict, *,
         raise agent_refused
 
 
-def normalize_control(srv, rd: Path, event_type: str, data, *, agent_token: bool = False) -> dict:
+def normalize_control(srv, rd: Path, event_type: str, data, *, agent_token: bool = False,
+                      code_from_overlay=None) -> dict:
     """Validate/normalize one control payload for both /control and /commands.
 
     The common preamble and tail serve every registered ControlSpec. External mode restrictions
     apply before the event-specific normalizer — and again over what it made of the payload — and
-    before any durable append.
+    before any durable append. `code_from_overlay` is an inject's `code_from` already converted
+    outside the run's command sequencer (`_apply_code_from`).
     """
     spec = CONTROL_SPECS.get(event_type)
     if spec is None:
@@ -2781,7 +2779,8 @@ def normalize_control(srv, rd: Path, event_type: str, data, *, agent_token: bool
     _external_mode_restriction(rd, event_type, data, agent_token=agent_token)
 
     if spec.normalize is not None:
-        data = spec.normalize(_ControlIntake(srv, rd, event_type, data, agent_token=agent_token))
+        data = spec.normalize(_ControlIntake(srv, rd, event_type, data, agent_token=agent_token,
+                                             code_from_overlay=code_from_overlay))
         # …and AGAIN over what the normalizer made of it (critic crit_v60 F3, driven): an import's
         # `{source_run, source_node}` reads as ready-made above, and the import then resolves it into
         # the node it WILL carry — for a source node reset from `implement`, no code and no files,

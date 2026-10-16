@@ -1,5 +1,6 @@
 """Bounded journal reads which retain quarantine and non-absence I/O failures."""
 from pathlib import Path
+from typing import Optional
 
 import orjson
 from fastapi import HTTPException
@@ -38,6 +39,55 @@ _RECEIPT_FIELDS = {"generation": str, "run_uid": str, "phase_id": str,
                    "reason": str, "action_id": str}
 
 
+def shape_checked(rows: list[dict], health: dict, predicate) -> list[dict]:
+    """The ONE shape rule of every harness journal reader: the rows `predicate` accepts, and the
+    health made INCOMPLETE by any it drops.
+
+    A JSON object a shape check drops may be the very action a retry is about to repeat (its
+    action_id, its version, its arm binding): absence among the VALID rows proves nothing, so a
+    writer that trusted them appended `version 1` past damaged history (review 2026-10-15,
+    weekly-journal-shape-health). Display may keep the accepted rows; a writer refuses through
+    `history_incomplete` until the journal is recovered.
+    """
+    valid = [row for row in rows if predicate(row)]
+    health["invalid_record_rows"] = len(rows) - len(valid)
+    health["read_complete"] &= len(valid) == len(rows)
+    return valid
+
+
+def first_damaged_line(path: Path, predicate=None) -> Optional[int]:
+    """The 1-based line number of the first non-blank line of `path` that is not a JSON object
+    (or that `predicate` refuses), None when every line reads. Only on the refusal path: it names
+    the line an operator fixes, because the 503 used to name the file alone."""
+    try:
+        raw = path.read_bytes()
+    except OSError:
+        return None
+    for number, line in enumerate(raw.split(b"\n"), start=1):
+        if not line.strip():
+            continue
+        try:
+            row = orjson.loads(line)
+        except orjson.JSONDecodeError:
+            return number
+        if not isinstance(row, dict) or (predicate is not None and not predicate(row)):
+            return number
+    return None
+
+
+def history_incomplete(path: Path, source: str, predicate=None, **extra) -> HTTPException:
+    """The 503 a writer raises over an incomplete journal: the file AND the first damaged line,
+    and what the operator does about it. No reader here quarantines or rewrites a journal — it is
+    the operator's append-only record, so the operator repairs (or removes) that one line."""
+    line = first_damaged_line(path, predicate)
+    where = f"{source} line {line}" if line is not None else source
+    return HTTPException(503, {
+        "code": "harness_history_incomplete", "source": source, "line": line,
+        "message": f"{where} is not a readable record of this journal",
+        "remediation": (f"ask the operator to fix or delete {where} (append-only JSONL: one JSON "
+                        "object per line), then retry with the same action_id"), **extra})
+
+
 def receipt_records(rows: list[dict], health: dict, *, decisions: bool) -> list[dict]:
     """Shared display/write shape contract; bool is never an integer stamp.
 
@@ -45,12 +95,12 @@ def receipt_records(rows: list[dict], health: dict, *, decisions: bool) -> list[
     acknowledgement readers must refuse that incomplete source, because a skipped
     record could be the original action or a conflicting use of its identity.
     """
+    return shape_checked(rows, health, receipt_predicate(decisions=decisions))
+
+
+def receipt_predicate(*, decisions: bool):
     fields = {**_RECEIPT_FIELDS, **({"idea_sha256": str} if decisions else {})}
-    valid = [row for row in rows if all(type(row.get(key)) is value
-                                       for key, value in fields.items())]
-    health["invalid_record_rows"] = len(rows) - len(valid)
-    health["read_complete"] &= len(valid) == len(rows)
-    return valid
+    return lambda row: all(type(row.get(key)) is value for key, value in fields.items())
 
 
 def read_receipts(path: Path, *, decisions: bool) -> list[dict]:
@@ -62,8 +112,7 @@ def read_receipts(path: Path, *, decisions: bool) -> list[dict]:
     rows, health = read_source(path)
     rows = receipt_records(rows, health, decisions=decisions)
     if not health["read_complete"]:
-        raise HTTPException(503, {"code": "harness_history_incomplete", "source": path.name,
-                                  "message": "ask the operator to recover the journal before retrying"})
+        raise history_incomplete(path, path.name, receipt_predicate(decisions=decisions))
     return rows
 
 
@@ -91,8 +140,7 @@ def read_knowledge_source(path: Path) -> list[dict]:
     """
     rows, health = read_source(path, max_bytes=64 * 1024 * 1024)
     if not health["read_complete"]:
-        raise HTTPException(503, {"code": "harness_history_incomplete", "source": path.name,
-                                  "source_health": health})
+        raise history_incomplete(path, path.name, source_health=health)
     return rows
 
 

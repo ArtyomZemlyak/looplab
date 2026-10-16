@@ -100,8 +100,15 @@ its code is a new change, not a merge git could vouch for. A `git` source (e.g. 
 source (git >= 2.38): your uncommitted edits stay, an overlap is `409 code_from_merge_conflict`
 naming the paths, and the reply warns how many base files the branch lacked. Your repository's refs,
 objects, config, index and hooks are never written. `POST /api/runs/{run_id}/code/overlay` (MCP
-`code_overlay`) previews what any of these becomes; paths outside the task's edit surface or
-protected files are refused, as in any inject.
+`code_overlay`) previews what any of these becomes, refused exactly as the inject would be
+(`serve/code_from.py`): paths outside the task's edit surface or protected files, an empty change
+(`code_from_empty`), a worktree whose directory is gone (`409 code_worktree_missing`), and a change
+made on a base an upstream advance has since moved under a path it also changed
+(`409 code_from_stale_base` naming the paths: `git merge base` in the worktree, then resubmit).
+`start` belongs to a patch only. With the scoped agent token `git.repo` must be the run's own
+source repository or a git worktree of it (`403 code_from_git_not_permitted`); the owner may name
+any repository. A rejected inject keeps the refusal's `paths` on its command record; a git
+timeout is a 503 with no record, so the same key retries.
 A worktree you have not submitted yet is in no event, so the log cannot rebuild it; on a tmpfs run
 root `looplab run-mirror` backs up its branch and uncommitted files as `code/agent_backup/`, and
 `looplab code-status --sync` (and nothing else) re-creates the worktree after a restore

@@ -103,6 +103,7 @@ _LAYOUT = {
     "agent_events": "serve",    # the external agent's wake-up outbox, long poll and notification hook
     "command_identity": "serve",
     "command_receipt": "serve",
+    "code_from": "serve",       # doc 79: the one code_from conversion (intake + overlay preview)
     "external_attention": "serve",
     "assistant_language": "serve",
     "result_notices": "serve",

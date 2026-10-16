@@ -190,7 +190,11 @@ A branch of your own — e.g. a Claude Code worktree branch of the operator's re
 goes in as `code_from: {"git": {"repo": "<absolute path>", "ref": "<branch>"}}`: LoopLab
 fetches it read-only and three-way merges it onto the run's base, so the operator's
 uncommitted edits are kept, an overlap is a 409 naming the paths, and a warning says how
-many base files your branch lacked. `{"patch": "<unified diff>"}` and `files=` still work.
+many base files your branch lacked; the repository must be the run's source repository or
+a worktree of it. If the run's base advanced under a path you changed, the submission is
+`409 code_from_stale_base`: `git merge base` in the worktree and resubmit. A REJECTED
+inject is its key's final outcome — fix the cause and resubmit under a NEW key.
+`{"patch": "<unified diff>"}` and `files=` still work.
 Every submission is held to the task's edit surface. `GET /api/runs/{run_id}/code` shows
 each attempt's commit and the effective hyperparameters LoopLab observed, with mismatches
 against the params you declared.

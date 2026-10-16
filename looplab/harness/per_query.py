@@ -45,7 +45,8 @@ from looplab.events.replay import fold
 from looplab.events.run_generation import run_generation_token
 from looplab.harness.campaign import (METRIC_RE, SLUG_RE, author_of, experiments_of,
                                       read_journal)
-from looplab.harness.journals import read_event_source, read_source
+from looplab.harness.journals import (history_incomplete, read_event_source, read_source,
+                                      shape_checked)
 from looplab.trust import paired
 
 PER_QUERY_DIR = "per_query"
@@ -56,6 +57,12 @@ CONSISTENCY_TOLERANCE = 1e-6
 
 
 _SEPARATORS = frozenset("\t\n")
+
+
+def _has_separator(label: str) -> bool:
+    """Whether a query/cluster label holds a delimiter of `test_id_for`'s serialization (TAB or
+    newline) — the ONE spelling `test_id_for` and the upload's `_labels` refusal both ask."""
+    return bool(_SEPARATORS.intersection(label))
 
 
 def manifest_path(rd: Path) -> Path:
@@ -70,7 +77,7 @@ def test_id_for(query_ids: list[str], clusters: list[str]) -> str:
     id and were paired by position (review 2026-10-15, weekly-shared-test-delimiters). Such a
     label is refused (`_labels`, a 400 at upload) rather than re-encoded: every id already issued
     for an unambiguous upload stays exactly what it was."""
-    if any(_SEPARATORS.intersection(x) for x in (*query_ids, *clusters)):
+    if any(_has_separator(x) for x in (*query_ids, *clusters)):
         raise ValueError("a query or cluster label may not contain a tab or a newline")
     lines = "\n".join(f"{q}\t{c}" for q, c in sorted(zip(query_ids, clusters)))
     return "qs1-" + hashlib.sha256(lines.encode("utf-8")).hexdigest()[:32]
@@ -138,7 +145,7 @@ def _labels(arrays: dict, name: str, n: Optional[int] = None) -> list[str]:
     if len(shape) != 1 or (n is not None and shape[0] != n):
         raise HTTPException(400, f"{name!r} must be a 1-D array with one label per query")
     labels = [str(v) for v in values]
-    if any(_SEPARATORS.intersection(label) for label in labels):
+    if any(_has_separator(label) for label in labels):
         # The test id's serialization delimits with TAB/newline (`test_id_for`): a label holding
         # one would make two different query sets one test.
         raise HTTPException(400, f"{name!r} labels may not contain a tab or a newline")
@@ -163,15 +170,14 @@ def _read_gz(path: Path) -> Any:
 
 def read_manifest(rd: Path) -> tuple[list[dict], dict]:
     rows, health = read_source(manifest_path(rd))
-    valid = [row for row in rows if isinstance(row.get("upload_id"), str)
-             and isinstance(row.get("test_id"), str) and isinstance(row.get("node_id"), int)]
-    health["invalid_record_rows"] = len(rows) - len(valid)
-    # A row this shape check drops may be the very upload a retry is about to repeat (its
-    # action_id, its arm binding): absence among the VALID rows proves nothing, so the history is
-    # not complete — the writer refuses with `harness_history_incomplete` until it is recovered,
-    # the rule `journals.receipt_records` keeps (review 2026-10-15, weekly-journal-shape-health).
-    health["read_complete"] &= len(valid) == len(rows)
-    return valid, health
+    # A dropped row may be the very upload a retry is about to repeat (its action_id, its arm
+    # binding): incomplete it is (`journals.shape_checked`); the writer refuses until recovered.
+    return shape_checked(rows, health, _manifest_row), health
+
+
+def _manifest_row(row: dict) -> bool:
+    return (isinstance(row.get("upload_id"), str) and isinstance(row.get("test_id"), str)
+            and isinstance(row.get("node_id"), int))
 
 
 def current_uploads(rows: list[dict], state=None) -> list[dict]:
@@ -201,6 +207,29 @@ def _measured(node, key: Optional[str]) -> Optional[float]:
     return value if math.isfinite(value) else None
 
 
+def _replayed_upload(rd: Path, body, source_sha: str) -> Optional[dict]:
+    """The original receipt of this exact upload (same run, action_id and request digest), when the
+    run is still the generation the caller names and the manifest reads completely; else None, and
+    the caller's refusal stands. Read-only and unlocked: the manifest is append-only."""
+    try:
+        events = read_event_source(rd)
+        if run_generation_token(events) != body.expected_generation.lower():
+            return None
+        run_uid = fold(events).run_uid
+        rows, health = read_manifest(rd)
+    except HTTPException:
+        return None
+    if not health["read_complete"] or not run_uid:
+        return None
+    digest = hashlib.sha256(orjson.dumps(body.request_payload(source_sha),
+                                         option=orjson.OPT_SORT_KEYS)).hexdigest()
+    for old in rows:
+        if (old.get("run_uid") == run_uid and old.get("action_id") == body.action_id
+                and old.get("request_sha256") == digest):
+            return {"ok": True, "replayed": True, "upload": old}
+    return None
+
+
 def publish_upload(srv, rd: Path, body, *, agent_token: bool) -> dict:
     """Validate, reduce and store one node's per-query arrays; idempotent on `action_id`."""
     from looplab.serve.control_validation import run_is_external
@@ -211,13 +240,23 @@ def publish_upload(srv, rd: Path, body, *, agent_token: bool) -> dict:
     raw = _upload_bytes(rd, body)
     source_sha = hashlib.sha256(raw).hexdigest()
     arrays = _arrays_from_payload(body.format, raw)
-    queries = _labels(arrays, body.query_key)
+    try:
+        queries = _labels(arrays, body.query_key)
+        clusters = (_labels(arrays, body.cluster_key, len(queries)) if body.cluster_key
+                    else list(queries))
+    except HTTPException:
+        # The label rule is newer than some accepted uploads (TAB/newline, 2026-10-15): a same-key
+        # retry of an upload accepted before it must replay that receipt, not 400 (review
+        # 2026-10-16). Looked up only on this refusal path, so an ordinary upload folds once.
+        replayed = _replayed_upload(rd, body, source_sha)
+        if replayed is not None:
+            return replayed
+        raise
     n = len(queries)
     if not 2 <= n <= MAX_QUERIES:
         raise HTTPException(400, f"an upload holds 2..{MAX_QUERIES} queries")
     if len(set(queries)) != n:
         raise HTTPException(400, "query ids must be unique within an upload")
-    clusters = _labels(arrays, body.cluster_key, n) if body.cluster_key else list(queries)
     # A cluster-robust SE over ONE cluster is undefined (NaN): stored, it would make this response
     # and every later comparison/leaderboard over the test unrenderable as JSON. Refuse it here,
     # before anything is written — the cluster set is part of the test id, so every arm shares it.
@@ -313,8 +352,7 @@ def publish_upload(srv, rd: Path, body, *, agent_token: bool) -> dict:
             with interprocess_lock(Path(str(path) + ".lock"), required=True):
                 rows, health = read_manifest(rd)
                 if not health["read_complete"]:
-                    raise HTTPException(503, {"code": "harness_history_incomplete",
-                                              "source": f"{PER_QUERY_DIR}/{MANIFEST}"})
+                    raise history_incomplete(path, f"{PER_QUERY_DIR}/{MANIFEST}", _manifest_row)
                 request_digest = hashlib.sha256(orjson.dumps(
                     body.request_payload(source_sha), option=orjson.OPT_SORT_KEYS)).hexdigest()
                 for old in rows:

@@ -29,7 +29,7 @@ from fastapi import HTTPException
 from looplab.core.atomicio import append_jsonl_bytes_locked
 from looplab.events.eventstore import EventStoreLockError, interprocess_lock
 from looplab.harness.campaign import author_of, experiments_of, read_journal
-from looplab.harness.journals import read_source
+from looplab.harness.journals import history_incomplete, read_source, shape_checked
 from looplab.harness.per_query import (compare_experiment, read_manifest,
                                        shared_test_leaderboard)
 
@@ -44,10 +44,13 @@ def report_path(root: Path, supertask_id: str) -> Path:
     return Path(root) / REPORT_DIR / f"{supertask_id}.jsonl"
 
 
+def _narrative_row(row: dict) -> bool:
+    return isinstance(row.get("revision"), int) and isinstance(row.get("body_markdown"), str)
+
+
 def narrative_versions(root: Path, supertask_id: str) -> list[dict]:
-    rows, _health = read_source(report_path(root, supertask_id))
-    return [row for row in rows if isinstance(row.get("revision"), int)
-            and isinstance(row.get("body_markdown"), str)]
+    rows, health = read_source(report_path(root, supertask_id))
+    return shape_checked(rows, health, _narrative_row)         # display keeps the readable rows
 
 
 def publish_narrative(root: Path, supertask_id: str, body, *, agent_token: bool,
@@ -62,10 +65,11 @@ def publish_narrative(root: Path, supertask_id: str, body, *, agent_token: bool,
         path.parent.mkdir(parents=True, exist_ok=True)
         with interprocess_lock(Path(str(path) + ".lock"), required=True):
             rows, health = read_source(path)
+            # The SHAPE check downgrades the health too (`journals.shape_checked`): a dropped row
+            # may be the revision this action_id already published (review 2026-10-16, A5).
+            versions = shape_checked(rows, health, _narrative_row)
             if not health["read_complete"]:
-                raise HTTPException(503, {"code": "harness_history_incomplete",
-                                          "source": f"{REPORT_DIR}/{path.name}"})
-            versions = [r for r in rows if isinstance(r.get("revision"), int)]
+                raise history_incomplete(path, f"{REPORT_DIR}/{path.name}", _narrative_row)
             request = {"title": body.title, "body_markdown": text,
                        "key_findings": list(body.key_findings),
                        "expected_revision": body.expected_revision}

@@ -50,7 +50,8 @@ from looplab.core.atomicio import append_jsonl_bytes_locked, atomic_write_bytes,
 from looplab.events.eventstore import EventStoreLockError, interprocess_lock
 from looplab.events.replay import fold
 from looplab.events.run_generation import run_generation_token
-from looplab.harness.journals import read_event_source, read_source
+from looplab.harness.journals import (history_incomplete, read_event_source, read_source,
+                                      shape_checked)
 
 JOURNAL = "protocol_amendments.jsonl"
 POLICY = "harness_policy.json"
@@ -84,15 +85,19 @@ def author_of(agent_token: bool) -> dict:
 def read_journal(rd: Path) -> tuple[list[dict], dict]:
     """All rows (shape-checked) plus the source health; a missing file is an empty protocol."""
     rows, health = read_source(journal_path(rd))
-    valid = [row for row in rows if isinstance(row.get("amendment_id"), str)
-             and row.get("kind") in AMENDMENT_KINDS and isinstance(row.get("version"), int)]
-    health["invalid_record_rows"] = len(rows) - len(valid)
-    # A JSON object this shape check drops may be an earlier amendment (its action_id, its
-    # version): a writer that trusted the VALID rows appended `version 1` past damaged history.
-    # Incomplete it is, as `journals.receipt_records` rules (review 2026-10-15,
-    # weekly-journal-shape-health); `publish_amendment` refuses until the journal is recovered.
-    health["read_complete"] &= len(valid) == len(rows)
-    return valid, health
+    # A dropped row may be an earlier amendment (its action_id, its version): incomplete it is
+    # (`journals.shape_checked`); `publish_amendment` refuses until the journal is recovered.
+    return shape_checked(rows, health, _journal_row), health
+
+
+def _journal_row(row: dict) -> bool:
+    return (isinstance(row.get("amendment_id"), str) and row.get("kind") in AMENDMENT_KINDS
+            and isinstance(row.get("version"), int))
+
+
+def journal_incomplete(rd: Path) -> HTTPException:
+    """The 503 naming the journal's first damaged line (`journals.history_incomplete`)."""
+    return history_incomplete(journal_path(rd), JOURNAL, _journal_row)
 
 
 def experiments_of(rows: list[dict], run_uid: Optional[str] = None) -> dict[str, dict]:
@@ -355,6 +360,40 @@ def normalize_experiment(raw: Any, *, root: Optional[Path] = None) -> dict:
     return exp
 
 
+# What a re-filed declaration must AGREE on to count as the registered one (`same_declaration`):
+# the statistics and the design. Strict equality of the whole stored payload refused a legitimate
+# second candidate over a row an older `normalize_experiment` wrote (a default key added or gone)
+# or over a cosmetic title/notes/description edit (review 2026-10-16). `primary_metric` is kept: it
+# picks the default contrast metric and what a report leads with.
+DECLARATION_FIELDS = ("hypothesis", "arms", "tests", "metrics", "primary_metric", "contrasts",
+                      "correction", "alpha", "ci", "bootstrap_replicates", "supersedes")
+
+
+def _declaration_substance(exp: dict) -> dict:
+    def plain(rows):
+        return ({k: v for k, v in row.items() if k != "description"} if isinstance(row, dict)
+                else row for row in rows)
+    out = {field: exp.get(field) for field in DECLARATION_FIELDS}
+    if isinstance(out["arms"], dict):
+        out["arms"] = dict(zip(out["arms"], plain(out["arms"].values())))
+    for field in ("tests", "metrics"):
+        if isinstance(out[field], list):
+            out[field] = list(plain(out[field]))
+    return out
+
+
+def same_declaration(saved: dict, proposed: dict) -> bool:
+    """Whether `proposed` (already normalized) declares the registered experiment `saved`: both
+    through the CURRENT `normalize_experiment` where the stored row still validates, then compared
+    on `DECLARATION_FIELDS` without descriptions."""
+    try:
+        saved = normalize_experiment(saved)
+    except HTTPException:
+        pass                       # an older row the current rules refuse: compared as stored
+    return (_canonical(_declaration_substance(saved))
+            == _canonical(_declaration_substance(proposed)))
+
+
 # ----------------------------------------------------------------------------------- the writer
 def _canonical(value) -> bytes:
     return orjson.dumps(value, option=orjson.OPT_SORT_KEYS)
@@ -418,7 +457,7 @@ def publish_amendment(srv, rd: Path, body, *, agent_token: bool) -> dict:
             with interprocess_lock(Path(str(path) + ".lock"), required=True):
                 rows, health = read_journal(rd)
                 if not health["read_complete"]:
-                    raise HTTPException(503, {"code": "harness_history_incomplete", "source": JOURNAL})
+                    raise journal_incomplete(rd)
                 request_digest = hashlib.sha256(_canonical(body.request_payload())).hexdigest()
                 for old in rows:
                     if old.get("run_uid") == state.run_uid and old.get("action_id") == body.action_id:
@@ -445,7 +484,7 @@ def publish_amendment(srv, rd: Path, body, *, agent_token: bool) -> dict:
                             # second candidate under the same experiment may proceed; one whose
                             # hypothesis/arms/correction differ may not (weekly-registration-
                             # conflict) — the registration stays immutable either way.
-                            "same_declaration": saved == exp,
+                            "same_declaration": same_declaration(saved, exp),
                             "message": (f"experiment {exp['experiment_id']!r} is already registered "
                                         "and a registration is immutable"),
                             "remediation": ("register a new experiment_id with supersedes="
@@ -494,11 +533,17 @@ def _mount_path(spec) -> Optional[str]:
     return os.path.expanduser(os.path.expandvars(path)) if isinstance(path, str) else None
 
 
+# The fingerprint's VERSION. `lfp2` (2026-10-16) hashes a directory LINK by its target, which `lfp1`
+# never saw, so the two digest the same tree differently: a fingerprint of another method is NOT
+# COMPARABLE (`data_content_incomparable`), never evidence that the data changed.
+FINGERPRINT_METHOD = "lfp2"
+
+
 def content_fingerprint(path: Optional[str]) -> dict:
     """`{method, digest, files, bytes, hashed_bytes, sampled_files, truncated, missing}` for the file
     or directory tree at `path` (a link at the ROOT is followed — it is the declared mount; links
     inside a tree are recorded by target, never followed)."""
-    out = {"method": "lfp1", "digest": None, "files": 0, "bytes": 0, "hashed_bytes": 0,
+    out = {"method": FINGERPRINT_METHOD, "digest": None, "files": 0, "bytes": 0, "hashed_bytes": 0,
            "sampled_files": 0, "truncated": False, "missing": False}
     if not path or not os.path.exists(path):
         out["missing"] = True
@@ -677,9 +722,13 @@ def _apply_task_amendment(rd: Path, changes) -> tuple[dict, Any]:
                               "after": content_fingerprint(_mount_path(spec))}
     for name in data_remove:
         data_content[name] = {"before": previous.get(name), "after": None}
-    refreshed = [n for n in data_refresh
-                 if (data_content[n]["before"] or {}).get("digest")
-                 != data_content[n]["after"].get("digest")]
+    refreshed, incomparable = [], []
+    for n in data_refresh:
+        before, after = data_content[n]["before"] or {}, data_content[n]["after"]
+        if before.get("digest") and before.get("method") != after.get("method"):
+            incomparable.append(n)       # two fingerprint versions: no verdict either way
+        elif before.get("digest") != after.get("digest"):
+            refreshed.append(n)
     if not diff and not data_refresh:
         raise HTTPException(400, "the task changes leave the task unchanged")
     if diff:
@@ -696,6 +745,8 @@ def _apply_task_amendment(rd: Path, changes) -> tuple[dict, Any]:
     if data_content:
         out["data_content"] = data_content
         out["data_content_changed"] = refreshed
+        if incomparable:
+            out["data_content_incomparable"] = incomparable
     return (out, undo)
 
 
@@ -880,7 +931,7 @@ def _publish_budget(srv, rd: Path, body, *, agent_token: bool) -> dict:
     request_digest = hashlib.sha256(_canonical(body.request_payload())).hexdigest()
     rows, health = read_journal(rd)
     if not health["read_complete"]:
-        raise HTTPException(503, {"code": "harness_history_incomplete", "source": JOURNAL})
+        raise journal_incomplete(rd)
     events = read_event_source(rd)
     state = fold(events)
     for old in rows:

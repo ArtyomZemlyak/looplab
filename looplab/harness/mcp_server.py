@@ -135,8 +135,11 @@ class HarnessAPI:
             return self._read_refusal("generation_mismatch", mismatch=True)
         return result
 
-    def _result(self, response: httpx.Response, *, method: str = "GET") -> dict:
-        write = method != "GET"
+    def _result(self, response: httpx.Response, *, method: str = "GET",
+                read_only: bool = False) -> dict:
+        # `read_only`: a POST that writes nothing the caller must recover (the code overlay
+        # preview) reads a 5xx as unavailable, never as an unknown write outcome (review 2026-10-16).
+        write = method != "GET" and not read_only
         if len(response.content) > MAX_RESPONSE_BYTES:
             result = {"status": response.status_code, "truncated": True, "bytes": len(response.content)}
             if write and (200 <= response.status_code < 300 or response.status_code >= 500):
@@ -231,7 +234,7 @@ class HarnessAPI:
         return {"path": route, "operations": operations, "components": needed}
 
     def request(self, method: str, path: str, body: dict | None = None,
-                idempotency_key: str = "") -> dict:
+                idempotency_key: str = "", *, read_only: bool = False) -> dict:
         verb = method.upper()
         if verb not in ("GET", "POST", "PUT", "PATCH", "DELETE"):
             raise ValueError("unsupported HTTP method")
@@ -282,12 +285,12 @@ class HarnessAPI:
         except httpx.TransportError:
             # Never echo transport exception text: it may contain sensitive URLs.
             # Even a timeout after sending a write can hide an accepted command.
-            if verb == "GET":
+            if verb == "GET" or read_only:
                 return {"status": None, "code": "api_unreachable", "outcome": "unavailable",
                         "message": "API read response unavailable. Check the UI/server and read again explicitly; missing evidence does not prove no action occurred."}
             result = self._unknown_write({"status": None}, "transport_error")
         else:
-            result = self._result(response, method=verb)
+            result = self._result(response, method=verb, read_only=read_only)
         return {**result, "client_request": saved} if saved is not None else result
 
     def wait_for_next(self, after: int | None = None, timeout_s: float = 120.0,
@@ -827,11 +830,12 @@ def build_server(api: HarnessAPI):
         phase = phase_detail(phase_id)
         if phase is None:
             return {"error": "unknown phase", "phase_id": phase_id}
-        from looplab.serve.protocol import (CONTROL_DATA_FIELDS,
-                                           CONTROL_SERVER_DERIVED_FIELDS)
+        from looplab.serve.protocol import control_request_fields, control_server_fields
         phase["commands"] = {
-            name: {"request_fields": sorted(CONTROL_DATA_FIELDS[name]),
-                   "server_derived": sorted(CONTROL_SERVER_DERIVED_FIELDS.get(name, ())) }
+            # Stamped fields (`origin`, `code_commit`) are server-side: offered as request fields
+            # they were refused at intake as forged (review 2026-10-16).
+            name: {"request_fields": sorted(control_request_fields(name)),
+                   "server_derived": sorted(control_server_fields(name))}
             for ref in phase["writes"] if ref.startswith("command:")
             for name in (ref.removeprefix("command:"),)
         }
@@ -1249,16 +1253,18 @@ def _campaign_tools(mcp, api, ToolAnnotations) -> None:
         """Preview what a submission's code becomes — exactly one of worktree=name, patch=diff
         (against start) or git={"repo": abs path, "ref": branch|commit} (a foreign branch, e.g. a
         Claude Code worktree branch, fetched read-only and three-way merged onto the run's base;
-        overlapping edits are a 409 naming the paths). Returns changed/deleted paths with sizes,
-        stale_base and warnings (e.g. "your branch lacks N uncommitted files of the source").
-        Submits nothing; writes only run-private git objects."""
+        overlapping edits are a 409 naming the paths; git.repo must be the run's source repository
+        or a worktree of it). Returns changed/deleted paths with sizes, stale_base and warnings.
+        Refused like the submission: an empty change, a base advanced under changed paths (409
+        code_from_stale_base: `git merge base`). Submits nothing; writes only run-private objects."""
         body: dict = {"expected_generation": expected_generation, "include_files": False}
         for field, value in (("worktree", worktree), ("patch", patch), ("git", git)):
             if value is not None:
                 body[field] = value
         if patch is not None:
-            body["start"] = start
-        return api.request("POST", _code_path(run_id, expected_generation, "overlay"), body)
+            body["start"] = start or "base"
+        return api.request("POST", _code_path(run_id, expected_generation, "overlay"), body,
+                           read_only=True)
 
     @mcp.tool()
     def finish_run(run_id: str, expected_generation: str, key: str, report: dict | None = None,

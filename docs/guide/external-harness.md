@@ -1012,8 +1012,8 @@ Existing journals use the same rule without a migration or a new digest field.
 
 A decision/review source must be complete before either an acknowledgement or a
 fresh write can be trusted. Malformed JSON, invalid UTF-8, non-object records or
-invalid receipt fields return HTTP 503 with `harness_history_incomplete` and the
-source filename. Candidate admission cannot use decisions from that damaged
+invalid receipt fields return HTTP 503 with `harness_history_incomplete`, the
+source filename and first damaged `line`. Candidate admission cannot use decisions from that damaged
 source; finish and configured review windows cannot use reviews from it.
 `harness-progress` remains readable with the accepted history, `complete=false`,
 `source_health` and `next_step.code=inspect_sources`. Its displayed due lists are

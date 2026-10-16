@@ -129,6 +129,24 @@ def _normalize_expected_generation(value: object) -> str:
     return value.lower()
 
 
+def _code_from_transient(event_type: str, exc: HTTPException) -> bool:
+    """An inject's `code_from` refused for a reason a retry of the SAME request can cure
+    (`serve/code_from.py::CODE_FROM_TRANSIENT_CODES`): answered as its 503, never recorded."""
+    from looplab.serve.code_from import CODE_FROM_TRANSIENT_CODES
+    detail = exc.detail
+    return (event_type == "inject_node" and exc.status_code >= 500 and isinstance(detail, dict)
+            and detail.get("code") in CODE_FROM_TRANSIENT_CODES)
+
+
+def _code_from_refusal_paths(detail: dict) -> Optional[list]:
+    """The bounded `paths` of a code_from refusal that names them, else None."""
+    from looplab.serve.code_from import CODE_FROM_PATH_CODES, MAX_REFUSAL_PATHS
+    paths = detail.get("paths")
+    if detail.get("code") not in CODE_FROM_PATH_CODES or not isinstance(paths, list):
+        return None
+    return [path[:1024] for path in paths[:MAX_REFUSAL_PATHS] if isinstance(path, str)]
+
+
 def _proc_stat_state(pid: int) -> Optional[str]:
     """The one-letter kernel state `/proc/<pid>/stat` reports, or None where it cannot be read."""
     if os.name == "nt":
@@ -2841,6 +2859,34 @@ class RunCommandService:
         return "reject", _error(refused["code"], refused["message"], refused["remediation"],
                                 retryable=bool(refused["retryable"]))
 
+    def _precompute_code_from(self, rd: Path, path: Path, event_type: str, raw_data: dict,
+                              expected: str, *, agent_token: bool):
+        """Convert an inject's `code_from` BEFORE the run's command sequencer is taken.
+
+        The conversion can fetch a foreign repository (`engine/code_foreign.py::_fetch`, up to 600 s)
+        and, inside `sequence`, held every other command of the run for that long (review
+        2026-10-16). It writes only the run's PRIVATE code repository, so it needs no sequencer; the
+        intake re-checks under the lock only what may have moved since (the active base,
+        `code_from.py::require_current_base`). Returns the overlay, the 4xx it was refused with (the
+        intake records that rejection exactly as it would have), or None — no code_from, a same-key
+        record already exists (it replays, nothing is converted), or the generation does not match
+        (refused under the lock before any conversion matters). A transient refusal (5xx) is raised
+        here: no durable record, so the same key retries."""
+        if event_type != "inject_node" or "code_from" not in raw_data:
+            return None
+        try:
+            if self._read_existing(path) is not None or self.run_generation(rd) != expected:
+                return None
+        except HTTPException:
+            return None                          # the sequenced path reports what is unreadable
+        from looplab.serve.code_from import compute_overlay
+        try:
+            return compute_overlay(rd, raw_data["code_from"], agent_token=agent_token)
+        except HTTPException as exc:
+            if exc.status_code >= 500:
+                raise
+            return exc
+
     def submit(self, rd: Path, idempotency_key: str, event_type: str, data,
                *, expected_generation: object = None, drain_only: object = None,
                agent_token: bool = False) -> dict:
@@ -2863,6 +2909,8 @@ class RunCommandService:
         # never be silently accepted just because a record happens to exist.
         expected = _normalize_expected_generation(expected_generation)
         path = self._path(rd, command_id)
+        code_from_overlay = self._precompute_code_from(rd, path, event_type, raw_data, expected,
+                                                       agent_token=agent_token)
 
         should_start = False
         synchronous = False
@@ -2921,7 +2969,8 @@ class RunCommandService:
                                if gate_field is not None else None)
                 try:
                     normalized_candidate = normalize_control(
-                        self.srv, rd, event_type, raw_data, agent_token=agent_token)
+                        self.srv, rd, event_type, raw_data, agent_token=agent_token,
+                        code_from_overlay=code_from_overlay)
                     if gate_field is not None:
                         gate_after = getattr(self.srv.state(rd), gate_field, None)
                         if (not isinstance(gate_before, int) or isinstance(gate_before, bool)
@@ -2935,6 +2984,10 @@ class RunCommandService:
                     _semantic_raw, semantic_candidate = self._payload(
                         event_type, normalized_candidate)
                 except HTTPException as exc:
+                    if _code_from_transient(event_type, exc):
+                        # A missing/timed-out git or unreadable code storage is not a verdict on
+                        # the command: no record, so the SAME key retries (review 2026-10-16).
+                        raise
                     normalization_error = exc
                 # Reload recovery is special for FINALIZE: the browser may have lost its generated
                 # key/command id, while the durable stop intent is still pending. Return the existing
@@ -3111,6 +3164,12 @@ class RunCommandService:
                                     and not isinstance(current_version, bool)
                                     and 1 <= current_version <= COMMENT_MAX_VERSION):
                                 safe_error["current_version"] = current_version
+                            # …and the bounded path list a code_from refusal names (a merge
+                            # conflict, a stale base): the paths the agent resolves, lost before
+                            # (review 2026-10-16).
+                            paths = _code_from_refusal_paths(detail)
+                            if paths is not None:
+                                safe_error["paths"] = paths
                             record["error"] = safe_error
                         else:
                             record["error"] = _error(

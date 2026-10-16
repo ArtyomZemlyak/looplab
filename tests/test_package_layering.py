@@ -119,7 +119,9 @@ DEFERRED: dict[tuple[str, str], str] = {
                            "per progress read",
     ("harness", "serve"): "`mcp_server.phase_info` describes a phase's command fields from the "
                           "UI-free protocol's canonical wire tables, per MCP call; "
-                          "`client_requests` derives a saved command's durable id per save",
+                          "`client_requests` derives a saved command's durable id per save; "
+                          "`composite.submit_experiment` checks a code_from with the shared "
+                          "vocabulary, per call",
     ("judgebench", "adapters"): "`bait` reads the MLE-bench extras at audit time",
     ("judgebench", "agents"): "the agent-trajectory ladder drives the real `drive_tool_loop` "
                               "inside one bench case (doc 27 §4 rungs 2/4/5); deferred so the "

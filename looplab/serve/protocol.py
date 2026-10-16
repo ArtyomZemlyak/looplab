@@ -489,6 +489,71 @@ CONTROL_SERVER_DERIVED_FIELDS: dict[str, frozenset[str]] = {
     # A declared edge is always `mode: authored`; the server says so, the author cannot.
     EV_CONCEPT_EDGE: frozenset({"mode"}),
 }
+# OPTIONAL keys the event carries that the server STAMPS and the intake refuses when a caller sends
+# one (`origin_forged`, `code_commit_forged`). They stay on the allow-list above only because the
+# normalizer writes them before its residual allow-list check (`control_validation.py::
+# _normalize_inject_node`), so phase_info must not offer them as request fields (review
+# 2026-10-16): `control_request_fields` is the request side, `control_server_fields` the server's.
+CONTROL_SERVER_STAMPED_FIELDS: dict[str, frozenset[str]] = {
+    EV_INJECT_NODE: frozenset({"origin", "code_commit"}),
+}
+assert all(CONTROL_SERVER_STAMPED_FIELDS[name] <= CONTROL_DATA_FIELDS[name]
+           for name in CONTROL_SERVER_STAMPED_FIELDS)
+
+
+def control_request_fields(event_type: str) -> frozenset[str]:
+    """What a CALLER may send for one control event: the allow-list less the stamped fields."""
+    return (CONTROL_DATA_FIELDS[event_type]
+            - CONTROL_SERVER_STAMPED_FIELDS.get(event_type, frozenset()))
+
+
+def control_server_fields(event_type: str) -> frozenset[str]:
+    """What the SERVER writes for one control event and a caller may not: derived + stamped."""
+    return (CONTROL_SERVER_DERIVED_FIELDS.get(event_type, frozenset())
+            | CONTROL_SERVER_STAMPED_FIELDS.get(event_type, frozenset()))
+
+
+# ---- doc 79 `code_from`: ONE vocabulary for the inject intake (`control_validation.py::
+# _apply_code_from`), the `/code/overlay` preview (`routers/upstream_ops.py`) and the harness
+# composite (`harness/composite.py::submit_experiment`), all through `code_from_shape_error`. Three
+# hand copies of this shape had drifted (review 2026-10-16): the intake accepted `start` beside a
+# worktree or a foreign branch and ignored it, and `{"patch": p, "start": None}` passed the intake
+# and was a 422 at the preview.
+CODE_FROM_SOURCES = ("worktree", "patch", "git")
+CODE_FROM_GIT_FIELDS = frozenset({"repo", "ref", "prefix"})
+CODE_FROM_SHAPE_MESSAGE = (
+    'code_from must be exactly one of {"worktree": name}, {"patch": text, "start"?: '
+    '"base"|"node:<id>"|<commit>} or {"git": {"repo": path, "ref": branch|commit, "prefix"?}}')
+
+
+def code_from_shape_error(spec) -> Optional[str]:
+    """What is wrong with a `code_from` value's SHAPE, or None. The server decides the rest."""
+    if not isinstance(spec, dict):
+        return CODE_FROM_SHAPE_MESSAGE
+    kinds = [kind for kind in CODE_FROM_SOURCES if kind in spec]
+    if len(kinds) != 1 or set(spec) - set(CODE_FROM_SOURCES) - {"start"}:
+        return CODE_FROM_SHAPE_MESSAGE
+    start = spec.get("start")
+    if start is not None and kinds[0] != "patch":
+        # A worktree carries the start it was made at; a foreign branch merges onto the run's base.
+        return f"start applies only to a patch, not to code_from.{kinds[0]}"
+    if start is not None and not (isinstance(start, str) and 0 < len(start) <= 80):
+        return "code_from.start must be 'base', 'node:<id>' or a commit id"
+    foreign = spec.get("git")
+    if kinds[0] == "git" and (not isinstance(foreign, dict) or not {"repo", "ref"} <= set(foreign)
+                              or set(foreign) - CODE_FROM_GIT_FIELDS):
+        return CODE_FROM_SHAPE_MESSAGE
+    return None
+
+
+def normalize_code_from(spec: dict) -> dict:
+    """The canonical form of a shape-checked `code_from`: a patch's absent/None start is `base`."""
+    kind = next(kind for kind in CODE_FROM_SOURCES if kind in spec)
+    out = {kind: spec[kind]}
+    if kind == "patch":
+        out["start"] = spec.get("start") or "base"
+    return out
+
 
 # Versioned collaboration takes the strict-CAS append (the retired compatibility /control route
 # refused these outright): the durable command protocol requires an idempotency key plus the exact

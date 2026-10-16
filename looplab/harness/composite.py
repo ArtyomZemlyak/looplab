@@ -31,13 +31,15 @@ from pathlib import Path
 from typing import Any, Optional
 from urllib.parse import quote
 
+from looplab.core.errors import ConfigRefusal
+
 MAX_UPLOAD_FILE_BYTES = 24 * 1024 * 1024
 _TERMINAL = {"succeeded", "noop", "failed", "rejected", "timed_out"}
 
 
 def _run_path(run_id: str, suffix: str = "") -> str:
     if not run_id or "/" in run_id or "\\" in run_id or run_id in (".", ".."):
-        raise ValueError("run_id must be one literal run identifier")
+        raise ConfigRefusal("run_id must be one literal run identifier")
     return f"/api/runs/{quote(run_id, safe='')}" + suffix
 
 
@@ -77,10 +79,16 @@ class _Steps:
 
     def done(self, *, message: str, **extra) -> dict:
         failed = next((s for s in self.steps if not s["ok"]), None)
+        if failed is not None and failed.get("code") == "command_rejected":
+            # A REJECTED command is its key's final outcome: the same key replays the rejection.
+            message = (f"stopped at {failed['step']}: the command was rejected — read its error, "
+                       "fix the cause and call again with a NEW key (completed steps under the old "
+                       "key stay recorded)")
+        elif failed is not None:
+            message = (f"stopped at {failed['step']}: read its receipt; repeat this call with the "
+                       "SAME key to resume (completed steps replay their original receipts)")
         return {"ok": failed is None, "stopped_at": failed["step"] if failed else None,
-                "steps": self.steps, "message": message if failed is None else (
-                    f"stopped at {failed['step']}: read its receipt; repeat this call with the SAME "
-                    "key to resume (completed steps replay their original receipts)"), **extra}
+                "steps": self.steps, "message": message, **extra}
 
 
 def _command(api, run_id: str, generation: str, event_type: str, data: dict, key: str, *,
@@ -107,19 +115,23 @@ def _command(api, run_id: str, generation: str, event_type: str, data: dict, key
     return out
 
 
-_CODE_FROM_KINDS = ("worktree", "patch", "git")
-
-
-def _code_from_shape(code_from) -> Optional[str]:
-    """What is wrong with a `code_from` value, or None. The server decides the rest; this only
-    keeps a malformed one from reaching the preview as a 422."""
-    if not isinstance(code_from, dict):
-        return "code_from must be an object"
-    kinds = [k for k in _CODE_FROM_KINDS if k in code_from]
-    if len(kinds) != 1 or set(code_from) - set(_CODE_FROM_KINDS) - {"start"}:
-        return ('code_from must be exactly one of {"worktree": name}, {"patch": text, "start"?} '
-                'or {"git": {"repo": path, "ref": branch|commit}}')
-    return None
+def _settled_inject_refusal(steps: "_Steps", record: dict, status: str) -> dict:
+    """A same-key resume whose inject already ended rejected/failed/timed_out: stop with ITS error.
+    The key cannot carry a second attempt — the same key and payload resolve to this record — so
+    the agent fixes the cause and submits under a NEW key (or, for a retryable failure, retries the
+    recorded command itself)."""
+    error = record.get("error") or record.get("error_code")
+    steps.steps.append({"step": "inject", "ok": False, "status": status, "replayed": True,
+                        "code": f"command_{status}", "id": record.get("id"), "error": error})
+    retryable = (status in ("failed", "timed_out") and isinstance(error, dict)
+                 and error.get("retryable") is True)
+    message = (f"this key's inject was already {status}; a command key is bound to its first "
+               "outcome, so repeating this call with the SAME key replays it. ")
+    message += (f"Its failure is retryable: POST /api/runs/<run>/commands/{record.get('id')}/retry "
+                "retries that exact command." if retryable else
+                "Read its error, fix the cause (e.g. merge the base and resolve the named paths), "
+                "then call again with a NEW key.")
+    return {"ok": False, "stopped_at": "inject", "steps": steps.steps, "message": message}
 
 
 def _preview_summary(result: dict) -> dict:
@@ -155,13 +167,16 @@ def submit_experiment(api, run_id: str, expected_generation: str, *, key: str, i
     dry run reports the paths the candidate would change. `parent_ids` names several parents — a
     worktree that ran `git merge nodes/n<id>` lists every node it combined — and is exclusive with
     `parent_id`."""
+    # The ONE code_from vocabulary the intake and the preview also read (UI-free; deferred, as
+    # every harness->serve edge is: `tests/test_package_layering.py::DEFERRED`).
+    from looplab.serve.protocol import code_from_shape_error, normalize_code_from
     steps = _Steps()
     if not isinstance(idea, dict) or not isinstance(idea.get("operator"), str):
-        raise ValueError("idea must be an object with an operator")
+        raise ConfigRefusal("idea must be an object with an operator")
     if not key or len(key) > 120:
-        raise ValueError("key must be a stable non-empty string of at most 120 characters")
+        raise ConfigRefusal("key must be a stable non-empty string of at most 120 characters")
     if parent_id is not None and parent_ids is not None:
-        raise ValueError("give parent_id or parent_ids, not both")
+        raise ConfigRefusal("give parent_id or parent_ids, not both")
     idea = dict(idea)
     progress = api.run_progress(run_id, expected_generation)
     if not steps.add("read_progress", progress):
@@ -182,8 +197,10 @@ def submit_experiment(api, run_id: str, expected_generation: str, *, key: str, i
     if code_from is not None:
         if files or code or deleted:
             missing.append("code_from OR files/code/deleted, not both")
-        elif _code_from_shape(code_from):
-            missing.append(_code_from_shape(code_from))
+        elif code_from_shape_error(code_from):
+            missing.append(code_from_shape_error(code_from))
+        else:
+            code_from = normalize_code_from(code_from)
     elif not (files or code or deleted):
         missing.append("code_from, or files or code (an external run evaluates ready-made "
                        "candidates; code_from={'worktree': name} is the default path)")
@@ -201,15 +218,23 @@ def submit_experiment(api, run_id: str, expected_generation: str, *, key: str, i
         # the agent has edited since (or a base that has moved): the preview is skipped then.
         prior = (None if dry_run else
                  api.command_receipt(run_id, expected_generation, idempotency_key=f"{key}:inject"))
-        landed = bool(prior) and _ok(prior) and isinstance(
-            (prior.get("body") or {}).get("command"), dict)
-        if landed:
+        record = (prior.get("body") or {}).get("command") if prior and _ok(prior) else None
+        status = record.get("status") if isinstance(record, dict) else None
+        if status in ("rejected", "failed", "timed_out"):
+            # NOT landed (review 2026-10-16): a same-key retry would skip the preview and replay
+            # this receipt forever — a durable command key is bound to its first outcome, and the
+            # same key with the same payload resolves to that record (`run_commands.py::submit`).
+            return _settled_inject_refusal(steps, record, status)
+        if isinstance(record, dict):
             steps.steps.append({"step": "preview_code", "ok": True,
                                 "status": "skipped: this key's inject was already submitted"})
         else:
             # Before ANY write: the conversion the intake will apply, on the same route and rules.
+            # A preview writes nothing the caller owns: `read_only` keeps a 5xx an unavailable
+            # read, never an unknown WRITE outcome to recover (`mcp_server.py::HarnessAPI._result`).
             preview = api.request("POST", _run_path(run_id, "/code/overlay"), {
-                **code_from, "expected_generation": expected_generation, "include_files": False})
+                **code_from, "expected_generation": expected_generation, "include_files": False},
+                read_only=True)
             ok = _ok(preview)
             steps.steps.append({"step": "preview_code", "ok": ok, **_preview_summary(preview)})
             if not ok:
@@ -367,11 +392,11 @@ def upload_per_query(api, run_id: str, expected_generation: str, *, node_id: int
         resumed = api.resume_upload(_run_path(run_id, "/per-query"), run_id, action_id)
         if resumed is not None:
             return resumed
-        raise ValueError("path must be a readable local file (and no spooled upload is pending "
+        raise ConfigRefusal("path must be a readable local file (and no spooled upload is pending "
                          "for this action_id)")
     size = source.stat().st_size
     if size > MAX_UPLOAD_FILE_BYTES:
-        raise ValueError(f"per-query files are at most {MAX_UPLOAD_FILE_BYTES} bytes")
+        raise ConfigRefusal(f"per-query files are at most {MAX_UPLOAD_FILE_BYTES} bytes")
     fmt = "json" if source.suffix.lower() == ".json" else "npz"
     body = {"expected_generation": expected_generation, "action_id": action_id,
             "node_id": node_id, "format": fmt,
