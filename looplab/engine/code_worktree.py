@@ -1296,7 +1296,7 @@ def _restore_backup(repo: CodeRepo, run_dir: Path, root: Path, bdir: Path) -> di
     # The source repository's shallow cut the backup was taken under (see `agent_backup`):
     # each listed commit that is here and whose parents are not becomes a cut again.
     shallow = index.get("shallow") if isinstance(index.get("shallow"), list) else ()
-    cuts = [c for c in shallow if isinstance(c, str) and len(c) == 40
+    cuts = [c for c in shallow if is_object_id(c)
             and repo.has_object(c)
             and any(not repo.has_object(p) for p in repo.commit_parents(c))]
     repo.add_shallow(cuts)
