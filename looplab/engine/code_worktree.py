@@ -672,7 +672,10 @@ def _copy_plain(wt: Path, out_dir: Path, rows: list) -> dict:
                 tmp = dest.with_name(dest.name + ".part")
                 try:
                     shutil.copyfile(base / rel, tmp)
-                    os.utime(tmp, ns=(st.st_atime_ns, st.st_mtime_ns))
+                    # The copy keeps the source's mtime (the restore sets it back from the row);
+                    # one value for both times, so this is a timestamp carry, not a signature.
+                    mtime = st.st_mtime_ns
+                    os.utime(tmp, ns=(mtime, mtime))
                     os.replace(tmp, dest)
                 except OSError:
                     try:
