@@ -1,7 +1,8 @@
 """Code identity commands (doc 79): `code-status` / `code-worktree` / `code-export`.
 
 What each touches: `code-status` reads the run and (with `--sync`) writes ONLY the run's private
-code repository (`RUN_DIR/code/repo.git`), appending no event; `code-worktree` adds a worktree of that
+code repository (`RUN_DIR/code/repo.git`) — after a mirror restore, also the agent worktrees its
+`code/agent_backup/` carries — appending no event; `code-worktree` adds a worktree of that
 private repository under `RUN_DIR/code/worktrees/`; `code-export` writes NEW objects and ONE NEW
 branch into the operator-named task repository and never touches its HEAD, index, working tree,
 existing branches or remotes, and never pushes. No command calls a model.
@@ -37,7 +38,9 @@ def code_status_cmd(
     from looplab.engine.code_identity import code_status, sync_run
     _require_run_dir(run_dir)
     if sync:
-        sync_run(run_dir)
+        agents = sync_run(run_dir).get("agent_worktrees")
+        if agents:                       # a mirror restore's agent-worktree backup was consumed
+            typer.echo("agent worktrees restored: " + json.dumps(agents, default=str), err=True)
     from looplab.adapters.tasks import load_task
     from looplab.core.config import read_config_snapshot
     from looplab.core.errors import OperatorRefusal

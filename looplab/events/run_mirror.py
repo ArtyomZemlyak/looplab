@@ -27,7 +27,13 @@ WHAT. `mirror_pass` copies each run directory under `src_root` to `dst_root/<run
   * lock files, SQLite read models (rebuilt from the log), `__pycache__`, the eval canary's scratch
     and the run's private code repository (`code/repo.git`, `code/worktrees`, rebuilt from the log by
     `code_identity.sync_run`; the binary-overlay store `code/blobs` IS copied)
-    are skipped, as is any file over `max_file_bytes` (named in the manifest's `skipped`).
+    are skipped, as is any file over `max_file_bytes` (named in the manifest's `skipped`);
+  * what the log CANNOT rebuild — an external agent's unsubmitted worktree: its `agent/<name>`
+    branch, its metadata and its uncommitted bytes — rides as `MirrorConfig.run_extras`, files
+    derived on the source side into the mirror's spool and mirrored under `code/agent_backup/`
+    (`engine/code_worktree.py::agent_backup`; `sync_run` re-creates the worktrees from them);
+  * a file that disappeared from the source drops its manifest row and DIRTIES the manifest, so a
+    deletion-only pass rewrites it and a restore never resurrects the file.
 
 THROTTLED. A token bucket bounds bytes per second and destination file operations per second; the
 big span logs are copied only every `slow_every` passes. Nothing ever LISTS or `stat`s the
@@ -74,6 +80,9 @@ SKIP_NAMES = frozenset({"engine.lock"})
 # Directories of a run that are rebuildable or scratch: the private code repository and its agent
 # worktrees are rebuilt from the log (`engine/code_identity.py::sync_run`), the canary tree is
 # disposable by design. `code/blobs/` (binary overlay files) is NOT rebuildable and IS mirrored.
+# An agent worktree's UNSUBMITTED work is not in the log either: it is carried by the
+# `code/agent_backup/` bundle a `run_extras` producer derives (the CLI wires one), never by copying
+# these two trees file by file (a live git directory copied mid-write is not a repository).
 SKIP_TOP_DIRS = frozenset({"canary", STATE_DIR})
 SKIP_SUBTREES = frozenset({"code/repo.git", "code/worktrees"})
 SKIP_ANY_DIRS = frozenset({"__pycache__", ".git"})
@@ -106,6 +115,14 @@ class MirrorConfig:
     op_timeout_s: float = 120.0
     runs: tuple = ()
     exclude: tuple = ()
+    # `run_extras(run_dir, spool_dir) -> {rel: path}`: files a run's mirror carries that are NOT
+    # files of the run directory — derived on the source side into `spool_dir` (the mirror's own
+    # territory under the state directory, so the mirror still writes nothing under a run) and
+    # copied to `dst_root/<run>/<rel>` like any other file, manifest row included. `events/` cannot
+    # import the engine, so the CLI injects the engine's producer: the agent-worktree backup
+    # (`engine/code_worktree.py::agent_backup`, weekly-worktree-restore-loss, closed 2026-10-16).
+    # None (a bare `MirrorConfig`) mirrors the run directory alone.
+    run_extras: Optional[Callable[[Path, Path], dict]] = None
 
     def __post_init__(self):
         self.src_root = Path(self.src_root)
@@ -211,9 +228,43 @@ def list_runs(cfg: MirrorConfig) -> list[Path]:
     return [p for p in children if (p / "events.jsonl").is_file()]
 
 
-def plan_run(run_dir: Path, cfg: MirrorConfig, copied: dict, pass_no: int) -> tuple[list, dict]:
+def _plan_file(rel: str, path: Path, cfg: MirrorConfig, copied: dict, pass_no: int,
+               todo: list, skipped: dict) -> None:
+    """Plan ONE candidate file: append `[rel, stat_result]` to `todo` when it changed since `copied`
+    recorded it, or name it in `skipped` when it is too large. Shared by the run walk and the
+    `MirrorConfig.run_extras` files, so both obey the same size cap and change tier."""
+    try:
+        st = path.lstat()
+    except OSError:
+        return
+    if not os.path.isfile(path) or path.is_symlink():
+        return
+    if st.st_size > cfg.max_file_bytes:
+        skipped[rel] = f"larger than {cfg.max_file_bytes} bytes ({st.st_size})"
+        return
+    if rel.rsplit("/", 1)[-1] in SLOW_FILES and cfg.slow_every > 1 and pass_no % cfg.slow_every:
+        if rel in copied:
+            return
+    prior = copied.get(rel)
+    # (size, mtime) is deliberately the WEAK change tier: the mirror re-copies what moved,
+    # and a same-size same-mtime rewrite is caught by the next manifest SHA mismatch only
+    # at restore. `st` itself rides along; the copy reads its two fields. The SOURCE's size
+    # is compared: a `*.jsonl` cut at its last newline records the cut as `size` and the
+    # source's own as `source_size`, and comparing the cut re-copied a torn-tailed log on
+    # every pass forever (review g8).
+    prior_size = prior.get("source_size", prior.get("size")) if prior else None
+    if prior and prior_size == st.st_size and prior.get("mtime_ns") == st.st_mtime_ns:
+        return
+    todo.append([rel, st])
+
+
+def plan_run(run_dir: Path, cfg: MirrorConfig, copied: dict, pass_no: int,
+             extras: Optional[dict] = None) -> tuple[list, dict]:
     """`(todo, skipped)`: files of `run_dir` that changed since `copied` recorded them, in priority
-    order, as `[rel, stat_result]`; and `{rel: reason}` for what is never mirrored."""
+    order, as `[rel, stat_result]`; and `{rel: reason}` for what is never mirrored. `extras`
+    (`{rel: path}`, from `MirrorConfig.run_extras`) are planned beside the walk and WIN over a run
+    file of the same name: the copy is read from `extras[rel]`, never from `run_dir / rel`."""
+    extras = extras or {}
     todo, skipped = [], {}
     for dirpath, dirnames, filenames in os.walk(run_dir, followlinks=False):
         base = Path(dirpath)
@@ -226,35 +277,27 @@ def plan_run(run_dir: Path, cfg: MirrorConfig, copied: dict, pass_no: int) -> tu
                              and not (base / d).is_symlink())
         for name in sorted(filenames):
             rel = rel_dir + name
-            why = _skipped(rel, cfg)
-            if why is not None:
+            if rel in extras or _skipped(rel, cfg) is not None:
                 continue
-            path = base / name
-            try:
-                st = path.lstat()
-            except OSError:
-                continue
-            if not os.path.isfile(path) or path.is_symlink():
-                continue
-            if st.st_size > cfg.max_file_bytes:
-                skipped[rel] = f"larger than {cfg.max_file_bytes} bytes ({st.st_size})"
-                continue
-            if name in SLOW_FILES and cfg.slow_every > 1 and pass_no % cfg.slow_every:
-                if rel in copied:
-                    continue
-            prior = copied.get(rel)
-            # (size, mtime) is deliberately the WEAK change tier: the mirror re-copies what moved,
-            # and a same-size same-mtime rewrite is caught by the next manifest SHA mismatch only
-            # at restore. `st` itself rides along; the copy reads its two fields. The SOURCE's size
-            # is compared: a `*.jsonl` cut at its last newline records the cut as `size` and the
-            # source's own as `source_size`, and comparing the cut re-copied a torn-tailed log on
-            # every pass forever (review g8).
-            prior_size = prior.get("source_size", prior.get("size")) if prior else None
-            if prior and prior_size == st.st_size and prior.get("mtime_ns") == st.st_mtime_ns:
-                continue
-            todo.append([rel, st])
+            _plan_file(rel, base / name, cfg, copied, pass_no, todo, skipped)
+    for rel in sorted(extras):
+        _plan_file(rel, extras[rel], cfg, copied, pass_no, todo, skipped)
     todo.sort(key=lambda row: _priority(row[0]))
     return todo, skipped
+
+
+def _valid_extras(extras, cfg: MirrorConfig) -> dict:
+    """The `{rel: Path}` a `run_extras` hook returned, kept only where `rel` is a plain run-relative
+    path the mirror would not skip anyway (a hook may not smuggle a lock file, a `..` or an absolute
+    path into a manifest that `restore_run` writes back under the run)."""
+    out = {}
+    for rel, path in (extras or {}).items():
+        if (not isinstance(rel, str) or not rel or rel.startswith("/") or "\\" in rel
+                or any(p in ("", ".", "..") for p in rel.split("/"))
+                or _skipped(rel, cfg) is not None):
+            continue
+        out[rel] = Path(path)
+    return out
 
 
 # ------------------------------------------------------------------------------------- copying
@@ -449,10 +492,24 @@ def mirror_run(run_dir: Path, cfg: MirrorConfig, state: dict, *, pass_no: int,
     if not isinstance(copied, dict):
         copied = _manifest_rows(cfg, run) or {}
         rstate["files"] = copied
-    todo, skipped = plan_run(run_dir, cfg, copied, pass_no)
+    errors = []
+    extras, extras_failed = {}, False
+    if cfg.run_extras is not None:
+        # A failed producer (git failing or timing out) costs only that backup's freshness this
+        # pass: its last copy stays listed (`present` below), the run's own files are still
+        # mirrored, and the error is reported with the pass. Not a blind handler: the engine's git
+        # failures are `CodeRepoError` (a RuntimeError), I/O is OSError; a producer BUG stays loud.
+        try:
+            extras = _valid_extras(cfg.run_extras(run_dir, cfg.state_path.parent / "spool" / run),
+                                   cfg)
+        except (OSError, RuntimeError, ValueError) as exc:
+            extras_failed = True
+            errors.append({"run": run, "path": "<run_extras>",
+                           "error": f"{type(exc).__name__}: {exc}"[:300]})
+    prior_extras = set(rstate.get("extras") or ())
+    todo, skipped = plan_run(run_dir, cfg, copied, pass_no, extras)
     dst_run = cfg.dst_root / run
     n = nbytes = 0
-    errors = []
     for rel, st in todo:
         size, mtime_ns = st.st_size, st.st_mtime_ns
         dst = dst_run / rel
@@ -464,8 +521,8 @@ def mirror_run(run_dir: Path, cfg: MirrorConfig, state: dict, *, pass_no: int,
             made_dirs.add(str(parent))
         ops_bucket.take(1)
         try:
-            row = copy_one(run_dir / rel, dst, size=size, mtime_ns=mtime_ns, cfg=cfg,
-                           bytes_bucket=bytes_bucket)
+            row = copy_one(extras.get(rel, run_dir / rel), dst, size=size, mtime_ns=mtime_ns,
+                           cfg=cfg, bytes_bucket=bytes_bucket)
         except MirrorStuck:
             raise
         except FileNotFoundError:
@@ -484,15 +541,27 @@ def mirror_run(run_dir: Path, cfg: MirrorConfig, state: dict, *, pass_no: int,
         nbytes += row["size"]
     # Rows for files that no longer exist at the source are dropped from the manifest (their stale
     # copy stays in the destination, unreferenced: deleting on S3 is a cost this job does not pay).
-    present = {rel for rel in copied if (run_dir / rel).is_file()}
-    # OPEN[weekly-mirror-deletion] P1 (review 2026-10-15): deletion-only passes pop
-    # these rows without dirtying the manifest. With no other copies/skips changed,
-    # restore resurrects a deleted gpu_gate.json (reproduced with hold=true).
-    # Mark removals dirty before the write gate; docs/audit/weekly-review-20261015.md.
-    # proof:`present:if (n or rstate.get("manifest_stale") or not rstate.get("manifest_written")@looplab/events/run_mirror.py`
+    # An extra is present while its producer still returns it; when the producer FAILED this pass,
+    # the extras it returned last time are kept as they are rather than read as deleted.
+    def present(rel: str) -> bool:
+        if rel in extras:
+            return extras[rel].is_file()
+        if extras_failed and rel in prior_extras:
+            return True
+        return (run_dir / rel).is_file()
     for rel in list(copied):
-        if rel not in present:
+        if not present(rel):
             copied.pop(rel, None)
+            # A REMOVAL dirties the manifest exactly like a copy does. Until 2026-10-16 a pass whose
+            # only change was a deletion popped the row here and then skipped the manifest write
+            # (nothing copied, nothing newly skipped), so the destination manifest kept listing the
+            # deleted file and `restore_run` brought it back — a deleted `gpu_gate.json` with
+            # `hold=true` returned on restore (review 2026-10-15, weekly-mirror-deletion). Flagged
+            # in the STATE, like a copy: a pass that dies before the write still rewrites the
+            # manifest next time, and a restarted mirror that re-seeds `copied` from the stale
+            # manifest pops the same row again and so dirties it again.
+            rstate["manifest_stale"] = True
+    rstate["extras"] = sorted(prior_extras if extras_failed else extras)
     if (n or rstate.get("manifest_stale") or not rstate.get("manifest_written")
             or skipped != rstate.get("skipped", {})):
         manifest = {"version": 1, "run": run, "source": str(run_dir), "updated_at": time.time(),

@@ -30,6 +30,11 @@ Slug: `weekly-mirror-deletion`.
 удалениями обновляет манифест; восстановление не возвращает удалённые файлы,
 в том числе после перезапуска процесса зеркалирования.
 
+_Закрыто 2026-10-16: `mirror_run` ставит `manifest_stale` при каждом удалении строки, поэтому
+проход только с удалениями переписывает манифест (и после зависшей записи, и после потери
+state-файла); регрессии — `tests/test_run_mirror.py::test_a_deletion_only_pass_rewrites_the_manifest_and_restore_does_not_resurrect`
+и `test_a_deletion_survives_a_mirror_restart_between_the_pop_and_the_manifest`._
+
 ### 2. P1 — конфликт предрегистрации считается успешным повтором
 
 Slug: `weekly-registration-conflict`.
@@ -65,6 +70,14 @@ Slug: `weekly-worktree-restore-loss`.
 поддерживаемого рабочего процесса. Нужно сохранять агентские refs, метаданные
 и незавершённые правки либо явно предусмотреть отдельный backup.
 Приёмка: восстановить ещё не отправленное предложение с его историей и файлами.
+
+_Закрыто 2026-10-16: `looplab run-mirror` на каждом проходе (через новый `MirrorConfig.run_extras`)
+строит `code_worktree.py::agent_backup` — полный `git bundle` веток `agent/*` плюс коммит
+незакоммиченных файлов каждого worktree и его метаданные — в spool зеркала, только читая ран, и
+зеркалирует его как `code/agent_backup/`; `sync_run` после восстановления пересоздаёт ветки и
+worktree с грязными файлами (`restore_agent_worktrees`). Остаток: грязные файлы сверх
+`MAX_BACKUP_DIRTY_BYTES` и bundle сверх `--max-file-mb` не сохраняются (названы в записи).
+Регрессия на настоящем git — `tests/test_code_identity.py::test_an_unsubmitted_agent_worktree_survives_mirror_wipe_restore_and_sync`._
 
 ### 4. P2 — экспорт теряет executable bit
 

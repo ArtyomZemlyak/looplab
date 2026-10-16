@@ -3416,7 +3416,7 @@ looplab harness-mcp
 
 ## `run-mirror`
 
-| `--src ROOT --dst DIR [--loop] [--interval S] [--max-mbps M] [--max-files-per-s N] [--max-file-mb M] [--op-timeout S] [--run R]... [--exclude GLOB]... [--exit-on-stuck]` | Copies the run directories under `--src` (e.g. tmpfs `/dev/shm/looplab-runs`) to `--dst` (default `$LOOPLAB_RUN_MIRROR_DST`, e.g. an S3 FUSE mount): only changed files, `*.jsonl` cut at the last newline, one SHA-256 manifest per run, throttled, never listing the destination during a pass; a hung destination call stops the pass (exit 3 with `--exit-on-stuck`). Skips locks, SQLite read models, `code/repo.git`, `code/worktrees` and `canary/` (rebuildable); `code/blobs` is copied. [Doc 80](../80-open-items-triage-2026-10-14.md) |
+| `--src ROOT --dst DIR [--loop] [--interval S] [--max-mbps M] [--max-files-per-s N] [--max-file-mb M] [--op-timeout S] [--run R]... [--exclude GLOB]... [--exit-on-stuck]` | Copies the run directories under `--src` (e.g. tmpfs `/dev/shm/looplab-runs`) to `--dst` (default `$LOOPLAB_RUN_MIRROR_DST`, e.g. an S3 FUSE mount): only changed files, `*.jsonl` cut at the last newline, one SHA-256 manifest per run, throttled, never listing the destination during a pass; a hung destination call stops the pass (exit 3 with `--exit-on-stuck`). Skips locks, SQLite read models, `code/repo.git`, `code/worktrees` and `canary/` (rebuildable); `code/blobs` is copied, and an agent worktree's unsubmitted branch and uncommitted files ride as a `code/agent_backup/` bundle that `code-status --sync` re-creates after a restore; a deleted source file leaves the manifest. [Doc 80](../80-open-items-triage-2026-10-14.md) |
 
 ## `run-mirror-status`
 

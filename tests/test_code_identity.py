@@ -697,3 +697,80 @@ def test_merged_mode_truth_table():
     assert _merged_mode(f, x, link) is None             # the target moved it elsewhere
     assert _merged_mode(None, x, f) is None             # both added, different modes
     assert _merged_mode(None, x, None) == "100755"      # a new path
+
+
+def test_an_unsubmitted_agent_worktree_survives_mirror_wipe_restore_and_sync(tmp_path):
+    """weekly-worktree-restore-loss (review 2026-10-15): the mirror skips `code/repo.git` and
+    `code/worktrees` as "rebuilt by `code-status --sync`", but an agent worktree that was never
+    injected is in no event — mirror -> restore -> sync lost `agent/draft`, its unique committed
+    proposal and every uncommitted byte. Real git, real mirror, real tmpfs-style wipe."""
+    import os
+    import shutil
+    from looplab.engine.code_worktree import AGENT_BACKUP_REL, agent_backup, list_worktrees
+    from looplab.events.run_mirror import MirrorConfig, mirror_pass, restore_run
+    _, task = _repo_task(tmp_path)
+    r, d = task.build_roles()
+    rd = tmp_path / "src" / "run"
+    anyio.run(Engine(rd, task=task, researcher=r, developer=d, sandbox=SubprocessSandbox(),
+                     policy=GreedyTree(n_seeds=1, max_nodes=1)).run)
+    wt = Path(add_worktree(rd, "draft")["path"])
+    (wt / "train.py").write_text("print('LR: 0.03')\n")
+    _git(wt, "commit", "-qam", "proposal")                  # the unique, unsubmitted commit
+    proposal = _git(wt, "rev-parse", "HEAD").strip()
+    (wt / "recipe.env").write_text("SEED=9\n")              # an uncommitted edit ...
+    (wt / "notes.txt").write_text("try warmup\n")           # ... and an untracked new file
+    status = _git(wt, "status", "--porcelain")
+    overlay = overlay_from_worktree(rd, "draft")
+    index = Path(_git(wt, "rev-parse", "--git-path", "index").strip())
+    index_before = (index.stat().st_mtime_ns, index.read_bytes())
+    objects_before = sorted(p.name for p in (rd / "code" / "repo.git" / "objects").rglob("*"))
+
+    cfg = MirrorConfig(src_root=tmp_path / "src", dst_root=tmp_path / "dst", max_bytes_per_s=0,
+                       max_files_per_s=0, run_extras=agent_backup)
+    first = mirror_pass(cfg)
+    assert first.stuck is None and not first.errors, first.as_dict()
+    # Read-only on the run: the agent's index, its worktree and the run repository are untouched.
+    assert (index.stat().st_mtime_ns, index.read_bytes()) == index_before
+    assert _git(wt, "status", "--porcelain") == status
+    assert sorted(p.name for p in (rd / "code" / "repo.git" / "objects").rglob("*")) == objects_before
+    assert (cfg.dst_root / "run" / AGENT_BACKUP_REL / "agents.bundle").is_file()
+    assert mirror_pass(cfg).runs["run"]["copied"] == 0      # unchanged worktree: no re-bundle
+
+    shutil.rmtree(tmp_path / "src")                          # the pod restart wipes tmpfs
+    os.makedirs(tmp_path / "src")
+    assert not restore_run(cfg.dst_root, "run", cfg.src_root)["failures"]
+    # Until a sync consumed it, the restored backup IS the backup: the producer defers to it.
+    assert agent_backup(rd, tmp_path / "spool") == {}
+    synced = sync_run(rd)
+    assert synced["agent_worktrees"]["restored"] == ["draft"], synced["agent_worktrees"]
+    assert not (rd / AGENT_BACKUP_REL).exists()              # consumed
+
+    assert [m["name"] for m in list_worktrees(rd)] == ["draft"]
+    assert CodeRepo(rd).rev(proposal) == proposal            # the unique commit resolves
+    assert CodeRepo(rd).rev("refs/heads/agent/draft") == proposal
+    assert _git(wt, "rev-parse", "HEAD").strip() == proposal
+    assert (wt / "train.py").read_text() == "print('LR: 0.03')\n"
+    assert (wt / "recipe.env").read_text() == "SEED=9\n"     # the dirty edit is back
+    assert (wt / "notes.txt").read_text() == "try warmup\n"
+    assert _git(wt, "status", "--porcelain") == status       # and reads as it did
+    after = overlay_from_worktree(rd, "draft")
+    assert (after["files"], after["deleted"]) == (overlay["files"], overlay["deleted"])
+    assert sync_run(rd).get("agent_worktrees") is None       # idempotent: nothing left to restore
+    # The restored worktree is backed up again by the next pass.
+    assert not mirror_pass(cfg).errors
+    assert (tmp_path / "src" / ".looplab-mirror" / "spool" / "run" / "agents.bundle").is_file()
+    # Never overwrites: a second copy restored where something already sits at the worktree path
+    # keeps the backup (pending) and the stray directory, and a later sync finishes the job.
+    assert not restore_run(cfg.dst_root, "run", cfg.src_root, as_name="run2")["failures"]
+    rd2 = tmp_path / "src" / "run2"
+    (rd2 / "code" / "worktrees" / "draft").mkdir(parents=True)
+    (rd2 / "code" / "worktrees" / "draft" / "mine.txt").write_text("keep\n")
+    held = sync_run(rd2)["agent_worktrees"]
+    assert held["pending"] and held["skipped"][0]["reason"] == "worktree_path_exists", held
+    assert (rd2 / AGENT_BACKUP_REL / "agents.bundle").is_file()
+    assert (rd2 / "code" / "worktrees" / "draft" / "mine.txt").read_text() == "keep\n"
+    shutil.rmtree(rd2 / "code" / "worktrees" / "draft")
+    assert sync_run(rd2)["agent_worktrees"]["restored"] == ["draft"]
+    wt2 = Path(list_worktrees(rd2)[0]["path"])
+    assert wt2 == rd2 / "code" / "worktrees" / "draft"       # re-pointed at the restored run
+    assert (wt2 / "recipe.env").read_text() == "SEED=9\n"

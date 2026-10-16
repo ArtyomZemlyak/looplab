@@ -1,8 +1,9 @@
 """Run-directory durability commands: `run-mirror` / `run-mirror-status` / `run-mirror-restore`.
 
 What each touches: `run-mirror` READS the run directories under `--src` and writes ONLY under
-`--dst` (the mirrored copies and one manifest per run) plus its own state file under
-`<src>/.looplab-mirror/`; it appends no event, takes no lock the engine takes and calls no model.
+`--dst` (the mirrored copies and one manifest per run) plus its own state file and the agent-worktree
+backup spool under `<src>/.looplab-mirror/`; it appends no event, takes no lock the engine takes and
+calls no model.
 `run-mirror-status` reads the state file and the source only. `run-mirror-restore` writes ONE new run
 directory under `--src` (refusing an existing one) from the mirror. See `events/run_mirror.py`.
 """
@@ -58,11 +59,16 @@ def run_mirror_cmd(
     Only changed files are copied; an append-only `*.jsonl` is cut at its last newline; each run
     gets a manifest with every file's SHA-256, which `run-mirror-restore` verifies. Never lists the
     destination during a pass and never blocks an engine: a hung destination call stops the pass."""
+    from looplab.engine.code_worktree import agent_backup
     from looplab.events.run_mirror import mirror_loop
 
+    # `run_extras`: an external agent's unsubmitted worktree (branch, metadata, uncommitted bytes)
+    # is in no event, so the log cannot rebuild it; the engine derives a bundle of it into the
+    # mirror's spool and the mirror carries it as `code/agent_backup/` (review 2026-10-15).
     cfg = _config(src, dst, interval_s=interval, max_bytes_per_s=max_mbps * 1024 * 1024,
                   max_files_per_s=max_files_per_s, max_file_bytes=int(max_file_mb * 1024 * 1024),
-                  op_timeout_s=op_timeout, runs=tuple(run), exclude=tuple(exclude))
+                  op_timeout_s=op_timeout, runs=tuple(run), exclude=tuple(exclude),
+                  run_extras=agent_backup)
     code = mirror_loop(cfg, passes=None if loop else 1, exit_on_stuck=exit_on_stuck,
                        log=lambda line: typer.echo(line, err=True))
     if code:

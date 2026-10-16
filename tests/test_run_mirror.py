@@ -207,6 +207,100 @@ def test_a_pass_that_dies_before_the_manifest_rewrites_it_on_the_next_pass(tmp_p
             == (rd / "events.jsonl").read_bytes())
 
 
+def test_a_deletion_only_pass_rewrites_the_manifest_and_restore_does_not_resurrect(tmp_path):
+    """weekly-mirror-deletion (review 2026-10-15): a pass whose ONLY change was a deleted file
+    popped its row from the state and skipped the manifest write (nothing copied, nothing newly
+    skipped), so `restore_run` brought back a deleted `gpu_gate.json` with its old `hold=true`."""
+    rd = _fake_run(tmp_path / "src")
+    (rd / "gpu_gate.json").write_text('{"hold": true}', encoding="utf-8")
+    cfg = _cfg(tmp_path)
+    mirror_pass(cfg)
+    manifest = cfg.dst_root / "r1" / MANIFEST
+    assert "gpu_gate.json" in json.loads(manifest.read_text())["files"]
+    (rd / "gpu_gate.json").unlink()                             # the operator released the gate
+    report = mirror_pass(cfg)
+    assert report.runs["r1"]["copied"] == 0                     # a deletion-only pass ...
+    assert "gpu_gate.json" not in json.loads(manifest.read_text())["files"]   # ... rewrote it
+    restored = restore_run(cfg.dst_root, "r1", cfg.src_root, as_name="r1-back")
+    assert not restored["failures"]
+    assert not (cfg.src_root / "r1-back" / "gpu_gate.json").exists()
+
+
+def test_a_deletion_survives_a_mirror_restart_between_the_pop_and_the_manifest(tmp_path,
+                                                                                monkeypatch):
+    """The same removal across a restarted mirror process: a pass that popped the row and then hung
+    on the manifest write (state saved, manifest stale), and a process that lost its state file and
+    re-seeds it FROM the stale manifest — each reloads its state from disk and still rewrites the
+    manifest without the deleted file."""
+    rd = _fake_run(tmp_path / "src")
+    (rd / "gpu_gate.json").write_text('{"hold": true}', encoding="utf-8")
+    (rd / "notes.json").write_text("{}", encoding="utf-8")
+    cfg = _cfg(tmp_path, op_timeout_s=0.2)
+    mirror_pass(cfg)
+    manifest = cfg.dst_root / "r1" / MANIFEST
+    (rd / "gpu_gate.json").unlink()
+    gate = threading.Event()
+    real = run_mirror._write_json_atomic
+
+    def manifest_never_lands(path, data):
+        if str(path).startswith(str(cfg.dst_root)):
+            gate.wait(5)
+            return None
+        return real(path, data)
+
+    monkeypatch.setattr(run_mirror, "_write_json_atomic", manifest_never_lands)
+    assert mirror_pass(cfg).stuck
+    gate.set()
+    monkeypatch.setattr(run_mirror, "_write_json_atomic", real)
+    assert "gpu_gate.json" in json.loads(manifest.read_text())["files"]       # still stale
+    assert "gpu_gate.json" not in run_mirror.load_state(cfg)["runs"]["r1"]["files"]
+    mirror_pass(cfg)                                            # a NEW pass, state read from disk
+    assert "gpu_gate.json" not in json.loads(manifest.read_text())["files"]
+    # A restarted mirror whose state file is gone re-seeds from the destination manifest: a file
+    # deleted while it was down is popped from the seeded rows and the manifest is rewritten.
+    (rd / "notes.json").unlink()
+    cfg.state_path.unlink()
+    assert mirror_pass(cfg).runs["r1"]["copied"] == 0
+    assert "notes.json" not in json.loads(manifest.read_text())["files"]
+    back = restore_run(cfg.dst_root, "r1", cfg.src_root, as_name="r1-back")
+    assert not back["failures"]
+    assert not (cfg.src_root / "r1-back" / "gpu_gate.json").exists()
+    assert not (cfg.src_root / "r1-back" / "notes.json").exists()
+
+
+def test_run_extras_are_mirrored_kept_on_a_failed_producer_and_dropped_when_gone(tmp_path):
+    """`MirrorConfig.run_extras`: files derived OUTSIDE the run (the agent-worktree backup) ride in
+    the run's manifest; a producer that raises keeps the last copy listed; one that stops
+    returning a file drops its row and rewrites the manifest."""
+    _fake_run(tmp_path / "src")
+    mode = {"now": "ok"}
+
+    def extras(run_dir, spool):
+        if mode["now"] == "boom":
+            raise RuntimeError("git timed out")
+        if mode["now"] == "gone":
+            return {}
+        spool.mkdir(parents=True, exist_ok=True)
+        (spool / "b.bin").write_bytes(b"bundle")
+        return {"code/agent_backup/agents.bundle": spool / "b.bin", "../escape": spool / "b.bin",
+                "engine.lock": spool / "b.bin"}
+
+    cfg = _cfg(tmp_path, run_extras=extras)
+    mirror_pass(cfg)
+    manifest = cfg.dst_root / "r1" / MANIFEST
+    files = json.loads(manifest.read_text())["files"]
+    assert "code/agent_backup/agents.bundle" in files
+    assert "../escape" not in files and "engine.lock" not in files
+    assert (cfg.dst_root / "r1" / "code" / "agent_backup" / "agents.bundle").read_bytes() == b"bundle"
+    mode["now"] = "boom"
+    report = mirror_pass(cfg)
+    assert [e["path"] for e in report.errors] == ["<run_extras>"]
+    assert "code/agent_backup/agents.bundle" in json.loads(manifest.read_text())["files"]
+    mode["now"] = "gone"
+    mirror_pass(cfg)
+    assert "code/agent_backup/agents.bundle" not in json.loads(manifest.read_text())["files"]
+
+
 class _FaultyWrite:
     """A destination file handle whose `write` runs `fault` first (hang or raise)."""
 

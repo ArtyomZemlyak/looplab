@@ -79,3 +79,7 @@ The worktree is checked out from the run's private repository at the active base
 seed base, so a worktree started from `node:<id>` carries that experiment's change plus yours.
 `POST /api/runs/{run_id}/code/overlay` previews the files a worktree or patch becomes;
 paths outside the task's edit surface or protected files are refused, as in any inject.
+A worktree you have not submitted yet is in no event, so the log cannot rebuild it; on a tmpfs run
+root `looplab run-mirror` backs up its branch and uncommitted files as `code/agent_backup/`, and
+`looplab code-status --sync` re-creates the worktree after a restore
+([deployment](deployment.md#run-directories-in-tmpfs-the-durable-mirror)).

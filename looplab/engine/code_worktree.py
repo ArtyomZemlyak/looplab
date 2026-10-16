@@ -327,3 +327,260 @@ def overlay_from_patch(run_dir, patch: str, *, start: str = "base", **kw) -> dic
     out = _overlay_between(repo, run_dir, commit, tree, **kw)
     out["stale_base"] = _stale(repo, commit)
     return out
+
+
+# ---------------------------------------------------------------------------- agent worktree backup
+# WHY (weekly-worktree-restore-loss, review 2026-10-15; closed 2026-10-16). The run mirror skips
+# `code/repo.git` and `code/worktrees` because `sync_run` rebuilds the repository from the log — true
+# for bases and recorded attempts, FALSE for an external agent's worktree that has not been injected
+# yet: its `agent/<name>` branch, its `.meta` row and its uncommitted edits are in no event. A real
+# mirror -> restore -> `sync_run` lost the branch, the unique committed proposal and every dirty byte.
+#
+# WHAT. `agent_backup` (the run mirror's `run_extras` producer, wired by `looplab run-mirror`) writes
+# two files OUTSIDE the run directory, into the mirror's spool: `agents.bundle`, a self-contained
+# `git bundle` of every `refs/heads/agent/*` plus one `refs/looplab/agent-dirty/<name>` commit per
+# worktree whose files differ from its HEAD (tracked edits, deletions and untracked files `git add -A`
+# would take — the repository's `info/exclude` keeps checkpoints out, exactly as for an overlay); and
+# `agents.json`, the worktrees' metadata with each one's head and dirty commit. The mirror copies
+# both to `code/agent_backup/` of the mirrored run. After a restore, `sync_run` calls
+# `restore_agent_worktrees`, which imports the bundle, re-creates each missing branch and worktree
+# and lays the dirty tree back over it (index at HEAD, so `git status` reads as it did).
+#
+# READ-ONLY ON THE RUN. The dirty capture runs `git add -A` against a COPY of the worktree's index
+# with `GIT_OBJECT_DIRECTORY` pointed at a scratch object store whose alternate is the run
+# repository's: the new blobs land in the scratch store, the agent's index and the run repository are
+# never written, and no lock the engine (or the agent's own git) takes is taken.
+#
+# BOUNDED AND CHANGE-DETECTED. A worktree whose dirty files exceed `MAX_BACKUP_DIRTY_BYTES` (what an
+# overlay could carry at most) keeps its committed history in the bundle and says `dirty_skipped`;
+# the bundle is re-created only when the backup KEY (every agent ref, every dirty tree, every meta
+# row) moved, so an idle worktree costs one stat-cached `git add -A` per pass and no upload. A bundle
+# over the mirror's `--max-file-mb` is named in the manifest's `skipped`, like any other large file.
+AGENT_BACKUP_REL = "code/agent_backup"
+AGENT_BUNDLE = "agents.bundle"
+AGENT_BACKUP_INDEX = "agents.json"
+AGENT_BRANCH_PREFIX = "refs/heads/agent/"
+AGENT_DIRTY_REF = "refs/looplab/agent-dirty/"
+AGENT_HEAD_REF = "refs/looplab/agent-head/"
+MAX_BACKUP_DIRTY_BYTES = MAX_OVERLAY_BYTES + MAX_OVERLAY_BINARY_BYTES
+_BACKUP_VERSION = 1
+# The dirty commit is a pure function of (tree, parent): a fixed identity and date, so an unchanged
+# worktree yields the same commit id pass after pass.
+_FIXED_COMMIT_ENV = {"GIT_AUTHOR_NAME": "LoopLab", "GIT_AUTHOR_EMAIL": "looplab@invalid",
+                     "GIT_COMMITTER_NAME": "LoopLab", "GIT_COMMITTER_EMAIL": "looplab@invalid",
+                     "GIT_AUTHOR_DATE": "@0 +0000", "GIT_COMMITTER_DATE": "@0 +0000"}
+
+
+def _clear_backup(out_dir: Path) -> None:
+    for name in (AGENT_BUNDLE, AGENT_BACKUP_INDEX):
+        try:
+            (out_dir / name).unlink()
+        except OSError:
+            pass                           # never written, or already gone
+
+
+def _dirty_bytes(wt: Path, env: dict) -> int:
+    """Bytes of every path `git status` (on the COPIED index, `--no-optional-locks`) lists as
+    changed or untracked: the work `git add -A` would hash, measured before it does."""
+    out = run_git("-C", str(wt), "--no-optional-locks", "status", "--porcelain", "-z",
+                  "--untracked-files=all", "--no-renames", env_extra=env).stdout
+    total = 0
+    for item in out.split(b"\x00"):
+        if len(item) > 3:
+            try:
+                st = (wt / item[3:].decode("utf-8", "surrogateescape")).lstat()
+            except OSError:
+                continue                   # a deletion (or a path gone since): no bytes to hash
+            total += st.st_size
+    return total
+
+
+def _capture_dirty(repo: CodeRepo, wt: Path, scratch: Path, head: str, row: dict) -> None:
+    """Set `row["dirty_commit"]` to a commit (in `scratch`'s object store) of `wt`'s files as they
+    are, parented on `head` — or leave it None when they equal `head`'s tree."""
+    objects = scratch / "objects"
+    index = scratch.parent / f"index-{row['name']}"
+    real = run_git("-C", str(wt), "rev-parse", "--git-path", "index").stdout.decode().strip()
+    real_path = Path(real) if Path(real).is_absolute() else wt / real
+    env = {"GIT_INDEX_FILE": str(index), "GIT_OBJECT_DIRECTORY": str(objects)}
+    try:
+        # The agent's own index carries the stat cache, so `add -A` re-hashes only what changed.
+        index.write_bytes(real_path.read_bytes())
+    except OSError:
+        run_git("-C", str(wt), "read-tree", head, env_extra=env)
+    size = _dirty_bytes(wt, env)
+    if size > MAX_BACKUP_DIRTY_BYTES:
+        # No measured size in the row: it is part of the backup KEY, and a growing file would
+        # otherwise re-bundle the committed history on every pass.
+        row["dirty_skipped"] = f"uncommitted files exceed {MAX_BACKUP_DIRTY_BYTES} bytes"
+        return
+    run_git("-C", str(wt), "add", "-A", ".", env_extra=env)
+    tree = run_git("-C", str(wt), "write-tree", env_extra=env).stdout.decode().strip()
+    if tree == repo.tree(head):
+        return
+    row["dirty_tree"] = tree
+    row["dirty_commit"] = run_git(
+        "-C", str(wt), "commit-tree", tree, "-p", head, "-m",
+        f"looplab: uncommitted work of agent worktree {row['name']} (mirror backup)",
+        env_extra={**env, **_FIXED_COMMIT_ENV}).stdout.decode().strip()
+
+
+def agent_backup(run_dir, out_dir) -> dict:
+    """The run mirror's `run_extras` producer: `{rel: path}` of the backup files in `out_dir`.
+
+    Returns `{}` (and removes stale outputs) when there is nothing to back up — no repository, no
+    agent branch — and ALSO when the run directory still holds an unconsumed backup a restore put
+    there (`code/agent_backup/agents.json`): until `restore_agent_worktrees` re-created the
+    worktrees from it, that restored copy IS the backup, and the mirror carries it as a run file."""
+    import hashlib
+    import os
+    from looplab.core.atomicio import atomic_write_bytes
+    from looplab.core.jsonutil import canonical_json
+    run_dir, out_dir = Path(run_dir), Path(out_dir)
+    repo = CodeRepo(run_dir)
+    if (run_dir / AGENT_BACKUP_REL / AGENT_BACKUP_INDEX).is_file() or not repo.exists():
+        _clear_backup(out_dir)
+        return {}
+    refs = repo.refs(AGENT_BRANCH_PREFIX)
+    if not refs:
+        _clear_backup(out_dir)
+        return {}
+    out_dir.mkdir(parents=True, exist_ok=True)
+    bundle, index_path = out_dir / AGENT_BUNDLE, out_dir / AGENT_BACKUP_INDEX
+    rows = []
+    with tempfile.TemporaryDirectory(prefix=".agent-backup-", dir=str(out_dir)) as tmp:
+        scratch = Path(tmp) / "scratch.git"
+        run_git("init", "--bare", "--quiet", "--template=", str(scratch))
+        (scratch / "objects" / "info").mkdir(parents=True, exist_ok=True)
+        (scratch / "objects" / "info" / "alternates").write_text(
+            str((repo.path / "objects").resolve()) + "\n", encoding="utf-8")
+        for meta in list_worktrees(run_dir):
+            name = meta.get("name") if isinstance(meta, dict) else None
+            if not isinstance(name, str) or not NAME.match(name):
+                continue
+            row = {k: meta.get(k) for k in ("name", "branch", "start", "start_commit",
+                                            "base_digest")}
+            row.update(branch_head=refs.get(f"{AGENT_BRANCH_PREFIX}{name}"), dirty_commit=None)
+            wt = run_dir / WORKTREES_REL / name
+            if wt.is_dir():
+                head = run_git("-C", str(wt), "rev-parse", "--verify", "HEAD",
+                               check=False).stdout.decode().strip()
+                if head:
+                    row["head"] = head
+                    _capture_dirty(repo, wt, scratch, head, row)
+            rows.append(row)
+        index = {"version": _BACKUP_VERSION, "refs": refs, "worktrees": rows}
+        key = hashlib.sha256(canonical_json(index)).hexdigest()
+        try:
+            prior = json.loads(index_path.read_text(encoding="utf-8")).get("key")
+        except (OSError, ValueError, AttributeError):
+            prior = None
+        if prior != key or not bundle.is_file():
+            for ref, sha in sorted(refs.items()):
+                run_git("--git-dir", str(scratch), "update-ref", ref, sha)
+            for row in rows:
+                if row.get("dirty_commit"):
+                    run_git("--git-dir", str(scratch), "update-ref",
+                            AGENT_DIRTY_REF + row["name"], row["dirty_commit"])
+                elif row.get("head") and row["head"] != row.get("branch_head"):
+                    # The agent moved the worktree off its branch: carry that commit too.
+                    run_git("--git-dir", str(scratch), "update-ref",
+                            AGENT_HEAD_REF + row["name"], row["head"])
+            # A FULL bundle (the objects behind the alternate are packed in): the history it needs
+            # is the run repository's, which a restore rebuilds only for bases and attempts.
+            staged = Path(tmp) / AGENT_BUNDLE
+            run_git("--git-dir", str(scratch), "bundle", "create", "--quiet", str(staged),
+                    "--all", timeout=300)
+            os.replace(staged, bundle)
+            atomic_write_bytes(index_path, json.dumps({**index, "key": key}, indent=1,
+                                                      sort_keys=True).encode("utf-8"))
+    return {f"{AGENT_BACKUP_REL}/{AGENT_BUNDLE}": bundle,
+            f"{AGENT_BACKUP_REL}/{AGENT_BACKUP_INDEX}": index_path}
+
+
+def restore_agent_worktrees(run_dir) -> Optional[dict]:
+    """Re-create the agent branches and worktrees a restored `code/agent_backup/` carries.
+
+    None when the run holds no backup. Never overwrites: a branch that already exists at ANOTHER
+    commit, or a worktree path or `.meta` row already present, is reported under `skipped` and the
+    backup is KEPT (`pending: true`), so nothing in it is lost; when every entry is restored (or was
+    already in place) the consumed backup is removed and the next mirror pass backs up the live
+    worktrees again. Takes the repository lock: it writes refs, like the engine does."""
+    import shutil
+    run_dir = Path(run_dir)
+    root = run_dir / AGENT_BACKUP_REL
+    try:
+        index = json.loads((root / AGENT_BACKUP_INDEX).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    report: dict = {"refs": [], "restored": [], "skipped": [], "pending": False}
+    bundle = root / AGENT_BUNDLE
+    if not isinstance(index, dict) or not bundle.is_file():
+        report.update(pending=True, skipped=[{"name": "*", "reason": "backup_unreadable"}])
+        return report
+    repo = CodeRepo(run_dir).ensure()
+    with repo.lock():
+        listed = {}
+        for line in repo.git("bundle", "unbundle", str(bundle), timeout=300).stdout.decode(
+                "utf-8", "replace").splitlines():
+            sha, _, ref = line.strip().partition(" ")
+            if sha and ref:
+                listed[ref] = sha
+        current = repo.refs(AGENT_BRANCH_PREFIX)
+        diverged = set()
+        for ref, sha in sorted(listed.items()):
+            if not ref.startswith(AGENT_BRANCH_PREFIX):
+                continue
+            have = current.get(ref)
+            if have is None:
+                repo.git("update-ref", ref, sha, "")     # "" = create only, never move one
+                report["refs"].append(ref)
+            elif have != sha:
+                diverged.add(ref)
+                report["skipped"].append({"name": ref[len(AGENT_BRANCH_PREFIX):],
+                                          "reason": "branch_diverged", "kept": have,
+                                          "backup": sha})
+        repo.git("worktree", "prune")
+        for row in index.get("worktrees") or ():
+            name = row.get("name") if isinstance(row, dict) else None
+            if not isinstance(name, str) or not NAME.match(name):
+                continue
+            ref = AGENT_BRANCH_PREFIX + name
+            path, meta_file = run_dir / WORKTREES_REL / name, _meta_path(run_dir, name)
+            if path.exists() and meta_file.exists():
+                continue                                    # already in place
+            if ref in diverged:
+                continue                                    # reported above
+            if path.exists() or meta_file.exists() or repo.rev(ref) is None:
+                report["skipped"].append({"name": name, "reason": "worktree_path_exists"
+                                          if path.exists() or meta_file.exists()
+                                          else "branch_missing"})
+                continue
+            path.parent.mkdir(parents=True, exist_ok=True)
+            repo.git("worktree", "add", "--quiet", str(path), f"agent/{name}")
+            head, dirty = row.get("head"), row.get("dirty_commit")
+            if head and head != row.get("branch_head") and (
+                    listed.get(AGENT_HEAD_REF + name) == head
+                    or listed.get(AGENT_DIRTY_REF + name) == dirty):
+                # The worktree stood off its branch: put HEAD back where it was (detached — the
+                # branch it may have been on can be checked out in one worktree only).
+                run_git("-C", str(path), "checkout", "--quiet", "--detach", head)
+            if dirty and listed.get(AGENT_DIRTY_REF + name) == dirty:
+                # Switch the files (not HEAD) to the dirty tree — tracked edits, deletions and new
+                # files alike — then put the index back at HEAD: the worktree reads as it did.
+                run_git("-C", str(path), "read-tree", "-m", "-u", "HEAD", dirty)
+                run_git("-C", str(path), "reset", "--quiet")
+            meta = {k: row.get(k) for k in ("name", "branch", "start", "start_commit",
+                                            "base_digest")}
+            meta.update(path=str(path), restored_from_backup={
+                "branch_head": row.get("branch_head"), "dirty_commit": dirty,
+                **({"dirty_skipped": row["dirty_skipped"]} if row.get("dirty_skipped") else {})})
+            meta_file.parent.mkdir(parents=True, exist_ok=True)
+            meta_file.write_text(json.dumps(meta, indent=1), encoding="utf-8")
+            report["restored"].append(name)
+    # Pending only on a CONFLICT (something here the backup would overwrite): a worktree row whose
+    # branch was already gone when it was backed up has nothing to restore and holds nothing back.
+    report["pending"] = any(s["reason"] != "branch_missing" for s in report["skipped"])
+    if not report["pending"]:
+        shutil.rmtree(root, ignore_errors=True)
+    return report
