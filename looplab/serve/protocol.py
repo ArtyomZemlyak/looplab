@@ -444,8 +444,9 @@ CONTROL_DATA_FIELDS: dict[str, frozenset[str]] = {
         # eval reads (`LOOPLAB_USES_WORKDIRS`).
         "node_kind", "uses",
         "source_run", "source_node",
-        # Doc 79: `{"worktree": name}` or `{"patch": text, "start"?}` — an external agent's code in the
-        # run's private code repository, converted to `files`/`deleted` and consumed at intake
+        # Doc 79: `{"worktree": name}`, `{"patch": text, "start"?}` or `{"git": {"repo", "ref"}}` (a
+        # foreign branch merged onto the run's base, `engine/code_foreign.py`) — an external agent's
+        # code in the run's private code repository, converted to `files`/`deleted` and consumed at intake
         # (`control_validation._apply_code_from`), so no inject_node row carries it.
         "code_from"}),
     EV_DEEP_RESEARCH: frozenset(),

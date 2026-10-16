@@ -1,6 +1,6 @@
 """External-agent code authoring against the run's code repository (doc 79 §4).
 
-An external agent (Codex, Claude Code, a script) proposes code three ways, all ending in the same
+An external agent (Codex, Claude Code, a script) proposes code four ways, all ending in the same
 `inject_node` `files`/`deleted` overlay the engine already materializes:
 
   * `files` directly (unchanged);
@@ -11,7 +11,16 @@ An external agent (Codex, Claude Code, a script) proposes code three ways, all e
     from `node:<id>` that is the start node's own change PLUS the agent's, because the overlay is
     materialized over the base, not over the node (`_seed_base_of`);
   * a unified PATCH against the active base (or a node): `overlay_from_patch` applies it to a
-    private index, and the overlay is again the whole change over the start's seed base.
+    private index, and the overlay is again the whole change over the start's seed base;
+  * a FOREIGN BRANCH of another local repository, merged three-way onto the active base
+    (`engine/code_foreign.py`, which ends in `_overlay_between` like the two above).
+
+The worktree is the DEFAULT agent workflow (AGENTS.md "Code changes belong in the run"): every
+evaluated node is a branch `nodes/n<id>` visible inside it, so `git merge nodes/n<id>` there is how
+an agent combines experiments, and the merged result is one submission with `parent_ids` naming
+each. `add_worktree(path=...)` puts a worktree on persistent disk outside a tmpfs run
+(`_worktree_location` says where it may and may not go); `agent_backup` then bundles its branch but
+not its files, and `restore_agent_worktrees` re-links the surviving directory.
 
 Why a worktree is safe HERE when doc 37 declined it for node workspaces: the worktree is wired to the
 run's own repository, never to the operator's object database (doc 37 §5c), and its start commit
@@ -148,8 +157,83 @@ def _seed_base_of(repo: CodeRepo, commit: str) -> str:
     return commit
 
 
-def add_worktree(run_dir, name: str, *, start: str = "base") -> dict:
-    """Create `RUN_DIR/code/worktrees/<name>` on branch `agent/<name>` at `start`."""
+def _inside(path: Path, root: Path) -> bool:
+    try:
+        path.relative_to(root)
+        return True
+    except ValueError:
+        return False
+
+
+def _operator_source_roots(run_dir: Path) -> Optional[list]:
+    """The directories an agent worktree may NOT be placed in: every editable's source (the
+    operator's own checkout, `origin_path` under a pinned `seed_base`; also every source the run
+    recorded as dirty at start) and, when it is in git, that repository's whole working tree.
+    None when the task snapshot cannot be read — then nobody can say where the source is, and the
+    caller refuses rather than guess. Read-only: `rev-parse --show-toplevel` writes nothing."""
+    from looplab.engine.code_export import _editable_sources
+    from looplab.engine.code_identity import _read_events, _run_meta
+    editables = _editable_sources(run_dir)
+    if editables is None:
+        return None
+    sources = [src for _, src in editables]
+    try:
+        _, started = _run_meta(_read_events(run_dir))
+    except (OSError, ValueError):            # no readable log: the snapshot's editables still hold
+        started = {}
+    sources += [row.get("source") for row in started.get("dirty_inputs") or ()
+                if isinstance(row, dict) and isinstance(row.get("source"), str)]
+    roots = []
+    for src in sources:
+        if not src:
+            continue
+        p = Path(src).expanduser()
+        roots.append(p.resolve())
+        top = run_git("-C", str(p), "rev-parse", "--show-toplevel", check=False) if p.is_dir() else None
+        if top is not None and top.returncode == 0 and top.stdout.strip():
+            roots.append(Path(top.stdout.decode("utf-8", "replace").strip()).resolve())
+    return roots
+
+
+def _worktree_location(run_dir: Path, name: str, path) -> tuple:
+    """`(path, outside_run)` for a new worktree. WHY a path at all (2026-10-16): a run root on tmpfs
+    (`/dev/shm`, the deployment guide's fast path) loses `code/worktrees` on a pod restart — the
+    mirror backs the branch up, but an agent that edits for hours wants its files on PERSISTENT disk
+    in the first place. Such a worktree may live anywhere EXCEPT (a) the operator's source tree —
+    LoopLab never writes into the operator's repository, and a worktree there is an untracked
+    directory in their working tree — and (b) any other subtree of the run directory, which belongs
+    to the engine (node workdirs, blobs, the mirror spool). Absolute only: the server's cwd is not
+    the agent's."""
+    default = run_dir / WORKTREES_REL / name
+    if path is None or str(path).strip() == "":
+        return default, False
+    raw = Path(str(path)).expanduser()
+    if not raw.is_absolute():
+        raise OverlayRefusal("code_worktree_path_invalid",
+                             f"path must be absolute (got {str(path)[:200]!r})")
+    target = raw.resolve()
+    if target == default.resolve():
+        return default, False
+    if _inside(target, run_dir.resolve()):
+        raise OverlayRefusal("code_worktree_path_refused",
+                             "a worktree inside the run directory lives only at "
+                             f"{WORKTREES_REL}/<name>; pass no path, or one outside {run_dir}")
+    roots = _operator_source_roots(run_dir)
+    if roots is None:
+        raise OverlayRefusal("code_worktree_path_unverifiable",
+                             "the run's task snapshot is unreadable, so the operator's source tree "
+                             "is unknown; pass no path (the worktree stays in the run directory)")
+    for root in roots:
+        if _inside(target, root) or _inside(root, target):
+            raise OverlayRefusal("code_worktree_path_refused",
+                                 f"{target} is inside (or contains) the operator's source tree "
+                                 f"{root}; LoopLab never writes there — choose another directory")
+    return target, True
+
+
+def add_worktree(run_dir, name: str, *, start: str = "base", path=None) -> dict:
+    """Create `RUN_DIR/code/worktrees/<name>` (or `path`, outside the run directory and the
+    operator's source tree — `_worktree_location`) on branch `agent/<name>` at `start`."""
     from looplab.engine.code_identity import sync_run
     if not isinstance(name, str) or not NAME.match(name):
         raise OverlayRefusal("code_worktree_name", "name: 1-64 of letters, digits, '_', '.', '-'")
@@ -158,8 +242,10 @@ def add_worktree(run_dir, name: str, *, start: str = "base") -> dict:
     repo = CodeRepo(run_dir)
     if not repo.exists():
         raise OverlayRefusal("code_repo_missing", "this run has no code repository yet (no seed)")
-    path = run_dir / WORKTREES_REL / name
-    if path.exists() or _meta_path(run_dir, name).exists():
+    path, outside = _worktree_location(run_dir, name, path)
+    # An existing EMPTY directory is a mount point an operator prepared; anything else is somebody's.
+    occupied = path.exists() and not (path.is_dir() and not any(path.iterdir()))
+    if occupied or _meta_path(run_dir, name).exists():
         raise OverlayRefusal("code_worktree_exists", f"worktree {name} already exists: {path}")
     with repo.lock():
         commit = _resolve_start(repo, start)
@@ -167,9 +253,28 @@ def add_worktree(run_dir, name: str, *, start: str = "base") -> dict:
         repo.git("worktree", "add", "--quiet", "-b", f"agent/{name}", str(path), commit)
         meta = {"name": name, "path": str(path), "branch": f"agent/{name}", "start": start,
                 "start_commit": commit, "base_digest": _digest_of(repo, commit)}
+        if outside:
+            # Read by `agent_backup` (bundle the branch, skip the files: they are on persistent
+            # disk) and `restore_agent_worktrees` (re-link the directory, never re-create it).
+            meta["outside_run"] = True
         _meta_path(run_dir, name).parent.mkdir(parents=True, exist_ok=True)
         _meta_path(run_dir, name).write_text(json.dumps(meta, indent=1), encoding="utf-8")
     return meta
+
+
+def worktree_guide(meta: dict) -> dict:
+    """The next steps an agent reads beside a new worktree: the DEFAULT code workflow (AGENTS.md
+    "Code changes belong in the run"). Plain strings, no engine state: the route, the CLI and the
+    MCP tool return the same words."""
+    name = meta.get("name", "<name>")
+    return {
+        "edit": f"cd {meta.get('path')} — edit, run and commit as usual (branch {meta.get('branch')})",
+        "combine": "git merge nodes/n<id> — another experiment's change (branches nodes/n<id>, "
+                   "base, champion are visible here); name every merged node in parent_ids",
+        "preview": f"code_overlay(worktree={name!r}) — the files the submission becomes; submits nothing",
+        "submit": f"submit_experiment(..., code_from={{'worktree': {name!r}}}, parent_ids=[...]) "
+                  f"or inject_node with code_from {{\"worktree\": \"{name}\"}}",
+    }
 
 
 def list_worktrees(run_dir) -> list:
@@ -181,6 +286,29 @@ def list_worktrees(run_dir) -> list:
         except (OSError, ValueError):
             continue
     return out
+
+
+def describe_worktrees(run_dir) -> list:
+    """`list_worktrees` plus what each one is NOW: whether its directory exists, its HEAD, whether it
+    still starts on the active base (`stale_base`). Read-only (`--no-optional-locks`)."""
+    repo = CodeRepo(run_dir)
+    rows = []
+    for meta in list_worktrees(run_dir):
+        if not isinstance(meta, dict):
+            continue
+        row = {k: meta.get(k) for k in ("name", "path", "branch", "start", "start_commit",
+                                        "base_digest")}
+        row["outside_run"] = bool(meta.get("outside_run"))
+        wt = Path(str(meta.get("path") or ""))
+        row["exists"] = wt.is_dir()
+        head = (run_git("-C", str(wt), "--no-optional-locks", "rev-parse", "--verify", "HEAD",
+                        check=False) if row["exists"] else None)
+        row["head"] = (head.stdout.decode().strip() or None) if head is not None and \
+            head.returncode == 0 else None
+        start = meta.get("start_commit")
+        row["stale_base"] = _stale(repo, start) if repo.exists() and isinstance(start, str) else None
+        rows.append(row)
+    return rows
 
 
 def _surface_check(run_dir, paths) -> list:
@@ -271,6 +399,19 @@ def _overlay_between(repo: CodeRepo, run_dir, start: str, tree_or_commit: str, *
     if inherited:
         out["inherited_outside_surface"] = inherited
     return out
+
+
+def overlay_summary(overlay: dict) -> dict:
+    """An overlay WITHOUT its file bodies: `files` becomes `{path: bytes}` (a binary marker counts
+    its stored size). What the MCP preview and `submit_experiment` read — a 2 MiB overlay would
+    exceed the harness client's 256 KiB reply cap, and a write-shaped reply over the cap reads as an
+    unknown outcome there (`harness/mcp_server.py::HarnessAPI._result`)."""
+    sizes = {}
+    for path, text in (overlay.get("files") or {}).items():
+        m = _BLOB_SPEC.match(text[len(BLOB_MARKER):]) if is_blob_marker(text) else None
+        sizes[path] = int(m.group(2)) if m else len(str(text).encode("utf-8"))
+    return {**{k: v for k, v in overlay.items() if k != "files"}, "files": sizes,
+            "files_omitted": True}
 
 
 def _stale(repo: CodeRepo, start: str) -> bool:
@@ -580,7 +721,15 @@ def agent_backup(run_dir, out_dir) -> dict:
             row = {k: meta.get(k) for k in ("name", "branch", "start", "start_commit",
                                             "base_digest")}
             row.update(branch_head=refs.get(f"{AGENT_BRANCH_PREFIX}{name}"), dirty_commit=None)
-            wt = run_dir / WORKTREES_REL / name
+            outside = bool(meta.get("outside_run"))
+            wt = Path(str(meta.get("path"))) if outside else run_dir / WORKTREES_REL / name
+            if outside:
+                # A worktree OUTSIDE the run directory (`add_worktree(path=...)`) is on the disk
+                # the operator chose to survive a restart: its files are not this backup's to
+                # carry (they may be gigabytes the agent keeps there on purpose). Its BRANCH is —
+                # the branch lives in `code/repo.git`, which the mirror skips — and the restore
+                # re-links the directory to the rebuilt repository (`_relink_outside_worktree`).
+                row.update(outside_run=True, path=str(wt))
             if wt.is_dir():
                 head = run_git("-C", str(wt), "rev-parse", "--verify", "HEAD",
                                check=False).stdout.decode().strip()
@@ -590,7 +739,8 @@ def agent_backup(run_dir, out_dir) -> dict:
                     # switched to a branch of its own gets it back, not a detached HEAD.
                     row["head_ref"] = run_git("-C", str(wt), "symbolic-ref", "-q", "HEAD",
                                               check=False).stdout.decode().strip() or None
-                    _capture_dirty(repo, wt, scratch, head, row)
+                    if not outside:
+                        _capture_dirty(repo, wt, scratch, head, row)
             rows.append(row)
         extra = {r["head_ref"]: r["head"] for r in rows
                  if (r.get("head_ref") or "").startswith("refs/heads/")
@@ -634,7 +784,68 @@ def agent_backup(run_dir, out_dir) -> dict:
 
 # Reported, but nothing a later sync could still do: the worktree IS restored (its commit, its
 # files); keeping the backup would only re-block the next one.
-_NOT_PENDING = frozenset({"branch_missing", "head_branch_detached", "plain_files_missing"})
+_NOT_PENDING = frozenset({"branch_missing", "head_branch_detached", "plain_files_missing",
+                          "outside_files_not_backed_up"})
+
+
+def _write_restored_meta(meta_file: Path, row: dict, path: Path, dirty) -> None:
+    meta = {k: row.get(k) for k in ("name", "branch", "start", "start_commit", "base_digest")}
+    if row.get("outside_run"):
+        meta["outside_run"] = True
+    meta.update(path=str(path), restored_from_backup={
+        "branch_head": row.get("branch_head"), "dirty_commit": dirty,
+        **({"dirty_skipped": row["dirty_skipped"]} if row.get("dirty_skipped") else {}),
+        **({"files_skipped": row["files_skipped"]} if row.get("files_skipped") else {})})
+    meta_file.parent.mkdir(parents=True, exist_ok=True)
+    meta_file.write_text(json.dumps(meta, indent=1), encoding="utf-8")
+
+
+def _relink_outside_worktree(repo: CodeRepo, run_dir: Path, path: Path, name: str,
+                             row: dict) -> Optional[dict]:
+    """Re-attach a persistent worktree directory to the REBUILT run repository; None on success,
+    else the `skipped` row saying why (nothing is changed then).
+
+    After a tmpfs restore `code/repo.git` is rebuilt by `sync_run`, so the directory's `.git` FILE
+    points at an administrative entry (`repo.git/worktrees/<name>`) that no longer exists, and git
+    has no command that adopts an occupied directory (`worktree add` refuses it, `worktree repair`
+    needs the entry to exist). So the entry is minted by a `--no-checkout` worktree at a scratch
+    path, its two pointers are re-aimed at the real directory (`<dir>/.git` -> entry, entry's
+    `gitdir` -> `<dir>/.git`), the scratch directory is removed, HEAD is put back on the branch (or
+    the detached commit) it stood on, and the index is reset to HEAD WITHOUT touching a file — the
+    agent's uncommitted edits read as dirty exactly as before."""
+    import shutil
+    dotgit = path / ".git"
+    if dotgit.is_dir():
+        return {"reason": "outside_path_is_a_repository", "path": str(path)}
+    probe = run_git("-C", str(path), "rev-parse", "--absolute-git-dir", check=False)
+    if probe.returncode == 0 and Path(probe.stdout.decode().strip()).resolve().is_relative_to(
+            (repo.path / "worktrees").resolve()):
+        return None                                         # still linked: nothing to do
+    head, head_ref = row.get("head"), row.get("head_ref")
+    start = head if isinstance(head, str) and repo.rev(head) else f"agent/{name}"
+    scratch = run_dir / WORKTREES_REL / ".relink" / name
+    shutil.rmtree(scratch, ignore_errors=True)
+    scratch.parent.mkdir(parents=True, exist_ok=True)
+    repo.git("worktree", "add", "--quiet", "--no-checkout", "--detach", str(scratch), start)
+    try:
+        pointer = (scratch / ".git").read_text(encoding="utf-8").strip()
+        admin = Path(pointer[len("gitdir:"):].strip()) if pointer.startswith("gitdir:") else None
+        if admin is None or not admin.is_dir():
+            return {"reason": "outside_relink_failed", "path": str(path)}
+        dotgit.write_text(f"gitdir: {admin}\n", encoding="utf-8")
+        (admin / "gitdir").write_text(f"{dotgit}\n", encoding="utf-8")
+    finally:
+        shutil.rmtree(scratch, ignore_errors=True)
+    if isinstance(head_ref, str) and head_ref.startswith("refs/heads/"):
+        if repo.rev(head_ref) is None and start == head:
+            repo.git("update-ref", head_ref, head, "")      # a branch of its own: create only
+        at = repo.rev(head_ref)
+        # Back ON the branch only where it still names the commit the directory stood on; a branch
+        # that moved since leaves HEAD detached at that commit (never lost, never moved).
+        if at is not None and (start != head or at == head):
+            run_git("-C", str(path), "symbolic-ref", "HEAD", head_ref)
+    run_git("-C", str(path), "reset", "--quiet")            # index := HEAD; files untouched
+    return None
 
 
 def _restore_plain(root: Path, worktree: Path, row: dict) -> list:
@@ -712,10 +923,26 @@ def restore_agent_worktrees(run_dir) -> Optional[dict]:
                 continue
             ref = AGENT_BRANCH_PREFIX + name
             path, meta_file = run_dir / WORKTREES_REL / name, _meta_path(run_dir, name)
+            outside = bool(row.get("outside_run")) and isinstance(row.get("path"), str)
+            if outside:
+                path = Path(row["path"])
             if path.exists() and meta_file.exists():
                 continue                                    # already in place
             if ref in diverged:
                 continue                                    # reported above
+            if outside and path.exists():
+                # On persistent disk and still there, edits and all: re-link it to the rebuilt
+                # repository instead of re-creating it (which would refuse the occupied path).
+                if repo.rev(ref) is None:
+                    report["skipped"].append({"name": name, "reason": "branch_missing"})
+                    continue
+                note = _relink_outside_worktree(repo, run_dir, path, name, row)
+                if note is not None:
+                    report["skipped"].append({"name": name, **note})
+                    continue
+                _write_restored_meta(meta_file, row, path, row.get("dirty_commit"))
+                report["restored"].append(name)
+                continue
             if path.exists() or meta_file.exists() or repo.rev(ref) is None:
                 report["skipped"].append({"name": name, "reason": "worktree_path_exists"
                                           if path.exists() or meta_file.exists()
@@ -756,14 +983,12 @@ def restore_agent_worktrees(run_dir) -> Optional[dict]:
             if missing:
                 report["skipped"].append({"name": name, "reason": "plain_files_missing",
                                           "paths": missing[:20], "count": len(missing)})
-            meta = {k: row.get(k) for k in ("name", "branch", "start", "start_commit",
-                                            "base_digest")}
-            meta.update(path=str(path), restored_from_backup={
-                "branch_head": row.get("branch_head"), "dirty_commit": dirty,
-                **({"dirty_skipped": row["dirty_skipped"]} if row.get("dirty_skipped") else {}),
-                **({"files_skipped": row["files_skipped"]} if row.get("files_skipped") else {})})
-            meta_file.parent.mkdir(parents=True, exist_ok=True)
-            meta_file.write_text(json.dumps(meta, indent=1), encoding="utf-8")
+            if outside:
+                # Re-created at its persistent path, but that disk had lost the directory too: the
+                # committed branch is back, the uncommitted files were never this backup's.
+                report["skipped"].append({"name": name, "reason": "outside_files_not_backed_up",
+                                          "path": str(path)})
+            _write_restored_meta(meta_file, row, path, dirty)
             report["restored"].append(name)
     # Pending only on a CONFLICT (something here the backup would overwrite): a worktree row whose
     # branch was already gone when it was backed up has nothing to restore and holds nothing back.

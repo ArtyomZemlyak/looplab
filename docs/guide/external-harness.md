@@ -61,21 +61,17 @@ operator starts the server and run, while the coding agent proposes candidates.
    resubmit the last candidate. See [Reconnect and recovery](#reconnect-and-recovery).
 
 For a quick offline evaluator, `examples/toy_task.json` can replace `task.json`.
-The coding agent's own model calls can still cost money; they are outside
-LoopLab's provider-cost ledger. The scoped token cannot launch a run or change
-global settings. The full `harness` contract and the live progress endpoint
-remain authoritative if enabled obligations require more steps than this sketch.
+The coding agent's own model calls cost money outside LoopLab's cost ledger. The
+scoped token cannot launch a run or change global settings. Where enabled obligations
+require more steps than this sketch, the `harness` contract and live progress win.
 
-The contract, handoff and progress bootstrap reads require a configuration this
-server build understands. HTTP 503 with `harness_config_unavailable` names a
-missing/unreadable/invalid `config.snapshot.json`; ask the operator to restore
-the original snapshot. `harness_config_incompatible` names an unsupported format
-or unknown setting; verify the server version and use a compatible build.
-Do not delete unknown settings to bypass obligations. The ordinary config view
-remains available for diagnostics when readable, but does not approve actions.
-After operator repair, explicitly refresh bootstrap reads. These refusals do not
-rewrite snapshots, retry commands or resume training; supported legacy and retired
-settings remain readable.
+Bootstrap reads (contract, handoff, progress) need a configuration this server build
+understands. HTTP 503 `harness_config_unavailable` names a missing/unreadable/invalid
+`config.snapshot.json` (the operator restores it); `harness_config_incompatible` an
+unsupported format or unknown setting (use a compatible build). Never delete unknown
+settings to bypass obligations. The config view stays readable for diagnostics but
+approves nothing. Refresh explicitly after repair; these refusals rewrite, retry and
+resume nothing, and legacy and retired settings stay readable.
 
 ### Brief results in Assistant chat
 
@@ -1113,6 +1109,12 @@ Unchanged-code remeasurement via `node_reset` from `eval` is a different decisio
 It is not a way to submit corrected source. This procedure adds no automatic
 repair, retry, hidden wait or admission/finalization requirement; existing enabled
 obligations still apply.
+
+### Write code in a run worktree (default)
+
+MCP `code_worktree`, edit and commit there, `git merge nodes/n<id>` to combine experiments,
+then `submit_experiment(code_from={"worktree": name}, parent_ids=[...])`. Your own branch goes
+in as `code_from={"git": {"repo", "ref"}}` ([details](code-identity.md#external-agents)).
 
 ## Finding a run that needs an agent answer
 

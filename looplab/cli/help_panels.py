@@ -52,7 +52,7 @@ HELP_PANELS: tuple[tuple[str, tuple[tuple[str, str], ...]], ...] = (
         ("export-bundle", "Package a run for a reviewer as an RO-Crate bundle."),
         ("export-git", "Export the experiment tree as a git repository, one commit per experiment."),
         ("code-status", "Each attempt's code commit, the run's bases and what is pending upstream."),
-        ("code-worktree", "A git worktree of the run's code for an external agent to edit."),
+        ("code-worktree", "A git worktree of the run's code: edit, merge experiments, submit."),
         ("code-export", "Export the run's code fixes into the task repo as a new branch."),
         ("export-sft", "Export the run's model turns as outcome-labelled SFT rows."),
         ("tensorboard", "Serve TensorBoard over the experiments' training logs."),

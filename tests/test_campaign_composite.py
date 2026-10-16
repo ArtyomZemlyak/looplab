@@ -100,7 +100,12 @@ def test_the_campaign_tools_are_advertised():
     assert {"amend_protocol", "run_protocol", "upload_per_query", "compare_experiment",
             "shared_test_leaderboard", "campaign_supertask", "campaign_report",
             "publish_campaign_narrative", "submit_experiment", "finish_run",
-            "retry_node"} <= names
+            "retry_node", "code_worktree", "code_worktrees", "code_overlay"} <= names
+    schemas = {tool.name: tool.model_dump(by_alias=True)["inputSchema"]["properties"]
+               for tool in anyio.run(build_server(api).list_tools)}
+    # Worktree + merge is the default submission path (AGENTS.md "Code changes belong in the run").
+    assert {"code_from", "parent_ids"} <= set(schemas["submit_experiment"])
+    assert "path" in schemas["code_worktree"] and "git" in schemas["code_overlay"]
 
 
 def test_submit_experiment_preregisters_files_and_injects_in_one_call(tmp_path, monkeypatch):

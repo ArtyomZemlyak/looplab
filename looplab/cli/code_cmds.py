@@ -3,7 +3,8 @@
 What each touches: `code-status` reads the run and (with `--sync`) writes ONLY the run's private
 code repository (`RUN_DIR/code/repo.git`) — after a mirror restore, also the agent worktrees its
 `code/agent_backup/` carries — appending no event; `code-worktree` adds a worktree of that
-private repository under `RUN_DIR/code/worktrees/`; `code-export` writes NEW objects and ONE NEW
+private repository under `RUN_DIR/code/worktrees/` (or at `--path`, outside the run directory and
+never inside the operator's source tree); `code-export` writes NEW objects and ONE NEW
 branch into the operator-named task repository and never touches its HEAD, index, working tree,
 existing branches or remotes, and never pushes. No command calls a model.
 """
@@ -98,20 +99,25 @@ def code_worktree_cmd(
     run_dir: Path = typer.Argument(..., help="Run directory."),
     name: str = typer.Argument(..., help="Worktree name (branch agent/<name>)."),
     start: str = typer.Option("base", help="`base` (the active base), `node:<id>` or a commit."),
+    path: Optional[Path] = typer.Option(None, "--path", help="Put the worktree here instead (e.g. "
+                                        "persistent disk for a tmpfs run): outside the run "
+                                        "directory and the operator's source tree."),
 ):
     """Give an external agent a git worktree of the run's code to edit.
 
     Checked out from the run's PRIVATE repository (never the operator's) at the active base, which
-    holds the seeded working tree including uncommitted edits. Submit the result with inject_node
-    `code_from: {"worktree": "<name>"}`."""
+    holds the seeded working tree including uncommitted edits. `git merge nodes/n<id>` there
+    combines another experiment's change. Submit the result with inject_node
+    `code_from: {"worktree": "<name>"}` (and `parent_ids` naming every merged node)."""
     from looplab.engine.code_repo import CodeRepoError
-    from looplab.engine.code_worktree import add_worktree
+    from looplab.engine.code_worktree import add_worktree, worktree_guide
     _require_run_dir(run_dir)
     try:
-        meta = add_worktree(run_dir, name, start=start)
+        meta = add_worktree(run_dir, name, start=start,
+                            path=None if path is None else path.expanduser().absolute())
     except CodeRepoError as exc:
         _refuse(f"code-worktree: {exc}")
-    typer.echo(json.dumps(meta, indent=1))
+    typer.echo(json.dumps({**meta, "guide": worktree_guide(meta)}, indent=1, ensure_ascii=False))
 
 
 @app.command(name="code-export")

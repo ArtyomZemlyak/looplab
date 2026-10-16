@@ -175,9 +175,22 @@ Every candidate's code is recorded as a commit of the run's private repository
 (`RUN_DIR/code/repo.git`, `docs/guide/code-identity.md`), and the operator exports
 the run's fixes into the task repository with `looplab code-export`. Code edited in
 a copy outside the run — a scratch clone, a campaign directory, the editable source
-between runs — reaches neither. To change code, take a worktree of the run's
-current base (`looplab code-worktree RUN NAME` or `POST /api/runs/{run_id}/code/worktrees`),
-edit and commit there, and submit `inject_node` with `code_from: {"worktree": NAME}`
-(or `{"patch": "<unified diff>"}`); the overlay is held to the task's edit surface.
-`GET /api/runs/{run_id}/code` shows each attempt's commit and the effective
-hyperparameters LoopLab observed, with mismatches against the params you declared.
+between runs — reaches neither. The worktree is the default way to write code:
+
+1. MCP `code_worktree(run_id, expected_generation, name)` (or `looplab code-worktree RUN NAME`)
+   checks out the run's current base — `start="node:<id>"` for an experiment — on branch
+   `agent/NAME`. On a tmpfs run root pass `path=` to keep it on persistent disk (never
+   inside the operator's source tree).
+2. Edit, run and commit there. `git merge nodes/n<id>` combines another experiment's
+   change (branches `base`, `nodes/n<id>`, `champion` are visible in the worktree).
+3. `submit_experiment(..., code_from={"worktree": NAME}, parent_ids=[...])` — list every
+   node you merged. `code_overlay` previews what the submission becomes; submits nothing.
+
+A branch of your own — e.g. a Claude Code worktree branch of the operator's repository —
+goes in as `code_from: {"git": {"repo": "<absolute path>", "ref": "<branch>"}}`: LoopLab
+fetches it read-only and three-way merges it onto the run's base, so the operator's
+uncommitted edits are kept, an overlap is a 409 naming the paths, and a warning says how
+many base files your branch lacked. `{"patch": "<unified diff>"}` and `files=` still work.
+Every submission is held to the task's edit surface. `GET /api/runs/{run_id}/code` shows
+each attempt's commit and the effective hyperparameters LoopLab observed, with mismatches
+against the params you declared.

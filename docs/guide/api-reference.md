@@ -10,7 +10,7 @@ vocabulary a client may append is `serve/protocol.py::CONTROL_EVENTS`.
 
 <!-- generated: api routes -->
 
-199 routes on 173 paths; 10 deprecated; 27 with a declared response model.
+200 routes on 173 paths; 10 deprecated; 27 with a declared response model.
 
 ### `/api`
 
@@ -199,8 +199,9 @@ vocabulary a client may append is `serve/protocol.py::CONTROL_EVENTS`.
 | `POST` | `/api/runs/{run_id}/chat-log` | Append ONE chat turn (the verbatim feed entry: role/content/trace or role/action/status) | — |  |
 | `GET` | `/api/runs/{run_id}/code` | The run's code: bases (with upstream evidence), per-attempt commits with changed paths, | — |  |
 | `GET` | `/api/runs/{run_id}/code/diff` | A bounded unified diff of one commit of the run's code repository against `against` | — |  |
-| `POST` | `/api/runs/{run_id}/code/overlay` | Preview the `files`/`deleted` overlay a worktree or a patch becomes (the same conversion | — |  |
+| `POST` | `/api/runs/{run_id}/code/overlay` | Preview the `files`/`deleted` overlay a worktree, a patch or a foreign git branch | — |  |
 | `POST` | `/api/runs/{run_id}/code/sync` | Build the attempt commits the log implies but no code_snapshot recorded (old runs). | — |  |
+| `GET` | `/api/runs/{run_id}/code/worktrees` | The run's agent worktrees: path (in or outside the run directory), branch, start, HEAD | — |  |
 | `POST` | `/api/runs/{run_id}/code/worktrees` | Check out the run's active base (or `node:<id>`) from the PRIVATE run repository into | — |  |
 | `POST` | `/api/runs/{run_id}/command` | Action-router (Workstream C): turn a free-text instruction into EITHER a concrete control | — |  |
 | `GET` | `/api/runs/{run_id}/command-receipt` | Observe a saved command by ID or Idempotency-Key without restarting work. | — |  |

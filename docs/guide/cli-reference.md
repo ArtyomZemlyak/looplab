@@ -3115,7 +3115,7 @@ egress boundary.
 
 ## `code-worktree`
 
-| `RUN_DIR NAME [--start base\|node:<id>]` | A worktree of the run's private repository, branch `agent/NAME`, for an external agent. |
+| `RUN_DIR NAME [--start base\|node:<id>] [--path DIR]` | A worktree of the run's private repository, branch `agent/NAME`, for an external agent; `git merge nodes/n<id>` there combines experiments. `--path` keeps it on persistent disk outside the run (refused inside the operator's source tree). [Code identity](code-identity.md#external-agents) |
 
 ## `code-export`
 

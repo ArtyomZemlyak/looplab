@@ -1159,17 +1159,33 @@ def _check_inject_question(ctx: _ControlIntake, question_id: Optional[str]) -> N
         })
 
 
+_CODE_FROM_SOURCES = frozenset({"worktree", "patch", "git"})
+
+
+def _code_from_git(rd: Path, git) -> dict:
+    """`code_from: {"git": {...}}` — a foreign repository's branch merged onto the run's base
+    (`engine/code_foreign.py`). Its one refusal of its own SHAPE is the conflict: 409 with the
+    paths, so an agent resolves exactly those; every other refusal is the shared mapping."""
+    from looplab.engine.code_foreign import OverlayConflict, overlay_from_git
+    try:
+        return overlay_from_git(rd, git)
+    except OverlayConflict as exc:
+        raise HTTPException(409, {"code": exc.code, "message": str(exc),
+                                  "paths": exc.paths}) from exc
+
+
 def _apply_code_from(ctx: _ControlIntake) -> None:
     """Doc 79: turn `code_from` — a LoopLab-provided worktree or a unified patch against the run's
     active base — into the `files`/`deleted` overlay every other inject carries, held to the task's
     edit surface (`engine/code_worktree.py`). Consumed here; never written to the event."""
     data = ctx.data
     spec = data.pop("code_from")
-    if not isinstance(spec, dict) or len({"worktree", "patch"} & set(spec)) != 1 or (
-            set(spec) - {"worktree", "patch", "start"}):
+    if not isinstance(spec, dict) or len(_CODE_FROM_SOURCES & set(spec)) != 1 or (
+            set(spec) - _CODE_FROM_SOURCES - {"start"}):
         raise HTTPException(400, {"code": "code_from_invalid", "message":
-                                  "code_from must be {\"worktree\": name} or {\"patch\": text, \"start\"?: "
-                                  "\"base\"|\"node:<id>\"}"})
+                                  "code_from must be {\"worktree\": name}, {\"patch\": text, \"start\"?: "
+                                  "\"base\"|\"node:<id>\"} or {\"git\": {\"repo\": path, \"ref\": "
+                                  "branch|commit}}"})
     if data.get("files") or data.get("deleted"):
         raise HTTPException(400, {"code": "code_from_conflict", "message":
                                   "give either code_from or files/deleted, not both"})
@@ -1178,6 +1194,8 @@ def _apply_code_from(ctx: _ControlIntake) -> None:
     try:
         if "worktree" in spec:
             overlay = overlay_from_worktree(ctx.rd, spec["worktree"])
+        elif "git" in spec:
+            overlay = _code_from_git(ctx.rd, spec["git"])
         else:
             overlay = overlay_from_patch(ctx.rd, spec["patch"], start=str(spec.get("start") or "base"))
     except CodeRepoError as exc:

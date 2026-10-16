@@ -62,7 +62,10 @@ MCP_INSTRUCTIONS = (
     "Use only the scoped harness credential; owner-only workflows require the operator. "
     "Between decisions, block on wait_for_next(after=<last id>) instead of polling: LoopLab "
     "derives node/stage/question/obligation/idle/GPU events itself. Order GPU work across runs "
-    "with PUT /api/runs/{run_id}/gpu-gate (hold / start_after) instead of handoff scripts."
+    "with PUT /api/runs/{run_id}/gpu-gate (hold / start_after) instead of handoff scripts. "
+    "Write code in the run, not in copies: code_worktree, edit and commit there, git merge "
+    "nodes/n<id> to combine experiments, then submit_experiment(code_from={worktree}, parent_ids); "
+    "a branch of your own goes in as code_from={git: {repo, ref}} (merged onto the run's base)."
 )
 
 
@@ -1188,18 +1191,74 @@ def _campaign_tools(mcp, api, ToolAnnotations) -> None:
                           deleted: list[str] | None = None, parent_id: int | None = None,
                           research_question: dict | None = None, experiment: dict | None = None,
                           experiment_reason: str = "", memo: dict | None = None,
-                          decisions: dict | None = None, dry_run: bool = False) -> dict:
+                          decisions: dict | None = None, dry_run: bool = False,
+                          code_from: dict | None = None, parent_ids: list[int] | None = None,
+                          parent_generations: dict | None = None) -> dict:
         """One call for the whole admission ceremony: pre-register `experiment` (protocol
         journal), add `research_question` {id, statement?, concepts?} and file the idea under it,
         publish `memo`, record `decisions` {phase: {reason, alternatives?}} the run requires,
-        then inject the candidate (idea with concepts + files/code). dry_run=true lists missing
-        obligations and the plan without writing. Stops at the first failed step; repeat with the
-        SAME key to resume — completed steps replay their receipts."""
+        then inject the candidate (idea with concepts + its code). Code: code_from={"worktree":
+        name} (the default: a code_worktree you edited/committed, `git merge nodes/n<id>` to
+        combine experiments), {"patch": diff} or {"git": {"repo": abs path, "ref": branch}} (your
+        own branch, merged onto the run's base; overlaps are named conflicts) — OR files/code.
+        code_from is previewed first, so a refusal writes nothing. parent_ids lists every merged
+        node (exclusive with parent_id). dry_run=true lists missing obligations, the plan and the
+        changed paths without writing. Stops at the first failed step; repeat with the SAME key to
+        resume — completed steps replay their receipts; a new candidate needs a new key."""
         return composite.submit_experiment(
             api, run_id, expected_generation, key=key, idea=idea, files=files, code=code,
             deleted=deleted, parent_id=parent_id, research_question=research_question,
             experiment=experiment, experiment_reason=experiment_reason, memo=memo,
-            decisions=decisions, dry_run=dry_run)
+            decisions=decisions, dry_run=dry_run, code_from=code_from, parent_ids=parent_ids,
+            parent_generations=parent_generations)
+
+    def _code_path(run_id: str, expected_generation: str, suffix: str) -> str:
+        api._run_identity(run_id, expected_generation)
+        return f"/api/runs/{quote(run_id, safe='')}/code/{suffix}"
+
+    @mcp.tool(annotations=ToolAnnotations(readOnlyHint=False, destructiveHint=False,
+                                        idempotentHint=False, openWorldHint=False))
+    def code_worktree(run_id: str, expected_generation: str, name: str, start: str = "base",
+                      path: str | None = None) -> dict:
+        """THE DEFAULT WAY TO WRITE CODE: a git worktree of the run's code (its private
+        repository, never the operator's) at the active base, or start="node:<id>", on branch
+        agent/<name>. Edit, run and commit there; `git merge nodes/n<id>` combines another
+        experiment's change. Then submit_experiment(code_from={"worktree": name},
+        parent_ids=[...every merged node]). path= puts it on persistent disk outside the run
+        directory (tmpfs runs); never inside the operator's source tree. Returns path, branch,
+        start_commit and a guide. A second call with the same name is refused (409)."""
+        body = {"name": name, "start": start, "expected_generation": expected_generation}
+        if path:
+            body["path"] = path
+        return api.request("POST", _code_path(run_id, expected_generation, "worktrees"), body)
+
+    @mcp.tool(annotations=ToolAnnotations(readOnlyHint=True, destructiveHint=False,
+                                        idempotentHint=True, openWorldHint=False))
+    def code_worktrees(run_id: str, expected_generation: str) -> dict:
+        """List this run's agent worktrees: path, branch, start, HEAD now and stale_base (the run's
+        base advanced since it was made: merge `base` into it or start a new one). Starts no work."""
+        return api._checked_generation(api.request(
+            "GET", _code_path(run_id, expected_generation, "worktrees")
+            + f"?expected_generation={expected_generation}"), expected_generation)
+
+    @mcp.tool(annotations=ToolAnnotations(readOnlyHint=False, destructiveHint=False,
+                                        idempotentHint=True, openWorldHint=False))
+    def code_overlay(run_id: str, expected_generation: str, worktree: str | None = None,
+                     patch: str | None = None, git: dict | None = None,
+                     start: str = "base") -> dict:
+        """Preview what a submission's code becomes — exactly one of worktree=name, patch=diff
+        (against start) or git={"repo": abs path, "ref": branch|commit} (a foreign branch, e.g. a
+        Claude Code worktree branch, fetched read-only and three-way merged onto the run's base;
+        overlapping edits are a 409 naming the paths). Returns changed/deleted paths with sizes,
+        stale_base and warnings (e.g. "your branch lacks N uncommitted files of the source").
+        Submits nothing; writes only run-private git objects."""
+        body: dict = {"expected_generation": expected_generation, "include_files": False}
+        for field, value in (("worktree", worktree), ("patch", patch), ("git", git)):
+            if value is not None:
+                body[field] = value
+        if patch is not None:
+            body["start"] = start
+        return api.request("POST", _code_path(run_id, expected_generation, "overlay"), body)
 
     @mcp.tool()
     def finish_run(run_id: str, expected_generation: str, key: str, report: dict | None = None,

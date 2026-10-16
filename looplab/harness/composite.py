@@ -107,18 +107,61 @@ def _command(api, run_id: str, generation: str, event_type: str, data: dict, key
     return out
 
 
+_CODE_FROM_KINDS = ("worktree", "patch", "git")
+
+
+def _code_from_shape(code_from) -> Optional[str]:
+    """What is wrong with a `code_from` value, or None. The server decides the rest; this only
+    keeps a malformed one from reaching the preview as a 422."""
+    if not isinstance(code_from, dict):
+        return "code_from must be an object"
+    kinds = [k for k in _CODE_FROM_KINDS if k in code_from]
+    if len(kinds) != 1 or set(code_from) - set(_CODE_FROM_KINDS) - {"start"}:
+        return ('code_from must be exactly one of {"worktree": name}, {"patch": text, "start"?} '
+                'or {"git": {"repo": path, "ref": branch|commit}}')
+    return None
+
+
+def _preview_summary(result: dict) -> dict:
+    """The preview receipt an agent reads: WHAT the submission becomes, never the file bodies
+    (`include_files=false`), plus the warnings and the conflict paths a refusal names."""
+    body = result.get("body") if isinstance(result.get("body"), dict) else {}
+    out = {k: result.get(k) for k in ("status", "code", "outcome", "reason", "message")
+           if result.get(k) is not None}
+    if _ok(result):
+        out.update(changed=[r.get("path") for r in (body.get("changed") or [])][:100],
+                   deleted=list(body.get("deleted") or [])[:100],
+                   **{k: body[k] for k in ("stale_base", "warnings", "inherited_outside_surface",
+                                           "binary_files", "foreign", "base_digest")
+                      if body.get(k)})
+    elif isinstance(body.get("detail"), (dict, str)):
+        out["detail"] = body["detail"]
+    return out
+
+
 def submit_experiment(api, run_id: str, expected_generation: str, *, key: str, idea: dict,
                       files: Optional[dict] = None, code: Optional[str] = None,
                       deleted: Optional[list] = None, parent_id: Optional[int] = None,
                       research_question: Optional[dict] = None,
                       experiment: Optional[dict] = None, experiment_reason: str = "",
                       memo: Optional[dict] = None, decisions: Optional[dict] = None,
-                      dry_run: bool = False) -> dict:
+                      dry_run: bool = False, code_from: Optional[dict] = None,
+                      parent_ids: Optional[list] = None,
+                      parent_generations: Optional[dict] = None) -> dict:
+    """`code_from` (doc 79 §4) is the run-worktree / patch / foreign-branch alternative to
+    `files`/`code`/`deleted` — exactly one of the two. It is PREVIEWED through the same route the
+    intake converts it with (`POST .../code/overlay`, paths and sizes only) BEFORE anything is
+    written, so a surface refusal or a merge conflict stops the call with nothing registered, and a
+    dry run reports the paths the candidate would change. `parent_ids` names several parents — a
+    worktree that ran `git merge nodes/n<id>` lists every node it combined — and is exclusive with
+    `parent_id`."""
     steps = _Steps()
     if not isinstance(idea, dict) or not isinstance(idea.get("operator"), str):
         raise ValueError("idea must be an object with an operator")
     if not key or len(key) > 120:
         raise ValueError("key must be a stable non-empty string of at most 120 characters")
+    if parent_id is not None and parent_ids is not None:
+        raise ValueError("give parent_id or parent_ids, not both")
     idea = dict(idea)
     progress = api.run_progress(run_id, expected_generation)
     if not steps.add("read_progress", progress):
@@ -136,8 +179,14 @@ def submit_experiment(api, run_id: str, expected_generation: str, *, key: str, i
     for phase in required:
         if phase not in decisions:
             missing.append(f"decisions[{phase!r}] = {{reason, alternatives?}} (required review)")
-    if not (files or code or deleted):
-        missing.append("files or code (an external run evaluates ready-made candidates)")
+    if code_from is not None:
+        if files or code or deleted:
+            missing.append("code_from OR files/code/deleted, not both")
+        elif _code_from_shape(code_from):
+            missing.append(_code_from_shape(code_from))
+    elif not (files or code or deleted):
+        missing.append("code_from, or files or code (an external run evaluates ready-made "
+                       "candidates; code_from={'worktree': name} is the default path)")
     if research_question is not None:
         if not isinstance(research_question, dict) or not research_question.get("id"):
             missing.append("research_question.id")
@@ -147,6 +196,24 @@ def submit_experiment(api, run_id: str, expected_generation: str, *, key: str, i
         (["add research question"] if research_question and research_question.get("statement") else []) + \
         (["publish research memo"] if memo else []) + \
         [f"decision {p}" for p in decisions] + ["inject_node"]
+    if code_from is not None and not missing:
+        # A same-key RESUME whose inject already landed must replay it, not re-judge a worktree
+        # the agent has edited since (or a base that has moved): the preview is skipped then.
+        prior = (None if dry_run else
+                 api.command_receipt(run_id, expected_generation, idempotency_key=f"{key}:inject"))
+        landed = bool(prior) and _ok(prior) and isinstance(
+            (prior.get("body") or {}).get("command"), dict)
+        if landed:
+            steps.steps.append({"step": "preview_code", "ok": True,
+                                "status": "skipped: this key's inject was already submitted"})
+        else:
+            # Before ANY write: the conversion the intake will apply, on the same route and rules.
+            preview = api.request("POST", _run_path(run_id, "/code/overlay"), {
+                **code_from, "expected_generation": expected_generation, "include_files": False})
+            ok = _ok(preview)
+            steps.steps.append({"step": "preview_code", "ok": ok, **_preview_summary(preview)})
+            if not ok:
+                return steps.done(message="")
     if missing or dry_run:
         steps.steps.append({"step": "validate", "ok": not missing, "missing": missing,
                             "blockers": blockers, "plan": plan})
@@ -194,7 +261,8 @@ def submit_experiment(api, run_id: str, expected_generation: str, *, key: str, i
             return steps.done(message="")
     data: dict[str, Any] = {"idea": idea}
     for name, value in (("files", files), ("code", code), ("deleted", deleted),
-                        ("parent_id", parent_id)):
+                        ("parent_id", parent_id), ("parent_ids", parent_ids),
+                        ("parent_generations", parent_generations), ("code_from", code_from)):
         if value is not None:
             data[name] = value
     result = _command(api, run_id, expected_generation, "inject_node", data, f"{key}:inject",

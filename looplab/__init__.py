@@ -41,6 +41,7 @@ _LAYOUT = {
     "code_identity": "engine",   # doc 79: per-attempt commits, base lineage, code status
     "code_export": "engine",     # doc 79: export the run's code to the task repo as a branch
     "code_worktree": "engine",   # doc 79: external-agent worktrees and patch overlays
+    "code_foreign": "engine",    # doc 79 §4: a foreign git branch merged onto the run's base
     "upstream_gate": "engine",
     "upstream_evidence": "core",
     "upstream_tools": "tools",

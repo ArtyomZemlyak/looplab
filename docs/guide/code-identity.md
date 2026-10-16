@@ -64,21 +64,32 @@ executable bit of the working tree the run started from is not exported.
 
 ## External agents
 
-An external agent can keep using `inject_node` with `files`, or work in a git worktree:
+The default agent workflow is a git worktree of the run's code; `inject_node` with `files` still
+works.
 
 ```bash
 looplab code-worktree runs/my-run fix-lr        # RUN_DIR/code/worktrees/fix-lr, branch agent/fix-lr
-# edit, run, commit in that directory as usual, then submit:
-#   inject_node {"idea": {...}, "code_from": {"worktree": "fix-lr"}}
-# or a unified diff against the active base:
-#   inject_node {"idea": {...}, "code_from": {"patch": "--- a/x.py\n+++ b/x.py\n..."}}
+# edit, run, commit there; `git merge nodes/n3` combines experiment 3's change; then submit:
+#   submit_experiment(..., code_from={"worktree": "fix-lr"}, parent_ids=[3])   (MCP)
+#   inject_node {"idea": {...}, "code_from": {"worktree": "fix-lr"}, "parent_ids": [3]}
+# a unified diff against the active base:  "code_from": {"patch": "--- a/x.py\n+++ b/x.py\n..."}
+# a branch of your own repository:         "code_from": {"git": {"repo": "/abs/path", "ref": "my-branch"}}
 ```
 
 The worktree is checked out from the run's private repository at the active base (or
-`node:<id>`), never from your repository. The submitted overlay is always the whole change over the
-seed base, so a worktree started from `node:<id>` carries that experiment's change plus yours.
-`POST /api/runs/{run_id}/code/overlay` previews the files a worktree or patch becomes;
-paths outside the task's edit surface or protected files are refused, as in any inject.
+`node:<id>`), never from your repository; MCP `code_worktree` / `code_worktrees` make and list
+them. On a tmpfs run root, `--path` (route/MCP `path`) puts it on persistent disk — refused inside
+your source tree or another part of the run directory; the mirror then backs up its branch but not
+its files, and a restore re-links the same directory. The submitted overlay is always the whole
+change over the seed base, so a worktree started from `node:<id>` carries that experiment's change
+plus yours, and one that merged `nodes/n<id>` carries both. A `git` source (e.g. Claude Code's
+`worktree-agent-<id>` branch of your repository) is fetched read-only into
+`refs/looplab/foreign/<commit>` and three-way merged onto the active base from where it left the
+source (git >= 2.38): your uncommitted edits stay, an overlap is `409 code_from_merge_conflict`
+naming the paths, and the reply warns how many base files the branch lacked. Your repository's refs,
+objects, config, index and hooks are never written. `POST /api/runs/{run_id}/code/overlay` (MCP
+`code_overlay`) previews what any of these becomes; paths outside the task's edit surface or
+protected files are refused, as in any inject.
 A worktree you have not submitted yet is in no event, so the log cannot rebuild it; on a tmpfs run
 root `looplab run-mirror` backs up its branch and uncommitted files as `code/agent_backup/`, and
 `looplab code-status --sync` re-creates the worktree after a restore
