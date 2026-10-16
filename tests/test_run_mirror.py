@@ -301,6 +301,43 @@ def test_run_extras_are_mirrored_kept_on_a_failed_producer_and_dropped_when_gone
     assert "code/agent_backup/agents.bundle" not in json.loads(manifest.read_text())["files"]
 
 
+def test_a_lost_state_file_and_a_failing_producer_keep_the_extras_rows(tmp_path):
+    """The state lives in tmpfs: after a restart it is seeded from the destination manifest. With
+    the producer failing on that very pass, every extra read as a deleted run file and the
+    manifest a restore trusts was rewritten WITHOUT the agent backup. Kept now, and the manifest
+    names its extras, so the next good pass still retires a version the producer dropped."""
+    _fake_run(tmp_path / "src")
+    mode = {"now": "v1"}
+
+    def extras(run_dir, spool):
+        if mode["now"] == "boom":
+            raise RuntimeError("git timed out")
+        spool.mkdir(parents=True, exist_ok=True)
+        (spool / "b.bin").write_bytes(mode["now"].encode())
+        return {f"code/agent_backup/files/w/ckpt.v{mode['now']}": spool / "b.bin",
+                "code/agent_backup/agents.json": spool / "b.bin"}
+
+    cfg = _cfg(tmp_path, run_extras=extras)
+    mirror_pass(cfg)
+    manifest = cfg.dst_root / "r1" / MANIFEST
+    first = json.loads(manifest.read_text())
+    assert first["extras"] == ["code/agent_backup/agents.json", "code/agent_backup/files/w/ckpt.vv1"]
+    cfg.state_path.unlink()                                  # the pod restart took the state
+    mode["now"] = "v2"
+    mirror_pass(cfg)
+    second = json.loads(manifest.read_text())
+    assert "code/agent_backup/files/w/ckpt.vv2" in second["files"]
+    assert "code/agent_backup/files/w/ckpt.vv1" not in second["files"]
+    assert not (cfg.dst_root / "r1" / "code/agent_backup/files/w/ckpt.vv1").exists()
+    # A manifest an older build wrote names no extras; the state is gone and the producer fails.
+    manifest.write_text(json.dumps({k: v for k, v in second.items() if k != "extras"}))
+    cfg.state_path.unlink()
+    mode["now"] = "boom"
+    report = mirror_pass(cfg)
+    assert [e["path"] for e in report.errors] == ["<run_extras>"]
+    assert set(second["files"]) <= set(json.loads(manifest.read_text())["files"])
+
+
 class _FaultyWrite:
     """A destination file handle whose `write` runs `fault` first (hang or raise)."""
 

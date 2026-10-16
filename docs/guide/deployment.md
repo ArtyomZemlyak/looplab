@@ -355,12 +355,17 @@ What it guarantees (`looplab/events/run_mirror.py`):
   switched to) plus a commit of each worktree's small uncommitted files, and the worktree metadata.
   Large files are not git's: an ignored file (checkpoints, `*.npy`, … — the repository's excludes)
   and any dirty file over 8 MiB is copied as a PLAIN file `files/<worktree>/<path>.v<version>`, the
-  version taken from its size and mtime; a new version replaces the old name, whose destination
-  copy the mirror then deletes. Derived read-only (the agent's index and the run repository are
-  never written); the bundle is rebuilt only when a branch or a small file changed. After a
-  restore, `looplab code-status --sync <run>` re-creates each branch and worktree — on the branch it
-  stood on, or detached where it was detached — with its files, and consumes the backup; an
-  existing branch at another commit or worktree path is never overwritten (reported, backup kept).
+  version taken from its full stat identity (inode and ctime too, never its bytes); a new version
+  replaces the old name, whose destination copy the mirror then deletes. A name that is not UTF-8
+  is skipped by name. Derived read-only (the agent's index and the run repository are never
+  written); a worktree whose status and listed files did not move is not re-hashed, and the bundle
+  is rebuilt only when a branch or a small file changed. After a restore, ONLY
+  `looplab code-status --sync <run>` (which `run-mirror-restore` names) re-creates each branch and
+  worktree — on the branch it stood on, or detached where it was detached — with its files, and
+  consumes the backup; an overlay preview or `code-export` never does. An existing branch at
+  another commit or worktree path is never overwritten, and a path outside the run is held to the
+  `code-worktree --path` rule (reported, backup kept); while a backup is kept, the live worktrees
+  are backed up beside it (`pending/`), so a second restart loses neither.
   A plain file over `--max-file-mb` is listed as `skipped` (raise the cap for checkpoints), and
   past `code_worktree.py::MAX_BACKUP_FILES` / `MAX_BACKUP_FILES_BYTES` a file is named in the
   row's `files_skipped`. The backup is the `run-mirror` command's: a `MirrorConfig` built in code

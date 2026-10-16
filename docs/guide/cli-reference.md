@@ -3111,7 +3111,7 @@ egress boundary.
 
 ## `code-status`
 
-| `RUN_DIR [--sync] [--json]` | Each attempt's commit in `RUN_DIR/code/repo.git`, bases, pending upstream; `--sync` builds commits an old log implies. [Code identity](code-identity.md) |
+| `RUN_DIR [--sync] [--json]` | Each attempt's commit in `RUN_DIR/code/repo.git`, bases, pending upstream; `--sync` builds commits an old log implies and restores a run mirror's agent worktrees (`code/agent_backup/`). [Code identity](code-identity.md) |
 
 ## `code-worktree`
 

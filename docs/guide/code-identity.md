@@ -104,5 +104,5 @@ objects, config, index and hooks are never written. `POST /api/runs/{run_id}/cod
 protected files are refused, as in any inject.
 A worktree you have not submitted yet is in no event, so the log cannot rebuild it; on a tmpfs run
 root `looplab run-mirror` backs up its branch and uncommitted files as `code/agent_backup/`, and
-`looplab code-status --sync` re-creates the worktree after a restore
+`looplab code-status --sync` (and nothing else) re-creates the worktree after a restore
 ([deployment](deployment.md#run-directories-in-tmpfs-the-durable-mirror)).

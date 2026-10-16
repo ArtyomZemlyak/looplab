@@ -31,7 +31,7 @@ WHAT. `mirror_pass` copies each run directory under `src_root` to `dst_root/<run
   * what the log CANNOT rebuild — an external agent's unsubmitted worktree: its `agent/<name>`
     branch, its metadata and its uncommitted bytes — rides as `MirrorConfig.run_extras`, files
     derived on the source side into the mirror's spool and mirrored under `code/agent_backup/`
-    (`engine/code_worktree.py::agent_backup`; `sync_run` re-creates the worktrees from them);
+    (`engine/code_worktree.py::agent_backup`; `looplab code-status --sync` re-creates them);
   * a file that disappeared from the source drops its manifest row and DIRTIES the manifest, so a
     deletion-only pass rewrites it and a restore never resurrects the file.
 
@@ -456,18 +456,23 @@ def save_state(cfg: MirrorConfig, state: dict) -> None:
     _write_json_atomic(cfg.state_path, state)
 
 
-def _manifest_rows(cfg: MirrorConfig, run: str) -> Optional[dict]:
-    """The destination manifest's `files` map for `run`, read once under a deadline (None if absent
-    or unreadable). Seeds a missing local state so a restart does not re-upload everything."""
+def _manifest_rows(cfg: MirrorConfig, run: str) -> tuple[Optional[dict], list]:
+    """The destination manifest's `files` map for `run` (None if absent or unreadable) and the rels
+    it marks as `extras`, read once under a deadline. Seeds a missing local state so a restart
+    does not re-upload everything — and still knows which rows a `run_extras` producer owns."""
     path = cfg.dst_root / run / MANIFEST
     try:
         data = _deadline_call(lambda: _read_json(path, {}), cfg.op_timeout_s, f"reading {path}")
     except MirrorStuck:
         raise
     except OSError:
-        return None
+        return None, []
     files = data.get("files") if isinstance(data, dict) else None
-    return files if isinstance(files, dict) else None
+    if not isinstance(files, dict):
+        return None, []
+    extras = data.get("extras")
+    return files, [r for r in extras if isinstance(r, str) and r in files] if isinstance(
+        extras, list) else []
 
 
 # ------------------------------------------------------------------------------------- one pass
@@ -490,8 +495,10 @@ def mirror_run(run_dir: Path, cfg: MirrorConfig, state: dict, *, pass_no: int,
     rstate = state["runs"].setdefault(run, {})
     copied = rstate.get("files")
     if not isinstance(copied, dict):
-        copied = _manifest_rows(cfg, run) or {}
+        seeded, seeded_extras = _manifest_rows(cfg, run)
+        copied = seeded or {}
         rstate["files"] = copied
+        rstate["extras"] = seeded_extras
     errors = []
     extras, extras_failed = {}, False
     if cfg.run_extras is not None:
@@ -542,11 +549,15 @@ def mirror_run(run_dir: Path, cfg: MirrorConfig, state: dict, *, pass_no: int,
     # Rows for files that no longer exist at the source are dropped from the manifest (their stale
     # copy stays in the destination, unreferenced: deleting on S3 is a cost this job does not pay).
     # An extra is present while its producer still returns it; when the producer FAILED this pass,
-    # the extras it returned last time are kept as they are rather than read as deleted.
+    # every row not under the run directory is kept as it is rather than read as deleted — not
+    # only the extras the state remembers: a state file lost (tmpfs) and seeded from a manifest an
+    # older build wrote without `extras` knows none, and popping them dropped the whole agent
+    # backup from the manifest a restore trusts (review 2026-10-16). A run file deleted during
+    # such a pass leaves the manifest one pass later.
     def present(rel: str) -> bool:
         if rel in extras:
             return extras[rel].is_file()
-        if extras_failed and rel in prior_extras:
+        if extras_failed:
             return True
         return (run_dir / rel).is_file()
     retired_extras = []
@@ -564,11 +575,17 @@ def mirror_run(run_dir: Path, cfg: MirrorConfig, state: dict, *, pass_no: int,
             # manifest next time, and a restarted mirror that re-seeds `copied` from the stale
             # manifest pops the same row again and so dirties it again.
             rstate["manifest_stale"] = True
-    rstate["extras"] = sorted(prior_extras if extras_failed else extras)
+    owned = sorted(prior_extras if extras_failed else extras)
+    if owned != sorted(prior_extras):
+        rstate["manifest_stale"] = True    # the manifest names its extras: a new set rewrites it
+    rstate["extras"] = owned
     if (n or rstate.get("manifest_stale") or not rstate.get("manifest_written")
             or skipped != rstate.get("skipped", {})):
+        # `extras` names the rows a `run_extras` producer owns, so a mirror whose state file was
+        # lost still retires an old one (and never reads it as a deleted run file).
         manifest = {"version": 1, "run": run, "source": str(run_dir), "updated_at": time.time(),
-                    "files": copied, "skipped": skipped}
+                    "files": copied, "skipped": skipped,
+                    "extras": [rel for rel in owned if rel in copied]}
         ops_bucket.take(1)
         # `_write_json_atomic` creates the run's destination directory itself (an unchanged run
         # seeded from a state file may never have made it in this process).
@@ -765,7 +782,10 @@ def restore_run(dst_root, run: str, src_root, *, as_name: Optional[str] = None,
     return {"run": name, "from": str(mirror), "to": str(target), "files": restored,
             "bytes": nbytes, "failures": failures,
             "skipped_at_mirror": manifest.get("skipped") or {},
-            "next": f"looplab resume {target}"}
+            "next": f"looplab resume {target}",
+            # Unsubmitted agent worktrees come back only at this explicit restore point.
+            **({"agent_worktrees": f"looplab code-status --sync {target}"}
+               if any(rel.startswith("code/agent_backup/") for rel in files) else {})}
 
 
 def restore_missing(dst_root, src_root, *, verify: bool = True,

@@ -255,7 +255,7 @@ def test_a_worktree_outside_the_run_survives_a_tmpfs_wipe_and_is_refused_in_the_
     shutil.rmtree(tmp_path / "src")                                   # the pod restart wipes tmpfs
     os.makedirs(tmp_path / "src")
     assert not restore_run(cfg.dst_root, "run", cfg.src_root)["failures"]
-    report = sync_run(rd)["agent_worktrees"]
+    report = sync_run(rd, restore_agents=True)["agent_worktrees"]
     assert report["restored"] == ["keep"] and not report["pending"], report
     assert [m["path"] for m in list_worktrees(rd)] == [str(persist.resolve())]
     assert _git(persist, "rev-parse", "HEAD").strip() == head

@@ -712,11 +712,12 @@ def lifecycle_seeds(events) -> list:
     return out
 
 
-def sync_run(run_dir, events=None) -> dict:
+def sync_run(run_dir, events=None, *, restore_agents: bool = False) -> dict:
     """Build the commits the log implies but no `code_snapshot` recorded (old runs, a kill between
-    the seed and its record). Writes ONLY the run's code repository — and, when a mirror restore
-    left a `code/agent_backup/`, the agent worktrees it carries
-    (`code_worktree.py::restore_agent_worktrees`, reported as `agent_worktrees`); appends no event."""
+    the seed and its record). Writes ONLY the run's code repository; appends no event. With
+    `restore_agents` (an explicit restore point: `looplab code-status --sync`), also the agent
+    worktrees a mirror restore's `code/agent_backup/` carries
+    (`code_worktree.py::restore_agent_worktrees`, reported as `agent_worktrees`)."""
     from looplab.engine.shared import engine_fold as fold
     from looplab.events.git_export import node_lifecycles
     events = events if events is not None else _read_events(run_dir)
@@ -779,15 +780,19 @@ def sync_run(run_dir, events=None) -> dict:
     out = {"built": built, "recorded": len(recorded)}
     # The one thing the log cannot rebuild: an external agent's unsubmitted worktree. A run restored
     # from the run mirror carries it as `code/agent_backup/` (`code_worktree.py::agent_backup`);
-    # re-created here, so `code-status --sync` (and `add_worktree`, which syncs first) brings the
-    # branch, its history and its uncommitted files back (weekly-worktree-restore-loss).
-    from looplab.engine.code_worktree import AGENT_BACKUP_INDEX, AGENT_BACKUP_REL
-    if (Path(run_dir) / AGENT_BACKUP_REL / AGENT_BACKUP_INDEX).is_file():
+    # re-created here, AFTER the bases above, so `code-status --sync` brings the branch, its history
+    # and its uncommitted files back (weekly-worktree-restore-loss). ONLY when asked: every code
+    # path syncs first — a "submits nothing" overlay preview, `add_worktree`, `code-export` — and
+    # none of them may create worktrees or re-link (and reset) an operator's outside directory
+    # (review 2026-10-16).
+    if restore_agents:
         from looplab.engine.code_worktree import restore_agent_worktrees
         try:
-            out["agent_worktrees"] = restore_agent_worktrees(run_dir)
-        except CodeRepoError as exc:     # a record, never a refusal; the backup stays in place
-            out["agent_worktrees"] = {"pending": True, "error": f"{exc.code}: {exc}"[:300]}
+            agents = restore_agent_worktrees(run_dir)
+        except (CodeRepoError, OSError) as exc:  # a record, never a refusal; the backup stays
+            agents = {"pending": True, "error": f"{type(exc).__name__}: {exc}"[:300]}
+        if agents is not None:
+            out["agent_worktrees"] = agents
     return out
 
 

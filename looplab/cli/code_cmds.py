@@ -28,7 +28,8 @@ def _refuse(message: str):
 def code_status_cmd(
     run_dir: Path = typer.Argument(..., help="Run directory."),
     sync: bool = typer.Option(False, "--sync", help="First build commits the log implies but no "
-                                                   "code_snapshot recorded (old runs)."),
+                                                   "code_snapshot recorded (old runs), and restore "
+                                                   "a run mirror's agent worktrees."),
     as_json: bool = typer.Option(False, "--json", help="Print the full JSON status."),
 ):
     """Show the run's code: bases, per-attempt commits, what is pending upstream.
@@ -39,7 +40,7 @@ def code_status_cmd(
     from looplab.engine.code_identity import code_status, sync_run
     _require_run_dir(run_dir)
     if sync:
-        agents = sync_run(run_dir).get("agent_worktrees")
+        agents = sync_run(run_dir, restore_agents=True).get("agent_worktrees")
         if agents:                       # a mirror restore's agent-worktree backup was consumed
             typer.echo("agent worktrees restored: " + json.dumps(agents, default=str), err=True)
     from looplab.adapters.tasks import load_task

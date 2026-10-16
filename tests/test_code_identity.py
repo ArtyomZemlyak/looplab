@@ -741,7 +741,7 @@ def test_an_unsubmitted_agent_worktree_survives_mirror_wipe_restore_and_sync(tmp
     assert not restore_run(cfg.dst_root, "run", cfg.src_root)["failures"]
     # Until a sync consumed it, the restored backup IS the backup: the producer defers to it.
     assert agent_backup(rd, tmp_path / "spool") == {}
-    synced = sync_run(rd)
+    synced = sync_run(rd, restore_agents=True)
     assert synced["agent_worktrees"]["restored"] == ["draft"], synced["agent_worktrees"]
     assert not (rd / AGENT_BACKUP_REL).exists()              # consumed
 
@@ -755,7 +755,7 @@ def test_an_unsubmitted_agent_worktree_survives_mirror_wipe_restore_and_sync(tmp
     assert _git(wt, "status", "--porcelain") == status       # and reads as it did
     after = overlay_from_worktree(rd, "draft")
     assert (after["files"], after["deleted"]) == (overlay["files"], overlay["deleted"])
-    assert sync_run(rd).get("agent_worktrees") is None       # idempotent: nothing left to restore
+    assert sync_run(rd, restore_agents=True).get("agent_worktrees") is None  # nothing left
     # The restored worktree is backed up again by the next pass.
     assert not mirror_pass(cfg).errors
     assert (tmp_path / "src" / ".looplab-mirror" / "spool" / "run" / "agents.bundle").is_file()
@@ -765,12 +765,12 @@ def test_an_unsubmitted_agent_worktree_survives_mirror_wipe_restore_and_sync(tmp
     rd2 = tmp_path / "src" / "run2"
     (rd2 / "code" / "worktrees" / "draft").mkdir(parents=True)
     (rd2 / "code" / "worktrees" / "draft" / "mine.txt").write_text("keep\n")
-    held = sync_run(rd2)["agent_worktrees"]
+    held = sync_run(rd2, restore_agents=True)["agent_worktrees"]
     assert held["pending"] and held["skipped"][0]["reason"] == "worktree_path_exists", held
     assert (rd2 / AGENT_BACKUP_REL / "agents.bundle").is_file()
     assert (rd2 / "code" / "worktrees" / "draft" / "mine.txt").read_text() == "keep\n"
     shutil.rmtree(rd2 / "code" / "worktrees" / "draft")
-    assert sync_run(rd2)["agent_worktrees"]["restored"] == ["draft"]
+    assert sync_run(rd2, restore_agents=True)["agent_worktrees"]["restored"] == ["draft"]
     wt2 = Path(list_worktrees(rd2)[0]["path"])
     assert wt2 == rd2 / "code" / "worktrees" / "draft"       # re-pointed at the restored run
     assert (wt2 / "recipe.env").read_text() == "SEED=9\n"
@@ -833,7 +833,7 @@ def test_large_and_ignored_agent_files_ride_as_versioned_plain_files_and_heads_c
     shutil.rmtree(tmp_path / "src")
     os.makedirs(tmp_path / "src")
     assert not restore_run(cfg.dst_root, "run", cfg.src_root)["failures"]
-    report = sync_run(rd)["agent_worktrees"]
+    report = sync_run(rd, restore_agents=True)["agent_worktrees"]
     assert sorted(report["restored"]) == ["draft", "loose", "side"], report
     assert not report["pending"], report
     assert (wt / "checkpoint-1" / "model.pt").read_bytes() == b"\x03" * 301
@@ -963,7 +963,7 @@ def test_an_agent_backup_of_a_shallow_run_repository_bundles_and_restores(tmp_pa
         (restored / rel).parent.mkdir(parents=True, exist_ok=True)
         shutil.copyfile(src, restored / rel)
     repo.rename(tmp_path / "moved-away")
-    assert sync_run(restored)["agent_worktrees"]["restored"] == ["draft"]
+    assert sync_run(restored, restore_agents=True)["agent_worktrees"]["restored"] == ["draft"]
     assert not (restored / AGENT_BACKUP_REL).exists()
     back = Path(list_worktrees(restored)[0]["path"])
     assert _git(back, "log", "--format=%H").split() == [proposal, CodeRepo(rd).rev(BASE_BRANCH),
