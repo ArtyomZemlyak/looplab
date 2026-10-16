@@ -40,7 +40,8 @@ from pathlib import Path
 from typing import Optional
 
 from looplab.core.atomicio import atomic_write_text
-from looplab.engine.code_repo import CodeRepo, CodeRepoError, WORKTREES_REL, run_git
+from looplab.engine.code_repo import (FIXED_COMMIT_ENV, CodeRepo, CodeRepoError, WORKTREES_REL,
+                                      is_object_id, readonly_git, run_git)
 
 NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$")
 MAX_OVERLAY_FILES = 128
@@ -117,12 +118,32 @@ def _resolve_start(repo: CodeRepo, start: str) -> str:
         sha = repo.rev(node_branch(int(start[5:])))
     elif re.fullmatch(r"[0-9a-f]{7,64}", start):
         sha = repo.rev(start)
+        if sha is not None and not _reaches_base(repo, sha):
+            # Since version 2 the repository also holds the OPERATOR's fetched history (the first
+            # base's parent and `HISTORY_DEPTH` commits behind it). An overlay is the change over
+            # the start's seed base (`_seed_base_of`), and an operator commit has none: the diff
+            # was taken against the operator commit and materialized over the active base,
+            # silently reverting every uncommitted edit the base holds (review 2026-10-16).
+            raise OverlayRefusal("code_start_not_run_commit",
+                                 f"{start!r} is not a commit of this run (a base, an attempt or "
+                                 "an agent commit on one); use 'base', 'node:<id>' or such a commit")
     else:
         sha = None
     if sha is None:
         raise OverlayRefusal("code_start_unknown",
                              f"no commit for start {start!r}: use 'base', 'node:<id>' or a commit")
     return sha
+
+
+def _reaches_base(repo: CodeRepo, commit: str) -> bool:
+    """Whether `commit`'s FIRST-PARENT chain reaches one of the run's base commits (itself one
+    included) — what every commit LoopLab writes, and every agent commit made on one, does."""
+    from looplab.engine.code_identity import BASE_REF
+    bases = set(repo.refs(BASE_REF).values())
+    if commit in bases:
+        return True
+    out = repo.git("rev-list", "--first-parent", commit, check=False)
+    return any(sha in bases for sha in out.stdout.decode("ascii", "replace").split())
 
 
 def _digest_of(repo: CodeRepo, commit: str) -> Optional[str]:
@@ -197,10 +218,32 @@ def _operator_source_roots(run_dir: Path) -> Optional[list]:
             continue
         p = Path(src).expanduser()
         roots.append(p.resolve())
-        top = run_git("-C", str(p), "rev-parse", "--show-toplevel", check=False) if p.is_dir() else None
+        # The repository's whole working tree, asked read-only with the source trusted for reading
+        # (`readonly_git`): hermetic git refused a source another uid owns as "dubious ownership",
+        # the toplevel dropped out of the refused roots, and a path elsewhere in the operator's
+        # working tree was accepted (review 2026-10-16). Git's own discovery rule — the nearest
+        # ancestor holding `.git` — is applied too, so a probe that still fails refuses rather
+        # than allows.
+        top = readonly_git(p, "rev-parse", "--show-toplevel", check=False) if p.is_dir() else None
         if top is not None and top.returncode == 0 and top.stdout.strip():
             roots.append(Path(top.stdout.decode("utf-8", "replace").strip()).resolve())
+        found = next((a for a in (p.resolve(), *p.resolve().parents) if (a / ".git").exists()),
+                     None)
+        if found is not None:
+            roots.append(found)
     return roots
+
+
+def _default_location(run_dir: Path, default: Path) -> Path:
+    """`default` when no link under the run directory redirects it, else a refusal."""
+    parent = run_dir.resolve() / WORKTREES_REL
+    linked = [p for p in (run_dir / "code", run_dir / WORKTREES_REL, default) if p.is_symlink()]
+    resolved = default.resolve()
+    if linked or not _inside(resolved, parent) or resolved == parent:
+        raise OverlayRefusal("code_worktree_path_refused",
+                             f"{default} is redirected by a link; a worktree inside the run "
+                             "directory is created only at a real path there")
+    return default
 
 
 def _worktree_location(run_dir: Path, name: str, path) -> tuple:
@@ -211,17 +254,23 @@ def _worktree_location(run_dir: Path, name: str, path) -> tuple:
     LoopLab never writes into the operator's repository, and a worktree there is an untracked
     directory in their working tree — and (b) any other subtree of the run directory, which belongs
     to the engine (node workdirs, blobs, the mirror spool). Absolute only: the server's cwd is not
-    the agent's."""
+    the agent's.
+
+    The DEFAULT location is held to the same standard (review 2026-10-16): it is used only when
+    nothing under the run directory redirects it — `code`, `code/worktrees` and the worktree path
+    itself are no links, and the resolved path stays under the resolved `code/worktrees` — because
+    an existing EMPTY directory is accepted, and a link planted there (to an empty directory in the
+    operator's source tree, say) had `git worktree add` write wherever it pointed."""
     default = run_dir / WORKTREES_REL / name
     if path is None or str(path).strip() == "":
-        return default, False
+        return _default_location(run_dir, default), False
     raw = Path(str(path)).expanduser()
     if not raw.is_absolute():
         raise OverlayRefusal("code_worktree_path_invalid",
                              f"path must be absolute (got {str(path)[:200]!r})")
     target = raw.resolve()
-    if target == default.resolve():
-        return default, False
+    if target == default.resolve() or raw == default:
+        return _default_location(run_dir, default), False
     if _inside(target, run_dir.resolve()):
         raise OverlayRefusal("code_worktree_path_refused",
                              "a worktree inside the run directory lives only at "
@@ -309,7 +358,12 @@ def describe_worktrees(run_dir) -> list:
         row = {k: meta.get(k) for k in ("name", "path", "branch", "start", "start_commit",
                                         "base_digest")}
         row["outside_run"] = bool(meta.get("outside_run"))
-        wt = Path(str(meta.get("path") or ""))
+        if not isinstance(meta.get("path"), str) or not meta["path"].strip():
+            # `Path("")` is ".", the SERVER's cwd: its checkout was reported as this worktree.
+            row.update(exists=False, head=None, stale_base=None, unreadable="no_path")
+            rows.append(row)
+            continue
+        wt = Path(meta["path"])
         row["exists"] = wt.is_dir()
         head = (run_git("-C", str(wt), "--no-optional-locks", "rev-parse", "--verify", "HEAD",
                         check=False) if row["exists"] else None)
@@ -454,10 +508,17 @@ def overlay_from_worktree(run_dir, name: str, **kw) -> dict:
     # The worktree's committed HEAD: the history a REAL merge (`git merge nodes/n<id>`) left there.
     # Intake stamps it on the inject (`inject_node.code_commit`), and the attempt commit takes the
     # node commits it verifiably contains as git parents (`code_identity.py::merged_node_commits`).
+    # Only for a CLEAN worktree (the submitted tree IS HEAD's tree, review 2026-10-16): with
+    # uncommitted edits the overlay is not HEAD, and a merge parent claims that the merged node's
+    # change is in the attempt — which an uncommitted revert of it would make false. A dirty
+    # submission claims no git parent; its `parent_ids` still become the co-parents trailer.
     head = run_git("-C", str(path), "rev-parse", "--verify", "--quiet", "HEAD^{commit}",
                    check=False).stdout.decode().strip()
-    if len(head) == 40:
-        out["head_commit"] = head
+    if is_object_id(head):
+        if repo.tree(head) == tree:
+            out["head_commit"] = head
+        else:
+            out["head_commit_withheld"] = "uncommitted_changes"
     return out
 
 
@@ -548,10 +609,9 @@ MAX_BACKUP_FILES_BYTES = 64 * 1024 ** 3
 _BACKUP_JUNK = ("__pycache__/", ".ipynb_checkpoints/")
 _BACKUP_VERSION = 2
 # The dirty commit is a pure function of (tree, parent): a fixed identity and date, so an unchanged
-# worktree yields the same commit id pass after pass.
-_FIXED_COMMIT_ENV = {"GIT_AUTHOR_NAME": "LoopLab", "GIT_AUTHOR_EMAIL": "looplab@invalid",
-                     "GIT_COMMITTER_NAME": "LoopLab", "GIT_COMMITTER_EMAIL": "looplab@invalid",
-                     "GIT_AUTHOR_DATE": "@0 +0000", "GIT_COMMITTER_DATE": "@0 +0000"}
+# worktree yields the same commit id pass after pass (`code_repo.py::FIXED_COMMIT_ENV`, the one
+# spelling `CodeRepo.commit_tree` uses too).
+_FIXED_COMMIT_ENV = FIXED_COMMIT_ENV
 
 
 def _clear_backup(out_dir: Path) -> None:

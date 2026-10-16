@@ -16,8 +16,11 @@ This module is plumbing only; what a base or an attempt IS lives in `engine/code
 from __future__ import annotations
 
 import os
+import re
+import shlex
 import subprocess
 import threading
+import time
 import uuid
 from pathlib import Path
 from typing import Iterable, Optional
@@ -25,6 +28,28 @@ from typing import Iterable, Optional
 REPO_REL = "code/repo.git"
 WORKTREES_REL = "code/worktrees"
 IDENTITY = b"LoopLab <looplab@invalid>"
+# The same identity for a `commit-tree` (synthetic merge inputs, the agent backup's dirty commit):
+# a fixed author AND date, so a commit is a pure function of (tree, parents, message) and an
+# unchanged input yields the same id pass after pass.
+FIXED_COMMIT_ENV = {"GIT_AUTHOR_NAME": "LoopLab", "GIT_AUTHOR_EMAIL": "looplab@invalid",
+                    "GIT_COMMITTER_NAME": "LoopLab", "GIT_COMMITTER_EMAIL": "looplab@invalid",
+                    "GIT_AUTHOR_DATE": "@0 +0000", "GIT_COMMITTER_DATE": "@0 +0000"}
+# The code-identity version a NEW repository is built at, stamped in its config on creation
+# (`looplab.identityVersion`), so a run with no `code_snapshot` row still rebuilds at the version
+# its repository was first built at (`code_origin.py::run_version`).
+# `code_identity.py::SNAPSHOT_VERSION` is this value; what each version means is said there.
+IDENTITY_VERSION = 2
+_OBJECT_ID = re.compile(r"[0-9a-f]{40}(?:[0-9a-f]{24})?")
+# How long a writer of `$GIT_DIR/shallow` waits for git's own `shallow.lock` (a concurrent
+# `fetch --depth` holds it only for its last step).
+SHALLOW_LOCK_WAIT_S = 30.0
+
+
+def is_object_id(value) -> bool:
+    """THE one spelling of "a full git object id": 40 (SHA-1) or 64 (SHA-256) lowercase hex. Every
+    reader of a commit id off the log, a probe or a file uses it (some sites accepted 64 characters,
+    others only 40, and `$GIT_DIR/shallow` silently lost a SHA-256 line)."""
+    return isinstance(value, str) and _OBJECT_ID.fullmatch(value) is not None
 ATTRIBUTES = b"* -text -filter -ident -working-tree-encoding\n"
 # Untracked output an agent worktree must not ingest by `git add -A` (doc 37 §6: checkpoints are
 # 99 % of a node workspace). The run repository is private, but it is still this run's disk.
@@ -78,6 +103,38 @@ def run_git(*argv: str, cwd=None, input: Optional[bytes] = None, timeout: float 
         tail = result.stderr.decode("utf-8", "replace").strip().splitlines()[-1:] or [""]
         raise CodeRepoError("git_failed", f"git {argv[0] if argv else ''} failed: {tail[0][:300]}")
     return result
+
+
+def readonly_safe_dirs(path) -> list:
+    """The `safe.directory` values that let a READ-ONLY git call work in `path`'s repository when
+    another uid owns it. WHY: `_env` points the global config at /dev/null (hermetic), so the
+    operator's own `safe.directory` is not read, and a source owned by another user failed every
+    probe as "dubious ownership", reported as "not git" (review 2026-10-16). The values are the
+    directory, every ancestor (git checks the work tree's TOP, which may be any of them) and each
+    one's `.git` (`upload-pack` checks the git dir) — never `*`: only the repository `path` is in
+    is trusted, and only for reading (no hook, fsmonitor or filter runs: `_argv`)."""
+    try:
+        real = Path(os.path.realpath(os.path.expanduser(str(path))))
+    except (OSError, ValueError):
+        return []
+    out: list = []
+    for anc in (real, *real.parents):
+        out += [anc.as_posix(), (anc / ".git").as_posix()]
+    return out
+
+
+def readonly_git(path, *argv: str, **kw) -> subprocess.CompletedProcess:
+    """`git -C <path> …` in a repository LoopLab only READS (the operator's source, a foreign
+    branch): `~` expanded (every comparison here is of expanded paths), `--no-optional-locks` (no
+    index refresh written back), and the path trusted for reading (`readonly_safe_dirs`)."""
+    where = os.path.expanduser(str(path))
+    safe = [arg for d in readonly_safe_dirs(where) for arg in ("-c", f"safe.directory={d}")]
+    return run_git(*safe, "-C", where, "--no-optional-locks", *argv, **kw)
+
+
+def is_dubious_ownership(result: subprocess.CompletedProcess) -> bool:
+    """A refusal git made for OWNERSHIP, said apart from "not a repository"."""
+    return result.returncode != 0 and b"dubious ownership" in (result.stderr or b"")
 
 
 def quoted(path: str) -> bytes:
@@ -180,6 +237,8 @@ class CodeRepo:
             run_git("--git-dir", str(staging), "config", "user.name", "LoopLab")
             run_git("--git-dir", str(staging), "config", "user.email", "looplab@invalid")
             run_git("--git-dir", str(staging), "config", "core.hooksPath", os.devnull)
+            run_git("--git-dir", str(staging), "config", "looplab.identityVersion",
+                    str(IDENTITY_VERSION))
             run_git("--git-dir", str(staging), "symbolic-ref", "HEAD", "refs/heads/base")
             try:
                 os.rename(staging, self.path)
@@ -191,6 +250,15 @@ class CodeRepo:
                 from looplab.core.atomicio import rmtree_readonly_aware
                 rmtree_readonly_aware(staging)
         return self
+
+    def identity_version(self) -> Optional[int]:
+        """The version stamped at creation (`IDENTITY_VERSION`); None when absent (a repository
+        built before the stamp existed) or unreadable."""
+        if not self.exists():
+            return None
+        out = self.git("config", "--get", "looplab.identityVersion", check=False)
+        text = out.stdout.decode("ascii", "replace").strip()
+        return int(text) if out.returncode == 0 and text.isdigit() else None
 
     def rev(self, ref: str) -> Optional[str]:
         if not self.exists():
@@ -224,6 +292,11 @@ class CodeRepo:
                 + b"author %s %d +0000\n" % (IDENTITY, int(when))
                 + b"committer %s %d +0000\n" % (IDENTITY, int(when))
                 + b"data %d\n" % len(msg) + msg + b"\n")
+        merges = list(merges or ())
+        if merges and not parent:
+            # Silently dropped before: a root commit that claimed none of the merges it was given.
+            # A merge as the FIRST parent instead would be what every first-parent walk lands on.
+            raise CodeRepoError("git_failed", "merge parents need a first parent")
         if parent:
             head += b"from %s\n" % parent.encode("ascii")
             # Further git parents AFTER the first (doc 79, 2026-10-16): only ever node commits a
@@ -235,7 +308,28 @@ class CodeRepo:
 
     def write_tree_commit(self, ref: str, files: Iterable, *, message: str, when: int,
                           parent: Optional[str] = None) -> str:
-        """A commit whose tree is EXACTLY `files` ((path, bytes, executable) rows), parent optional."""
+        """A commit whose tree is EXACTLY `files` ((path, bytes, executable) rows), parent optional.
+
+        A `parent` this repository does not hold is still NAMED, because the commit id is what the
+        log decided (`code_origin.py`). fast-import cannot start from an absent commit, so the tree
+        is imported alone and the commit object written with `hash-object`, byte for byte what
+        fast-import writes (`tests/test_code_identity.py` compares the two ids). The caller makes
+        the commit a shallow cut (`add_shallow`): measured 2026-10-16 (git 2.43), a cut at the
+        absent PARENT leaves `log`/`rev-list`/`bundle` failing, a cut at the commit itself does not."""
+        if parent and not self.has_object(parent):
+            scratch = f"refs/looplab/tmp/tree-{uuid.uuid4().hex[:12]}"
+            try:
+                tree = self.tree(self.write_tree_commit(scratch, files, message="tree\n", when=0))
+            finally:
+                self.git("update-ref", "-d", scratch, check=False)
+            msg = message.encode("utf-8", "replace")
+            raw = (b"tree %s\nparent %s\n" % (str(tree).encode("ascii"), parent.encode("ascii"))
+                   + b"author %s %d +0000\n" % (IDENTITY, int(when))
+                   + b"committer %s %d +0000\n\n" % (IDENTITY, int(when)) + msg)
+            sha = self.git("hash-object", "-t", "commit", "-w", "--stdin",
+                           input=raw).stdout.decode("ascii").strip()
+            self.update_ref(ref, sha)
+            return sha
         body = [self._commit_header(ref, when, message, parent), b"deleteall\n"]
         for path, data, executable in files:
             safe = safe_path(path)
@@ -276,6 +370,45 @@ class CodeRepo:
     def has_object(self, sha: str) -> bool:
         return self.exists() and self.git("cat-file", "-e", sha, check=False).returncode == 0
 
+    def commit_tree(self, tree: str, parents: Iterable = (), message: str = "") -> str:
+        """A commit of `tree` under the FIXED identity and date (`FIXED_COMMIT_ENV`): the same
+        inputs always give the same id. Objects only, no ref."""
+        argv = ["commit-tree", tree, "-m", message]
+        for parent in parents or ():
+            argv += ["-p", parent]
+        return self.git(*argv, env_extra=FIXED_COMMIT_ENV).stdout.decode().strip()
+
+    def fetch_readonly(self, source, refspecs: Iterable, *, depth: Optional[int] = None,
+                       deepen: Optional[int] = None, timeout: float = 120,
+                       check: bool = True) -> subprocess.CompletedProcess:
+        """Fetch FROM a repository LoopLab only reads (the operator's source, a foreign branch):
+        the one spelling of that fetch, so every caller has the same safety flags.
+
+        Read-only on `source`: its `upload-pack` reads and writes nothing, and no tag, FETCH_HEAD,
+        submodule or maintenance follows. Protocol v2, so a commit that is no ref tip any more is
+        still served by id (v0 refuses an unadvertised object; measured, git 2.43). `upload-pack`
+        runs with the source trusted for reading (`readonly_safe_dirs`) on ITS command line: a
+        local transport clears `-c` config (`GIT_CONFIG_PARAMETERS`) for it (measured). An
+        unbounded fetch from a shallow source needs `--update-shallow` (git rejects the refs
+        otherwise, measured); a bounded one (`depth` / `deepen`) takes the cut as its own.
+
+        NOT under `lock()`: git writes refs and `$GIT_DIR/shallow` under its own lockfiles, and
+        `add_shallow` takes the same `shallow.lock`, so a long fetch never stalls the engine's
+        attempt records (review 2026-10-16). Never fetch a commit already present with `depth`:
+        that rewrites it as a shallow cut and truncates the history behind it (measured)."""
+        src = os.path.expanduser(str(source))
+        upload = " ".join(["git", *(shlex.quote(a) for d in readonly_safe_dirs(src)
+                                    for a in ("-c", f"safe.directory={d}")), "upload-pack"])
+        argv = ["-c", "protocol.version=2", "fetch", "--quiet", "--no-tags", "--no-write-fetch-head",
+                "--no-recurse-submodules", "--no-auto-maintenance", f"--upload-pack={upload}"]
+        if depth is not None:
+            argv.append(f"--depth={int(depth)}")
+        elif deepen is not None:
+            argv.append(f"--deepen={int(deepen)}")
+        else:
+            argv.append("--update-shallow")
+        return self.git(*argv, src, *refspecs, timeout=timeout, check=check)
+
     def commit_parents(self, commit: str) -> list:
         """The parent ids a commit OBJECT names, read off its header — never a walk, so a parent
         that is absent (or cut by `shallow`) is still named."""
@@ -294,19 +427,46 @@ class CodeRepo:
             text = (self.path / "shallow").read_text(encoding="ascii")
         except (OSError, UnicodeDecodeError):
             return []
-        return sorted({line.strip() for line in text.splitlines() if len(line.strip()) == 40})
+        return sorted({line.strip() for line in text.splitlines() if is_object_id(line.strip())})
 
     def add_shallow(self, commits: Iterable) -> None:
-        """Merge `commits` into `$GIT_DIR/shallow`, written whole (temp + rename). Only for a commit
-        that IS present and whose parents are NOT: the line is what lets git stop at a commit whose
-        history was never fetched (`code_origin.py`). Callers hold `lock()`."""
-        have = set(self.shallow())
-        want = {c for c in commits if isinstance(c, str) and len(c) == 40} - have
-        if not want:
+        """Merge `commits` into `$GIT_DIR/shallow`. Only for a commit that IS present and whose
+        parents are NOT: the line is what lets git stop at a commit whose history was never fetched
+        (`code_origin.py`).
+
+        Under GIT'S OWN lock protocol (`shallow.lock` created exclusively, written, renamed over
+        `shallow`), not `lock()` alone: a read-only `fetch --depth` (`fetch_readonly`) runs outside
+        the run's lock and rewrites the file under that lockfile, so a plain temp+rename here could
+        drop the cut the fetch just wrote, or the fetch this one."""
+        want = {c for c in commits if is_object_id(c)}
+        if not want or want <= set(self.shallow()):
             return
-        from looplab.core.atomicio import atomic_write_bytes
-        atomic_write_bytes(self.path / "shallow",
-                           "".join(f"{c}\n" for c in sorted(have | want)).encode("ascii"))
+        lock = self.path / "shallow.lock"
+        deadline = time.monotonic() + SHALLOW_LOCK_WAIT_S
+        while True:
+            try:
+                fd = os.open(lock, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o644)
+                break
+            except FileExistsError:
+                if time.monotonic() > deadline:
+                    raise CodeRepoError("git_failed", "shallow.lock is held: another git process "
+                                                      "is writing the shallow file") from None
+                time.sleep(0.05)
+        renamed = False
+        try:
+            have = set(self.shallow())               # re-read under the lock
+            with os.fdopen(fd, "wb") as fh:
+                fh.write("".join(f"{c}\n" for c in sorted(have | want)).encode("ascii"))
+                fh.flush()
+                os.fsync(fh.fileno())
+            os.replace(lock, self.path / "shallow")
+            renamed = True
+        finally:
+            if not renamed:
+                try:
+                    os.unlink(lock)                  # never leave git's lock behind
+                except OSError:
+                    pass                             # nothing to remove
 
     def tree(self, commit: str) -> Optional[str]:
         out = self.git("rev-parse", "--verify", "--quiet", commit + "^{tree}", check=False)

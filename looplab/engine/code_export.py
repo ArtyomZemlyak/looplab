@@ -34,7 +34,7 @@ import tempfile
 from pathlib import Path
 from typing import Optional
 
-from looplab.engine.code_repo import CodeRepo, CodeRepoError, run_git, safe_path
+from looplab.engine.code_repo import CodeRepo, CodeRepoError, readonly_git, run_git, safe_path
 
 ZERO = "0" * 40
 _ID_ENV = {"GIT_AUTHOR_NAME": "LoopLab", "GIT_AUTHOR_EMAIL": "looplab@invalid",
@@ -84,13 +84,27 @@ def _merge3(target: Path, ours: bytes, base: bytes, theirs: bytes) -> Optional[b
     return res.stdout if res.returncode == 0 else None
 
 
-def _tracks_file_mode(target: Path) -> bool:
-    """Whether the target repository counts the executable bit of a WORKING TREE, as `git status`
-    does: `core.fileMode=false` (what `git init` writes on a filesystem without one — Windows) says
-    a working tree's mode is not evidence, and the run's seed archive read its modes off a working
-    tree's `st_mode`. Only the base step compares such a mode against a git commit; the delta steps
-    compare the run's own commits, whose modes agree with each other either way."""
-    res = _tgit(target, "config", "--bool", "--get", "core.fileMode", check=False)
+def _tracks_file_mode(repo_dir) -> Optional[bool]:
+    """Whether the repository at `repo_dir` counts a WORKING TREE's executable bit, as `git status`
+    there does: `core.fileMode=false` is what `git init` writes where `chmod` is not kept (vfat,
+    NTFS, CIFS, 9p, WSL's `/mnt/c`, which report 0755 for every file), and git then never takes a
+    mode off that working tree. Unset means true (git's default). None when `repo_dir` is not a
+    readable git repository. Read-only (`readonly_git`).
+
+    The question is asked of BOTH sides of the base step (`_base_step`): the seed archive read its
+    modes off the SOURCE's working tree (`st_mode`), so whether they are evidence is the source's
+    filesystem's answer, and the target's answer says whether the operator wants a mode carried at
+    all. The delta steps compare the run's OWN commits (each read off the run's node workdirs), so
+    neither question arises there."""
+    try:
+        res = readonly_git(repo_dir, "config", "--bool", "core.fileMode", check=False)
+        if res.returncode not in (0, 1):
+            return None
+        if res.returncode == 1 and readonly_git(repo_dir, "rev-parse", "--git-dir",
+                                                check=False).returncode != 0:
+            return None                          # exit 1 = unset, or not a repository at all
+    except CodeRepoError:
+        return None
     return res.stdout.decode("utf-8", "replace").strip() != "false"
 
 
@@ -110,16 +124,19 @@ def _merged_mode(before, after, have) -> Optional[str]:
 
 
 def _carry(target: Path, before, after, have, old_bytes, new_bytes) -> tuple:
-    """Carry one path's `before -> after` onto the target's `have`, comparing the (mode, blob)
-    PAIR (blob-only equality called a chmod-only change "already present"). `old_bytes` /
-    `new_bytes` are callables (read only when a merge or a write needs them). Returns
+    """Carry one path's `before -> after` onto the target's `have`. CONTENT is compared on the blob
+    and the MODE is resolved apart from it (`_merged_mode`), never the two as one pair (review
+    2026-10-16: pair equality made a deletion of a file the target only chmod'ed a conflict, and
+    content the target already held a "change" when only the target's own mode differed).
+    `old_bytes` / `new_bytes` are callables (read only when a merge or a write needs them). Returns
     `("already", None)`, `("set", (mode, sha) | None)` with None a deletion, `("conflict", None)`
     or `("mode_conflict", None)`."""
-    if have == after:
-        return "already", None
     if after is None:
-        # A deletion needs the target to hold exactly what the run deleted, its mode included.
-        return ("set", None) if have == before else ("conflict", None)
+        if have is None:
+            return "already", None       # the target deleted it too
+        # A deletion needs the target to hold the CONTENT the run deleted; a mode the target set
+        # on it since is not content the deletion loses.
+        return ("set", None) if before is not None and have[1] == before[1] else ("conflict", None)
     if have is None:
         if before is None:
             return "set", (after[0], _write_blob(target, new_bytes()))
@@ -128,7 +145,8 @@ def _carry(target: Path, before, after, have, old_bytes, new_bytes) -> tuple:
     if mode is None:
         return "mode_conflict", None
     if have[1] == after[1]:
-        return "set", (mode, have[1])    # the bytes are there already: only the mode moves
+        # The bytes are there already: "already present" unless the MODE still has to move.
+        return ("already", None) if mode == have[0] else ("set", (mode, have[1]))
     if before is not None and have[1] == before[1]:
         return "set", (mode, _write_blob(target, new_bytes()))
     if before is None:
@@ -177,31 +195,63 @@ class _Builder:
         return sha
 
 
+def _seed_mode_trust(target: Path, source: Optional[str]) -> dict:
+    """Whether the seed's executable bits are carried (`trusted`), with each side's answer
+    (`_tracks_file_mode`). Trusted only when NEITHER side says a working tree's mode is no evidence
+    (review 2026-10-16: the target's answer alone let a seed copied off vfat / NTFS / CIFS / 9p /
+    `/mnt/c`, where every file reads 0755, `chmod +x` every file of the export). A source that is
+    not a readable repository any more (gone after a restore, or never git) gives no answer and
+    the target's stands — the seed's `st_mode` is then the only evidence there is."""
+    target_tracks = _tracks_file_mode(target)
+    source_tracks = _tracks_file_mode(source) if source else None
+    return {"trusted": target_tracks is not False and source_tracks is not False,
+            "target": target_tracks, "source": source_tracks}
+
+
 def _base_step(repo: CodeRepo, builder: _Builder, base_commit: str, *, run_id: str,
-               digest: str, drift_from: Optional[str] = None) -> dict:
+               digest: str, drift_from: Optional[str] = None,
+               source: Optional[str] = None) -> dict:
     """Carry the run's starting base onto the target head (never deleting).
 
     With `drift_from` — the target's copy of the source commit the run started from — this is the
     DELTA that commit -> the run's seed (its uncommitted edits), applied path by path like any other
     delta, so a target that moved on since (another run's delivery) keeps its changes. Without it
     (a source that was not git, or a commit the target lacks) the target is made to hold the seed's
-    bytes at every path the seed has."""
+    bytes at every path the seed has.
+
+    MODES. The seed's executable bit is a working tree's `st_mode`. Where either side says that is
+    no evidence (`_seed_mode_trust`), the run's side of every path takes the mode GIT recorded for it
+    in the source commit (`drift_from` in the target, else the first base's parent in the run's own
+    repository — the same commit), then the target's, and a path new in the seed is 100644 — as git
+    itself adds a file under `core.fileMode=false`. So an untrusted seed moves no mode at all; a
+    trusted one moves exactly the paths whose mode differs from the source commit's: real chmods."""
     entries = repo.entries(base_commit)
     tpaths = {builder.tpath(p): p for p in entries}
     current = _target_entries(builder.target, builder.head, list(tpaths))
     origin = (_target_entries(builder.target, drift_from, list(tpaths))
               if drift_from is not None else None)
-    # The seed's executable bit is a working tree's `st_mode`; where the target says a working
-    # tree's mode is not evidence (`_tracks_file_mode`), the run's side keeps the mode git already
-    # had, so a Windows seed does not `chmod -x` every script the source commit marks executable.
-    track = _tracks_file_mode(builder.target)
+    trust = _seed_mode_trust(builder.target, source)
+    recorded_modes: dict = {}
+    if origin is not None:
+        recorded_modes = {tp: row[0] for tp, row in origin.items()}
+    elif not trust["trusted"]:
+        parents = repo.commit_parents(base_commit)
+        if parents and repo.has_object(parents[0] + "^{tree}"):
+            recorded_modes = {builder.tpath(p): row[0]
+                              for p, row in repo.entries(parents[0]).items()}
+
+    def run_mode(tpath: str, mode: str, have) -> str:
+        if trust["trusted"]:
+            return mode
+        return recorded_modes.get(tpath) or (have[0] if have else "100644")
+
     rows, unchanged, already, conflicts, mode_conflicts = {}, 0, 0, [], []
     for tpath, path in sorted(tpaths.items()):
         mode, sha = entries[path]
         have = current.get(tpath)
         if origin is not None:
             before = origin.get(tpath)
-            run = (mode, sha) if track else ((before or have or (mode,))[0], sha)
+            run = (run_mode(tpath, mode, have), sha)
             if before == run:
                 unchanged += 1                       # not part of the run's drift
                 continue
@@ -219,7 +269,7 @@ def _base_step(repo: CodeRepo, builder: _Builder, base_commit: str, *, run_id: s
                     mode_conflicts.append({"path": tpath, "base": before[0] if before else None,
                                            "run": run[0], "target": have[0] if have else None})
             continue
-        run = (mode, sha) if track else ((have or (mode,))[0], sha)
+        run = (run_mode(tpath, mode, have), sha)
         if have == run:
             unchanged += 1
             continue
@@ -228,7 +278,8 @@ def _base_step(repo: CodeRepo, builder: _Builder, base_commit: str, *, run_id: s
             continue
         rows[tpath] = (run[0], _write_blob(builder.target, data))
     if conflicts:
-        out = {"kind": "base", "commit": None, "conflicts": conflicts, "drift_from": drift_from}
+        out = {"kind": "base", "commit": None, "conflicts": conflicts, "drift_from": drift_from,
+               "file_mode": trust}
         if mode_conflicts:
             out["mode_conflicts"] = mode_conflicts
         return out
@@ -248,7 +299,7 @@ def _base_step(repo: CodeRepo, builder: _Builder, base_commit: str, *, run_id: s
     sha = builder.commit(rows, message)
     return {"kind": "base", "commit": sha, "changed": len(rows), "unchanged": unchanged,
             "already_present": already, "not_in_snapshot": not_in_snapshot,
-            "drift_from": drift_from}
+            "drift_from": drift_from, "file_mode": trust}
 
 
 def _delta_step(repo: CodeRepo, builder: _Builder, old: str, new: str, message: str,
@@ -414,8 +465,10 @@ def export_code(run_dir, target, *, branch: Optional[str] = None, onto: Optional
              check=False).returncode == 0:
         raise ExportRefusal("export_branch_exists",
                             f"branch {branch} already exists in {target}; choose another --branch")
-    workspace = started.get("workspace") if isinstance(started.get("workspace"), dict) else {}
-    recorded = _recorded_source_commit(workspace)
+    # The one reading of where the run's code came from, shared with the base parent and a foreign
+    # branch's merge base (`code_origin.py::run_source`).
+    from looplab.engine.code_origin import run_source
+    source, recorded = run_source(events, run_dir)
     if not (recorded and _tgit(target, "cat-file", "-e", recorded + "^{commit}",
                                check=False).returncode == 0):
         recorded = None
@@ -449,7 +502,7 @@ def export_code(run_dir, target, *, branch: Optional[str] = None, onto: Optional
         raise ExportRefusal("export_nothing", "the run's base archive is unavailable")
     if include_base:
         steps.append(_base_step(repo, builder, first, run_id=run_id, digest=chain[0],
-                                drift_from=recorded))
+                                drift_from=recorded, source=source))
         if steps[-1].get("conflicts"):
             report["status"] = "conflict"
     prev = first

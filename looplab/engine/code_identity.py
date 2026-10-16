@@ -9,7 +9,8 @@ two kinds of commit:
     cannot be the source repo's HEAD). Bases form a lineage: the run's first base is parented on the
     commit the operator's editable stood at when the run started (since version 2, 2026-10-16, when
     that commit's objects can be fetched read-only — `engine/code_origin.py`; else, and in every
-    version-1 run, it is a root), so `git log` shows the operator's history and `git diff <that
+    version-1 run, it is a root; once decided, a rebuild names the SAME parent even when its objects
+    are gone, as its own shallow cut), so `git log` shows the operator's history and `git diff <that
     commit> <base>` is exactly the uncommitted edits; a base produced by the upstream lane
     (`base_advanced`) has the base it replaced as parent; a new digest the live source produced
     mid-run (an operator edit) has the previously seen base as parent.
@@ -40,12 +41,14 @@ import stat
 from pathlib import Path
 from typing import Iterable, Optional
 
-from looplab.engine.code_repo import CodeRepo, CodeRepoError, REPO_REL, safe_path
+from looplab.engine.code_repo import (IDENTITY_VERSION, CodeRepo, CodeRepoError, REPO_REL,
+                                      is_object_id, safe_path)
 
 # 2 (2026-10-16): the first base is parented on the operator's source commit, attempts carry the
-# co-parents trailer and real merge parents. A run builds at the version of its FIRST recorded row
-# (`code_origin.py::run_version`), so a version-1 run reproduces its historical commits byte for byte.
-SNAPSHOT_VERSION = 2
+# co-parents trailer and real merge parents. A run builds at the version of its FIRST row, else of
+# its repository's stamp (`code_origin.py::run_version`), and every new row of the run is stamped
+# with THAT version — so a version-1 run, resumed or synced, reproduces its commits byte for byte.
+SNAPSHOT_VERSION = IDENTITY_VERSION
 # A real merge brings at most this many node commits in as git parents (an octopus beyond it says
 # nothing a reviewer can use; the trailer still names every co-parent).
 MAX_MERGE_PARENTS = 16
@@ -246,30 +249,56 @@ def _run_meta(events) -> tuple:
     return "run", {}
 
 
+def _is_first_base(info: dict) -> bool:
+    # The run's FIRST base. An upstream-advanced base is never this one: its tree is the lane's.
+    return not info.get("parent") and info.get("reason", "initial") == "initial"
+
+
+def prepare_first_base(repo: CodeRepo, run_dir, events, digest: Optional[str], lineage: dict,
+                       origin_source: Optional[str] = None) -> Optional[tuple]:
+    """The first base's parent decision (`code_origin.py::first_base_parent`) when the lineage
+    root of `digest` is the run's first base and is not built yet, else None. Called BEFORE
+    `repo.lock()`: it may probe the operator's source and fetch from it (bounded, read-only), and
+    holding the lock across that stalled every attempt record, worktree and sync of the run for up
+    to two minutes on the first node's eval path (review 2026-10-16)."""
+    hops = 0
+    while digest and (lineage.get(digest) or {}).get("parent") and hops < 256:
+        digest, hops = lineage[digest]["parent"], hops + 1
+    if not digest or not _is_first_base(lineage.get(digest, {})) \
+            or repo.rev(BASE_REF + digest) is not None:
+        return None
+    from looplab.engine.code_origin import first_base_parent
+    return first_base_parent(repo, run_dir, events, origin_source)
+
+
 def ensure_base(repo: CodeRepo, run_dir, events, digest: str, lineage=None, _depth: int = 0,
-                origin: Optional[dict] = None, origin_source: Optional[str] = None):
+                origin: Optional[dict] = None, origin_source: Optional[str] = None,
+                origin_decision: Optional[tuple] = None):
     """The base commit of `digest`, creating it (and its lineage parents) when missing. None when
     its archive cannot be read. `origin`, when given, receives the diagnostic of the FIRST base's
-    parent decision (`code_origin.py::first_base_parent`) if this call created that base."""
+    parent decision (`code_origin.py::first_base_parent`) if this call created that base;
+    `origin_decision` is that decision made before the caller locked (`prepare_first_base`)."""
     ref = BASE_REF + digest
     existing = repo.rev(ref)
     if existing is not None:
         return existing
     lineage = lineage if lineage is not None else base_lineage(events)
     info = lineage.get(digest, {"parent": None, "reason": "initial"})
-    parent_sha, origin_parent = None, None
+    parent_sha, origin_parent, diag = None, None, {}
     if info.get("parent") and _depth < 64:
         parent_sha = ensure_base(repo, run_dir, events, info["parent"], lineage, _depth + 1,
-                                 origin, origin_source)
+                                 origin, origin_source, origin_decision)
     files = archive_files(run_dir, events, digest)
     if files is None:
         return None
-    if not info.get("parent") and info.get("reason", "initial") == "initial":
-        # The run's FIRST base: parented on the operator's source commit when the log (or, before
-        # any row, the source) says so and its objects are here — read-only on the operator side.
-        # An upstream-advanced base is never this one: its tree is the lane's, not the source's.
-        from looplab.engine.code_origin import first_base_parent
-        origin_parent, diag = first_base_parent(repo, run_dir, events, origin_source)
+    first = _is_first_base(info)
+    if first:
+        # Parented on the operator's source commit when the log (or, before any row, this run's
+        # own decision record, then the source) says so — read-only on the operator side.
+        if origin_decision is None:
+            from looplab.engine.code_origin import first_base_parent
+            origin_decision = first_base_parent(repo, run_dir, events, origin_source)
+        origin_parent, diag = origin_decision[0], dict(origin_decision[1])
         parent_sha = origin_parent
         if origin is not None:
             origin.update(diag)
@@ -278,13 +307,20 @@ def ensure_base(repo: CodeRepo, run_dir, events, digest: str, lineage=None, _dep
     sha = repo.write_tree_commit(ref, files, message=_base_message(run_id, digest, info, started,
                                                                    origin_parent),
                                  when=when, parent=parent_sha)
-    if origin_parent:
-        # The parent's objects ride beside the run (`code/origin/`, mirrored), so a rebuild with
-        # the operator's repository gone still writes this same commit id.
-        from looplab.engine.code_origin import write_sidecar
-        sidecar = write_sidecar(repo, run_dir, origin_parent, sha)
-        if origin is not None:
-            origin["sidecar"] = sidecar
+    if first:
+        from looplab.engine.code_origin import write_decision, write_sidecar
+        # Durable beside the run (`code/origin/`, mirrored): a rebuild with no recorded row reads
+        # this decision before it would probe a source that may be gone (`decided_parent`).
+        write_decision(run_dir, origin_parent)
+        if origin_parent and diag.get("via") == "cut":
+            # The decided parent's objects are gone: the same id, walkable as its own cut.
+            repo.add_shallow([sha])
+        elif origin_parent:
+            # The parent's objects ride beside the run, so a rebuild with the operator's
+            # repository gone still writes this same commit id.
+            sidecar = write_sidecar(repo, run_dir, origin_parent, sha)
+            if origin is not None:
+                origin["sidecar"] = sidecar
     return sha
 
 
@@ -419,11 +455,11 @@ def _parse_attempt_ref(ref: str):
 def merged_node_commits(repo: CodeRepo, head: Optional[str]) -> list:
     """The node attempt commits a REAL merge brought into `head` — an agent worktree's committed
     history (the agent ran `git merge nodes/n<id>`, or started from `node:<id>`) — as
-    `[{node_id, generation, commit}]`: every attempt commit reachable from `head`, reduced to the
-    independent tips (`merge-base --independent`: a repair commit stands for the attempt it sits
-    on), each re-verified with `merge-base --is-ancestor`, ordered by (node, generation, seed), at
-    most `MAX_MERGE_PARENTS`. [] when `head` is not in the repository. A claim git can verify, never
-    one taken from the submitter: `head` itself is server-derived (`inject_node.code_commit`)."""
+    `[{node_id, generation, commit}]`: every attempt commit reachable from `head` (`for-each-ref
+    --merged`), reduced to the independent tips (a repair commit stands for the attempt it sits
+    on), ordered by (node, generation, seed), at most `MAX_MERGE_PARENTS`. [] when `head` is not in
+    the repository. A claim git can verify, never one taken from the submitter: `head` itself is
+    server-derived (`inject_node.code_commit`)."""
     if not isinstance(head, str) or repo.rev(head) is None:
         return []
     # ONE call answers "which attempt commits does `head` contain": `--merged` keeps exactly the
@@ -439,8 +475,16 @@ def merged_node_commits(repo: CodeRepo, head: Optional[str]) -> list:
             attempts.setdefault(sha, parsed)
     if not attempts:
         return []
-    tips = repo.git("merge-base", "--independent", *sorted(attempts)).stdout.decode("ascii").split()
-    verified = sorted((t for t in tips if t in attempts), key=lambda t: attempts[t])
+    # The independent tips WITHOUT an argv of every id (`merge-base --independent <all>` met the
+    # 32 767-character Windows command line at ~780 attempts; review 2026-10-16): an attempt is NOT
+    # a tip when another one reaches it, i.e. when it is reachable from some attempt's PARENTS. One
+    # `rev-list --stdin`, stopped at the bases — an attempt never sits below a base, so the walk is
+    # the attempt layer only, never the operator's history.
+    feed = "".join(f"{sha}^@\n" for sha in sorted(attempts))
+    feed += "".join(f"^{sha}\n" for sha in sorted(set(repo.refs(BASE_REF).values())))
+    reached = set(repo.git("rev-list", "--stdin", input=feed.encode("ascii")).stdout.decode(
+        "ascii", "replace").split())
+    verified = sorted((t for t in attempts if t not in reached), key=lambda t: attempts[t])
     return [{"node_id": attempts[t][0], "generation": attempts[t][1], "commit": t}
             for t in verified[:MAX_MERGE_PARENTS]]
 
@@ -464,23 +508,43 @@ def co_parent_refs(events, parent_ids, before_seq) -> list:
     return [{"node_id": p, **({"commit": last[p]} if p in last else {})} for p in others]
 
 
-def injected_code_commit(events, node_id, generation) -> Optional[str]:
+def _same_overlay(created: dict, files, deleted) -> bool:
+    return (files is not None and dict(files or {}) == dict(created.get("files") or {})
+            and sorted(deleted or ()) == sorted(created.get("deleted") or ()))
+
+
+def injected_code_commit(events, node_id, generation, files=None, deleted=None) -> Optional[str]:
     """The agent worktree head an injected node's code came from (`node_created.code_commit`,
-    stamped at intake from `code_from: {"worktree": …}`), for THAT lifecycle only."""
-    out = None
+    stamped at intake from `code_from: {"worktree": …}`), for THAT lifecycle.
+
+    A lifecycle with its own `node_created` reads that row. One opened WITHOUT a `node_created` — an
+    eval `node_reset` or a holdout requeue moves the generation and keeps the code — reads the latest
+    EARLIER `node_created` of the node, but only when the lifecycle's overlay (`files`, `deleted`)
+    is still exactly that row's: the code the head describes, decided on content, so a reset that
+    re-developed the code or a rebased overlay claims nothing (review 2026-10-16: lifecycle >= 1 of
+    a merged node lost its merge parents with its code unchanged)."""
+    own = earlier = None
     for e in events or ():
         if _etype(e) != "node_created":
             continue
         d = _edata(e)
+        if d.get("node_id") != node_id:
+            continue
         gen = d.get("generation") if type(d.get("generation")) is int else 0
-        if d.get("node_id") == node_id and gen == generation:
-            sha = d.get("code_commit")
-            out = sha if isinstance(sha, str) and len(sha) == 40 else None
-    return out
+        if gen == generation:
+            own = d
+        elif gen < generation:
+            earlier = d
+    row = own if own is not None else (
+        earlier if earlier is not None and _same_overlay(earlier, files, deleted) else None)
+    sha = row.get("code_commit") if row is not None else None
+    return sha if is_object_id(sha) else None
 
 
-def _payload_base(node_id, generation, seed_seq) -> dict:
-    return {"version": SNAPSHOT_VERSION, "node_id": node_id, "generation": generation,
+def _payload_base(node_id, generation, seed_seq, version: int = SNAPSHOT_VERSION) -> dict:
+    # `version` is the RUN's (`code_origin.py::run_version`): a resumed version-1 run's new rows
+    # say 1, never this build's version (review 2026-10-16).
+    return {"version": version, "node_id": node_id, "generation": generation,
             "seed_event_seq": seed_seq, "repo": REPO_REL}
 
 
@@ -498,19 +562,32 @@ def record_attempt(run_dir, events, *, node_id: int, generation: int, seed_event
     both only for a version-2 run (`code_origin.py::run_version`). `origin_source` is the live
     engine's editable path, for the first base's parent (offline, the task snapshot names it)."""
     from looplab.engine.code_origin import run_version
-    payload = _payload_base(node_id, generation, seed_event_seq)
+    repo = CodeRepo(run_dir)
+    try:
+        version = run_version(events, SNAPSHOT_VERSION, repo)
+    except CodeRepoError:
+        version = run_version(events, SNAPSHOT_VERSION)
+    payload = _payload_base(node_id, generation, seed_event_seq, version)
     payload["source"] = source
     if base_digest is None:
         return {**payload, "status": "unavailable", "reason": "no_seed_base"}
-    current = run_version(events, SNAPSHOT_VERSION) >= 2
+    current = version >= 2
     co_parents = co_parent_refs(events, parent_ids, seed_event_seq) if current else []
     try:
-        repo = CodeRepo(run_dir).ensure()
+        repo.ensure()
+        lineage = base_lineage(events)
+        if current and code_commit and not repair_of and repo.rev(code_commit) is None:
+            # The head a REAL merge left is recorded but not here (a rebuilt repository before the
+            # agent backup is restored): a commit written now would lack the merge parents the head
+            # names, and its ref would pin that. Left unbuilt and said, so a later sync — after the
+            # head is back — builds it whole (review 2026-10-16).
+            return {**payload, "status": "unavailable", "reason": "merge_head_missing",
+                    "message": f"merge head {code_commit[:12]} is not in the run repository"}
+        decision = prepare_first_base(repo, run_dir, events, base_digest, lineage, origin_source)
         with repo.lock():
-            lineage = base_lineage(events)
             origin: dict = {}
             base_sha = ensure_base(repo, run_dir, events, base_digest, lineage, origin=origin,
-                                   origin_source=origin_source)
+                                   origin_source=origin_source, origin_decision=decision)
             if base_sha is None:
                 return {**payload, "status": "unavailable", "reason": "base_archive_unavailable",
                         "base": {"digest": base_digest}}
@@ -602,7 +679,9 @@ def record_materialized(engine, node, workdir, seed) -> Optional[dict]:
                                  source="workspace", idea=idea,
                                  when=getattr(seeded, "ts", 0.0) or 0.0,
                                  parent_ids=list(getattr(node, "parent_ids", None) or ()),
-                                 code_commit=injected_code_commit(events, node.id, generation),
+                                 code_commit=injected_code_commit(events, node.id, generation,
+                                                                  node.files or {},
+                                                                  node.deleted or ()),
                                  origin_source=engine_source(engine))
         _append_snapshot(engine, payload)
         return payload
@@ -720,8 +799,11 @@ def sync_run(run_dir, events=None, *, restore_agents: bool = False) -> dict:
     (`code_worktree.py::restore_agent_worktrees`, reported as `agent_worktrees`)."""
     from looplab.engine.shared import engine_fold as fold
     from looplab.events.git_export import node_lifecycles
+    from looplab.engine.code_origin import run_version
     events = events if events is not None else _read_events(run_dir)
     recorded = recorded_snapshots(events)
+    repo = CodeRepo(run_dir)
+    version = run_version(events, SNAPSHOT_VERSION, repo)
     state = fold(events)
     superseded, _ = node_lifecycles(events)
     rebased: dict = {}
@@ -748,7 +830,7 @@ def sync_run(run_dir, events=None, *, restore_agents: bool = False) -> dict:
             lc = superseded[(nid, gen)]
             files, deleted = lc.files, list(lc.deleted)
         else:
-            built.append({**_payload_base(nid, gen, e.seq), "status": "unavailable",
+            built.append({**_payload_base(nid, gen, e.seq, version), "status": "unavailable",
                           "reason": "overlay_unknown"})
             continue
         idea = node.idea.model_dump() if node is not None and hasattr(node.idea, "model_dump") else None
@@ -759,19 +841,21 @@ def sync_run(run_dir, events=None, *, restore_agents: bool = False) -> dict:
                                     changes=changes_from_log(files, deleted), source="log",
                                     idea=idea, when=getattr(e, "ts", 0.0) or 0.0,
                                     parent_ids=list(getattr(holder, "parent_ids", None) or ()),
-                                    code_commit=injected_code_commit(events, nid, gen)))
-    repo = CodeRepo(run_dir)
+                                    code_commit=injected_code_commit(events, nid, gen, files,
+                                                                     deleted)))
     lineage = base_lineage(events)
     if repo.exists() or (lineage and recorded):
         try:
             repo.ensure()
+            decision = prepare_first_base(repo, run_dir, events, next(iter(lineage), None),
+                                          lineage)
             with repo.lock():
                 # EVERY base of the lineage, not only those an unrecorded attempt sits on: after a
                 # mirror restore (the mirror skips `code/repo.git`) this is what rebuilds the bases
                 # — the same ids, the first one's operator parent from its sidecar when the source
                 # is gone (`code_origin.py`) — before the agent backup below is unbundled onto them.
                 for digest in lineage:
-                    ensure_base(repo, run_dir, events, digest, lineage)
+                    ensure_base(repo, run_dir, events, digest, lineage, origin_decision=decision)
                 refresh_base_branch(repo, events, lineage)
                 _refresh_champion(repo, state, {**recorded, **{
                     (b["node_id"], b["generation"], b["seed_event_seq"]): b for b in built}})
@@ -916,6 +1000,19 @@ def code_status(run_dir, events=None, *, task=None, settings=None, nominations: 
                "reason": info.get("reason"), "seq": info.get("seq"), "active": digest == active}
         if info.get("advance"):
             row["upstream"] = info["advance"]
+        if row["commit"] and _is_first_base(info):
+            # The operator commit the first base names, and whether its history is HERE: a base
+            # whose decided parent's objects could not be had is written naming it anyway (the
+            # same id) as its own shallow cut — said, so `git log` ending at the base is explained.
+            try:
+                parents = repo.commit_parents(row["commit"])
+                if parents:
+                    row["origin_parent"] = parents[0]
+                    if not repo.has_object(parents[0]):
+                        row["history"] = "unavailable"
+                        row["history_reason"] = "origin_objects_missing"
+            except CodeRepoError:
+                pass                     # a read for the operator's view, never a refusal
         bases.append(row)
     snapshots = recorded_snapshots(events)
     configs: dict = {}
@@ -1008,7 +1105,9 @@ def code_status(run_dir, events=None, *, task=None, settings=None, nominations: 
     branches = {name[len("refs/heads/"):]: sha for name, sha in refs.items()
                 if name.startswith("refs/heads/")}
     missing = sum(1 for a in attempts if not a["recorded"] and a.get("commit") is None)
-    return {"version": SNAPSHOT_VERSION, "repo": {"path": REPO_REL, "exists": repo.exists()},
+    from looplab.engine.code_origin import run_version
+    return {"version": SNAPSHOT_VERSION, "run_version": run_version(events, SNAPSHOT_VERSION, repo),
+            "repo": {"path": REPO_REL, "exists": repo.exists()},
             "active_base": active, "bases": bases, "attempts": attempts, "branches": branches,
             "upstream": pending, "unsynced_attempts": missing,
             "champion": None if best is None else {"node_id": best.id, "generation": best.attempt,

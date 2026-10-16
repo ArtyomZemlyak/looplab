@@ -20,6 +20,11 @@ also kept in `RUN_DIR/code/origin/`, so a restored run rebuilds the same base wi
 repository. The first base has no parent when the editable is a subdirectory of its repository,
 there are several editables, the source is not git or `seed_base` is pinned (`base.origin.reason` on
 the `code_snapshot` row says which). Runs recorded before 2026-10-16 keep their parentless bases.
+Once a base id is recorded it never changes: if a rebuild can get neither your repository nor
+`code/origin/`, the base still names the same parent and its history simply ends there
+(`code-status` shows `history: unavailable` on that base). Your repository is only read, also
+when another user owns it; the history fetch is bounded (30 s) and does not delay other work on
+the run.
 
 Branches: `base` (the active base), `nodes/n<id>` (latest attempt of each node), `champion`,
 `agent/<name>` (external-agent worktrees). Each attempt also gets an `effective_config` record: the
@@ -67,8 +72,11 @@ one directory of the repository is refused until you pass `--prefix`. Your
 open the merge request yourself, or apply the `--patches` series. A conflict stops the export and
 names the paths; nothing is created. A file's mode travels with its bytes: a `chmod +x` exports with
 or without a content change, and a mode your branch changed differently is reported as a conflict
-(`mode_conflicts`) rather than silently picked. With `core.fileMode=false` in your repository, the
-executable bit of the working tree the run started from is not exported.
+(`mode_conflicts`) rather than silently picked. The executable bit of the working tree the run
+started from is exported only when neither your target repository nor the source checkout says
+`core.fileMode=false` (what git writes on vfat, NTFS, CIFS or WSL's `/mnt/c`, where every file
+reads as executable); otherwise every file keeps the mode its commit has (`file_mode` in the
+report).
 
 ## External agents
 
@@ -85,19 +93,22 @@ looplab code-worktree runs/my-run fix-lr        # RUN_DIR/code/worktrees/fix-lr,
 ```
 
 The worktree is checked out from the run's private repository at the active base (or
-`node:<id>`), never from your repository; MCP `code_worktree` / `code_worktrees` make and list
-them. On a tmpfs run root, `--path` (route/MCP `path`) puts it on persistent disk — refused inside
+`node:<id>`, or a commit of the run — a commit of your own history is refused as
+`code_start_not_run_commit`), never from your repository; MCP `code_worktree` / `code_worktrees`
+make and list them. On a tmpfs run root, `--path` (route/MCP `path`) puts it on persistent disk — refused inside
 your source tree or another part of the run directory; the mirror then backs up its branch but not
 its files, and a restore re-links the same directory. The submitted overlay is always the whole
 change over the seed base, so a worktree started from `node:<id>` carries that experiment's change
 plus yours. Combining experiments is an ordinary `git merge nodes/n<id>` in the worktree: the
 injected experiment's commit then has those experiments as git parents (each checked against the
-worktree's history), so merging it elsewhere brings all of them. An ensemble LoopLab builds itself
+worktree's history), so merging it elsewhere brings all of them — when the worktree is submitted
+clean; with uncommitted changes no git parent is claimed. An ensemble LoopLab builds itself
 only names its other parents in a `Looplab-Co-Parents` trailer — it keeps one git parent, because
 its code is a new change, not a merge git could vouch for. A `git` source (e.g. Claude Code's
 `worktree-agent-<id>` branch of your repository) is fetched read-only into
 `refs/looplab/foreign/<commit>` and three-way merged onto the active base from where it left the
-source (git >= 2.38): your uncommitted edits stay, an overlap is `409 code_from_merge_conflict`
+source (git >= 2.38; `repo` may be any directory of that repository, and a shallow clone works):
+your uncommitted edits stay, an overlap is `409 code_from_merge_conflict`
 naming the paths, and the reply warns how many base files the branch lacked. Your repository's refs,
 objects, config, index and hooks are never written. `POST /api/runs/{run_id}/code/overlay` (MCP
 `code_overlay`) previews what any of these becomes, refused exactly as the inject would be

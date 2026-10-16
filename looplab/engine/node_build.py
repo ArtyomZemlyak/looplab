@@ -43,6 +43,7 @@ from looplab.core.models import (Idea, Node, NodeStatus, RunState, durable_idea_
 from looplab.engine.audit import AuditMixin
 from looplab.engine.card_reservation import (_BuildReservation, discarded_proposal_receipt,
                                              scored_anchor)
+from looplab.engine.code_repo import is_object_id
 from looplab.engine.costs import bind_cost_accountants, find_cost_accountants, seed_prior_spend
 from looplab.engine.lessons_priors import LESSON_ROLE_DEVELOPER
 from looplab.engine.plan import META_SWEEP
@@ -2723,8 +2724,7 @@ class NodeBuildMixin:
                     # doc 79 (2026-10-16): the agent worktree HEAD intake stamped from
                     # `code_from.worktree`; OMITTED otherwise, so every other inject keeps its shape.
                     **({"code_commit": req["code_commit"]}
-                       if isinstance(req.get("code_commit"), str)
-                       and len(req["code_commit"]) == 40 else {}),
+                       if is_object_id(req.get("code_commit")) else {}),
             ):
                 return
             # Mirror _create_node / _rerun_node: a Developer session that CRASHED returns the
