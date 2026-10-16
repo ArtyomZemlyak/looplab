@@ -2863,7 +2863,7 @@ class RunCommandService:
                               expected: str, *, agent_token: bool):
         """Convert an inject's `code_from` BEFORE the run's command sequencer is taken.
 
-        The conversion can fetch a foreign repository (`engine/code_foreign.py::_fetch`, up to 600 s)
+        The conversion can fetch a foreign repository (`engine/code_foreign.py::_ensure_commit`, bounded by `FETCH_TIMEOUT_S`)
         and, inside `sequence`, held every other command of the run for that long (review
         2026-10-16). It writes only the run's PRIVATE code repository, so it needs no sequencer; the
         intake re-checks under the lock only what may have moved since (the active base,

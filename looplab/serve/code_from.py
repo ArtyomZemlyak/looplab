@@ -27,7 +27,7 @@ Developer build). The checks every caller now gets, in order:
    worktree merged the active base (`git merge base`) or carries exactly the active base's bytes
    there.
 
-The conversion can run a long `git fetch` (`code_foreign.py::_fetch`, bounded there at 600 s), so
+The conversion can run a long `git fetch` (`code_foreign.py::_ensure_commit`, each fetch bounded by `FETCH_TIMEOUT_S`), so
 the command service runs it BEFORE it takes the run's command sequencer
 (`run_commands.py::RunCommandService._precompute_code_from`) and the intake re-checks only step 5
 under the lock, against the log as it is then.

@@ -183,24 +183,11 @@ def build_router(srv):
                                    expected=expected, current=current,
                                    remediation="read /state and retry with its generation")
 
-    def code_call(run_id, fn, *, request=None, write=False, expected_generation=None,
-                  sequenced=False, prepare=None):
-        """One code route's fence, credential and error mapping (`serve/code_from.py`).
-
-        THE GENERATION FENCE (review 2026-10-16). A read — and the overlay PREVIEW, which writes
-        only run-private git objects and can fetch for minutes — is a compare-and-swap ACROSS the
-        work through `commands.generation_fence` (taken before AND after; never the exclusive
-        sequencer). A `sequenced` write — creating a worktree — compares under
-        `commands.sequence`, so a run replaced between the check and the write cannot be handed a
-        worktree of its predecessor's repository; its long half (`prepare`, the idempotent
-        `sync_run`) runs before the lock is taken. `fn` receives the run dir and the generation the
-        fence observed."""
-        from looplab.engine.code_repo import CodeRepoError
-        from looplab.serve.code_from import code_http_error
+    def code_run(run_id, *, request=None, write=False):
+        """`(run dir, credential refusal applied)` for one code route."""
         rd = srv.run_dir(run_id)
         if not (rd / "events.jsonl").is_file():
             raise HTTPException(404, {"code": "run_not_found", "message": f"no run {run_id}"})
-        expected = expected_generation.lower() if expected_generation is not None else None
         if write and request is not None and request_agent_token(request):
             try:
                 settings = read_config_snapshot(rd / "config.snapshot.json", refuse_unknown=False)
@@ -209,16 +196,23 @@ def build_router(srv):
             if not getattr(settings, "external_harness", False):
                 raise HTTPException(403, {"code": "agent_token_refused", "message":
                                           "Code writes on internal runs require the operator credential"})
+        return rd
+
+    def code_call(run_id, fn, *, request=None, write=False, expected_generation=None):
+        """One code route's READ fence, credential and error mapping (`serve/code_from.py`).
+
+        THE GENERATION FENCE (review 2026-10-16). A read — and the overlay PREVIEW, which writes
+        only run-private git objects and can fetch for minutes — is a compare-and-swap ACROSS the
+        work through `commands.generation_fence` (taken before AND after; never the exclusive
+        sequencer). The worktree-creating write is `code_call_sequenced`, a SEPARATE helper on
+        purpose: a GET handler reaches only this one, so no GET can wait on the sequencer
+        (`tests/test_refusal_vocabulary.py::test_only_a_reconciling_GET_still_takes_the_sequencer`
+        follows same-module helpers). `fn` receives the run dir and the generation observed."""
+        from looplab.engine.code_repo import CodeRepoError
+        from looplab.serve.code_from import code_http_error
+        rd = code_run(run_id, request=request, write=write)
+        expected = expected_generation.lower() if expected_generation is not None else None
         try:
-            if sequenced:
-                if prepare is not None:
-                    prepare(rd)
-                with srv.commands.sequence(rd):
-                    # Writer side: an unreadable log is "", which never matches.
-                    current = srv.commands.run_generation(rd)
-                    if expected is not None and current != expected:
-                        raise generation_moved(expected, current)
-                    return fn(rd, current)
             rd, before = srv.commands.generation_fence(rd)
             if expected is not None and before != expected:
                 raise generation_moved(expected, before)
@@ -228,6 +222,26 @@ def build_router(srv):
                 if after != before:
                     raise generation_moved(expected, after)
             return out
+        except (CodeRepoError, OSError) as exc:
+            raise code_http_error(exc) from exc
+
+    def code_call_sequenced(run_id, fn, *, request=None, expected_generation=None, prepare=None):
+        """A code WRITE that compares the generation under `commands.sequence`, so a run replaced
+        between the check and the write cannot be handed a worktree of its predecessor's
+        repository; its long half (`prepare`, the idempotent `sync_run`) runs before the lock."""
+        from looplab.engine.code_repo import CodeRepoError
+        from looplab.serve.code_from import code_http_error
+        rd = code_run(run_id, request=request, write=True)
+        expected = expected_generation.lower() if expected_generation is not None else None
+        try:
+            if prepare is not None:
+                prepare(rd)
+            with srv.commands.sequence(rd):
+                # Writer side: an unreadable log is "", which never matches.
+                current = srv.commands.run_generation(rd)
+                if expected is not None and current != expected:
+                    raise generation_moved(expected, current)
+                return fn(rd, current)
         except (CodeRepoError, OSError) as exc:
             raise code_http_error(exc) from exc
 
@@ -299,9 +313,8 @@ def build_router(srv):
         def prepare(rd):
             from looplab.engine.code_identity import sync_run
             sync_run(rd)                     # the long half, before the sequencer is taken
-        return code_call(run_id, write, request=request, write=True,
-                         expected_generation=body.expected_generation, sequenced=True,
-                         prepare=prepare)
+        return code_call_sequenced(run_id, write, request=request,
+                                   expected_generation=body.expected_generation, prepare=prepare)
 
     @router.get("/api/runs/{run_id}/code/worktrees")
     def code_worktrees(run_id: str, response: Response,
