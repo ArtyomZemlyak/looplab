@@ -55,16 +55,23 @@ MAX_QUERIES = 2_000_000
 CONSISTENCY_TOLERANCE = 1e-6
 
 
+_SEPARATORS = frozenset("\t\n")
+
+
 def manifest_path(rd: Path) -> Path:
     return Path(rd) / PER_QUERY_DIR / MANIFEST
 
 
 def test_id_for(query_ids: list[str], clusters: list[str]) -> str:
-    # OPEN[weekly-shared-test-delimiters] P2 (review 2026-10-15): labels accept tabs
-    # and newlines. ("a\tb", "c") and ("a", "b\tc") serialize identically; real uploads
-    # with different query sets receive the same test_id and become pairable.
-    # Use an unambiguous tuple encoding or refuse separators; see the weekly audit.
-    # proof:`present:"\n".join(f"{q}\t{c}"@looplab/harness/per_query.py`
+    """The shared-test id of a (query, cluster) pair set: order-free, `qs1-` + 32 hex.
+
+    The serialization is `q<TAB>c` lines, so a label holding a TAB or a newline is ambiguous —
+    `("a\tb", "c")` and `("a", "b\tc")` are the same bytes, and two DIFFERENT query sets got one
+    id and were paired by position (review 2026-10-15, weekly-shared-test-delimiters). Such a
+    label is refused (`_labels`, a 400 at upload) rather than re-encoded: every id already issued
+    for an unambiguous upload stays exactly what it was."""
+    if any(_SEPARATORS.intersection(x) for x in (*query_ids, *clusters)):
+        raise ValueError("a query or cluster label may not contain a tab or a newline")
     lines = "\n".join(f"{q}\t{c}" for q, c in sorted(zip(query_ids, clusters)))
     return "qs1-" + hashlib.sha256(lines.encode("utf-8")).hexdigest()[:32]
 
@@ -130,7 +137,12 @@ def _labels(arrays: dict, name: str, n: Optional[int] = None) -> list[str]:
     shape, values = arrays[name]
     if len(shape) != 1 or (n is not None and shape[0] != n):
         raise HTTPException(400, f"{name!r} must be a 1-D array with one label per query")
-    return [str(v) for v in values]
+    labels = [str(v) for v in values]
+    if any(_SEPARATORS.intersection(label) for label in labels):
+        # The test id's serialization delimits with TAB/newline (`test_id_for`): a label holding
+        # one would make two different query sets one test.
+        raise HTTPException(400, f"{name!r} labels may not contain a tab or a newline")
+    return labels
 
 
 # ----------------------------------------------------------------------------------- storage
@@ -154,8 +166,11 @@ def read_manifest(rd: Path) -> tuple[list[dict], dict]:
     valid = [row for row in rows if isinstance(row.get("upload_id"), str)
              and isinstance(row.get("test_id"), str) and isinstance(row.get("node_id"), int)]
     health["invalid_record_rows"] = len(rows) - len(valid)
-    # Review 2026-10-15, weekly-journal-shape-health: as in campaign.read_journal,
-    # rejected rows must also invalidate read_complete before a writer trusts absence.
+    # A row this shape check drops may be the very upload a retry is about to repeat (its
+    # action_id, its arm binding): absence among the VALID rows proves nothing, so the history is
+    # not complete — the writer refuses with `harness_history_incomplete` until it is recovered,
+    # the rule `journals.receipt_records` keeps (review 2026-10-15, weekly-journal-shape-health).
+    health["read_complete"] &= len(valid) == len(rows)
     return valid, health
 
 

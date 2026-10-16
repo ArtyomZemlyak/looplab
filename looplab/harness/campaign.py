@@ -87,11 +87,11 @@ def read_journal(rd: Path) -> tuple[list[dict], dict]:
     valid = [row for row in rows if isinstance(row.get("amendment_id"), str)
              and row.get("kind") in AMENDMENT_KINDS and isinstance(row.get("version"), int)]
     health["invalid_record_rows"] = len(rows) - len(valid)
-    # OPEN[weekly-journal-shape-health] P2 (review 2026-10-15): a valid JSON object
-    # with missing receipt fields is discarded but read_complete stays true. A new
-    # amendment then appends version 1 past damaged history instead of refusing.
-    # per_query.read_manifest has the same hole; use journals.receipt_records' rule.
-    # proof:`absent:health["read_complete"] &= len(valid) == len(rows)@looplab/harness/campaign.py`
+    # A JSON object this shape check drops may be an earlier amendment (its action_id, its
+    # version): a writer that trusted the VALID rows appended `version 1` past damaged history.
+    # Incomplete it is, as `journals.receipt_records` rules (review 2026-10-15,
+    # weekly-journal-shape-health); `publish_amendment` refuses until the journal is recovered.
+    health["read_complete"] &= len(valid) == len(rows)
     return valid, health
 
 
@@ -437,8 +437,15 @@ def publish_amendment(srv, rd: Path, body, *, agent_token: bool) -> dict:
                     exp = normalize_experiment(body.experiment, root=Path(rd).parent)
                     known = experiments_of(current)
                     if exp["experiment_id"] in known:
+                        saved = {k: v for k, v in known[exp["experiment_id"]].items()
+                                 if k not in ("registration", "superseded")}
                         raise HTTPException(409, {
                             "code": "experiment_exists",
+                            # Whether THIS declaration is the registered one: a caller filing a
+                            # second candidate under the same experiment may proceed; one whose
+                            # hypothesis/arms/correction differ may not (weekly-registration-
+                            # conflict) — the registration stays immutable either way.
+                            "same_declaration": saved == exp,
                             "message": (f"experiment {exp['experiment_id']!r} is already registered "
                                         "and a registration is immutable"),
                             "remediation": ("register a new experiment_id with supersedes="
@@ -508,14 +515,16 @@ def content_fingerprint(path: Optional[str]) -> dict:
             # the target read as "unchanged". Links INSIDE a tree stay recorded by target.
             yield "", root.resolve()
             return
-        # OPEN[weekly-data-directory-links] P2 (review 2026-10-15): os.walk puts
-        # directory symlinks in dirnames, not filenames, and does not descend them.
-        # Retargeting mount/train from dataset A to B leaves the digest unchanged
-        # with files=0/truncated=false. Record those link targets as promised above.
-        # proof:`present:for name in sorted(filenames):@looplab/harness/campaign.py`
         for dirpath, dirnames, filenames in os.walk(root):
             dirnames.sort()
-            for name in sorted(filenames):
+            # A link to a DIRECTORY lands in `dirnames` and is never descended (no followlinks,
+            # so a link cycle is never walked), so it was recorded nowhere: retargeting
+            # `mount/train` from dataset A to B left the digest unchanged with files=0 (review
+            # 2026-10-15, weekly-data-directory-links). It is yielded beside the files and
+            # hashed by its TARGET like any inner link, in one sorted name order.
+            names = sorted(set(filenames) | {d for d in dirnames
+                                             if os.path.islink(os.path.join(dirpath, d))})
+            for name in names:
                 full = Path(dirpath) / name
                 yield full.relative_to(root).as_posix(), full
 

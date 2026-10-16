@@ -216,3 +216,28 @@ def test_retry_node_repeated_after_the_reset_landed_replays_instead_of_resetting
     assert again["steps"][0].get("replayed") is True
     assert again["steps"][0].get("id") == first["steps"][-1].get("id")
     assert [e.type for e in store.read_all()].count("node_reset") == 1
+
+
+def test_a_reused_experiment_id_with_another_declaration_stops_before_inject(tmp_path, monkeypatch):
+    """Review 2026-10-15 (weekly-registration-conflict): `experiment_exists` is not a replay
+    receipt. A second candidate under the SAME declaration proceeds; a changed hypothesis or
+    correction under a reused id stops before anything is injected."""
+    root, rd, store, api, server, spawns = _setup(tmp_path, monkeypatch)
+    generation = run_generation_token(store.read_all())
+    idea = {"operator": "improve", "rationale": "move x"}
+    first = composite.submit_experiment(api, "camp", generation, key="K1", idea=idea,
+                                        code="print(3)", experiment=EXPERIMENT)
+    assert first["ok"], first
+    injects = lambda: sum(1 for e in store.read_all() if e.type == "inject_node")
+    assert injects() == 1
+    changed = {**EXPERIMENT, "hypothesis": "x=0 beats x=3", "correction": "none"}
+    clash = composite.submit_experiment(api, "camp", generation, key="K2", idea=idea,
+                                        code="print(4)", experiment=changed)
+    assert not clash["ok"] and clash["stopped_at"] == "register_experiment", clash
+    assert injects() == 1
+    proto = server.get("/api/runs/camp/protocol", headers=OWNER).json()
+    assert proto["experiments"][0]["hypothesis"] == "x=3 beats x=0"
+    second = composite.submit_experiment(api, "camp", generation, key="K3", idea=idea,
+                                         code="print(5)", experiment=EXPERIMENT)
+    assert second["ok"], second
+    assert injects() == 2

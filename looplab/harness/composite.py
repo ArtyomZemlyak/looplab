@@ -157,15 +157,16 @@ def submit_experiment(api, run_id: str, expected_generation: str, *, key: str, i
             "expected_generation": expected_generation, "action_id": f"{key}:experiment",
             "kind": "experiment", "experiment": experiment,
             "reason": experiment_reason or "pre-registered with the experiment's first candidate"})
-        # OPEN[weekly-registration-conflict] P1 (review 2026-10-15): experiment_exists
-        # is not a replay receipt. A different key with the same experiment_id and
-        # changed hypothesis/correction gets 409 here, but still injects and returns ok.
-        # Compare the saved declaration before accepting reuse; see the weekly audit.
-        # proof:`present:ok=_ok(result) or replay@looplab/harness/composite.py`
-        replay = (result.get("status") == 409 and isinstance(result.get("body"), dict)
-                  and ((result["body"].get("detail") or {}) if isinstance(
-                      result["body"].get("detail"), dict) else {}).get("code") == "experiment_exists")
-        if not steps.add("register_experiment", result, ok=_ok(result) or replay):
+        # `experiment_exists` continues ONLY when the server says the registered declaration
+        # is this one (`same_declaration`): a second candidate filed under the same experiment.
+        # A different hypothesis/arms/correction under a reused id stops here, before anything
+        # is injected — it used to count as a replay, inject, and report success while the
+        # journal kept the original (review 2026-10-15, weekly-registration-conflict).
+        body = result.get("body") if isinstance(result.get("body"), dict) else {}
+        detail = body.get("detail") if isinstance(body.get("detail"), dict) else {}
+        registered = (result.get("status") == 409 and detail.get("code") == "experiment_exists"
+                      and detail.get("same_declaration") is True)
+        if not steps.add("register_experiment", result, ok=_ok(result) or registered):
             return steps.done(message="")
     if research_question and research_question.get("statement"):
         result = _command(api, run_id, expected_generation, "hypothesis_added", {

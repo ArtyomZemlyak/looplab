@@ -563,3 +563,71 @@ def test_shared_test_leaderboard_ranks_by_direction(tmp_path, monkeypatch):
     inferred = client.get(url, params={"metric": "FUR@200"}, headers=AGENT).json()
     assert inferred["direction"] == "min" and inferred["direction_source"] == "experiments"
     assert [e["node_id"] for e in inferred["entries"]] == [0, 1]
+
+
+# ------------------------------------------------- weekly audit 2026-10-15 (OPEN items closed)
+def test_a_damaged_journal_row_refuses_the_next_amendment(tmp_path, monkeypatch):
+    """weekly-journal-shape-health: a JSON object that fails the shape check may BE an earlier
+    amendment; the writer refuses instead of appending version 1 past it."""
+    root, client = _client(tmp_path, monkeypatch)
+    rd, store = _make_run(root, "camp", _repo(tmp_path), nodes=())
+    (rd / "protocol_amendments.jsonl").write_text(json.dumps({"action_id": "lost"}) + "\n")
+    r = _amend(client, "camp", store, "experiment", experiment=_experiment())
+    assert r.status_code == 503 and r.json()["detail"]["code"] == "harness_history_incomplete"
+
+
+def test_a_damaged_manifest_row_refuses_the_next_upload(tmp_path, monkeypatch):
+    root, client = _client(tmp_path, monkeypatch)
+    rd, store = _make_run(root, "camp", _repo(tmp_path), nodes=(0,), metrics={0: 0.5})
+    from looplab.harness.per_query import manifest_path, read_manifest
+    path = manifest_path(rd)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps({"action_id": "lost"}) + "\n")
+    _rows, health = read_manifest(rd)
+    assert health["read_complete"] is False and health["invalid_record_rows"] == 1
+    r = _upload(client, "camp", store, 0, _arrays(0)[0])
+    assert r.status_code == 503, r.text
+
+
+@pytest.mark.parametrize("queries,clusters", [
+    (["a\tb", "z"], ["c", "u"]), (["a", "z"], ["b\tc", "u"]), (["a\nb", "z"], ["c", "u"])])
+def test_a_label_holding_a_separator_is_refused(tmp_path, monkeypatch, queries, clusters):
+    """weekly-shared-test-delimiters: TAB/newline delimit the test-id serialization, so
+    `("a\\tb","c")` and `("a","b\\tc")` were one test id for two different query sets."""
+    root, client = _client(tmp_path, monkeypatch)
+    rd, store = _make_run(root, "camp", _repo(tmp_path), nodes=(0,), metrics={0: 0.5})
+    body = {"expected_generation": _gen(store), "action_id": "sep", "node_id": 0, "format": "json",
+            "content_b64": base64.b64encode(json.dumps(
+                {"keys": queries, "users": clusters, "v": [1.0, 0.0]}).encode()).decode(),
+            "metrics": {"m": {"array": "v"}}, "cluster_key": "users"}
+    r = client.post("/api/runs/camp/per-query", json=body, headers=AGENT)
+    assert r.status_code == 400 and "tab or a newline" in r.text
+
+
+def test_the_test_id_is_order_free_and_unchanged_for_plain_labels():
+    from looplab.harness.per_query import test_id_for
+    a = test_id_for(["q1", "q2"], ["u1", "u2"])
+    assert a == test_id_for(["q2", "q1"], ["u2", "u1"])
+    # The serialization every issued id was minted with (compatibility with stored uploads).
+    import hashlib
+    assert a == "qs1-" + hashlib.sha256(b"q1\tu1\nq2\tu2").hexdigest()[:32]
+    with pytest.raises(ValueError):
+        test_id_for(["a\tb"], ["c"])
+
+
+def test_a_link_to_a_directory_inside_a_mount_is_fingerprinted_by_target(tmp_path):
+    """weekly-data-directory-links: retargeting `mount/train` from dataset A to B changed
+    nothing in the digest (files=0); a link cycle is still never walked."""
+    from looplab.harness.campaign import content_fingerprint
+    for name in ("A", "B"):
+        (tmp_path / name).mkdir()
+        (tmp_path / name / "x.csv").write_text(name)
+    mount = tmp_path / "mount"
+    mount.mkdir()
+    (mount / "train").symlink_to(tmp_path / "A", target_is_directory=True)
+    (mount / "loop").symlink_to(mount, target_is_directory=True)
+    first = content_fingerprint(str(mount))
+    assert first["files"] == 2 and not first["truncated"]
+    (mount / "train").unlink()
+    (mount / "train").symlink_to(tmp_path / "B", target_is_directory=True)
+    assert content_fingerprint(str(mount))["digest"] != first["digest"]
