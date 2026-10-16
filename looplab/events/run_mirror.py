@@ -485,6 +485,11 @@ def mirror_run(run_dir: Path, cfg: MirrorConfig, state: dict, *, pass_no: int,
     # Rows for files that no longer exist at the source are dropped from the manifest (their stale
     # copy stays in the destination, unreferenced: deleting on S3 is a cost this job does not pay).
     present = {rel for rel in copied if (run_dir / rel).is_file()}
+    # OPEN[weekly-mirror-deletion] P1 (review 2026-10-15): deletion-only passes pop
+    # these rows without dirtying the manifest. With no other copies/skips changed,
+    # restore resurrects a deleted gpu_gate.json (reproduced with hold=true).
+    # Mark removals dirty before the write gate; docs/audit/weekly-review-20261015.md.
+    # proof:`present:if (n or rstate.get("manifest_stale") or not rstate.get("manifest_written")@looplab/events/run_mirror.py`
     for rel in list(copied):
         if rel not in present:
             copied.pop(rel, None)

@@ -348,6 +348,13 @@ What it guarantees (`looplab/events/run_mirror.py`):
 * not copied: lock files, SQLite read models (rebuilt from the log), `code/repo.git` and `code/worktrees` (rebuilt by
   `looplab code-status --sync`), `canary/`, and files over `--max-file-mb` (listed as `skipped`).
 
+> OPEN[weekly-worktree-restore-loss] **P1, review 2026-10-15:** the rebuild claim above does
+> not hold for an agent's unsubmitted worktree. A real mirror/restore followed by sync lost
+> both `agent/draft` and its unique committed proposal; only recorded node attempts rebuilt.
+> Persist agent refs, worktree metadata and unsubmitted bytes, or explicitly require a separate
+> backup before relying on tmpfs. See the [weekly audit](../audit/weekly-review-20261015.md).
+> proof:`present:"code/repo.git", "code/worktrees"@looplab/events/run_mirror.py`
+
 Measured on the MiniOneRec box (S3 via geesefs, 2026-10-14): a 762-file, 27 MB run copy mirrored in
 95 s at `--max-files-per-s 10`, the next pass took 0.0 s with no destination access, and the
 restored copy folded to the identical `RunState`.

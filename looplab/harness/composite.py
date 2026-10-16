@@ -157,6 +157,11 @@ def submit_experiment(api, run_id: str, expected_generation: str, *, key: str, i
             "expected_generation": expected_generation, "action_id": f"{key}:experiment",
             "kind": "experiment", "experiment": experiment,
             "reason": experiment_reason or "pre-registered with the experiment's first candidate"})
+        # OPEN[weekly-registration-conflict] P1 (review 2026-10-15): experiment_exists
+        # is not a replay receipt. A different key with the same experiment_id and
+        # changed hypothesis/correction gets 409 here, but still injects and returns ok.
+        # Compare the saved declaration before accepting reuse; see the weekly audit.
+        # proof:`present:ok=_ok(result) or replay@looplab/harness/composite.py`
         replay = (result.get("status") == 409 and isinstance(result.get("body"), dict)
                   and ((result["body"].get("detail") or {}) if isinstance(
                       result["body"].get("detail"), dict) else {}).get("code") == "experiment_exists")

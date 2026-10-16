@@ -60,6 +60,11 @@ def manifest_path(rd: Path) -> Path:
 
 
 def test_id_for(query_ids: list[str], clusters: list[str]) -> str:
+    # OPEN[weekly-shared-test-delimiters] P2 (review 2026-10-15): labels accept tabs
+    # and newlines. ("a\tb", "c") and ("a", "b\tc") serialize identically; real uploads
+    # with different query sets receive the same test_id and become pairable.
+    # Use an unambiguous tuple encoding or refuse separators; see the weekly audit.
+    # proof:`present:"\n".join(f"{q}\t{c}"@looplab/harness/per_query.py`
     lines = "\n".join(f"{q}\t{c}" for q, c in sorted(zip(query_ids, clusters)))
     return "qs1-" + hashlib.sha256(lines.encode("utf-8")).hexdigest()[:32]
 
@@ -149,6 +154,8 @@ def read_manifest(rd: Path) -> tuple[list[dict], dict]:
     valid = [row for row in rows if isinstance(row.get("upload_id"), str)
              and isinstance(row.get("test_id"), str) and isinstance(row.get("node_id"), int)]
     health["invalid_record_rows"] = len(rows) - len(valid)
+    # Review 2026-10-15, weekly-journal-shape-health: as in campaign.read_journal,
+    # rejected rows must also invalidate read_complete before a writer trusts absence.
     return valid, health
 
 

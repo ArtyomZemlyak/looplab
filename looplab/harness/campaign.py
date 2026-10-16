@@ -87,6 +87,11 @@ def read_journal(rd: Path) -> tuple[list[dict], dict]:
     valid = [row for row in rows if isinstance(row.get("amendment_id"), str)
              and row.get("kind") in AMENDMENT_KINDS and isinstance(row.get("version"), int)]
     health["invalid_record_rows"] = len(rows) - len(valid)
+    # OPEN[weekly-journal-shape-health] P2 (review 2026-10-15): a valid JSON object
+    # with missing receipt fields is discarded but read_complete stays true. A new
+    # amendment then appends version 1 past damaged history instead of refusing.
+    # per_query.read_manifest has the same hole; use journals.receipt_records' rule.
+    # proof:`absent:health["read_complete"] &= len(valid) == len(rows)@looplab/harness/campaign.py`
     return valid, health
 
 
@@ -503,6 +508,11 @@ def content_fingerprint(path: Optional[str]) -> dict:
             # the target read as "unchanged". Links INSIDE a tree stay recorded by target.
             yield "", root.resolve()
             return
+        # OPEN[weekly-data-directory-links] P2 (review 2026-10-15): os.walk puts
+        # directory symlinks in dirnames, not filenames, and does not descend them.
+        # Retargeting mount/train from dataset A to B leaves the digest unchanged
+        # with files=0/truncated=false. Record those link targets as promised above.
+        # proof:`present:for name in sorted(filenames):@looplab/harness/campaign.py`
         for dirpath, dirnames, filenames in os.walk(root):
             dirnames.sort()
             for name in sorted(filenames):

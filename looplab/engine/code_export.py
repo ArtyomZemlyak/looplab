@@ -187,6 +187,11 @@ def _base_step(repo: CodeRepo, builder: _Builder, base_commit: str, *, run_id: s
 def _delta_step(repo: CodeRepo, builder: _Builder, old: str, new: str, message: str,
                 kind: str) -> dict:
     """Carry the run's old->new change onto the target head; a conflict stops before committing."""
+    # OPEN[weekly-export-file-mode] P2 (review 2026-10-15): blob-only equality and
+    # retaining have[0] discard the run's executable-bit changes. A changed script
+    # recorded as 100755 exports as 100644; chmod-only changes are called already present.
+    # Merge (mode, blob), including _base_step; docs/audit/weekly-review-20261015.md.
+    # proof:`line:rows[tpath] = (have[0]&&else after[0]@looplab/engine/code_export.py`
     changed = repo.changed(old, new)
     old_e, new_e = repo.entries(old), repo.entries(new)
     current = _target_entries(builder.target, builder.head, [builder.tpath(r["path"]) for r in changed])
