@@ -4,6 +4,7 @@ repository as a new branch — without touching the operator's checkout. Real gi
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -24,6 +25,7 @@ from looplab.events.replay import fold
 from looplab.core.effective_config import canonical_key, capture
 from looplab.runtime.sandbox import SubprocessSandbox
 from looplab.search.policy import GreedyTree
+from tests._posix_gates import MODE_BITS
 
 _M = {"kind": "stdout_json", "key": "metric"}
 
@@ -473,15 +475,18 @@ def test_a_worktree_or_patch_from_a_node_carries_that_nodes_change(tmp_path):
         overlay_from_worktree(rd, "from8")
 
 
-def _run_from_target_worktree(tmp_path):
+def _run_from_target_worktree(tmp_path, prepare=None):
     """A run whose editable is a worktree of the target repository, so the source commit the run
-    recorded at start exists there (the doc 72 O14 delivery shape)."""
+    recorded at start exists there (the doc 72 O14 delivery shape). `prepare(src)` edits the
+    source before the run seeds from it."""
     target = _target_repo(tmp_path, {"train.py": "print('LR: 0.01')\nprint('Batch: 32 (micro=8)')\n",
                                      "recipe.env": "SEED=1\n"})
     src = tmp_path / "src"
     _git(target, "worktree", "add", "-q", "--detach", str(src), "main")
     (src / "score.py").write_text('import json\nprint(json.dumps({"metric": 7.5}))\n')
     (src / "train.py").write_text("print('LR: 0.02')\nprint('Batch: 32 (micro=8)')\n")
+    if prepare is not None:
+        prepare(src)
     task = RepoTask(id="p", direction="max", editable_path=str(src), protect=["score.py"],
                     edit_surface=["train.py", "recipe.env"],
                     eval=EvalSpec(command=[sys.executable, "score.py"], metric=_M))
@@ -584,3 +589,111 @@ def test_export_prefix_reads_the_task_as_the_adapter_does(tmp_path, monkeypatch)
     assert prefix == "svc" and "a" in note                  # the root editable decides, said so
     with pytest.raises(ExportRefusal, match="--prefix"):
         prefix_for(editables=[multi[0], {"name": "b", "path": str(target / "elsewhere/b")}])
+
+
+# ------------------------------------------------- review 2026-10-15: weekly-export-file-mode
+
+def _mode(target: Path, rev: str, path: str) -> str:
+    return _git(target, "ls-tree", rev, "--", path).split(" ", 1)[0]
+
+
+@MODE_BITS
+def test_export_carries_a_chmod_in_the_base_with_and_without_a_content_change(tmp_path):
+    """The seed's `chmod +x` exports as 100755: on a changed file (equality was blob-only and the
+    target's `have[0]` was kept) and on an unchanged one (a chmod-only drift was `unchanged`)."""
+    def chmod(src):
+        os.chmod(src / "train.py", 0o755)           # content changed too (LR 0.01 -> 0.02)
+        os.chmod(src / "recipe.env", 0o755)         # mode only
+    target, rd, _ = _run_from_target_worktree(tmp_path, chmod)
+    report = export_code(rd, target, branch="modes", node="none")
+    assert report["status"] == "created", report
+    assert report["steps"][0]["changed"] == 3, report["steps"]      # train.py, recipe.env, score.py
+    assert _mode(target, "modes", "train.py") == "100755"
+    assert "0.02" in _git(target, "show", "modes:train.py")
+    assert _mode(target, "modes", "recipe.env") == "100755"
+    assert _git(target, "show", "modes:recipe.env") == "SEED=1\n"
+    assert _mode(target, "modes", "score.py") == "100644"
+    # A target that does not count a working tree's mode (`core.fileMode=false`, Windows' default)
+    # takes the seed's st_mode as no evidence: the bytes move, the source commit's modes stay.
+    _git(target, "config", "core.fileMode", "false")
+    report = export_code(rd, target, branch="modes-off", node="none")
+    assert report["steps"][0]["changed"] == 2, report["steps"]      # train.py, score.py
+    assert _mode(target, "modes-off", "train.py") == "100644"
+    assert _mode(target, "modes-off", "recipe.env") == "100644"
+
+
+def _node_commit(rd: Path, changes: dict) -> str:
+    """Point node 0's recorded attempt commit at one made of `changes` on the run's base."""
+    code = CodeRepo(rd)
+    base = code.rev(BASE_BRANCH)
+    commit = code.write_overlay_commit("refs/heads/nodes/n0-modes", base, changes,
+                                       message="node 0 g0: modes\n", when=7)
+
+    def point(row):
+        if row["type"] == "code_snapshot" and row["data"].get("node_id") == 0:
+            row["data"].update(status="recorded", commit=commit,
+                               base={**(row["data"].get("base") or {}), "commit": base})
+        return row
+    _rewrite_rows(rd, point)
+    return commit
+
+
+def test_export_carries_a_nodes_chmod_with_and_without_a_content_change(tmp_path):
+    """A node commit's 100644 -> 100755 survives the node step: with new bytes (exported as 100644
+    before) and alone (skipped as `already_present` before). Then the target's OWN chmod survives
+    a node that changed only the bytes — the run did not move the mode, so there is no conflict."""
+    target, rd, _ = _run_from_target_worktree(tmp_path)
+    _node_commit(rd, {"train.py": (b"print('LR: 0.03')\nprint('Batch: 32 (micro=8)')\n", True),
+                      "recipe.env": (b"SEED=1\n", True)})
+    report = export_code(rd, target, branch="node-modes", node="0")
+    assert report["status"] == "created", report
+    node_step = report["steps"][-1]
+    assert node_step["kind"] == "node" and node_step["commit"], report["steps"]
+    assert node_step["changed"] == 2 and node_step["already_present"] == 0, node_step
+    assert _mode(target, "node-modes", "train.py") == "100755"
+    assert "0.03" in _git(target, "show", "node-modes:train.py")
+    assert _mode(target, "node-modes", "recipe.env") == "100755"
+    _git(target, "checkout", "-q", "-b", "own-chmod", "node-modes~1")
+    _git(target, "update-index", "--chmod=+x", "recipe.env")
+    _git(target, "commit", "-qm", "chmod recipe")
+    _node_commit(rd, {"recipe.env": (b"SEED=4\n", False)})
+    report = export_code(rd, target, branch="kept", node="0", onto="own-chmod", include_base=False)
+    assert report["status"] == "created", report
+    assert _mode(target, "kept", "recipe.env") == "100755"
+    assert _git(target, "show", "kept:recipe.env") == "SEED=4\n"
+
+
+@MODE_BITS
+def test_export_names_a_mode_conflict_instead_of_picking_a_side(tmp_path):
+    """Both sides added `run.sh` with the same bytes and different modes: a conflict that names the
+    modes, and no branch — never one side's mode silently."""
+    def add_script(src):
+        (src / "run.sh").write_text("echo hi\n")
+        os.chmod(src / "run.sh", 0o755)
+        _git(src, "add", "run.sh")                  # staged, never committed: the seed copies it
+    target, rd, _ = _run_from_target_worktree(tmp_path, add_script)
+    _git(target, "checkout", "-q", "-b", "moved", "main")
+    (target / "run.sh").write_text("echo hi\n")
+    os.chmod(target / "run.sh", 0o644)
+    _git(target, "add", "run.sh")
+    _git(target, "commit", "-qm", "add run.sh")
+    report = export_code(rd, target, branch="clash", onto="moved", node="none")
+    assert report["status"] == "conflict", report["steps"]
+    step = report["steps"][0]
+    assert step["conflicts"] == ["run.sh"] and step["commit"] is None, step
+    assert step["mode_conflicts"] == [{"path": "run.sh", "base": None, "run": "100755",
+                                       "target": "100644"}]
+    assert _git(target, "branch", "--list", "clash") == ""
+
+
+def test_merged_mode_truth_table():
+    """The mode rule apart from the text: the run's move wins over an unmoved target, the target's
+    move survives an unmoved run, agreement is agreement, and two different moves are None."""
+    from looplab.engine.code_export import _merged_mode
+    x, f, link = ("100755", "a"), ("100644", "a"), ("120000", "a")
+    assert _merged_mode(f, x, f) == "100755"            # run chmod +x, target untouched
+    assert _merged_mode(f, f, x) == "100755"            # target chmod +x, run untouched
+    assert _merged_mode(f, x, x) == "100755"            # both
+    assert _merged_mode(f, x, link) is None             # the target moved it elsewhere
+    assert _merged_mode(None, x, f) is None             # both added, different modes
+    assert _merged_mode(None, x, None) == "100755"      # a new path

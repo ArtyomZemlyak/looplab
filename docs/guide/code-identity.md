@@ -57,7 +57,10 @@ editable's path inside your repository, read from the task the way the run read 
 one directory of the repository is refused until you pass `--prefix`. Your
 `HEAD`, index, working tree, other branches and remotes are not touched and nothing is pushed —
 open the merge request yourself, or apply the `--patches` series. A conflict stops the export and
-names the paths; nothing is created.
+names the paths; nothing is created. A file's mode travels with its bytes: a `chmod +x` exports with
+or without a content change, and a mode your branch changed differently is reported as a conflict
+(`mode_conflicts`) rather than silently picked. With `core.fileMode=false` in your repository, the
+executable bit of the working tree the run started from is not exported.
 
 ## External agents
 

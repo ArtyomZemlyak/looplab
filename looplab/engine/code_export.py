@@ -17,9 +17,12 @@ new branch with the all-zero old value (create-only). The operator's HEAD, index
 existing branches, remotes and config are never touched, nothing is pushed, no hook runs. Each
 changed path applies when the target still holds the run's OLD bytes there (or already holds the new
 ones); otherwise a text three-way merge (`git merge-file`) is tried, and a conflict stops the export
-before that commit with the conflicting paths named. A base step never deletes: a target path the
-run's snapshot does not hold is counted (`not_in_snapshot`), not removed — a seed copies tracked
-files only and may be bounded, so absence is not evidence of deletion.
+before that commit with the conflicting paths named. The file MODE is carried beside the bytes and
+resolved apart from them (`_merged_mode`): a chmod exports with or without a content change, and a
+mode the target moved differently is a conflict (`mode_conflicts`), never a silent pick. A base
+step never deletes: a target path the run's snapshot does not hold is counted (`not_in_snapshot`),
+not removed — a seed copies tracked files only and may be bounded, so absence is not evidence of
+deletion.
 
 `--patches DIR` also writes the created branch as a `git format-patch` series for a merge request
 on a host the operator chooses.
@@ -81,6 +84,62 @@ def _merge3(target: Path, ours: bytes, base: bytes, theirs: bytes) -> Optional[b
     return res.stdout if res.returncode == 0 else None
 
 
+def _tracks_file_mode(target: Path) -> bool:
+    """Whether the target repository counts the executable bit of a WORKING TREE, as `git status`
+    does: `core.fileMode=false` (what `git init` writes on a filesystem without one — Windows) says
+    a working tree's mode is not evidence, and the run's seed archive read its modes off a working
+    tree's `st_mode`. Only the base step compares such a mode against a git commit; the delta steps
+    compare the run's own commits, whose modes agree with each other either way."""
+    res = _tgit(target, "config", "--bool", "--get", "core.fileMode", check=False)
+    return res.stdout.decode("utf-8", "replace").strip() != "false"
+
+
+def _merged_mode(before, after, have) -> Optional[str]:
+    """The target's mode once the run's `before -> after` is carried onto `have`, resolved APART
+    from the text (review 2026-10-15, weekly-export-file-mode: the mode used to be the target's
+    `have[0]` whatever the run did, so `chmod +x train.sh` exported as 100644). Each argument is a
+    `(mode, sha)` pair or None; `after` is not None. None is a CONFLICT — the target moved the mode
+    one way and the run another (or both added the path with different modes) — said, never a pick."""
+    if have is None:
+        return after[0]
+    if have[0] == after[0] or (before is not None and before[0] == after[0]):
+        return have[0]                   # the target already holds it, or the run left it alone
+    if before is not None and have[0] == before[0]:
+        return after[0]                  # the run moved it and the target did not
+    return None
+
+
+def _carry(target: Path, before, after, have, old_bytes, new_bytes) -> tuple:
+    """Carry one path's `before -> after` onto the target's `have`, comparing the (mode, blob)
+    PAIR (blob-only equality called a chmod-only change "already present"). `old_bytes` /
+    `new_bytes` are callables (read only when a merge or a write needs them). Returns
+    `("already", None)`, `("set", (mode, sha) | None)` with None a deletion, `("conflict", None)`
+    or `("mode_conflict", None)`."""
+    if have == after:
+        return "already", None
+    if after is None:
+        # A deletion needs the target to hold exactly what the run deleted, its mode included.
+        return ("set", None) if have == before else ("conflict", None)
+    if have is None:
+        if before is None:
+            return "set", (after[0], _write_blob(target, new_bytes()))
+        return "conflict", None          # the target deleted what the run changed
+    mode = _merged_mode(before, after, have)
+    if mode is None:
+        return "mode_conflict", None
+    if have[1] == after[1]:
+        return "set", (mode, have[1])    # the bytes are there already: only the mode moves
+    if before is not None and have[1] == before[1]:
+        return "set", (mode, _write_blob(target, new_bytes()))
+    if before is None:
+        return "conflict", None          # both added the path with different bytes
+    ours = _tgit(target, "cat-file", "blob", have[1]).stdout
+    merged = _merge3(target, ours, old_bytes(), new_bytes())
+    if merged is None:
+        return "conflict", None
+    return "set", (mode, _write_blob(target, merged))
+
+
 class _Builder:
     """Accumulates commits on top of `onto` in the target repo through a private index."""
 
@@ -132,39 +191,47 @@ def _base_step(repo: CodeRepo, builder: _Builder, base_commit: str, *, run_id: s
     current = _target_entries(builder.target, builder.head, list(tpaths))
     origin = (_target_entries(builder.target, drift_from, list(tpaths))
               if drift_from is not None else None)
-    rows, unchanged, already, conflicts = {}, 0, 0, []
+    # The seed's executable bit is a working tree's `st_mode`; where the target says a working
+    # tree's mode is not evidence (`_tracks_file_mode`), the run's side keeps the mode git already
+    # had, so a Windows seed does not `chmod -x` every script the source commit marks executable.
+    track = _tracks_file_mode(builder.target)
+    rows, unchanged, already, conflicts, mode_conflicts = {}, 0, 0, [], []
     for tpath, path in sorted(tpaths.items()):
         mode, sha = entries[path]
         have = current.get(tpath)
         if origin is not None:
             before = origin.get(tpath)
-            if before is not None and before[1] == sha:
+            run = (mode, sha) if track else ((before or have or (mode,))[0], sha)
+            if before == run:
                 unchanged += 1                       # not part of the run's drift
                 continue
-            if have is not None and have[1] == sha:
+            outcome, row = _carry(
+                builder.target, before, run, have,
+                lambda b=before: _tgit(builder.target, "cat-file", "blob", b[1]).stdout,
+                lambda p=path: repo.blob(base_commit, p) or b"")
+            if outcome == "already":
                 already += 1
-                continue
-            if not ((have is None and before is None) or
-                    (have is not None and before is not None and have[1] == before[1])):
-                ours = _tgit(builder.target, "cat-file", "blob", have[1]).stdout if have else None
-                base_bytes = (_tgit(builder.target, "cat-file", "blob", before[1]).stdout
-                              if before else None)
-                merged = (_merge3(builder.target, ours, base_bytes, repo.blob(base_commit, path) or b"")
-                          if ours is not None and base_bytes is not None else None)
-                if merged is None:
-                    conflicts.append(tpath)
-                else:
-                    rows[tpath] = (have[0], _write_blob(builder.target, merged))
-                continue
-        elif have is not None and have[1] == sha:
+            elif outcome == "set":
+                rows[tpath] = row
+            else:
+                conflicts.append(tpath)
+                if outcome == "mode_conflict":
+                    mode_conflicts.append({"path": tpath, "base": before[0] if before else None,
+                                           "run": run[0], "target": have[0] if have else None})
+            continue
+        run = (mode, sha) if track else ((have or (mode,))[0], sha)
+        if have == run:
             unchanged += 1
             continue
         data = repo.blob(base_commit, path)
         if data is None:
             continue
-        rows[tpath] = (have[0] if have is not None else mode, _write_blob(builder.target, data))
+        rows[tpath] = (run[0], _write_blob(builder.target, data))
     if conflicts:
-        return {"kind": "base", "commit": None, "conflicts": conflicts, "drift_from": drift_from}
+        out = {"kind": "base", "commit": None, "conflicts": conflicts, "drift_from": drift_from}
+        if mode_conflicts:
+            out["mode_conflicts"] = mode_conflicts
+        return out
     under = _tgit(builder.target, "ls-tree", "-r", "-z", "--name-only", "--full-tree", builder.head,
                   *(["--", builder.prefix] if builder.prefix else [])).stdout.split(b"\x00")
     not_in_snapshot = sum(1 for p in under if p and p.decode("utf-8", "replace") not in tpaths)
@@ -186,42 +253,35 @@ def _base_step(repo: CodeRepo, builder: _Builder, base_commit: str, *, run_id: s
 
 def _delta_step(repo: CodeRepo, builder: _Builder, old: str, new: str, message: str,
                 kind: str) -> dict:
-    """Carry the run's old->new change onto the target head; a conflict stops before committing."""
-    # OPEN[weekly-export-file-mode] P2 (review 2026-10-15): blob-only equality and
-    # retaining have[0] discard the run's executable-bit changes. A changed script
-    # recorded as 100755 exports as 100644; chmod-only changes are called already present.
-    # Merge (mode, blob), including _base_step; docs/audit/weekly-review-20261015.md.
-    # proof:`line:rows[tpath] = (have[0]&&else after[0]@looplab/engine/code_export.py`
+    """Carry the run's old->new change onto the target head; a conflict stops before committing.
+
+    Each path is compared and carried as its (mode, blob) PAIR (`_carry`): a chmod with or without
+    a content change exports as the run made it, and a mode the target moved differently is a
+    conflict named in `mode_conflicts` (review 2026-10-15, closed 2026-10-16)."""
     changed = repo.changed(old, new)
     old_e, new_e = repo.entries(old), repo.entries(new)
     current = _target_entries(builder.target, builder.head, [builder.tpath(r["path"]) for r in changed])
-    rows, conflicts, already = {}, [], 0
+    rows, conflicts, mode_conflicts, already = {}, [], [], 0
     for row in changed:
         path, tpath = row["path"], builder.tpath(row["path"])
         before, after, have = old_e.get(path), new_e.get(path), current.get(tpath)
-        if (after is None and have is None) or (after is not None and have is not None
-                                                and have[1] == after[1]):
+        outcome, carried = _carry(builder.target, before, after, have,
+                                  lambda p=path: repo.blob(old, p) or b"",
+                                  lambda p=path: repo.blob(new, p) or b"")
+        if outcome == "already":
             already += 1
-            continue
-        if (have is None and before is None) or (have is not None and before is not None
-                                                 and have[1] == before[1]):
-            if after is None:
-                rows[tpath] = None
-            else:
-                data = repo.blob(new, path) or b""
-                rows[tpath] = (have[0] if have is not None else after[0],
-                               _write_blob(builder.target, data))
-            continue
-        if have is not None and before is not None and after is not None:
-            ours = _tgit(builder.target, "cat-file", "blob", have[1]).stdout
-            merged = _merge3(builder.target, ours, repo.blob(old, path) or b"",
-                             repo.blob(new, path) or b"")
-            if merged is not None:
-                rows[tpath] = (have[0], _write_blob(builder.target, merged))
-                continue
-        conflicts.append(tpath)
+        elif outcome == "set":
+            rows[tpath] = carried
+        else:
+            conflicts.append(tpath)
+            if outcome == "mode_conflict":
+                mode_conflicts.append({"path": tpath, "base": before[0] if before else None,
+                                       "run": after[0], "target": have[0] if have else None})
     if conflicts:
-        return {"kind": kind, "commit": None, "conflicts": conflicts, "changed": len(changed)}
+        out = {"kind": kind, "commit": None, "conflicts": conflicts, "changed": len(changed)}
+        if mode_conflicts:
+            out["mode_conflicts"] = mode_conflicts
+        return out
     sha = builder.commit(rows, message)
     return {"kind": kind, "commit": sha, "changed": len(rows), "already_present": already}
 
