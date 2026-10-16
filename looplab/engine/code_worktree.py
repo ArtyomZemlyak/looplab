@@ -351,11 +351,21 @@ def overlay_from_patch(run_dir, patch: str, *, start: str = "base", **kw) -> dic
 # repository's: the new blobs land in the scratch store, the agent's index and the run repository are
 # never written, and no lock the engine (or the agent's own git) takes is taken.
 #
-# BOUNDED AND CHANGE-DETECTED. A worktree whose dirty files exceed `MAX_BACKUP_DIRTY_BYTES` (what an
-# overlay could carry at most) keeps its committed history in the bundle and says `dirty_skipped`;
-# the bundle is re-created only when the backup KEY (every agent ref, every dirty tree, every meta
-# row) moved, so an idle worktree costs one stat-cached `git add -A` per pass and no upload. A bundle
-# over the mirror's `--max-file-mb` is named in the manifest's `skipped`, like any other large file.
+# LARGE FILES ARE NOT GIT'S. A checkpoint, a dataset shard or any other file git is told to ignore
+# (the repository's excludes) and every dirty file over `LARGE_FILE_BYTES` is kept OUT of the bundle
+# and copied as a PLAIN file to `files/<worktree>/<path>.v<version>`, the version a digest of its
+# (size, mtime) — a path with its version in its name, no content store, no DVC. A changed file is a
+# new name (the old one is dropped from the spool, so the mirror drops it too), an unchanged one is
+# never re-copied, and the restore lays each back at `<path>` after the dirty tree. If the small
+# files alone would still exceed `MAX_BACKUP_DIRTY_BYTES` (what an overlay can carry), the largest
+# move to the plain store until they fit. Bounded by `MAX_BACKUP_FILES` / `MAX_BACKUP_FILES_BYTES`;
+# what is past a bound is named in the row (`files_skipped`), and a plain file over the mirror's
+# `--max-file-mb` is listed as `skipped` like any other large file. Caches git and Jupyter make
+# (`__pycache__/`, `.ipynb_checkpoints/`) are not backed up.
+#
+# CHANGE-DETECTED. The bundle is re-created only when its own KEY (every branch ref, every dirty
+# tree, every HEAD) moved — a checkpoint rewritten every step re-copies that one plain file, never
+# the history — so an idle worktree costs one stat-cached `git add -A` per pass and no upload.
 AGENT_BACKUP_REL = "code/agent_backup"
 AGENT_BUNDLE = "agents.bundle"
 AGENT_BACKUP_INDEX = "agents.json"
@@ -363,7 +373,12 @@ AGENT_BRANCH_PREFIX = "refs/heads/agent/"
 AGENT_DIRTY_REF = "refs/looplab/agent-dirty/"
 AGENT_HEAD_REF = "refs/looplab/agent-head/"
 MAX_BACKUP_DIRTY_BYTES = MAX_OVERLAY_BYTES + MAX_OVERLAY_BINARY_BYTES
-_BACKUP_VERSION = 1
+AGENT_FILES_DIR = "files"
+LARGE_FILE_BYTES = 8 * 1024 * 1024
+MAX_BACKUP_FILES = 2000
+MAX_BACKUP_FILES_BYTES = 64 * 1024 ** 3
+_BACKUP_JUNK = ("__pycache__/", ".ipynb_checkpoints/")
+_BACKUP_VERSION = 2
 # The dirty commit is a pure function of (tree, parent): a fixed identity and date, so an unchanged
 # worktree yields the same commit id pass after pass.
 _FIXED_COMMIT_ENV = {"GIT_AUTHOR_NAME": "LoopLab", "GIT_AUTHOR_EMAIL": "looplab@invalid",
@@ -372,32 +387,67 @@ _FIXED_COMMIT_ENV = {"GIT_AUTHOR_NAME": "LoopLab", "GIT_AUTHOR_EMAIL": "looplab@
 
 
 def _clear_backup(out_dir: Path) -> None:
+    import shutil
     for name in (AGENT_BUNDLE, AGENT_BACKUP_INDEX):
         try:
             (out_dir / name).unlink()
         except OSError:
             pass                           # never written, or already gone
+    shutil.rmtree(out_dir / AGENT_FILES_DIR, ignore_errors=True)
 
 
-def _dirty_bytes(wt: Path, env: dict) -> int:
-    """Bytes of every path `git status` (on the COPIED index, `--no-optional-locks`) lists as
-    changed or untracked: the work `git add -A` would hash, measured before it does."""
+def _dirty_entries(wt: Path, env: dict) -> list[tuple[str, bool, int]]:
+    """`(path, ignored, size)` for every path `git status` (on the COPIED index,
+    `--no-optional-locks`) lists as changed, untracked or IGNORED — size 0 for a deletion, a link
+    or anything not a regular file (nothing a plain copy could carry)."""
+    import os
+    import stat as _stat
     out = run_git("-C", str(wt), "--no-optional-locks", "status", "--porcelain", "-z",
-                  "--untracked-files=all", "--no-renames", env_extra=env).stdout
-    total = 0
+                  "--untracked-files=all", "--ignored=matching", "--no-renames",
+                  env_extra=env).stdout
+    rows = []
     for item in out.split(b"\x00"):
-        if len(item) > 3:
-            try:
-                st = (wt / item[3:].decode("utf-8", "surrogateescape")).lstat()
-            except OSError:
-                continue                   # a deletion (or a path gone since): no bytes to hash
-            total += st.st_size
-    return total
+        if len(item) <= 3:
+            continue
+        rel = item[3:].decode("utf-8", "surrogateescape")
+        ignored = item[:2] == b"!!"
+        if ignored and _backup_junk(rel):
+            continue                       # a cache git and Jupyter rebuild on their own
+        if ignored and rel.endswith("/"):
+            # An ignored DIRECTORY (`checkpoint-500/`) is reported whole: carry its files.
+            for dirpath, dirnames, filenames in os.walk(wt / rel):
+                dirnames[:] = sorted(d for d in dirnames if d + "/" not in _BACKUP_JUNK)
+                for fname in sorted(filenames):
+                    sub = Path(dirpath, fname).relative_to(wt).as_posix()
+                    try:
+                        st = Path(dirpath, fname).lstat()
+                    except OSError:
+                        continue
+                    if _stat.S_ISREG(st.st_mode):
+                        rows.append((sub, True, st.st_size))
+            continue
+        try:
+            st = (wt / rel).lstat()
+        except OSError:
+            rows.append((rel, ignored, 0))  # a deletion (or a path gone since)
+            continue
+        rows.append((rel, ignored, st.st_size if _stat.S_ISREG(st.st_mode) else 0))
+    return rows
+
+
+def _backup_junk(rel: str) -> bool:
+    return any(f"/{d}" in f"/{rel}" for d in _BACKUP_JUNK)
+
+
+def _plain_version(st) -> str:
+    import hashlib
+    return hashlib.sha256(f"{st.st_size}:{st.st_mtime_ns}".encode()).hexdigest()[:12]
 
 
 def _capture_dirty(repo: CodeRepo, wt: Path, scratch: Path, head: str, row: dict) -> None:
-    """Set `row["dirty_commit"]` to a commit (in `scratch`'s object store) of `wt`'s files as they
-    are, parented on `head` — or leave it None when they equal `head`'s tree."""
+    """Set `row["dirty_commit"]` to a commit (in `scratch`'s object store) of `wt`'s SMALL files as
+    they are, parented on `head` — or leave it None when they equal `head`'s tree — and
+    `row["plain"]` to the large and ignored files a plain copy carries instead (see above)."""
     objects = scratch / "objects"
     index = scratch.parent / f"index-{row['name']}"
     real = run_git("-C", str(wt), "rev-parse", "--git-path", "index").stdout.decode().strip()
@@ -408,13 +458,27 @@ def _capture_dirty(repo: CodeRepo, wt: Path, scratch: Path, head: str, row: dict
         index.write_bytes(real_path.read_bytes())
     except OSError:
         run_git("-C", str(wt), "read-tree", head, env_extra=env)
-    size = _dirty_bytes(wt, env)
-    if size > MAX_BACKUP_DIRTY_BYTES:
-        # No measured size in the row: it is part of the backup KEY, and a growing file would
-        # otherwise re-bundle the committed history on every pass.
-        row["dirty_skipped"] = f"uncommitted files exceed {MAX_BACKUP_DIRTY_BYTES} bytes"
-        return
-    run_git("-C", str(wt), "add", "-A", ".", env_extra=env)
+    entries = _dirty_entries(wt, env)
+    plain = {rel for rel, ignored, size in entries
+             if size and (ignored or size > LARGE_FILE_BYTES)}
+    small = sorted(((size, rel) for rel, ignored, size in entries
+                    if not ignored and rel not in plain), reverse=True)
+    total = sum(size for size, _ in small)
+    for size, rel in small:                # the largest leave git first, until the rest fits
+        if total <= MAX_BACKUP_DIRTY_BYTES:
+            break
+        plain.add(rel)
+        total -= size
+    row["plain"] = sorted(plain)
+    # Only a NON-ignored path needs excluding (`add -A` never takes an ignored one, and git refuses
+    # a pathspec that names one).
+    ignored = {rel for rel, was_ignored, _ in entries if was_ignored}
+    pathspec = scratch.parent / f"pathspec-{row['name']}"
+    pathspec.write_bytes(b"\x00".join([b"."] + [
+        (":(exclude,literal)" + rel).encode("utf-8", "surrogateescape")
+        for rel in sorted(plain - ignored)]))
+    run_git("-C", str(wt), "add", "-A", "--pathspec-from-file", str(pathspec),
+            "--pathspec-file-nul", env_extra=env)
     tree = run_git("-C", str(wt), "write-tree", env_extra=env).stdout.decode().strip()
     if tree == repo.tree(head):
         return
@@ -423,6 +487,61 @@ def _capture_dirty(repo: CodeRepo, wt: Path, scratch: Path, head: str, row: dict
         "-C", str(wt), "commit-tree", tree, "-p", head, "-m",
         f"looplab: uncommitted work of agent worktree {row['name']} (mirror backup)",
         env_extra={**env, **_FIXED_COMMIT_ENV}).stdout.decode().strip()
+
+
+def _copy_plain(wt: Path, out_dir: Path, rows: list) -> dict:
+    """Copy each row's `plain` paths to `files/<name>/<path>.v<version>` (only what is not there
+    yet), drop every stored file no row wants any more, and return `{rel: path}` for the mirror.
+    Rewrites each row's `plain` into `files` (`{path, stored, size, mtime_ns}`) and
+    `files_skipped`."""
+    import os
+    import shutil
+    root = out_dir / AGENT_FILES_DIR
+    wanted: dict = {}
+    count, total = 0, 0
+    for row in rows:
+        files, skipped = [], []
+        base = wt / row["name"]
+        for rel in row.pop("plain", None) or ():
+            try:
+                st = (base / rel).lstat()
+            except OSError:
+                continue                   # gone since the status: nothing to carry
+            if count >= MAX_BACKUP_FILES or total + st.st_size > MAX_BACKUP_FILES_BYTES:
+                skipped.append({"path": rel, "reason": "backup_bound"})
+                continue
+            stored = f"{AGENT_FILES_DIR}/{row['name']}/{rel}.v{_plain_version(st)}"
+            dest = out_dir / stored
+            if not dest.is_file():
+                dest.parent.mkdir(parents=True, exist_ok=True)
+                tmp = dest.with_name(dest.name + ".part")
+                try:
+                    shutil.copyfile(base / rel, tmp)
+                    os.utime(tmp, ns=(st.st_atime_ns, st.st_mtime_ns))
+                    os.replace(tmp, dest)
+                except OSError:
+                    try:
+                        tmp.unlink()
+                    except OSError:
+                        pass               # never created
+                    skipped.append({"path": rel, "reason": "unreadable"})
+                    continue
+            count, total = count + 1, total + st.st_size
+            wanted[stored] = dest
+            files.append({"path": rel, "stored": stored, "size": st.st_size,
+                          "mtime_ns": st.st_mtime_ns})
+        row["files"] = files
+        if skipped:
+            row["files_skipped"] = skipped
+    # An older version (or a file the agent deleted) leaves the spool, so it leaves the mirror.
+    if root.is_dir():
+        for path in sorted(root.rglob("*"), reverse=True):
+            rel = path.relative_to(out_dir).as_posix()
+            if path.is_file() and rel not in wanted:
+                path.unlink()
+            elif path.is_dir() and not any(path.iterdir()):
+                path.rmdir()
+    return {f"{AGENT_BACKUP_REL}/{rel}": path for rel, path in wanted.items()}
 
 
 def agent_backup(run_dir, out_dir) -> dict:
@@ -467,16 +586,30 @@ def agent_backup(run_dir, out_dir) -> dict:
                                check=False).stdout.decode().strip()
                 if head:
                     row["head"] = head
+                    # WHICH branch the worktree stands on (None = detached): an agent that
+                    # switched to a branch of its own gets it back, not a detached HEAD.
+                    row["head_ref"] = run_git("-C", str(wt), "symbolic-ref", "-q", "HEAD",
+                                              check=False).stdout.decode().strip() or None
                     _capture_dirty(repo, wt, scratch, head, row)
             rows.append(row)
-        index = {"version": _BACKUP_VERSION, "refs": refs, "worktrees": rows}
+        extra = {r["head_ref"]: r["head"] for r in rows
+                 if (r.get("head_ref") or "").startswith("refs/heads/")
+                 and r["head_ref"] not in refs}
+        bundle_key = hashlib.sha256(canonical_json(
+            {"version": _BACKUP_VERSION, "refs": refs, "extra": extra,
+             "worktrees": [{k: v for k, v in r.items() if k != "plain"} for r in rows]}
+        )).hexdigest()
+        extras = _copy_plain(run_dir / WORKTREES_REL, out_dir, rows)
+        index = {"version": _BACKUP_VERSION, "refs": refs, "worktrees": rows,
+                 "bundle_key": bundle_key}
         key = hashlib.sha256(canonical_json(index)).hexdigest()
         try:
-            prior = json.loads(index_path.read_text(encoding="utf-8")).get("key")
+            prior_index = json.loads(index_path.read_text(encoding="utf-8"))
+            prior, prior_bundle = prior_index.get("key"), prior_index.get("bundle_key")
         except (OSError, ValueError, AttributeError):
-            prior = None
-        if prior != key or not bundle.is_file():
-            for ref, sha in sorted(refs.items()):
+            prior = prior_bundle = None
+        if prior_bundle != bundle_key or not bundle.is_file():
+            for ref, sha in sorted({**refs, **extra}.items()):
                 run_git("--git-dir", str(scratch), "update-ref", ref, sha)
             for row in rows:
                 if row.get("dirty_commit"):
@@ -492,10 +625,42 @@ def agent_backup(run_dir, out_dir) -> dict:
             run_git("--git-dir", str(scratch), "bundle", "create", "--quiet", str(staged),
                     "--all", timeout=300)
             os.replace(staged, bundle)
+        if prior != key:
             atomic_write_bytes(index_path, json.dumps({**index, "key": key}, indent=1,
                                                       sort_keys=True).encode("utf-8"))
     return {f"{AGENT_BACKUP_REL}/{AGENT_BUNDLE}": bundle,
-            f"{AGENT_BACKUP_REL}/{AGENT_BACKUP_INDEX}": index_path}
+            f"{AGENT_BACKUP_REL}/{AGENT_BACKUP_INDEX}": index_path, **extras}
+
+
+# Reported, but nothing a later sync could still do: the worktree IS restored (its commit, its
+# files); keeping the backup would only re-block the next one.
+_NOT_PENDING = frozenset({"branch_missing", "head_branch_detached", "plain_files_missing"})
+
+
+def _restore_plain(root: Path, worktree: Path, row: dict) -> list:
+    """Lay each backed-up plain file (`files` of the row) back at its path in `worktree` with its
+    mtime; returns the paths whose stored copy is not in the backup (the mirror skipped it as over
+    `--max-file-mb`, or it was never copied). Never writes outside the worktree."""
+    import os
+    import shutil
+    from looplab.core.pathsafe import contained_member
+    missing = []
+    for item in row.get("files") or ():
+        rel, stored = item.get("path"), item.get("stored")
+        src = contained_member(root, stored) if isinstance(stored, str) else None
+        dest = contained_member(worktree, rel) if isinstance(rel, str) else None
+        if src is None or dest is None:
+            continue
+        if not src.is_file():
+            missing.append(rel)
+            continue
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        tmp = dest.with_name(dest.name + ".looplab-restore")
+        shutil.copyfile(src, tmp)
+        if isinstance(item.get("mtime_ns"), int):
+            os.utime(tmp, ns=(item["mtime_ns"], item["mtime_ns"]))
+        os.replace(tmp, dest)
+    return missing
 
 
 def restore_agent_worktrees(run_dir) -> Optional[dict]:
@@ -559,28 +724,50 @@ def restore_agent_worktrees(run_dir) -> Optional[dict]:
             path.parent.mkdir(parents=True, exist_ok=True)
             repo.git("worktree", "add", "--quiet", str(path), f"agent/{name}")
             head, dirty = row.get("head"), row.get("dirty_commit")
-            if head and head != row.get("branch_head") and (
+            head_ref = row.get("head_ref")
+            if (head and head_ref and head_ref != ref and head_ref.startswith("refs/heads/")
+                    and listed.get(head_ref) == head):
+                # The agent had switched to a branch of its own: put THAT branch back (created
+                # if missing, never moved), checked out here. A branch that exists at another
+                # commit, or is checked out elsewhere, leaves HEAD detached at the backed-up
+                # commit and says so — the commit itself is never lost.
+                if repo.rev(head_ref) is None:
+                    repo.git("update-ref", head_ref, head, "")
+                    report["refs"].append(head_ref)
+                short = head_ref[len("refs/heads/"):]
+                moved = repo.rev(head_ref) != head
+                if moved or run_git("-C", str(path), "checkout", "--quiet", short,
+                                    check=False).returncode:
+                    run_git("-C", str(path), "checkout", "--quiet", "--detach", head)
+                    report["skipped"].append({"name": name, "reason": "head_branch_detached",
+                                              "branch": short})
+            elif head and head != row.get("branch_head") and (
                     listed.get(AGENT_HEAD_REF + name) == head
                     or listed.get(AGENT_DIRTY_REF + name) == dirty):
-                # The worktree stood off its branch: put HEAD back where it was (detached — the
-                # branch it may have been on can be checked out in one worktree only).
+                # The worktree stood DETACHED (or a pre-v2 backup that did not record where):
+                # put HEAD back exactly where it was — detached, as it was.
                 run_git("-C", str(path), "checkout", "--quiet", "--detach", head)
             if dirty and listed.get(AGENT_DIRTY_REF + name) == dirty:
                 # Switch the files (not HEAD) to the dirty tree — tracked edits, deletions and new
                 # files alike — then put the index back at HEAD: the worktree reads as it did.
                 run_git("-C", str(path), "read-tree", "-m", "-u", "HEAD", dirty)
                 run_git("-C", str(path), "reset", "--quiet")
+            missing = _restore_plain(root, path, row)
+            if missing:
+                report["skipped"].append({"name": name, "reason": "plain_files_missing",
+                                          "paths": missing[:20], "count": len(missing)})
             meta = {k: row.get(k) for k in ("name", "branch", "start", "start_commit",
                                             "base_digest")}
             meta.update(path=str(path), restored_from_backup={
                 "branch_head": row.get("branch_head"), "dirty_commit": dirty,
-                **({"dirty_skipped": row["dirty_skipped"]} if row.get("dirty_skipped") else {})})
+                **({"dirty_skipped": row["dirty_skipped"]} if row.get("dirty_skipped") else {}),
+                **({"files_skipped": row["files_skipped"]} if row.get("files_skipped") else {})})
             meta_file.parent.mkdir(parents=True, exist_ok=True)
             meta_file.write_text(json.dumps(meta, indent=1), encoding="utf-8")
             report["restored"].append(name)
     # Pending only on a CONFLICT (something here the backup would overwrite): a worktree row whose
     # branch was already gone when it was backed up has nothing to restore and holds nothing back.
-    report["pending"] = any(s["reason"] != "branch_missing" for s in report["skipped"])
+    report["pending"] = any(s["reason"] not in _NOT_PENDING for s in report["skipped"])
     if not report["pending"]:
         shutil.rmtree(root, ignore_errors=True)
     return report

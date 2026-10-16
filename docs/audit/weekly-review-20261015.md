@@ -75,8 +75,10 @@ _Закрыто 2026-10-16: `looplab run-mirror` на каждом проход�
 строит `code_worktree.py::agent_backup` — полный `git bundle` веток `agent/*` плюс коммит
 незакоммиченных файлов каждого worktree и его метаданные — в spool зеркала, только читая ран, и
 зеркалирует его как `code/agent_backup/`; `sync_run` после восстановления пересоздаёт ветки и
-worktree с грязными файлами (`restore_agent_worktrees`). Остаток: грязные файлы сверх
-`MAX_BACKUP_DIRTY_BYTES` и bundle сверх `--max-file-mb` не сохраняются (названы в записи).
+worktree с грязными файлами (`restore_agent_worktrees`). Большие и игнорируемые файлы
+(чекпойнты) не идут в git: они копируются обычными файлами `files/<worktree>/<путь>.v<версия>`,
+новая версия заменяет старую и в зеркале; worktree возвращается на свою ветку или detached, как
+был.
 Регрессия на настоящем git — `tests/test_code_identity.py::test_an_unsubmitted_agent_worktree_survives_mirror_wipe_restore_and_sync`._
 
 ### 4. P2 — экспорт теряет executable bit

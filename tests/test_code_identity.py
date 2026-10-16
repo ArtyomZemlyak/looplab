@@ -774,3 +774,73 @@ def test_an_unsubmitted_agent_worktree_survives_mirror_wipe_restore_and_sync(tmp
     wt2 = Path(list_worktrees(rd2)[0]["path"])
     assert wt2 == rd2 / "code" / "worktrees" / "draft"       # re-pointed at the restored run
     assert (wt2 / "recipe.env").read_text() == "SEED=9\n"
+
+
+def test_large_and_ignored_agent_files_ride_as_versioned_plain_files_and_heads_come_back(
+        tmp_path, monkeypatch):
+    """Large files are not git's: a checkpoint (ignored), an ignored dataset shard and a big edit
+    of a tracked file are copied as PLAIN files named `<path>.v<version>` beside the bundle, a new
+    version replaces the old name in the spool, and the restore lays each back. A worktree that
+    had switched to a branch of its own comes back ON it; a detached one comes back detached."""
+    import os
+    import shutil
+    import looplab.engine.code_worktree as cw
+    from looplab.events.run_mirror import MirrorConfig, mirror_pass, restore_run
+    monkeypatch.setattr(cw, "LARGE_FILE_BYTES", 64)          # "large" without writing 8 MiB
+    _, task = _repo_task(tmp_path)
+    r, d = task.build_roles()
+    rd = tmp_path / "src" / "run"
+    anyio.run(Engine(rd, task=task, researcher=r, developer=d, sandbox=SubprocessSandbox(),
+                     policy=GreedyTree(n_seeds=1, max_nodes=1)).run)
+    wt = Path(add_worktree(rd, "draft")["path"])
+    (wt / "checkpoint-1").mkdir()
+    (wt / "checkpoint-1" / "model.pt").write_bytes(b"\x01" * 300)   # an ignored directory
+    (wt / "shard.npy").write_bytes(b"\x02" * 200)                    # an ignored file
+    (wt / "train.py").write_text("x = 1\n" * 40)                     # a LARGE tracked edit
+    (wt / "notes.txt").write_text("small\n")                         # stays in git
+    (wt / "__pycache__").mkdir()
+    (wt / "__pycache__" / "a.pyc").write_bytes(b"junk")              # never backed up
+    status = _git(wt, "status", "--porcelain")
+    side = Path(add_worktree(rd, "side")["path"])
+    _git(side, "switch", "-q", "-c", "exp")                          # a branch of its own
+    (side / "train.py").write_text("print('exp')\n")
+    _git(side, "commit", "-qam", "exp work")
+    exp_head = _git(side, "rev-parse", "HEAD").strip()
+    loose = Path(add_worktree(rd, "loose")["path"])
+    _git(loose, "commit", "-q", "--allow-empty", "-m", "detached work")
+    loose_head = _git(loose, "rev-parse", "HEAD").strip()
+    _git(loose, "checkout", "-q", "--detach", loose_head)
+    _git(loose, "branch", "-q", "-f", "agent/loose", "HEAD~1")     # its branch stays behind
+
+    cfg = MirrorConfig(src_root=tmp_path / "src", dst_root=tmp_path / "dst", max_bytes_per_s=0,
+                       max_files_per_s=0, run_extras=cw.agent_backup)
+    assert not mirror_pass(cfg).errors
+    spool = tmp_path / "src" / ".looplab-mirror" / "spool" / "run" / "files" / "draft"
+    stored = sorted(p.relative_to(spool).as_posix() for p in spool.rglob("*") if p.is_file())
+    assert [s.rsplit(".v", 1)[0] for s in stored] == ["checkpoint-1/model.pt", "shard.npy",
+                                                      "train.py"], stored
+    # A new version of the checkpoint is a new name; the old one leaves the spool and the mirror.
+    (wt / "checkpoint-1" / "model.pt").write_bytes(b"\x03" * 301)
+    assert not mirror_pass(cfg).errors
+    now = sorted(p.relative_to(spool).as_posix() for p in spool.rglob("*") if p.is_file())
+    assert len(now) == 3 and set(now) != set(stored)
+    dst_files = cfg.dst_root / "run" / "code" / "agent_backup" / "files" / "draft"
+    assert sorted(p.relative_to(dst_files).as_posix()
+                  for p in dst_files.rglob("*") if p.is_file()) == now
+
+    shutil.rmtree(tmp_path / "src")
+    os.makedirs(tmp_path / "src")
+    assert not restore_run(cfg.dst_root, "run", cfg.src_root)["failures"]
+    report = sync_run(rd)["agent_worktrees"]
+    assert sorted(report["restored"]) == ["draft", "loose", "side"], report
+    assert not report["pending"], report
+    assert (wt / "checkpoint-1" / "model.pt").read_bytes() == b"\x03" * 301
+    assert (wt / "shard.npy").read_bytes() == b"\x02" * 200
+    assert (wt / "train.py").read_text() == "x = 1\n" * 40
+    assert (wt / "notes.txt").read_text() == "small\n"
+    assert not (wt / "__pycache__").exists()
+    assert _git(wt, "status", "--porcelain") == status.replace("?? __pycache__/\n", "")
+    assert _git(side, "symbolic-ref", "HEAD").strip() == "refs/heads/exp"   # back ON its branch
+    assert _git(side, "rev-parse", "HEAD").strip() == exp_head
+    assert subprocess.run(["git", "symbolic-ref", "-q", "HEAD"], cwd=loose).returncode == 1
+    assert _git(loose, "rev-parse", "HEAD").strip() == loose_head          # detached, as it was

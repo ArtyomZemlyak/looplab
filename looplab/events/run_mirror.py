@@ -549,9 +549,12 @@ def mirror_run(run_dir: Path, cfg: MirrorConfig, state: dict, *, pass_no: int,
         if extras_failed and rel in prior_extras:
             return True
         return (run_dir / rel).is_file()
+    retired_extras = []
     for rel in list(copied):
         if not present(rel):
             copied.pop(rel, None)
+            if rel in prior_extras and not extras_failed:
+                retired_extras.append(rel)
             # A REMOVAL dirties the manifest exactly like a copy does. Until 2026-10-16 a pass whose
             # only change was a deletion popped the row here and then skipped the manifest write
             # (nothing copied, nothing newly skipped), so the destination manifest kept listing the
@@ -575,6 +578,19 @@ def mirror_run(run_dir: Path, cfg: MirrorConfig, state: dict, *, pass_no: int,
         rstate["manifest_written"] = True
         rstate.pop("manifest_stale", None)
         rstate["skipped"] = skipped
+        # The one exception to "stale copies stay": an EXTRA the producer stopped returning. It is
+        # the mirror's own derived file, not the run's — the agent backup's plain files carry
+        # their version in their name, so a checkpoint rewritten every step would otherwise leave
+        # every version behind in the destination. Deleted only AFTER the manifest that no longer
+        # lists it is written (a restore never reads a manifest naming a missing file); a delete
+        # that fails leaves one more unreferenced copy, which is what every other removal leaves.
+        for rel in retired_extras:
+            ops_bucket.take(1)
+            try:
+                _deadline_call(lambda rel=rel: (dst_run / rel).unlink(missing_ok=True),
+                               cfg.op_timeout_s, f"removing {dst_run / rel}")
+            except OSError as exc:
+                errors.append({"run": run, "path": rel, "error": f"{type(exc).__name__}: {exc}"})
     newest = max((row.get("mtime_ns", 0) for row in copied.values()), default=0)
     rstate.update({"last_mirrored_at": time.time(), "newest_copied_mtime_ns": newest,
                    "file_count": len(copied)})

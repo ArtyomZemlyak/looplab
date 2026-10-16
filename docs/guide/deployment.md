@@ -350,18 +350,21 @@ What it guarantees (`looplab/events/run_mirror.py`):
 * not copied file by file: lock files, SQLite read models (rebuilt from the log), `code/repo.git`
   and `code/worktrees`, `canary/`, and files over `--max-file-mb` (listed as `skipped`). Bases and
   recorded node attempts in `code/repo.git` are rebuilt from the log by `looplab code-status --sync`;
-* an external agent's UNSUBMITTED worktree is not in the log, so each pass backs it up separately:
-  `git bundle` of every `agent/<name>` branch plus a commit of each worktree's uncommitted files
-  (edits, deletions, untracked files `git add -A` would take; the repository's excludes keep
-  checkpoints out), with the worktree metadata, mirrored as `code/agent_backup/`. It is derived
-  read-only (the agent's index and the run repository are never written) and re-bundled only when a
-  branch or the dirty files changed. After a restore, `looplab code-status --sync <run>` re-creates
-  each branch and worktree with its uncommitted files and consumes the backup; an existing branch at
-  another commit or an existing worktree path is never overwritten (reported, backup kept). A
-  worktree whose uncommitted files exceed what one overlay can carry
-  (`code_worktree.py::MAX_BACKUP_DIRTY_BYTES`) keeps only its committed history, and a bundle over
-  `--max-file-mb` is listed as `skipped` — commit, or raise the cap, before relying on tmpfs. The
-  backup is the `run-mirror` command's: a `MirrorConfig` built in code has no `run_extras` producer.
+* an external agent's UNSUBMITTED worktree is not in the log, so each pass backs it up separately
+  as `code/agent_backup/`: a `git bundle` of every `agent/<name>` branch (and a branch the agent
+  switched to) plus a commit of each worktree's small uncommitted files, and the worktree metadata.
+  Large files are not git's: an ignored file (checkpoints, `*.npy`, … — the repository's excludes)
+  and any dirty file over 8 MiB is copied as a PLAIN file `files/<worktree>/<path>.v<version>`, the
+  version taken from its size and mtime; a new version replaces the old name, whose destination
+  copy the mirror then deletes. Derived read-only (the agent's index and the run repository are
+  never written); the bundle is rebuilt only when a branch or a small file changed. After a
+  restore, `looplab code-status --sync <run>` re-creates each branch and worktree — on the branch it
+  stood on, or detached where it was detached — with its files, and consumes the backup; an
+  existing branch at another commit or worktree path is never overwritten (reported, backup kept).
+  A plain file over `--max-file-mb` is listed as `skipped` (raise the cap for checkpoints), and
+  past `code_worktree.py::MAX_BACKUP_FILES` / `MAX_BACKUP_FILES_BYTES` a file is named in the
+  row's `files_skipped`. The backup is the `run-mirror` command's: a `MirrorConfig` built in code
+  has no `run_extras` producer.
 
 Measured on the MiniOneRec box (S3 via geesefs, 2026-10-14): a 762-file, 27 MB run copy mirrored in
 95 s at `--max-files-per-s 10`, the next pass took 0.0 s with no destination access, and the
