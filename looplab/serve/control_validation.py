@@ -436,6 +436,25 @@ def _normalize_lifecycle_target(ctx: _ControlIntake) -> None:
 
 # ------------------------------------------------------------------ run lifecycle normalizers
 
+# An engine pause reason is a snake_case CODE that readers decide on (`PAUSE_REASON_EXTERNAL_
+# OBLIGATIONS` lets a budget extension pass a stop; `attention.py::BOX_FAULT_PAUSE_REASONS` raises a
+# box-fault alert). An HTTP reason is prose; one that spells a code is refused, never stored, so no
+# caller can forge the engine's own pause.
+_REASON_CODE = re.compile(r"[a-z0-9]+(?:_[a-z0-9]+)+")
+
+
+def _normalize_operator_reason(ctx: _ControlIntake) -> dict:
+    """`pause`/`resume` `reason` (doc 82 П5): bounded prose, optional, never an engine code."""
+    if ctx.data.get("reason") is not None:
+        ctx.data["reason"] = ctx.text("reason", limit=256)
+        if _REASON_CODE.fullmatch(ctx.data["reason"].strip()):
+            raise HTTPException(422, {
+                "code": "reason_is_engine_code",
+                "message": "reason must be prose, not an engine reason code",
+                "field_errors": {"reason": "describe why in words"}})
+    return ctx.data
+
+
 def _normalize_run_abort(ctx: _ControlIntake) -> dict:
     # `_normalize_finalize_data` REBINDS the payload, so write it back before using a helper that
     # reads `ctx.data`.
@@ -2390,9 +2409,9 @@ assert _INJECT_IMPORT_FIELDS <= CONTROL_DATA_FIELDS[EV_INJECT_NODE], (
 # sibling; that is deliberate and visible here rather than hidden in an `elif ... in {A, B}`.
 _CONTROL_NORMALIZERS: dict[str, Optional[Callable]] = {
     EV_RUN_ABORT: _normalize_run_abort,
-    EV_PAUSE: None,
+    EV_PAUSE: _normalize_operator_reason,
     EV_RESTART: _normalize_restart,
-    EV_RESUME: None,
+    EV_RESUME: _normalize_operator_reason,
     EV_RUN_REOPENED: None,
     EV_NODE_ABORT: _normalize_node_abort,
     EV_NODE_RESET: _normalize_node_reset,

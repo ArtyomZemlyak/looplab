@@ -2889,7 +2889,9 @@ class RunCommandService:
 
     def submit(self, rd: Path, idempotency_key: str, event_type: str, data,
                *, expected_generation: object = None, drain_only: object = None,
-               agent_token: bool = False) -> dict:
+               agent_token: bool = False, agent_via: str = "token") -> dict:
+        """`agent_via`: which agent party asked (`principal.py::request_agent_credential`) — the
+        scoped token, or the open UI's declared client (doc 82 П5). It names `submitted_by`."""
         from looplab.serve.command_identity import command_identity
         command_id, key_digest = command_identity(idempotency_key)
         if not isinstance(event_type, str):
@@ -3086,7 +3088,8 @@ class RunCommandService:
                     if agent_token:
                         # WHO asked (critic crit_v61 M1): the agent token is the `owner` principal,
                         # and without this the owner could not tell its records from their own.
-                        record["submitted_by"] = "agent_token"
+                        record["submitted_by"] = ("agent_client" if agent_via == "client"
+                                                  else "agent_token")
                     try:
                         if normalization_error is not None:
                             raise normalization_error

@@ -702,3 +702,93 @@ def test_waiting_long_polls_hold_no_worker_thread(tmp_path):
     started = time.monotonic()
     anyio.run(main)
     assert time.monotonic() - started < 10
+
+
+class _Activity:
+    """A stand-in for `serve/agent_activity.py::AgentActivity`: its own clock, and which runs saw
+    an agent request after which instant."""
+
+    def __init__(self):
+        self.t = 0.0
+        self.seen: dict[str, float] = {}
+
+    def clock_now(self):
+        return self.t
+
+    def seen_since(self, run_id, since):
+        return self.seen.get(run_id, -1.0) > since
+
+
+def test_codex_preset_wakes_only_a_run_that_named_its_thread(tmp_path):
+    """doc 82 П5: one flag switches on a FIXED argv; each run's agent supplies its own session."""
+    root = tmp_path / "runs"
+    for name in ("with", "without"):
+        (root / name).mkdir(parents=True)
+    calls = []
+    pump = ae.AgentEventPump(SimpleNamespace(root=root), clock=_Clock(),
+                             runner=lambda argv, timeout: calls.append(argv) or {"ok": True, "exit_code": 0})
+    ae.write_notify_config(root, {**ae.codex_preset(), "debounce_s": 0}, ae.CODEX_HOOK)
+    assert ae.read_notify_config(root, ae.CODEX_HOOK)["preset"] == "codex"
+    with pytest.raises(ValueError):          # the preset's argv cannot be swapped
+        ae.write_notify_config(root, {"preset": "codex", "command": ["sh", "-c", "{message}"]},
+                               ae.CODEX_HOOK)
+    ae.write_run_notify(root / "with", variables={"thread": "T-1"}, hook=ae.CODEX_HOOK)
+    ae.append_events(root, [{"run_id": "with", "kind": "node_failed", "key": "a", "summary": "x"},
+                            {"run_id": "without", "kind": "node_failed", "key": "b", "summary": "y"}])
+    _rewrite_outbox_ts(root, pump.clock() - 1)
+    pump.deliver()
+    assert len(calls) == 1 and calls[0][:4] == ["codex", "queue", "--thread", "T-1"]
+    statuses = {(r["status"], tuple(r.get("runs", []))) for r in ae.ledger_rows(root)}
+    assert ("skipped", ("without",)) in statuses and ("delivered", ("with",)) in statuses
+
+
+def test_a_delivery_with_no_reaction_is_resent_once_then_recorded(tmp_path):
+    """Exit 0 hands a message over; it does not wake an agent. No agent request to the run within
+    the reaction window: ONE reminder, then `no_reaction`. A reaction closes it."""
+    root = tmp_path / "runs"
+    (root / "r").mkdir(parents=True)
+    calls = []
+    activity = _Activity()
+    pump = ae.AgentEventPump(SimpleNamespace(root=root, agent_activity=activity), clock=_Clock(),
+                             runner=lambda argv, timeout: calls.append(argv) or {"ok": True, "exit_code": 0})
+    ae.write_notify_config(root, {"command": ["wake", "{message}"], "debounce_s": 0})
+    ae.append_events(root, [{"run_id": "r", "kind": "run_idle", "key": "k1", "summary": "idle"}])
+    _rewrite_outbox_ts(root, pump.clock() - 1)
+    pump.deliver()
+    assert len(calls) == 1
+    pump.clock.t += ae.REACTION_WINDOW_S - 1
+    pump.deliver()
+    assert len(calls) == 1                                    # still inside the window
+    pump.clock.t += 2
+    pump.deliver()
+    assert len(calls) == 2 and calls[1] == calls[0]           # the one reminder, same argv
+    pump.clock.t += ae.REACTION_WINDOW_S + 1
+    pump.deliver()
+    assert len(calls) == 2                                    # never a second reminder
+    statuses = [r["status"] for r in reversed(ae.ledger_rows(root))]
+    assert statuses == ["delivered", "resent_no_reaction", "no_reaction"]
+
+    # A reaction (any agent request to the run after the delivery) closes the wait.
+    ae.append_events(root, [{"run_id": "r", "kind": "node_failed", "key": "k2", "summary": "x"}])
+    _rewrite_outbox_ts(root, pump.clock() - 1)
+    pump.deliver()
+    activity.t += 5
+    activity.seen["r"] = activity.t
+    pump.clock.t += 1
+    pump.deliver()
+    assert len(calls) == 3
+    assert ae.ledger_rows(root)[0]["status"] == "reacted"
+
+
+def test_the_cli_switches_the_codex_preset_on_with_one_flag(tmp_path):
+    from typer.testing import CliRunner
+    from looplab.cli import app
+    root = tmp_path / "runs"
+    root.mkdir()
+    result = CliRunner().invoke(app, ["agent-notify", "--run-root", str(root), "--codex"])
+    assert result.exit_code == 0, result.output
+    assert ae.read_notify_config(root, ae.CODEX_HOOK)["command"] == list(ae.CODEX_PRESET_COMMAND)
+    result = CliRunner().invoke(app, ["agent-notify", "--run-root", str(root), "--codex",
+                                      "--thread", "T-9"])
+    assert result.exit_code == 0, result.output
+    assert ae.read_notify_config(root, ae.CODEX_HOOK)["vars"] == {"thread": "T-9"}

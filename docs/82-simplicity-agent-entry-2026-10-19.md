@@ -15,7 +15,8 @@ mode is the main path: no tokens. Seven packages, cheapest first; every claim ch
 руководство [external-harness](guide/external-harness.md).
 
 Статус: план в работе. Сделано: П1 (анонимное подключение агента, экстра `ui` с MCP), П2 (профиль
-`agent-minimal`, `strategist_every=0`, вывод `backend=toy` для external-запуска), П3 (MCP `start_run`), П4 (карточка «Кто ведёт» и строка для Codex).
+`agent-minimal`, `strategist_every=0`, вывод `backend=toy` для external-запуска), П3 (MCP `start_run`), П4 (карточка «Кто ведёт» и строка для Codex), П5 (атрибуция и ограждения агента в открытом
+режиме, пресет `codex`, проверка реакции, `reason` у pause/resume).
 Решения §8 приняты по рекомендациям по умолчанию (Р1–Р7).
 
 ## 1. Требования пользователя

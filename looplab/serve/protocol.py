@@ -416,9 +416,11 @@ CONTROL_EVENTS = frozenset({
 # replay ignores many of them, so a caller could persist `{secret: ...}` and receive false success.
 CONTROL_DATA_FIELDS: dict[str, frozenset[str]] = {
     EV_RUN_ABORT: frozenset({"reason"}),
-    EV_PAUSE: frozenset(),
+    # `reason` (doc 82 П5): the operator's or agent's own words for a stop or a resume, shown in
+    # the run's history; an engine reason code is refused (`control_validation.py`).
+    EV_PAUSE: frozenset({"reason"}),
     EV_RESTART: frozenset(),
-    EV_RESUME: frozenset(),
+    EV_RESUME: frozenset({"reason"}),
     EV_RUN_REOPENED: frozenset(),
     EV_NODE_ABORT: frozenset({"node_id", "generation", "reason"}),
     EV_NODE_RESET: frozenset({"node_id", "generation", "from_stage"}),

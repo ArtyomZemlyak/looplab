@@ -272,7 +272,7 @@ test('open-server handoff shows no credential step and offers the one-line Codex
     await React.act(async () => { view.container.querySelector('summary').click() })
     await until(() => view.container.textContent.includes('C:/Runs/demo'), 'anonymous handoff')
     assert.match(view.container.textContent, /codex -c 'mcp_servers\.looplab\.command="looplab"'/)
-    assert.match(view.container.textContent, /No token is needed/)
+    assert.match(view.container.textContent, /No token needed/)
     assert.match(view.container.textContent, /2\. Connect and give the agent this run/)
     assert.doesNotMatch(view.container.textContent, /Supply the scoped credential|Operator setup required|env_vars/)
     assert.ok(globalThis.fetch.calls.every(call => call.method === 'GET'))

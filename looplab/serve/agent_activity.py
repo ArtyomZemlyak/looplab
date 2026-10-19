@@ -19,6 +19,7 @@ been quiet for `QUIET_AFTER_SECONDS` (or was never observed). `status` keeps its
 values so an older UI keeps reading the same field.
 """
 from collections import OrderedDict
+from pathlib import PurePath
 from datetime import datetime, timezone
 import threading
 import time
@@ -76,6 +77,18 @@ class AgentActivity:
             authored.move_to_end(key)
             while len(authored) > MAX_RUNS:
                 authored.popitem(last=False)
+
+    def clock_now(self) -> float:
+        """This tracker's own clock, for a later `seen_since` question."""
+        return self._clock()
+
+    def seen_since(self, run_id: str, since: float) -> bool:
+        """Did any agent request (read or authored) reach the run named `run_id` after `since`?
+        Matched by run directory NAME across generations: a wake-up is about the run, and a reset
+        that replaced its generation is still the agent acting on it (doc 82 П5)."""
+        with self._lock:
+            rows = list(self._reads.items()) + list((getattr(self, "_authored", None) or {}).items())
+        return any(PurePath(key[0]).name == run_id and value[0] > since for key, value in rows)
 
     def snapshot(self, rd, generation, *, waiting=None):
         with self._lock:

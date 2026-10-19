@@ -96,7 +96,7 @@ export default function HarnessHandoff({ runId, generation, seq, defaultOpen = f
         <button type="button" className="btn sm" onClick={copyConfig}>{t('Copy MCP configuration')}</button>
         {copied?.scope === scope && copied.type === 'config' && copied.client === client && <p role="status">{anonymous ? uiText(copied.message) : t(copied.message)}</p>}
         {anonymous ? <>
-          <p>{uiText('No token is needed: this UI runs without owner login. For a virtual environment, set command to the full looplab executable path on the client machine.')}</p>
+          <p>{uiText('No token needed: this UI runs without owner login.')}</p>
           <p>{t(value.scope)}</p>
         </> : <>
           <p>{client === 'codex' ? t('Place this in a trusted project .codex/config.toml or your user config. env_vars forwards the scoped token from the Codex process environment.')

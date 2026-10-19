@@ -1,7 +1,7 @@
 {
   "schema": 1,
   "language": "ru",
-  "count": 8072,
+  "count": 8077,
   "messages": {
     "# LoopLab run report — {0}": "# Отчёт запуска LoopLab — {0}",
     "## Agent narrative (advisory)": "## Пояснения агента (рекомендации)",
@@ -8054,7 +8054,6 @@
     "MCP configuration copied.": "Конфигурация MCP скопирована.",
     "Register once with one command (it writes your Codex config):": "Зарегистрируйте один раз одной командой (она запишет конфигурацию Codex):",
     "Or place this in a trusted project .codex/config.toml:": "Или добавьте это в .codex/config.toml доверенного проекта:",
-    "No token is needed: this UI runs without owner login. For a virtual environment, set command to the full looplab executable path on the client machine.": "Токен не нужен: этот UI работает без входа владельца. Для виртуального окружения укажите в command полный путь к looplab на компьютере клиента.",
     "2. Connect and give the agent this run": "2. Подключите агента к этому запуску",
     "This UI runs without owner login, so harness-mcp connects without a token. Keep LOOPLAB_UI_TOKEN out of the MCP process environment.": "Этот UI работает без входа владельца, поэтому harness-mcp подключается без токена. Не передавайте LOOPLAB_UI_TOKEN в окружение процесса MCP.",
     "This UI requires owner login and has no scoped harness credential. Ask the operator to set a distinct LOOPLAB_HARNESS_TOKEN for the UI and the MCP process; never use LOOPLAB_UI_TOKEN.": "Этот UI требует входа владельца, а harness-токен не настроен. Попросите оператора задать отдельный LOOPLAB_HARNESS_TOKEN для UI и процесса MCP; LOOPLAB_UI_TOKEN не используйте.",
@@ -8074,7 +8073,13 @@
     "No LoopLab model? Your coding agent (Codex) can run the experiment: paste this line into a terminal in your project.": "Нет модели LoopLab? Эксперимент может вести ваш агент (Codex): вставьте эту строку в терминал в папке проекта.",
     "<your goal>": "<ваша цель>",
     "Drive LoopLab run {0} via the looplab MCP tools: connection_check, run_progress, then submit_experiment and wait_for_next until done; LoopLab measures. Pause or finish explicitly.{1}": "Drive LoopLab run {0} via the looplab MCP tools: connection_check, run_progress, then submit_experiment and wait_for_next until done; LoopLab measures. Pause or finish explicitly.{1}",
-    "Via the looplab MCP tools: start_run a LoopLab run for this goal, give me its ui_url, then drive it (run_progress, submit_experiment, wait_for_next).{0} Goal: {1}": "Via the looplab MCP tools: start_run a LoopLab run for this goal, give me its ui_url, then drive it (run_progress, submit_experiment, wait_for_next).{0} Goal: {1}"
+    "Via the looplab MCP tools: start_run a LoopLab run for this goal, give me its ui_url, then drive it (run_progress, submit_experiment, wait_for_next).{0} Goal: {1}": "Via the looplab MCP tools: start_run a LoopLab run for this goal, give me its ui_url, then drive it (run_progress, submit_experiment, wait_for_next).{0} Goal: {1}",
+    "handed over (exit 0)": "передано (exit 0)",
+    "reacted": "агент отреагировал",
+    "resent once": "отправлено повторно",
+    "no reaction": "нет реакции",
+    "skipped": "пропущено",
+    "No token needed: this UI runs without owner login.": "Токен не нужен: этот UI работает без входа владельца."
   },
   "plurals": {
     "({0} paraphrases folded)": {

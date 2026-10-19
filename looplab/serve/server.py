@@ -46,6 +46,7 @@ from looplab.serve.engine_proc import (  # noqa: F401 — _engine_alive/_kill_pr
     install_resume_reconcile_hooks, sweep_stale_lifecycle_locks)
 from looplab.serve.principal import (ANONYMOUS_PRINCIPAL, LOCAL_PRINCIPAL, OWNER_PRINCIPAL,
                                      review_principal, stamp as _stamp_principal,
+                                     declared_agent_client, stamp_agent_client,
                                      stamp_agent_token)
 from looplab.serve.owner_token import (
     log_owner_token_decision, on_shared_origin, resolve_owner_token)
@@ -428,6 +429,56 @@ def _warm_route_matching(app: "FastAPI") -> None:
     _warm(app.routes)
 
 
+def agent_write_refused(method: str, p: str, *, external_launch: bool = False) -> bool:
+    """Is this write outside the external agent's scope? The ONE deny list (doc 82 П5), applied to
+    the scoped harness token and, on the open UI, to a request that declares itself the agent
+    (`X-LoopLab-Client: harness-mcp/...`) — a guard for an honest agent there, not protection:
+    any caller can send or omit the header.
+
+    `external_launch`: the open-UI agent may launch its OWN external run (MCP `start_run`) —
+    `/api/start` and `/api/start/preflight`; the route then refuses a launch whose effective
+    settings are not `external_harness=true` (`serve/routers/control.py`). Genesis stays refused
+    (it spends LoopLab's model), and so does a token's launch (doc 82 Р3)."""
+    if method not in ("POST", "PUT", "PATCH", "DELETE"):
+        return False
+    if external_launch and p in ("/api/start", "/api/start/preflight"):
+        return False
+    return bool(
+        p.startswith("/api/settings") or p == "/api/genesis"
+        or p == "/api/start" or p.startswith("/api/start/")
+        or p.startswith("/api/assistant/")
+        # These owner workflows invoke LoopLab's own model. An external
+        # agent must author the equivalent domain decisions itself.
+        or p in ("/api/research", "/api/llm/health",
+                 "/api/cross-run/concept-steward",
+                 "/api/cross-run/claim-steward")
+        # The concept lens is a paid `derive_lens` call (critic crit_v60 F2). The
+        # chat log holds the pending actions the owner's TUI replays with the
+        # owner's token (critic crit_v62 F1, driven: a forged row became a fork,
+        # a resume and a paid report refresh).
+        or re.fullmatch(r"/api/runs/[^/]+/(chat|chat-log|suggest|command"
+                        r"|report_refresh|concepts/lens)", p)
+        # Destructive recovery and cleanup of the owner's work (crit_v62 F5,
+        # driven: `memory-purge` emptied the lesson store of a live run).
+        or re.fullmatch(r"/api/runs/[^/]+/(memory-purge|resolve-activity-claims"
+                        r"|concepts/lens/abandon|concepts/lens/recovery/abandon"
+                        r"|nodes/[^/]+/clear_trace)", p)
+        or re.fullmatch(r"/api/scope-report-actions/[^/]+/abandon", p)
+        or (p.startswith("/api/scope-report/") and p.endswith("/generate"))
+        or re.fullmatch(r"/api/runs/[^/]+/(reset|deletions)", p)
+        # The operator's limits on what the agent may amend or add (doc 81): an
+        # agent that could write them would set its own ceiling.
+        or re.fullmatch(r"/api/runs/[^/]+/harness-policy", p)
+        # The owner's prompts, skills and knowledge: every live internal run
+        # re-reads them (critic crit_v61 M2, driven: a PUT answered 200).
+        or re.fullmatch(r"/api/(prompts|skills|knowledge)/.+", p)
+        # Deleting a run, revoking the owner's share link, deleting a project or
+        # a super-task (the last three: critic crit_v63, incidental).
+        or (method == "DELETE"
+            and re.fullmatch(r"/api/(runs/[^/]+|runs/[^/]+/reviews/[^/]+"
+                             r"|projects/[^/]+|supertasks/[^/]+)", p)))
+
+
 def make_app(run_root: str | os.PathLike, *, bind_host: Optional[str] = None) -> "FastAPI":
     """Build the ASGI app. `bind_host` is the address this app is about to be PUBLISHED on.
 
@@ -665,40 +716,7 @@ def make_app(run_root: str | os.PathLike, *, bind_host: Optional[str] = None) ->
                     and not _owner_authenticated(request) and not harness_auth):
                 return JSONResponse({"detail": "unauthorized (missing/invalid UI token)"},
                                     status_code=401)
-            if (harness_auth and request.method in ("POST", "PUT", "PATCH", "DELETE")
-                    and (p.startswith("/api/settings") or p == "/api/genesis"
-                         or p == "/api/start" or p.startswith("/api/start/")
-                         or p.startswith("/api/assistant/")
-                         # These owner workflows invoke LoopLab's own model. An external
-                         # agent must author the equivalent domain decisions itself.
-                         or p in ("/api/research", "/api/llm/health",
-                                  "/api/cross-run/concept-steward",
-                                  "/api/cross-run/claim-steward")
-                         # The concept lens is a paid `derive_lens` call (critic crit_v60 F2). The
-                         # chat log holds the pending actions the owner's TUI replays with the
-                         # owner's token (critic crit_v62 F1, driven: a forged row became a fork,
-                         # a resume and a paid report refresh).
-                         or re.fullmatch(r"/api/runs/[^/]+/(chat|chat-log|suggest|command"
-                                         r"|report_refresh|concepts/lens)", p)
-                         # Destructive recovery and cleanup of the owner's work (crit_v62 F5,
-                         # driven: `memory-purge` emptied the lesson store of a live run).
-                         or re.fullmatch(r"/api/runs/[^/]+/(memory-purge|resolve-activity-claims"
-                                         r"|concepts/lens/abandon|concepts/lens/recovery/abandon"
-                                         r"|nodes/[^/]+/clear_trace)", p)
-                         or re.fullmatch(r"/api/scope-report-actions/[^/]+/abandon", p)
-                         or (p.startswith("/api/scope-report/") and p.endswith("/generate"))
-                         or re.fullmatch(r"/api/runs/[^/]+/(reset|deletions)", p)
-                         # The operator's limits on what the agent may amend or add (doc 81): an
-                         # agent that could write them would set its own ceiling.
-                         or re.fullmatch(r"/api/runs/[^/]+/harness-policy", p)
-                         # The owner's prompts, skills and knowledge: every live internal run
-                         # re-reads them (critic crit_v61 M2, driven: a PUT answered 200).
-                         or re.fullmatch(r"/api/(prompts|skills|knowledge)/.+", p)
-                         # Deleting a run, revoking the owner's share link, deleting a project or
-                         # a super-task (the last three: critic crit_v63, incidental).
-                         or (request.method == "DELETE"
-                             and re.fullmatch(r"/api/(runs/[^/]+|runs/[^/]+/reviews/[^/]+"
-                                              r"|projects/[^/]+|supertasks/[^/]+)", p)))):
+            if harness_auth and agent_write_refused(request.method, p):
                 return JSONResponse({"detail": "harness token cannot change operator defaults (settings, prompts, skills, knowledge), launch, reset, purge or delete a run, set a run's harness policy, write a run's chat log, clear or abandon the owner's work (a trace, an activity claim, a lens, a scope action, a share link, a project or super-task), or invoke an internal model workflow; ask the operator"},
                                     status_code=403)
             # Protected mode uses the owner principal; open UI uses the local principal.
@@ -742,7 +760,20 @@ def make_app(run_root: str | os.PathLike, *, bind_host: Optional[str] = None) ->
                 # No token resolved: the historical single-user plane, named `local` so the
                 # portfolio decision (`serve/principal.py`) can tell it from a review link.
                 _stamp_principal(request, LOCAL_PRINCIPAL)
-                return await call_next(request)
+                p = _scope_route_path(request.scope)
+                if not declared_agent_client(request):
+                    return await call_next(request)
+                # THE OPEN-UI AGENT (doc 82 П5, Р5): `harness-mcp` names itself. Its requests are
+                # attributed to the agent (commands, checkpoint answers, uploads, activity) and
+                # held to the scoped token's deny list, except its own external launch.
+                if agent_write_refused(request.method, p, external_launch=True):
+                    return JSONResponse({"detail": "the external agent cannot change operator defaults (settings, prompts, skills, knowledge), reset, purge or delete a run, set a run's harness policy, write a run's chat log, clear or abandon the owner's work, or invoke an internal model workflow; ask the operator",
+                                         "code": "agent_scope_refused"}, status_code=403)
+                stamp_agent_client(request)
+                response = await call_next(request)
+                if response.status_code < 400 and p.startswith("/api/"):
+                    await _observe_agent_request(request.method, p)
+                return response
             try:
                 review = await anyio.to_thread.run_sync(reviews.resolve, review_token)
             except ReviewError as exc:

@@ -376,10 +376,34 @@ def notify_hooks(root) -> dict[str, dict]:
     return out
 
 
+# THE CODEX PRESET (doc 82 П5). The argv is FIXED here — the operator switches it on with one flag
+# (`looplab agent-notify --codex [THREAD]`), nobody types a command — and the agent supplies only its
+# own session id as the run's `thread` var (`PUT /api/runs/{run}/agent-notify`). A run with no
+# thread is skipped, not failed: there is nobody to queue the message for.
+CODEX_HOOK = "codex"
+CODEX_PRESET_COMMAND = ("codex", "queue", "--thread", "{thread}", "--message", "{message}")
+# After a delivery that exited 0, LoopLab waits this long for the agent's next request to the run;
+# with none it sends ONE reminder, then records `no_reaction`. Exit 0 proves the message was handed
+# over, not that the agent woke (`codex queue` only queues it for the session).
+REACTION_WINDOW_S = 600.0
+
+
+def codex_preset(thread: Optional[str] = None) -> dict:
+    """The notify body the `--codex` flag writes for the `codex` hook."""
+    body = {"command": list(CODEX_PRESET_COMMAND), "preset": "codex", "enabled": True}
+    if thread:
+        body["vars"] = {"thread": thread}
+    return body
+
+
 def validate_notify_config(body: dict) -> dict:
     """The one validator for a hook configuration (CLI, owner API). Raises ValueError."""
     if not isinstance(body, dict):
         raise ValueError("notify config must be an object")
+    preset = body.get("preset")
+    if preset is not None and (preset != "codex"
+                               or list(body.get("command") or []) != list(CODEX_PRESET_COMMAND)):
+        raise ValueError("preset 'codex' takes its fixed command; no other preset exists")
     command = body.get("command")
     if isinstance(command, str):
         import shlex
@@ -390,11 +414,14 @@ def validate_notify_config(body: dict) -> dict:
     variables = body.get("vars") or {}
     _check_vars(variables)
     fields = _template_fields(command)
-    unknown = fields - _BUILTIN_FIELDS - set(variables)
+    # The preset's `{thread}` comes from each run's own vars (the agent's session id).
+    unknown = fields - _BUILTIN_FIELDS - set(variables) - ({"thread"} if preset else set())
     if unknown:
         raise ValueError(f"command uses undefined placeholders: {sorted(unknown)} "
                          f"(built-ins: {sorted(_BUILTIN_FIELDS)}; others come from vars)")
     out = {**NOTIFY_DEFAULTS, "command": command, "vars": dict(variables)}
+    if preset:
+        out["preset"] = preset
     for key in ("debounce_s", "max_delay_s", "timeout_s", "retry_base_s"):
         if key in body:
             value = float(body[key])
@@ -690,6 +717,9 @@ class AgentEventPump:
         self._gpu_free_since: Optional[float] = None
         self._rule_progress: dict[tuple, float] = {}
         self._routine_seen: dict[str, bool] = {}
+        # Deliveries awaiting the agent's reaction, per hook (process-local, like the activity they
+        # are checked against: a restarted server forgets them and sends no reminder).
+        self._awaiting: dict[str, list[dict]] = {}
         self._lock = threading.Lock()
 
     # lifecycle
@@ -958,9 +988,65 @@ class AgentEventPump:
             return records[DEFAULT_HOOK]
         return next((r for r in records.values() if r is not None), None)
 
+    def _agent_reacted(self, runs, since: float) -> Optional[bool]:
+        """Did an agent request reach any of `runs` after `since` (the activity clock)? None when
+        this server keeps no activity record."""
+        activity = getattr(self.srv, "agent_activity", None)
+        seen = getattr(activity, "seen_since", None)
+        if not callable(seen):
+            return None
+        return any(seen(run, since) for run in runs)
+
+    def _check_reactions(self, hook: str, config: dict) -> None:
+        """A delivery that exited 0 handed the message over; this checks the agent then acted
+        (doc 82 П5): `reacted`, else one `resent_no_reaction` reminder, else `no_reaction`."""
+        pending = self._awaiting.get(hook) or []
+        keep = []
+        now = self.clock()
+        for item in pending:
+            reacted = self._agent_reacted(item["runs"], item["since"])
+            if reacted is None:
+                continue
+            base = {"ts": now, "event_ids": item["event_ids"], "runs": item["runs"],
+                    "kinds": item["kinds"], **({"hook": hook} if hook != DEFAULT_HOOK else {})}
+            if reacted:
+                _append_ledger(self.root, {**base, "status": "reacted", "attempt": item["attempt"]})
+                continue
+            if now - item["wall"] < REACTION_WINDOW_S:
+                keep.append(item)
+                continue
+            if item["resent"]:
+                _append_ledger(self.root, {**base, "status": "no_reaction", "attempt": item["attempt"],
+                                           "error": "no agent request reached the run after the reminder"})
+                continue
+            result = self.runner(item["argv"], float(config.get("timeout_s", 60)))
+            _append_ledger(self.root, {**base, "status": "resent_no_reaction",
+                                       "attempt": item["attempt"] + 1,
+                                       "exit_code": result.get("exit_code"),
+                                       "error": _clip(result.get("error") or "", 400)})
+            if result.get("ok"):
+                activity = getattr(self.srv, "agent_activity", None)
+                keep.append({**item, "resent": True, "attempt": item["attempt"] + 1, "wall": now,
+                             "since": activity.clock_now() if activity is not None else item["since"]})
+        if keep:
+            self._awaiting[hook] = keep
+        else:
+            self._awaiting.pop(hook, None)
+
+    def _await_reaction(self, hook: str, argv: list[str], rows: list[dict], attempt: int) -> None:
+        activity = getattr(self.srv, "agent_activity", None)
+        runs = sorted({r.get("run_id") for r in rows if r.get("run_id")})
+        if activity is None or not callable(getattr(activity, "clock_now", None)) or not runs:
+            return
+        self._awaiting.setdefault(hook, []).append({
+            "argv": list(argv), "runs": runs, "event_ids": [r["id"] for r in rows],
+            "kinds": sorted({r["kind"] for r in rows}), "since": activity.clock_now(),
+            "wall": self.clock(), "resent": False, "attempt": attempt})
+
     def _deliver_hook(self, hook: str, config: dict) -> Optional[dict]:
         if not config or not config.get("enabled", True) or not config.get("command"):
             return None
+        self._check_reactions(hook, config)
         d = events_dir(self.root)
         state = _read_json(d / STATE, {})
         delivery = _hook_delivery(state, hook)
@@ -1024,6 +1110,18 @@ class AgentEventPump:
         failed_before = int(delivery.get("failed", 0))
         all_ok, record = True, None
         for gkey, grows in groups.items():
+            if config.get("preset") == "codex" and not merged_vars[gkey].get("thread"):
+                # Nobody to wake: the run's agent has not reported its Codex session (doc 82 П5).
+                if attempts == 1:
+                    _append_ledger(self.root, {
+                        "ts": now, "attempt": 0, "status": "skipped",
+                        "event_ids": [r["id"] for r in grows],
+                        "runs": sorted({r.get("run_id") for r in grows if r.get("run_id")}),
+                        "kinds": sorted({r["kind"] for r in grows}),
+                        "error": "no thread: the agent sets it with PUT /api/runs/{run}/agent-notify "
+                                 '{"hook": "codex", "vars": {"thread": "<session id>"}}',
+                        **({"hook": hook} if hook != DEFAULT_HOOK else {})})
+                continue
             message = compose_message(grows, limit_chars=int(config.get("message_chars", 1500)),
                                       failed_before=failed_before)
             fields = {**merged_vars[gkey], "message": message,
@@ -1050,6 +1148,7 @@ class AgentEventPump:
             all_ok &= bool(result["ok"])
             if result["ok"]:
                 delivered.update(r["id"] for r in grows)
+                self._await_reaction(hook, argv, grows, attempts)
             _append_ledger(self.root, record)
         last_id = last_seen
         if all_ok:

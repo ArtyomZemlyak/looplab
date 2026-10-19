@@ -62,7 +62,7 @@ export default function OrchestrationPanel() {
           <th>{uiText("when")}</th><th>{uiText("status")}</th><th>{uiText("events")}</th><th>{uiText("runs")}</th><th>{uiText("detail")}</th></tr></thead>
           <tbody>{ledger.rows.slice(0, 20).map(row => <tr key={row.key} className={`wake-${row.tone}`}>
             <td>{row.when || '—'}</td>
-            <td>{uiText(row.status || '—')}{row.attempt > 1 ? ` #${row.attempt}` : ''}</td>
+            <td>{uiText(row.label || '—')}{row.attempt > 1 ? ` #${row.attempt}` : ''}</td>
             <td>{row.test ? uiText("test") : `${row.events} · ${row.kinds.join(', ')}`}</td>
             <td>{row.runs.join(', ') || '—'}</td>
             <td className="muted">{row.exitCode != null && row.exitCode !== 0 ? uiMessage("exit {0}", [row.exitCode]) + ' ' : ''}{row.error}</td>

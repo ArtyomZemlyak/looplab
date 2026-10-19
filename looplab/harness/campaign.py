@@ -874,7 +874,8 @@ def agent_added_nodes(srv, rd: Path) -> int:
     failed and rejected ones excluded)."""
     total = 0
     for _path, record in srv.commands._scan_command_records(rd, on_symlink="unreadable"):
-        if (not record or record.get("submitted_by") != "agent_token"
+        # Both agent parties (doc 82 П5): the scoped token and the open UI's declared client.
+        if (not record or record.get("submitted_by") not in ("agent_token", "agent_client")
                 or record.get("event_type") != "budget_extend"
                 or record.get("status") in ("failed", "rejected", "timed_out")):
             continue

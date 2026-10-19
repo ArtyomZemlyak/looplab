@@ -100,16 +100,49 @@ def stamp(request, principal: Principal) -> None:
 AGENT_TOKEN_ATTR = "agent_token"
 
 
+# WHO the agent is, apart from WHAT the agent scope permits (doc 82 П5). Two parties carry the agent
+# scope: the scoped token (authenticated) and, on the open UI, a request that DECLARES itself the
+# agent with `X-LoopLab-Client: harness-mcp/<version>` (unauthenticated — any caller can send or
+# omit it, so its scope is a guard for an honest agent, never a security boundary). Every
+# `request_agent_token` reader applies the agent scope and attribution to both (doc 82 Р5);
+# `request_agent_credential` says which party it was, for a record that names its author.
+AGENT_VIA_ATTR = "agent_via"
+AGENT_CLIENT_HEADER = "X-LoopLab-Client"
+AGENT_CLIENT_PREFIX = "harness-mcp/"
+
+
 def stamp_agent_token(request) -> None:
     setattr(request.state, AGENT_TOKEN_ATTR, True)
+    setattr(request.state, AGENT_VIA_ATTR, "token")
+
+
+def declared_agent_client(request) -> bool:
+    """Does the request name itself LoopLab's MCP client? A claim, never a credential."""
+    value = request.headers.get(AGENT_CLIENT_HEADER, "")
+    return isinstance(value, str) and value.startswith(AGENT_CLIENT_PREFIX)
+
+
+def stamp_agent_client(request) -> None:
+    """The open-UI agent: the agent scope and attribution, by a declared header (doc 82 Р5)."""
+    setattr(request.state, AGENT_TOKEN_ATTR, True)
+    setattr(request.state, AGENT_VIA_ATTR, "client")
 
 
 def request_agent_token(request) -> bool:
-    """Did this request authenticate with the AGENT token? False when nothing stamped it."""
+    """Does the AGENT scope apply — the agent token, or the open UI's declared agent client?
+    False when nothing stamped it."""
     try:
         return getattr(request.state, AGENT_TOKEN_ATTR) is True
     except AttributeError:
         return False
+
+
+def request_agent_credential(request) -> Optional[str]:
+    """`"token"` (authenticated), `"client"` (the open UI's declared agent) or None."""
+    if not request_agent_token(request):
+        return None
+    via = getattr(request.state, AGENT_VIA_ATTR, "token")
+    return via if via in ("token", "client") else "token"
 
 
 def request_principal(request) -> Principal:

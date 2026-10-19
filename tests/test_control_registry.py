@@ -333,11 +333,30 @@ def test_a_payload_with_no_rule_of_its_own_still_goes_through_both_shared_guards
     """A `None` normalizer must not mean "unvalidated": the shared preamble and tail still run."""
     rd = _seed(tmp_path)
     srv = _Srv(tmp_path)
-    assert CONTROL_SPECS[EV_PAUSE].normalize is None
-    assert normalize_control(srv, rd, EV_PAUSE, {}) == {}
+    # `run_reopened`: no fields and no rule of its own. (`pause` was the example until its
+    # `reason` got a rule, doc 82 П5 — see the test below.)
+    from looplab.events.types import EV_RUN_REOPENED
+    assert CONTROL_SPECS[EV_RUN_REOPENED].normalize is None
     with pytest.raises(HTTPException) as unknown_field:
-        normalize_control(srv, rd, EV_PAUSE, {"reason": "x"})
+        normalize_control(srv, rd, EV_RUN_REOPENED, {"reason": "x"})
     assert unknown_field.value.status_code == 400
     with pytest.raises(HTTPException) as unknown_event:
         normalize_control(srv, rd, "not_an_event", {})
     assert unknown_event.value.status_code == 400
+
+
+@pytest.mark.parametrize("event", ["pause", "resume"])
+def test_pause_and_resume_take_a_prose_reason_never_an_engine_code(tmp_path, event):
+    """doc 82 П5: the operator's or agent's own words ride on the intent; a snake_case code the
+    engine writes (and readers decide on) is refused, so no caller forges the engine's pause."""
+    rd = _seed(tmp_path)
+    srv = _Srv(tmp_path)
+    assert normalize_control(srv, rd, event, {}) == {}
+    assert normalize_control(srv, rd, event, {"reason": "  waiting for the GPU  "}) == {
+        "reason": "waiting for the GPU"}
+    for forged in ("external_finish_obligations_due", "infra_unavailable", "engine_error"):
+        with pytest.raises(HTTPException) as refused:
+            normalize_control(srv, rd, event, {"reason": forged})
+        assert refused.value.status_code == 422
+    with pytest.raises(HTTPException):
+        normalize_control(srv, rd, event, {"reason": "x" * 257})

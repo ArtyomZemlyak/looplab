@@ -52,3 +52,12 @@ test('forensics view leads with the original exception and per-rank signals', ()
   assert.deepEqual(view.tails, [{ name: 'stage1.log', text: 'a\nb' }])
   assert.equal(forensicsView(null), null)
 })
+
+test('the wake-up ledger says exit 0 is a hand-over and names the reaction states (doc 82 П5)', () => {
+  const view = wakeLedgerView({ configured: true, config: { command: ['codex'] }, ledger: [
+    { ts: 1, status: 'delivered' }, { ts: 2, status: 'reacted' },
+    { ts: 3, status: 'resent_no_reaction' }, { ts: 4, status: 'no_reaction' }, { ts: 5, status: 'failed' }] }, 10)
+  assert.deepEqual(view.rows.map(r => [r.label, r.tone]), [
+    ['handed over (exit 0)', 'ok'], ['reacted', 'ok'],
+    ['resent once', 'warn'], ['no reaction', 'bad'], ['failed', 'warn']])
+})

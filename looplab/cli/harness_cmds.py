@@ -144,6 +144,10 @@ def agent_notify(
     clear: bool = typer.Option(False, "--clear", help="Remove the notification hook."),
     hook: str = typer.Option(None, "--hook", help="A NAMED agent connection (e.g. codex, claude) "
                              "with its own command, vars and delivery; omitted = the default hook."),
+    codex: bool = typer.Option(False, "--codex", help="Switch on the Codex preset (hook `codex`: "
+                               "`codex queue --thread {thread} --message {message}`); each run's "
+                               "agent reports its own session as the run's `thread`."),
+    thread: str = typer.Option(None, "--thread", help="With --codex: one Codex session for every run."),
 ) -> None:
     """Configure the command the UI server runs to wake an external agent (operator only).
 
@@ -160,6 +164,15 @@ def agent_notify(
         hook = check_hook_name(hook)
     except ValueError as exc:
         raise CliRefusal(str(exc)) from exc
+    if codex:
+        # doc 82 П5: one flag, a fixed argv; the agent supplies its thread per run.
+        from looplab.serve.agent_events import CODEX_HOOK, codex_preset
+        try:
+            write_notify_config(root, codex_preset(thread or None), CODEX_HOOK)
+        except ValueError as exc:
+            raise CliRefusal(str(exc)) from exc
+        typer.echo(json.dumps(notify_status(root), ensure_ascii=False, indent=1))
+        return
     if clear:
         clear_notify_config(root, hook)
     elif command or var or debounce is not None or kinds or disable:

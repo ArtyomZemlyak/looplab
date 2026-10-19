@@ -34,6 +34,10 @@ export function gpuQueueView(status, now = Date.now() / 1000) {
   return { known: true, held: status.lease_held, holder, queue, gates }
 }
 
+const WAKE = { delivered: ['handed over (exit 0)', 'ok'], reacted: ['reacted', 'ok'],
+  failed: ['failed', 'warn'], skipped: ['skipped', 'warn'],
+  resent_no_reaction: ['resent once', 'warn'], no_reaction: ['no reaction', 'bad'] }
+
 // The notification hook's delivery ledger, newest first, with a tone per row.
 export function wakeLedgerView(status, now = Date.now() / 1000) {
   if (!status || typeof status !== 'object') return { configured: false, command: null, rows: [] }
@@ -42,7 +46,9 @@ export function wakeLedgerView(status, now = Date.now() / 1000) {
     key: `${row.ts}-${i}`,
     when: ago(row.ts, now),
     status: row.status,
-    tone: row.status === 'delivered' ? 'ok' : row.status === 'failed' ? 'warn' : 'bad',
+    // `delivered` is exit 0 — handed over, not proof the agent woke (doc 82 П5); `reacted` is.
+    label: (WAKE[row.status] || [row.status])[0],
+    tone: (WAKE[row.status] || [, 'bad'])[1],
     attempt: row.attempt ?? null,
     kinds: Array.isArray(row.kinds) ? row.kinds : [],
     runs: Array.isArray(row.runs) ? row.runs : [],

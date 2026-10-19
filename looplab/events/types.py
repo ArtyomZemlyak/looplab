@@ -2435,7 +2435,8 @@ EVENT_PAYLOAD_KEYS: dict[str, PayloadContract] = {
     "resume": PayloadContract(
         "The operator resumed a paused run.",
         required=(),
-        optional=(),
+        # `reason`: the operator's or agent's own words (doc 82 П5); the fold reads none.
+        optional=("reason",),
     ),
     "resume_requested": PayloadContract(
         "A durable resume intent, appended before the engine is spawned.",

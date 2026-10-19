@@ -3400,7 +3400,7 @@ looplab harness-mcp
 
 ## `agent-notify`
 
-| `[--run-root R] [--command 'ARGV {message}'] [--var K=V] [--debounce S] [--kinds a,b] [--disable] [--clear]` | The command the UI server runs, without a shell, to wake an external agent on new events; debounced, retried, every attempt in a ledger. No option prints the hook and ledger. [Doc 78](../78-external-agent-orchestration-2026-10-14.md) |
+| `[--run-root R] [--command 'ARGV {message}'] [--var K=V] [--debounce S] [--kinds a,b] [--disable] [--clear] [--codex [--thread T]]` | The command the UI server runs, without a shell, to wake an external agent on new events; debounced, retried, every attempt in a ledger. No option prints the hook and ledger. `--codex` switches on the fixed `codex queue --thread {thread} --message {message}` preset (hook `codex`); each run's agent sets its `thread` via `PUT /api/runs/{run}/agent-notify`. A delivery with no agent request to the run within 10 minutes is resent once, then recorded `no_reaction`. [Doc 78](../78-external-agent-orchestration-2026-10-14.md) |
 
 ## `agent-events`
 

@@ -33,7 +33,7 @@ from looplab.serve.launch import (
     safe_run_dir,
     validate_idempotency_key,
 )
-from looplab.serve.principal import request_agent_token
+from looplab.serve.principal import request_agent_credential, request_agent_token
 from looplab.serve.protocol import EXPECTED_RUN_GENERATION_FIELD, GENESIS_CHAT_SEQ_BASE
 from looplab.serve.reset_route import durable_reset_run
 from looplab.serve.settings_store import SettingsRevisionConflict
@@ -204,7 +204,8 @@ def build_router(srv) -> APIRouter:
         result = await anyio.to_thread.run_sync(lambda: srv.commands.submit(
             rd, idem, body.get("type"), body.get("data"),
             expected_generation=body.get(EXPECTED_RUN_GENERATION_FIELD),
-            drain_only=body.get("drain_only"), agent_token=agent_token))
+            drain_only=body.get("drain_only"), agent_token=agent_token,
+            agent_via=request_agent_credential(request) or "token"))
         generation = body.get(EXPECTED_RUN_GENERATION_FIELD)
         if agent_token and isinstance(generation, str):
             # An AUTHORED action, kept apart from reads (doc 78 §4, `serve/agent_activity.py`).
@@ -345,6 +346,19 @@ def build_router(srv) -> APIRouter:
             _record, public = reconcile_start(srv, rd, record)
         return public
 
+    def _refuse_agent_internal_launch(request, plan) -> None:
+        """The open-UI agent may launch only an EXTERNAL run (doc 82 П5, Р5): an internal run spends
+        LoopLab's own model and is the owner's decision. Read off the resolved settings, so a layer
+        that turned external mode off is seen too."""
+        if (request_agent_credential(request) == "client"
+                and plan.effective_settings.get("external_harness") is not True):
+            raise HTTPException(403, {
+                "code": "agent_scope_refused",
+                "message": "the external agent may launch only an external run "
+                           "(external_harness=true); ask the operator for an internal one",
+                "field_errors": {"settings.external_harness": "must be true for an agent launch"},
+            })
+
     @router.post("/api/start/preflight")
     async def start_preflight(request: Request):
         """Validate and resolve a launch without writing, reserving a name, or starting an engine."""
@@ -356,7 +370,9 @@ def build_router(srv) -> APIRouter:
                 "message": "start body must be valid JSON",
                 "field_errors": {},
             }) from exc
-        return preflight_response(await anyio.to_thread.run_sync(lambda: preflight_start(srv, body)))
+        plan = await anyio.to_thread.run_sync(lambda: preflight_start(srv, body))
+        _refuse_agent_internal_launch(request, plan)
+        return preflight_response(plan)
 
     @router.post("/api/validate")
     async def validate_run_launch(request: Request):
@@ -373,6 +389,11 @@ def build_router(srv) -> APIRouter:
                 "message": "validate body must be valid JSON",
                 "field_errors": {},
             }) from exc
+        if request_agent_credential(request) == "client":
+            # The open-UI agent validates only its own external launches (doc 82 П5); the verdict
+            # of any other proposal is the owner's question.
+            plan = await anyio.to_thread.run_sync(lambda: preflight_start(srv, body))
+            _refuse_agent_internal_launch(request, plan)
         return await anyio.to_thread.run_sync(lambda: validate_launch(srv, body))
 
     @router.post("/api/start")
@@ -422,6 +443,7 @@ def build_router(srv) -> APIRouter:
                 return replayed
 
         plan = await anyio.to_thread.run_sync(lambda: preflight_start(srv, body))
+        _refuse_agent_internal_launch(request, plan)
         submitted_token = body.get("validation_token") or ""
         if key and not submitted_token:
             raise HTTPException(409, {
