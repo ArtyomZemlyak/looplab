@@ -22,7 +22,9 @@ def test_mcp_advertises_run_controls_and_full_settings_discovery():
             "retry_node", "resume_per_query_upload",
             "pending_per_query_uploads",
             # The run-code surface (doc 79 §4, tests/test_code_identity_agent.py).
-            "code_worktree", "code_worktrees", "code_overlay"} == {tool.name for tool in tools}
+            "code_worktree", "code_worktrees", "code_overlay",
+            # The agent creates its own run (doc 82 П3, tests/test_harness_start_run.py).
+            "start_run"} == {tool.name for tool in tools}
     for tool in (t for t in tools if t.name.startswith("upstream_")):
         hints = tool.annotations.model_dump(by_alias=True)
         assert hints["idempotentHint"]

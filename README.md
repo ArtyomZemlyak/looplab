@@ -50,7 +50,8 @@ The [Quickstart](docs/guide/quickstart.md) walks through these steps.
 replay, a live model and crash recovery.
 
 **Working in Codex or Claude Code?** Your coding agent can propose the candidates while LoopLab runs
-and scores them. Register it once, no token needed: `codex mcp add looplab -- looplab harness-mcp`.
+and scores them. Register it once, no token needed: `codex mcp add looplab -- looplab harness-mcp`,
+then tell it your goal: it starts the run itself (MCP `start_run`) and gives you the UI link.
 See the [external-agent quickstart](docs/guide/external-harness.md#first-external-run)
 and [`AGENTS.md`](AGENTS.md).
 

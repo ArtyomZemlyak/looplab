@@ -10,7 +10,7 @@ from __future__ import annotations
 import json
 import uuid
 
-from looplab.core.run_proposal import RunProposal
+from looplab.core.run_proposal import COMPOSABLE_TASK_GUIDE, RunProposal
 from looplab.tools._base import fn_spec
 
 
@@ -35,67 +35,7 @@ class RunLauncherTools:
                 "model/max_nodes/etc. in `settings`. Inline tasks are VALIDATED before card creation "
                 "and an invalid one is bounced back to you; task-file cards are resolved and validated "
                 "by launch-card preflight.\n"
-                "A task is COMPOSABLE — there is NO `kind`. You describe what you HAVE and the engine "
-                "infers the task. Always give `goal` and `direction` (EXACTLY \"max\" or \"min\"), then "
-                "add the capability fields that apply:\n"
-                "IMPORTANT — the `goal` is the ONLY task text the coding agent (Developer) reads; the "
-                "`rationale` and any knowledge you save are NOT reliably in its context. So put EVERY "
-                "developer-critical setup detail IN THE GOAL: required CLI flags (e.g. a `--flag` that is "
-                "mandatory or the run crashes), a known-good baseline command to start from, data quirks "
-                "(label conventions, formats), exact paths that exist. If you discovered a must-have flag "
-                "or command while exploring, it belongs in the goal, not just the summary you show me.\n"
-                "• `repo`: ABSOLUTE path to an editable codebase that EXISTS on disk — the agent may edit "
-                "ANY file within it (protect exceptions with `protect:[...]`).\n"
-                "• `dataset`: read-only data/model weights that live OUTSIDE the repo, as "
-                "{\"<mount>\":\"<ABSOLUTE path>\"} (a bare path is mounted as ./dataset). They appear at "
-                "./<mount> in the workdir. A repo that trains but has NO dataset mounts fails every node "
-                "with file-not-found — DISCOVER the paths from the repo (README, configs, script defaults) "
-                "+ the user's message, VERIFY each exists, and if a required path is unknown ASK in "
-                "`reply` (never omit/guess).\n"
-                "• `cmd`: HOW to run + score one experiment. Either a bare argv "
-                "([\"python\",\"test.py\"]) or an object {command:[...], metric:{reader,...}, timeout}. "
-                "`metric.reader` is one of stdout_json / stdout_regex / file_json / file_regex — HOW to "
-                "read the printed metric. For stdout_json/file_json give `key` (the JSON field, e.g. "
-                "\"recall\"); for stdout_regex/file_regex give `pattern` (a regex whose group 1 is the "
-                "number, e.g. \"RECALL@100: ([0-9.]+)\") — NOT `key`; add `path` for the file_* readers. Set "
-                "`reader:\"auto\"` ONLY for the narrow case where a training COMMAND already runs and you "
-                "just need the agent to write the metric reader.\n"
-                "• `kaggle`: a Kaggle / MLE-bench competition slug (the official grader scores a "
-                "submission — no `cmd` needed).\n"
-                "`cmd` IS A CONTRACT — the command that runs + the reader that reads its metric. It is the "
-                "SCORING step, NOT the trainer: training is a SEPARATE stage the agent declares at run time "
-                "(its `declare_stages` tool), and the engine runs it BEFORE `cmd`. WHAT the agent may EDIT "
-                "is a SEPARATE, independent decision — `edit_surface` (globs the agent may edit; default = "
-                "the WHOLE repo) minus `protect` (exceptions). The file `cmd` runs is NOT auto-protected, "
-                "so decide edit-scope explicitly:\n"
-                "  • `cmd` points at an OPERATOR-owned scorer the agent must not tamper with (e.g. the "
-                "framework's test.py) → add that file to `protect` (the agent then adds a train stage before "
-                "it; your protected cmd scores the freshly-trained model).\n"
-                "  • `cmd` points at a file the agent must BUILD → leave it editable (a protected file can't "
-                "be created).\n"
-                "  • NO existing scorer anywhere → point `cmd` at an entrypoint the agent will BUILD "
-                "(e.g. [\"python\",\"looplab_eval.py\"]) and leave it editable — a repo task ALWAYS "
-                "carries a `cmd` (or metric.reader \"auto\"); say in the goal what it must train and "
-                "print.\n"
-                "In every case say each node must actually TRAIN a fresh model and score THAT model — never "
-                "read a pre-existing checkpoint or a static results file (results_last.csv is a PRIOR run's "
-                "output, not a score). If training happens, set `cmd.timeout` GENEROUSLY (seconds): training "
-                "runs minutes-to-hours but the default is 600s, which SIGKILLs it mid-first-epoch into an "
-                "undertrained model — size it to the full schedule (often 7200-14400s).\n"
-                "OPTIONAL fields (the engine honors them — reach for them when the task needs it): "
-                "`edit_surface`:[globs] restricts what the agent may edit (default: the WHOLE repo); "
-                "a `setup`:[argv] field INSIDE `cmd` runs before each eval (write it nested: "
-                "`cmd`:{command, metric, setup:[\"pip\",\"install\",\"-r\",\"requirements.txt\"]} — NOT a "
-                "top-level \"cmd.setup\" key); a `profiles` field INSIDE `cmd` "
-                "({smoke:{overrides,timeout},full:{…}}) gives a cheap search eval + a full "
-                "confirm eval; `params`:{name:[lo,hi]} + a `%params%` token in a command tunes numeric "
-                "hyperparameters with NO code edit; `editables`:[{name,path,surface}] mounts several "
-                "editable repos. Per-source DATA permissions: a `dataset`/`data` value may be an object "
-                "{path, mount(read-only symlink vs copy-in), edit, copy_modify, preprocess, extend} — "
-                "default is read-only with copy/preprocess/extend allowed, so the agent can derive/augment "
-                "a training set but not touch the original. To let it MODIFY the data, set mount:false (a "
-                "writable per-node copy); a mounted original is read-only, so mount:true+edit:true is "
-                "auto-converted to a writable copy.",
+                + COMPOSABLE_TASK_GUIDE,
                 {"run_id": {"type": "string", "description": "short kebab-case name you invent"},
                  "task": {"type": "object", "description": "composable inline task: goal + direction + the fields you have (repo / dataset / cmd{command|stages,metric:{reader,key},timeout} / kaggle). No `kind`."},
                  "task_file": {"type": "string", "description": "a catalogue task path (alternative to task)"},

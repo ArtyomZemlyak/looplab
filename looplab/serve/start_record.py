@@ -312,6 +312,11 @@ def reconcile_start(srv, rd: Path, record: dict) -> tuple[dict, dict]:
     if meta_matches and has_first_run_started(rd):
         transition(status="succeeded", phase="event_observed", paid_effect_unknown=False,
                    error_code=None)
+        # Let the canonical observer retire this start's spawn lease once the engine lock is
+        # visible. Without it the lease outlived a started run until the FIRST command probed it —
+        # and that probe refuses its own decision (`run_commands.py::_recent_spawn_claim`), so an
+        # agent's first `submit_experiment` after `start_run` was always a 409 (doc 82 П3).
+        srv.commands.observe_external_spawn(rd, f"start:{start_id}")
     elif meta_matches and (liveness is True
                            or (liveness is False and _engine_alive(rd))):
         transition(status="executing", phase="engine_observed", paid_effect_unknown=False,

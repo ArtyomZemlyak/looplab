@@ -327,3 +327,75 @@ class ClientActions(ClientRequests):
         return {"request_id": row["request_id"], "request_sha256": row["request_sha256"],
                 "path": row["request"]["path"], "action_id": row["request"]["body"]["action_id"],
                 "server_effects": "unobserved"}
+
+
+class ClientStarts:
+    """MCP `start_run`'s launch bodies (doc 82 П3), saved before `POST /api/start`.
+
+    A start has no run generation yet, so it cannot live under `ClientRequests`' (run, generation)
+    directories: it is keyed on the launch's own Idempotency-Key, per server, in `starts/`. The
+    saved body — task, settings, the run name and the preflight's validation token — is what a
+    repeat after a lost response resends byte for byte, so a changed default or a re-derived token
+    can never turn one intent into a second run. Like every record here it is an unobserved
+    intention, never a server verdict.
+    """
+
+    def __init__(self, root, server_url):
+        self._store = ClientRequests(root, server_url)
+        self.server = self._store.server
+        self.directory = self._store.scope / "starts"
+
+    def _path(self, key):
+        ClientRequests._key(key)
+        return self.directory / ("start_" + _hash(key.encode("ascii"))[:32] + ".json")
+
+    def _row(self, key, body):
+        request = json.loads(_bytes({"method": "POST", "path": "/api/start", "body": body,
+                                     "idempotency_key": key}))
+        return {"version": 1, "server": self.server, "request_sha256": _hash(_bytes(request)),
+                "request": request}
+
+    def saved(self, key):
+        """The saved body for this launch key, or None. A damaged record is an error, never None."""
+        path = self._path(key)
+        if not path.exists() and not path.is_symlink():
+            return None
+        raw = read_bounded_regular_file(path, MAX_RECORD_BYTES)
+        if raw is None:
+            raise ValueError("client start record unavailable")
+        try:
+            row = strict_json_loads(raw)
+        except (DuplicateJSONKey, JSONTooDeep, TypeError, RecursionError) as exc:
+            raise ValueError("client start record invalid") from exc
+        request = row.get("request") if isinstance(row, dict) else None
+        if (not isinstance(row, dict) or set(row) != {"version", "server", "request_sha256", "request"}
+                or row["version"] != 1 or row["server"] != self.server
+                or not isinstance(request, dict) or request.get("idempotency_key") != key
+                or not isinstance(request.get("body"), dict)
+                or row["request_sha256"] != _hash(_bytes(request))):
+            raise ValueError("client start record identity/content invalid")
+        return request["body"]
+
+    def save(self, key, body):
+        """Save before HTTP. The same key with a different body is refused, nothing written."""
+        row = self._row(key, body)
+        raw = _bytes(row)
+        if len(raw) > MAX_RECORD_BYTES:
+            raise ValueError("client start record exceeds storage limit")
+        for path in (self._store.root, self._store.scope, self.directory):
+            if not path.exists() and not path.is_symlink():
+                strict_atomic_write_bytes(path / ".directory", b"LoopLab client requests v1\n")
+                if os.name != "nt":
+                    path.chmod(0o700)
+            _normal(path, directory=True)
+        lock = self.directory / ".lock"
+        if lock.exists() or lock.is_symlink():
+            _normal(lock)
+        with interprocess_lock(lock, required=True, blocking=False):
+            prior = self.saved(key)
+            if prior is not None and _bytes(prior) != _bytes(row["request"]["body"]):
+                raise ClientRequestRefused("client_request_conflict",
+                    "A different launch is already saved under this key. Nothing was saved or "
+                    "sent: repeat start_run with the original task/settings, or use a new key.")
+            strict_atomic_write_bytes(self._path(key), raw)
+        return row

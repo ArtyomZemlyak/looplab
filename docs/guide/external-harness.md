@@ -26,22 +26,23 @@ The default UI runs without owner login, so the coding agent connects with **no 
 (a protected server is covered in [External harness setup](#external-harness-setup)).
 
 1. From a source checkout, install `pip install -e ".[ui]"` (the `ui` extra includes the MCP
-   client) and start `looplab ui --run-root runs`. Open the UI to watch the same run root.
+   client).
 2. Register LoopLab with the coding client once:
    `codex mcp add looplab -- looplab harness-mcp` (Claude Code:
    `claude mcp add looplab -- looplab harness-mcp`). Add
    `--env LOOPLAB_HARNESS_URL=<url>` when the UI is not on `http://127.0.0.1:8765`.
-   No environment variable is needed otherwise.
-3. Start a small task in a second terminal with
-   `looplab run task.json --out runs/my-run -s external_harness=true`. A fresh external run
-   defaults to `backend=toy` and the `agent-minimal` profile: the agent owes a coded candidate and
-   the checks the operator declared; another `profile` adds obligations.
-   Keep this process running. The external agent, not LoopLab's built-in Researcher,
-   chooses the next candidate; the task's evaluator still runs inside LoopLab.
+3. Tell the agent the goal. It calls MCP `start_run(task, key)` with a composable task — the
+   schema the UI Assistant's launch card uses, checked by the same preflight — and gets `run_id`,
+   `generation` and `ui_url` to open. The run is external with `backend=toy` and the
+   `agent-minimal` profile: the agent owes a coded candidate and the operator's declared checks;
+   another `profile` adds obligations. With no UI answering and no `LOOPLAB_HARNESS_URL`,
+   `harness-mcp` starts `looplab ui` over `./runs`; that server stops with the MCP session, the
+   engine does not. An operator can launch instead: `looplab ui --run-root runs`, then
+   `looplab run task.json --out runs/my-run -s external_harness=true`.
 4. Open the coding client in a trusted project (Codex: inspect `/mcp`; Claude: review the
    project MCP approval prompt — **Pending approval** means the process has not connected).
    **Connected** only proves the stdio process, even when the UI/API is unreachable, so ask
-   the agent to call MCP `connection_check` for this run: on an open UI it answers `ok` with
+   the agent to call MCP `connection_check` for an operator's run: on an open UI it answers `ok` with
    `credential: "anonymous"`. **Progress → Agent obligations → Connect external agent** shows
    the same commands and an instruction to copy. Without the UI handoff, give the agent this
    instruction, replacing the run ID:
@@ -308,15 +309,8 @@ observed event withdraws the copy action until fresh context arrives.
 Copying does not launch/resume a run or change a client configuration. After
 connecting, read `/state?observe_only=true` and compare generation/run UID before acting;
 reconnect to the same run using current command receipts and checkpoints.
-Engine liveness does not measure agent liveness. The handoff has been exercised
-with Python MCP SDK 2.2.0 and Codex 0.159.2's real MCP client: discovery, live reads,
-ready-made candidates, measured evaluations, receipts, retries and result commentary.
-Claude Code 2.1.286's project configuration was checked for pending approval,
-approved stdio connection and missing-token failure. Its real MCP client also completed
-candidate evaluation, reconnect/retry and result commentary with a local scripted
-Messages provider. The provider selected tool calls; LoopLab measured the scores.
-Paid model judgment and interactive tool approvals remain untested. See doc 71
-sections 31–33 for the tested boundary.
+Engine liveness does not measure agent liveness. Which MCP clients and versions the handoff was
+exercised with, and the boundary of those tests, is in doc 71 sections 31–33.
 
 ### Codex as a live agent
 

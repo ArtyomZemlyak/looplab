@@ -401,7 +401,22 @@ def _stop_child(child: Optional[subprocess.Popen]) -> None:
             pass
 
 
-def ensure_server(base_url: Optional[str], run_root: str, *, log=lambda m: None) -> tuple[str, Optional[subprocess.Popen]]:
+def _port_free(port: int) -> bool:
+    with closing(socket.socket(socket.AF_INET, socket.SOCK_STREAM)) as s:
+        try:
+            s.bind(("127.0.0.1", port))
+        except OSError:
+            return False
+        return True
+
+
+def stop_server(child: Optional[subprocess.Popen]) -> None:
+    """The public name of `_stop_child`, for the MCP harness's own autostarted server (doc 82 П3)."""
+    _stop_child(child)
+
+
+def ensure_server(base_url: Optional[str], run_root: str, *, log=lambda m: None,
+                  prefer_default_port: bool = False) -> tuple[str, Optional[subprocess.Popen]]:
     """Return a (base_url, child) for a reachable server. If `base_url` already answers, reuse it (no
     child). Otherwise launch our own `looplab ui --no-build` (API only — the TUI never needs the React
     bundle) on a free local port, wait until it answers, and return its handle so the caller can stop it
@@ -420,7 +435,10 @@ def ensure_server(base_url: Optional[str], run_root: str, *, log=lambda m: None)
     if Api(default).ping():
         return default, None
 
-    port = _free_port()
+    # `prefer_default_port`: the MCP harness's server (doc 82 П3) takes the default port when it is
+    # free, so the next agent session — and the user's browser — find it where they look first.
+    default_port = int(os.environ.get('LOOPLAB_UI_PORT', '8765'))
+    port = default_port if prefer_default_port and _port_free(default_port) else _free_port()
     url = f"http://127.0.0.1:{port}"
     log(f"no server found — launching one on {url} …")
     env = {**os.environ, "LOOPLAB_RUN_ROOT": run_root}

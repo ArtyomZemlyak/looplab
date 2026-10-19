@@ -18,6 +18,10 @@ returning every receipt so a retry can resume with the same keys:
   (`node_reset` from `eval` or a later stage), never a new node or run.
 * `upload_per_query` — a local per-query `.npz`/JSON file sent to the run (the bounded body route).
 * `campaign_supertask` — create (or reuse) a super-task and assign runs to it.
+* `start_run` — the external agent creates its own run (doc 82 П3): the composable task through the
+  same `/api/start/preflight` funnel the UI card uses, then `/api/start` with the validation token and
+  a key derived from `key`, then the startup status and the new run's generation. The body is saved on
+  the client before the POST (`client_requests.py::ClientStarts`), so a repeat resends it exactly.
 
 Every write step derives its idempotency key / action id from the caller's `key`, so repeating the
 same call after a lost response resolves each step to its original receipt instead of repeating it.
@@ -462,3 +466,134 @@ def campaign_supertask(api, name: str, run_ids: list, supertask_id: Optional[str
 
 __all__ = ["campaign_supertask", "finish_run", "resume_per_query_upload", "retry_node",
            "submit_experiment", "upload_per_query"]
+
+
+# The startup statuses `serve/start_record.py::start_public` reports while an engine is coming up.
+_START_PENDING = {"preparing", "accepted", "executing"}
+
+
+def _start_run_id(task: dict, key: str) -> str:
+    """A run name that is a pure function of the task's goal and the caller's key, so the same
+    `start_run` repeated after a lost response names the same run (and the server's keyed replay
+    answers it) while a new key never collides with an old run."""
+    import hashlib
+    from looplab.core.run_proposal import slug_run_id
+    stem = slug_run_id(task.get("goal") or task.get("competition") or task.get("kaggle") or "run")
+    return f"{(stem or 'run')[:30].rstrip('-')}-{hashlib.sha256(key.encode()).hexdigest()[:8]}"
+
+
+def _refusal_fields(result: dict) -> dict:
+    """A 4xx launch refusal's `code`/`message`/`field_errors`, so the agent can fix and repeat."""
+    body = result.get("body")
+    detail = body.get("detail") if isinstance(body, dict) else None
+    if isinstance(detail, dict):
+        out = {k: detail[k] for k in ("code", "message", "field_errors", "remediation")
+               if k in detail}
+    else:
+        out = {"message": str(detail)[:500]} if detail else {}
+    out.setdefault("message", "")
+    return out
+
+
+def start_run(api, *, task: dict, key: str, run_id: Optional[str] = None,
+              settings: Optional[dict] = None, dry_run: bool = False,
+              wait_seconds: float = 60.0) -> dict:
+    """Create an EXTERNAL run from a composable task and wait until its engine has started.
+
+    `external_harness=true` is always set; the launch point then fills `backend=toy` and the
+    `agent-minimal` profile when `settings` names neither (`core/config.py::external_launch_defaults`).
+    A refused task comes back with the funnel's `field_errors`: fix them and call again with the same
+    key — nothing was started. After a lost response, the same key resends the SAVED body; a new
+    task needs a new key."""
+    from looplab.core.run_proposal import RunProposal
+
+    steps = _Steps()
+    if not isinstance(task, dict) or not task:
+        raise ConfigRefusal("task must be a composable task object: goal + direction + the fields "
+                            "you have (repo / dataset / cmd / kaggle); no `kind`")
+    if (not isinstance(key, str) or not key or len(key) > 190
+            or any(ord(c) < 32 or ord(c) > 126 for c in key)):
+        raise ConfigRefusal("key must be printable ASCII of 1-190 characters")
+    if settings is not None and not isinstance(settings, dict):
+        raise ConfigRefusal("settings must be an object of Settings fields")
+    start_key = f"{key}:start"
+    reach = api.ensure_reachable() if callable(getattr(api, "ensure_reachable", None)) else None
+    if reach is not None and not reach.get("ok"):
+        steps.steps.append({"step": "server", "ok": False, **reach})
+        return steps.done(message="")
+    store = getattr(api, "starts", None)
+    body = store.saved(start_key) if store is not None else None
+    if body is None:
+        merged = {**(settings or {}), "external_harness": True}
+        name = run_id or _start_run_id(task, key)
+        body = RunProposal.from_card({"run_id": name, "task": task, "settings": merged},
+                                     planner="mcp").start_body()
+        pre = api.request("POST", "/api/start/preflight", body, read_only=True)
+        if not steps.add("preflight", pre):
+            return steps.done(**_refusal_fields(pre))
+        preview = pre["body"].get("preview") if isinstance(pre.get("body"), dict) else None
+        if dry_run:
+            return steps.done(message="dry run: validated, nothing was started", dry_run=True,
+                              run_id=body["run_id"], preview=preview,
+                              warnings=pre["body"].get("warnings", []))
+        body = {**body, "validation_token": pre["body"].get("validation_token"),
+                "idempotency_key": start_key}
+        if store is not None:
+            try:
+                store.save(start_key, body)
+            except (OSError, ValueError) as exc:
+                steps.steps.append({"step": "save_request", "ok": False, "outcome": "not_sent",
+                                    "message": getattr(exc, "message", None) or
+                                    "the launch body could not be saved on this machine; "
+                                    "nothing was sent"})
+                return steps.done(message="")
+    elif dry_run:
+        return steps.done(message="dry run: this key's launch is already saved; nothing was sent",
+                          dry_run=True, run_id=body.get("run_id"))
+    run = body["run_id"]
+    started = api.request("POST", "/api/start", body)
+    if started.get("outcome") != "unknown" and not steps.add("start", started):
+        return steps.done(**_refusal_fields(started))
+    if started.get("outcome") == "unknown":
+        # A lost acknowledgement: observe the durable startup record instead of guessing.
+        steps.steps.append({"step": "start", "ok": True, "outcome": "unknown",
+                            "message": "acknowledgement lost; observing the startup record"})
+    deadline = time.monotonic() + max(0.0, float(wait_seconds))
+    status_path = f"/api/start/{quote(run, safe='')}/status"
+    while True:
+        status = api.request("GET", status_path, idempotency_key=start_key)
+        record = status.get("body") if isinstance(status.get("body"), dict) else {}
+        if (status.get("status") != 200 or record.get("status") not in _START_PENDING
+                or time.monotonic() >= deadline):
+            break
+        time.sleep(0.5)
+    # Appended by hand: `_Steps.add` would let the startup record's own `ok` (true while the engine is
+    # merely `executing`) overwrite this step's verdict.
+    started_ok = status.get("status") == 200 and record.get("status") == "succeeded"
+    steps.steps.append({"step": "startup", "ok": started_ok, "http_status": status.get("status"),
+                        **{k: status[k] for k in ("code", "outcome", "message") if status.get(k)},
+                        **{k: record[k] for k in ("status", "started", "can_retry",
+                                                  "paid_effect_unknown", "error") if k in record}})
+    if not started_ok:
+        if record.get("status") in _START_PENDING:
+            steps.steps[-1]["message"] = ("the engine has not reported run_started yet; repeat "
+                                          "start_run with the same key to keep observing")
+        return steps.done(message="", run_id=run)
+    state = api.request("GET", _run_path(run, "/state?observe_only=true"))
+    generation = (state.get("body") or {}).get("generation") if isinstance(state.get("body"), dict) else None
+    if not steps.add("read_state", state, ok=_ok(state) and isinstance(generation, str)):
+        return steps.done(message="", run_id=run)
+    progress = api.run_progress(run, generation)
+    next_step = (progress.get("body") or {}).get("next_step") if _ok(progress) else None
+    steps.add("read_progress", progress)
+    execution = (progress.get("body") or {}).get("execution") if _ok(progress) else None
+    if isinstance(execution, dict) and execution.get("engine_running") is True:
+        # One more observation now that the engine lock is visible: it retires the start's spawn
+        # lease (`serve/start_record.py::reconcile_start`), so the first command is not refused.
+        api.request("GET", status_path, idempotency_key=start_key)
+    base = str(api.client.base_url).rstrip("/")
+    return steps.done(message="run started; drive it with run_progress, submit_experiment and "
+                              "wait_for_next. Give the user ui_url.",
+                      run_id=run, generation=generation, ui_url=f"{base}/#/run/{quote(run, safe='')}",
+                      next_step=next_step)
+

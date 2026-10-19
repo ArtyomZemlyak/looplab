@@ -48,8 +48,10 @@ def test_agents_md_opens_with_a_short_first_run_sequence():
     first = re.split(r"^## ", text, flags=re.M)[1]
     assert first.startswith("First run in five steps")
     assert len(first.split()) <= 200
-    for step in ("looplab ui", "external_harness=true", "harness-mcp", "connection_check",
-                 "result_notices"):
+    # doc 82 П3: the agent launches its own run with MCP `start_run`; `looplab run` stays the
+    # operator's alternative, so the external-mode switch is still named.
+    for step in ("looplab ui", "start_run", "external_harness=true", "harness-mcp",
+                 "connection_check", "result_notices"):
         assert step in first, step
     # doc 75 §12 (critic 2): Codex and other clients load `AGENTS.md` as a REPOSITORY's contributor
     # instructions, so a contributor's agent read the harness contract. The head says whose file it is.
@@ -153,7 +155,7 @@ PROSE_CEILINGS = {
     "cli-reference.md": 28772,
     "concepts.md": 32764,
     "configuration.md": 10447,
-    "external-harness.md": 15589,
+    "external-harness.md": 15540,
     "llm-and-agents.md": 14472,
     "memory.md": 12532,
     "tasks.md": 22381,

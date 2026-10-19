@@ -32,6 +32,8 @@ WRITE_RECOVERY_MESSAGE = (
     "or action_id to recover a missing acknowledgement. No automatic retry was made."
 )
 MCP_INSTRUCTIONS = (
+    "First: 1. start_run(task, key): run_id, generation, ui_url for the user. "
+    "2. run_progress: next step. 3. submit_experiment; wait_for_next. "
     "LoopLab evaluates ready-made experiments; the external agent proposes candidates. "
     "Start with capabilities and connection_check, then read /state?observe_only=true, task, config and harness-contract. "
     "Call run_progress with the current generation; inspect source_health and checkpoints. "
@@ -107,13 +109,53 @@ class HarnessAPI:
             raise ValueError("LOOPLAB_HARNESS_URL must be a valid HTTP(S) server URL") from None
         # Anonymous: the open (default) UI needs no credential (doc 82 П1); a protected one answers 401.
         self.anonymous = not token
+        # `run_stdio` sets these when no LOOPLAB_HARNESS_URL was given: `ensure_reachable` may then
+        # start a private UI over `autostart_root` (doc 82 П3); the child is stopped with the MCP.
+        self.autostart_root = None
+        self.autostart_child = None
+        self._request_dir = request_dir
+        self.starts = None
         self.requests = None
         self.uploads = None
         if request_dir is not None:
-            from looplab.harness.client_requests import ClientRequests
-            from looplab.harness.upload_spool import UploadSpool
-            self.requests = ClientRequests(request_dir, str(self.client.base_url))
-            self.uploads = UploadSpool(request_dir, str(self.client.base_url))
+            self._bind_stores(request_dir, uploads=True)
+
+    def _bind_stores(self, request_dir, *, uploads: bool) -> None:
+        """The client-side stores are scoped by server URL, so they follow the client's base URL.
+        `uploads`: the per-query upload spool too (`run_stdio` has never bound it)."""
+        from looplab.harness.client_requests import ClientRequests, ClientStarts
+        from looplab.harness.upload_spool import UploadSpool
+        self._request_dir = request_dir
+        self.requests = ClientRequests(request_dir, str(self.client.base_url))
+        self.uploads = UploadSpool(request_dir, str(self.client.base_url)) if uploads else None
+        self.starts = ClientStarts(request_dir, str(self.client.base_url))
+
+    def ensure_reachable(self) -> dict:
+        """Is a LoopLab UI answering at the client's URL? If not and autostart is configured (no
+        LOOPLAB_HARNESS_URL was given), start a private one over the agent's run root, preferring the
+        default port, and rebind this client to it (doc 82 П3). Reads nothing of any run."""
+        try:
+            self.client.get("api/runs", timeout=2.5)
+            return {"ok": True}
+        except httpx.TransportError:
+            pass
+        if self.autostart_root is None:
+            return {"ok": False, "status": None, "code": "api_unreachable", "outcome": "unavailable",
+                    "message": "No LoopLab UI answers at LOOPLAB_HARNESS_URL. Start `looplab ui` there "
+                               "or unset LOOPLAB_HARNESS_URL so harness-mcp starts its own."}
+        # Deferred: `harness` reaches `serve` only inside a call (tests/test_package_layering.py).
+        from looplab.serve.tui_api import ApiError
+        from looplab.serve.tui_format import ensure_server
+        try:
+            url, child = ensure_server(None, str(self.autostart_root), prefer_default_port=True)
+        except ApiError as exc:
+            return {"ok": False, "status": None, "code": "server_autostart_failed",
+                    "outcome": "unavailable", "message": str(exc)}
+        self.autostart_child = child
+        self.client.base_url = httpx.URL(url.rstrip("/") + "/")
+        if self._request_dir is not None:
+            self._bind_stores(self._request_dir, uploads=self.uploads is not None)
+        return {"ok": True, "autostarted": url}
 
     @staticmethod
     def _path(path: str) -> str:
@@ -824,6 +866,25 @@ def build_server(api: HarnessAPI):
         """Discover LoopLab phases, backend support, limits and control interfaces."""
         return harness_manifest()
 
+    from looplab.core.run_proposal import COMPOSABLE_TASK_GUIDE
+    from looplab.harness import composite
+
+    @mcp.tool(description=(
+        "Create YOUR external run from a task and start its engine (doc 82): the user's goal in "
+        "words becomes a composable `task`; you never write task.json or run `looplab run`. "
+        "external_harness is always on; with no `settings` the run gets backend=toy and the "
+        "agent-minimal profile (you owe a coded candidate; LoopLab measures). Returns run_id, "
+        "generation, ui_url (give it to the user) and next_step. A refused task returns "
+        "field_errors: fix and call again with the SAME key (nothing started). A repeat with the "
+        "same key after a lost reply resends the saved launch; a new run needs a new key. "
+        "dry_run=true validates only. If no LoopLab UI answers and LOOPLAB_HARNESS_URL is unset, "
+        "harness-mcp starts one over ./runs (stopped when this MCP session ends; the engine "
+        "keeps running).\n" + COMPOSABLE_TASK_GUIDE))
+    def start_run(task: dict, key: str, run_id: str | None = None, settings: dict | None = None,
+                  dry_run: bool = False) -> dict:
+        return composite.start_run(api, task=task, key=key, run_id=run_id, settings=settings,
+                                   dry_run=dry_run)
+
     @mcp.tool(annotations=ToolAnnotations(readOnlyHint=True, idempotentHint=True,
                                          destructiveHint=False, openWorldHint=True))
     def connection_check(run_id: str, expected_generation: str = "") -> dict:
@@ -1345,12 +1406,20 @@ def stdio_credential(token: str | None = None) -> str:
 
 def run_stdio(url: str | None = None, token: str | None = None) -> None:
     credential = stdio_credential(token)
-    api = HarnessAPI(url or os.environ.get("LOOPLAB_HARNESS_URL", "http://127.0.0.1:8765"),
-                     credential)
+    explicit = url or os.environ.get("LOOPLAB_HARNESS_URL", "")
+    # The default address is the one `looplab ui` and the autostart below bind (LOOPLAB_UI_PORT).
+    default = f"http://127.0.0.1:{int(os.environ.get('LOOPLAB_UI_PORT') or 8765)}"
+    api = HarnessAPI(explicit or default, credential)
+    if not explicit and not credential:
+        # The beginner's path (doc 82 П3): no URL, no token. `start_run` may start a private UI over
+        # the agent's run root when none answers; a URL or a token means a server the operator runs.
+        api.autostart_root = Path(os.environ.get("LOOPLAB_RUN_ROOT") or "runs").resolve()
     try:
-        from looplab.harness.client_requests import ClientRequests
         directory = os.environ.get("LOOPLAB_HARNESS_REQUEST_DIR") or Path.home() / ".looplab" / "harness-requests"
-        api.requests = ClientRequests(directory, str(api.client.base_url))
+        api._bind_stores(directory, uploads=False)
         build_server(api).run(transport="stdio")
     finally:
         api.client.close()
+        if api.autostart_child is not None:
+            from looplab.serve.tui_format import stop_server
+            stop_server(api.autostart_child)
