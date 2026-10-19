@@ -3,7 +3,7 @@
 // projection.  Curated runtime controls edit one key inside that same JSON object.
 
 export const LAUNCH_RUNTIME_FIELDS = Object.freeze([
-  { key: 'profile', label: 'Profile', type: 'enum', options: ['default', 'fast', 'thorough'] },
+  { key: 'profile', label: 'Profile', type: 'enum', options: ['default', 'fast', 'thorough', 'agent-minimal'] },
   { key: 'backend', label: 'Backend', type: 'enum', options: ['toy', 'llm'] },
   { key: 'llm_model', label: 'Model', type: 'text', placeholder: 'inherit configured model' },
   { key: 'llm_budget_usd', label: 'Run LLM budget (USD)', type: 'float', min: 0,

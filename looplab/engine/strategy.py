@@ -569,9 +569,9 @@ class StrategyCadenceMixin:
         if plateau_due(rung, started_at, last, seen=plateau_seen,
                        key=(_plateau_leader(state), rung)):
             return True
-        # `strategist_every` is `ge=1` via Settings, but the Engine kwarg / EngineOptions accept 0, and
-        # this cadence is reused for coverage snapshots even with NO strategist wired
-        # (`_maybe_snapshot_coverage`) — `_cadence_due` guards `every <= 0` for that case.
+        # `strategist_every=0` is OFF (Settings `ge=0` since doc 82 П2; the Engine kwarg / EngineOptions
+        # always accepted it), and this cadence is reused for coverage snapshots even with NO
+        # strategist wired (`_maybe_snapshot_coverage`) — `_cadence_due` guards `every <= 0`.
         return cadence_due(n, last, self.strategist_every)
 
     def _strategy_may(self, strat: dict, key: str) -> bool:

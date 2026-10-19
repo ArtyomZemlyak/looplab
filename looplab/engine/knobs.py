@@ -113,7 +113,9 @@ class EngineKnobs:
     external_harness = Knob("external_harness", bool)
     _policy_name = Knob("policy_name")
     _ablate_every = Knob("ablate_every")
-    strategist_every = Knob("strategist_every", lambda v: max(1, v))
+    # 0 is OFF since doc 82 П2 (`Settings.strategist_every` ge=0): `cadence_due` reads `every <= 0`
+    # as never, so the clamp is to 0 — a floor of 1 would turn "off" into "every node".
+    strategist_every = Knob("strategist_every", lambda v: max(0, v))
     concept_retag_every = Knob("concept_retag_every", lambda v: max(1, v))
     # STORED RAW: 0 is OFF here (every other interval knob reads 0 that way too), so a clamp
     # would turn "never stop the run for me" into "stop after one failure".

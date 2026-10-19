@@ -25,7 +25,8 @@ from looplab.core.pathsafe import RUN_CHILD_NAME_DEFECTS, validate_run_child
 from looplab.core.appconfig import load_document, parse_document_text, split_document
 from looplab.core.comparison import canonical_comparison_contract
 from looplab.core.config import (Settings, canonicalize_parallelism_source,
-                                 flatten_parallelism_layers)
+                                 external_launch_defaults, flatten_parallelism_layers,
+                                 launch_layer_truthy)
 from looplab.core.run_deletion import RunDeletionStorageError, load_run_deletion_fence
 from looplab.core.run_proposal import RunProposal
 from looplab.serve.appstate import (
@@ -534,9 +535,16 @@ def _resolved_settings(task: dict, saved: dict, file_settings: dict,
         canonicalize_parallelism_source(launch_settings),
     ])
     inferred = False
+    # A fresh external run (doc 82 П2): `backend=toy` unless the layer that asked for external mode
+    # or a higher one names a backend, and `profile=agent-minimal` unless any layer names one. Before
+    # the generative-task `llm` inference below, which this makes moot for an external launch.
+    env_fields = set(getattr(base, "model_fields_set", set()))
+    merged.update(external_launch_defaults(
+        [canonicalize_parallelism_source(layer) for layer in (saved, file_settings, launch_settings)],
+        env_fields=env_fields))
     # An env/.env backend is an explicit operator choice too.  Only infer when every higher-precedence
     # source and the base Settings source left it unset.
-    if "backend" not in merged and "backend" not in getattr(base, "model_fields_set", set()):
+    if "backend" not in merged and "backend" not in env_fields:
         from looplab.engine.genesis import default_backend
         if default_backend(task.get("kind"), chosen=False) == "llm":
             merged["backend"] = "llm"
@@ -938,6 +946,10 @@ def _defaults_backend_llm(task_spec: Optional[dict], task_file: Optional[str],
     uncontained read for the CLI-shaped callers that have no server root; the HTTP caller passes it.
     """
     if "backend" in settings:
+        return False
+    # A card that asks for an external agent (doc 82 П2/П4) launches with `backend=toy`
+    # (`core/config.py::external_launch_defaults`); an `llm` hint here would make it a 422.
+    if launch_layer_truthy(settings.get("external_harness")):
         return False
     file_settings: dict = {}
     if not (isinstance(task_spec, dict) and task_spec):

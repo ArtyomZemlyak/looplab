@@ -153,7 +153,7 @@ PROSE_CEILINGS = {
     "cli-reference.md": 28772,
     "concepts.md": 32764,
     "configuration.md": 10447,
-    "external-harness.md": 15601,
+    "external-harness.md": 15589,
     "llm-and-agents.md": 14472,
     "memory.md": 12532,
     "tasks.md": 22381,

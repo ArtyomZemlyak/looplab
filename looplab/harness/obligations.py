@@ -206,7 +206,7 @@ def run_obligations(task, settings, *, generation: str) -> dict:
                               "settings": {"best_of_n": settings.best_of_n},
                               "checkpoint": "candidate_admission", "proof": "review distinct complete implementations; selected code/files must match admission",
                               "enforced": True},
-        "strategy": {"required": bool(external),
+        "strategy": {"required": bool(external and settings.strategist_every > 0),
                      "settings": {"strategist_every": settings.strategist_every},
                      "checkpoint": "candidate_admission_at_configured_cadence",
                      "proof": "idea-bound strategy review receipt", "enforced": True},

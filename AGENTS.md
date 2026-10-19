@@ -12,7 +12,8 @@
 2. The operator registers the MCP server once: `codex mcp add looplab -- looplab harness-mcp`
    (add `--env LOOPLAB_HARNESS_URL=...` if the UI is not on `http://127.0.0.1:8765`).
 3. Launch the run and keep it running:
-   `looplab run examples/toy_task.json --out runs/my-run --backend toy -s external_harness=true`.
+   `looplab run examples/toy_task.json --out runs/my-run -s external_harness=true` (it defaults
+   to `backend=toy` and profile `agent-minimal`: you owe a coded candidate, LoopLab the score).
 4. Call MCP `connection_check` for `my-run`, then `run_progress`: it names the next required step.
    Submit a ready-made candidate with `submit_experiment`.
 5. Read the measured result with `result_notices`, decide the next candidate, and pause or finalize
@@ -46,8 +47,8 @@ control event, sequence and error/retryable fields. An incomplete HTTP 200 is
 unavailable, not a saved command verdict; read again explicitly before recovery.
 
 For an externally driven run, start with `looplab harness` and connect
-`looplab harness-mcp` to the running UI. Launch with `--backend toy -s
-external_harness=true`. Read live state, task and config through MCP, submit
+`looplab harness-mcp` to the running UI. Launch with `-s external_harness=true` (a fresh
+external run defaults to `backend=toy` and the `agent-minimal` profile). Read live state, task and config through MCP, submit
 ready-made candidates using durable `inject_node` commands, then inspect measured
 evidence before the next decision. Pause or finalize explicitly. The old
 `developer_backend=codex|claude` mode delegates only candidate editing and keeps

@@ -313,7 +313,77 @@ PROFILES: dict[str, dict] = {
         "watchdog_reflection": True,   # feed recent live-watchdog (train-monitor/ASHA) flags to proposals
         "reflection_priors": True,     # cross-run priors; memory_dir is set by default, so live
     },
+    # The external-agent run's minimal contract (doc 82 П2): the agent owes a candidate with code, the
+    # measured result is LoopLab's, and only the checks the OPERATOR declared stay (`stage_check` on a
+    # declared stage). Every other enabled setting is an admission/finish obligation on the agent
+    # (`harness/obligations.py`) — 19 of 23 required on the bare defaults — so this bundle turns
+    # each of them off. The live training monitors and the deadline grace are off too (doc 82 Р1):
+    # they hold a node on a question while the agent sleeps; `harness-monitor-rules` or an explicit
+    # field brings them back. Chosen by the launch points for a fresh external run that names no
+    # profile (`external_launch_defaults`), never by the validator: a `Settings(external_harness=True)`
+    # built anywhere else keeps today's obligations.
+    "agent-minimal": {
+        "novelty_mode": "off",
+        "foresight": False,
+        "concept_pivot": False,
+        "concept_run_base": False,
+        "cross_run_concepts": False,
+        "track_hypotheses": False,
+        "reflection_priors": False,
+        "lessons_every": 0,
+        "cross_run_curation": False,
+        "coverage_context": False,
+        "report_every": 0,
+        "deep_research_every": -1,
+        "eval_deadline_grace_s": 0,
+        "train_monitor": False,
+        "asha_live": False,
+        "stage_check_tools": False,
+        "strategist_every": 0,
+    },
 }
+
+EXTERNAL_DEFAULT_PROFILE = "agent-minimal"
+
+
+def launch_layer_truthy(value) -> bool:
+    """A launch layer's boolean as pydantic would read it (`-s external_harness=true` may be a str)."""
+    if isinstance(value, str):
+        return value.strip().lower() in ("1", "true", "yes", "on")
+    return value is True or (isinstance(value, int) and not isinstance(value, bool) and value == 1)
+
+
+def external_launch_defaults(layers, *, env_fields=frozenset()) -> dict:
+    """What a FRESH external run's launch fills in when its layers left it unset (doc 82 П2).
+
+    `layers` are the launch's explicit settings sources, LOWEST precedence first (saved UI settings,
+    the task file's `settings:`, the launch request — or the CLI's file, flags and `--set`);
+    `env_fields` are the fields an environment/.env source set, below all of them. Two rules:
+
+    * `external_harness` true with no `backend` in the layer that set it or any higher one ->
+      `backend=toy`. A lower layer's `backend: llm` (saved UI settings, a genesis card) is the
+      ordinary product default, not a choice about this external run, and would otherwise turn the
+      "external agent" switch into a 422. An explicit `backend` in the same or a higher layer wins —
+      and `llm` there is still refused by `Settings`.
+    * no `profile` in any layer or the environment -> `profile=agent-minimal`.
+
+    Applied only at the launch points (`serve/launch.py::_resolved_settings`, `looplab run` on a
+    run directory with no events, MCP `start_run` through `/api/start`). A resumed run reads its
+    snapshot, which carries every field and an explicit profile, so nothing here re-fills it.
+    """
+    layers = [dict(layer or {}) for layer in layers]
+    external_at = None
+    for index, layer in enumerate(layers):
+        if "external_harness" in layer:
+            external_at = index if launch_layer_truthy(layer["external_harness"]) else None
+    if external_at is None:
+        return {}
+    out = {}
+    if not any("backend" in layer for layer in layers[external_at:]):
+        out["backend"] = "toy"
+    if not any("profile" in layer for layer in layers) and "profile" not in env_fields:
+        out["profile"] = EXTERNAL_DEFAULT_PROFILE
+    return out
 
 
 # The shipped agent-governance matrix (who may change which setting at runtime). Defined as a module
@@ -1836,7 +1906,10 @@ class Settings(BaseSettings):
     strategist_backend: str = "agent"          # "off" | "rule" | "llm" | "agent" — default AGENTIC: the
     #   Strategist READS the run/data/sibling-runs/KB/memory with tools before deciding, not a single-shot
     #   call over aggregate stats. "llm" = the old non-agentic single-shot; "rule"/"off" = no LLM.
-    strategist_every: int = Field(default=3, ge=1)   # consult cadence (created nodes)
+    # Consult cadence (created nodes). 0 = OFF (doc 82 П2): no periodic consult, and on an external
+    # run no strategy review is due (`harness/decisions.py::required_decisions`); the seed-boundary and
+    # plateau consults of an internal run are unchanged. Every snapshot before 0 was allowed is >= 1.
+    strategist_every: int = Field(default=3, ge=0)
     # THE STRATEGIST SEES THE GPU POOL (doc 69 §6.1, 69.23). `minionerec-backbones-v10`'s Strategist
     # set `eval_parallel=2` "without oversubscribing 192 CPU-only cores" on four H200s: its brief
     # named no pool, no per-experiment GPU budget, nothing the queued work declared and nothing about

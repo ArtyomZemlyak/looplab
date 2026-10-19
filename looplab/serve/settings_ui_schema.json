@@ -12,10 +12,11 @@
           "options": [
             "default",
             "fast",
-            "thorough"
+            "thorough",
+            "agent-minimal"
           ],
           "default": "default",
-          "help": "Preset bundle. default/fast = lean defaults; thorough = turn on multi-seed confirmation, the reward-hack/leakage/critic monitors AND gate them (trust_gate=gate), ablation refinement and the prompt cues — in one word. (Novelty is the agentic Researcher's call by default; the algorithmic novelty gates stay OFF.) A profile only fills fields you have not set yourself; any explicit knob here still wins."
+          "help": "Preset bundle. default/fast = lean defaults; thorough = turn on multi-seed confirmation, the reward-hack/leakage/critic monitors AND gate them (trust_gate=gate), ablation refinement and the prompt cues — in one word. (Novelty is the agentic Researcher's call by default; the algorithmic novelty gates stay OFF.) A profile only fills fields you have not set yourself; any explicit knob here still wins. agent-minimal = an external agent owes only a coded candidate and the operator's declared checks; a fresh external run gets it when no profile is set."
         },
         {
           "key": "policy",
@@ -211,7 +212,7 @@
           "label": "Consult every",
           "type": "int",
           "default": 3,
-          "help": "Strategist consult cadence in created nodes (bounded, so it never thrashes)."
+          "help": "Strategist consult cadence in created nodes (bounded, so it never thrashes). 0 = off: no periodic consult, and an external agent owes no strategy review."
         },
         {
           "key": "strategist_gpu_brief",

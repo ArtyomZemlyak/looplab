@@ -1,7 +1,7 @@
 {
   "schema": 1,
   "language": "ru",
-  "count": 8056,
+  "count": 8058,
   "messages": {
     "# LoopLab run report — {0}": "# Отчёт запуска LoopLab — {0}",
     "## Agent narrative (advisory)": "## Пояснения агента (рекомендации)",
@@ -8058,7 +8058,9 @@
     "2. Connect and give the agent this run": "2. Подключите агента к этому запуску",
     "This UI runs without owner login, so harness-mcp connects without a token. Keep LOOPLAB_UI_TOKEN out of the MCP process environment.": "Этот UI работает без входа владельца, поэтому harness-mcp подключается без токена. Не передавайте LOOPLAB_UI_TOKEN в окружение процесса MCP.",
     "This UI requires owner login and has no scoped harness credential. Ask the operator to set a distinct LOOPLAB_HARNESS_TOKEN for the UI and the MCP process; never use LOOPLAB_UI_TOKEN.": "Этот UI требует входа владельца, а harness-токен не настроен. Попросите оператора задать отдельный LOOPLAB_HARNESS_TOKEN для UI и процесса MCP; LOOPLAB_UI_TOKEN не используйте.",
-    "Without owner login every local process, the agent included, can use this server's API; it is not restricted to this run. Turn on owner login before exposing the server to others.": "Без входа владельца API этого сервера доступен любому локальному процессу, включая агента, и не ограничен этим запуском. Включите вход владельца, прежде чем открывать сервер другим."
+    "Without owner login every local process, the agent included, can use this server's API; it is not restricted to this run. Turn on owner login before exposing the server to others.": "Без входа владельца API этого сервера доступен любому локальному процессу, включая агента, и не ограничен этим запуском. Включите вход владельца, прежде чем открывать сервер другим.",
+    "Preset bundle. default/fast = lean defaults; thorough = turn on multi-seed confirmation, the reward-hack/leakage/critic monitors AND gate them (trust_gate=gate), ablation refinement and the prompt cues — in one word. (Novelty is the agentic Researcher's call by default; the algorithmic novelty gates stay OFF.) A profile only fills fields you have not set yourself; any explicit knob here still wins. agent-minimal = an external agent owes only a coded candidate and the operator's declared checks; a fresh external run gets it when no profile is set.": "Набор настроек одним словом. default/fast — облегчённые значения по умолчанию; thorough — включает подтверждение на нескольких сидах, мониторы reward-hack, утечек и критика с правом блокировать выбор (trust_gate=gate), уточнение через абляции и подсказки в промптах. (Новизну по умолчанию оценивает агентный Researcher; алгоритмические фильтры новизны выключены.) Профиль заполняет только поля, которые вы не задали сами; любое явное значение побеждает. agent-minimal — внешний агент обязан только прислать кандидата с кодом и пройти проверки, объявленные оператором; новый external-ран получает его, если профиль не задан.",
+    "Strategist consult cadence in created nodes (bounded, so it never thrashes). 0 = off: no periodic consult, and an external agent owes no strategy review.": "Как часто консультироваться со Strategist, в созданных узлах (с ограничением, чтобы не дёргать его постоянно). 0 — выключено: без периодических консультаций, и внешний агент не обязан делать обзор стратегии."
   },
   "plurals": {
     "({0} paraphrases folded)": {

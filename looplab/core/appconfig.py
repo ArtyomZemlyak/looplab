@@ -34,6 +34,7 @@ from typing import Any, Optional
 
 from looplab.core.errors import ConfigRefusal
 from looplab.core.config import (DEVELOPER_BACKENDS, Settings, canonicalize_parallelism_source,
+                                 external_launch_defaults,
                                  flatten_parallelism_layers)
 
 _RUNTIME_CREDENTIAL_FIELDS = {"llm_api_key", "llm_api_key_base_url"}
@@ -277,10 +278,15 @@ def apply_task_flags(task: dict, *, kind: Optional[str], goal: Optional[str],
     return task
 
 
-def build_settings(file_settings: dict, typed_overrides: dict, sets: dict) -> Settings:
+def build_settings(file_settings: dict, typed_overrides: dict, sets: dict, *,
+                   fresh_run: bool = False) -> Settings:
     """Merge settings in precedence order (file < typed flags < --set) and build a validated
     ``Settings``. Unspecified fields fall back to env/.env/defaults because pydantic-settings ranks
-    ``__init__`` kwargs above env, so the merged dict wins only where it actually sets a value."""
+    ``__init__`` kwargs above env, so the merged dict wins only where it actually sets a value.
+
+    ``fresh_run``: the run directory holds no events yet, so this is a LAUNCH and a fresh external
+    run takes `core/config.py::external_launch_defaults` (doc 82 П2). An existing run is never
+    re-filled: its explicit settings stay what they were."""
     # These layers all become one Pydantic "init" source. Promote aliases BEFORE flattening them,
     # otherwise a file canonical value can shadow a higher-priority CLI legacy override.
     for layer, source in (("the config file's `settings:` block", file_settings),
@@ -294,12 +300,22 @@ def build_settings(file_settings: dict, typed_overrides: dict, sets: dict) -> Se
         # after flattening, the operator would be told a key is unknown without being told where
         # they wrote it.
         refuse_unknown_settings_keys(source, layer=layer)
-    merged = flatten_parallelism_layers([
-        canonicalize_parallelism_source(file_settings),
-        canonicalize_parallelism_source(typed_overrides),
-        canonicalize_parallelism_source(sets),
-    ])
+    layers = [canonicalize_parallelism_source(file_settings),
+              canonicalize_parallelism_source(typed_overrides),
+              canonicalize_parallelism_source(sets)]
+    merged = flatten_parallelism_layers(layers)
+    if fresh_run:
+        merged.update(external_launch_defaults(layers, env_fields=_env_setting_fields()))
     return Settings(**merged)
+
+
+def _env_setting_fields() -> set:
+    """The `Settings` fields an environment/.env source sets — the lowest launch layer."""
+    try:
+        return set(Settings().model_fields_set)
+    except ValueError:      # pydantic's ValidationError is one
+        # An invalid environment fails in the real `Settings(**merged)` with its own message.
+        return set()
 
 
 # --- `looplab init` template -------------------------------------------------------------------

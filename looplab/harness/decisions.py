@@ -48,7 +48,8 @@ def required_decisions(settings, node_count: int) -> dict[str, int]:
         required["foresight"] = settings.foresight_panel
     if settings.best_of_n > 1:
         required["candidate_ranking"] = settings.best_of_n
-    if node_count and node_count % settings.strategist_every == 0:
+    # strategist_every=0 is off (doc 82 П2): no strategy review is ever due.
+    if settings.strategist_every > 0 and node_count and node_count % settings.strategist_every == 0:
         required["strategy"] = 1
     return required
 

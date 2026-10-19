@@ -33,7 +33,9 @@ The default UI runs without owner login, so the coding agent connects with **no 
    `--env LOOPLAB_HARNESS_URL=<url>` when the UI is not on `http://127.0.0.1:8765`.
    No environment variable is needed otherwise.
 3. Start a small task in a second terminal with
-   `looplab run task.json --out runs/my-run --backend toy -s external_harness=true`.
+   `looplab run task.json --out runs/my-run -s external_harness=true`. A fresh external run
+   defaults to `backend=toy` and the `agent-minimal` profile: the agent owes a coded candidate and
+   the checks the operator declared; another `profile` adds obligations.
    Keep this process running. The external agent, not LoopLab's built-in Researcher,
    chooses the next candidate; the task's evaluator still runs inside LoopLab.
 4. Open the coding client in a trusted project (Codex: inspect `/mcp`; Claude: review the
@@ -476,16 +478,9 @@ Anonymous opt-out cannot be combined with a scoped harness credential. A local U
 without either token keeps its usual anonymous mode. Supply only the harness token
 to the external MCP process; use the owner token to unlock the browser.
 
-Launch a run with LoopLab's offline roles; they are never asked to propose or repair
-in external mode. The task's declared eval command still runs in LoopLab's sandbox.
-Choose the mode at launch; per-run configuration edits cannot switch an existing
-run between internal search and external control.
-
-```sh
-looplab run task.json --out runs/my-run --backend toy -s external_harness=true
-```
-
-Keep that run process open while the coding agent sends commands from another terminal.
+Choose external mode at launch, as in the [First external run](#first-external-run); per-run
+configuration edits cannot switch an existing run between internal search and external control.
+The task's declared eval command still runs in LoopLab's sandbox.
 
 Configure your coding agent's MCP client to launch `looplab harness-mcp` over stdio,
 with nothing on an open UI — on a protected one **only** `LOOPLAB_HARNESS_TOKEN` — and, if the

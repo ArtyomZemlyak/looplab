@@ -1207,7 +1207,11 @@ def run(
     except ValueError as e:
         raise typer.BadParameter(str(e))
     try:
-        settings = appconfig.build_settings(file_settings, typed, sets)
+        # A fresh external run takes `backend=toy` + `profile=agent-minimal` when its layers left them
+        # unset (doc 82 П2); a run directory that already holds events is never re-filled.
+        settings = appconfig.build_settings(
+            file_settings, typed, sets, fresh_run=not _log_has_events(
+                out or (Path(file_out) if file_out else Path("runs/run_local"))))
     except ValidationError as e:
         raise typer.BadParameter(f"invalid settings: {e}")
     explicit_settings = _explicit_setting_names(typed, sets, explicit_setting)
