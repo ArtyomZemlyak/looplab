@@ -59,7 +59,7 @@ MCP_INSTRUCTIONS = (
     "Typed run_progress and connection_check validate critical progress fields, source completeness, explicit expansion/finish gates and pending counts. Missing fields are unavailable, not empty obligations. A structurally valid complete=false read retains source diagnostics; read success does not grant admission. Refresh explicitly; no automatic retry or work. "
     "The stdio client durably saves original command and supported semantic action POSTs before HTTP in its private client store. On reconnect use saved_commands/saved_command or saved_actions/saved_action, verify hashes, then read original server receipts and fresh progress/checkpoints/source_health before any explicit exact retry. Semantic actions include decisions/reviews, checkpoints, hypotheses, selection verify/values, lessons/skill-candidates, result commentary and upstream operations. Preserve all original action IDs and evidence revisions/tokens. Local records are unobserved intentions, not applied verdicts; an empty/missing client store proves no absence of server effects. Other API routes still require retaining originals yourself. Client storage failure returns not_sent for that invocation, without HTTP or automatic repair. "
     "A campaign of experiments stays in ONE run: submit_experiment pre-registers and injects; amend_protocol records experiment/task/files/budget changes with reason and diff (task/files need a paused, stopped engine); retry_node retries a failed setup as a new attempt; upload_per_query + compare_experiment give LoopLab's paired CIs and Holm — quote them; finish_run finalizes. Use campaign_supertask only when an incompatible task forces a new run. "
-    "Use only the scoped harness credential; owner-only workflows require the operator. "
+    "On an open UI connect without a credential; on a protected one use only the scoped harness credential. Owner-only workflows require the operator. "
     "Between decisions, block on wait_for_next(after=<last id>) instead of polling: LoopLab "
     "derives node/stage/question/obligation/idle/GPU events itself. Order GPU work across runs "
     "with PUT /api/runs/{run_id}/gpu-gate (hold / start_after) instead of handoff scripts. "
@@ -67,6 +67,25 @@ MCP_INSTRUCTIONS = (
     "nodes/n<id> to combine experiments, then submit_experiment(code_from={worktree}, parent_ids); "
     "a branch of your own goes in as code_from={git: {repo, ref}} (merged onto the run's base)."
 )
+
+
+def client_header() -> str:
+    """`X-LoopLab-Client`: names the MCP client to the server. It is attribution, never a credential.
+
+    The version comes from the installed metadata, not `looplab.__version__`: the harness package
+    does not import the package root (`tests/test_package_layering.py`)."""
+    from importlib.metadata import PackageNotFoundError, version
+
+    try:
+        return f"harness-mcp/{version('looplab')}"
+    except PackageNotFoundError:     # a bare source tree on sys.path
+        return "harness-mcp/0"
+
+
+ANONYMOUS_401_MESSAGE = (
+    "This LoopLab UI requires a credential (owner login is on), and harness-mcp runs without one. "
+    "Ask the operator for a scoped LOOPLAB_HARNESS_TOKEN, set it in the MCP process environment "
+    "and restart the MCP client. Never use LOOPLAB_UI_TOKEN here.")
 
 
 class HarnessAPI:
@@ -82,9 +101,12 @@ class HarnessAPI:
         try:
             self.client = httpx.Client(base_url=url.rstrip("/") + "/", timeout=30,
                                       follow_redirects=False, trust_env=False, transport=transport,
-                                      headers={"X-LoopLab-Token": token} if token else {})
+                                      headers={"X-LoopLab-Token": token, "X-LoopLab-Client": client_header()}
+                                      if token else {"X-LoopLab-Client": client_header()})
         except httpx.InvalidURL:
             raise ValueError("LOOPLAB_HARNESS_URL must be a valid HTTP(S) server URL") from None
+        # Anonymous: the open (default) UI needs no credential (doc 82 П1); a protected one answers 401.
+        self.anonymous = not token
         self.requests = None
         self.uploads = None
         if request_dir is not None:
@@ -154,6 +176,9 @@ class HarnessAPI:
                 return self._unknown_write({"status": response.status_code}, "invalid_json")
             body = response.text
         result = {"status": response.status_code, "body": body}
+        if response.status_code == 401 and self.anonymous:
+            # The one actionable refusal of the anonymous path: say what to configure, in fixed words.
+            result = {**result, "code": "credential_required", "message": ANONYMOUS_401_MESSAGE}
         if write and response.status_code >= 500:
             return self._unknown_write(result, "server_error")
         return result
@@ -673,7 +698,8 @@ class HarnessAPI:
             if status != 200:
                 code, message = {
                     None: ("api_unreachable", "UI/API request failed. Check the server URL, network and running UI."),
-                    401: ("credential_refused", "API rejected the credential. Ask the operator for the scoped token."),
+                    401: (("credential_required", ANONYMOUS_401_MESSAGE) if self.anonymous else
+                          ("credential_refused", "API rejected the credential. Ask the operator for the scoped token.")),
                     403: ("access_refused", "API refused this read. Check the credential and launched run mode."),
                     404: ("run_not_found", "Run not found on this server. Check the URL, run root and literal run ID."),
                     409: ("run_context_changed", "Run context changed or is unavailable. Read state and request fresh handoff."),
@@ -702,12 +728,11 @@ class HarnessAPI:
         if handoff.get("ok") is False:
             return handoff
         handoff = handoff["body"]
-        if handoff.get("credential_configured") is False:
-            return {"ok": False, "status": 200, "code": "harness_credential_missing", "at": "handoff",
-                    "message": "This server has no harness credential configured. Ask the operator to configure it and restart the UI."}
+        # A server without a harness credential is the OPEN UI (doc 82 П1): the reads above already
+        # succeeded without one, so the connection is anonymous, not refused.
         paths = handoff.get("server_paths")
         if (handoff.get("run_id") != run_id or handoff.get("generation") != generation
-                or handoff.get("mode") != "external_harness" or handoff.get("credential_configured") is not True
+                or handoff.get("mode") != "external_harness" or type(handoff.get("credential_configured")) is not bool
                 or not isinstance(paths, dict)
                 or any(not isinstance(paths.get(key), str) or not paths[key] for key in ("run_root", "run_dir"))
                 or (handoff.get("engine_running") is not None and type(handoff["engine_running"]) is not bool)):
@@ -722,6 +747,7 @@ class HarnessAPI:
                     "message": "Connection evidence does not match this external run. Request fresh context."}
         return {"ok": True, "status": 200, "code": "run_reads_succeeded", "run_id": run_id,
                 "generation": generation, "server_paths": {key: paths[key] for key in ("run_root", "run_dir")},
+                "credential": "harness_token" if handoff["credential_configured"] else "anonymous",
                 "engine_running": handoff.get("engine_running"), "agent_connection": "not_measured",
                 "evidence_complete": progress["complete"],
                 "source_health": progress.get("source_health"), "next_step": progress.get("next_step"),
@@ -1287,16 +1313,38 @@ def _campaign_tools(mcp, api, ToolAnnotations) -> None:
                                     from_stage=from_stage, generation=generation)
 
 
-def run_stdio(url: str | None = None, token: str | None = None) -> None:
-    credential = token if token is not None else os.environ.get("LOOPLAB_HARNESS_TOKEN", "")
-    if not credential or not credential.strip() or credential == "${LOOPLAB_HARNESS_TOKEN}":
-        raise ConfigRefusal("Set LOOPLAB_HARNESS_TOKEN in the MCP process environment. "
-                         "LOOPLAB_UI_TOKEN is never used by harness-mcp; ask the operator "
-                         "for a distinct scoped credential.")
+def stdio_credential(token: str | None = None) -> str:
+    """The credential `harness-mcp` sends: a scoped token, or "" for the anonymous (open UI) path.
+
+    No token is the default (doc 82 П1): the UI's owner login is off unless configured, so the agent
+    connects with nothing. Refused instead: an explicit but unusable token (never a fallback to the
+    environment), a token equal to `LOOPLAB_UI_TOKEN`, and an environment that carries only
+    `LOOPLAB_UI_TOKEN` — that server is protected, and the owner secret is never sent.
+    """
+    owner = os.environ.get("LOOPLAB_UI_TOKEN", "")
+    if token is not None:
+        credential = token
+        if not credential.strip() or credential == "${LOOPLAB_HARNESS_TOKEN}":
+            raise ConfigRefusal("The explicit harness credential is empty. Unset it to connect "
+                                "anonymously to an open UI, or pass the scoped LOOPLAB_HARNESS_TOKEN.")
+    else:
+        credential = os.environ.get("LOOPLAB_HARNESS_TOKEN", "")
+        if not credential.strip() or credential == "${LOOPLAB_HARNESS_TOKEN}":
+            if owner.strip():
+                raise ConfigRefusal("This MCP environment carries LOOPLAB_UI_TOKEN but no "
+                                    "LOOPLAB_HARNESS_TOKEN: the UI is protected. Remove LOOPLAB_UI_TOKEN "
+                                    "from the MCP process and set a distinct scoped LOOPLAB_HARNESS_TOKEN; "
+                                    "harness-mcp never uses the owner credential.")
+            return ""
     if any(ord(char) < 32 or ord(char) > 126 for char in credential):
         raise ConfigRefusal("LOOPLAB_HARNESS_TOKEN must be printable ASCII without control characters.")
-    if credential == os.environ.get("LOOPLAB_UI_TOKEN", ""):
+    if credential == owner:
         raise ConfigRefusal("The harness credential must differ from LOOPLAB_UI_TOKEN.")
+    return credential
+
+
+def run_stdio(url: str | None = None, token: str | None = None) -> None:
+    credential = stdio_credential(token)
     api = HarnessAPI(url or os.environ.get("LOOPLAB_HARNESS_URL", "http://127.0.0.1:8765"),
                      credential)
     try:

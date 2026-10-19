@@ -138,7 +138,8 @@ For a shared/public server, opt into auth and URL checks or use an authenticated
 LOOPLAB_UI_REQUIRE_AUTH=1 LOOPLAB_UI_CHECK_ORIGIN=1 LOOPLAB_UI_HOSTS=lab.example.org looplab ui --host 0.0.0.0
 ```
 
-An open UI grants owner access to all reachable callers. A `LOOPLAB_HARNESS_TOKEN` can
+An open UI grants owner access to all reachable callers, which is also why `looplab harness-mcp`
+connects to it with no token (the beginner's external-agent path). A `LOOPLAB_HARNESS_TOKEN` can
 coexist with open UI without a separate owner token; requests presenting it still retain
 agent restrictions. It does not protect the open owner plane from callers omitting it.
 Use a different owner token when enabling owner login. Review link creation still requires

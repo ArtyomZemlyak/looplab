@@ -10,6 +10,21 @@ No hooks, saved chat, user settings, owner credential or built-in shell tools
 are supplied to Claude. No permission bypass: only the named test MCP tools
 are allowed for the authorized scenarios. CLI cost estimates use fixture token
 counts and are NOT actual provider charges. This does not test model judgment.
+
+What the check covers (moved from docs/guide/external-harness.md, doc 82 П1):
+
+The output directory must be new. It starts a disposable loopback server/root,
+protected CPU training scorer and local scripted Messages provider. Three fresh
+Claude invocations check a denied tool, submit a candidate, then reconnect/retry,
+measure two successful configurations and one failed configuration, publish Russian
+interpretations and explicitly finish. Inspect/replay and protected file bytes are checked.
+The client gets only a synthetic API key and scoped test token, isolated settings,
+default permission mode and an explicit allowlist of LoopLab tools for the authorized
+cases. It uses no permission bypass, shell tools, saved chat or model account.
+`acceptance.json` stores client version, call counts and measured outcomes. Claude's
+cost estimate reflects fixture token counts; it is not a provider charge. This checks
+transport and permission handling, not an LLM's research choices or enabled optional
+obligations (research, concepts, reports and monitors are disabled for this small task).
 """
 import argparse
 import hashlib

@@ -5,6 +5,22 @@ Runs extend-to-completion, stop, capped extension and disabled grace. The timer
 before protected SGD is fault injection, not a claim about slow ML training.
 Kills only its owned MCP process and restarts only its disposable UI. No model
 calls, owner credential in MCP, user configuration changes or automatic verdicts.
+
+What the probe covers (moved from docs/guide/external-harness.md, doc 82 П1):
+
+The separate deadline probe launches four isolated runs with an unchanged protected
+SGD scorer and an operator-declared timeout. A deliberate timer before SGD makes
+deadline decisions reproducible. For enabled grace it observes continued command
+output during an unanswered checkpoint, kills its own MCP, restarts its UI and
+reads the same question with the same live engine and no terminal metric. It rejects
+`abort`, explicitly answers `extend` or `stop`, and retries the exact answer both
+before and after terminal. The completion case measures held-out MSE; stop and
+exhausted grace retain no metric. Stage events record the granted cap, including
+the timed-out stage. Each command executes once, and a cap allows no second question.
+With grace disabled there is no checkpoint. All runs publish result interpretations
+in Russian and pass `inspect`/`replay`. Use `--case completed_extend`, `--case stop`,
+`--case capped_extend` or `--case disabled` for one scenario in a new output directory.
+This checks protocol timing with fault injection, not long-running ML or model judgment.
 """
 from __future__ import annotations
 

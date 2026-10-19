@@ -3,7 +3,7 @@ import React, { useEffect, useRef, useState } from 'react'
 import { get, runApiPath } from './util.js'
 import { useScopedResource } from './useScopedResource.js'
 import { PANEL_REQUEST_TIMEOUT_MS, RUN_GENERATION_RE } from './panelPrimitives.js'
-import { harnessAgentInstruction, harnessMcpDescriptor, harnessServerUrl, validHarnessHandoff } from './harnessHandoff.js'
+import { harnessAgentInstruction, harnessCodexAddCommand, harnessMcpDescriptor, harnessServerUrl, validHarnessHandoff } from './harnessHandoff.js'
 import './harness-handoff.css'
 import HarnessReceipt from './HarnessReceipt.jsx'
 import { useAssistantUILanguage } from './useAssistantLanguage.js'
@@ -36,18 +36,23 @@ export default function HarnessHandoff({ runId, generation, seq, defaultOpen = f
   const value = resource.data
   const fresh = resource.status === 'ready' && !(seq > value?.event_seq)
   const url = harnessServerUrl(location.href)
+  // The open UI (doc 82 П1): no token exists, so no step asks for one. An older server without
+  // `credential_mode` keeps the token wording.
+  const anonymous = value?.credential_mode === 'anonymous'
   const copy = async () => {
     try {
       await navigator.clipboard.writeText(harnessAgentInstruction(value, url, language))
-      setCopied({ scope, type: 'instruction', message: 'Agent instruction copied. Supply the scoped secret separately.' })
+      setCopied({ scope, type: 'instruction', message: anonymous ? 'Agent instruction copied.'
+        : 'Agent instruction copied. Supply the scoped secret separately.' })
     } catch {
       setCopied({ scope, type: 'instruction', message: 'Clipboard unavailable. Select the instruction below and copy it manually.' })
     }
   }
   const copyConfig = async () => {
     try {
-      await navigator.clipboard.writeText(harnessMcpDescriptor(url, client))
-      setCopied({ scope, type: 'config', client, message: 'MCP configuration copied. Supply the scoped secret separately.' })
+      await navigator.clipboard.writeText(harnessMcpDescriptor(url, client, { anonymous }))
+      setCopied({ scope, type: 'config', client, message: anonymous ? 'MCP configuration copied.'
+        : 'MCP configuration copied. Supply the scoped secret separately.' })
     } catch {
       setCopied({ scope, type: 'config', client, message: 'Clipboard unavailable. Select the configuration below and copy it manually.' })
     }
@@ -71,18 +76,27 @@ export default function HarnessHandoff({ runId, generation, seq, defaultOpen = f
         <label>{t('MCP client ')}<select value={client} onChange={event => { setClient(event.target.value); setCopied(null) }}>
           <option value="codex">{uiText("Codex")}</option><option value="claude">{uiText("Claude Code")}</option>
           <option value="generic">{t('Other MCP client')}</option></select></label>
-        <pre>{harnessMcpDescriptor(url, client)}</pre>
+        {anonymous && client === 'codex' && <>
+          <p>{t('Register once with one command (it writes your Codex config):')}</p>
+          <pre>{harnessCodexAddCommand(url)}</pre>
+          <p>{t('Or place this in a trusted project .codex/config.toml:')}</p></>}
+        <pre>{harnessMcpDescriptor(url, client, { anonymous })}</pre>
         <button type="button" className="btn sm" onClick={copyConfig}>{t('Copy MCP configuration')}</button>
         {copied?.scope === scope && copied.type === 'config' && copied.client === client && <p role="status">{t(copied.message)}</p>}
-        <p>{client === 'codex' ? t('Place this in a trusted project .codex/config.toml or your user config. env_vars forwards the scoped token from the Codex process environment.')
-          : client === 'claude' ? t('Place this in your project .mcp.json. The token placeholder reads the scoped credential from the Claude process environment.')
-            : t("This is a generic stdio descriptor; configure scoped credential forwarding in your client's environment settings.")}{t(' The token value is not included.')}</p>
-        <p>{t('For a virtual environment, set command to the full looplab executable path on the client machine. Supply the scoped credential and restart the client. harness-mcp refuses a missing token; it never falls back to owner access.')}</p>
-        <h4>{t('2. Supply the scoped credential separately')}</h4>
-        <p role="status">{value.credential_configured ? t('A harness credential is configured on this server.')
-          : t('Operator setup required: this server has no scoped harness credential configured.')}</p>
-        <p>{t(value.credential_policy)}</p><p>{t(value.scope)}</p>
-        <h4>{t('3. Connect and give the agent this run')}</h4>
+        {anonymous ? <>
+          <p>{t('No token is needed: this UI runs without owner login. For a virtual environment, set command to the full looplab executable path on the client machine.')}</p>
+          <p>{t(value.scope)}</p>
+        </> : <>
+          <p>{client === 'codex' ? t('Place this in a trusted project .codex/config.toml or your user config. env_vars forwards the scoped token from the Codex process environment.')
+            : client === 'claude' ? t('Place this in your project .mcp.json. The token placeholder reads the scoped credential from the Claude process environment.')
+              : t("This is a generic stdio descriptor; configure scoped credential forwarding in your client's environment settings.")}{t(' The token value is not included.')}</p>
+          <p>{t('For a virtual environment, set command to the full looplab executable path on the client machine. Supply the scoped credential and restart the client. harness-mcp refuses a missing token; it never falls back to owner access.')}</p>
+          <h4>{t('2. Supply the scoped credential separately')}</h4>
+          <p role="status">{value.credential_configured ? t('A harness credential is configured on this server.')
+            : t('Operator setup required: this server has no scoped harness credential configured.')}</p>
+          <p>{t(value.credential_policy)}</p><p>{t(value.scope)}</p>
+        </>}
+        <h4>{anonymous ? t('2. Connect and give the agent this run') : t('3. Connect and give the agent this run')}</h4>
         <p>{client === 'claude' ? t('Open Claude interactively in that project and review its project MCP approval prompt. Pending approval means the MCP process has not connected yet.')
           : client === 'codex' ? t('Open Codex in a trusted project and inspect /mcp to confirm that looplab loaded.')
             : t('Inspect the MCP server status in your client.')}{t(' Connected confirms the stdio process only. Tool calls can still need client approval. Use connection_check for this run and inspect its result.')}{client === 'claude' && t(' In Claude --print, exit 0 can include permission_denials.')}</p>

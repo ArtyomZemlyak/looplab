@@ -4,6 +4,22 @@ python -m benchmarks.external_asha_smoke --out .tmp/new-asha-proof
 Tests same-rung stop recovery, absent resource declaration, absent peer rung and
 operator retarget before evaluation or at an open question. Only private processes
 and configuration are used. No model calls.
+
+What the probe covers (moved from docs/guide/external-harness.md, doc 82 П1):
+
+The ASHA probe measures two baseline SGD curves before each new control candidate.
+Its five cases cover same-resource stop recovery, no declared resource, an absent
+peer rung, operator retarget before evaluation, and retarget while a stop question
+is open and MCP is disconnected. The last case reconnects to the same question
+with current abort authority removed and unchanged journal bytes. Only the fixture's
+operator performs retarget, with a private credential never supplied to MCP.
+An opaque protected command trains and scores once per node, computing actual
+held-out MSE at each step. Stop produces no completed metric or checkpoint; advisory
+cases finish normally. Every terminal node and finalized run gets a Russian result
+interpretation, protected scorer bytes stay unchanged, and `inspect`/`replay` pass.
+Use `--case same_resource_stop`, `missing_resource`, `unmatched_rung`, `retarget`
+or `retarget_open` to select one case in a new output directory. This is protocol
+acceptance with real short SGD, not a claim that ASHA or the agent makes good ML decisions.
 """
 from __future__ import annotations
 

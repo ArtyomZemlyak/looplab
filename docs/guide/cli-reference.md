@@ -3389,10 +3389,10 @@ looplab harness [--settings]
 
 ## `harness-mcp`
 
-Serve every live UI API operation to a coding agent over stdio MCP (`harness/mcp_server.py`). Needs
-`pip install 'looplab[harness,ui]'` and a running `looplab ui`. `LOOPLAB_HARNESS_URL` names another
-UI; `LOOPLAB_HARNESS_TOKEN` is the scoped agent credential, distinct from the owner's
-`LOOPLAB_UI_TOKEN`. No options.
+Serve the UI's API to a coding agent over stdio MCP (`harness/mcp_server.py`). Needs
+`pip install 'looplab[ui]'` and a running `looplab ui`; register once:
+`codex mcp add looplab -- looplab harness-mcp`. Open UI: no token; protected: the scoped
+`LOOPLAB_HARNESS_TOKEN` (never `LOOPLAB_UI_TOKEN`); `LOOPLAB_HARNESS_URL`: another UI. No options.
 
 ```bash
 looplab harness-mcp

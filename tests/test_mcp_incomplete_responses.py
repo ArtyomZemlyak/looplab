@@ -54,8 +54,13 @@ def test_oversized_read_keeps_narrow_query_advice_and_no_partial_body():
 def test_validation_refusals_keep_original_status_and_body(status):
     api = HarnessAPI("http://localhost", transport=httpx.MockTransport(
         lambda request: httpx.Response(status, json={"detail": "input refused"})))
-    assert api.request("POST", "/api/runs/demo/commands", {}) == {
-        "status": status, "body": {"detail": "input refused"}}
+    expected = {"status": status, "body": {"detail": "input refused"}}
+    if status == 401:
+        # An anonymous client (doc 82 П1) keeps the original status and body and is told, in fixed
+        # words, which credential the protected server wants.
+        from looplab.harness.mcp_server import ANONYMOUS_401_MESSAGE
+        expected |= {"code": "credential_required", "message": ANONYMOUS_401_MESSAGE}
+    assert api.request("POST", "/api/runs/demo/commands", {}) == expected
 
 
 def test_generic_text_reads_and_empty_no_content_writes_remain_supported():

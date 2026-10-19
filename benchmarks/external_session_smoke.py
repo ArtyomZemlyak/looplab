@@ -16,6 +16,49 @@ Use --obligations to exercise enabled research, concept base, report and
 lesson/skill reviews across MCP sessions and node reset.
 Use --monitor for a checked operator training/evaluation command, followed by
 an advisory monitor that survives a second MCP loss and UI restart.
+
+What the scenario covers (moved from docs/guide/external-harness.md, doc 82 П1):
+
+The offline scenario runs three real CPU training configurations with a protected
+scorer. It kills its own MCP process, restarts its private UI server, withholds two
+committed acknowledgements as HTTP 503, and damages a disposable checkpoint tail.
+It checks original receipt recovery without duplicate candidates, read-only history,
+source refusal, answer replay after terminal, result summaries, and `inspect`/`replay`.
+It pauses with an open stage checkpoint and reconnects without answering or
+resuming; phase discovery follows the server's actual next step. The optional
+hold samples the same question, pending node and unchanged journals over real
+time. It settles the pause's recorded engine acknowledgement before comparing
+journal bytes, then explicitly resumes that same engine without repeating score.
+It later pauses, reconnects in a third MCP session, resumes through the production
+command spawner and resets a measured node. The old verdict remains replayable;
+the new attempt stays pending until its own checkpoint is answered.
+With `--engine-loss`, the fixture terminates its owned engine after score has
+completed but before the checkpoint is answered. Read-only reconnect leaves it
+stopped; explicit resume spawns a replacement, re-evaluates the same node attempt
+and opens a question bound to its fresh claim. The old answer receives 409 without
+changing the journal. The history retains that question as superseded. The proof
+counts both score executions and distinguishes them from the single terminal result.
+With `--obligations`, the operator enables research/report every node, a run concept
+base, reflection priors and per-node comparative lesson/skill reviews. The agent
+uses MCP discovery, publishes a research memo, tags candidates, seeds `run_concepts`,
+and writes reports over actual measured state. It records justified no-action
+reviews because this single deterministic fixture supports no reusable ML finding.
+Reports/reviews survive reconnect and become due again after reset, even when the
+node count is unchanged. Finalization closes finish obligations without satisfying
+an expansion-only research gate. This flag can be combined with `--engine-loss`.
+With `--monitor`, the operator declares one protected `train_eval` command with a
+training role. It performs training and scoring once. Monitoring is enabled with
+kill configured and a 600-second cadence; the fast command opens its first question
+in the final observation before node terminal. The fixture kills a second owned
+MCP process at that monitor, restarts its UI again, and verifies the same question
+and live engine on reconnect. Advisory `abort` is refused, explicit `continue`
+settles the question, and exact replay creates no duplicate answer. Reset gets a
+fresh monitor; the failed configuration keeps no metric after its own review.
+This tests completed-command advisory recovery, not live-curve stop judgment.
+Only this fixture restores its known valid bytes; that is not a production repair
+procedure. `acceptance.json`, engine logs and inspection output are saved under the
+output directory. This checks protocol recovery, not model judgments or interactive
+tool approval in an installed Codex/Claude client. Remote agent liveness is unmeasured.
 """
 from __future__ import annotations
 

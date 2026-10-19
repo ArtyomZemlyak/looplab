@@ -1,7 +1,7 @@
 {
   "schema": 1,
   "language": "ru",
-  "count": 8047,
+  "count": 8056,
   "messages": {
     "# LoopLab run report — {0}": "# Отчёт запуска LoopLab — {0}",
     "## Agent narrative (advisory)": "## Пояснения агента (рекомендации)",
@@ -5112,7 +5112,7 @@
     "Fix the highlighted fields before validation.": "Устанавливать выделенные поля до подтверждения.",
     "Fix the settings JSON before using the shortcuts below.": "Устанавливайте настройки JSON перед тем, как использовать кратчайшие пути.",
     "Fix the task JSON before review.": "Перед пересмотром задачи JSON исправьте.",
-    "For a virtual environment, set command to the full looplab executable path on the client machine. Supply the scoped credential and restart the client. harness-mcp refuses a missing token; it never falls back to owner access.": "Для виртуальной среды настраивайте команду на полную петлю на исполнительном пути на клиентском механизме. Поставьте крупное полномочие и перезапуск клиента. Реактивный Mcp отказывает в недостающем символе; он никогда не возвращается к владельцу.",
+    "For a virtual environment, set command to the full looplab executable path on the client machine. Supply the scoped credential and restart the client. harness-mcp refuses a missing token; it never falls back to owner access.": "Для виртуального окружения укажите в command полный путь к looplab на компьютере клиента. Передайте harness-токен и перезапустите клиент. Без токена harness-mcp откажет в подключении; доступ владельца не подставляется.",
     "For each proposed Idea": "По каждому предлагаемому принципу",
     "Fork created · kept your newer chat selection": "Ответвление создано · ваш более новый выбор чата сохранён",
     "Fork failed": "Ответвление не удалось",
@@ -8049,7 +8049,16 @@
     "gen {0}": "версия {0}",
     "Empty cell: the experiment does not have that value (never zero). \"idea\" is what the experiment asked for; \"ran with\" is the effective config its attempt recorded.": "Пустая ячейка: у эксперимента нет этого значения (это не ноль). «идея» — что эксперимент запросил; «запущено с» — фактический конфиг, записанный его попыткой.",
     "The effective configs could not be read; the \"ran with\" columns are missing.": "Не удалось прочитать фактические конфиги; столбцов «запущено с» нет.",
-    "Table: all experiments × parameters × metrics": "Таблица: все эксперименты × параметры × метрики"
+    "Table: all experiments × parameters × metrics": "Таблица: все эксперименты × параметры × метрики",
+    "Agent instruction copied.": "Инструкция скопирована.",
+    "MCP configuration copied.": "Конфигурация MCP скопирована.",
+    "Register once with one command (it writes your Codex config):": "Зарегистрируйте один раз одной командой (она запишет конфигурацию Codex):",
+    "Or place this in a trusted project .codex/config.toml:": "Или добавьте это в .codex/config.toml доверенного проекта:",
+    "No token is needed: this UI runs without owner login. For a virtual environment, set command to the full looplab executable path on the client machine.": "Токен не нужен: этот UI работает без входа владельца. Для виртуального окружения укажите в command полный путь к looplab на компьютере клиента.",
+    "2. Connect and give the agent this run": "2. Подключите агента к этому запуску",
+    "This UI runs without owner login, so harness-mcp connects without a token. Keep LOOPLAB_UI_TOKEN out of the MCP process environment.": "Этот UI работает без входа владельца, поэтому harness-mcp подключается без токена. Не передавайте LOOPLAB_UI_TOKEN в окружение процесса MCP.",
+    "This UI requires owner login and has no scoped harness credential. Ask the operator to set a distinct LOOPLAB_HARNESS_TOKEN for the UI and the MCP process; never use LOOPLAB_UI_TOKEN.": "Этот UI требует входа владельца, а harness-токен не настроен. Попросите оператора задать отдельный LOOPLAB_HARNESS_TOKEN для UI и процесса MCP; LOOPLAB_UI_TOKEN не используйте.",
+    "Without owner login every local process, the agent included, can use this server's API; it is not restricted to this run. Turn on owner login before exposing the server to others.": "Без входа владельца API этого сервера доступен любому локальному процессу, включая агента, и не ограничен этим запуском. Включите вход владельца, прежде чем открывать сервер другим."
   },
   "plurals": {
     "({0} paraphrases folded)": {

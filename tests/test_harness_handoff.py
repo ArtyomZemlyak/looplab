@@ -103,6 +103,45 @@ def test_handoff_reports_missing_scoped_credential_without_exporting_owner(tmp_p
     assert "operator-secret-1234" not in response.text
 
 
+def test_handoff_names_the_protected_server_without_a_scoped_credential(tmp_path, monkeypatch):
+    _, store, client = _run(tmp_path, monkeypatch, credential=False)
+    value = client.get("/api/runs/demo/harness-handoff", params={
+        "expected_generation": run_generation_token(store.read_all())},
+        headers={"X-LoopLab-Token": "operator-secret-1234"}).json()
+    assert value["credential_mode"] == "operator_setup"
+    assert "LOOPLAB_HARNESS_TOKEN" in value["credential_policy"]
+
+
+def test_open_server_handoff_is_anonymous_and_asks_for_no_token(tmp_path, monkeypatch):
+    """doc 82 П1: no owner login and no harness credential — the beginner's server. The handoff
+    tells the agent it connects with no token, and the anonymous MCP client really passes
+    connection_check against this app (no environment variable at all)."""
+    rd, store, _ = _run(tmp_path, monkeypatch, credential=False)
+    monkeypatch.delenv("LOOPLAB_UI_TOKEN", raising=False)
+    client = TestClient(make_app(rd.parent))
+    generation = run_generation_token(store.read_all())
+    value = client.get("/api/runs/demo/harness-handoff",
+                       params={"expected_generation": generation}).json()
+    assert value["credential_configured"] is False and value["credential_mode"] == "anonymous"
+    assert "without a token" in value["credential_policy"]
+    from looplab.harness.mcp_server import HarnessAPI
+
+    seen = []
+
+    def via_app(request):
+        seen.append(request)
+        reply = client.request(request.method, request.url.raw_path.decode(),
+                               headers=dict(request.headers))
+        return httpx.Response(reply.status_code, content=reply.content,
+                              headers={"content-type": reply.headers.get("content-type", "")})
+
+    api = HarnessAPI("http://127.0.0.1:8765", transport=httpx.MockTransport(via_app))
+    result = api.connection_check("demo")
+    assert result["ok"], result
+    assert result["credential"] == "anonymous" and result["generation"] == generation
+    assert all("X-LoopLab-Token" not in r.headers for r in seen)
+
+
 def test_handoff_and_progress_route_a_literal_encoded_looking_run_id(tmp_path, monkeypatch):
     run_id = "mnist # %2F"
     rd, store, client = _run(tmp_path, monkeypatch, run_id=run_id)

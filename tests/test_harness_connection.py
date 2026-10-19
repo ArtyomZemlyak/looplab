@@ -155,7 +155,9 @@ def test_connection_keeps_incomplete_journal_evidence_explicit():
     assert result["source_health"]["reviews"]["read_complete"] is False
 
 
-def test_connection_refuses_server_without_scoped_credential():
+def test_connection_on_an_open_server_is_anonymous_not_refused():
+    """doc 82 П1: a server with no harness credential is the open UI. The reads succeed without a
+    token, so connection_check passes and says the connection is anonymous."""
     seen=[]
     def handler(request):
         seen.append(request)
@@ -163,5 +165,18 @@ def test_connection_refuses_server_without_scoped_credential():
         if request.url.path.endswith("/harness-handoff"):value["credential_configured"]=False
         return httpx.Response(200,json=value)
     api=HarnessAPI("http://localhost",transport=httpx.MockTransport(handler))
-    assert api.connection_check("demo")["code"]=="harness_credential_missing"
-    assert len(seen)==2
+    result=api.connection_check("demo")
+    assert result["ok"] and result["code"]=="run_reads_succeeded"
+    assert result["credential"]=="anonymous"
+    assert len(seen)==3
+    assert all("X-LoopLab-Token" not in r.headers for r in seen)
+
+
+def test_connection_on_a_protected_server_without_token_names_the_credential():
+    api=HarnessAPI("http://localhost",transport=httpx.MockTransport(
+        lambda request: httpx.Response(401, json={"detail": "unauthorized"})))
+    result=api.connection_check("demo")
+    assert result["ok"] is False and result["code"]=="credential_required"
+    assert "LOOPLAB_HARNESS_TOKEN" in result["message"]
+
+

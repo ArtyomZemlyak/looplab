@@ -4,6 +4,166 @@ python -m benchmarks.external_idle_recovery_smoke --out .tmp/new-idle-proof
 The private fixture kills its own MCP, optionally its own idle engine, and
 restarts its own UI. Reads never resume; a durable explicit resume uses the
 production spawner. No provider calls or user server/configuration changes.
+
+What the probe and its options cover (moved from docs/guide/external-harness.md, doc 82 П1):
+
+`--seed-base-recovery` covers agent loss and explicit engine recovery on a private
+git fixture. It changes the source after the first seed and before its terminal,
+checks the old/new copied-base receipts through public MCP, joins each to its
+seed event and generation, and requires exactly two protected training executions.
+It verifies seed provenance and the old/new run-owned archives, including their
+protected scorer bytes. It makes no claim of upstream advancement or complete
+archived-base replay (data and environment remain outside the snapshot).
+After the two evaluations finish, this option removes its disposable source and
+node workdirs, exports both bases via the CLI and verifies the crate. One separate
+export-validation SGD execution reapplies the recorded second recipe and compares
+its result. The proof reports it separately from the two engine evaluations;
+export/validation leave the event log unchanged.
+This variant declares `cmd.scorer_boundary.files: [score.py]`, with manual `protect`
+empty and entrypoint inference disabled. It verifies the declared scorer's hash
+and complete boundary receipt through MCP after each terminal and reconnect.
+The boundary covers the listed files; it does not certify dependency closure.
+
+`--pinned-seed` first records a private seed archive, then selects that exact
+`workspace_seeded` sequence and digest in the operator's task. After the first
+terminal it removes its owned source, reconnects or explicitly resumes the engine,
+and submits the second recipe. Both terminal/MCP receipts must retain the same
+base digest and origin selection. Each case still runs exactly two engine SGD
+evaluations and one separately counted export-validation execution. Export verifies
+one deduplicated base after source/workdir loss; `inspect`/`replay` and protected
+scorer checks remain required. The selected origin is retained as a required input;
+origin loss refuses future seeds/resume. This tests immutable **initial** selection,
+not live advancement or model-authored equivalence judgments. See
+[task setup](tasks.md#start-a-new-task-from-a-recorded-base) for the operator field;
+candidate injection cannot set or change it.
+
+
+The idle recovery probe finishes a protected real SGD evaluation before killing
+its own MCP and restarting its private UI. With only MCP loss, the same engine
+waits for another explicit candidate. With engine loss too, `run_progress` directs
+the new session to recovery despite having no pending nodes or recorded pause.
+Three repeated reads leave the event log unchanged; a durable explicit `resume`
+creates one replacement engine, and an exact retry creates none. Both cases
+measure a second candidate, publish result interpretations, finalize explicitly
+and pass `inspect`/`replay`. Select `--case agent_loss` or `--case engine_loss`.
+This short protocol test observes engine ownership, not remote agent availability.
+Its optional `--quiet-hold-seconds 121` holds the real engine idle after MCP death
+for more than the activity threshold. Operator reads then see `quiet`; the measured
+result and event log remain unchanged. UI restart shows `not_observed`, and a new
+MCP progress read establishes a new observation. A quiet/forgotten observation
+never resumes the run or becomes a verdict that the agent died.
+
+For real lost responses after server acceptance, use a new disposable output:
+
+    python -m benchmarks.external_idle_recovery_smoke --out .tmp/new-transport-proof --case agent_loss --drop-command-response
+
+An owned loopback TCP proxy forwards the first candidate and node commentary,
+receives the UI's successful responses, then closes each connection without sending
+the reply to MCP. The agent observes unknown write outcomes, reads the saved receipts
+and retries the exact bodies/identifiers. A progress GET reply is also lost: unavailable
+evidence changes no work. Recovery, UI restart and a second measured candidate still
+produce exactly two score executions and three commentary rows (two nodes and one
+explicitly finalized run). This exercises real transport/protocol recovery with short
+protected SGD, not model decisions or interactive client approval.
+Add `--response-fault invalid_json`, `oversized` or `server_error` to replace the
+two accepted write replies with malformed HTTP 200, over-cap HTTP 200 or HTTP 503.
+The proxy first receives upstream 200 in every case. The GET reply still disconnects.
+Each independent case must preserve the same receipts, two actual score executions
+and three commentary rows; fault payloads never supply a metric.
+Add `--read-fault stale_generation` or `wrong_receipt` to replace the GET reply
+with a JSON object carrying another generation or command ID. The latter targets
+the original command receipt; the former targets progress. MCP must return
+`response_context_mismatch` despite HTTP 200, omit the body and leave work unchanged.
+Explicit fresh reads then recover the correct evidence. Each case needs a new out
+directory; write faults and read faults are independent fixture options.
+Add `--discovery-fault disconnect`, `invalid_json` or `invalid_catalog` to fault
+both live discovery tools before the first candidate. The proxy receives upstream
+200, then disconnects or substitutes HTML/JSON with malformed `paths`. Each tool
+must return unavailable evidence without claiming an empty catalog; its next
+explicit read must recover the real command route/schema. Discovery changes no
+events or work. The remaining protected SGD/reconnect checks still apply.
+For the minimal remote-client installation, create a separate environment with
+`pip install -e ".[harness]"` and pass its Python executable using `--mcp-python`.
+The fixture requires FastAPI absent and blocks both FastAPI and Uvicorn imports
+inside its stdio process. It reads every phase and the setting metadata before
+and after reconnect, while its server, engine and protected scorer use the normal
+interpreter. Uvicorn may be present as an MCP dependency; it must not be imported
+by the stdio path. Combine this option with the discovery/response faults above.
+Use `--result-backlog --case all` in a fresh output directory to defer the two
+node interpretations across MCP death/UI restart, then recover them using one-item
+pages through typed MCP `result_notices`. Each summary is posted and exactly retried while its next cursor stays valid;
+finalized run/node receipts are paged too. This covers both agent loss and engine
+loss with an explicit resume. It can use `--mcp-python`; response-loss proxy options
+are separate probes. The fixture waits for the engine's existing post-evaluation
+`trust_scan` before asserting that commentary/page reads append no events.
+Add `--failed-first` to this backlog probe to fail the first protected scorer on
+an invalid learning-rate type, read generation/attempt-fenced logs after reconnect,
+reject stale log reads and changed-payload key reuse, then submit a corrected child.
+An exact retry of the admitted failed candidate must not execute its scorer again.
+The final result contains one failure without a score and one measured SGD result,
+with separate interpretations and preserved lineage. Both agent-loss and engine-loss
+cases are supported; the fault changes only editable configuration.
+Add `--obligations` to enable research, authored concepts, novelty decisions,
+reports and lesson/skill reviews in this recovery probe. After the corrected child
+settles, it repeats the old journal requests and verifies that original receipts
+are returned without new rows while progress still marks them superseded.
+Commentary alone must not permit finish; a fresh report alone must not discharge
+fresh lesson/skill reviews. The agent supplies justified no-action reviews for
+this deterministic fixture, then explicitly finishes. Expansion-only research and
+concept-base gates remain separate from finalization. These are scripted protocol
+decisions, not model judgment parity tests.
+Add `--damaged-journals` with `--obligations` to damage each private decision/review
+journal after the two terminal outcomes. Progress must expose incomplete sources;
+both exact retries and new action IDs must refuse without changing journal/event
+bytes. A damaged review source also refuses explicit finish. Only the fixture
+operator restores its own known-good backup; the server performs no repair.
+After restoration the old receipts replay, stay superseded, and require current
+finish evidence as above. The byte attribution check waits for the specific
+existing report command's engine acknowledgement, which may follow its intake receipt.
+Add `--value-recovery` with `--result-backlog` to exercise explicit greedy → MCTS →
+greedy switches on two successful measured SGD nodes. The fixture operator sets
+`mcts_value_weight=0.4` at launch; the scoped agent switches only the policy.
+It submits the complete batch with clearly labelled scripted headroom beliefs,
+replays its original request, refuses changed evidence revision under that action,
+then replays again after returning to greedy. Exactly two value events and two
+applied strategy decisions are recorded, without extra scoring. This option excludes
+`--failed-first`: MCTS branch review needs two eligible measured branches.
+Combine it with `--obligations` and `--mcp-python` for report/review and minimal
+remote-client coverage; use a fresh output directory for each probe.
+Add `--damaged-events` with `--obligations` to damage a complete record in the
+private event log after terminal results. Progress must expose incomplete event
+health; hypothesis/selection reads and exact/fresh decision/review requests must
+return source refusals without modifying event or sidecar bytes. With
+`--value-recovery`, the accepted value batch is checked too. Only the fixture
+operator restores its known-good backup, then recovers the old ACKs and explicitly
+satisfies current finish obligations. This probe preserves normal EventStore
+torn-tail handling and makes no production repair request.
+`--case agent_loss --drop-command-response --read-fault incomplete_result_page`
+removes `items` from a real successful result reply while preserving generation.
+The typed read must return `invalid_result_page`, without body or automatic retry.
+The next explicit read recovers the measured receipt without changing event bytes.
+Run this response-loss probe separately from backlog/engine-loss probes.
+`--read-fault incomplete_receipt` in the same agent-loss response-loss probe
+submits an invalid hint, observes its real `rejected` record, and removes `terminal`
+from one successful receipt reply while preserving generation/ID. The typed read
+must refuse it; the next explicit read recovers `rejected`/`invalid_command` with
+no new event, automatic retry or worker restart. The protected SGD evaluations remain unchanged.
+`--read-fault incomplete_progress` removes the candidate decision requirements from
+two real successful progress replies, keeping generation and the other fields.
+Both typed `run_progress` and `connection_check` must refuse that context. Explicit
+subsequent reads recover the gates without event changes, work or automatic retries.
+Add `--knowledge-recovery` with `--result-backlog --obligations` to publish a
+protected-evaluation protocol lesson and candidate skill after two measured nodes.
+An owned proxy drops both accepted responses; exact retries must recover one lesson
+and one skill receipt. The fixture damages its own event/knowledge sources, proves
+refusal for writes and fresh completed reviews without changing domain bytes, and
+restores only its own backups. Run it separately from `--failed-first` and
+`--drop-command-response`. The authored technique checks recovery protocol; it is
+not evidence of general ML quality. Finish report and completed reviews stay explicit.
+`--case agent_loss --drop-command-response --read-fault stale_result_generation`
+instead replaces a successful result page's generation at the owned proxy. The
+typed tool must return unavailable context without those receipts; the next explicit
+read recovers. This fault is synthetic transport evidence, never an ML result.
 """
 from __future__ import annotations
 

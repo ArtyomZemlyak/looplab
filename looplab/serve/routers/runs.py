@@ -1090,7 +1090,8 @@ def build_router(srv) -> APIRouter:
         response.headers["Vary"] = "X-LoopLab-Token, Authorization"
         try:
             return snapshot(_run_dir(run_id), expected_generation,
-                            credential_configured=srv.harness_auth_configured)
+                            credential_configured=srv.harness_auth_configured,
+                            owner_login=bool(getattr(srv, "owner_auth_enabled", False)))
         except OSError as exc:
             raise refusal("event_log_unreadable") from exc
 

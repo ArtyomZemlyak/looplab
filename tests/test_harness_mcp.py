@@ -53,11 +53,13 @@ def test_mcp_advertises_run_controls_and_full_settings_discovery():
     assert "command_receipt" in MCP_INSTRUCTIONS[:512]
 
 
-@pytest.mark.parametrize("scoped,owner", [(None, None), (None, "owner-secret"),
-    ("", "owner-secret"), ("   ", "owner-secret"), ("${LOOPLAB_HARNESS_TOKEN}", None),
+@pytest.mark.parametrize("scoped,owner", [(None, "owner-secret"),
+    ("", "owner-secret"), ("   ", "owner-secret"), ("${LOOPLAB_HARNESS_TOKEN}", "owner-secret"),
     ("same-secret", "same-secret"), ("secret\nvalue", None),
     ("secret\x7fvalue", None), ("secret\u0100value", None)])
 def test_stdio_never_uses_an_owner_fallback_or_opens_transport_without_scoped_token(monkeypatch, scoped, owner):
+    """doc 82 П1: no token is the anonymous path — but never when the MCP environment carries the
+    owner's token (that UI is protected), never with that token itself, never with a malformed one."""
     import looplab.harness.mcp_server as module
     for name, value in [("LOOPLAB_HARNESS_TOKEN", scoped), ("LOOPLAB_UI_TOKEN", owner)]:
         if value is None:
@@ -71,6 +73,49 @@ def test_stdio_never_uses_an_owner_fallback_or_opens_transport_without_scoped_to
     assert "owner-secret" not in str(exc.value) and "same-secret" not in str(exc.value)
     if scoped and scoped.strip():
         assert scoped not in str(exc.value)
+
+
+@pytest.mark.parametrize("scoped", [None, "", "   ", "${LOOPLAB_HARNESS_TOKEN}"])
+def test_stdio_without_any_token_opens_an_anonymous_transport(monkeypatch, scoped):
+    """The beginner's path (doc 82 П1): no variable at all. The transport carries no token header
+    — only the attribution header — and the owner's token is never sent."""
+    import looplab.harness.mcp_server as module
+    monkeypatch.delenv("LOOPLAB_UI_TOKEN", raising=False)
+    if scoped is None:
+        monkeypatch.delenv("LOOPLAB_HARNESS_TOKEN", raising=False)
+    else:
+        monkeypatch.setenv("LOOPLAB_HARNESS_TOKEN", scoped)
+    seen, clients = [], []
+
+    def api(url, token):
+        assert token == ""
+        value = HarnessAPI(url, token, transport=httpx.MockTransport(
+            lambda request: seen.append(request) or httpx.Response(200, json={})))
+        clients.append(value)
+        return value
+
+    class Server:
+        def run(self, transport):
+            assert transport == "stdio"
+            clients[0].request("GET", "/api/runs")
+
+    monkeypatch.setattr(module, "HarnessAPI", api)
+    monkeypatch.setattr(module, "build_server", lambda _: Server())
+    run_stdio()
+    assert clients[0].anonymous and clients[0].client.is_closed
+    assert "X-LoopLab-Token" not in seen[0].headers
+    assert seen[0].headers["X-LoopLab-Client"].startswith("harness-mcp/")
+
+
+def test_anonymous_401_names_the_credential_to_configure():
+    api = HarnessAPI("http://127.0.0.1:8765", transport=httpx.MockTransport(
+        lambda request: httpx.Response(401, json={"detail": "unauthorized"})))
+    result = api.request("GET", "/api/runs")
+    assert result["status"] == 401 and result["code"] == "credential_required"
+    assert "LOOPLAB_HARNESS_TOKEN" in result["message"]
+    scoped = HarnessAPI("http://127.0.0.1:8765", "scoped", transport=httpx.MockTransport(
+        lambda request: httpx.Response(401, json={"detail": "unauthorized"})))
+    assert "code" not in scoped.request("GET", "/api/runs")
 
 
 @pytest.mark.parametrize("token", ["", "secret\x00value"])
@@ -106,6 +151,7 @@ def test_stdio_forwards_only_selected_scoped_credential_and_closes_transport(mon
 
 
 def test_cli_reports_missing_credential_before_opening_stdio(monkeypatch):
+    # The owner's token alone in the MCP environment = a protected UI: refused before stdio opens.
     from typer.testing import CliRunner
     from looplab.cli import app
     monkeypatch.delenv("LOOPLAB_HARNESS_TOKEN", raising=False)

@@ -93,7 +93,10 @@ def test_a_missing_config_file_is_refused_not_a_usage_error(tmp_path):
 
 
 def test_harness_mcp_without_its_token_is_refused_not_a_usage_error(monkeypatch):
+    # Without any token harness-mcp connects anonymously to an open UI (doc 82 П1); the refusal
+    # that remains is an MCP environment that carries only the owner's token (a protected UI).
     monkeypatch.delenv("LOOPLAB_HARNESS_TOKEN", raising=False)
+    monkeypatch.setenv("LOOPLAB_UI_TOKEN", "owner-secret")
     output = _refused(CliRunner().invoke(app, ["harness-mcp"]))
     assert "LOOPLAB_HARNESS_TOKEN" in output
 

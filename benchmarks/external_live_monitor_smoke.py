@@ -4,6 +4,21 @@ python -m benchmarks.external_live_monitor_smoke --out .tmp/new-live-monitor-pro
 Tests improving-loss protection, deliberate stop of a frozen-optimizer control
 after MCP/UI recovery, and spent training authority during checkpoint validation.
 Only the fixture's own processes are stopped; the output directory must be new.
+
+What the probe covers (moved from docs/guide/external-harness.md, doc 82 П1):
+
+The live monitor probe runs three protected CPU SGD configurations with a separate
+protected scorer. The improving curve keeps abort unavailable after `watch`.
+A zero-learning-rate control grants an explicit second-question abort; killing the
+fixture's MCP and restarting its UI preserves that question and live engine. The
+agent deliberately stops this acceptance control, which yields no completed metric
+or training artifact and never runs score. A third case saves its checkpoint before
+validation in the same command: subsequent questions remain advisory after `watch`.
+Each question is answered through MCP, exact retries create no duplicate answers,
+protected sources stay unchanged, and terminal/run interpretations appear in Russian.
+All three runs pass `inspect`/`replay`. Use `--case improving`, `--case frozen_stop`
+or `--case checkpoint_validation` to select one case. Delays pace real optimizer
+steps for observation; this does not test model judgment or a multi-hour session.
 """
 from __future__ import annotations
 

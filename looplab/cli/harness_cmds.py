@@ -25,10 +25,11 @@ def harness(
 def harness_mcp() -> None:
     """Serve all live UI API operations to a coding agent over stdio MCP.
 
-    Requires `pip install 'looplab[harness,ui]'` and a running `looplab ui`.
-    Set LOOPLAB_HARNESS_URL for another local/proxied UI and LOOPLAB_HARNESS_TOKEN
-    for the scoped agent credential. Missing credentials fail before connection;
-    LOOPLAB_UI_TOKEN is never used as a fallback.
+    Requires `pip install 'looplab[ui]'` and a running `looplab ui`. Register once with
+    `codex mcp add looplab -- looplab harness-mcp`. On an open UI (the default) no token is
+    needed. Set LOOPLAB_HARNESS_URL for another local/proxied UI and, on a protected UI,
+    LOOPLAB_HARNESS_TOKEN for the scoped agent credential. LOOPLAB_UI_TOKEN is never used:
+    an environment carrying only it is refused before connection.
     """
     from looplab.harness.mcp_server import run_stdio
     try:

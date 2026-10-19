@@ -22,29 +22,27 @@ reference.
 
 ## First external run
 
-Use a **separate run root and UI server for external runs**. A harness token can control
-the launched runs on its server; it is not a token limited to a single run. The
-operator starts the server and run, while the coding agent proposes candidates.
+The default UI runs without owner login, so the coding agent connects with **no token**
+(a protected server is covered in [External harness setup](#external-harness-setup)).
 
-1. From a source checkout, install `pip install -e ".[ui,harness]"`. Start the UI with
-   an owner credential and a distinct `LOOPLAB_HARNESS_TOKEN`, using the commands in
-   [External harness setup](#external-harness-setup). Keep the owner credential out
-   of the coding agent's environment. Open the UI to watch the same run root.
-2. Start a small task in a second terminal with
+1. From a source checkout, install `pip install -e ".[ui]"` (the `ui` extra includes the MCP
+   client) and start `looplab ui --run-root runs`. Open the UI to watch the same run root.
+2. Register LoopLab with the coding client once:
+   `codex mcp add looplab -- looplab harness-mcp` (Claude Code:
+   `claude mcp add looplab -- looplab harness-mcp`). Add
+   `--env LOOPLAB_HARNESS_URL=<url>` when the UI is not on `http://127.0.0.1:8765`.
+   No environment variable is needed otherwise.
+3. Start a small task in a second terminal with
    `looplab run task.json --out runs/my-run --backend toy -s external_harness=true`.
    Keep this process running. The external agent, not LoopLab's built-in Researcher,
    chooses the next candidate; the task's evaluator still runs inside LoopLab.
-3. In **Progress → Agent obligations → Connect external agent**, inspect the server/root
-   and copy the instruction for this run. Configure the coding client's stdio MCP
-   server as `looplab harness-mcp`, passing only `LOOPLAB_HARNESS_TOKEN` and the UI
-   URL. Supply the credential separately; client-specific examples are below.
-   If the MCP client runs on another machine, install `pip install -e ".[harness]"`
-   there from a matching LoopLab checkout; the client does not need `[ui]` or FastAPI.
-   In Claude, review the project MCP approval prompt; **Pending approval** means
-   the process has not connected. In Codex, use a trusted project and inspect `/mcp`.
-   **Connected** only proves the stdio process, even when the UI/API is unreachable.
-   Ask the agent to call MCP `connection_check` for this run before continuing.
-   Without the UI handoff, give the agent this instruction, replacing the run ID:
+4. Open the coding client in a trusted project (Codex: inspect `/mcp`; Claude: review the
+   project MCP approval prompt — **Pending approval** means the process has not connected).
+   **Connected** only proves the stdio process, even when the UI/API is unreachable, so ask
+   the agent to call MCP `connection_check` for this run: on an open UI it answers `ok` with
+   `credential: "anonymous"`. **Progress → Agent obligations → Connect external agent** shows
+   the same commands and an instruction to copy. Without the UI handoff, give the agent this
+   instruction, replacing the run ID:
 
    > Start with `looplab harness` and MCP capabilities. Call `connection_check`
    > for `my-run` to check live API reads, not only stdio. Read the current
@@ -54,15 +52,18 @@ operator starts the server and run, while the coding agent proposes candidates.
    > result and checkpoints, then decide what to do next. Explicitly pause or
    > finalize when done. Do not claim a score before LoopLab evaluates it.
 
-4. Watch the run in the UI. Before its first candidate, **Progress → Agent obligations**
+5. Watch the run in the UI. Before its first candidate, **Progress → Agent obligations**
    shows what the external agent owes. A live server or engine does not prove
    that the agent is connected. If the agent stops, reconnect it to the **same**
    run, read current generation and receipts, and continue; do not blindly
    resubmit the last candidate. See [Reconnect and recovery](#reconnect-and-recovery).
 
+If the MCP client runs on another machine, install `pip install -e ".[harness]"` there from a
+matching LoopLab checkout; the client does not need `[ui]` or FastAPI.
+
 For a quick offline evaluator, `examples/toy_task.json` can replace `task.json`.
-The coding agent's own model calls cost money outside LoopLab's cost ledger. The
-scoped token cannot launch a run or change global settings. Where enabled obligations
+The coding agent's own model calls cost money outside LoopLab's cost ledger. On a
+protected server the scoped token cannot launch a run or change global settings. Where enabled obligations
 require more steps than this sketch, the `harness` contract and live progress win.
 
 Bootstrap reads (contract, handoff, progress) need a configuration this server build
@@ -253,8 +254,10 @@ external agent**. Opening this block performs an authenticated read of
 checks the run generation, external mode, event history and saved task/config.
 The block displays its actual run root and directory, a last-read engine probe,
 and a copyable MCP configuration. Choose **Codex**, **Claude Code**, or
-**Other MCP client**. Codex uses TOML with `env_vars`; Claude uses project
-`.mcp.json` with environment expansion. The other-client descriptor is:
+**Other MCP client**. On an open UI (handoff `credential_mode: "anonymous"`) no descriptor
+names a token, Codex also gets the one-time `codex mcp add looplab -- looplab harness-mcp`,
+and the credential step is not shown. On a protected UI Codex uses TOML with `env_vars` and
+Claude uses project `.mcp.json` with environment expansion. The other-client descriptor is:
 
 ```json
 {
@@ -277,20 +280,19 @@ Only requests presenting the scoped token receive agent restrictions; other reac
 have owner access in open mode. Enable `LOOPLAB_UI_REQUIRE_AUTH=1` or supply a distinct owner
 token to protect the operator plane on a shared/public server.
 
-Supply a distinct `LOOPLAB_HARNESS_TOKEN` through the client's protected credential
-mechanism. Remove `LOOPLAB_UI_TOKEN` from the MCP process environment, including
+On a protected UI, supply a distinct `LOOPLAB_HARNESS_TOKEN` through the client's protected
+credential mechanism. Remove `LOOPLAB_UI_TOKEN` from the MCP process environment, including
 inherited variables. The descriptor and copied instruction contain no credential.
-Restart the coding client after setting its environment. `harness-mcp` refuses
-to start without a nonempty scoped credential or when it matches the inherited
-owner token; it never falls back to `LOOPLAB_UI_TOKEN`. An unexpanded token
-placeholder also fails locally. Claude's empty default makes an unset variable
-fail at startup instead of sending placeholder text to the API.
+Restart the coding client after setting its environment. With no token at all `harness-mcp`
+connects anonymously; it refuses to start when the environment carries only
+`LOOPLAB_UI_TOKEN` (a protected UI) or a token equal to it, and it never falls back to
+`LOOPLAB_UI_TOKEN`. An unexpanded token placeholder counts as no token.
 The token must contain printable ASCII without control characters; invalid header
 values fail before transport with a fixed message that omits the secret.
 The block reports only whether a scoped credential was configured when this
 server started; it cannot tell whether your client has the right secret or is
-connected. If none is configured, the operator must configure one and restart the
-server before connecting. Its scope covers the server's launched external runs
+connected. If owner login is on and none is configured (`credential_mode: "operator_setup"`),
+the operator must configure one and restart the server before connecting. Its scope covers the server's launched external runs
 and limited controls on internal runs, rather than only the displayed run.
 
 **Copy agent instruction** prepares the run identity, generation, workspace edit
@@ -313,6 +315,19 @@ candidate evaluation, reconnect/retry and result commentary with a local scripte
 Messages provider. The provider selected tool calls; LoopLab measured the scores.
 Paid model judgment and interactive tool approvals remain untested. See doc 71
 sections 31–33 for the tested boundary.
+
+### Codex as a live agent
+
+Codex leads a run only while its **interactive** client is open: an agent that is not running
+cannot answer `wait_for_next`, a checkpoint or a result. Start it in a terminal multiplexer so
+the session survives a closed window, e.g. `tmux new -s codex` and then `codex` in a trusted
+project, and detach with `Ctrl-b d`. Register LoopLab once with
+`codex mcp add looplab -- looplab harness-mcp`, or for one session only pass
+`codex -c 'mcp_servers.looplab.command="looplab"' -c 'mcp_servers.looplab.args=["harness-mcp"]'`.
+`codex exec` runs one non-interactive turn and exits, and `codex queue --thread … --message …`
+only queues a message for an existing session; neither keeps a session leading the run without
+an open client. Between decisions the agent blocks on MCP `wait_for_next`; the operator's
+`looplab agent-notify` hook can also wake a sleeping session ([Orchestration](#orchestration-doc-78)).
 
 ### Check the live connection
 
@@ -428,27 +443,26 @@ run this opt-in, local acceptance check:
 python -m benchmarks.claude_harness_smoke --claude /absolute/path/to/claude --out .tmp/claude-smoke
 ```
 
-The output directory must be new. It starts a disposable loopback server/root,
-protected CPU training scorer and local scripted Messages provider. Three fresh
-Claude invocations check a denied tool, submit a candidate, then reconnect/retry,
-measure two successful configurations and one failed configuration, publish Russian
-interpretations and explicitly finish. Inspect/replay and protected file bytes are checked.
-The client gets only a synthetic API key and scoped test token, isolated settings,
-default permission mode and an explicit allowlist of LoopLab tools for the authorized
-cases. It uses no permission bypass, shell tools, saved chat or model account.
-`acceptance.json` stores client version, call counts and measured outcomes. Claude's
-cost estimate reflects fixture token counts; it is not a provider charge. This checks
-transport and permission handling, not an LLM's research choices or enabled optional
-obligations (research, concepts, reports and monitors are disabled for this small task).
+The output directory must be new; `benchmarks/claude_harness_smoke.py`'s docstring states what it
+checks.
+
 
 ## External harness setup
 
-Install the optional UI and MCP packages. Start the UI against the run root you want
-to control. Set a distinct harness token for the coding agent; keep the owner token
-in the UI server/operator session.
+On the open (default) UI there is nothing to set up beyond the [First external run](#first-external-run):
+`harness-mcp` sends no token and the server asks for none. Without owner login every local
+process, the agent included, can use the server's API, so keep such a server private to your
+machine. `harness-mcp` refuses to start when its environment carries `LOOPLAB_UI_TOKEN` without a
+harness token (that UI is protected; the owner secret is never sent), and an anonymous request a
+protected server refuses answers `credential_required` naming the variable to set.
+
+**Protected server.** Use a **separate run root and UI server for external runs**: a harness
+token can control the launched runs on its server; it is not a token limited to a single run.
+Set a distinct harness token for the coding agent; keep the owner token in the UI
+server/operator session.
 
 ```sh
-pip install -e ".[ui,harness]"
+pip install -e ".[ui]"
 export LOOPLAB_UI_TOKEN='choose-a-private-token'
 export LOOPLAB_HARNESS_TOKEN='choose-a-different-agent-token'
 looplab ui --run-root runs --host 127.0.0.1 --port 8765
@@ -474,11 +488,13 @@ looplab run task.json --out runs/my-run --backend toy -s external_harness=true
 Keep that run process open while the coding agent sends commands from another terminal.
 
 Configure your coding agent's MCP client to launch `looplab harness-mcp` over stdio,
-with **only** `LOOPLAB_HARNESS_TOKEN` and, if the server is elsewhere,
-`LOOPLAB_HARNESS_URL=http://127.0.0.1:8765`. The process offers twelve tools:
-`capabilities`, `connection_check`, `phases`, `phase_info`, `settings_keys`, `setting_info`, `operations`,
-`operation_schema`, `run_progress`, `result_notices`, `command_receipt` and `api_request`. The latter
-forwards to the same authenticated HTTP API as the UI. It never writes directly to
+with nothing on an open UI — on a protected one **only** `LOOPLAB_HARNESS_TOKEN` — and, if the
+server is elsewhere, `LOOPLAB_HARNESS_URL=http://127.0.0.1:8765`. The client's live tool list
+(Codex `/mcp`) is the authoritative set; the bootstrap tools are `capabilities`,
+`connection_check`, `phases`, `phase_info`, `settings_keys`, `setting_info`, `operations`,
+`operation_schema`, `run_progress`, `result_notices`, `command_receipt` and `api_request`, and the
+rest cover experiments, campaigns, run code, upstream operations, saved requests and
+`wait_for_next`. `api_request` forwards to the same HTTP API as the UI. It never writes directly to
 the event log. Use the live `operations` catalog to discover read, settings,
 task, evidence, artifact and control routes, and `operation_schema` for a route's
 OpenAPI definition. `settings_keys` and `setting_info` expose all Settings, including
@@ -1317,246 +1333,9 @@ python -m benchmarks.external_idle_recovery_smoke --out .tmp/pinned-base-proof -
 python -m benchmarks.external_idle_recovery_smoke --out .tmp/activity-proof --case agent_loss --quiet-hold-seconds 121
 ```
 
-`--seed-base-recovery` covers agent loss and explicit engine recovery on a private
-git fixture. It changes the source after the first seed and before its terminal,
-checks the old/new copied-base receipts through public MCP, joins each to its
-seed event and generation, and requires exactly two protected training executions.
-It verifies seed provenance and the old/new run-owned archives, including their
-protected scorer bytes. It makes no claim of upstream advancement or complete
-archived-base replay (data and environment remain outside the snapshot).
-After the two evaluations finish, this option removes its disposable source and
-node workdirs, exports both bases via the CLI and verifies the crate. One separate
-export-validation SGD execution reapplies the recorded second recipe and compares
-its result. The proof reports it separately from the two engine evaluations;
-export/validation leave the event log unchanged.
-This variant declares `cmd.scorer_boundary.files: [score.py]`, with manual `protect`
-empty and entrypoint inference disabled. It verifies the declared scorer's hash
-and complete boundary receipt through MCP after each terminal and reconnect.
-The boundary covers the listed files; it does not certify dependency closure.
+What each probe and option covers — and what it does not — is in its module docstring
+(`benchmarks/external_*_smoke.py`). Each needs a new output directory.
 
-`--pinned-seed` first records a private seed archive, then selects that exact
-`workspace_seeded` sequence and digest in the operator's task. After the first
-terminal it removes its owned source, reconnects or explicitly resumes the engine,
-and submits the second recipe. Both terminal/MCP receipts must retain the same
-base digest and origin selection. Each case still runs exactly two engine SGD
-evaluations and one separately counted export-validation execution. Export verifies
-one deduplicated base after source/workdir loss; `inspect`/`replay` and protected
-scorer checks remain required. The selected origin is retained as a required input;
-origin loss refuses future seeds/resume. This tests immutable **initial** selection,
-not live advancement or model-authored equivalence judgments. See
-[task setup](tasks.md#start-a-new-task-from-a-recorded-base) for the operator field;
-candidate injection cannot set or change it.
-
-The offline scenario runs three real CPU training configurations with a protected
-scorer. It kills its own MCP process, restarts its private UI server, withholds two
-committed acknowledgements as HTTP 503, and damages a disposable checkpoint tail.
-It checks original receipt recovery without duplicate candidates, read-only history,
-source refusal, answer replay after terminal, result summaries, and `inspect`/`replay`.
-It pauses with an open stage checkpoint and reconnects without answering or
-resuming; phase discovery follows the server's actual next step. The optional
-hold samples the same question, pending node and unchanged journals over real
-time. It settles the pause's recorded engine acknowledgement before comparing
-journal bytes, then explicitly resumes that same engine without repeating score.
-It later pauses, reconnects in a third MCP session, resumes through the production
-command spawner and resets a measured node. The old verdict remains replayable;
-the new attempt stays pending until its own checkpoint is answered.
-With `--engine-loss`, the fixture terminates its owned engine after score has
-completed but before the checkpoint is answered. Read-only reconnect leaves it
-stopped; explicit resume spawns a replacement, re-evaluates the same node attempt
-and opens a question bound to its fresh claim. The old answer receives 409 without
-changing the journal. The history retains that question as superseded. The proof
-counts both score executions and distinguishes them from the single terminal result.
-With `--obligations`, the operator enables research/report every node, a run concept
-base, reflection priors and per-node comparative lesson/skill reviews. The agent
-uses MCP discovery, publishes a research memo, tags candidates, seeds `run_concepts`,
-and writes reports over actual measured state. It records justified no-action
-reviews because this single deterministic fixture supports no reusable ML finding.
-Reports/reviews survive reconnect and become due again after reset, even when the
-node count is unchanged. Finalization closes finish obligations without satisfying
-an expansion-only research gate. This flag can be combined with `--engine-loss`.
-With `--monitor`, the operator declares one protected `train_eval` command with a
-training role. It performs training and scoring once. Monitoring is enabled with
-kill configured and a 600-second cadence; the fast command opens its first question
-in the final observation before node terminal. The fixture kills a second owned
-MCP process at that monitor, restarts its UI again, and verifies the same question
-and live engine on reconnect. Advisory `abort` is refused, explicit `continue`
-settles the question, and exact replay creates no duplicate answer. Reset gets a
-fresh monitor; the failed configuration keeps no metric after its own review.
-This tests completed-command advisory recovery, not live-curve stop judgment.
-Only this fixture restores its known valid bytes; that is not a production repair
-procedure. `acceptance.json`, engine logs and inspection output are saved under the
-output directory. This checks protocol recovery, not model judgments or interactive
-tool approval in an installed Codex/Claude client. Remote agent liveness is unmeasured.
-
-The separate deadline probe launches four isolated runs with an unchanged protected
-SGD scorer and an operator-declared timeout. A deliberate timer before SGD makes
-deadline decisions reproducible. For enabled grace it observes continued command
-output during an unanswered checkpoint, kills its own MCP, restarts its UI and
-reads the same question with the same live engine and no terminal metric. It rejects
-`abort`, explicitly answers `extend` or `stop`, and retries the exact answer both
-before and after terminal. The completion case measures held-out MSE; stop and
-exhausted grace retain no metric. Stage events record the granted cap, including
-the timed-out stage. Each command executes once, and a cap allows no second question.
-With grace disabled there is no checkpoint. All runs publish result interpretations
-in Russian and pass `inspect`/`replay`. Use `--case completed_extend`, `--case stop`,
-`--case capped_extend` or `--case disabled` for one scenario in a new output directory.
-This checks protocol timing with fault injection, not long-running ML or model judgment.
-
-The live monitor probe runs three protected CPU SGD configurations with a separate
-protected scorer. The improving curve keeps abort unavailable after `watch`.
-A zero-learning-rate control grants an explicit second-question abort; killing the
-fixture's MCP and restarting its UI preserves that question and live engine. The
-agent deliberately stops this acceptance control, which yields no completed metric
-or training artifact and never runs score. A third case saves its checkpoint before
-validation in the same command: subsequent questions remain advisory after `watch`.
-Each question is answered through MCP, exact retries create no duplicate answers,
-protected sources stay unchanged, and terminal/run interpretations appear in Russian.
-All three runs pass `inspect`/`replay`. Use `--case improving`, `--case frozen_stop`
-or `--case checkpoint_validation` to select one case. Delays pace real optimizer
-steps for observation; this does not test model judgment or a multi-hour session.
-
-The ASHA probe measures two baseline SGD curves before each new control candidate.
-Its five cases cover same-resource stop recovery, no declared resource, an absent
-peer rung, operator retarget before evaluation, and retarget while a stop question
-is open and MCP is disconnected. The last case reconnects to the same question
-with current abort authority removed and unchanged journal bytes. Only the fixture's
-operator performs retarget, with a private credential never supplied to MCP.
-An opaque protected command trains and scores once per node, computing actual
-held-out MSE at each step. Stop produces no completed metric or checkpoint; advisory
-cases finish normally. Every terminal node and finalized run gets a Russian result
-interpretation, protected scorer bytes stay unchanged, and `inspect`/`replay` pass.
-Use `--case same_resource_stop`, `missing_resource`, `unmatched_rung`, `retarget`
-or `retarget_open` to select one case in a new output directory. This is protocol
-acceptance with real short SGD, not a claim that ASHA or the agent makes good ML decisions.
-
-The idle recovery probe finishes a protected real SGD evaluation before killing
-its own MCP and restarting its private UI. With only MCP loss, the same engine
-waits for another explicit candidate. With engine loss too, `run_progress` directs
-the new session to recovery despite having no pending nodes or recorded pause.
-Three repeated reads leave the event log unchanged; a durable explicit `resume`
-creates one replacement engine, and an exact retry creates none. Both cases
-measure a second candidate, publish result interpretations, finalize explicitly
-and pass `inspect`/`replay`. Select `--case agent_loss` or `--case engine_loss`.
-This short protocol test observes engine ownership, not remote agent availability.
-Its optional `--quiet-hold-seconds 121` holds the real engine idle after MCP death
-for more than the activity threshold. Operator reads then see `quiet`; the measured
-result and event log remain unchanged. UI restart shows `not_observed`, and a new
-MCP progress read establishes a new observation. A quiet/forgotten observation
-never resumes the run or becomes a verdict that the agent died.
-
-For real lost responses after server acceptance, use a new disposable output:
-
-```sh
-python -m benchmarks.external_idle_recovery_smoke --out .tmp/new-transport-proof --case agent_loss --drop-command-response
-```
-
-An owned loopback TCP proxy forwards the first candidate and node commentary,
-receives the UI's successful responses, then closes each connection without sending
-the reply to MCP. The agent observes unknown write outcomes, reads the saved receipts
-and retries the exact bodies/identifiers. A progress GET reply is also lost: unavailable
-evidence changes no work. Recovery, UI restart and a second measured candidate still
-produce exactly two score executions and three commentary rows (two nodes and one
-explicitly finalized run). This exercises real transport/protocol recovery with short
-protected SGD, not model decisions or interactive client approval.
-Add `--response-fault invalid_json`, `oversized` or `server_error` to replace the
-two accepted write replies with malformed HTTP 200, over-cap HTTP 200 or HTTP 503.
-The proxy first receives upstream 200 in every case. The GET reply still disconnects.
-Each independent case must preserve the same receipts, two actual score executions
-and three commentary rows; fault payloads never supply a metric.
-Add `--read-fault stale_generation` or `wrong_receipt` to replace the GET reply
-with a JSON object carrying another generation or command ID. The latter targets
-the original command receipt; the former targets progress. MCP must return
-`response_context_mismatch` despite HTTP 200, omit the body and leave work unchanged.
-Explicit fresh reads then recover the correct evidence. Each case needs a new out
-directory; write faults and read faults are independent fixture options.
-Add `--discovery-fault disconnect`, `invalid_json` or `invalid_catalog` to fault
-both live discovery tools before the first candidate. The proxy receives upstream
-200, then disconnects or substitutes HTML/JSON with malformed `paths`. Each tool
-must return unavailable evidence without claiming an empty catalog; its next
-explicit read must recover the real command route/schema. Discovery changes no
-events or work. The remaining protected SGD/reconnect checks still apply.
-For the minimal remote-client installation, create a separate environment with
-`pip install -e ".[harness]"` and pass its Python executable using `--mcp-python`.
-The fixture requires FastAPI absent and blocks both FastAPI and Uvicorn imports
-inside its stdio process. It reads every phase and the setting metadata before
-and after reconnect, while its server, engine and protected scorer use the normal
-interpreter. Uvicorn may be present as an MCP dependency; it must not be imported
-by the stdio path. Combine this option with the discovery/response faults above.
-Use `--result-backlog --case all` in a fresh output directory to defer the two
-node interpretations across MCP death/UI restart, then recover them using one-item
-pages through typed MCP `result_notices`. Each summary is posted and exactly retried while its next cursor stays valid;
-finalized run/node receipts are paged too. This covers both agent loss and engine
-loss with an explicit resume. It can use `--mcp-python`; response-loss proxy options
-are separate probes. The fixture waits for the engine's existing post-evaluation
-`trust_scan` before asserting that commentary/page reads append no events.
-Add `--failed-first` to this backlog probe to fail the first protected scorer on
-an invalid learning-rate type, read generation/attempt-fenced logs after reconnect,
-reject stale log reads and changed-payload key reuse, then submit a corrected child.
-An exact retry of the admitted failed candidate must not execute its scorer again.
-The final result contains one failure without a score and one measured SGD result,
-with separate interpretations and preserved lineage. Both agent-loss and engine-loss
-cases are supported; the fault changes only editable configuration.
-Add `--obligations` to enable research, authored concepts, novelty decisions,
-reports and lesson/skill reviews in this recovery probe. After the corrected child
-settles, it repeats the old journal requests and verifies that original receipts
-are returned without new rows while progress still marks them superseded.
-Commentary alone must not permit finish; a fresh report alone must not discharge
-fresh lesson/skill reviews. The agent supplies justified no-action reviews for
-this deterministic fixture, then explicitly finishes. Expansion-only research and
-concept-base gates remain separate from finalization. These are scripted protocol
-decisions, not model judgment parity tests.
-Add `--damaged-journals` with `--obligations` to damage each private decision/review
-journal after the two terminal outcomes. Progress must expose incomplete sources;
-both exact retries and new action IDs must refuse without changing journal/event
-bytes. A damaged review source also refuses explicit finish. Only the fixture
-operator restores its own known-good backup; the server performs no repair.
-After restoration the old receipts replay, stay superseded, and require current
-finish evidence as above. The byte attribution check waits for the specific
-existing report command's engine acknowledgement, which may follow its intake receipt.
-Add `--value-recovery` with `--result-backlog` to exercise explicit greedy → MCTS →
-greedy switches on two successful measured SGD nodes. The fixture operator sets
-`mcts_value_weight=0.4` at launch; the scoped agent switches only the policy.
-It submits the complete batch with clearly labelled scripted headroom beliefs,
-replays its original request, refuses changed evidence revision under that action,
-then replays again after returning to greedy. Exactly two value events and two
-applied strategy decisions are recorded, without extra scoring. This option excludes
-`--failed-first`: MCTS branch review needs two eligible measured branches.
-Combine it with `--obligations` and `--mcp-python` for report/review and minimal
-remote-client coverage; use a fresh output directory for each probe.
-Add `--damaged-events` with `--obligations` to damage a complete record in the
-private event log after terminal results. Progress must expose incomplete event
-health; hypothesis/selection reads and exact/fresh decision/review requests must
-return source refusals without modifying event or sidecar bytes. With
-`--value-recovery`, the accepted value batch is checked too. Only the fixture
-operator restores its known-good backup, then recovers the old ACKs and explicitly
-satisfies current finish obligations. This probe preserves normal EventStore
-torn-tail handling and makes no production repair request.
-`--case agent_loss --drop-command-response --read-fault incomplete_result_page`
-removes `items` from a real successful result reply while preserving generation.
-The typed read must return `invalid_result_page`, without body or automatic retry.
-The next explicit read recovers the measured receipt without changing event bytes.
-Run this response-loss probe separately from backlog/engine-loss probes.
-`--read-fault incomplete_receipt` in the same agent-loss response-loss probe
-submits an invalid hint, observes its real `rejected` record, and removes `terminal`
-from one successful receipt reply while preserving generation/ID. The typed read
-must refuse it; the next explicit read recovers `rejected`/`invalid_command` with
-no new event, automatic retry or worker restart. The protected SGD evaluations remain unchanged.
-`--read-fault incomplete_progress` removes the candidate decision requirements from
-two real successful progress replies, keeping generation and the other fields.
-Both typed `run_progress` and `connection_check` must refuse that context. Explicit
-subsequent reads recover the gates without event changes, work or automatic retries.
-Add `--knowledge-recovery` with `--result-backlog --obligations` to publish a
-protected-evaluation protocol lesson and candidate skill after two measured nodes.
-An owned proxy drops both accepted responses; exact retries must recover one lesson
-and one skill receipt. The fixture damages its own event/knowledge sources, proves
-refusal for writes and fresh completed reviews without changing domain bytes, and
-restores only its own backups. Run it separately from `--failed-first` and
-`--drop-command-response`. The authored technique checks recovery protocol; it is
-not evidence of general ML quality. Finish report and completed reviews stay explicit.
-`--case agent_loss --drop-command-response --read-fault stale_result_generation`
-instead replaces a successful result page's generation at the owned proxy. The
-typed tool must return unavailable context without those receipts; the next explicit
-read recovers. This fault is synthetic transport evidence, never an ML result.
 
 ## Delegating only code editing
 

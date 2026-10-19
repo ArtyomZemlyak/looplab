@@ -7,18 +7,18 @@
 
 ## First run in five steps
 
-1. The operator installs `pip install -e ".[ui,harness]"`, sets `LOOPLAB_UI_TOKEN` and a different
-   `LOOPLAB_HARNESS_TOKEN`, and starts `looplab ui --run-root runs`.
-2. The operator launches the run and keeps it running:
-   `looplab run task.json --out runs/my-run --backend toy -s external_harness=true`
-   (`examples/toy_task.json` works as `task.json`).
-3. Your MCP client starts `looplab harness-mcp` over stdio with only `LOOPLAB_HARNESS_TOKEN`
-   (plus `LOOPLAB_HARNESS_URL` if the UI is not on `http://127.0.0.1:8765`).
+1. The operator installs `pip install -e ".[ui]"` and starts `looplab ui --run-root runs`. No
+   token is needed: owner login is off by default, and `harness-mcp` then connects anonymously.
+2. The operator registers the MCP server once: `codex mcp add looplab -- looplab harness-mcp`
+   (add `--env LOOPLAB_HARNESS_URL=...` if the UI is not on `http://127.0.0.1:8765`).
+3. Launch the run and keep it running:
+   `looplab run examples/toy_task.json --out runs/my-run --backend toy -s external_harness=true`.
 4. Call MCP `connection_check` for `my-run`, then `run_progress`: it names the next required step.
-   Submit a ready-made candidate with a durable `inject_node` command.
+   Submit a ready-made candidate with `submit_experiment`.
 5. Read the measured result with `result_notices`, decide the next candidate, and pause or finalize
    explicitly when done. LoopLab evaluates; never claim a score it did not measure.
 
+On a protected UI (owner login on) the MCP process needs a distinct `LOOPLAB_HARNESS_TOKEN`.
 The rest of this file is the contract you are held to; `docs/guide/external-harness.md` is the full
 guide, including client configuration and recovery.
 

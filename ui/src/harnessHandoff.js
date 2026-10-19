@@ -67,18 +67,38 @@ Recovery: ${value.recovery}
 Check engine status in /state before deciding to resume. Connecting does not authorize a new run, automatic resume or internal-agent takeover. Server paths may be unavailable on a remote client.`
 }
 
-export function harnessMcpDescriptor(serverUrl, client = 'generic') {
+// `anonymous`: the open UI (handoff `credential_mode: "anonymous"`, doc 82 П1). harness-mcp then
+// connects with no token, so the descriptor forwards none and names no token variable.
+export function harnessMcpDescriptor(serverUrl, client = 'generic', { anonymous = false } = {}) {
   const url = harnessServerUrl(serverUrl)
-  if (client === 'codex') return `[mcp_servers.looplab]
+  if (client === 'codex') return anonymous ? `[mcp_servers.looplab]
+command = "looplab"
+args = ["harness-mcp"]
+env = { LOOPLAB_HARNESS_URL = ${JSON.stringify(url)} }` : `[mcp_servers.looplab]
 command = "looplab"
 args = ["harness-mcp"]
 env_vars = ["LOOPLAB_HARNESS_TOKEN"]
 env = { LOOPLAB_HARNESS_URL = ${JSON.stringify(url)} }`
   if (client === 'claude') return JSON.stringify({ mcpServers: { looplab: {
     type: 'stdio', command: 'looplab', args: ['harness-mcp'],
-    env: { LOOPLAB_HARNESS_URL: url, LOOPLAB_HARNESS_TOKEN: '${LOOPLAB_HARNESS_TOKEN:-}' },
+    env: anonymous ? { LOOPLAB_HARNESS_URL: url }
+      : { LOOPLAB_HARNESS_URL: url, LOOPLAB_HARNESS_TOKEN: '${LOOPLAB_HARNESS_TOKEN:-}' },
   } } }, null, 2)
   if (client !== 'generic') throw new Error('Unknown MCP client')
   return JSON.stringify({ command: 'looplab', args: ['harness-mcp'],
     env: { LOOPLAB_HARNESS_URL: url } }, null, 2)
+}
+
+export const HARNESS_DEFAULT_URL = 'http://127.0.0.1:8765'
+
+// POSIX single-quote: the one quoting a copied shell line uses, so no URL character is code.
+export const shellQuote = value => /^[A-Za-z0-9_./:=@%+-]+$/.test(value) ? value
+  : `'${String(value).replaceAll("'", `'\\''`)}'`
+
+// The one-time registration on the anonymous path: `codex mcp add` writes Codex's own config.
+// The URL is passed only when the UI is not on harness-mcp's default address.
+export function harnessCodexAddCommand(serverUrl) {
+  const url = harnessServerUrl(serverUrl)
+  const env = url === HARNESS_DEFAULT_URL ? '' : ` --env ${shellQuote(`LOOPLAB_HARNESS_URL=${url}`)}`
+  return `codex mcp add looplab${env} -- looplab harness-mcp`
 }

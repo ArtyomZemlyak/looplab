@@ -1,7 +1,7 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import React from 'react'
-import { harnessAgentInstruction, harnessMcpDescriptor, harnessServerUrl, validHarnessHandoff } from '../src/harnessHandoff.js'
+import { harnessAgentInstruction, harnessCodexAddCommand, harnessMcpDescriptor, harnessServerUrl, shellQuote, validHarnessHandoff } from '../src/harnessHandoff.js'
 import { fetchStub, jsonResponse, mountLive, until } from './_mount.js'
 import { harnessText } from '../src/harnessText.js'
 
@@ -244,6 +244,39 @@ test('operator sees missing credential setup and clipboard fallback without an a
   } finally {
     if (previous) Object.defineProperty(navigator, 'clipboard', previous)
     else delete navigator.clipboard
+    await harness.close()
+  }
+})
+
+test('anonymous descriptors forward no token and the Codex line quotes the URL (doc 82 П1)', () => {
+  const href = 'https://host/user/u/proxy/8765/'
+  const codex = harnessMcpDescriptor(href, 'codex', { anonymous: true })
+  assert.match(codex, /\[mcp_servers.looplab\]/)
+  assert.doesNotMatch(codex, /env_vars|LOOPLAB_HARNESS_TOKEN|LOOPLAB_UI_TOKEN/)
+  const claude = JSON.parse(harnessMcpDescriptor(href, 'claude', { anonymous: true })).mcpServers.looplab
+  assert.deepEqual(claude.env, { LOOPLAB_HARNESS_URL: 'https://host/user/u/proxy/8765' })
+  assert.equal(harnessCodexAddCommand('http://127.0.0.1:8765/'), 'codex mcp add looplab -- looplab harness-mcp')
+  assert.equal(harnessCodexAddCommand(href),
+    'codex mcp add looplab --env LOOPLAB_HARNESS_URL=https://host/user/u/proxy/8765 -- looplab harness-mcp')
+  assert.equal(shellQuote("a b'c"), `'a b'\\''c'`)
+  assert.equal(shellQuote('$(rm -rf ~)'), `'$(rm -rf ~)'`)
+})
+
+test('open-server handoff shows no credential step and offers the one-time codex mcp add', async () => {
+  const harness = await mountLive({ visible: true })
+  try {
+    const { default: HarnessHandoff } = await harness.load('/src/HarnessHandoff.jsx')
+    globalThis.fetch = fetchStub({ '/api/runs/demo/harness-handoff': { ...handoff, credential_configured: false,
+      credential_mode: 'anonymous', credential_policy: 'This UI runs without owner login, so harness-mcp connects without a token. Keep LOOPLAB_UI_TOKEN out of the MCP process environment.' } })
+    const view = await harness.mount(HarnessHandoff, { runId: 'demo', generation, seq: 12 })
+    await React.act(async () => { view.container.querySelector('summary').click() })
+    await until(() => view.container.textContent.includes('C:/Runs/demo'), 'anonymous handoff')
+    assert.match(view.container.textContent, /codex mcp add looplab/)
+    assert.match(view.container.textContent, /No token is needed/)
+    assert.match(view.container.textContent, /2\. Connect and give the agent this run/)
+    assert.doesNotMatch(view.container.textContent, /Supply the scoped credential|Operator setup required|env_vars/)
+    assert.ok(globalThis.fetch.calls.every(call => call.method === 'GET'))
+  } finally {
     await harness.close()
   }
 })

@@ -26,7 +26,7 @@ const human = (s) =>
   !/^(#[/]|https?:|[./].*[/]|[A-Z_]+\s*=)/.test(s);
 // A shell command is copied and pasted, never translated: the Russian catalogue once rendered
 // `looplab finalize <runs>/{0}` as `Завершить процесс <unes>/{0}`. Paths are opaque the same way.
-const command = (s) => /^(looplab |git |python |npm )/.test(s);
+const command = (s) => /^(looplab |git |python |npm |codex )/.test(s);
 const placeholderSet = (text) =>
   [...new Set(text.match(/\{\d+\}/g) || [])].sort().join();
 const hasJSX = (n) =>

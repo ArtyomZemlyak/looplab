@@ -20,7 +20,32 @@ from looplab.events.run_generation import run_generation_token
 from looplab.harness.obligations import run_obligations
 
 
-def snapshot(rd: Path, expected_generation: str, *, credential_configured: bool) -> dict:
+def credential_mode(credential_configured: bool, owner_login: bool) -> str:
+    """How an agent's MCP process connects to this server (doc 82 П1).
+
+    `harness_token`: a scoped credential is configured; `anonymous`: the open UI (no owner login),
+    harness-mcp connects with no token; `operator_setup`: owner login is on and no scoped
+    credential exists, so an agent cannot connect until the operator configures one.
+    """
+    if credential_configured:
+        return "harness_token"
+    return "operator_setup" if owner_login else "anonymous"
+
+
+_CREDENTIAL_POLICY = {
+    "harness_token": "Use only a distinct LOOPLAB_HARNESS_TOKEN in the MCP process; remove LOOPLAB_UI_TOKEN from its environment. Pass the secret separately through the client's protected credential mechanism.",
+    "anonymous": "This UI runs without owner login, so harness-mcp connects without a token. Keep LOOPLAB_UI_TOKEN out of the MCP process environment.",
+    "operator_setup": "This UI requires owner login and has no scoped harness credential. Ask the operator to set a distinct LOOPLAB_HARNESS_TOKEN for the UI and the MCP process; never use LOOPLAB_UI_TOKEN.",
+}
+_SCOPE = {
+    "harness_token": "The harness token controls launched external runs on this server and has limited controls on internal runs; it is not restricted to this run. Prefer a separate server/run root for external work.",
+    "anonymous": "Without owner login every local process, the agent included, can use this server's API; it is not restricted to this run. Turn on owner login before exposing the server to others.",
+}
+_SCOPE["operator_setup"] = _SCOPE["harness_token"]
+
+
+def snapshot(rd: Path, expected_generation: str, *, credential_configured: bool,
+             owner_login: bool = False) -> dict:
     integrity = log_integrity(rd / "events.jsonl")
     if integrity.get("unreadable"):
         raise OSError("event history unreadable")
@@ -40,6 +65,8 @@ def snapshot(rd: Path, expected_generation: str, *, credential_configured: bool)
     state = fold(events)
     constraints = run_obligations(task, settings, generation=generation)["enforced_on_candidate"]
     spec = task.repo_spec() if callable(getattr(task, "repo_spec", None)) else None
+
+    mode = credential_mode(bool(credential_configured), bool(owner_login))
 
     def text(value):
         return redact_persisted_text(value, max_chars=2000, entropy=False, single_line=True)
@@ -67,7 +94,10 @@ def snapshot(rd: Path, expected_generation: str, *, credential_configured: bool)
             "protected_names": names(constraints["protected_names"]),
             "operator_stages": names(constraints["operator_stages"]),
             "meaning": "Submit ready-made code/files through inject_node; LoopLab materializes node workspaces, validates the patch and owns evaluation."},
-        "credential_policy": "Use only a distinct LOOPLAB_HARNESS_TOKEN in the MCP process; remove LOOPLAB_UI_TOKEN from its environment. Pass the secret separately through the client's protected credential mechanism.",
-        "scope": "The harness token controls launched external runs on this server and has limited controls on internal runs; it is not restricted to this run. Prefer a separate server/run root for external work.",
+        # One policy per server mode (doc 82 П1): the open UI (no credential, no owner login) is
+        # the beginner's path, and harness-mcp connects to it with no token at all.
+        "credential_mode": mode,
+        "credential_policy": _CREDENTIAL_POLICY[mode],
+        "scope": _SCOPE[mode],
         "recovery": "Reconnect to this same run. Read current /state generation and command receipts before resubmitting; inspect checkpoints even after evaluator completion. Explicitly pause or finalize when done. No internal agent takeover is automatic.",
     }

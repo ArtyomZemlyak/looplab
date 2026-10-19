@@ -56,7 +56,11 @@ def test_http_refusal_is_preserved_with_no_retry(status):
         seen.append(request)
         return httpx.Response(status, json=detail)
     api = HarnessAPI("http://localhost", transport=httpx.MockTransport(handler))
-    assert api.result_notices("demo", GEN) == {"status": status, "body": detail}
+    expected = {"status": status, "body": detail}
+    if status == 401:   # the anonymous client's one addition (doc 82 П1): what to configure
+        from looplab.harness.mcp_server import ANONYMOUS_401_MESSAGE
+        expected |= {"code": "credential_required", "message": ANONYMOUS_401_MESSAGE}
+    assert api.result_notices("demo", GEN) == expected
     assert len(seen) == 1
 
 
