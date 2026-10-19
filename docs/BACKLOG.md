@@ -82,6 +82,34 @@ site that proves it is open.
 > rest of §0.1 is deliberately NOT tagged, because a marker whose proof nobody re-derived would be
 > the same unverified claim the glyph already was. See CLAUDE.md for what is and is not tagged.]
 
+### §0.0 Простой вход новичка: Assistant и внешний агент без токенов (2026-10-19)
+
+План, сверенный с кодом на `6dd598083`: [doc 82](82-simplicity-agent-entry-2026-10-19.md). Входов
+ровно два: Assistant в UI и внешний агент (Codex), который сам создаёт run. Токены не нужны, новичок
+не пишет `task.json` и не запускает `looplab run`. Пакеты по возрастанию цены; решения владельца
+Р1–Р7 перечислены в doc 82 §8.
+
+- **П1 (S)** — анонимный `harness-mcp`: снять отказ без токена в `run_stdio` и
+  `harness_credential_missing` в `connection_check`; дескрипторы UI без секрета; одна экстра для UI и
+  MCP; починить «twelve tools», шаги AGENTS.md и `ru.json:5115`.
+- **П2 (S–M)** — значения по умолчанию для external-рана: `backend=toy` выводится, профиль
+  `agent-minimal` по умолчанию в точках запуска, `strategist_every=0`; genesis не вписывает `llm` для
+  external.
+- **П3 (M)** — MCP `start_run(task)`: агент сам создаёт run по composable-задаче `propose_run`;
+  `harness-mcp` находит или поднимает UI-сервер сам.
+- **П4 (M)** — карточка запуска: «Кто ведёт: LoopLab / внешний агент», одна строка для Codex после
+  запуска, выход на путь Б, если у LoopLab нет модели.
+- **П5 (M)** — атрибуция агента в открытом режиме (`X-LoopLab-Client`), разделение авторизации и
+  атрибуции в 19 местах, пресет пробуждения `codex`, подпись «передано (exit 0)», `reason` у
+  pause/resume.
+- **П6 (M)** — tmpfs: предупреждение и баннер; зеркало ранов — дочерний процесс UI с общей
+  блокировкой с CLI.
+- **П7 (M–L)** — `submit_experiment(node_kind, uses)`, `uses` на любые evaluated-узлы, artifact-узлы
+  без гейтов новизны, автозагрузка per-query, фикс выбора загрузки в `per_query.py::_resolve_arm`.
+- **Позже:** release-wheel с `ui_dist`; `eval.tracks` в живом ране; автостарт сессии Codex; профиль
+  `agent-standard`; пометка старых `operator_upload` в проекции; блок вывода `looplab run` и короткий
+  `looplab harness`; MCP по HTTP из UI-сервера.
+
 ### §0.1 Ranked
 
 > **[2026-10-14 — сверено заново, [doc 80](80-open-items-triage-2026-10-14.md) §3.]** Из 19 строк открыты три: #7 (остаток, маркер `landlock-is-opt-in-by-default`, ждёт GPU-проверки владельцем), #14 (адаптеры AutoML/multimodal, P3) и #18 (маркер `eval-parallelism-is-in-process-only`, P3). #6 отклонён (`DECLINED`), остальные 15 закрыты.

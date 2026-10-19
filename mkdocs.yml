@@ -168,6 +168,7 @@ nav:
       - Tracing: 08-tracing-architecture.md
   - Design records:
       - Index: 00-INDEX.md
+      - "Simple entry: Assistant and external agent, plan (2026-10-19)": 82-simplicity-agent-entry-2026-10-19.md
       - "Campaign in one run (2026-10-14)": 81-campaign-in-one-run-2026-10-14.md
       - "Open-items triage (2026-10-14)": 80-open-items-triage-2026-10-14.md
       - "Attempt git identity and code export (2026-10-14)": 79-node-git-identity-and-code-upstream-2026-10-14.md
