@@ -50,13 +50,15 @@ export function modelConnectionView(snapshot, check, language = 'auto') {
   if (!settings) return { tone: 'warn', text: text('Could not read saved model settings.', 'Не удалось прочитать настройки модели.') }
   const model = typeof settings.llm_model === 'string' ? settings.llm_model.trim() : ''
   const endpoint = typeof settings.llm_base_url === 'string' ? settings.llm_base_url.trim() : ''
-  if (!model || !endpoint) return { tone: 'warn', text: text('Set a model and endpoint before chatting.', 'Перед общением укажите модель и адрес сервера модели.') }
+  // `agentFallback` (doc 82 П4): without a working model the Assistant cannot plan a run, so the
+  // surface offers path B — the user's coding agent — instead of an error alone.
+  if (!model || !endpoint) return { tone: 'warn', agentFallback: true, text: text('Set a model and endpoint before chatting.', 'Перед общением укажите модель и адрес сервера модели.') }
   const name = model.slice(0, 80)
   const current = revision(snapshot.settings_revision) && revision(snapshot.secret_revision)
     && check?.settingsRevision === snapshot.settings_revision
     && check?.secretRevision === snapshot.secret_revision
   if (current && check.outcome === 'passed') return { tone: 'ok', text: `${name} · ${text('Last explicit test passed.', 'Последняя явная проверка связи пройдена.')}` }
-  if (current && check.outcome === 'failed') return { tone: 'warn', text: `${name} · ${text('Last test failed. Review Settings.', 'Проверка связи не прошла. Откройте настройки.')}` }
+  if (current && check.outcome === 'failed') return { tone: 'warn', agentFallback: true, text: `${name} · ${text('Last test failed. Review Settings.', 'Проверка связи не прошла. Откройте настройки.')}` }
   if (current && check.outcome === 'unknown') return { tone: 'warn', text: `${name} · ${text('Test outcome unknown. Review Settings.', 'Результат проверки неизвестен. Откройте настройки.')}` }
   if (['incomplete', 'unbound', 'endpoint_mismatch'].includes(snapshot.credential?.status)) {
     return { tone: 'warn', text: `${name} · ${text('Shared key needs attention.', 'Проверьте общий API-ключ в настройках.')}` }

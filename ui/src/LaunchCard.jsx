@@ -8,9 +8,10 @@ import {
 } from './util.js'
 import {
   LAUNCH_RUNTIME_FIELDS, buildLaunchBody, createLaunchDraft,
-  launchFingerprint, parseObjectJson, runtimeValue, summarizeLaunchDecision, summarizeLaunchTask,
-  updateRuntimeValue,
+  launchDriver, launchFingerprint, parseObjectJson, runtimeValue, setLaunchDriver,
+  summarizeLaunchDecision, summarizeLaunchTask, updateRuntimeValue,
 } from './launchDraft.js'
+import { harnessCodexOneLiner, harnessRunPrompt } from './codexLine.js'
 import { launchStatusOutcome, pollLaunchStatus } from './launchRecovery.js'
 import { launchCostSummary } from './launchCostModel.js'
 import LazyBoundary from './LazyBoundary.jsx'
@@ -296,6 +297,9 @@ export default function LaunchCard({
   fingerprintRef.current = fingerprint
   const validatedCurrent = !!validation?.token && validation.fingerprint === fingerprint
   const settingsParsed = parseObjectJson(draft.settings_json, 'Settings')
+  const driver = launchDriver(draft)
+  const agentLine = startedRunId && driver === 'external'
+    ? harnessCodexOneLiner(location.href, harnessRunPrompt(startedRunId, cardLanguage)) : ''
   // The first paint (and any in-place identity change) is non-interactive until tab recovery has
   // been read. Otherwise Reset could erase an unresolved paid-Start fence before this effect runs.
   const transportPending = hydratedTransportIdentity !== transportIdentity
@@ -671,8 +675,20 @@ export default function LaunchCard({
     requestAnimationFrame(() => { runIdRef.current?.focus(); runIdRef.current?.select() })
   }
 
-  const changeRuntime = (field, raw) => {
-    const changed = updateRuntimeValue(draft, field, raw)
+  const [lineCopied, setLineCopied] = useState('')
+  const copyAgentLine = async line => {
+    try {
+      await navigator.clipboard.writeText(line)
+      setLineCopied('Codex line copied.')
+    } catch {
+      setLineCopied('Clipboard unavailable; select the line and copy it.')
+    }
+  }
+
+  const changeRuntime = (field, raw) => applyRuntimeChange(updateRuntimeValue(draft, field, raw))
+  // "Who drives" (doc 82 П4): one choice that writes `external_harness` + an explicit `backend`.
+  const changeDriver = driver => applyRuntimeChange(setLaunchDriver(draft, driver))
+  const applyRuntimeChange = changed => {
     if (!changed.ok) {
       setErrors({ settings: changed.error }); setNotice('Fix the settings JSON before using the shortcuts below.')
       return
@@ -842,6 +858,15 @@ export default function LaunchCard({
           : t('Validate to see effective limits.')}</dd></div>
       </dl>
     </section>}
+    <fieldset className="asst-launch-driver" disabled={locked || !settingsParsed.ok}>
+      <legend>{uiText('Who drives the run')}</legend>
+      <label><input type="radio" name={`launch-${reactId}-driver`} value="looplab"
+        checked={driver === 'looplab'} onChange={() => changeDriver('looplab')} /> {uiText('LoopLab')}</label>
+      <label><input type="radio" name={`launch-${reactId}-driver`} value="external"
+        checked={driver === 'external'} onChange={() => changeDriver('external')} /> {uiText('External agent (Codex)')}</label>
+      {driver === 'external' && <span className="asst-launch-help">
+        {uiText('Your coding agent proposes experiments; LoopLab measures them. After Start, copy one Codex line.')}</span>}
+    </fieldset>
     {hasFieldErrors
       ? <p className="asst-launch-openreason">{t('Proposal details are open so you can fix the highlighted fields.')}</p>
       : <button type="button" className="btn xs ghost asst-launch-configtoggle" aria-expanded={showConfig}
@@ -1023,6 +1048,14 @@ export default function LaunchCard({
       {validatedCurrent && reviewSettings?.backend === 'llm' && <p className="asst-launch-cost">{costReview.accounting}</p>}
     </>}
 
+    {agentLine && <section className="asst-launch-section asst-launch-agentline"
+      aria-labelledby={`${titleId}-agentline`}>
+      <h4 id={`${titleId}-agentline`}>{uiText('Hand this run to Codex in one line')}</h4>
+      <p>{uiText('Paste it into a terminal in your project; no config file or token needed.')}</p>
+      <pre>{agentLine}</pre>
+      <button type="button" className="btn xs" onClick={() => copyAgentLine(agentLine)}>{uiText('Copy Codex line')}</button>
+      {lineCopied && <p role="status">{uiText(lineCopied)}</p>}
+    </section>}
     <div className="asst-perm-actions asst-launch-actions">
       <button type="button" className="btn xs ghost" disabled={locked} onClick={reset}>{t('Reset proposal')}</button>
       {startedRunId

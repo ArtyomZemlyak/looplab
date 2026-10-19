@@ -170,6 +170,41 @@ export function updateRuntimeValue(draft, field, rawValue) {
   return { ok: true, draft: { ...draft, settings_json: pretty(settings) } }
 }
 
+// "Who drives" (doc 82 П4): one choice on the card instead of two settings. An external agent's run
+// is `external_harness: true` with `backend: "toy"` written explicitly, because the proposal or the
+// saved settings may already carry `backend: "llm"`, which the server refuses for an external run.
+// Switching back restores the backend the draft had before (or removes the key it did not have);
+// the prior value rides on the draft, never inside the settings JSON the server validates.
+export const LAUNCH_DRIVERS = Object.freeze(['looplab', 'external'])
+
+export function launchDriver(draft) {
+  const parsed = parseObjectJson(draft?.settings_json, 'Settings')
+  return parsed.ok && parsed.value.external_harness === true ? 'external' : 'looplab'
+}
+
+export function setLaunchDriver(draft, driver) {
+  if (!LAUNCH_DRIVERS.includes(driver)) return { ok: false, error: 'Unknown driver' }
+  const parsed = parseObjectJson(draft?.settings_json, 'Settings')
+  if (!parsed.ok) return { ok: false, error: parsed.error }
+  if (launchDriver(draft) === driver) return { ok: true, draft }
+  const settings = clone(parsed.value)
+  const next = { ...draft }
+  if (driver === 'external') {
+    // A string so a retained draft keeps it (`launchDraftStore.js`); '' = the draft had no backend.
+    next.driver_prior_backend = Object.hasOwn(settings, 'backend') ? String(settings.backend) : ''
+    settings.external_harness = true
+    settings.backend = 'toy'
+  } else {
+    delete settings.external_harness
+    const prior = draft?.driver_prior_backend
+    if (prior === '') delete settings.backend
+    else if (typeof prior === 'string') settings.backend = prior
+    delete next.driver_prior_backend
+  }
+  next.settings_json = pretty(settings)
+  return { ok: true, draft: next }
+}
+
 const short = (value, max = 120) => {
   const text = typeof value === 'string' ? value : JSON.stringify(value)
   return text.length > max ? text.slice(0, max - 1) + '…' : text

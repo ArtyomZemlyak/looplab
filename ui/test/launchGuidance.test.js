@@ -272,3 +272,34 @@ test('an older cost preview stays visibly unknown instead of asserting that no b
     assert.equal(calls.calls.length, 1)
   } finally { await mounted.unmount() }
 })
+
+test('who drives: the external choice launches an external toy run and offers one Codex line (doc 82 П4)', async () => {
+  let preflightBody
+  const calls = fetchStub({
+    'POST /api/start/preflight': ({ init }) => {
+      preflightBody = JSON.parse(init.body)
+      return preview(preflightBody)
+    },
+    'POST /api/start': ({ init }) => ({ run_id: JSON.parse(init.body).run_id, ok: true,
+      status: 'succeeded', started: true, can_retry: false, paid_effect_unknown: false }),
+    'GET /api/start/guide-demo/status': { run_id: 'guide-demo', ok: true, status: 'succeeded',
+      started: true, can_retry: false, paid_effect_unknown: false },
+  })
+  globalThis.fetch = calls
+  const mounted = await harness.mount(Card, { spec: { ...spec, settings: { ...spec.settings, backend: 'llm' } } })
+  try {
+    await until(() => button(mounted, 'Validate — free')?.disabled === false, 'hydrated card')
+    const external = mounted.container.querySelector('input[type="radio"][value="external"]')
+    await click(external)
+    await until(() => mounted.container.textContent.includes('After Start, copy one Codex line'), 'external help')
+    await click(button(mounted, 'Validate — free'))
+    await until(() => button(mounted, 'Start run')?.disabled === false, 'validated')
+    assert.equal(preflightBody.settings.external_harness, true)
+    assert.equal(preflightBody.settings.backend, 'toy')
+    await click(button(mounted, 'Start run'))
+    await until(() => mounted.container.textContent.includes('Hand this run to Codex in one line'), 'agent line')
+    const line = mounted.container.querySelector('.asst-launch-agentline pre').textContent
+    assert.match(line, /^codex -c /)
+    assert.match(line, /"guide-demo"/)
+  } finally { await mounted.unmount() }
+})

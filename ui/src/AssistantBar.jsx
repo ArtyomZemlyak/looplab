@@ -3560,7 +3560,7 @@ export default function AssistantBar({ runId, hidden = false, onReady }) {
           : 'Опишите цель исследования или спросите о результатах. Запуск начнётся после проверки и подтверждения карточки.' : (newRunDraft ? uiText('Describe the goal, server paths, and time limit. For example: improve accuracy on [dataset] in three experiments. Review the launch card before starting.') : (runId ? (showRunResult ? uiText('Read the recorded result, open its code, or prepare a question below.') : (selectedRunHasNoNodes ? uiText('No experiment has been measured yet. Ask what is due before the first one.') : uiText('Ask about results or the next experiment.'))) : (firstRun ? uiText('Describe a goal to get a launch proposal. The run starts only after you review and approve it.') : uiText('Describe a goal, ask about runs, or plan an experiment.'))))))}</p>
       {firstRun && <LazyBoundary resetKey="model-setup" language={uiLanguage} focusOnFailure={false}
         label={text('Model setup', 'Настройка модели')}>
-        <FirstRunModelStatus language={uiLanguage} onSettings={openAssistantModelSettings} />
+        <FirstRunModelStatus language={uiLanguage} onSettings={openAssistantModelSettings} goal={input} />
       </LazyBoundary>}
       {newRunDraft && <LazyBoundary resetKey="run-examples" language={uiLanguage} focusOnFailure={false}
         label={text('New run examples', 'Примеры нового запуска')}>

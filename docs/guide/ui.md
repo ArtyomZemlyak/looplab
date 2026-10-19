@@ -26,14 +26,14 @@ The chat needs a configured model: see [Check the model](#check-the-model). For 
 first-run example, see the [Assistant quickstart](quickstart.md#assistant-in-the-web-ui); for the
 engine without a model, the [CLI walkthrough](cli-walkthrough.md).
 
-For a run controlled by Codex or Claude Code, the first experiment can wait for that
-agent's decision. The empty Lineage view links to **Agent obligations**, which lists current
-admission and finish requirements. A live UI or engine alone does not show whether an
-external agent is connected; see the [external harness guide](external-harness.md).
+**Who drives the run** on the card chooses **LoopLab** or **External agent (Codex)**. The second
+starts an external run (`backend=toy`, no LoopLab model) and, after **Start run**, shows one line to
+copy into a terminal: it registers LoopLab with Codex and hands it this run. Without a configured
+model the first-run panel offers the same kind of line with your goal, so Codex creates the run.
+Such a run waits for the agent's decisions: the empty Lineage view links to **Agent obligations**;
+see the [external harness guide](external-harness.md).
 
 ### Check the model
-
-*Moved here from the opening of this section (doc 74 EB-11: the opening keeps the steps).*
 
 Open **LoopLab → Settings → Essential → Model** to check the saved
 model and endpoint. **Test active LLM** makes one provider request and may be billed. The saved
@@ -89,8 +89,6 @@ neither generalization nor statistical significance. Incomplete run sources supp
 Assistant card's numeric summary and explain why; ongoing finalization is not shown as finished.
 
 ### Launch card: limits, cost and startup
-
-*Moved here from the Quickstart (doc 74 EB-11), which now keeps only the five steps.*
 
 The launch card shows a **Next:** instruction in the Assistant language (**Дальше:** in Russian).
 Before validation, review the goal, metric direction and code/data paths. After validation, review

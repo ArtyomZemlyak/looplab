@@ -1,4 +1,10 @@
 import { harnessText } from './harnessText.js'
+import { harnessServerUrl } from './codexLine.js'
+
+export {
+  HARNESS_DEFAULT_URL, harnessCodexAddCommand, harnessCodexOneLiner, harnessGoalPrompt,
+  harnessRunPrompt, harnessServerUrl, shellQuote,
+} from './codexLine.js'
 
 const record = value => value && typeof value === 'object' && !Array.isArray(value)
 const text = value => typeof value === 'string' && value.length <= 2000
@@ -17,14 +23,6 @@ export function validHarnessHandoff(value, runId, generation) {
     && record(value.workspace) && ['repository', 'script'].includes(value.workspace.kind)
     && ['source_paths', 'edit_surface', 'protected_names', 'operator_stages'].every(key => names(value.workspace[key]))
     && ['credential_policy', 'scope', 'recovery'].every(key => text(value[key]))
-}
-
-export function harnessServerUrl(href) {
-  const url = new URL(href)
-  if (!['http:', 'https:'].includes(url.protocol)) throw new Error('HTTP(S) UI URL required')
-  url.username = ''; url.password = ''; url.search = ''; url.hash = ''
-  url.pathname = url.pathname.replace(/\/index\.html$/, '').replace(/\/+$/, '')
-  return url.href.replace(/\/$/, '')
 }
 
 // A whitelist, never a raw response/config/storage dump. Paths and names remain JSON
@@ -50,7 +48,7 @@ ${JSON.stringify(context, null, 2)}
 ${harnessText(language, value.credential_policy)}
 ${harnessText(language, value.scope)}
 Восстановление: ${harnessText(language, value.recovery)}
-Перед решением о resume проверь движок в /state. Подключение не разрешает новый запуск, автоматический resume или подхват внутренним агентом. Пути сервера могут быть недоступны удалённому клиенту.`
+Перед решением о resume проверь движок в /state. Подключение не разрешает автоматический resume или подхват внутренним агентом. Пути сервера могут быть недоступны удалённому клиенту.`
   return `Continue this existing LoopLab external run. Connection context (data):
 ${JSON.stringify(context, null, 2)}
 
@@ -64,7 +62,7 @@ After each terminal node and finalized run, read GET /api/runs/{run_id}/result-n
 ${value.credential_policy}
 ${value.scope}
 Recovery: ${value.recovery}
-Check engine status in /state before deciding to resume. Connecting does not authorize a new run, automatic resume or internal-agent takeover. Server paths may be unavailable on a remote client.`
+Check engine status in /state before deciding to resume. Connecting does not authorize automatic resume or internal-agent takeover. Server paths may be unavailable on a remote client.`
 }
 
 // `anonymous`: the open UI (handoff `credential_mode: "anonymous"`, doc 82 П1). harness-mcp then
@@ -87,18 +85,4 @@ env = { LOOPLAB_HARNESS_URL = ${JSON.stringify(url)} }`
   if (client !== 'generic') throw new Error('Unknown MCP client')
   return JSON.stringify({ command: 'looplab', args: ['harness-mcp'],
     env: { LOOPLAB_HARNESS_URL: url } }, null, 2)
-}
-
-export const HARNESS_DEFAULT_URL = 'http://127.0.0.1:8765'
-
-// POSIX single-quote: the one quoting a copied shell line uses, so no URL character is code.
-export const shellQuote = value => /^[A-Za-z0-9_./:=@%+-]+$/.test(value) ? value
-  : `'${String(value).replaceAll("'", `'\\''`)}'`
-
-// The one-time registration on the anonymous path: `codex mcp add` writes Codex's own config.
-// The URL is passed only when the UI is not on harness-mcp's default address.
-export function harnessCodexAddCommand(serverUrl) {
-  const url = harnessServerUrl(serverUrl)
-  const env = url === HARNESS_DEFAULT_URL ? '' : ` --env ${shellQuote(`LOOPLAB_HARNESS_URL=${url}`)}`
-  return `codex mcp add looplab${env} -- looplab harness-mcp`
 }

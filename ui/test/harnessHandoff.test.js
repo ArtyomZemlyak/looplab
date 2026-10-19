@@ -262,7 +262,7 @@ test('anonymous descriptors forward no token and the Codex line quotes the URL (
   assert.equal(shellQuote('$(rm -rf ~)'), `'$(rm -rf ~)'`)
 })
 
-test('open-server handoff shows no credential step and offers the one-time codex mcp add', async () => {
+test('open-server handoff shows no credential step and offers the one-line Codex hand-off', async () => {
   const harness = await mountLive({ visible: true })
   try {
     const { default: HarnessHandoff } = await harness.load('/src/HarnessHandoff.jsx')
@@ -271,12 +271,53 @@ test('open-server handoff shows no credential step and offers the one-time codex
     const view = await harness.mount(HarnessHandoff, { runId: 'demo', generation, seq: 12 })
     await React.act(async () => { view.container.querySelector('summary').click() })
     await until(() => view.container.textContent.includes('C:/Runs/demo'), 'anonymous handoff')
-    assert.match(view.container.textContent, /codex mcp add looplab/)
+    assert.match(view.container.textContent, /codex -c 'mcp_servers\.looplab\.command="looplab"'/)
     assert.match(view.container.textContent, /No token is needed/)
     assert.match(view.container.textContent, /2\. Connect and give the agent this run/)
     assert.doesNotMatch(view.container.textContent, /Supply the scoped credential|Operator setup required|env_vars/)
     assert.ok(globalThis.fetch.calls.every(call => call.method === 'GET'))
   } finally {
+    await harness.close()
+  }
+})
+
+test('the one-line Codex hand-off quotes the run name and the goal as data (doc 82 П4)', async () => {
+  const { harnessCodexOneLiner, harnessRunPrompt, harnessGoalPrompt } = await import('../src/harnessHandoff.js')
+  const line = harnessCodexOneLiner('http://127.0.0.1:8765/', harnessRunPrompt("it's $(rm -rf ~) `x`"))
+  assert.match(line, /^codex -c 'mcp_servers\.looplab\.command="looplab"' -c 'mcp_servers\.looplab\.args=\["harness-mcp"\]' '/)
+  assert.doesNotMatch(line, /LOOPLAB_HARNESS_URL/, 'the default UI needs no env')
+  // The whole prompt is ONE single-quoted word: every embedded quote is closed, escaped, reopened.
+  const prompt = line.slice(line.indexOf("' '") + 2)
+  assert.ok(prompt.startsWith("'") && prompt.endsWith("'"))
+  assert.match(prompt, /it'\\''s \$\(rm -rf ~\) `x`/)
+  const remote = harnessCodexOneLiner('https://host/user/u/proxy/8765/', harnessGoalPrompt('min (x-3)^2', 'ru'))
+  assert.match(remote, /-c 'mcp_servers\.looplab\.env=\{LOOPLAB_HARNESS_URL="https:\/\/host\/user\/u\/proxy\/8765"\}'/)
+  assert.match(remote, /start_run/)
+  assert.match(remote, /Отвечай по-русски\. Goal: min \(x-3\)\^2'$/)
+  assert.doesNotMatch(harnessAgentInstruction(handoff, 'http://localhost/'), /authorize a new run/)
+})
+
+test('open-server handoff offers the one-line Codex hand-off for this run', async () => {
+  const harness = await mountLive({ visible: true })
+  const writes = []
+  const previous = Object.getOwnPropertyDescriptor(navigator, 'clipboard')
+  Object.defineProperty(navigator, 'clipboard', { configurable: true, value: { writeText: async text => writes.push(text) } })
+  try {
+    const { default: HarnessHandoff } = await harness.load('/src/HarnessHandoff.jsx')
+    globalThis.fetch = fetchStub({ '/api/runs/demo/harness-handoff': { ...handoff, credential_configured: false,
+      credential_mode: 'anonymous' } })
+    const view = await harness.mount(HarnessHandoff, { runId: 'demo', generation, seq: 12 })
+    await React.act(async () => { view.container.querySelector('summary').click() })
+    await until(() => view.container.textContent.includes('Hand this run to Codex'), 'one-liner')
+    await React.act(async () => {
+      [...view.container.querySelectorAll('button')].find(b => b.textContent === 'Copy Codex line').click()
+    })
+    assert.match(writes[0], /^codex -c /)
+    assert.match(writes[0], /"demo"/)
+    assert.match(view.container.textContent, /Codex line copied/)
+  } finally {
+    if (previous) Object.defineProperty(navigator, 'clipboard', previous)
+    else delete navigator.clipboard
     await harness.close()
   }
 })

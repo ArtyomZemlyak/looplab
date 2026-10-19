@@ -155,11 +155,11 @@ PROSE_CEILINGS = {
     "cli-reference.md": 28772,
     "concepts.md": 32764,
     "configuration.md": 10447,
-    "external-harness.md": 15540,
+    "external-harness.md": 15539,
     "llm-and-agents.md": 14472,
     "memory.md": 12532,
     "tasks.md": 22381,
-    "ui.md": 23007,
+    "ui.md": 23004,
 }
 _GENERATED = {"api-reference.md", "event-reference.md"}
 

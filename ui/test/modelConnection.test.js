@@ -144,3 +144,9 @@ test('first-run card reads settings without probing and refreshes after returnin
     dom.window.close()
   }
 })
+
+test('a missing or failing model offers the coding-agent path (doc 82 П4)', () => {
+  assert.equal(modelConnectionView({ settings: {}, settings_revision: 'a'.repeat(64),
+    secret_revision: 'b'.repeat(64) }, null).agentFallback, true)
+  assert.equal(modelConnectionView(snapshot(), null).agentFallback, undefined)
+})

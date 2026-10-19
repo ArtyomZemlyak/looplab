@@ -1,7 +1,7 @@
 {
   "schema": 1,
   "language": "ru",
-  "count": 8058,
+  "count": 8072,
   "messages": {
     "# LoopLab run report — {0}": "# Отчёт запуска LoopLab — {0}",
     "## Agent narrative (advisory)": "## Пояснения агента (рекомендации)",
@@ -8060,7 +8060,21 @@
     "This UI requires owner login and has no scoped harness credential. Ask the operator to set a distinct LOOPLAB_HARNESS_TOKEN for the UI and the MCP process; never use LOOPLAB_UI_TOKEN.": "Этот UI требует входа владельца, а harness-токен не настроен. Попросите оператора задать отдельный LOOPLAB_HARNESS_TOKEN для UI и процесса MCP; LOOPLAB_UI_TOKEN не используйте.",
     "Without owner login every local process, the agent included, can use this server's API; it is not restricted to this run. Turn on owner login before exposing the server to others.": "Без входа владельца API этого сервера доступен любому локальному процессу, включая агента, и не ограничен этим запуском. Включите вход владельца, прежде чем открывать сервер другим.",
     "Preset bundle. default/fast = lean defaults; thorough = turn on multi-seed confirmation, the reward-hack/leakage/critic monitors AND gate them (trust_gate=gate), ablation refinement and the prompt cues — in one word. (Novelty is the agentic Researcher's call by default; the algorithmic novelty gates stay OFF.) A profile only fills fields you have not set yourself; any explicit knob here still wins. agent-minimal = an external agent owes only a coded candidate and the operator's declared checks; a fresh external run gets it when no profile is set.": "Набор настроек одним словом. default/fast — облегчённые значения по умолчанию; thorough — включает подтверждение на нескольких сидах, мониторы reward-hack, утечек и критика с правом блокировать выбор (trust_gate=gate), уточнение через абляции и подсказки в промптах. (Новизну по умолчанию оценивает агентный Researcher; алгоритмические фильтры новизны выключены.) Профиль заполняет только поля, которые вы не задали сами; любое явное значение побеждает. agent-minimal — внешний агент обязан только прислать кандидата с кодом и пройти проверки, объявленные оператором; новый external-ран получает его, если профиль не задан.",
-    "Strategist consult cadence in created nodes (bounded, so it never thrashes). 0 = off: no periodic consult, and an external agent owes no strategy review.": "Как часто консультироваться со Strategist, в созданных узлах (с ограничением, чтобы не дёргать его постоянно). 0 — выключено: без периодических консультаций, и внешний агент не обязан делать обзор стратегии."
+    "Strategist consult cadence in created nodes (bounded, so it never thrashes). 0 = off: no periodic consult, and an external agent owes no strategy review.": "Как часто консультироваться со Strategist, в созданных узлах (с ограничением, чтобы не дёргать его постоянно). 0 — выключено: без периодических консультаций, и внешний агент не обязан делать обзор стратегии.",
+    "Hand this run to Codex in one line": "Передать этот запуск Codex одной строкой",
+    "Copy Codex line": "Скопировать строку для Codex",
+    "Who drives the run": "Кто ведёт запуск",
+    "External agent (Codex)": "Внешний агент (Codex)",
+    "Unknown driver": "Неизвестный вариант ведущего запуска",
+    "asst-launch-section asst-launch-agentline": "asst-launch-section asst-launch-agentline",
+    "Your coding agent proposes experiments; LoopLab measures them. After Start, copy one Codex line.": "Эксперименты предлагает ваш агент, LoopLab их измеряет. После старта скопируйте одну строку для Codex.",
+    "Paste it into a terminal in your project; no config file or token needed.": "Вставьте её в терминал в папке проекта; файл конфигурации и токен не нужны.",
+    "Codex line copied.": "Строка для Codex скопирована.",
+    "Clipboard unavailable; select the line and copy it.": "Буфер обмена недоступен; выделите строку и скопируйте её.",
+    "No LoopLab model? Your coding agent (Codex) can run the experiment: paste this line into a terminal in your project.": "Нет модели LoopLab? Эксперимент может вести ваш агент (Codex): вставьте эту строку в терминал в папке проекта.",
+    "<your goal>": "<ваша цель>",
+    "Drive LoopLab run {0} via the looplab MCP tools: connection_check, run_progress, then submit_experiment and wait_for_next until done; LoopLab measures. Pause or finish explicitly.{1}": "Drive LoopLab run {0} via the looplab MCP tools: connection_check, run_progress, then submit_experiment and wait_for_next until done; LoopLab measures. Pause or finish explicitly.{1}",
+    "Via the looplab MCP tools: start_run a LoopLab run for this goal, give me its ui_url, then drive it (run_progress, submit_experiment, wait_for_next).{0} Goal: {1}": "Via the looplab MCP tools: start_run a LoopLab run for this goal, give me its ui_url, then drive it (run_progress, submit_experiment, wait_for_next).{0} Goal: {1}"
   },
   "plurals": {
     "({0} paraphrases folded)": {

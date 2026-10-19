@@ -1,5 +1,7 @@
 const DRAFT_FIELDS = Object.freeze([
   'proposal_id', 'run_id', 'source', 'task_file', 'task_json', 'settings_json', 'rationale', 'setup_steps',
+  // "Who drives" (doc 82 П4): the backend to restore when the card switches back to LoopLab.
+  'driver_prior_backend',
 ])
 
 const segment = value => encodeURIComponent(String(value == null || value === '' ? 'unsaved' : value))

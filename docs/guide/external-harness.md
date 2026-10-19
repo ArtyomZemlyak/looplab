@@ -258,8 +258,8 @@ checks the run generation, external mode, event history and saved task/config.
 The block displays its actual run root and directory, a last-read engine probe,
 and a copyable MCP configuration. Choose **Codex**, **Claude Code**, or
 **Other MCP client**. On an open UI (handoff `credential_mode: "anonymous"`) no descriptor
-names a token, Codex also gets the one-time `codex mcp add looplab -- looplab harness-mcp`,
-and the credential step is not shown. On a protected UI Codex uses TOML with `env_vars` and
+names a token, Codex gets one line that registers LoopLab and hands it this run,
+and the credential step is hidden. On a protected UI Codex uses TOML with `env_vars` and
 Claude uses project `.mcp.json` with environment expansion. The other-client descriptor is:
 
 ```json

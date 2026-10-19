@@ -3,12 +3,13 @@ import React, { useEffect, useState } from 'react'
 import { usePoll } from './hooks.js'
 import { deadlineGet } from './util.js'
 import { MODEL_CHECK_EVENT, modelConnectionView, readModelCheck } from './modelConnection.js'
+import { harnessCodexOneLiner, harnessGoalPrompt } from './codexLine.js'
 import LazyBoundary from './LazyBoundary.jsx'
 import './assistant-model-check.css'
 
 const AssistantModelCheck = React.lazy(() => import('./AssistantModelCheck.jsx'))
 
-export default function FirstRunModelStatus({ onSettings, language = 'auto' }) {
+export default function FirstRunModelStatus({ onSettings, language = 'auto', goal = '' }) {
   useUILanguage()
 
   const ru = effectiveUILanguage(language) === 'ru'
@@ -35,6 +36,10 @@ export default function FirstRunModelStatus({ onSettings, language = 'auto' }) {
     return request
   }, 30_000, [routeEpoch], { pauseHidden: true })
   const status = modelConnectionView(snapshot, check, language)
+  // Path B (doc 82 П4): no model, so hand the goal to a coding agent with one copied line.
+  const agentLine = status.agentFallback
+    ? harnessCodexOneLiner(location.href, harnessGoalPrompt(goal || uiText('<your goal>'), ru ? 'ru' : 'en'))
+    : ''
   return <div className="asst-new-run-hint asst-model-status">
     <span role="status" className={status.tone ? `model-connection-${status.tone}` : ''}>{uiText(status.text)}</span>
     {!showCheck && <button type="button" className="btn sm" onClick={onSettings}>{((ru ? 'Настроить модель' : uiText('Model settings')))}</button>}
@@ -46,5 +51,9 @@ export default function FirstRunModelStatus({ onSettings, language = 'auto' }) {
         {((ru ? 'Настроить модель' : uiText('Model settings')))}</button>}>
       <AssistantModelCheck onSettings={onSettings} language={language} />
     </LazyBoundary>}
+    {agentLine && <div className="asst-agent-path">
+      <p>{uiText('No LoopLab model? Your coding agent (Codex) can run the experiment: paste this line into a terminal in your project.')}</p>
+      <pre>{agentLine}</pre>
+    </div>}
   </div>
 }

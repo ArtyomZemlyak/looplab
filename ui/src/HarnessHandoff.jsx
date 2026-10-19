@@ -3,7 +3,7 @@ import React, { useEffect, useRef, useState } from 'react'
 import { get, runApiPath } from './util.js'
 import { useScopedResource } from './useScopedResource.js'
 import { PANEL_REQUEST_TIMEOUT_MS, RUN_GENERATION_RE } from './panelPrimitives.js'
-import { harnessAgentInstruction, harnessCodexAddCommand, harnessMcpDescriptor, harnessServerUrl, validHarnessHandoff } from './harnessHandoff.js'
+import { harnessAgentInstruction, harnessCodexOneLiner, harnessMcpDescriptor, harnessRunPrompt, harnessServerUrl, validHarnessHandoff } from './harnessHandoff.js'
 import './harness-handoff.css'
 import HarnessReceipt from './HarnessReceipt.jsx'
 import { useAssistantUILanguage } from './useAssistantLanguage.js'
@@ -48,6 +48,15 @@ export default function HarnessHandoff({ runId, generation, seq, defaultOpen = f
       setCopied({ scope, type: 'instruction', message: 'Clipboard unavailable. Select the instruction below and copy it manually.' })
     }
   }
+  const oneLiner = anonymous && value ? harnessCodexOneLiner(url, harnessRunPrompt(value.run_id, language)) : ''
+  const copyOneLiner = async () => {
+    try {
+      await navigator.clipboard.writeText(oneLiner)
+      setCopied({ scope, type: 'oneliner', message: 'Codex line copied.' })
+    } catch {
+      setCopied({ scope, type: 'oneliner', message: 'Clipboard unavailable; select the line and copy it.' })
+    }
+  }
   const copyConfig = async () => {
     try {
       await navigator.clipboard.writeText(harnessMcpDescriptor(url, client, { anonymous }))
@@ -72,19 +81,22 @@ export default function HarnessHandoff({ runId, generation, seq, defaultOpen = f
           <dt>{t('Run directory')}</dt><dd>{value.server_paths.run_dir}</dd>
           <dt>{t('Engine probe')}</dt><dd>{value.engine_running === null ? t('Unknown') : value.engine_running ? t('Alive at last read') : t('Stopped at last read')}{t(' · agent connection is not measured')}</dd>
         </dl>
+        {anonymous && <div className="harness-oneliner">
+          <h4>{uiText('Hand this run to Codex in one line')}</h4>
+          <p>{uiText('Paste it into a terminal in your project; no config file or token needed.')}</p>
+          <pre>{oneLiner}</pre>
+          <button type="button" className="btn sm" onClick={copyOneLiner}>{uiText('Copy Codex line')}</button>
+          {copied?.scope === scope && copied.type === 'oneliner' && <p role="status">{uiText(copied.message)}</p>}
+        </div>}
         <h4>{t('1. Configure the MCP process')}</h4>
         <label>{t('MCP client ')}<select value={client} onChange={event => { setClient(event.target.value); setCopied(null) }}>
           <option value="codex">{uiText("Codex")}</option><option value="claude">{uiText("Claude Code")}</option>
           <option value="generic">{t('Other MCP client')}</option></select></label>
-        {anonymous && client === 'codex' && <>
-          <p>{t('Register once with one command (it writes your Codex config):')}</p>
-          <pre>{harnessCodexAddCommand(url)}</pre>
-          <p>{t('Or place this in a trusted project .codex/config.toml:')}</p></>}
         <pre>{harnessMcpDescriptor(url, client, { anonymous })}</pre>
         <button type="button" className="btn sm" onClick={copyConfig}>{t('Copy MCP configuration')}</button>
-        {copied?.scope === scope && copied.type === 'config' && copied.client === client && <p role="status">{t(copied.message)}</p>}
+        {copied?.scope === scope && copied.type === 'config' && copied.client === client && <p role="status">{anonymous ? uiText(copied.message) : t(copied.message)}</p>}
         {anonymous ? <>
-          <p>{t('No token is needed: this UI runs without owner login. For a virtual environment, set command to the full looplab executable path on the client machine.')}</p>
+          <p>{uiText('No token is needed: this UI runs without owner login. For a virtual environment, set command to the full looplab executable path on the client machine.')}</p>
           <p>{t(value.scope)}</p>
         </> : <>
           <p>{client === 'codex' ? t('Place this in a trusted project .codex/config.toml or your user config. env_vars forwards the scoped token from the Codex process environment.')
@@ -96,12 +108,12 @@ export default function HarnessHandoff({ runId, generation, seq, defaultOpen = f
             : t('Operator setup required: this server has no scoped harness credential configured.')}</p>
           <p>{t(value.credential_policy)}</p><p>{t(value.scope)}</p>
         </>}
-        <h4>{anonymous ? t('2. Connect and give the agent this run') : t('3. Connect and give the agent this run')}</h4>
+        <h4>{anonymous ? uiText('2. Connect and give the agent this run') : t('3. Connect and give the agent this run')}</h4>
         <p>{client === 'claude' ? t('Open Claude interactively in that project and review its project MCP approval prompt. Pending approval means the MCP process has not connected yet.')
           : client === 'codex' ? t('Open Codex in a trusted project and inspect /mcp to confirm that looplab loaded.')
             : t('Inspect the MCP server status in your client.')}{t(' Connected confirms the stdio process only. Tool calls can still need client approval. Use connection_check for this run and inspect its result.')}{client === 'claude' && t(' In Claude --print, exit 0 can include permission_denials.')}</p>
         <button type="button" className="btn sm" onClick={copy}>{t('Copy agent instruction')}</button>
-        {copied?.scope === scope && copied.type === 'instruction' && <p role="status">{t(copied.message)}</p>}
+        {copied?.scope === scope && copied.type === 'instruction' && <p role="status">{anonymous ? uiText(copied.message) : t(copied.message)}</p>}
         <details><summary>{t('Preview instruction and workspace permissions')}</summary>
           <pre>{harnessAgentInstruction(value, url, language)}</pre></details>
         <p className="muted">{t('Copying starts no work. Reconnect here with current state, receipts and checkpoints.')}</p>

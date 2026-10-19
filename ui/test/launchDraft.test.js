@@ -183,3 +183,38 @@ test('the offline demo card names the metric its contract declares (doc 75 UX-31
   const score = rows.find(row => row.label === 'Score')
   assert.equal(score.value, 'quadratic_loss · lower is better')
 })
+
+test('who drives: external writes external_harness + backend toy and switching back restores the backend (doc 82 П4)', async () => {
+  const { launchDriver, setLaunchDriver } = await import('../src/launchDraft.js')
+  const withLlm = createLaunchDraft({ ...proposal, settings: { ...proposal.settings, backend: 'llm' } })
+  assert.equal(launchDriver(withLlm), 'looplab')
+  const external = setLaunchDriver(withLlm, 'external')
+  assert.ok(external.ok)
+  const settings = JSON.parse(external.draft.settings_json)
+  assert.equal(settings.external_harness, true)
+  assert.equal(settings.backend, 'toy', 'a carried backend=llm would be a 422 for an external run')
+  assert.deepEqual(settings.nested_future_setting, { keep: ['exactly'] }, 'unlisted settings survive')
+  assert.equal(launchDriver(external.draft), 'external')
+  assert.ok(buildLaunchBody(external.draft).ok)
+  const back = setLaunchDriver(external.draft, 'looplab')
+  const restored = JSON.parse(back.draft.settings_json)
+  assert.equal(restored.backend, 'llm')
+  assert.equal('external_harness' in restored, false)
+  assert.equal('driver_prior_backend' in back.draft, false)
+
+  const bare = createLaunchDraft(proposal)                      // no backend at all
+  const out = setLaunchDriver(setLaunchDriver(bare, 'external').draft, 'looplab').draft
+  assert.equal('backend' in JSON.parse(out.settings_json), false, 'a backend the draft never had is removed')
+  assert.equal(setLaunchDriver(bare, 'looplab').draft, bare, 'choosing the current driver is a no-op')
+  assert.equal(setLaunchDriver(bare, 'robot').ok, false)
+  assert.equal(setLaunchDriver({ ...bare, settings_json: '{' }, 'external').ok, false)
+})
+
+test('a retained draft keeps the backend to restore', async () => {
+  const { setLaunchDriver } = await import('../src/launchDraft.js')
+  const { retainedLaunchDraft } = await import('../src/launchDraftStore.js')
+  const draft = createLaunchDraft({ ...proposal, settings: { backend: 'llm' } })
+  const kept = retainedLaunchDraft(setLaunchDriver(draft, 'external').draft)
+  assert.equal(kept.driver_prior_backend, 'llm')
+  assert.equal(JSON.parse(setLaunchDriver(kept, 'looplab').draft.settings_json).backend, 'llm')
+})
