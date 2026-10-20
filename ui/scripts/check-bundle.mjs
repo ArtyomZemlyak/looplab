@@ -204,7 +204,10 @@ export const DEFAULT_BUDGETS = Object.freeze({
     // and their own stylesheets; every route closure kept its ceiling. Re-baselined to that build.
     // Then the Files paging/PDF view, the attempt Resources panel and the experiments table:
     // 702,223 B JS / 61,745 B CSS, again only lazy chunks and their own stylesheets.
-    js: { gzip: 686.5 * KIB },
+    // 2026-10-20 doc 82 П6: measured 703,293 B after co-locating the mirror banner with
+    // BundleFreshness (separate lazy banner was 703,707 B). 687 KiB leaves 195 B; the new
+    // UI reads source-local mirror health and warns before tmpfs runs are lost.
+    js: { gzip: 687 * KIB },
     css: { gzip: 60.5 * KIB },
   },
   individual: {

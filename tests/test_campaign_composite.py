@@ -246,3 +246,25 @@ def test_a_reused_experiment_id_with_another_declaration_stops_before_inject(tmp
                                          code="print(5)", experiment=EXPERIMENT)
     assert second["ok"], second
     assert injects() == 2
+
+
+def test_submit_experiment_forwards_artifact_kind_and_evaluated_uses(tmp_path, monkeypatch):
+    root, rd, store, api, server, spawns = _setup(tmp_path, monkeypatch)
+    store.append('node_created', {'node_id': 1, 'parent_ids': [], 'operator': 'draft',
+                                  'idea': {'operator': 'draft'}, 'code': 'x'})
+    store.append('node_evaluated', {'node_id': 1, 'metric': 0.5})
+    settings = Settings(backend='toy', external_harness=True,
+                        **{**_NO_OBLIGATIONS, 'novelty_mode': 'algo'})
+    (rd / 'config.snapshot.json').write_text(settings.model_dump_json())
+    generation = run_generation_token(store.read_all())
+    idea = {'operator': 'inject', 'rationale': 'prepare reusable arrays'}
+    prepared = composite.submit_experiment(api, 'camp', generation, key='prepare', idea=idea,
+                                           code='print(1)', node_kind='artifact', uses=[1])
+    assert prepared['ok'], prepared
+    injected = next(e for e in store.read_all() if e.type == 'inject_node')
+    assert injected.data['node_kind'] == 'artifact'
+    assert injected.data['uses'] == [1] and injected.data['uses_attempts'] == {'1': 0}
+    ordinary = composite.submit_experiment(api, 'camp', generation, key='ordinary', idea=idea,
+                                          code='print(2)')
+    assert not ordinary['ok']
+    assert 'novelty' in str(ordinary)

@@ -10,7 +10,7 @@ vocabulary a client may append is `serve/protocol.py::CONTROL_EVENTS`.
 
 <!-- generated: api routes -->
 
-200 routes on 173 paths; 10 deprecated; 27 with a declared response model.
+201 routes on 174 paths; 10 deprecated; 27 with a declared response model.
 
 ### `/api`
 
@@ -177,6 +177,12 @@ vocabulary a client may append is `serve/protocol.py::CONTROL_EVENTS`.
 | `GET` | `/api/review/nodes/{nid}` | Opt-in evidence projection: source/results, redacted, never live trace sidecars. | — |  |
 | `GET` | `/api/review/nodes/{nid}/metrics` | *Review Node Metrics* (no docstring) | — |  |
 | `GET` | `/api/review/state` | Return the review-safe state with the same bounded Cards fragment as owner/SSE state. | — |  |
+
+### `/api/run-mirror`
+
+| method | path | summary | response model | deprecated |
+|---|---|---|---|---|
+| `GET` | `/api/run-mirror` | Is the run root in memory (tmpfs), is a durable mirror configured | — |  |
 
 ### `/api/runs`
 

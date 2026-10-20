@@ -17,8 +17,7 @@ reconnect later) to choose further work: an idle external run waits for commands
 
 **Start here:** [First external run](#first-external-run) is the whole getting-started path; the
 first section of [`AGENTS.md`](https://github.com/ArtyomZemlyak/looplab/blob/master/AGENTS.md) is the
-same sequence in five steps for the agent itself. The rest of this page is the contract and recovery
-reference.
+same five steps for agents. The remaining sections cover the contract and recovery.
 
 ## First external run
 
@@ -1686,3 +1685,5 @@ its lattice level, filed experiments' tags only when it has none. Experiment tag
 generation-fenced through `concept_tag_edited`. Reaffirm a standing memo with
 `reaffirm_memo_id`; findings may carry `{id, text, status}` ([doc 76 §3](../76-external-agent-ux-open-items-2026-10-13.md)).
 
+
+[Mirroring and arrays](../82-simplicity-agent-entry-2026-10-19.md#10-implementation-notes).

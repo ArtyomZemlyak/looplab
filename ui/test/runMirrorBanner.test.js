@@ -1,0 +1,16 @@
+import assert from 'node:assert/strict'
+import test from 'node:test'
+import { fetchStub, jsonResponse, mountLive, until } from './_mount.js'
+
+test('tmpfs without a successful mirror names the durable-folder setting', async () => {
+  const harness = await mountLive({ visible: true })
+  globalThis.fetch = fetchStub({ '/api/run-mirror': { volatile: true, dst_root: null } })
+  try {
+    const { default: Banner } = await harness.load('/src/RunMirrorBanner.jsx')
+    const view = await harness.mount(Banner)
+    await until(() => view.container.textContent.includes('LOOPLAB_RUN_MIRROR_DST'))
+    assert.equal(view.container.querySelector('[role="status"]') !== null, true)
+  } finally {
+    await harness.close()
+  }
+})

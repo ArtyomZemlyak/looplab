@@ -162,7 +162,8 @@ def submit_experiment(api, run_id: str, expected_generation: str, *, key: str, i
                       memo: Optional[dict] = None, decisions: Optional[dict] = None,
                       dry_run: bool = False, code_from: Optional[dict] = None,
                       parent_ids: Optional[list] = None,
-                      parent_generations: Optional[dict] = None) -> dict:
+                      parent_generations: Optional[dict] = None,
+                      node_kind: Optional[str] = None, uses: Optional[list[int]] = None) -> dict:
     """`code_from` (doc 79 §4) is the run-worktree / patch / foreign-branch alternative to
     `files`/`code`/`deleted` — exactly one of the two. It is PREVIEWED through the same route the
     intake converts it with (`POST .../code/overlay`, paths and sizes only) BEFORE anything is
@@ -180,12 +181,16 @@ def submit_experiment(api, run_id: str, expected_generation: str, *, key: str, i
         raise ConfigRefusal("key must be a stable non-empty string of at most 120 characters")
     if parent_id is not None and parent_ids is not None:
         raise ConfigRefusal("give parent_id or parent_ids, not both")
+    if node_kind not in (None, "artifact"):
+        raise ConfigRefusal("node_kind must be artifact or omitted")
     idea = dict(idea)
     progress = api.run_progress(run_id, expected_generation)
     if not steps.add("read_progress", progress):
         return steps.done(message="")
     body = progress["body"]
-    required = body.get("candidate_decisions_per_idea") or {}
+    required = dict(body.get("candidate_decisions_per_idea") or {})
+    if node_kind == "artifact":
+        required.pop("novelty", None)
     requirements = body.get("candidate_requirements") or {}
     blockers = body.get("candidate_blockers_if_expanding") or []
     missing = []
@@ -290,7 +295,8 @@ def submit_experiment(api, run_id: str, expected_generation: str, *, key: str, i
     data: dict[str, Any] = {"idea": idea}
     for name, value in (("files", files), ("code", code), ("deleted", deleted),
                         ("parent_id", parent_id), ("parent_ids", parent_ids),
-                        ("parent_generations", parent_generations), ("code_from", code_from)):
+                        ("parent_generations", parent_generations), ("code_from", code_from),
+                        ("node_kind", node_kind), ("uses", uses)):
         if value is not None:
             data[name] = value
     result = _command(api, run_id, expected_generation, "inject_node", data, f"{key}:inject",

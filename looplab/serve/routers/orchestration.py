@@ -112,6 +112,15 @@ def build_router(srv) -> APIRouter:
                                      run_id=run_id, kinds=wanted, limit=limit)
 
     # ------------------------------------------------------------------ notification hook
+    @router.get("/api/run-mirror")
+    def get_run_mirror(response: Response):
+        """Is the run root in memory (tmpfs), is a durable mirror configured
+        (`LOOPLAB_RUN_MIRROR_DST`), its supervised child's state and when it last finished a pass.
+        Reads the run root and the mirror's state file only, never the destination (doc 82 П6)."""
+        from looplab.serve.mirror_supervisor import mirror_view
+        response.headers["Cache-Control"] = "no-store"
+        return mirror_view(srv.root, getattr(srv, "run_mirror", None))
+
     @router.get("/api/agent-notify")
     def get_agent_notify(response: Response):
         """The operator's notification hook, its delivery watermark and the recent ledger."""

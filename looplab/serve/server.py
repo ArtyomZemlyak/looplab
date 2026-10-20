@@ -901,6 +901,15 @@ def make_app(run_root: str | os.PathLike, *, bind_host: Optional[str] = None) ->
     lifecycle.on_startup("agent_events", srv.agent_events.start)
     lifecycle.on_shutdown("agent_events", srv.agent_events.stop)
 
+    # The run mirror (doc 82 П6): only with a destination the operator chose (Р7: no default), as
+    # a supervised child process — a hung FUSE call can then hold up the mirror alone.
+    from looplab.serve.mirror_supervisor import MIRROR_DST_ENV, MirrorSupervisor
+    srv.run_mirror = None
+    if os.environ.get(MIRROR_DST_ENV):
+        srv.run_mirror = MirrorSupervisor(root, os.environ[MIRROR_DST_ENV])
+        lifecycle.on_startup("run_mirror", srv.run_mirror.start)
+        lifecycle.on_shutdown("run_mirror", srv.run_mirror.stop)
+
     @app.get("/api/auth/status")
     def auth_status(request: Request):
         return {"required": bool(ui_token),

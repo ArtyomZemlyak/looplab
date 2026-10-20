@@ -41,7 +41,10 @@ destination during a pass (the state file is the memory of what was copied), and
 directory is created once per process. That is the metadata-storm rule for an S3 mount.
 
 NEVER BLOCKS THE ENGINE. The mirror is its own process (`looplab run-mirror`); it takes no lock the
-engine takes and only reads the source. Every destination operation runs in a worker thread under a
+engine takes and only reads the source. It takes ONE lock of its own (doc 82 П6):
+`src_root/.looplab-mirror/mirror.lock`, held non-blocking for a whole loop (or one pass), so two
+mirrors of one root — an operator's `run-mirror --loop` and the one `looplab ui` supervises under
+`LOOPLAB_RUN_MIRROR_DST` — never copy at once: the second refuses with `MirrorBusy`. Every destination operation runs in a worker thread under a
 deadline (`op_timeout_s`, scaled by size): a FUSE call that does not return marks the pass STUCK —
 recorded in the state with the path — and the pass stops touching the destination. With
 `exit_on_stuck` the loop then exits non-zero so a supervisor can restart it; a thread stuck in the
@@ -64,12 +67,14 @@ import os
 import shutil
 import threading
 import time
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable, Iterable, Optional
 
 STATE_DIR = ".looplab-mirror"
 STATE_FILE = "state.json"
+LOCK_FILE = "mirror.lock"
 MANIFEST = ".looplab-mirror.json"
 TMP_SUFFIX = ".mirror-tmp"
 _STATE_VERSION = 1
@@ -99,6 +104,10 @@ _TMP_SEQ = itertools.count()
 
 class MirrorStuck(RuntimeError):
     """A destination operation did not return within its deadline."""
+
+
+class MirrorBusy(RuntimeError):
+    """Another mirror holds this source root's mirror lock."""
 
 
 @dataclass
@@ -615,9 +624,33 @@ def mirror_run(run_dir: Path, cfg: MirrorConfig, state: dict, *, pass_no: int,
             "errors": errors}
 
 
+def mirror_lock_path(cfg: MirrorConfig) -> Path:
+    return cfg.src_root / STATE_DIR / LOCK_FILE
+
+
+@contextmanager
+def mirror_lock(cfg: MirrorConfig):
+    """Hold the source root's mirror lock, or raise `MirrorBusy` at once (never waits)."""
+    from looplab.events.eventstore import InterprocessLockContended, interprocess_lock
+
+    path = mirror_lock_path(cfg)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        with interprocess_lock(path, required=True, blocking=False):
+            yield path
+    except InterprocessLockContended as exc:
+        raise MirrorBusy(f"another mirror of {cfg.src_root} is running (lock {path})") from exc
+
+
 def mirror_pass(cfg: MirrorConfig, *, state: Optional[dict] = None,
-                clock=time.monotonic, sleep=time.sleep) -> PassReport:
-    """One pass over every run under `cfg.src_root`. Saves the state after each run."""
+                clock=time.monotonic, sleep=time.sleep, locked: bool = False) -> PassReport:
+    """One pass over every run under `cfg.src_root`. Saves the state after each run.
+
+    `locked`: the caller already holds `mirror_lock` (a loop holds it for its lifetime); otherwise
+    this pass takes it, and raises `MirrorBusy` while another mirror holds it."""
+    if not locked:
+        with mirror_lock(cfg):
+            return mirror_pass(cfg, state=state, clock=clock, sleep=sleep, locked=True)
     state = load_state(cfg) if state is None else state
     pass_no = int(state.get("pass", 0))
     report = PassReport()
@@ -662,10 +695,17 @@ def mirror_loop(cfg: MirrorConfig, *, passes: Optional[int] = None, exit_on_stuc
                 log: Callable[[str], None] = print, sleep=time.sleep,
                 stop: Optional[threading.Event] = None) -> int:
     """Run passes every `cfg.interval_s` seconds; returns 0, or 3 on a stuck destination with
-    `exit_on_stuck` (so a supervisor restarts a process that may hold a thread stuck in FUSE)."""
+    `exit_on_stuck` (so a supervisor restarts a process that may hold a thread stuck in FUSE).
+    Holds the mirror lock for the whole loop; raises `MirrorBusy` when another mirror holds it."""
+    with mirror_lock(cfg):
+        return _mirror_loop_locked(cfg, passes=passes, exit_on_stuck=exit_on_stuck, log=log,
+                                   sleep=sleep, stop=stop)
+
+
+def _mirror_loop_locked(cfg, *, passes, exit_on_stuck, log, sleep, stop) -> int:
     done = 0
     while True:
-        report = mirror_pass(cfg)
+        report = mirror_pass(cfg, locked=True)
         copied = sum(r.get("copied", 0) for r in report.runs.values())
         log(f"mirror pass: {len(report.runs)} run(s), {copied} file(s) copied, "
             f"{len(report.errors)} error(s), {report.seconds:.1f}s"

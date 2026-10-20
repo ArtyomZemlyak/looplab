@@ -4,7 +4,7 @@
 (goal in words → launch card with a "who drives: LoopLab / external agent" choice) and an external
 agent such as Codex that creates and drives the run itself through a new MCP `start_run`. Anonymous
 mode is the main path: no tokens. Seven packages, cheapest first; every claim checked against
-`6dd598083`. Nothing here is shipped yet.*
+`6dd598083`. Packages П1–П7 are implemented; validation and deployment records follow the commit history.*
 
 **Дата:** 2026-10-19. **База проверки:** `master` @ `6dd598083`. **Источник:** исходный план по двум
 ревью Claude Code (`/home/jovyan/data/looplab-reviews/20261019-simplicity-plan/PLAN.md`). Каждый его
@@ -14,9 +14,9 @@ mode is the main path: no tokens. Seven packages, cheapest first; every claim ch
 (пробуждение агента), [doc 81](81-campaign-in-one-run-2026-10-14.md) (кампания в одном ране),
 руководство [external-harness](guide/external-harness.md).
 
-Статус: план в работе. Сделано: П1 (анонимное подключение агента, экстра `ui` с MCP), П2 (профиль
+Статус: П1–П7 реализованы. Сделано: П1 (анонимное подключение агента, экстра `ui` с MCP), П2 (профиль
 `agent-minimal`, `strategist_every=0`, вывод `backend=toy` для external-запуска), П3 (MCP `start_run`), П4 (карточка «Кто ведёт» и строка для Codex), П5 (атрибуция и ограждения агента в открытом
-режиме, пресет `codex`, проверка реакции, `reason` у pause/resume).
+режиме, пресет `codex`, проверка реакции, `reason` у pause/resume), П6 (tmpfs предупреждение и баннер, супервизор зеркала), П7 (node_kind/uses, arm identity и автоматический per-query импорт).
 Решения §8 приняты по рекомендациям по умолчанию (Р1–Р7).
 
 ## 1. Требования пользователя
@@ -332,3 +332,55 @@ Release-wheel со собранным `ui_dist`, чтобы не нужен бы
 `operator_upload` в проекции. Блок вывода `looplab run` для external-рана и короткий
 `looplab harness` с `--full`. MCP по HTTP прямо из UI-сервера (`codex mcp add --url`), чтобы на машине
 агента не нужен был LoopLab.
+
+## 10. Implementation notes
+
+### In-memory runs and durable mirroring
+
+A Linux tmpfs/ramfs run root is detected automatically. `looplab ui` and `looplab run` warn when
+no destination is configured; the owner UI shows the warning and the last successful mirror pass.
+Set `LOOPLAB_RUN_MIRROR_DST` to a persistent directory before starting the UI. The UI supervises
+`run-mirror --loop --exit-on-stuck` as a separate process, restarts failures with backoff and shares
+one source-root lock with a manually started CLI mirror. `GET /api/run-mirror` reads only local
+status, never the destination. There is no default destination and a configured destination alone
+is not proof that any pass succeeded. A matching local readback does not prove a remote S3 flush.
+
+### Candidate artifacts and automatic per-query uploads
+
+`submit_experiment(node_kind="artifact", ...)` prepares unranked artifacts without a novelty
+review. Ordinary experiments still need their enabled review receipts. `uses=[node_id, ...]`
+can name any evaluated, non-deleted node; admission pins its current lifecycle and evaluation
+refuses a rebuilt or missing producer. This does not make a failed node a usable producer.
+
+An external candidate may write `per_query/<name>.npz` and `per_query/<name>.json` in its workdir.
+The JSON sidecar opts in with `metrics` and accepts `query_key`, `cluster_key`, `test_label`,
+`experiment_id`, `arm`, and `measured_check`, using the same schema as `upload_per_query`:
+
+```json
+{"metrics":{"recall":{"kind":"mean","array":"recall"}},
+ "test_label":"frozen-test", "query_key":"keys", "cluster_key":"users"}
+```
+
+The UI's existing event pump imports these after a terminal event, including recovery on server
+startup. Import is once per file and node lifecycle, bounded to 64 sidecars per node. A prior manual
+upload of the same source/experiment/arm wins. Missing declarations and linked files are not
+imported. Validation failures are logged; use manual `upload_per_query` to recover deliberately.
+The provenance remains candidate-authored workdir bytes, not authenticated measured evidence.
+Keep each inference policy bound to its own `experiment_id`/`arm`: uploads on one node and test
+no longer overwrite other arms. A comparison uses its exact binding first; legacy unbound or
+same-label sources remain usable only when unambiguous.
+
+To compare archived weights within the same compatible campaign, pause the run, add their mount
+with `amend_protocol(kind="task", inputs_add=[...], reason=...)`, resume and submit a scoring-only
+candidate. Declare its archive as an input and emit fresh per-query arrays on the frozen test.
+Do not fabricate a scored node or attach an old metric to a new lifecycle.
+
+### Historical comparison audit
+
+2026-10-20, host jupyterhub-ml-azemlyak-test: the available local root
+`/dev/shm/looplab-runs` contains one run, `minionerec-fuxi-d12-resume-w4-20261019`,
+with six per-query manifest rows. Grouping by `(node_id, test_id)` found no group with multiple
+experiment/arm bindings, so this run has no comparison requiring recalculation for this fix.
+Earlier lost run journals are unavailable here; this is not an audit claim about those archives.
+The regression scenario with three policies on one node now derives distinct upload IDs and
+strictly positive policy deltas instead of silently comparing the final policy with itself.

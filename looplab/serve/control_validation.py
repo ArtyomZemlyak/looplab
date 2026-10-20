@@ -953,7 +953,7 @@ def _normalize_metric_retarget(ctx: _ControlIntake) -> dict:
 
 def _normalize_artifact_fields(ctx: _ControlIntake) -> None:
     """`node_kind` and `uses` on an inject (doc 73 §1.4). `node_kind` is `"artifact"` or absent.
-    `uses` names artifact nodes that are ALREADY PRODUCED — evaluated in their current lifecycle —
+    `uses` names nodes that are ALREADY PRODUCED — evaluated in their current lifecycle —
     so the consumer never waits on, or races, a producer: an operator or the Assistant injects the
     consumers once the preparation is done. Refused, never coerced, so a typo cannot silently become
     an experiment that reads nothing."""
@@ -972,12 +972,12 @@ def _normalize_artifact_fields(ctx: _ControlIntake) -> None:
     state = ctx.state()
     for nid in uses:
         node = state.nodes.get(nid)
-        if node is None or getattr(node, "kind", None) != "artifact":
-            raise HTTPException(409, {"code": "inject_uses_not_artifact",
-                                      "message": f"uses: #{nid} is not an artifact node"})
+        if node is None:
+            raise HTTPException(409, {"code": "inject_uses_not_produced",
+                                      "message": f"uses: node #{nid} does not exist"})
         if node.status.value != "evaluated" or node.tombstoned:
             raise HTTPException(409, {"code": "inject_uses_not_produced",
-                                      "message": f"uses: artifact #{nid} has not been produced yet; "
+                                      "message": f"uses: node #{nid} has not been produced yet; "
                                                  "inject its consumers once it is"})
     # THE LIFECYCLE THAT WAS PRODUCED, SERVER-STAMPED (round 3). An inject is queued while stopped
     # and built later; by then the artifact may have been reset, rebuilt or deleted, and the consumer
@@ -1467,7 +1467,7 @@ def _normalize_inject_node(ctx: _ControlIntake) -> dict:
         if generation and ctx.state().run_uid:
             missing = missing_decisions(ctx.rd, settings, ctx.state(), normalized_idea, generation,
                                         code=data.get("code"), files=normalized_files,
-                                        deleted=data["deleted"])
+                                        deleted=data["deleted"], node_kind=data.get("node_kind"))
             if missing:
                 raise HTTPException(409, {
                     "code": "external_decisions_required", "phases": missing,

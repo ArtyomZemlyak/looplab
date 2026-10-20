@@ -300,6 +300,9 @@ def _isolate_shared_origin_detection(_isolation_patch):
     _isolation_patch.delenv("LOOPLAB_UI_REQUIRE_AUTH", raising=False)
     _isolation_patch.delenv("LOOPLAB_UI_CHECK_ORIGIN", raising=False)
     _isolation_patch.delenv("LOOPLAB_UI_AUTO_RESUME", raising=False)
+    # A developer's mirror destination (doc 82 П6) would make every `make_app` start a supervised
+    # `run-mirror` child copying the test's run root; tests that mean "mirror on" set it themselves.
+    _isolation_patch.delenv("LOOPLAB_RUN_MIRROR_DST", raising=False)
 
 
 @pytest.fixture(autouse=True)

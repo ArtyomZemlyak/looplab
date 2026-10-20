@@ -1,4 +1,5 @@
 import React, { useEffect, useState } from 'react'
+import RunMirrorBanner from './RunMirrorBanner.jsx'
 import { uiText, useUILanguage } from './uiLanguage.js'
 import { bundleIsStale, buildIdFromHtml, currentBuildId, indexUrl } from './bundleFreshness.js'
 
@@ -32,9 +33,8 @@ export default function BundleFreshness() {
       window.removeEventListener('focus', check); document.removeEventListener('visibilitychange', check)
     }
   }, [])
-  if (!stale) return null
-  return <div className="notice warn bundle-stale" role="status">
+  return <><RunMirrorBanner />{stale && <div className="notice warn bundle-stale" role="status">
     {uiText('The interface was updated. Reload the page to use the new version; save any draft first.')}{' '}
     <button type="button" className="btn sm" onClick={() => window.location.reload()}>{uiText('Reload')}</button>
-  </div>
+  </div>}</>
 }

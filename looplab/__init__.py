@@ -208,6 +208,7 @@ _LAYOUT = {
     "concept_lens_service": "serve",   # the paid concept-lens subsystem `routers/runs.py`
                                        # shed (doc 25 SR-04)
     "config": "core",
+    "volatile_fs": "core",
     "confirm": "trust",
     "confirm_phase": "engine",   # engine confirm mixin ("confirm" is taken by trust/confirm.py)
     "noise_floor": "engine",     # the eval noise-floor probe (doc 52 row 11)
@@ -454,6 +455,8 @@ _LAYOUT = {
     "scope_sources": "serve",
     "serve_prompts": "serve",   # UI-server prompt strings ("prompts" is taken by core/prompts.py)
     "server": "serve",
+    "mirror_supervisor": "serve",
+    "per_query_auto": "serve",
     "settings_store": "serve",
     "setup_identity": "core",   # run-start config_hash / setup manifest digests (doc 25 SE-01)
     "shell_tools": "tools",

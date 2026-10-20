@@ -1247,6 +1247,10 @@ def run(
     # run is never seeded, so nothing is resolved for it (critic 2026-09-26, driven: re-running a
     # seeded run whose source had since been removed was refused instead of continued).
     run_out = out or (Path(file_out) if file_out else Path("runs/run_local"))
+    from looplab.core.volatile_fs import volatile_warning
+    warning = volatile_warning(Path(run_out).parent)   # doc 82 П6: a tmpfs run root, said out loud
+    if warning:
+        typer.echo(warning, err=True)
     seed = None
     frozen_seed = _frozen_seed()
     if frozen_seed is None and getattr(settings, "seed_from_run", ""):

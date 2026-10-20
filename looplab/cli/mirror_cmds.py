@@ -60,7 +60,7 @@ def run_mirror_cmd(
     gets a manifest with every file's SHA-256, which `run-mirror-restore` verifies. Never lists the
     destination during a pass and never blocks an engine: a hung destination call stops the pass."""
     from looplab.engine.code_worktree import agent_backup
-    from looplab.events.run_mirror import mirror_loop
+    from looplab.events.run_mirror import MirrorBusy, mirror_loop
 
     # `run_extras`: an external agent's unsubmitted worktree (branch, metadata, uncommitted bytes)
     # is in no event, so the log cannot rebuild it; the engine derives a bundle of it into the
@@ -69,8 +69,13 @@ def run_mirror_cmd(
                   max_files_per_s=max_files_per_s, max_file_bytes=int(max_file_mb * 1024 * 1024),
                   op_timeout_s=op_timeout, runs=tuple(run), exclude=tuple(exclude),
                   run_extras=agent_backup)
-    code = mirror_loop(cfg, passes=None if loop else 1, exit_on_stuck=exit_on_stuck,
-                       log=lambda line: typer.echo(line, err=True))
+    try:
+        code = mirror_loop(cfg, passes=None if loop else 1, exit_on_stuck=exit_on_stuck,
+                           log=lambda line: typer.echo(line, err=True))
+    except MirrorBusy as exc:
+        # One mirror per run root (doc 82 П6): an operator's loop and the UI's supervised child
+        # never copy at once. A refusal (exit 2), so a supervisor waits instead of restarting.
+        raise CliRefusal(str(exc)) from exc
     if code:
         raise typer.Exit(code)
 

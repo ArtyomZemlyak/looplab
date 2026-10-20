@@ -834,6 +834,13 @@ class AgentEventPump:
             new_events = []
         else:
             new_events = [ev for ev in events if ev.seq > int(last_seq)]
+        # Terminal workdir arrays use the same durable uploader as a manual request. Startup also
+        # scans current terminals, so a UI restart recovers an import interrupted before receipt.
+        from looplab.serve.per_query_auto import import_terminal_arrays
+        try:
+            import_terminal_arrays(self.srv, rd)
+        except (OSError, ValueError, HTTPException):
+            _log.warning("terminal per-query import unavailable for %s", rd.name, exc_info=True)
         candidates = derive_log_events(rd.name, run_uid, new_events)
         conditions = self._conditions(rd, settings, state, events, run_uid)
         if conditions is not None:

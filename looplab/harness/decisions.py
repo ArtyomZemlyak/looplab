@@ -59,8 +59,10 @@ def decision_file(rd: Path) -> Path:
 
 
 def missing_decisions(rd: Path, settings, state, idea: Idea, generation: str,
-                      *, code=None, files=None, deleted=None) -> list[str]:
+                      *, code=None, files=None, deleted=None, node_kind=None) -> list[str]:
     required = required_decisions(settings, len(state.nodes))
+    if node_kind == "artifact":
+        required.pop("novelty", None)
     if not required:
         return []
     path = decision_file(rd)

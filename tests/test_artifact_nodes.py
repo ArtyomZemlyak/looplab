@@ -139,13 +139,13 @@ def _code(answer):
     return body.get("status"), (body.get("error") or {}).get("code")
 
 
-def test_uses_must_name_a_produced_artifact(_client):
+def test_uses_must_name_a_produced_node(_client):
     client, store = _client
     idea = {"operator": "inject", "rationale": "train on the prepared shards"}
     assert _code(_inject(client, {"idea": idea, "uses": [0]})) == (
         "rejected", "inject_uses_not_produced")
-    assert _code(_inject(client, {"idea": idea, "uses": [1]})) == (
-        "rejected", "inject_uses_not_artifact")
+    status, code = _code(_inject(client, {"idea": idea, "uses": [1]}))
+    assert code is None and status != "rejected", (status, code)
     store.append("node_evaluated", {"node_id": 0, "generation": 0, "metric": None, "violations": []})
     status, code = _code(_inject(client, {"idea": idea, "uses": [0]}))
     assert code is None and status != "rejected", (status, code)

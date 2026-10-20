@@ -181,11 +181,11 @@ def _manifest_row(row: dict) -> bool:
 
 
 def current_uploads(rows: list[dict], state=None) -> list[dict]:
-    """The latest upload per (node, test id), each stamped `stale` when its node lifecycle was
+    """The latest upload per (node, test id, experiment, arm), each stamped `stale` when its node lifecycle was
     reset after the upload (the arrays describe an abandoned attempt)."""
     latest: dict[tuple, dict] = {}
     for row in rows:
-        latest[(row["node_id"], row["test_id"])] = row
+        latest[(row["node_id"], row["test_id"], row.get("experiment_id"), row.get("arm"))] = row
     out = []
     for row in latest.values():
         node = state.nodes.get(row["node_id"]) if state is not None else None
@@ -230,7 +230,7 @@ def _replayed_upload(rd: Path, body, source_sha: str) -> Optional[dict]:
     return None
 
 
-def publish_upload(srv, rd: Path, body, *, agent_token: bool) -> dict:
+def publish_upload(srv, rd: Path, body, *, agent_token: bool, auto_attempt=None) -> dict:
     """Validate, reduce and store one node's per-query arrays; idempotent on `action_id`."""
     from looplab.serve.control_validation import run_is_external
     if agent_token and not run_is_external(rd):
@@ -314,6 +314,8 @@ def publish_upload(srv, rd: Path, body, *, agent_token: bool) -> dict:
             node = state.nodes.get(body.node_id)
             if node is None or getattr(node, "tombstoned", False):
                 raise HTTPException(404, f"no node {body.node_id} in this run")
+            if auto_attempt is not None and node.attempt != auto_attempt:
+                raise HTTPException(409, "node lifecycle changed before automatic upload")
             status = getattr(node.status, "value", str(node.status))
             if status not in ("evaluated", "failed") or node.terminal_event_seq is None:
                 raise HTTPException(409, {"code": "node_not_terminal",
@@ -369,6 +371,14 @@ def publish_upload(srv, rd: Path, body, *, agent_token: bool) -> dict:
                                 "code": "arm_bound_elsewhere",
                                 "message": (f"arm {body.arm!r} is already bound to node "
                                             f"{old.get('node_id')}; an arm is one node")})
+                if auto_attempt is not None:
+                    for old in rows:
+                        if (old.get("run_uid") == state.run_uid and old.get("node_id") == node.id
+                                and old.get("node_generation") == node.attempt
+                                and old.get("source", {}).get("sha256") == source_sha
+                                and old.get("experiment_id") == body.experiment_id
+                                and old.get("arm") == body.arm):
+                            return {"ok": True, "replayed": True, "upload": old}
                 upload_id = f"pq{len(rows) + 1}-{request_digest[:10]}"
                 tests_dir = Path(rd) / PER_QUERY_DIR / "tests"
                 test_file = tests_dir / f"{test_id}.json.gz"
@@ -492,6 +502,18 @@ def _resolve_arm(cache: _Root, home_run: str, exp: dict, label: str, test: dict)
     matches = [u for u in uploads if u["node_id"] == node_id and (
         u["test_id"] == test["test_id"] if test.get("test_id")
         else u.get("test_label") == test["label"])]
+    # A node can expose several inference policies on the SAME test. An explicit arm binding
+    # wins; only an unbound upload is a compatible legacy fallback. Never read a DIFFERENT arm.
+    bound = [u for u in matches if run_id == home_run
+             and u.get("experiment_id") == exp["experiment_id"] and u.get("arm") == label]
+    same_label = [u for u in matches if u.get("arm") == label]
+    unbound = [u for u in matches if not u.get("experiment_id") and not u.get("arm")]
+    # Existing post-hoc protocols often reuse an explicitly pinned node under the same arm name.
+    # If that name has several source policies, require a new explicit binding instead of guessing.
+    compatible = same_label or unbound
+    if not bound and len({u.get("source", {}).get("sha256") for u in compatible}) > 1:
+        compatible = []
+    matches = bound or compatible
     if not matches:
         return {"error": f"node {node_id} of run {run_id!r} has no upload for test {test['label']!r}",
                 "run_id": run_id, "node_id": node_id}
