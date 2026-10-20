@@ -697,9 +697,10 @@ def _backup_junk(rel: str) -> bool:
 def _plain_version(st) -> str:
     """The version in a plain file's stored name: a digest of its FULL stat identity
     (`core/atomicio.py::file_identity` — inode and ctime too, so a same-size rewrite that kept the
-    mtime, `cp -p` / `rsync -t` / a save inside one coarse tick, is a new name), never of its bytes:
+    mtime is a new name WHEN ctime advanced), never of its bytes:
     a checkpoint is gigabytes. A restored file is a new inode, so its version moves once after a
-    restore — one re-copy, never a stale one."""
+    restore — one re-copy. Identical metadata inside one filesystem tick remains indistinguishable,
+    as does restored mtime with unchanged Windows creation-time ctime; this is not a content digest."""
     import hashlib
     from looplab.core.atomicio import file_identity
     return hashlib.sha256(repr(file_identity(st)).encode("ascii")).hexdigest()[:12]

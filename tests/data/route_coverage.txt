@@ -70,6 +70,7 @@ GET /api/review/cost	tests/test_review_capabilities.py
 GET /api/review/nodes/{nid}	tests/test_review_capabilities.py
 GET /api/review/nodes/{nid}/metrics	tests/test_review_capabilities.py
 GET /api/review/state	tests/test_card_public_projection.py tests/test_collaboration.py tests/test_refusal_vocabulary.py tests/test_review_capabilities.py tests/test_server_code_freshness.py
+GET /api/run-mirror	tests/test_run_mirror_supervision.py
 GET /api/runs	tests/test_campaign_composite.py tests/test_campaign_protocol.py tests/test_campaign_runs.py tests/test_concept_shelf.py tests/test_node_sidecar_reads.py tests/test_owner_token.py tests/test_refusal_vocabulary.py tests/test_report.py tests/test_run_command_service.py tests/test_seq_gap_visibility.py tests/test_server.py tests/test_span_index.py tests/test_tui.py
 DELETE /api/runs/{run_id}	tests/test_deletion_identity_leak.py
 PATCH /api/runs/{run_id}	tests/test_server.py

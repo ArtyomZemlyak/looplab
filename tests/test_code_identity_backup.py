@@ -194,17 +194,24 @@ def test_a_restored_outside_path_obeys_the_location_rule(tmp_path):
     assert report["skipped"][0]["code"] == "code_worktree_path_not_canonical", report
 
 
-def test_a_same_size_rewrite_that_kept_its_mtime_is_a_new_plain_version(tmp_path):
-    """`cp -p`, `rsync -t`, a fixed-shape save inside one coarse tick: (size, mtime) did not move,
-    so the stale copy was kept and restored."""
+def test_a_same_size_rewrite_with_changed_ctime_is_a_new_plain_version(tmp_path):
+    """The metadata fingerprint must include ctime while preserving size and mtime.
+
+    Drive the timestamps: the local overlay filesystem can stamp two writes inside one tick with
+    the SAME full stat identity (observed 2026-10-20); on Windows ctime can be creation time too.
+    A stat-only version cannot distinguish that case, and a test must not assume a clock advanced.
+    """
+    from types import SimpleNamespace
+
     ckpt = tmp_path / "model.pt"
     ckpt.write_bytes(b"\x01" * 64)
     before = ckpt.stat()
-    ckpt.write_bytes(b"\x02" * 64)
-    os.utime(ckpt, ns=(before.st_atime_ns, before.st_mtime_ns))
-    after = ckpt.stat()
-    assert (after.st_size, after.st_mtime_ns) == (before.st_size, before.st_mtime_ns)
-    assert cw._plain_version(after) != cw._plain_version(before)
+    fields = {key: getattr(before, key, 0) for key in
+              ("st_dev", "st_ino", "st_size", "st_mtime_ns", "st_ctime_ns", "st_file_attributes")}
+    unchanged = SimpleNamespace(**fields)
+    changed = SimpleNamespace(**{**fields, "st_ctime_ns": fields["st_ctime_ns"] + 1})
+    assert cw._plain_version(unchanged) == cw._plain_version(before)
+    assert cw._plain_version(changed) != cw._plain_version(before)
 
 
 def test_a_plain_file_restores_with_its_stored_copys_mtime_and_leaves_no_temp(tmp_path,
