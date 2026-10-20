@@ -282,3 +282,20 @@ def test_a_child_of_a_consumer_inherits_what_it_uses():
     st = fold(rows)
     assert st.nodes[4].uses == [0, 1] and st.nodes[5].uses == [0, 1]
     assert st.nodes[6].uses == [], "an explicit `uses` — even empty — is what the writer said"
+
+
+def test_a_child_of_a_consumer_keeps_an_ordinary_evaluated_producer(tmp_path):
+    """Doc 82 П7: a scored experiment's files remain available after improving its consumer."""
+    engine = make_engine(tmp_path / 'run')
+    _created(engine, 0)
+    scored = RunResult(exit_code=0, stdout='score', metric=0.5, timed_out=False, stderr='')
+    _evaluate(engine, 0, scored)
+    _created(engine, 1, uses=[0], uses_attempts={'0': 0})
+    _evaluate(engine, 1, scored)
+    _created(engine, 2, parent_ids=[1])
+    state = fold(engine.store.read_all())
+    assert state.nodes[0].kind is None
+    assert state.nodes[2].uses == [0]
+    assert state.nodes[2].uses_attempts == {'0': 0}
+    assert engine._uses_workdirs_env(state.nodes[2]) == {
+        'LOOPLAB_USES_WORKDIRS': str((tmp_path / 'run/nodes/node_0').resolve())}

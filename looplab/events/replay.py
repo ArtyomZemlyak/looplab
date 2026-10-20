@@ -407,7 +407,7 @@ def unfinished_sync_lines(events) -> list[str]:
 
 def inherited_uses(st: RunState, parent_ids: list) -> list:
     """The artifacts a node built FROM consumers reads (doc 73 §1.4; critic 2026-10-08): the union
-    of its parents' `uses`, in parent order, bounded, artifact nodes only. An improve / merge /
+    of its parents' `uses`, in parent order, bounded to existing producers. An improve / merge /
     ablation of a consumer copies code that reads `LOOPLAB_USES_WORKDIRS`, and every creation path
     but the inject and the rebuild wrote no `uses` — the child got no variable and died of a
     KeyError, buying a triage and a repair. Derived HERE, from rows already folded, so every
@@ -419,7 +419,7 @@ def inherited_uses(st: RunState, parent_ids: list) -> list:
         parent = st.nodes.get(pid)
         for used in (getattr(parent, "uses", None) or []):
             producer = st.nodes.get(used)
-            if used not in out and getattr(producer, "kind", None) == "artifact":
+            if used not in out and producer is not None:
                 out.append(used)
     return out[:32]
 

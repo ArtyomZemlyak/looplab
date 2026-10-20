@@ -52,7 +52,14 @@ def test_terminal_sidecars_import_once_and_manual_upload_wins(tmp_path, monkeypa
     uploaded = import_terminal_arrays(srv, rd)
     assert len(uploaded) == 1
     assert uploaded[0]['source']['origin'] == 'node_workdir:per_query/test.npz'
-    assert import_terminal_arrays(srv, rd) == []
+    import looplab.serve.per_query_auto as auto
+    original_read = auto.read_bounded_regular_file
+    def no_array_read(path, limit):
+        assert path.suffix != '.npz', 'an imported terminal must not reread a large array'
+        return original_read(path, limit)
+    with monkeypatch.context() as patch:
+        patch.setattr(auto, 'read_bounded_regular_file', no_array_read)
+        assert import_terminal_arrays(srv, rd) == []
     assert len(client.get('/api/runs/auto/per-query', headers=AGENT).json()['uploads']) == 1
     # Another terminal with an existing manual receipt consumes no second upload.
     (tmp_path / 'other').mkdir()

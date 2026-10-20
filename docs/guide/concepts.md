@@ -777,8 +777,8 @@ Its metric is always None, even when the runner prints one, so it is never feasi
 champion, not killed by the proxy or ASHA, and not an attempt the plateau counts. A node that names it
 in `uses` gets `LOOPLAB_USES_WORKDIRS` — the artifacts' absolute workdirs, `os.pathsep`-joined —
 which its eval may read (the run directory is readable, never writable, to an eval). `uses` must name
-artifact nodes that are ALREADY produced; the command refuses `inject_uses_not_produced` /
-`inject_uses_not_artifact` otherwise, so a consumer never races its producer. Both keys land on
+evaluated nodes, including ordinary experiments; otherwise admission refuses
+`inject_uses_not_produced`. Consumers inherit these dependencies and lifecycle pins. Both keys land on
 `node_created` only when set, so every other node keeps its payload shape.
 
 It stays what it is: a retargeted objective never ranks it (even when an import left it the key),

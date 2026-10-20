@@ -51,6 +51,10 @@ def import_terminal_arrays(srv, rd: Path) -> list[dict]:
             continue
         for sidecar in sorted(directory.glob("*.json"))[:64]:
             try:
+                action = (f"auto-pq:{node.id}:{node.attempt}:" +
+                          hashlib.sha256(sidecar.name.encode()).hexdigest()[:24])
+                if any(r.get("run_uid") == state.run_uid and r.get("action_id") == action for r in rows):
+                    continue  # completed imports need no repeated NPZ read on a busy event pump
                 raw = read_bounded_regular_file(sidecar, 256 * 1024)
                 if raw is None:
                     continue
@@ -64,8 +68,6 @@ def import_terminal_arrays(srv, rd: Path) -> list[dict]:
                 if data is None:
                     continue
                 sha = hashlib.sha256(data).hexdigest()
-                action = (f"auto-pq:{node.id}:{node.attempt}:" +
-                          hashlib.sha256(sidecar.name.encode()).hexdigest()[:24])
                 if any(r.get("run_uid") == state.run_uid and r.get("node_id") == node.id
                        and r.get("node_generation") == node.attempt
                        and (r.get("action_id") == action or

@@ -37,6 +37,7 @@ def mounts(tmp_path):
     return str(path)
 
 
+@pytest.mark.posix_only("Linux /proc/mounts filesystem detection")
 @pytest.mark.parametrize("path,kind,volatile", [
     ("/dev/shm/looplab-runs", "tmpfs", True), ("/dev/shm/durable/runs", "ext4", False),
     ("/dev/shm", "tmpfs", True), ("/home/jovyan/data/runs", "fuse.geesefs", False),

@@ -442,7 +442,7 @@ CONTROL_DATA_FIELDS: dict[str, frozenset[str]] = {
         # two SERVER-STAMPED fields that make "what the operator changed" checkable.
         "forked_from",
         # An ARTIFACT node (doc 73 §1.4): `node_kind: "artifact"` succeeds on a clean pipeline with no
-        # metric and is never ranked; `uses` names produced artifact nodes whose workdirs this node's
+        # metric and is never ranked; `uses` names produced nodes whose workdirs this node's
         # eval reads (`LOOPLAB_USES_WORKDIRS`).
         "node_kind", "uses",
         "source_run", "source_node",

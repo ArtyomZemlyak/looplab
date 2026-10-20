@@ -2155,7 +2155,7 @@ class Node(BaseModel):
     # AN ARTIFACT NODE (doc 73 §1.4): `"artifact"` for an operator-injected node that PRODUCES what
     # other nodes read (a prepared dataset) — it succeeds on a clean pipeline with no metric, is never
     # ranked (no metric => not feasible) and is not an attempt the plateau counts. None = an
-    # experiment, which is every node of every log before this field. `uses`: the produced artifact
+    # experiment, which is every node of every log before this field. `uses`: the produced
     # nodes this node reads (`LOOPLAB_USES_WORKDIRS`). Both folded from `node_created`.
     kind: Optional[str] = None
     uses: list[int] = Field(default_factory=list)
