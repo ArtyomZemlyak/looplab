@@ -55,6 +55,7 @@ export {
   clearRunTransport, commandRecordMatchesAction, listLaunchTransports, loadAssistantRunTransport,
   loadLaunchTransport, loadRunCommandLock, loadRunTransport, peekReportRefreshIntent,
   reportRefreshIntent, saveAssistantRunTransport, saveLaunchTransport, saveRunCommandLock,
+  loadResearchMemoIntent, saveResearchMemoIntent, clearResearchMemoIntent,
   saveRunTransport, subscribeLaunchTransports, subscribeRunCommandLock,
 } from './commandStorage.js'
 export {
@@ -508,6 +509,7 @@ export async function getAuthoringOperation(
 // ---- ClearML-style project API ----
 export const listProjects = options => get('/api/projects', options)
 export const createProject = (name, parent_id = null) => post('/api/projects', { name, parent_id })
+export const putProjectMetricProfile = (id, body) => send(`/api/projects/${encodeURIComponent(id)}/metric-profile`, 'PUT', body)
 export const patchProject = (id, body) => send(`/api/projects/${encodeURIComponent(id)}`, 'PATCH', body)
 export const deleteProject = (id) => send(`/api/projects/${encodeURIComponent(id)}`, 'DELETE')
 const runOrganizationBody = (field, value, expectedGeneration, expectedCurrent) => {

@@ -171,6 +171,28 @@ def _conversation_etag(run_id: str, node_id: int, run_generation: Optional[str],
     return f'W/"llconv1-{digest}"'
 
 
+class MemoReviewRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    expected_generation: str = Field(pattern=r"^[0-9a-f]{64}$")
+    purpose: Literal["scientific", "technical"]
+    memo: dict
+
+
+class ReadinessBindingRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    expected_generation: str = Field(pattern=r"^[0-9a-f]{64}$")
+    experiment_id: str = Field(pattern=r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
+    subject_arm: str = Field(pattern=r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
+    scope_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    node_id: int = Field(ge=0)
+    attempt: int = Field(ge=0)
+    path: str = Field(min_length=1, max_length=1024)
+    manifest_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    artifact_path: Optional[str] = Field(default=None, min_length=1, max_length=1024)
+    artifact_sha256: Optional[str] = Field(default=None, pattern=r"^[0-9a-f]{64}$")
+    action_id: str = Field(pattern=r"^[A-Za-z0-9_.:-]{1,128}$")
+
+
 class ReportFigureUpload(BaseModel):
     """`POST /api/runs/{id}/report-figures`: which artifact to attach (the `/artifact/raw` fields)."""
     root: str = Field(max_length=200)
@@ -661,6 +683,16 @@ def _encode_state_frame(payload: dict, last_payload: Optional[dict], same_genera
     return kind, body, json.loads(full)
 
 
+class ResearchNoticeDispositionBody(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    expected_generation: str = Field(pattern=r"^[0-9a-f]{64}$")
+    command_id: str = Field(pattern=r"^cmd_[0-9a-f]{32}$")
+    notice_id: str = Field(pattern=r"^[0-9a-f]{64}$")
+    action_id: str = Field(pattern=r"^[A-Za-z0-9_.:-]{1,128}$")
+    disposition: Literal["unreviewed", "reviewed", "resolved"]
+    reason: str = Field(default="", max_length=500)
+
+
 class ExternalLessonBody(BaseModel):
     """Agent-authored conclusion; scope and evidence signatures are derived by the server."""
 
@@ -697,6 +729,10 @@ class ExternalDecisionBody(BaseModel):
     implementations: list[dict[str, Any]] = Field(default_factory=list, max_length=64)
     selected_index: int = Field(default=0, ge=0, le=63)
     reason: str = Field(min_length=1, max_length=1200)
+    prior_node_ids: list[StrictInt] = Field(default_factory=list, max_length=32)
+    alternatives_summary: str = Field(default="", max_length=1200)
+    information_gain: str = Field(default="", max_length=1200)
+    not_applicable_reason: str = Field(default="", max_length=1200)
 
 
 class ExternalReviewBody(BaseModel):
@@ -1055,6 +1091,91 @@ def build_router(srv) -> APIRouter:
         if observe_only:
             return _base_state_payload(_run_dir(run_id), seq)
         return _state_payload(_run_dir(run_id), seq)
+
+    @router.post("/api/runs/{run_id}/research-memo-review")
+    def post_research_memo_review(run_id: str, body: MemoReviewRequest):
+        """Advisory feedback on a draft research memo; this read does not publish or gate work."""
+        from looplab.harness.journals import read_event_source
+        from looplab.harness.research_quality import review_memo
+        events = read_event_source(_run_dir(run_id))
+        if run_generation_token(events) != body.expected_generation:
+            raise HTTPException(409, "run generation changed")
+        return {"generation": body.expected_generation, **review_memo(body.memo, purpose=body.purpose)}
+
+    @router.get("/api/runs/{run_id}/research-briefing")
+    def get_research_briefing(run_id: str, response: Response,
+                              expected_generation: str = Query(..., pattern=r"^[0-9a-f]{64}$"),
+                              language: Literal["en", "ru"] = Query("en")):
+        """Current bounded research and action context; observations do not grant authority."""
+        from looplab.harness.briefing import snapshot
+        response.headers["Cache-Control"] = "no-store"
+        result = snapshot(_run_dir(run_id), expected_generation, language=language)
+        from looplab.serve.mirror_supervisor import mirror_view, mirror_diagnostic
+        result["mirror"] = mirror_diagnostic(mirror_view(srv.root, getattr(srv, "run_mirror", None)))
+        return result
+
+    @router.get("/api/runs/{run_id}/research-notices")
+    def get_research_notices(run_id: str, response: Response,
+                             expected_generation: str = Query(..., pattern=r"^[0-9a-f]{64}$"),
+                             offset: int = Query(0, ge=0, le=10000), limit: int = Query(20, ge=1, le=20)):
+        """Read bounded saved command notices; missing historical notices remain unknown."""
+        from looplab.serve.research_notices import snapshot
+        response.headers["Cache-Control"] = "no-store"
+        return snapshot(srv, _run_dir(run_id), expected_generation, offset, limit)
+
+    @router.post("/api/runs/{run_id}/research-notices")
+    def post_research_notice(run_id: str, body: ResearchNoticeDispositionBody):
+        """Record an optional self-attested notice disposition, without creating a gate."""
+        from looplab.serve.research_notices import record
+        return record(srv, _run_dir(run_id), body)
+
+    @router.get("/api/runs/{run_id}/report/versions/{seq}/metric-bindings")
+    def get_report_metric_bindings(run_id: str, seq: int, response: Response,
+                                   expected_generation: str = Query(..., pattern=r"^[0-9a-f]{64}$")):
+        """Resolve report references to matching native per-query upload metadata."""
+        from looplab.harness.report_bindings import snapshot
+        response.headers["Cache-Control"] = "no-store"
+        return snapshot(_run_dir(run_id), expected_generation, seq)
+
+    @router.get("/api/runs/{run_id}/profile-measurements")
+    def get_profile_measurements(run_id: str, response: Response,
+                                 expected_generation: str = Query(..., pattern=r"^[0-9a-f]{64}$"),
+                                 offset: int = Query(0, ge=0, le=1000000),
+                                 limit: int = Query(10, ge=1, le=10)):
+        """Read declared profile keys from current node measurements without recomputation."""
+        from looplab.harness.profile_measurements import snapshot
+        response.headers["Cache-Control"] = "no-store"
+        return snapshot(_run_dir(run_id), expected_generation, offset, limit)
+
+    @router.get("/api/runs/{run_id}/research-export")
+    def get_research_export(run_id: str, response: Response,
+                            expected_generation: str = Query(..., pattern=r"^[0-9a-f]{64}$"),
+                            report_seq: list[int] = Query(default=[]),
+                            question_card_id: str | None = Query(default=None, min_length=1, max_length=160)):
+        """Export a bounded campaign overview and selected sanitized report versions."""
+        from looplab.harness.research_export import export
+        response.headers["Cache-Control"] = "no-store"
+        return export(_run_dir(run_id), expected_generation, report_seq, question_card_id)
+
+    @router.get("/api/runs/{run_id}/research-map")
+    def get_research_map(run_id: str, response: Response,
+                         expected_generation: str = Query(...),
+                         offset: int = Query(0, ge=0, le=1000000),
+                         limit: int = Query(20, ge=1, le=100)):
+        """Bounded read-only map of registered experiments, node references and reports."""
+        from looplab.harness.research_map import snapshot
+        if _RUN_GENERATION_RE.fullmatch(expected_generation) is None:
+            raise HTTPException(400, "expected_generation must be a SHA-256 token")
+        response.headers["Cache-Control"] = "no-store"
+        return snapshot(_run_dir(run_id), expected_generation, offset, limit)
+
+    @router.get("/api/runs/{run_id}/research-workflow")
+    def get_research_workflow(run_id: str):
+        """Canonical external research process; this read grants no execution authority."""
+        from importlib.resources import files
+        _run_dir(run_id)  # Use the same access and existence boundary as other run reads.
+        guide = files("looplab.harness").joinpath("external-research-workflow.md")
+        return {"version": 1, "markdown": guide.read_text(encoding="utf-8")}
 
     @router.get("/api/runs/{run_id}/harness-contract")
     def get_harness_contract(run_id: str):
@@ -2945,6 +3066,47 @@ def build_router(srv) -> APIRouter:
         if target_node_id is not None:
             response_identity.update({"node_id": target_node_id, "attempt": target_attempt})
         return payload, size, response_identity
+
+    @router.get("/api/runs/{run_id}/readiness-bindings")
+    def get_readiness_bindings(run_id: str, response: Response,
+                               expected_generation: str = Query(..., pattern=r"^[0-9a-f]{64}$")):
+        """Read late-binding receipts and current scope/attempt status, without granting authority."""
+        from looplab.harness.readiness_binding import snapshot
+        response.headers["Cache-Control"] = "no-store"
+        return snapshot(_run_dir(run_id), expected_generation)
+
+    @router.post("/api/runs/{run_id}/readiness-bindings")
+    def post_readiness_binding(run_id: str, body: ReadinessBindingRequest):
+        """Bind a terminal producer manifest to unchanged scientific scope; grants no execution."""
+        from looplab.harness.readiness_binding import publish
+        rd = _run_dir(run_id)
+        def read_manifest(path, node_id, attempt):
+            def digest_file(handle, size):
+                if size > 1024 * 1024:
+                    raise HTTPException(413, "manifest exceeds 1 MiB")
+                return hashlib.sha256(handle.read()).hexdigest()
+            digest, _, identity = _read_artifact_fenced(run_id, "run", path, body.expected_generation,
+                                                         node_id, attempt, digest_file)
+            return digest, identity
+        def read_artifact(path, node_id, attempt):
+            def digest_file(handle, size):
+                if size > 16 * 1024 * 1024 * 1024:
+                    raise HTTPException(413, "artifact exceeds 16 GiB verification limit")
+                before = os.fstat(handle.fileno())
+                digest = hashlib.sha256()
+                while True:
+                    chunk = handle.read(1024 * 1024)
+                    if not chunk:
+                        break
+                    digest.update(chunk)
+                after = os.fstat(handle.fileno())
+                if (before.st_size, before.st_mtime_ns, before.st_ino) != (after.st_size, after.st_mtime_ns, after.st_ino):
+                    raise HTTPException(409, "artifact changed during verification")
+                return digest.hexdigest()
+            digest, _, identity = _read_artifact_fenced(run_id, "run", path, body.expected_generation,
+                                                         node_id, attempt, digest_file)
+            return digest, identity
+        return publish(srv, rd, body, read_manifest, read_artifact)
 
     @router.get("/api/runs/{run_id}/artifact")
     def artifact(run_id: str, root: str, path: str,

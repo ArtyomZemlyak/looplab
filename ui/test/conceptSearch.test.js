@@ -192,3 +192,14 @@ test('filterConceptTree tolerates a malformed tree without throwing', () => {
   assert.deepEqual([...f.visible], [])
   assert.deepEqual([...f.expand], [])
 })
+
+test('governed aliases find the canonical concept in graph and tree search', () => {
+  const rename = { 'old/beam-width': 'decoding/beam', 'bad/cycle': 'bad/cycle' }
+  const results = searchConcepts({ 1: ['decoding/beam'] }, rename, 'beam-width')
+  assert.deepEqual(results.map(row => row.id), ['decoding/beam'])
+  assert.deepEqual(searchConcepts({ 1: ['decoding/beam'] }, rename, 'cycle'), [])
+  const tree = { nodes: { decoding: { parent: null, children: ['decoding/beam'] }, 'decoding/beam': { parent: 'decoding', children: [] } } }
+  const result = filterConceptTree(tree, {}, 'beam-width', { rename })
+  assert.ok(result.visible.has('decoding/beam'))
+  assert.ok(result.visible.has('decoding'))
+})

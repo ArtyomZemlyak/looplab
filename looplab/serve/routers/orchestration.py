@@ -53,6 +53,25 @@ class RunNotifyBody(BaseModel):
     hook: Optional[str] = Field(default=None, max_length=32)
 
 
+class AgentHandoffBody(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    expected_generation: str = Field(pattern=r"^[0-9a-f]{64}$")
+    action_id: str = Field(pattern=r"^[A-Za-z0-9_.:-]{1,128}$")
+    recipient_hook: str = Field(pattern=r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,31}$")
+    reason: str = Field(min_length=1, max_length=300)
+    next_read: str = Field(min_length=5, max_length=500)
+    urgency: Literal["normal", "high"] = "normal"
+
+
+class AgentAckBody(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    expected_generation: str = Field(pattern=r"^[0-9a-f]{64}$")
+    event_id: int = Field(ge=0)
+    recipient: str = Field(pattern=r"^[A-Za-z0-9_.-]{1,64}$")
+    action_id: str = Field(pattern=r"^[A-Za-z0-9_.:-]{1,128}$")
+    disposition: Literal["acknowledged", "resolved", "declined"]
+
+
 def _hook_param(hook: Optional[str]) -> Optional[str]:
     from looplab.serve.agent_events import check_hook_name
     try:
@@ -72,6 +91,34 @@ def build_router(srv) -> APIRouter:
 
     def _pump():
         return getattr(srv, "agent_events", None)
+
+    @router.post("/api/runs/{run_id}/agent-handoff")
+    def post_agent_handoff(run_id: str, body: AgentHandoffBody):
+        """Send an optional addressed wake-up; this does not authorize or launch work."""
+        from looplab.serve.agent_handoff import publish
+        srv.run_dir(run_id)
+        return publish(srv.root, run_id, body.expected_generation, body.action_id,
+                       body.recipient_hook, body.reason, body.next_read, body.urgency)
+
+    @router.post("/api/runs/{run_id}/agent-event-ack")
+    def post_agent_event_ack(run_id: str, body: AgentAckBody):
+        """Record an optional recipient handoff acknowledgement; no work is authorized."""
+        from looplab.serve.agent_ack import acknowledge
+        srv.run_dir(run_id)
+        return acknowledge(srv.root, run_id, body.expected_generation, body.event_id,
+                           body.recipient, body.action_id, body.disposition)
+
+    @router.get("/api/runs/{run_id}/agent-event-ack")
+    def get_agent_event_ack(run_id: str, expected_generation: str = Query(..., pattern=r"^[0-9a-f]{64}$"),
+                            recipient: Optional[str] = Query(None, max_length=64)):
+        """List optional handoff acknowledgements for a run generation."""
+        from looplab.serve.agent_ack import acknowledgements
+        from looplab.events.run_generation import run_generation_token
+        from looplab.harness.journals import read_event_source
+        rd = srv.run_dir(run_id)
+        if run_generation_token(read_event_source(rd)) != expected_generation:
+            raise HTTPException(409, "run generation changed")
+        return {"generation": expected_generation, "items": acknowledgements(srv.root, run_id, expected_generation, recipient)}
 
     # ------------------------------------------------------------------ agent events (long poll)
     @router.get("/api/agent-events")

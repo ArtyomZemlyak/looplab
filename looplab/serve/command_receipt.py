@@ -71,10 +71,26 @@ def snapshot(service, rd, expected_generation, *, command_id="", idempotency_key
     if service.generation_fence(rd)[1] != generation:
         raise HTTPException(409, "run generation changed during receipt read")
     error = error or {}
+    raw_notices = record.get("intake_notices")
+    notices = []
+    if isinstance(raw_notices, list):
+        allowed = {"questions_not_on_board", "experiment_not_filed", "readability", "readability_hint",
+                   "truncated", "redacted", "items_omitted", "report_unchanged"}
+        for notice in raw_notices[:32]:
+            if not isinstance(notice, dict) or not isinstance(notice.get("kind"), str) or notice["kind"] not in allowed:
+                continue
+            item = {"kind": notice["kind"]}
+            if isinstance(notice.get("field"), str):
+                item["field"] = redact_persisted_text(notice["field"], max_chars=160, entropy=False, single_line=True)
+            for key in ("count", "submitted", "kept", "open_questions", "current_seq"):
+                if type(notice.get(key)) is int and 0 <= notice[key] <= 1_000_000:
+                    item[key] = notice[key]
+            notices.append(item)
     return {"version": 1, "generation": generation, "terminal": record["status"] in TERMINAL_STATUSES,
             "command": {"id": command_id, "event_type": record["event_type"], "status": record["status"],
                         "event_seq": seq,
                         "error_code": redact_persisted_text(error.get("code", ""), max_chars=COMMAND_RECEIPT_ERROR_CAP,
                                                              entropy=False, single_line=True),
                         "retryable": error.get("retryable") is True},
+            "intake_notices": notices,
             "meaning": "Saved receipt only; no reconciliation or worker restart. It may lag events. Check current state, node results and checkpoints before choosing recovery."}

@@ -21,6 +21,29 @@ def harness(
     typer.echo(json.dumps(harness_manifest(include_settings=settings), ensure_ascii=False))
 
 
+@app.command(name="research-map")
+def research_map_cli(
+    run_dir: str = typer.Argument(..., help="Run directory on this host."),
+    generation: str = typer.Option(..., "--generation", help="Current run generation."),
+    offset: int = typer.Option(0, "--offset", min=0),
+    limit: int = typer.Option(20, "--limit", min=1, max=100),
+    briefing: bool = typer.Option(False, "--briefing", help="Show current action context instead of the map page."),
+) -> None:
+    """Read the bounded research map without starting or changing work."""
+    from pathlib import Path
+    from fastapi import HTTPException
+    from looplab.harness.research_map import snapshot
+    try:
+        if briefing:
+            from looplab.harness.briefing import snapshot as briefing_snapshot
+            result = briefing_snapshot(Path(run_dir), generation)
+        else:
+            result = snapshot(Path(run_dir), generation, offset, limit)
+    except HTTPException as exc:
+        raise CliRefusal(str(exc.detail)) from exc
+    typer.echo(json.dumps(result, ensure_ascii=False))
+
+
 @app.command(name="harness-mcp")
 def harness_mcp() -> None:
     """Serve all live UI API operations to a coding agent over stdio MCP.

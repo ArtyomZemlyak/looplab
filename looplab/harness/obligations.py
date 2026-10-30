@@ -31,6 +31,9 @@ EXTERNAL_POLICY_FIELDS = frozenset({
 })
 
 
+RESEARCH_WORKFLOW = {"version": 1, "guide": "/api/runs/{run_id}/research-workflow", "skill": "skills/looplab-research/SKILL.md", "principle": "Evidence and current authority govern action; a notification or historical handoff is not permission."}
+
+
 def evidence_revision(state) -> str:
     """Materialized node outcomes, stable across unrelated notes and commands."""
     import hashlib
@@ -214,6 +217,7 @@ def run_obligations(task, settings, *, generation: str) -> dict:
     return {
         "version": 1,
         "generation": generation,
+        "research_workflow": RESEARCH_WORKFLOW,
         "reasoning_owner": "external_agent" if external else "looplab",
         "output_language": {
             "language": getattr(settings, "output_language", "auto"),

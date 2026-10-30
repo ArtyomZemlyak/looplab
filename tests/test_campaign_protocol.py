@@ -721,3 +721,255 @@ def test_a_link_to_a_directory_inside_a_mount_is_fingerprinted_by_target(tmp_pat
     (mount / "train").unlink()
     (mount / "train").symlink_to(tmp_path / "B", target_is_directory=True)
     assert content_fingerprint(str(mount))["digest"] != first["digest"]
+
+
+def test_explicit_lineage_is_not_conflated_and_scope_changes_are_not_same_declaration():
+    from looplab.harness.campaign import normalize_experiment, same_declaration
+    from fastapi import HTTPException
+    relations = [{'kind': 'model_producer', 'subject_arm': 'A2', 'node_id': 2, 'node_generation': 1,
+                  'artifact_sha256': 'a' * 64},
+                 {'kind': 'scientific_control', 'subject_arm': 'A2', 'node_id': 0},
+                 {'kind': 'code_reference', 'subject_arm': 'A2', 'node_id': 1}]
+    first = normalize_experiment(_experiment(relationships=relations))
+    assert [r['kind'] for r in first['relationships']] == ['model_producer', 'scientific_control', 'code_reference']
+    assert first['relationships'][0]['node_generation'] == 1
+    assert not same_declaration(first, normalize_experiment(_experiment()))
+    with pytest.raises(HTTPException):
+        normalize_experiment(_experiment(relationships=[{'kind': 'model_producer', 'subject_arm': 'A2', 'node_id': 2, 'artifact_sha256': 'fake'}]))
+
+
+def test_late_binding_matches_frozen_scope_terminal_attempt_and_manifest(tmp_path, monkeypatch):
+    import hashlib
+    root, client = _client(tmp_path, monkeypatch)
+    rd, store = _make_run(root, 'camp', _repo(tmp_path), nodes=(0,), metrics={0: .5})
+    exp = _experiment(relationships=[{'kind': 'model_producer', 'subject_arm': 'A2', 'node_id': 0}])
+    registered = _amend(client, 'camp', store, 'experiment', experiment=exp)
+    assert registered.status_code == 200, registered.text
+    node = rd / 'nodes' / 'node_0'; node.mkdir(parents=True, exist_ok=True)
+    contents = b'{"checkpoint":"identity-only"}\n'; (node / 'manifest.json').write_bytes(contents)
+    gen = _gen(store)
+    page = client.get('/api/runs/camp/research-map', params={'expected_generation': gen}, headers=AGENT)
+    assert page.status_code == 200, page.text
+    scope = page.json()['experiments']['items'][0]['scope_sha256']
+    body = {'expected_generation': gen, 'experiment_id': 'D4', 'subject_arm': 'A2', 'scope_sha256': scope,
+            'node_id': 0, 'attempt': 0, 'path': 'nodes/node_0/manifest.json',
+            'manifest_sha256': hashlib.sha256(contents).hexdigest(), 'action_id': 'bind-1'}
+    url = '/api/runs/camp/readiness-bindings'
+    first = client.post(url, json=body, headers=AGENT)
+    assert first.status_code == 200, first.text
+    assert first.json()['binding']['status'] == 'manifest_verified'
+    assert 'not established' in first.json()['binding']['meaning']
+    assert client.post(url, json=body, headers=AGENT).json()['replayed'] is True
+    bindings = client.get(url, params={'expected_generation': gen}, headers=AGENT).json()
+    assert bindings['items'][0]['scope_and_attempt_current'] is True
+    assert bindings['items'][0]['manifest_current'] == 'not_rechecked'
+    assert client.post(url, json={**body, 'action_id': 'other', 'scope_sha256': '0' * 64}, headers=AGENT).status_code == 409
+    assert client.post(url, json={**body, 'action_id': 'other', 'manifest_sha256': '0' * 64}, headers=AGENT).status_code == 409
+    assert client.post(url, json={**body, 'action_id': 'other', 'attempt': 1}, headers=AGENT).status_code == 409
+    store.append('node_reset', {'node_id': 0, 'generation': 0, 'from_stage': 'eval'})
+    assert client.get(url, params={'expected_generation': gen}, headers=AGENT).json()['items'][0]['scope_and_attempt_current'] is False
+    recovered = client.post(url, json=body, headers=AGENT)
+    assert recovered.status_code == 200 and recovered.json()['replayed'] is True
+    assert client.post(url, json={**body, 'manifest_sha256': '0' * 64}, headers=AGENT).status_code == 409
+
+
+def test_map_surfaces_native_extra_metric_consistency_without_objective_scalar(tmp_path, monkeypatch):
+    root, client = _client(tmp_path, monkeypatch)
+    rd, store = _make_run(root, 'camp', _repo(tmp_path), nodes=())
+    arrays, values, *_ = _arrays(0, lift=0)
+    store.append('node_created', {'node_id': 0, 'parent_ids': [], 'operator': 'score', 'idea': {'operator': 'score'}})
+    store.append('node_evaluated', {'node_id': 0, 'metric': None, 'extra_metrics': {'ProductRecall@200': sum(values) / len(values)}})
+    res = _upload(client, 'camp', store, 0, arrays, measured_check={'metric': 'FUR@200', 'node_metric': 'ProductRecall@200'})
+    assert res.status_code == 200, res.text
+    assert res.json()['upload']['consistency']['status'] == 'matches_measured'
+    page = client.get('/api/runs/camp/research-map', params={'expected_generation': _gen(store)}, headers=AGENT).json()
+    item = page['uploads']['items'][0]
+    assert item['consistency']['status'] == 'matches_measured'
+    assert item['consistency']['node_metric'] == 'ProductRecall@200'
+    assert item['node_id'] == 0 and item['test_id'].startswith('qs1-')
+    assert page['nodes']['items'][0]['metric_present'] is False
+
+
+def test_preregistration_links_existing_question_card_without_inventing_one(tmp_path, monkeypatch):
+    from looplab.events.replay import fold
+    root, client = _client(tmp_path, monkeypatch)
+    rd, store = _make_run(root, 'camp', _repo(tmp_path), nodes=())
+    store.append('hypothesis_added', {'statement': 'Does context improve recall?', 'source': 'deep_research'})
+    state = fold(store.read_all())
+    card_id = next(c.id for c in state.cards.values() if c.statement == 'Does context improve recall?')
+    invalid = _amend(client, 'camp', store, 'experiment', action='bad-card', experiment=_experiment(question_card_id='missing-card'))
+    assert invalid.status_code == 409
+    response = _amend(client, 'camp', store, 'experiment', action='with-card', experiment=_experiment(question_card_id=card_id))
+    assert response.status_code == 200, response.text
+    page = client.get('/api/runs/camp/research-map', params={'expected_generation': _gen(store)}, headers=AGENT).json()
+    item = page['experiments']['items'][0]
+    assert item['question_card_id'] == card_id and item['question_card_statement'] == 'Does context improve recall?'
+
+
+def test_declared_work_type_is_preserved_for_same_node_retry(tmp_path, monkeypatch):
+    root, client = _client(tmp_path, monkeypatch)
+    rd, store = _make_run(root, 'camp', _repo(tmp_path), nodes=(0,), metrics={0: .5})
+    arms = {'A0': {'node_id': 0, 'work_kind': 'score_only'}, 'A1': {}, 'A2': {}}
+    result = _amend(client, 'camp', store, 'experiment', experiment=_experiment(arms=arms))
+    assert result.status_code == 200, result.text
+    url = '/api/runs/camp/research-map'; params = {'expected_generation': _gen(store)}
+    page = client.get(url, params=params, headers=AGENT).json()
+    assert page['nodes']['items'][0]['declared_work_kinds'] == ['score_only']
+    store.append('node_reset', {'node_id': 0, 'generation': 0, 'from_stage': 'eval'})
+    page = client.get(url, params=params, headers=AGENT).json()
+    assert page['nodes']['items'][0]['declared_work_kinds'] == ['score_only']
+    assert page['nodes']['items'][0]['attempt'] == 1
+    assert not page['nodes']['items'][0]['parent_card_id']
+
+
+def test_scientific_context_is_registered_and_visible_without_guessing_outcomes(tmp_path, monkeypatch):
+    root, client = _client(tmp_path, monkeypatch)
+    rd, store = _make_run(root, 'camp', _repo(tmp_path), nodes=())
+    context = {'change': 'Increase width', 'motivation': 'Test search depth', 'data_weights': 'Same saved model',
+               'control': 'Original width', 'criterion': 'Heldout recall improves', 'alternatives': 'Do nothing'}
+    exp = _experiment(research_context=context)
+    assert _amend(client, 'camp', store, 'experiment', experiment=exp).status_code == 200
+    page = client.get('/api/runs/camp/research-map', params={'expected_generation': _gen(store)}, headers=AGENT).json()
+    assert page['experiments']['items'][0]['research_context'] == context
+    assert 'outcome' not in page['experiments']['items'][0]['research_context']
+    different = _amend(client, 'camp', store, 'experiment', action='again',
+                       experiment=_experiment(research_context={**context, 'criterion': 'Different'}))
+    assert different.status_code == 409 and different.json()['detail']['same_declaration'] is False
+
+
+def test_novelty_decision_carries_real_prior_nodes_and_author_reasoning(tmp_path, monkeypatch):
+    root, client = _client(tmp_path, monkeypatch)
+    rd, store = _make_run(root, 'camp', _repo(tmp_path), nodes=(0,), metrics={0: .5})
+    body = {'expected_generation': _gen(store), 'action_id': 'novelty-context', 'phase_id': 'novelty',
+            'idea': {'operator': 'score', 'hypothesis': 'Wider search changes recall'}, 'decision': 'submit',
+            'reason': 'Compare search depth against the recorded baseline.', 'prior_node_ids': [0],
+            'alternatives_summary': 'Keep original width or use wider search.',
+            'information_gain': 'Separate decoding width from training effects.'}
+    url = '/api/runs/camp/harness-decisions'
+    first = client.post(url, json=body, headers=AGENT)
+    assert first.status_code == 200, first.text
+    assert client.post(url, json=body, headers=AGENT).json()['replayed'] is True
+    assert client.post(url, json={**body, 'information_gain': 'Different'}, headers=AGENT).status_code == 409
+    assert client.post(url, json={**body, 'action_id': 'bad-prior', 'prior_node_ids': [999]}, headers=AGENT).status_code == 409
+    page = client.get('/api/runs/camp/research-map', params={'expected_generation': _gen(store)}, headers=AGENT).json()
+    decision = page['decisions']['items'][0]
+    assert decision['prior_node_ids'] == [0] and decision['information_gain'] == body['information_gain']
+
+
+def test_ready_producer_event_allows_immediate_mechanical_binding(tmp_path, monkeypatch):
+    import hashlib
+    from looplab.serve.agent_events import AgentEventPump, read_outbox
+    root, client = _client(tmp_path, monkeypatch)
+    rd, store = _make_run(root, 'camp', _repo(tmp_path), nodes=())
+    exp = _experiment(arms={'A0': {'node_id': 1, 'work_kind': 'score_only'}, 'A1': {}, 'A2': {'node_id': 2, 'work_kind': 'score_only'}},
+                      relationships=[{'kind': 'model_producer', 'subject_arm': 'A2', 'node_id': 0}])
+    assert _amend(client, 'camp', store, 'experiment', experiment=exp).status_code == 200
+    brief_url = '/api/runs/camp/research-briefing'
+    pending = client.get(brief_url, params={'expected_generation': _gen(store)}, headers=AGENT).json()['readiness']['plans'][0]
+    assert pending['state'] == 'awaiting_producer_or_binding' and pending['authority'] == 'none'
+    now = [100.0]
+    pump = AgentEventPump(client.app.state.looplab, clock=lambda: now[0])
+    pump._scan_run(rd)
+    cursor = read_outbox(root)['newest_id']
+    store.append('node_created', {'node_id': 0, 'operator': 'fit', 'parent_ids': [], 'idea': {'operator': 'fit'}})
+    store.append('node_evaluated', {'node_id': 0, 'metric': .5})
+    folder = rd / 'nodes' / 'node_0'; folder.mkdir(parents=True)
+    manifest = b'{"checkpoint":"synthetic"}'; (folder / 'manifest.json').write_bytes(manifest)
+    now[0] += 4
+    pump._scan_run(rd)
+    page = client.get('/api/agent-events', params={'after': cursor, 'timeout': 0}, headers=AGENT).json()
+    assert any(e['kind'] == 'node_evaluated' and e['run_id'] == 'camp' for e in page['events'])
+    gen = _gen(store)
+    research = client.get('/api/runs/camp/research-map', params={'expected_generation': gen}, headers=AGENT).json()
+    scope = research['experiments']['items'][0]['scope_sha256']
+    body = {'expected_generation': gen, 'experiment_id': 'D4', 'subject_arm': 'A2', 'scope_sha256': scope,
+            'node_id': 0, 'attempt': 0, 'path': 'nodes/node_0/manifest.json',
+            'manifest_sha256': hashlib.sha256(manifest).hexdigest(), 'action_id': 'ready-bind'}
+    result = client.post('/api/runs/camp/readiness-bindings', json=body, headers=AGENT)
+    assert result.status_code == 200, result.text
+    assert result.json()['binding']['status'] == 'manifest_verified'
+    current = client.get('/api/runs/camp/readiness-bindings', params={'expected_generation': gen}, headers=AGENT).json()
+    assert current['items'][0]['scope_and_attempt_current'] and current['items'][0]['authority'] == 'none'
+    plan = client.get(brief_url, params={'expected_generation': gen}, headers=AGENT).json()['readiness']['plans'][0]
+    assert plan['state'] == 'binding_current' and plan['producer_node_id'] == 0 and plan['authority'] == 'none'
+    # Synthetic journal events represent two completed score-only arms; no engine or GPU is launched.
+    for node_id, arm, lift in [(1, 'A0', 0), (2, 'A2', .1)]:
+        arrays, values, *_ = _arrays(17, lift=lift)
+        store.append('node_created', {'node_id': node_id, 'operator': 'score', 'parent_ids': [], 'idea': {'operator': 'score'}})
+        store.append('node_evaluated', {'node_id': node_id, 'metric': None, 'extra_metrics': {'FUR@200': sum(values) / len(values)}})
+        upload = _upload(client, 'camp', store, node_id, arrays, experiment_id='D4', arm=arm,
+                         measured_check={'metric': 'FUR@200', 'node_metric': 'FUR@200'})
+        assert upload.status_code == 200, upload.text
+        assert upload.json()['upload']['consistency']['status'] == 'matches_measured'
+    comparison = client.get('/api/runs/camp/experiments/D4/comparison', headers=AGENT).json()
+    contrast = next(c for c in comparison['contrasts'] if c['control'] == 'A0' and c['treatment'] == 'A2' and c['metric'] == 'FUR@200')
+    assert contrast['status'] == 'computed' and contrast['registered_before_result']
+    graph = client.get('/api/runs/camp/research-map', params={'expected_generation': gen}, headers=AGENT).json()
+    score = next(a for a in graph['experiments']['items'][0]['arms'] if a['name'] == 'A2')
+    assert score['node_id'] == 2 and score['work_kind'] == 'score_only' and score['node_status'] == 'evaluated'
+    assert graph['experiments']['items'][0]['relationships'][0]['node_id'] == 0
+
+
+def test_late_binding_streams_actual_artifact_and_detects_mismatch(tmp_path, monkeypatch):
+    import hashlib
+    root, client = _client(tmp_path, monkeypatch)
+    rd, store = _make_run(root, 'camp', _repo(tmp_path), nodes=(0,), metrics={0: .5})
+    artifact = b'synthetic checkpoint bytes'; sha = hashlib.sha256(artifact).hexdigest()
+    exp = _experiment(relationships=[{'kind': 'model_producer', 'subject_arm': 'A2', 'node_id': 0, 'artifact_sha256': sha}])
+    assert _amend(client, 'camp', store, 'experiment', experiment=exp).status_code == 200
+    folder = rd / 'nodes' / 'node_0'; folder.mkdir(parents=True, exist_ok=True)
+    manifest = b'{"checkpoint":"model.bin"}'; (folder / 'manifest.json').write_bytes(manifest); (folder / 'model.bin').write_bytes(artifact)
+    gen = _gen(store); page = client.get('/api/runs/camp/research-map', params={'expected_generation': gen}, headers=AGENT).json()
+    body = {'expected_generation': gen, 'experiment_id': 'D4', 'subject_arm': 'A2',
+            'scope_sha256': page['experiments']['items'][0]['scope_sha256'], 'node_id': 0, 'attempt': 0,
+            'path': 'nodes/node_0/manifest.json', 'manifest_sha256': hashlib.sha256(manifest).hexdigest(),
+            'artifact_path': 'nodes/node_0/model.bin', 'artifact_sha256': sha, 'action_id': 'artifact-binding'}
+    url = '/api/runs/camp/readiness-bindings'
+    result = client.post(url, json=body, headers=AGENT)
+    assert result.status_code == 200, result.text
+    assert result.json()['binding']['status'] == 'artifact_and_manifest_verified'
+    assert 'execution authority is not established' in result.json()['binding']['meaning']
+    (folder / 'model.bin').write_bytes(b'changed')
+    conflict = client.post(url, json={**body, 'action_id': 'new-binding'}, headers=AGENT)
+    assert conflict.status_code == 409 and 'artifact hash mismatch' in conflict.text
+    assert client.post(url, json=body, headers=AGENT).json()['replayed']
+    snapshot = client.get(url, params={'expected_generation': gen}, headers=AGENT).json()['items'][0]
+    assert snapshot['artifact_current'] == 'not_rechecked'
+
+
+def test_artifact_read_runs_outside_sequence_and_rechecks_attempt(tmp_path, monkeypatch):
+    import hashlib
+    from contextlib import contextmanager
+    from types import SimpleNamespace
+    from fastapi import HTTPException
+    from looplab.harness.readiness_binding import publish
+    from looplab.serve.routers.runs import ReadinessBindingRequest
+    root, client = _client(tmp_path, monkeypatch)
+    rd, store = _make_run(root, 'camp', _repo(tmp_path), nodes=(0,), metrics={0: .5})
+    exp = _experiment(relationships=[{'kind': 'model_producer', 'subject_arm': 'A2', 'node_id': 0}])
+    assert _amend(client, 'camp', store, 'experiment', experiment=exp).status_code == 200
+    gen = _gen(store); scope = client.get('/api/runs/camp/research-map', params={'expected_generation': gen}, headers=AGENT).json()['experiments']['items'][0]['scope_sha256']
+    held = [False]
+    @contextmanager
+    def sequence(_rd):
+        assert not held[0]
+        held[0] = True
+        try: yield
+        finally: held[0] = False
+    srv = SimpleNamespace(commands=SimpleNamespace(sequence=sequence))
+    content = b'fixture'; sha = hashlib.sha256(content).hexdigest()
+    body = ReadinessBindingRequest(expected_generation=gen, experiment_id='D4', subject_arm='A2', scope_sha256=scope,
+        node_id=0, attempt=0, path='nodes/node_0/manifest', manifest_sha256=sha,
+        artifact_path='nodes/node_0/model', artifact_sha256=sha, action_id='race')
+    def read_manifest(path, node, attempt):
+        assert not held[0]
+        return sha, {'node_id': node, 'attempt': attempt}
+    def read_artifact(path, node, attempt):
+        assert not held[0]
+        store.append('node_reset', {'node_id': node, 'generation': attempt, 'from_stage': 'eval'})
+        return sha, {'node_id': node, 'attempt': attempt}
+    import pytest
+    with pytest.raises(HTTPException) as error:
+        publish(srv, rd, body, read_manifest, read_artifact)
+    assert error.value.status_code == 409
+    assert not (rd / 'readiness_bindings.jsonl').exists()

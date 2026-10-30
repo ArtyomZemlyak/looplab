@@ -1686,7 +1686,7 @@ def _normalize_report_generated(ctx: _ControlIntake) -> dict:
     # `body_markdown` / `key_metrics` (review 2026-10-14 section 6) are optional; `author_claim` names the
     # agent product ("Codex CLI") inside the SERVER-set publisher, which says who published.
     allowed = (set(sanitize_report_payload({})) - {"at_node", "trigger"}) | {
-        "body_markdown", "key_metrics", "author_claim", "figures"}
+        "body_markdown", "key_metrics", "author_claim", "figures", "campaign_overview"}
     unknown = set(raw) - allowed
     if unknown:
         raise HTTPException(400, f"report_generated.content has unknown field(s): {', '.join(sorted(unknown))}")
@@ -1697,6 +1697,8 @@ def _normalize_report_generated(ctx: _ControlIntake) -> dict:
     author_claim = raw.pop("author_claim", None)
     if author_claim is not None and not isinstance(author_claim, str):
         raise HTTPException(400, "report_generated.content.author_claim must be a string")
+    if "campaign_overview" in raw and not isinstance(raw["campaign_overview"], dict):
+        raise HTTPException(400, "report_generated.content.campaign_overview must be an object")
     if "key_metrics" in raw and not isinstance(raw["key_metrics"], dict):
         raise HTTPException(400, "report_generated.content.key_metrics must be an object "
                                  "{metrics: [{key, label}], nodes: [{node_id, label}], "

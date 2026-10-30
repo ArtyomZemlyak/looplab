@@ -169,3 +169,18 @@ def test_the_banner_read_says_where_the_runs_live_and_what_the_mirror_did(tmp_pa
     view = TestClient(app).get("/api/run-mirror").json()
     assert view["dst_root"] == str(cfg.dst_root) and view["last_pass_finished_at"]
     assert view["supervisor"]["state"] == "starting" and view["stuck"] is None
+
+
+def test_mirror_diagnostic_does_not_confuse_running_with_healthy():
+    from looplab.serve.mirror_supervisor import mirror_diagnostic
+    view = {"dst_root": "/mirror", "status_readable": True, "last_pass_finished_at": 990,
+            "stuck": {"reason": "write timed out"}, "errors": 0,
+            "supervisor": {"state": "running", "restarts": 92}}
+    observed = mirror_diagnostic(view, now=1000)
+    assert observed["state"] == "degraded"
+    assert observed["last_pass_age_seconds"] == 10
+    assert observed["supervisor_restarts"] == 92
+    view["stuck"] = None
+    assert mirror_diagnostic(view, now=1200)["state"] == "stale"
+    view["status_readable"] = False
+    assert mirror_diagnostic(view, now=1000)["state"] == "unknown"

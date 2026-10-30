@@ -175,7 +175,7 @@ def intake_notices(event_type: str, raw: dict, normalized: dict) -> list[dict]:
 # answers, result commentary). Ids, action ids, code and evidence references are never scanned.
 _PROSE_FIELDS = frozenset({"reason", "summary", "statement", "rationale", "text", "verdict",
                            "lesson", "description", "notes", "explanation", "comment", "title",
-                           "body", "outcome", "justification", "headline"})
+                           "body", "outcome", "justification", "headline", "alternatives_summary", "information_gain", "not_applicable_reason"})
 
 
 def readability_warnings(body) -> list[dict]:

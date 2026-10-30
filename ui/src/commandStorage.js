@@ -597,3 +597,28 @@ export function reportRefreshIntent(
     return { generation, idempotencyKey }
   } catch (cause) { throw reportStorageError(cause) }
 }
+
+// Store identity only, never authored text. Missing receipts do not prove non-application.
+const RESEARCH_MEMO_PREFIX = 'll.research-memo-intent.'
+export function loadResearchMemoIntent(runId, generation, storage) {
+  const backing = transportStorage(storage)
+  if (!backing || !validRunGeneration(generation)) return null
+  try {
+    const value = JSON.parse(backing.getItem(RESEARCH_MEMO_PREFIX + encodeURIComponent(String(runId))))
+    if (!value || !hasOnlyKeys(value, new Set(['generation', 'key'])) || value.generation !== generation || !UUID_V4_RE.test(value.key)) return null
+    return value
+  } catch { return null }
+}
+export function saveResearchMemoIntent(runId, value, storage) {
+  const backing = transportStorage(storage)
+  if (!backing || !validRunGeneration(value?.generation) || !UUID_V4_RE.test(value?.key || '')) return false
+  try {
+    const key = RESEARCH_MEMO_PREFIX + encodeURIComponent(String(runId))
+    const data = JSON.stringify({ generation: value.generation, key: value.key })
+    backing.setItem(key, data)
+    return backing.getItem(key) === data
+  } catch { return false }
+}
+export function clearResearchMemoIntent(runId, storage) {
+  try { transportStorage(storage)?.removeItem(RESEARCH_MEMO_PREFIX + encodeURIComponent(String(runId))) } catch { /* unavailable */ }
+}

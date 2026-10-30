@@ -6,10 +6,11 @@ import { uiText, uiMessage, uiPlural, useUILanguage } from './uiLanguage.js'
 // sandboxing CSP; the page fetches the bytes (an <img src> cannot carry the owner token) and shows
 // an object URL. Versions are every `report_generated` row, read through the fold's own sanitizer;
 // "Compare" diffs two recorded versions field by field (`reportHistoryModel.js::reportDiff`).
-import React, { useEffect, useState } from 'react'
+import React, { useEffect, useRef, useState } from 'react'
 
 import { get, getBlob, runApiPath } from './api.js'
 import Markdown from './markdown.jsx'
+import { downloadBlob } from './accessibility.jsx'
 import { normalizeReportFigures, normalizeReportVersions, reportDiff } from './reportHistoryModel.js'
 import './report-extras.css'
 
@@ -81,12 +82,20 @@ function DiffView({ diff }) {
 const _when = ts => (ts ? new Date(ts * 1000).toLocaleString() : '')
 const PUBLISHER_LABELS = { external_agent: 'external agent', looplab_model: 'LoopLab model', operator: 'operator' }
 
-export function ReportVersions({ runId, available = true }) {
+export function ReportVersions({ runId, generation, requestedReport, available = true }) {
   useUILanguage()
   const [open, setOpen] = useState(false)
+  const historyRef = useRef(null)
   const [list, setList] = useState(null), [unreadable, setUnreadable] = useState(false)
   const [pick, setPick] = useState([])
+  const [viewSeq, setViewSeq] = useState(null), [view, setView] = useState(null), [viewState, setViewState] = useState("idle")
   const [diff, setDiff] = useState(null), [diffState, setDiffState] = useState('idle')
+  const [exportState, setExportState] = useState('idle')
+  useEffect(() => {
+    if (!available || !Number.isSafeInteger(requestedReport?.seq) || requestedReport.seq < 0) return
+    setOpen(true); setViewSeq(requestedReport.seq)
+    if (typeof historyRef.current?.scrollIntoView === 'function') historyRef.current.scrollIntoView({ block: 'start' })
+  }, [requestedReport, available])
   useEffect(() => {
     if (!open || !available || typeof runId !== 'string' || !runId) return undefined
     let alive = true
@@ -108,10 +117,30 @@ export function ReportVersions({ runId, available = true }) {
       .catch(() => { if (alive) setDiffState('error') })
     return () => { alive = false; controller.abort() }
   }, [pick, runId])
+  useEffect(() => {
+    if (viewSeq == null || !available) { setView(null); return undefined }
+    let alive = true
+    const controller = new AbortController()
+    setViewState('loading'); setView(null)
+    get(runApiPath(runId, `/report/versions/${viewSeq}`), { signal: controller.signal, cache: 'no-store' })
+      .then(value => { if (alive) { setView(value?.content || {}); setViewState('ready') } })
+      .catch(() => { if (alive) setViewState('error') })
+    return () => { alive = false; controller.abort() }
+  }, [viewSeq, runId, available])
   if (!available) return null
+  const exportSelected = async () => {
+    setExportState('loading')
+    try {
+      const params = new URLSearchParams({ expected_generation: generation })
+      pick.forEach(seq => params.append('report_seq', String(seq)))
+      const result = await get(`${runApiPath(runId, '/research-export')}?${params}`, { cache: 'no-store' })
+      if (typeof result.markdown !== 'string' || !downloadBlob(`${runId}-research.md`, [result.markdown], 'text/markdown')) throw new Error()
+      setExportState('done')
+    } catch { setExportState('error') }
+  }
   const toggle = seq => setPick(prev => prev.includes(seq) ? prev.filter(s => s !== seq)
     : [...prev, seq].slice(-2))
-  return <details className="report-versions" onToggle={event => setOpen(event.currentTarget.open)}>
+  return <details ref={historyRef} className="report-versions" open={open} onToggle={event => setOpen(event.currentTarget.open)}>
     <summary>{uiText('Version history')}{list ? ` (${list.total})` : ''}</summary>
     {unreadable && <p className="muted" role="status">{uiText('The report history could not be read.')}</p>}
     {!list && !unreadable && open && <p className="muted">{uiText('Loading…')}</p>}
@@ -131,7 +160,30 @@ export function ReportVersions({ runId, available = true }) {
             {PUBLISHER_LABELS[version.publisher] ? ` · ${uiText(PUBLISHER_LABELS[version.publisher])}` : ''}{version.authorClaim ? ` · ${version.authorClaim}` : ''}</span>
           <span className="report-version-headline">{version.headline}</span>
         </label>
+        <button type="button" onClick={() => setViewSeq(version.seq)}>{uiText('View report')}</button>
       </li>)}</ol>
+      {viewSeq != null && <section aria-live="polite" className="report-historical-view">
+        <h3>{uiMessage('Report version #{0}', [viewSeq])}</h3>
+        {viewState === 'loading' && <p>{uiText('Loading…')}</p>}
+        {viewState === 'error' && <p role="status">{uiText('The report version could not be read.')}</p>}
+        {view && <>
+          {['headline', 'summary', 'verdict', 'champion_summary', 'body_markdown'].map(field =>
+            view[field] ? <section key={field}><h4>{uiText(FIELD_LABELS[field])}</h4><Markdown text={view[field]} /></section> : null)}
+          {['what_worked', 'what_didnt', 'learnings', 'next_directions', 'caveats'].map(field =>
+            Array.isArray(view[field]) && view[field].length ? <section key={field}>
+              <h4>{uiText(FIELD_LABELS[field])}</h4><ul>{view[field].map((item, i) => <li key={i}>{item}</li>)}</ul>
+            </section> : null)}
+          {view.key_metrics && <section><h4>{uiText('Key metrics')}</h4>
+            <p>{uiText('Historical metric references are shown without current values; inspect the recorded attempt for evidence.')}</p>
+            <ul>{(view.key_metrics.metrics || []).map(metric => <li key={metric.key}>{metric.label || metric.key}</li>)}</ul>
+            <p>{(view.key_metrics.nodes || []).map(node => `#${node.node_id}${node.label ? ` · ${node.label}` : ''}`).join(', ')}</p>
+          </section>}
+          <ReportFigures runId={runId} figures={view.figures} />
+        </>}
+      </section>}
+      {pick.length > 0 && /^[a-f0-9]{64}$/.test(generation || '') && <button type="button" disabled={exportState === 'loading'} onClick={exportSelected}>{uiText('Export selected reports')}</button>}
+      {exportState === 'error' && <p role="status">{uiText('Export unavailable. Select fewer reports or refresh the run.')}</p>}
+      {exportState === 'done' && <p role="status">{uiText('Research export downloaded.')}</p>}
       {list.truncated && <p className="muted">{uiText('Only the most recent versions are listed.')}</p>}
       {pick.length === 2 && diffState === 'loading' && <p className="muted">{uiText('Loading…')}</p>}
       {pick.length === 2 && diffState === 'error' && <p className="muted">{uiText('The two versions could not be read.')}</p>}

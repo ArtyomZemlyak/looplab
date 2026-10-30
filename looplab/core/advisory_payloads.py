@@ -1054,6 +1054,17 @@ def sanitize_research_memo_payload(payload, *, add_receipts: bool = True, env=No
         # and cannot be crowded out by model narrative — a receipt that vanishes under a long memo
         # is a receipt that is absent exactly when the memo is worth doubting.
         out["snapshot_superseded"] = snapshot_superseded_receipt(src["snapshot_superseded"])
+    if "local_lessons" in src:
+        lessons = []
+        for lesson in _items(src.get("local_lessons"), 32):
+            if not isinstance(lesson, dict):
+                continue
+            status = lesson.get("status")
+            lessons.append({"statement": _text(lesson.get("statement", ""), 1200, budget, env=env),
+                            "limitation": _text(lesson.get("limitation", ""), 1200, budget, env=env),
+                            "status": status if status in ("open", "limited", "supported", "refuted", "verified") else "open",
+                            "node_ids": [n for n in _items(lesson.get("node_ids"), 32) if type(n) is int and 0 <= n <= (1 << 63) - 1]})
+        out["local_lessons"] = lessons
     raw_claims, claims_total, claims_shape_known = _bounded_source(src.get("claims"))
     for claim in itertools.islice(raw_claims, MAX_RESEARCH_CLAIMS):
         if not isinstance(claim, dict):
@@ -1091,6 +1102,12 @@ def sanitize_research_memo_payload(payload, *, add_receipts: bool = True, env=No
             "urls": urls,
             "url_identities": url_identities,
         }
+        # Explicit author assessments remain separate from an independent verifier verdict.
+        if claim.get("author_status") in ("open", "limited", "refuted", "supported", "verified"):
+            projected_claim["author_status"] = claim["author_status"]
+        for key in ("limitation", "contrast_ref"):
+            if isinstance(claim.get(key), str) and claim[key].strip():
+                projected_claim[key] = _text(claim[key], 1200 if key == "limitation" else 200, budget, single_line=True, env=env)
         # The exact-span evidence a claim is BOUND to (doc 52 row 16): ids only, minted by the
         # engine (`core/research_record.py::bind_claims_to_evidence`), never model text.
         evidence_ids = [v for v in _items(claim.get("evidence_ids"), MAX_RESEARCH_EVIDENCE_REFS)
@@ -1324,6 +1341,18 @@ def sanitize_report_payload(payload, *, env=None) -> dict:
     # as it did. `body_markdown` is free GFM prose (tables included), never HTML the UI executes.
     # `key_metrics` are REFERENCES only — metric keys and node ids; the numbers are read from the
     # recorded nodes by whoever renders the report, never from the author's text.
+    if "campaign_overview" in src:
+        overview = src.get("campaign_overview") if isinstance(src.get("campaign_overview"), dict) else {}
+        result = {"summary": _text(overview.get("summary", ""), 8000, budget, env=env)}
+        for field in ("recommendation", "recommendation_limits"):
+            if field in overview:
+                result[field] = _text(overview.get(field, ""), 2000, budget, env=env)
+        for field in _REPORT_LIST_FIELDS:
+            result[field] = [_text(value, 1200, budget, single_line=True, env=env)
+                             for value in _items(overview.get(field), 32)]
+        result["report_seqs"] = [n for n in _items(overview.get("report_seqs"), 32)
+                                 if type(n) is int and 0 <= n <= (1 << 63) - 1]
+        out["campaign_overview"] = result
     if "body_markdown" in src:
         out["body_markdown"] = _text(src.get("body_markdown", ""), REPORT_BODY_MAX_CHARS,
                                      budget, env=env)
@@ -1389,15 +1418,23 @@ def _report_key_metrics(value, budget: list[int], *, env) -> dict:
         key = row["key"].strip()[:_METRIC_KEY_MAX]
         if not key:
             continue
-        metrics.append({"key": key, "label": _text(row.get("label", ""), 120, budget,
-                                                   single_line=True, env=env)})
+        metric = {"key": key, "label": _text(row.get("label", ""), 120, budget, single_line=True, env=env)}
+        for field in ("test_id", "cohort", "policy"):
+            if isinstance(row.get(field), str) and row[field].strip():
+                metric[field] = _text(row[field], 200, budget, single_line=True, env=env)
+        if row.get("role") in ("primary", "secondary", "transport"):
+            metric["role"] = row["role"]
+        metrics.append(metric)
     nodes = []
     for row in _items(src.get("nodes"), 24):
         row = {"node_id": row} if type(row) is int else row
         if not isinstance(row, dict) or type(row.get("node_id")) is not int or row["node_id"] < 0:
             continue
-        nodes.append({"node_id": row["node_id"], "label": _text(row.get("label", ""), 120,
-                                                                budget, single_line=True, env=env)})
+        node = {"node_id": row["node_id"], "label": _text(row.get("label", ""), 120, budget, single_line=True, env=env)}
+        attempt = row.get("node_generation")
+        if type(attempt) is int and attempt >= 0:
+            node["node_generation"] = attempt
+        nodes.append(node)
     baseline = src.get("baseline_node_id")
     return {"metrics": metrics, "nodes": nodes,
             "baseline_node_id": baseline if type(baseline) is int and baseline >= 0 else None}

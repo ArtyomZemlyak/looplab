@@ -18,6 +18,7 @@ from looplab.harness.phases import phase_catalog
 def harness_manifest(*, include_settings: bool = False) -> dict:
     """The versioned, stable entry point; schemas come from their actual owners."""
     result = {
+        "research_workflow": {"version": 1, "guide": "/api/runs/{run_id}/research-workflow", "skill": "skills/looplab-research/SKILL.md"},
         "protocol_version": 4,
         "mode": "external_harness_or_delegated_developer",
         "external_run_mode": {

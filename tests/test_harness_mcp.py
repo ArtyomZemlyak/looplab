@@ -14,6 +14,8 @@ def test_mcp_advertises_run_controls_and_full_settings_discovery():
     assert {"capabilities", "phases", "phase_info", "settings_keys", "setting_info", "operations",
             "operation_schema", "api_request", "run_progress", "result_notices", "command_receipt", "connection_check",
             "saved_commands", "saved_command", "saved_actions", "saved_action", "wait_for_next",
+            "research_map", "research_briefing", "send_agent_handoff", "acknowledge_agent_event",
+            "readiness_bindings", "bind_readiness", "review_research_memo",
             "upstream_status", "upstream_request", "upstream_propose", "upstream_check", "upstream_advance",
             # The campaign surface (doc 81, tests/test_campaign_composite.py).
             "amend_protocol", "run_protocol", "upload_per_query", "compare_experiment",

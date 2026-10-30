@@ -709,6 +709,7 @@ if (
     const page = JSON.parse(
       fs.readFileSync(path.join(root, "locales/ru.json"), "utf8"),
     );
+    const invalidCatalogueCount = page.count !== Object.keys(page.messages || {}).length;
     const missing = Object.keys(catalogue).filter(
       (key) => !Object.hasOwn(page.messages, key),
     );
@@ -733,6 +734,7 @@ if (
       )
       .map(([key]) => key);
     if (
+      invalidCatalogueCount ||
       missing.length ||
       files.length ||
       missingPlurals.length ||
@@ -743,6 +745,7 @@ if (
       console.error(
         JSON.stringify({
           unlocalizedFiles: files,
+          invalidCatalogueCount,
           missing,
           missingPlurals,
           unusedPlurals,

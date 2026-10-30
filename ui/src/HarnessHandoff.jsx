@@ -5,6 +5,7 @@ import { useScopedResource } from './useScopedResource.js'
 import { PANEL_REQUEST_TIMEOUT_MS, RUN_GENERATION_RE } from './panelPrimitives.js'
 import { harnessAgentInstruction, harnessCodexOneLiner, harnessMcpDescriptor, harnessRunPrompt, harnessServerUrl, validHarnessHandoff } from './harnessHandoff.js'
 import './harness-handoff.css'
+import Markdown from './markdown.jsx'
 import HarnessReceipt from './HarnessReceipt.jsx'
 import { useAssistantUILanguage } from './useAssistantLanguage.js'
 import { harnessText } from './harnessText.js'
@@ -18,6 +19,7 @@ export default function HarnessHandoff({ runId, generation, seq, defaultOpen = f
   const [open, setOpen] = useState(defaultOpen)
   const [copied, setCopied] = useState(null)
   const [client, setClient] = useState('codex')
+  const [guide, setGuide] = useState(null)
   const summaryRef = useRef(null)
   useEffect(() => {
     // An explicit connection click replaces its trigger after the module loads.
@@ -70,6 +72,10 @@ export default function HarnessHandoff({ runId, generation, seq, defaultOpen = f
     <summary ref={summaryRef}>{t('Connect external agent')}</summary>
     {open && <>
       <p>{t('Use a stdio MCP client on a machine with LoopLab installed. The URL must be reachable from that client.')}</p>
+      <details onToggle={event => {
+        if (event.currentTarget.open && !guide) get(runApiPath(runId, '/research-workflow'))
+          .then(value => setGuide(value.markdown)).catch(() => setGuide('Unavailable'))
+      }}><summary>{uiText('Research workflow')}</summary>{guide && <Markdown text={guide} />}</details>
       {!fresh && <p role="status">{resource.status === 'error' || resource.status === 'stale'
         ? t('Connection context unavailable. Refresh before copying.') : t('Reading connection context…')}{' '}
         <button type="button" className="btn sm ghost" disabled={!!resource.pending} onClick={() => resource.retry()}>{t('Retry')}</button></p>}

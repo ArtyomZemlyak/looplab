@@ -90,9 +90,15 @@ export function searchConcepts(nodeConcepts = {}, rename = {}, query = '', limit
   if (!q) return []
   const universe = conceptUniverse(nodeConcepts, rename)
   const scored = []
+  const aliasHits = new Set()
+  for (const alias of Object.keys(rename || {})) {
+    if (!alias.toLowerCase().includes(q)) continue
+    const canonical = canonicalId(alias, rename)
+    if (canonical && universe.has(canonical)) aliasHits.add(canonical)
+  }
   for (const [id, nodes] of universe) {
     const idLower = id.toLowerCase()
-    if (!idLower.includes(q)) continue
+    if (!idLower.includes(q) && !aliasHits.has(id)) continue
     const leaf = id.split('/').pop()
     const leafLower = leaf.toLowerCase()
     const rank = leafLower === q ? 0 : leafLower.startsWith(q) ? 1 : leafLower.includes(q) ? 2 : 3
@@ -138,6 +144,13 @@ export function filterConceptTree(tree, experimentRefs = {}, query = '', opts = 
   if (!nodes || typeof nodes !== 'object') return result
   const refs = experimentRefs && typeof experimentRefs === 'object' ? experimentRefs : {}
   const matchExperiments = opts.matchExperiments !== false
+  const aliasHits = new Set()
+  for (const alias of Object.keys(opts.rename || {})) {
+    if (alias.toLowerCase().includes(q)) {
+      const canonical = canonicalId(alias, opts.rename)
+      if (canonical) aliasHits.add(canonical)
+    }
+  }
   const has = (object, key) => Object.prototype.hasOwnProperty.call(object, key)
 
   for (const id of Object.keys(nodes)) {
@@ -145,7 +158,7 @@ export function filterConceptTree(tree, experimentRefs = {}, query = '', opts = 
     const node = nodes[id]
     if (!node || typeof node !== 'object') continue
     const leaf = String(id).split('/').pop().toLowerCase()
-    const selfHit = id.toLowerCase().includes(q) || leaf.includes(q)
+    const selfHit = id.toLowerCase().includes(q) || leaf.includes(q) || aliasHits.has(id)
     const expHit = matchExperiments && has(refs, id) && Array.isArray(refs[id])
       && refs[id].some(ref => experimentRefMatches(ref, query))
     if (selfHit) result.conceptHit.add(id)

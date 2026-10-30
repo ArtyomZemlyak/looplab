@@ -426,6 +426,19 @@ function StateCard({ tone, title, body, action, secondaryAction, pending = false
 // branch). `selectedNodeId` is what that host has selected, so an evidence row can show which
 // experiment the pane is answering about — without it the pane and the tree read as two unrelated
 // surfaces that happen to be side by side.
+function ConceptGuidance() {
+  return <details><summary>{uiText('How to name and interpret concepts')}</summary>
+        <p>{uiText('Use a stable, meaningful axis and name. Explain the concept in the experiment rationale or research memo.')}</p>
+        <ul>
+          <li>{uiText('Data and scale: source, cohort or model size.')}</li>
+          <li>{uiText('Objective and architecture: what is optimized and how the model is built.')}</li>
+          <li>{uiText('Input, decoding and evaluation: what the model sees, how it produces candidates, and how they are measured.')}</li>
+        </ul>
+        <p>{uiText('A concept groups a meaningful research difference; do not create a separate concept for every numeric parameter.')}</p>
+        <p>{uiText('A lens covers its eligible recorded items, not the completeness or truth of the whole research map. Aliases and merges follow the existing governed concept process.')}</p>
+      </details>
+}
+
 export default function ConceptView({ runId, generation, sequence: displayedSequence, state, onPickNode,
   selectedNodeId = null, onOpenLineage = null, observedSeq = null }) {
   useUILanguage()
@@ -693,8 +706,8 @@ export default function ConceptView({ runId, generation, sequence: displayedSequ
     className="cv-resource-note relationship-legend" role="note">{uiText("Relationship view · ")}{relationshipCopy.linkDescription}.
     {relationshipCopy.derivationNote && <> {relationshipCopy.derivationNote}</>}
     {' '}{uiText("Indentation shows one primary display parent; “+N links” opens additional projected parents. This is not a taxonomy hierarchy.")}</div>
-  const filter = useMemo(() => filterConceptTree(data?.tree, byConcept, query, { edgeProjection }),
-    [data, byConcept, query, edgeProjection])
+  const filter = useMemo(() => filterConceptTree(data?.tree, byConcept, query, { edgeProjection, rename: state?.concept_consolidation }),
+    [data, byConcept, query, edgeProjection, state?.concept_consolidation])
   const searching = query.trim().length > 0 && !!filter
   const effectiveExpanded = useMemo(
     () => searching ? new Set([...expanded, ...filter.expand]) : expanded,
@@ -1332,6 +1345,7 @@ export default function ConceptView({ runId, generation, sequence: displayedSequ
   if (stateCard) return <div className="concept-view cv-state-layout" role="region"
     aria-label={uiText(projectionAriaLabel)} aria-describedby={projectionDescription}>
     <StateCard {...stateCard} projectionLabel={projectionLabel} />
+    {stateCard.tone === 'empty' && <ConceptGuidance />}
     {stateCard.tone !== 'empty' && metricContext}{relationshipLegend}
     {data && recoveryNeedsSurface && (currentRecovery.status === 'settled' && !savedLensIntent
       ? <p className="cv-state-warning" role="status">{uiText(currentRecovery.notice)}</p>
@@ -1370,6 +1384,7 @@ export default function ConceptView({ runId, generation, sequence: displayedSequ
         {uiPlural(taggedConceptCount, '{0} tagged concept', '{0} tagged concepts')} · {uiPlural(displayedConceptNodeCount,
           '{0} displayed concept node', '{0} displayed concept nodes')} · {uiPlural(experimentCount, '{0} tagged experiment', '{0} tagged experiments')}
       </span></div>
+      <ConceptGuidance />
       <div className="cv-search cs">
         <div className={'cs-box' + (searching ? ' focus' : '')}>
           <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" aria-hidden="true">

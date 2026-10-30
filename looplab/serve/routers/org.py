@@ -18,7 +18,7 @@ from looplab.serve.memory_cascade import (MEMORY_CASCADE_SCHEMA, attributable_me
                                           purge_attributable_memory, run_memory_identity,
                                           unreadable_identity_receipt)
 from looplab.serve.http import generation_conflict, json_object
-from looplab.serve.projects import ProjectConflictError, ProjectError, ProjectStoreLockError
+from looplab.serve.projects import ProjectConflictError, ProjectError, ProjectStoreLockError, ProjectProfileConflict
 from looplab.serve.protocol import EXPECTED_RUN_GENERATION_FIELD
 
 
@@ -67,6 +67,8 @@ def build_router(srv) -> APIRouter:
                 "remediation": (
                     "Refresh the Runs list and repeat the change from the current run card."),
             }) from e
+        except ProjectProfileConflict as e:
+            raise HTTPException(409, {"code": "metric_profile_changed", "expected": e.expected, "current": e.current}) from e
         except ProjectStoreLockError as e:
             raise HTTPException(503, str(e)) from e
         except ProjectError as e:
@@ -134,6 +136,28 @@ def build_router(srv) -> APIRouter:
     @router.get("/api/projects")
     def list_projects():
         return projects.load()
+
+    @router.get("/api/projects/{pid}/metric-profile")
+    def get_metric_profile(pid: str):
+        from looplab.core.metric_profile import profile_digest
+        data = projects.load()
+        project = _project_call(lambda: projects._require(data, pid))
+        profile = project.get("metric_profile")
+        return {"profile": profile, "digest": profile_digest(profile),
+                "meaning": "Project-authored presentation profile; it does not compute or verify metrics."}
+
+    @router.put("/api/projects/{pid}/metric-profile")
+    async def put_metric_profile(pid: str, request: Request):
+        from looplab.serve.principal import request_agent_token
+        if request_agent_token(request):
+            raise HTTPException(403, "project metric profile is an owner setting")
+        body = await json_object(request)
+        expected = body.get("expected_digest")
+        if not isinstance(expected, str) or not re.fullmatch(r"[0-9a-f]{64}", expected):
+            raise HTTPException(400, "expected_digest must be a SHA-256")
+        if set(body) != {"expected_digest", "profile"}:
+            raise HTTPException(400, "body requires only expected_digest and profile")
+        return await _project_call_async(lambda: projects.put_metric_profile(pid, body["profile"], expected))
 
     @router.post("/api/projects")
     async def create_project(request: Request):

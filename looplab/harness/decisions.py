@@ -152,6 +152,16 @@ def publish_decision(srv, rd: Path, body) -> dict:
                    "option_sha256": sorted(options),
                    **({"candidate_sha256": selected_digest} if selected_digest else {}),
                    "reason": body.reason, "action_id": body.action_id}
+            prior = getattr(body, "prior_node_ids", []) or []
+            if any(type(n) is not int or n < 0 or n not in state.nodes for n in prior):
+                raise HTTPException(409, "prior_node_ids must name existing nodes")
+            if prior:
+                row["prior_node_ids"] = prior
+            from looplab.core.redact import redact_persisted_text
+            for field in ("alternatives_summary", "information_gain", "not_applicable_reason"):
+                value = getattr(body, field, "")
+                if value:
+                    row[field] = redact_persisted_text(value, max_chars=1200, entropy=False, single_line=True)
             payload = orjson.dumps(row, option=orjson.OPT_SORT_KEYS)
             path = decision_file(rd)
             with interprocess_lock(Path(str(path) + ".lock"), required=True):

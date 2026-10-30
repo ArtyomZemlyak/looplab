@@ -151,3 +151,44 @@ def test_a_report_without_figures_folds_exactly_as_before():
     kept = sanitize_report_payload({"headline": "h", "figures": [
         {"figure_id": "a" * 64, "caption": "c", "mime": "text/html"}, {"figure_id": "../x"}, 7]})
     assert kept["figures"] == [{"figure_id": "a" * 64, "caption": "c"}]
+
+
+def test_native_cumulative_overview_remains_accessible_after_latest_result(tmp_path, monkeypatch):
+    client, rd = _client(tmp_path, monkeypatch)
+    first = _report(client, {'headline': 'First result', 'campaign_overview': {
+        'summary': 'Two research directions.', 'what_worked': ['First outcome'],
+        'caveats': ['Exploratory'], 'report_seqs': []}}, 'overview-1')
+    assert first['status'] != 'rejected', first
+    second = _report(client, {'headline': 'Second result', 'body_markdown': 'Latest experiment.'}, 'overview-2')
+    assert second['status'] != 'rejected', second
+    gen = http_run_generation(client, 'demo', headers=AGENT)
+    page = client.get('/api/runs/demo/research-map', params={'expected_generation': gen}, headers=AGENT)
+    assert page.status_code == 200, page.text
+    assert page.json()['campaign_overview']['content']['summary'] == 'Two research directions.'
+    assert page.json()['campaign_overview']['content']['what_worked'] == ['First outcome']
+    assert page.json()['reports']['items'][0]['headline'] == 'Second result'
+
+
+def test_guided_memo_shape_reaches_native_research_journal(tmp_path, monkeypatch):
+    client, rd = _client(tmp_path, monkeypatch)
+    memo = {'summary': 'Does this improve ranking?', 'reasoning': 'This isolates decoding from training.',
+            'open_questions': ['Does it improve recall?'], 'next_experiments': ['Compare the frozen control.'],
+            'sources': [{'title': 'Example source', 'url': 'https://example.org/paper'}],
+            'claims': [{'statement': 'The cited method uses a different decoder.', 'node_ids': [],
+                        'urls': ['https://example.org/paper']}]}
+    response = post_command(client, 'research_completed', {'memo': memo}, key='guided-memo-1', headers=AGENT)
+    assert response.status_code == 200 and response.json()['status'] != 'rejected', response.text
+    state = fold(EventStore(rd / 'events.jsonl').read_all())
+    assert state.research[-1]['summary'] == memo['summary']
+    assert state.research[-1]['claims'][0]['urls'] == ['https://example.org/paper']
+
+
+def test_run_local_lesson_is_recorded_in_memo_without_shared_kb(tmp_path, monkeypatch):
+    client, rd = _client(tmp_path, monkeypatch)
+    memo = {'summary': 'A limited lesson.', 'local_lessons': [{'statement': 'Batch altered runtime.',
+        'limitation': 'One configuration only.', 'status': 'limited', 'node_ids': [1]}]}
+    response = post_command(client, 'research_completed', {'memo': memo}, key='local-lesson-1', headers=AGENT)
+    assert response.status_code == 200 and response.json()['status'] != 'rejected', response.text
+    state = fold(EventStore(rd / 'events.jsonl').read_all())
+    assert state.research[-1]['local_lessons'][0]['limitation'] == 'One configuration only.'
+    assert not (tmp_path / 'memory').exists()

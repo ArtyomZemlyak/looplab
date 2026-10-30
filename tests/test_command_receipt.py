@@ -135,3 +135,17 @@ def test_receipt_does_not_launder_damaged_error_or_sequence(tmp_path, monkeypatc
         headers={"X-LoopLab-Token": "agent-secret"})
     assert result.status_code == 503, result.text
     assert path.read_bytes() == before
+
+
+def test_read_only_receipt_returns_bounded_notice_categories_without_authored_text(tmp_path, monkeypatch):
+    rd, store, client, service = _client(tmp_path, monkeypatch)
+    gen = run_generation_token(store.read_all())
+    _, row = _record(rd, gen, 'succeeded', intake_notices=[
+        {'kind': 'questions_not_on_board', 'count': 2, 'message': 'owner-secret', 'samples': ['owner-secret']},
+        {'kind': 'readability', 'field': 'memo.summary'}, {'kind': 'unrecognized', 'message': 'private'}])
+    response = client.get('/api/runs/demo/command-receipt', params={'expected_generation': gen},
+                          headers={'X-LoopLab-Token': 'agent-secret', 'Idempotency-Key': 'original-key'})
+    assert response.status_code == 200, response.text
+    assert response.json()['intake_notices'] == [{'kind': 'questions_not_on_board', 'count': 2},
+                                                  {'kind': 'readability', 'field': 'memo.summary'}]
+    assert 'owner-secret' not in response.text and 'private' not in response.text

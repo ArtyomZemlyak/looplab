@@ -422,3 +422,40 @@ def test_projects_are_listed_and_deleted_over_http_without_orphaning_children(tm
     unknown = client.delete("/api/projects/no-such-project")
     assert unknown.status_code == 400 and "no such project" in unknown.text
     assert set(p["id"] for p in client.get("/api/projects").json()["projects"]) == {child}
+
+
+def test_project_metric_profiles_use_compare_and_swap_and_remain_project_scoped(tmp_path):
+    from looplab.core.metric_profile import profile_digest, profile_for_run
+    from looplab.serve.projects import ProjectProfileConflict
+    s = store(tmp_path); first = s.create('one'); second = s.create('two')
+    s.assign('run-a', first.id); s.assign('run-b', second.id)
+    profile = {'name': 'Recommendation', 'metrics': [{'key': 'ProductRecall@200', 'role': 'primary', 'denominator': 'all GT items'},
+               {'key': 'FUR@200', 'role': 'secondary', 'denominator': 'unseen GT'}], 'slices': ['repeat', 'explore', 'popularity'], 'notes': ''}
+    receipt = s.put_metric_profile(first.id, profile, profile_digest(None))
+    assert receipt['profile']['metrics'][0]['key'] == 'ProductRecall@200'
+    with pytest.raises(ProjectProfileConflict):
+        s.put_metric_profile(first.id, profile, profile_digest(None))
+    assert profile_for_run(tmp_path, 'run-a')['profile']['slices'] == ['repeat', 'explore', 'popularity']
+    assert profile_for_run(tmp_path, 'run-b')['state'] == 'unconfigured'
+    with pytest.raises(ProjectError):
+        s.put_metric_profile(second.id, {'name': 'bad', 'metrics': [{'key': 'x', 'role': 'secondary'}]}, profile_digest(None))
+
+
+def test_profile_authoring_language_is_optional_and_validated():
+    from looplab.core.metric_profile import normalize_profile
+    profile = {'name': 'Project', 'metrics': [{'key': 'm', 'role': 'primary'}]}
+    assert 'authoring_language' not in normalize_profile(profile)
+    assert normalize_profile({**profile, 'authoring_language': 'ru'})['authoring_language'] == 'ru'
+    with pytest.raises(ValueError):
+        normalize_profile({**profile, 'authoring_language': 'xx'})
+
+
+def test_publication_adapter_requires_explicit_safe_manual_configuration():
+    from looplab.core.metric_profile import normalize_profile
+    profile = {'name': 'Project', 'metrics': [{'key': 'm', 'role': 'primary'}]}
+    good = normalize_profile({**profile, 'publication': {'adapter': 'manual_markdown', 'destination_label': 'Team research'}})
+    assert good['publication']['adapter'] == 'manual_markdown'
+    with pytest.raises(ValueError):
+        normalize_profile({**profile, 'publication': {'adapter': 'manual_markdown', 'destination_label': 'https://secret.example/'}})
+    with pytest.raises(ValueError):
+        normalize_profile({**profile, 'publication': {'adapter': 'automatic', 'destination_label': 'Team'}})

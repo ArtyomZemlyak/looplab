@@ -236,15 +236,27 @@ def normalize_experiment(raw: Any, *, root: Optional[Path] = None) -> dict:
         raise HTTPException(400, "experiment must be an object")
     allowed = {"experiment_id", "title", "question", "hypothesis", "arms", "tests", "metrics",
                "primary_metric", "contrasts", "correction", "alpha", "ci", "bootstrap_replicates",
-               "supersedes", "notes"}
+               "supersedes", "notes", "relationships", "question_card_id", "research_context"}
     unknown = set(raw) - allowed
     if unknown:
         raise HTTPException(400, f"experiment has unknown field(s): {', '.join(sorted(unknown))}")
     exp: dict[str, Any] = {"experiment_id": _slug(raw.get("experiment_id"), "experiment_id")}
     exp["title"] = _text(raw.get("title"), "title", limit=300) or exp["experiment_id"]
     exp["question"] = _text(raw.get("question"), "question")
+    card_id = raw.get("question_card_id")
+    if card_id is not None:
+        if not isinstance(card_id, str) or not card_id.strip() or len(card_id) > 160 or any(ord(c) < 32 for c in card_id):
+            raise HTTPException(400, "question_card_id must be a non-empty existing card id")
+        exp["question_card_id"] = card_id
     exp["hypothesis"] = _text(raw.get("hypothesis"), "hypothesis", required=True)
     exp["notes"] = _text(raw.get("notes"), "notes")
+    if "research_context" in raw:
+        context = raw["research_context"]
+        fields = ("change", "motivation", "data_weights", "control", "criterion", "alternatives")
+        if not isinstance(context, dict) or set(context) - set(fields):
+            raise HTTPException(400, "research_context has unknown fields")
+        exp["research_context"] = {key: _text(context.get(key), f"research_context.{key}", limit=1200) or ""
+                                   for key in fields}
     arms = raw.get("arms")
     if not isinstance(arms, dict) or not 1 <= len(arms) <= 64:
         raise HTTPException(400, "arms must be an object of 1..64 named arms")
@@ -252,7 +264,7 @@ def normalize_experiment(raw: Any, *, root: Optional[Path] = None) -> dict:
     for label, arm in arms.items():
         _slug(label, "arm label")
         arm = arm if isinstance(arm, dict) else {}
-        if set(arm) - {"run_id", "node_id", "description"}:
+        if set(arm) - {"run_id", "node_id", "description", "work_kind"}:
             raise HTTPException(400, f"arm {label!r} has unknown fields")
         run_id = arm.get("run_id")
         if run_id is not None:
@@ -266,8 +278,36 @@ def normalize_experiment(raw: Any, *, root: Optional[Path] = None) -> dict:
                                     or node_id < 0):
             raise HTTPException(400, f"arm {label!r}: node_id must be a non-negative integer")
         exp["arms"][label] = {"run_id": run_id, "node_id": node_id,
-                              "description": _text(arm.get("description"), "arm description",
-                                                   limit=500)}
+                              "description": _text(arm.get("description"), "arm description", limit=500)}
+        work_kind = arm.get("work_kind")
+        if work_kind is not None:
+            if work_kind not in ("scientific_experiment", "fit", "score_only", "engineering_recovery"):
+                raise HTTPException(400, "arm work_kind is invalid")
+            exp["arms"][label]["work_kind"] = work_kind
+    relationships = raw.get("relationships", [])
+    if not isinstance(relationships, list) or len(relationships) > 128:
+        raise HTTPException(400, "relationships must be a list of at most 128 explicit references")
+    exp["relationships"] = []
+    for relation in relationships:
+        if not isinstance(relation, dict) or set(relation) - {"kind", "subject_arm", "run_id", "node_id", "node_generation", "artifact_sha256", "explanation"}:
+            raise HTTPException(400, "relationship has unknown fields")
+        kind = relation.get("kind")
+        if kind not in ("model_producer", "scientific_control", "code_reference"):
+            raise HTTPException(400, "relationship kind must be model_producer, scientific_control or code_reference")
+        if relation.get("subject_arm") not in exp["arms"]:
+            raise HTTPException(400, "relationship subject_arm must name a declared arm")
+        nid, attempt = relation.get("node_id"), relation.get("node_generation")
+        if type(nid) is not int or nid < 0 or (attempt is not None and (type(attempt) is not int or attempt < 0)):
+            raise HTTPException(400, "relationship requires non-negative node_id and optional node_generation")
+        rid = relation.get("run_id")
+        if rid is not None and (not isinstance(rid, str) or not rid or '/' in rid or '\\' in rid or rid in ('.', '..')):
+            raise HTTPException(400, "relationship run_id must be one run identifier")
+        digest = relation.get("artifact_sha256")
+        if digest is not None and (not isinstance(digest, str) or not re.fullmatch(r"[0-9a-f]{64}", digest)):
+            raise HTTPException(400, "relationship artifact_sha256 must be a lowercase SHA-256")
+        exp["relationships"].append({"kind": kind, "subject_arm": relation["subject_arm"], "run_id": rid,
+                                     "node_id": nid, "node_generation": attempt, "artifact_sha256": digest,
+                                     "explanation": _text(relation.get("explanation"), "relationship explanation", limit=500)})
     tests = raw.get("tests")
     if not isinstance(tests, list) or not 1 <= len(tests) <= 16:
         raise HTTPException(400, "tests must list 1..16 shared evaluation sets")
@@ -366,7 +406,7 @@ def normalize_experiment(raw: Any, *, root: Optional[Path] = None) -> dict:
 # or over a cosmetic title/notes/description edit (review 2026-10-16). `primary_metric` is kept: it
 # picks the default contrast metric and what a report leads with.
 DECLARATION_FIELDS = ("hypothesis", "arms", "tests", "metrics", "primary_metric", "contrasts",
-                      "correction", "alpha", "ci", "bootstrap_replicates", "supersedes")
+                      "correction", "alpha", "ci", "bootstrap_replicates", "supersedes", "relationships", "research_context")
 
 
 def _declaration_substance(exp: dict) -> dict:
@@ -474,6 +514,9 @@ def publish_amendment(srv, rd: Path, body, *, agent_token: bool) -> dict:
                 undo = None
                 if kind == "experiment":
                     exp = normalize_experiment(body.experiment, root=Path(rd).parent)
+                    card_id = exp.get("question_card_id")
+                    if card_id is not None and (card_id not in state.cards or state.cards[card_id].card_kind != "direction"):
+                        raise HTTPException(409, "question_card_id does not name a current research direction")
                     known = experiments_of(current)
                     if exp["experiment_id"] in known:
                         saved = {k: v for k, v in known[exp["experiment_id"]].items()

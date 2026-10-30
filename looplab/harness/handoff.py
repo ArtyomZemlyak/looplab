@@ -78,6 +78,7 @@ def snapshot(rd: Path, expected_generation: str, *, credential_configured: bool,
 
     return {
         "version": 1, "generation": generation,
+        "research_workflow": {"version": 1, "guide": "/api/runs/{run_id}/research-workflow", "skill": "skills/looplab-research/SKILL.md"},
         "run_id": redact_persisted_identity(rd.name, max_chars=256),
         "run_uid": redact_persisted_identity(state.run_uid, max_chars=256),
         "event_seq": events[-1].seq, "mode": "external_harness",

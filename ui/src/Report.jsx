@@ -22,6 +22,8 @@ import { readOnlyLabel } from './runMode.js'
 import { nodeRepeatChecksNotApplicable, resultMeasurement } from './resultMeasurement.js'
 import './report-trust-polish.css'
 import { ReportFigures, ReportVersions } from './ReportExtras.jsx'
+import ResearchMap from './ResearchMap.jsx'
+import ReportMetricBindings from './ReportMetricBindings.jsx'
 
 const TRUST_CLASS = { unverified: 'neutral', caveats: 'warn', suspect: 'alarm' }
 const TRUST_LABEL = { unverified: 'not fully verified', caveats: 'with caveats', suspect: 'flags found' }
@@ -117,13 +119,15 @@ function KeyMetricTable({ keyMetrics, nodes, championId }) {
   if (!rows || !rows.length) return null
   return <div className="md-table-wrap agent-report-metrics" role="region" tabIndex={0}
     aria-label={uiText('Key metrics (values measured by LoopLab)')}>
+    <p>{uiText('Values come from the current recorded attempt. Evaluation labels are author declarations; a numeric difference does not establish matching tests, policies or statistical significance.')}</p>
     <table className="tbl md-table">
       <caption>{uiText('Key metrics (values measured by LoopLab)')}</caption>
       <thead><tr><th scope="col">{uiText('Experiment')}</th>
-        {keyMetrics.metrics.map(m => <th scope="col" key={m.key} title={m.key}>{m.label || m.key}</th>)}</tr></thead>
+        {keyMetrics.metrics.map(m => <th scope="col" key={m.key} title={m.key}>{m.label || m.key}{[m.role, m.test_id, m.cohort, m.policy].filter(Boolean).length > 0 && <small> · {[m.role, m.test_id, m.cohort, m.policy].filter(Boolean).join(' · ')}</small>}</th>)}</tr></thead>
       <tbody>{rows.map(row => <tr key={row.node_id}>
         <th scope="row">#{row.node_id}{row.label ? ` · ${row.label}` : ''}{row.baseline ? ` · ${uiText('baseline')}` : ''}
-          {row.missing && <span className="muted"> · {uiText('not in this run')}</span>}</th>
+          {row.missing && <span className="muted"> · {uiText('not in this run')}</span>}
+          {row.attemptMismatch && <span className="muted"> · {uiText('recorded attempt differs or is unknown')}</span>}</th>
         {row.values.map(v => <td key={v.key} style={{ textAlign: 'right' }}>
           {v.value == null ? <span className="muted">{uiText('not measured')}</span> : fmt(v.value)}
           {v.delta != null && <span className="muted"> ({v.delta >= 0 ? '+' : ''}{fmt(v.delta)})</span>}
@@ -172,6 +176,7 @@ function AgentNarrative({ rep, coverage, generation, snapshotSeq, nodes, champio
     {rep.headline && <h3 className="agent-report-headline">{rep.headline}</h3>}
     {(rep.verdict || rep.summary) && <div className="agent-report-text"><Markdown text={rep.verdict || rep.summary} /></div>}
     <KeyMetricTable keyMetrics={rep.key_metrics} nodes={nodes} championId={championId} />
+    {liveReads && rep.key_metrics && <ReportMetricBindings runId={runId} generation={generation} seq={rep.published_seq} />}
     {rep.body_markdown && <div className="agent-report-text agent-report-body"><Markdown text={rep.body_markdown} /></div>}
     {/* Attached figures (review 2026-10-14 section 6): owner reads only; a review link or a
         historical snapshot says how many it does not show. */}
@@ -251,10 +256,11 @@ function List({ items }) {
 }
 
 export default function ReportView({ state, runId, onOpenPanel, canOpenPanel, onToast,
-  onPickNode, onPickEvidence, readOnly = false, runBackend = null, externalHarness = false,
+  onPickNode, onPickEvidence, onOpenConcepts, onOpenCards, readOnly = false, runBackend = null, externalHarness = false,
   historySeq = null, expectedGeneration = null, observedSeq = null,
   readOnlyReason = 'history', evidenceAvailable = true }) {
   const [, , localeRevision] = useUILanguage()
+  const [requestedReport, setRequestedReport] = useState(null)
   // The model check this tab last ran (Settings → Model, or the first-run "Check connection…").
   const [modelCheck, setModelCheck] = useState(readModelCheck)
   useEffect(() => {
@@ -657,11 +663,13 @@ export default function ReportView({ state, runId, onOpenPanel, canOpenPanel, on
       </dl>
       {!Object.keys(a.failures).length && !a.infeasible.length && <p className="muted">{uiText('No execution failures or constraint violations are recorded.')}</p>}
 
+      {readOnlyReason !== 'review' && <ResearchMap runId={runId} generation={expectedGeneration} onPickNode={onPickNode} onOpenConcepts={onOpenConcepts} onOpenCards={onOpenCards} onViewReport={seq => setRequestedReport({ seq })} readOnly={readOnly} />}
+
       <AgentNarrative rep={rep} coverage={coverage} generation={expectedGeneration} snapshotSeq={observedSeq}
         nodes={state.nodes} championId={best?.id ?? null} runId={runId}
         figures={state.report?.figures} liveReads={!readOnly || readOnlyReason === 'history'} />
       {/* Every published version, and a field-by-field comparison of any two (section 6.3). */}
-      {rep && <ReportVersions runId={runId} available={readOnlyReason !== 'review'} />}
+      {rep && <ReportVersions runId={runId} generation={expectedGeneration} requestedReport={requestedReport} available={readOnlyReason !== 'review'} />}
       {!rep && <p className="report-section-intro">{uiText('No detailed Assistant report has been published. Recorded outcomes remain available; discuss them in chat or refresh the report.')}</p>}
 
       {best && <><h2 id="report-section-champion" tabIndex={-1} className="section-h">{uiText("Selected experiment")}</h2>

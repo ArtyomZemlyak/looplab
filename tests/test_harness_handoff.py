@@ -187,3 +187,92 @@ def test_observe_only_state_skips_pending_reset_reconciliation(tmp_path, monkeyp
     assert response.status_code == 200
     assert response.json()["generation"] == run_generation_token(store.read_all())
     assert {p.name: p.read_bytes() for p in rd.iterdir() if p.is_file()} == before
+
+
+def test_external_workflow_is_available_from_the_same_run_without_mutation(tmp_path, monkeypatch):
+    rd, store, client = _run(tmp_path, monkeypatch)
+    before = {p.name: p.read_bytes() for p in rd.iterdir() if p.is_file()}
+    response = client.get('/api/runs/demo/research-workflow', headers={'X-LoopLab-Token': 'agent-secret-1234'})
+    assert response.status_code == 200
+    body = response.json()
+    assert body['version'] == 1
+    assert 'source, model producer, code reference, control and attempt' in body['markdown']
+    assert 'notification is not an admission' in body['markdown']
+    assert {p.name: p.read_bytes() for p in rd.iterdir() if p.is_file()} == before
+
+
+def test_briefing_prefers_latest_live_operator_direction_without_authorizing_work(tmp_path, monkeypatch):
+    rd, store, client = _run(tmp_path, monkeypatch)
+    generation = run_generation_token(store.read_all())
+    store.append('hint', {'text': 'old priority', 'replace': True})
+    store.append('hint', {'text': 'new priority', 'replace': True})
+    before = (rd / 'events.jsonl').read_bytes()
+    response = client.get('/api/runs/demo/research-briefing', params={
+        'expected_generation': generation, 'language': 'ru'}, headers={'X-LoopLab-Token': 'agent-secret-1234'})
+    assert response.status_code == 200, response.text
+    value = response.json()
+    assert value['operator_directions']['items'][-1] == 'new priority'
+    assert value['generation'] == generation and value['observation']['same_event_prefix']
+    assert 'not an authorization' in value['meaning']
+    assert (rd / 'events.jsonl').read_bytes() == before
+    assert client.get('/api/runs/demo/research-briefing', params={'expected_generation': '0' * 64},
+                      headers={'X-LoopLab-Token': 'agent-secret-1234'}).status_code == 409
+
+
+def test_briefing_reports_degraded_mirror_despite_running_child(tmp_path, monkeypatch):
+    rd, store, client = _run(tmp_path, monkeypatch)
+    gen = run_generation_token(store.read_all())
+    from looplab.serve import mirror_supervisor
+    monkeypatch.setattr(mirror_supervisor, 'mirror_view', lambda root, supervisor: {
+        'dst_root': '/fixture', 'status_readable': True, 'last_pass_finished_at': 1,
+        'stuck': {'reason': 'write timeout'}, 'errors': 0,
+        'supervisor': {'state': 'running', 'restarts': 92},
+    })
+    response = client.get('/api/runs/demo/research-briefing', params={'expected_generation': gen},
+                          headers={'X-LoopLab-Token': 'agent-secret-1234'})
+    assert response.status_code == 200
+    mirror = response.json()['mirror']
+    assert mirror['state'] == 'degraded' and mirror['stuck']
+    assert mirror['supervisor_state'] == 'running' and mirror['supervisor_restarts'] == 92
+    assert 'flush' in mirror['meaning']
+
+
+def test_project_metric_profile_is_in_briefing_and_conflicts_on_stale_edit(tmp_path, monkeypatch):
+    rd, store, client = _run(tmp_path, monkeypatch)
+    owner = {'X-LoopLab-Token': 'operator-secret-1234'}
+    agent = {'X-LoopLab-Token': 'agent-secret-1234'}
+    pid = client.post('/api/projects', json={'name': 'P'}, headers=owner).json()['id']
+    from looplab.serve.projects import ProjectStore
+    ProjectStore(rd.parent / 'projects.json').assign('demo', pid)
+    path = f'/api/projects/{pid}/metric-profile'
+    empty = client.get(path, headers=owner).json()
+    profile = {'name': 'Vision example', 'metrics': [{'key': 'IoU', 'label': 'Intersection over union',
+               'role': 'primary', 'denominator': 'union pixels'}], 'slices': ['small objects']}
+    assert client.put(path, headers=agent, json={'expected_digest': empty['digest'], 'profile': profile}).status_code in (401, 403)
+    saved = client.put(path, headers=owner, json={'expected_digest': empty['digest'], 'profile': profile})
+    assert saved.status_code == 200, saved.text
+    assert client.put(path, headers=owner, json={'expected_digest': empty['digest'], 'profile': profile}).status_code == 409
+    briefing = client.get('/api/runs/demo/research-briefing', params={'expected_generation': run_generation_token(store.read_all())}, headers=agent)
+    assert briefing.status_code == 200, briefing.text
+    assert briefing.json()['metric_profile']['profile']['metrics'][0]['key'] == 'IoU'
+
+
+def test_clean_skill_install_discovers_live_workflow_and_contract(tmp_path, monkeypatch):
+    import shutil
+    from importlib.resources import files
+    source = Path(__file__).resolve().parents[1] / 'skills' / 'looplab-research'
+    installed = tmp_path / 'fresh-skills' / 'looplab-research'
+    shutil.copytree(source, installed)
+    skill = (installed / 'SKILL.md').read_text()
+    assert skill.startswith('---\nname: looplab-research\n')
+    assert 'research-workflow' in skill and 'run_progress' in skill and 'generation' in skill
+    assert 'checkpoint SHA' not in skill and 'browser-fixture' not in skill
+    rd, store, client = _run(tmp_path / 'server', monkeypatch)
+    token = {'X-LoopLab-Token': 'agent-secret-1234'}
+    workflow = client.get('/api/runs/demo/research-workflow', headers=token)
+    contract = client.get('/api/runs/demo/harness-contract', headers=token)
+    assert workflow.status_code == contract.status_code == 200
+    assert workflow.json()['markdown'] == files('looplab.harness').joinpath('external-research-workflow.md').read_text(encoding='utf-8')
+    assert contract.json()['generation'] == run_generation_token(store.read_all())
+    assert contract.json()['version'] == workflow.json()['version'] == 1
+    assert 'workflow_version: "1"' in skill and 'contract_version: "1"' in skill

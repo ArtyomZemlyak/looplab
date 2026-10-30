@@ -287,6 +287,7 @@ def submit_experiment(api, run_id: str, expected_generation: str, *, key: str, i
             "expected_generation": expected_generation, "action_id": f"{key}:decision:{phase}",
             "phase_id": phase, "idea": idea, "decision": "submit",
             "alternatives": spec.get("alternatives") or [],
+            **{field: spec[field] for field in ("prior_node_ids", "alternatives_summary", "information_gain", "not_applicable_reason") if spec.get(field)},
             **({"implementations": spec["implementations"],
                 "selected_index": spec.get("selected_index", 0)} if spec.get("implementations") else {}),
             "reason": spec.get("reason") or "reviewed before submission"})

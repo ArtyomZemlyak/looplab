@@ -76,6 +76,7 @@ include = ["looplab*"]
 [tool.setuptools.package-data]
 looplab = [
     "serve/*.json",
+    "harness/*.md",
     "serve/ui_dist/*",
     "serve/ui_dist/assets/*",
     "serve/ui_dist/.vite/*",

@@ -146,12 +146,35 @@ def mirror_view(run_root, supervisor: Optional[MirrorSupervisor]) -> dict:
     out = {"run_root": str(root), "volatile": is_volatile(root), "dst_root": dst,
            "supervisor": supervisor.status() if supervisor is not None else None,
            "last_pass_finished_at": None, "stuck": None, "errors": 0,
-           "env": MIRROR_DST_ENV}
+           "env": MIRROR_DST_ENV, "status_readable": False}
     if dst:
         try:
             status = mirror_status(MirrorConfig(src_root=root, dst_root=Path(dst)))
         except (OSError, ValueError):
             return out
-        out.update(last_pass_finished_at=status.get("last_pass_finished_at"),
+        out.update(status_readable=True, last_pass_finished_at=status.get("last_pass_finished_at"),
                    stuck=status.get("stuck"), errors=len(status.get("errors") or []))
     return out
+
+
+def mirror_diagnostic(view: dict, *, now: float | None = None) -> dict:
+    """Report observations separately; a running child does not prove a successful mirror."""
+    now = time.time() if now is None else now
+    last = view.get("last_pass_finished_at")
+    age = max(0, now - last) if isinstance(last, (int, float)) and not isinstance(last, bool) else None
+    supervisor = view.get("supervisor") or {}
+    if not view.get("dst_root"):
+        state = "unconfigured"
+    elif view.get("stuck") or view.get("errors") or supervisor.get("state") in {"stuck", "restarting", "failed"}:
+        state = "degraded"
+    elif not view.get("status_readable") or age is None:
+        state = "unknown"
+    elif age > 180:
+        state = "stale"
+    else:
+        state = "observed_recent"
+    return {"state": state, "last_pass_finished_at": last, "last_pass_age_seconds": age,
+            "stuck": bool(view.get("stuck")), "errors": view.get("errors"),
+            "supervisor_state": supervisor.get("state"), "supervisor_restarts": supervisor.get("restarts"),
+            "status_readable": view.get("status_readable", False),
+            "meaning": "Local mirror metadata only; recent pass and readback do not prove durable storage flush."}

@@ -279,3 +279,15 @@ def test_the_rendered_memo_tags_each_claim_with_its_own_verdict():
     assert len(claim_lines) == 2, text
     assert all(line.startswith("- [SUPPORTED]") for line in claim_lines), text
     assert "evidence: #1" in text and "evidence: #2" in text, text
+
+
+def test_report_metric_refs_preserve_declared_scope_and_attempt_without_values():
+    clean = sanitize_report_payload({'key_metrics': {'metrics': [{
+        'key': 'ProductRecall@200', 'label': 'Product', 'role': 'primary', 'test_id': 'heldout',
+        'cohort': 'eligible users', 'policy': 'beam', 'value': 1}],
+        'nodes': [{'node_id': 3, 'node_generation': 1}], 'baseline_node_id': 3}})
+    refs = clean['key_metrics']
+    assert refs['metrics'][0] == {'key': 'ProductRecall@200', 'label': 'Product', 'role': 'primary',
+                                   'test_id': 'heldout', 'cohort': 'eligible users', 'policy': 'beam'}
+    assert refs['nodes'][0]['node_generation'] == 1
+    assert 'value' not in refs['metrics'][0]

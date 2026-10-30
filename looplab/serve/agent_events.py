@@ -48,6 +48,7 @@ permission, answers no checkpoint and starts no work.
 from __future__ import annotations
 
 import json
+import hashlib
 import logging
 import os
 import re
@@ -70,6 +71,7 @@ OUTBOX = "outbox.jsonl"
 STATE = "state.json"
 NOTIFY = "notify.json"
 LEDGER = "deliveries.jsonl"
+PENDING_REACTIONS = "pending-reactions.json"
 RUN_NOTIFY = "agent_notify.json"
 HOOKS_DIR = "hooks"
 # THE DEFAULT HOOK is the historical single `notify.json`; every other hook is a NAMED AGENT
@@ -81,7 +83,7 @@ _HOOK_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,31}$")
 
 ACTIONABLE_KINDS = (
     "node_evaluated", "node_failed", "stage_failed", "monitor_question", "obligation_due",
-    "run_idle", "run_paused", "run_finished", "gpu_free",
+    "run_idle", "run_paused", "run_finished", "gpu_free", "operator_direction", "agent_handoff",
 )
 # Kinds that describe a CONDITION that can stop holding (re-checked at delivery), as opposed to a
 # FACT the log recorded (a node evaluated, a stage failed), which stays true once true.
@@ -143,6 +145,38 @@ def _write_json(path: Path, data) -> None:
     os.replace(tmp, path)
 
 
+def _read_pending(root) -> tuple[dict, bool]:
+    """Fail closed on a damaged pending ledger: never overwrite unobserved state."""
+    path = events_dir(root) / PENDING_REACTIONS
+    try:
+        with path.open("rb") as stream:
+            raw = stream.read(4 * 1024 * 1024 + 1)
+    except FileNotFoundError:
+        return {}, True
+    except OSError:
+        return {}, False
+    if len(raw) > 4 * 1024 * 1024:
+        return {}, False
+    try:
+        data = json.loads(raw)
+    except (ValueError, UnicodeDecodeError):
+        return {}, False
+    def valid(item):
+        return (isinstance(item, dict) and isinstance(item.get("event_ids"), list) and bool(item["event_ids"])
+                and all(type(i) is int and i >= 0 for i in item["event_ids"])
+                and isinstance(item.get("runs"), list) and all(isinstance(v, str) for v in item["runs"])
+                and isinstance(item.get("kinds"), list) and all(isinstance(v, str) for v in item["kinds"])
+                and type(item.get("wall")) in (int, float) and 0 <= item["wall"] < 1e20
+                and type(item.get("attempt")) is int and item["attempt"] >= 1
+                and type(item.get("resent")) is bool
+                and isinstance(item.get("argv_sha256"), str) and re.fullmatch(r"[0-9a-f]{64}", item["argv_sha256"]))
+    if not isinstance(data, dict) or any(not isinstance(k, str) or not _HOOK_NAME.fullmatch(k)
+                                        or not isinstance(v, list) or any(not valid(i) for i in v)
+                                        for k, v in data.items()):
+        return {}, False
+    return data, True
+
+
 def _read_jsonl(path: Path) -> list[dict]:
     rows = []
     try:
@@ -193,6 +227,32 @@ def read_outbox(root, *, after: int = -1, run_id: Optional[str] = None,
             "gap": bool(after >= 0 and rows and oldest > after + 1)}
 
 
+def _last_outbox_id(path: Path) -> int:
+    """Last valid row id using a bounded tail; a large row falls back to the existing reader."""
+    try:
+        with path.open('rb') as stream:
+            stream.seek(0, os.SEEK_END)
+            size = stream.tell()
+            start = max(0, size - 65536)
+            stream.seek(start)
+            tail = stream.read()
+    except FileNotFoundError:
+        return -1
+    lines = tail.splitlines()
+    if start and lines:
+        lines = lines[1:]
+    for line in reversed(lines):
+        try:
+            row = json.loads(line)
+        except ValueError:
+            continue
+        if isinstance(row, dict) and type(row.get('id')) is int:
+            return row['id']
+    if start:
+        return max((r.get('id', -1) for r in _read_jsonl(path) if type(r.get('id')) is int), default=-1)
+    return -1
+
+
 def append_events(root, candidates: list[dict], *, run_state: Optional[dict] = None) -> list[dict]:
     """Append candidate events not seen before (dedupe by `key`); returns what was appended.
 
@@ -202,7 +262,8 @@ def append_events(root, candidates: list[dict], *, run_state: Optional[dict] = N
     appended = []
     with _lock(root):
         state = _read_json(d / STATE, {})
-        next_id = int(state.get("next_id", 0) or 0)
+        retained_max = max(_last_outbox_id(d / f"{OUTBOX}.1"), _last_outbox_id(d / OUTBOX))
+        next_id = max(int(state.get("next_id", 0) or 0), retained_max + 1)
         seen = state.setdefault("keys", {})
         for cand in candidates:
             scope = str(cand.get("run_id") or "_host")
@@ -244,7 +305,7 @@ def _clip(text, n: int = _SUMMARY_CHARS) -> str:
 
 def derive_log_events(run_id: str, run_uid: str, events) -> list[dict]:
     """Actionable rows from NEW event-log rows (each keyed by its seq)."""
-    from looplab.events.types import (EV_NODE_EVALUATED, EV_NODE_FAILED, EV_PAUSE,
+    from looplab.events.types import (EV_HINT, EV_NODE_EVALUATED, EV_NODE_FAILED, EV_PAUSE,
                                       EV_RUN_FINISHED, EV_STAGE_FINISHED)
     from looplab.runtime.command_eval import STAGE_FAILED_STATUSES
 
@@ -279,6 +340,10 @@ def derive_log_events(run_id: str, run_uid: str, events) -> list[dict]:
                                          f"{data.get('status')} (exit {data.get('exit_code')})"),
                         "details": {"stage": data.get("name"), "status": data.get("status"),
                                     "exit_code": data.get("exit_code")}})
+        elif ev.type == EV_HINT:
+            out.append({**base, "kind": "operator_direction",
+                        "summary": "operator direction changed; read the latest standing directions",
+                        "details": {"replace": bool(data.get("replace"))}})
         elif ev.type == EV_PAUSE:
             out.append({**base, "kind": "run_paused",
                         "summary": _clip(f"run paused: {data.get('reason') or 'operator'}"),
@@ -287,6 +352,11 @@ def derive_log_events(run_id: str, run_uid: str, events) -> list[dict]:
             out.append({**base, "kind": "run_finished",
                         "summary": _clip(f"run finished: {data.get('reason') or ''}"),
                         "details": {"reason": data.get("reason")}})
+    for row in out:
+        row['owner'] = 'external_agent'
+        row['urgency'] = 'high' if row['kind'] in ('node_failed', 'stage_failed') else 'normal'
+        row['next_read'] = f"/api/runs/{run_id}/harness-progress"
+        row['authority'] = 'notification_only'
     return out
 
 
@@ -331,6 +401,11 @@ def derive_condition_events(run_id: str, run_uid: str, progress: dict, *,
                                      + (f" ({budget_left} node(s) of budget left)"
                                         if budget_left is not None else "")),
                     "details": {"budget_left": budget_left, "at_node": at_node}})
+    for row in out:
+        row['owner'] = 'external_agent'
+        row['urgency'] = 'high' if row['kind'] == 'monitor_question' else 'normal'
+        row['next_read'] = f"/api/runs/{run_id}/harness-progress"
+        row['authority'] = 'notification_only'
     return out
 
 
@@ -599,6 +674,9 @@ def compose_message(rows: list[dict], *, limit_chars: int, failed_before: int = 
     for row in rows:
         where = f"[{row.get('run_id')}] " if row.get("run_id") and len(runs) > 1 else ""
         lines.append(f"- #{row['id']} {row['kind']}: {where}{row.get('summary', '')}")
+        if row.get("kind") == "agent_handoff":
+            lines.append(f"  Recipient: {row.get('recipient_hook')}; urgency: {row.get('urgency')}; "
+                         f"next read: {row.get('next_read')} (notification only).")
     if failed_before:
         lines.append(f"({failed_before} earlier notification(s) could not be delivered.)")
     after = rows[0]["id"] - 1 if rows else -1
@@ -717,9 +795,9 @@ class AgentEventPump:
         self._gpu_free_since: Optional[float] = None
         self._rule_progress: dict[tuple, float] = {}
         self._routine_seen: dict[str, bool] = {}
-        # Deliveries awaiting the agent's reaction, per hook (process-local, like the activity they
-        # are checked against: a restarted server forgets them and sends no reminder).
+        # Recovery stores IDs and a digest, never command argv, message text, or credentials.
         self._awaiting: dict[str, list[dict]] = {}
+        self._recovered_hooks: set[str] = set()
         self._lock = threading.Lock()
 
     # lifecycle
@@ -935,6 +1013,16 @@ class AgentEventPump:
         keep, stale = [], []
         for row in rows:
             run_id = row.get("run_id")
+            if row.get("kind") == "agent_handoff" and run_id:
+                from looplab.events.run_generation import run_generation_token
+                from looplab.harness.journals import read_event_source
+                try:
+                    current_generation = run_generation_token(read_event_source(self.root / run_id))
+                except HTTPException:
+                    current_generation = None
+                if current_generation is not None and current_generation != row.get("generation"):
+                    stale.append(row)
+                    continue
             if row.get("kind") not in CONDITION_KINDS or not run_id:
                 keep.append(row)
                 continue
@@ -1004,18 +1092,103 @@ class AgentEventPump:
             return None
         return any(seen(run, since) for run in runs)
 
+    def _persist_reactions(self, hook: str) -> None:
+        allowed = ("runs", "event_ids", "event_identities", "kinds", "wall", "resent", "attempt", "argv_sha256", "failed_before", "requires_ack", "coalesced_counts")
+        rows = [{k: item[k] for k in allowed if k in item} for item in self._awaiting.get(hook, [])]
+        with _lock(self.root):
+            path = events_dir(self.root) / PENDING_REACTIONS
+            data, healthy = _read_pending(self.root)
+            if not healthy:
+                raise OSError("notification pending ledger unavailable")
+            if rows:
+                data[hook] = rows
+            else:
+                data.pop(hook, None)
+            _write_json(path, data)
+
+    @staticmethod
+    def _restore_coalesced(rows: list[dict], item: dict) -> list[dict]:
+        counts = {pair[0]: pair[1] for pair in (item.get("coalesced_counts") or [])
+                  if isinstance(pair, list) and len(pair) == 2 and type(pair[0]) is int and type(pair[1]) is int and pair[1] > 1}
+        return [{**row, "summary": _clip(f"{counts[row['id']]} monitor questions; latest: "
+                                        f"{row.get('summary', '')}"), "coalesced": counts[row["id"]]}
+                if row.get("kind") == "monitor_question" and row.get("id") in counts else row for row in rows]
+
+    def _reaction_argv(self, hook: str, config: dict, rows: list[dict], failed_before: int) -> Optional[list[str]]:
+        if not rows:
+            return None
+        variables = None
+        for row in rows:
+            run_cfg = read_run_notify(self.root / row["run_id"], hook) if row.get("run_id") else {}
+            merged = {**config.get("vars", {}), **run_cfg.get("vars", {})}
+            if run_cfg.get("enabled") is False or (variables is not None and merged != variables):
+                return None
+            variables = merged
+        message = compose_message(rows, limit_chars=int(config.get("message_chars", 1500)), failed_before=failed_before)
+        fields = {**variables, "message": message, "run_id": rows[0].get("run_id") or "",
+                  "runs": ",".join(sorted({r.get("run_id") or "host" for r in rows})),
+                  "kinds": ",".join(sorted({r["kind"] for r in rows})), "count": str(len(rows)),
+                  "after": str(rows[0]["id"] - 1), "first_id": str(rows[0]["id"]), "last_id": str(rows[-1]["id"])}
+        try:
+            return render_argv(config["command"], fields)
+        except (KeyError, ValueError, TypeError):
+            return None
+
+    def _recover_reactions(self, hook: str, config: dict) -> None:
+        if hook in self._recovered_hooks:
+            return
+        self._recovered_hooks.add(hook)
+        pending_data, healthy = _read_pending(self.root)
+        if not healthy:
+            return
+        saved = pending_data.get(hook, [])
+        if not isinstance(saved, list):
+            return
+        activity = getattr(self.srv, "agent_activity", None)
+        now_clock = activity.clock_now() if activity is not None and callable(getattr(activity, "clock_now", None)) else None
+        if now_clock is None:
+            return
+        rows = _read_jsonl(events_dir(self.root) / f"{OUTBOX}.1") + _read_jsonl(events_dir(self.root) / OUTBOX)
+        indexed = {r.get("id"): r for r in rows if type(r.get("id")) is int}
+        for item in saved:
+            if not isinstance(item, dict) or not isinstance(item.get("event_ids"), list) or not item["event_ids"]:
+                continue
+            selected = [indexed.get(i) for i in item["event_ids"]]
+            argv = None
+            if all(isinstance(r, dict) for r in selected):
+                selected = self._restore_coalesced(selected, item)
+                candidate = self._reaction_argv(hook, config, selected, item.get("failed_before", 0))
+                if candidate is not None:
+                    digest = hashlib.sha256(json.dumps(candidate, ensure_ascii=False).encode()).hexdigest()
+                    if digest == item.get("argv_sha256"):
+                        argv = candidate
+            identities = [tuple(v) for v in item.get("event_identities", []) if isinstance(v, list) and len(v) == 4]
+            self._awaiting.setdefault(hook, []).append({**item, "argv": argv, "event_identities": identities, "since": now_clock})
+
     def _check_reactions(self, hook: str, config: dict) -> None:
         """A delivery that exited 0 handed the message over; this checks the agent then acted
         (doc 82 П5): `reacted`, else one `resent_no_reaction` reminder, else `no_reaction`."""
+        self._recover_reactions(hook, config)
         pending = self._awaiting.get(hook) or []
         keep = []
         now = self.clock()
+        from looplab.harness.journals import read_source
+        from looplab.serve.agent_ack import ACKS
+        acknowledgements, ack_health = read_source(events_dir(self.root) / ACKS)
+        acked_ids = {(r.get("event_id"), r.get("run_id"), r.get("run_uid"), r.get("generation"))
+                     for r in acknowledgements if r.get("recipient") == hook} if ack_health.get("read_complete") else set()
         for item in pending:
-            reacted = self._agent_reacted(item["runs"], item["since"])
-            if reacted is None:
-                continue
             base = {"ts": now, "event_ids": item["event_ids"], "runs": item["runs"],
                     "kinds": item["kinds"], **({"hook": hook} if hook != DEFAULT_HOOK else {})}
+            identities = item.get("event_identities") or []
+            if identities and set(identities).issubset(acked_ids):
+                _append_ledger(self.root, {**base, "status": "acknowledged", "attempt": item["attempt"]})
+                continue
+            requires_ack = item.get("requires_ack", "agent_handoff" in (item.get("kinds") or []))
+            reacted = False if requires_ack else self._agent_reacted(item["runs"], item["since"])
+            if reacted is None:
+                keep.append(item)  # Activity cannot be established: preserve the unresolved observation.
+                continue
             if reacted:
                 _append_ledger(self.root, {**base, "status": "reacted", "attempt": item["attempt"]})
                 continue
@@ -1026,33 +1199,74 @@ class AgentEventPump:
                 _append_ledger(self.root, {**base, "status": "no_reaction", "attempt": item["attempt"],
                                            "error": "no agent request reached the run after the reminder"})
                 continue
+            if item.get("argv") is None:
+                keep.append(item)  # Missing outbox or changed hook: do not route a guessed reminder.
+                continue
+            outbox = _read_jsonl(events_dir(self.root) / f"{OUTBOX}.1") + _read_jsonl(events_dir(self.root) / OUTBOX)
+            indexed = {r.get("id"): r for r in outbox if type(r.get("id")) is int}
+            original = [indexed.get(i) for i in item["event_ids"]]
+            if not all(isinstance(r, dict) for r in original):
+                keep.append(item)  # Retention gap: cannot safely reconstruct the delivered batch.
+                continue
+            original = self._restore_coalesced(original, item)
+            candidate = self._reaction_argv(hook, config, original, item.get("failed_before", 0))
+            if candidate is None or hashlib.sha256(json.dumps(candidate, ensure_ascii=False).encode()).hexdigest() != item.get("argv_sha256"):
+                keep.append(item)  # Config or recipient changed, including while the process was running.
+                continue
+            fresh, stale = self._still_actionable(original)
+            fresh = [r for r in fresh if (r["id"], r.get("run_id"), r.get("run_uid"), r.get("generation")) not in acked_ids]
+            if stale:
+                _append_ledger(self.root, {**base, "event_ids": [r["id"] for r in stale], "status": "dropped_stale",
+                                           "attempt": item["attempt"], "error": "no longer actionable before reminder"})
+            if not fresh:
+                continue
+            candidate = self._reaction_argv(hook, config, fresh, item.get("failed_before", 0))
+            if candidate is None:
+                keep.append(item)
+                continue
+            item = {**item, "argv": candidate, "argv_sha256": hashlib.sha256(json.dumps(candidate, ensure_ascii=False).encode()).hexdigest(),
+                    "event_ids": [r["id"] for r in fresh], "runs": sorted({r.get("run_id") for r in fresh if r.get("run_id")}),
+                    "kinds": sorted({r["kind"] for r in fresh}),
+                    "event_identities": [(r["id"], r.get("run_id"), r.get("run_uid"), r.get("generation")) for r in fresh if r.get("kind") == "agent_handoff"],
+                    "requires_ack": any(r.get("kind") == "agent_handoff" for r in fresh),
+                    "coalesced_counts": [[r["id"], r["coalesced"]] for r in fresh if type(r.get("coalesced")) is int and r["coalesced"] > 1]}
+            base = {**base, "event_ids": item["event_ids"], "runs": item["runs"], "kinds": item["kinds"]}
             result = self.runner(item["argv"], float(config.get("timeout_s", 60)))
             _append_ledger(self.root, {**base, "status": "resent_no_reaction",
                                        "attempt": item["attempt"] + 1,
                                        "exit_code": result.get("exit_code"),
                                        "error": _clip(result.get("error") or "", 400)})
-            if result.get("ok"):
-                activity = getattr(self.srv, "agent_activity", None)
-                keep.append({**item, "resent": True, "attempt": item["attempt"] + 1, "wall": now,
-                             "since": activity.clock_now() if activity is not None else item["since"]})
+            activity = getattr(self.srv, "agent_activity", None)
+            keep.append({**item, "resent": True, "attempt": item["attempt"] + 1, "wall": now,
+                         "since": activity.clock_now() if activity is not None else item["since"]})
         if keep:
             self._awaiting[hook] = keep
         else:
             self._awaiting.pop(hook, None)
+        if pending:
+            self._persist_reactions(hook)
 
-    def _await_reaction(self, hook: str, argv: list[str], rows: list[dict], attempt: int) -> None:
+    def _await_reaction(self, hook: str, argv: list[str], rows: list[dict], attempt: int, failed_before: int = 0) -> None:
         activity = getattr(self.srv, "agent_activity", None)
         runs = sorted({r.get("run_id") for r in rows if r.get("run_id")})
         if activity is None or not callable(getattr(activity, "clock_now", None)) or not runs:
             return
         self._awaiting.setdefault(hook, []).append({
             "argv": list(argv), "runs": runs, "event_ids": [r["id"] for r in rows],
+            "event_identities": [(r["id"], r.get("run_id"), r.get("run_uid"), r.get("generation"))
+                                 for r in rows if r.get("kind") == "agent_handoff"],
+            "requires_ack": any(r.get("kind") == "agent_handoff" for r in rows),
+            "coalesced_counts": [[r["id"], r["coalesced"]] for r in rows if type(r.get("coalesced")) is int and r["coalesced"] > 1],
             "kinds": sorted({r["kind"] for r in rows}), "since": activity.clock_now(),
-            "wall": self.clock(), "resent": False, "attempt": attempt})
+            "wall": self.clock(), "resent": False, "attempt": attempt, "failed_before": failed_before,
+            "argv_sha256": hashlib.sha256(json.dumps(argv, ensure_ascii=False).encode()).hexdigest()})
+        self._persist_reactions(hook)
 
     def _deliver_hook(self, hook: str, config: dict) -> Optional[dict]:
         if not config or not config.get("enabled", True) or not config.get("command"):
             return None
+        if not _read_pending(self.root)[1]:
+            return None  # A damaged pending ledger is unknown, not an empty queue.
         self._check_reactions(hook, config)
         d = events_dir(self.root)
         state = _read_json(d / STATE, {})
@@ -1063,7 +1277,8 @@ class AgentEventPump:
             return None
         page = read_outbox(self.root, after=through, kinds=config.get("kinds"),
                            limit=int(config.get("max_batch", 20)))
-        rows = [r for r in page["events"] if self._run_wanted(config, r.get("run_id"))]
+        rows = [r for r in page["events"] if self._run_wanted(config, r.get("run_id"))
+                and (not r.get("recipient_hook") or r.get("recipient_hook") == hook)]
         if not rows:
             if page["events"]:
                 self._save_delivery(state, through=page["events"][-1]["id"], attempts=0,
@@ -1155,7 +1370,7 @@ class AgentEventPump:
             all_ok &= bool(result["ok"])
             if result["ok"]:
                 delivered.update(r["id"] for r in grows)
-                self._await_reaction(hook, argv, grows, attempts)
+                self._await_reaction(hook, argv, grows, attempts, failed_before)
             _append_ledger(self.root, record)
         last_id = last_seen
         if all_ok:
@@ -1235,9 +1450,16 @@ def notify_status(root) -> dict:
     state = _read_json(events_dir(root) / STATE, {})
     hooks = {name: {"config": cfg, "delivery": _hook_delivery(state, name)}
              for name, cfg in notify_hooks(root).items()}
+    pending, pending_healthy = _read_pending(root)
+    pending_view = {name: [{"event_ids": [i for i in item.get("event_ids", []) if type(i) is int][:100],
+                            "wall": item.get("wall"), "resent": item.get("resent") is True}
+                           for item in rows[-20:] if isinstance(item, dict) and isinstance(item.get("event_ids"), list)]
+                    for name, rows in pending.items() if isinstance(name, str) and _HOOK_NAME.fullmatch(name) and isinstance(rows, list)}
     return {"configured": bool(config), "config": config,
             "delivery": state.get("delivery") or {}, "newest_event_id": state.get("next_id", 0) - 1,
-            "hooks": hooks, "ledger": ledger_rows(root, limit=50)}
+            "hooks": hooks, "ledger": ledger_rows(root, limit=50), "reaction_pending": pending_view,
+            "reaction_pending_readable": pending_healthy,
+            "reaction_pending_meaning": "A pending reminder can remain unsent if its outbox rows or original hook configuration are unavailable."}
 
 
 def run_event_summary(root, run_id: str, *, limit: int = 20) -> dict:

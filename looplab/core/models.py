@@ -2371,6 +2371,7 @@ class ResearchMemo(BaseModel):
     # traceable to the experiments/sources it rests on; the Verifier (trust/memo_verify.py) then
     # checks each claim against its cited evidence and flags the unsupported ones.
     claims: list[dict] = Field(default_factory=list)
+    local_lessons: list[dict] = Field(default_factory=list, description="Run-scoped authored lessons with node evidence and limitations; no shared KB write or automatic verification.")
     # Sanitizer cardinality receipt for the pre-cap claims list. Excluded from generic model dumps so old
     # state/golden projections stay byte-compatible; the research event writer forwards it explicitly.
     claims_receipt: Optional[dict] = Field(default=None, exclude=True)

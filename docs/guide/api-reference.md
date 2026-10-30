@@ -10,7 +10,7 @@ vocabulary a client may append is `serve/protocol.py::CONTROL_EVENTS`.
 
 <!-- generated: api routes -->
 
-201 routes on 174 paths; 10 deprecated; 27 with a declared response model.
+211 routes on 182 paths; 10 deprecated; 27 with a declared response model.
 
 ### `/api`
 
@@ -191,6 +191,9 @@ vocabulary a client may append is `serve/protocol.py::CONTROL_EVENTS`.
 | `GET` | `/api/runs` | *List Runs* (no docstring) | — |  |
 | `DELETE` | `/api/runs/{run_id}` | Never let a bodyless request delete an uninspected replacement generation. | — | yes |
 | `PATCH` | `/api/runs/{run_id}` | Set/clear a run's UI display label. Non-destructive: the run dir id is unchanged. | — |  |
+| `GET` | `/api/runs/{run_id}/agent-event-ack` | List optional handoff acknowledgements for a run generation. | — |  |
+| `POST` | `/api/runs/{run_id}/agent-event-ack` | Record an optional recipient handoff acknowledgement; no work is authorized. | — |  |
+| `POST` | `/api/runs/{run_id}/agent-handoff` | Send an optional addressed wake-up; this does not authorize or launch work. | — |  |
 | `GET` | `/api/runs/{run_id}/agent-notify` | This run's recent actionable events, its delivery ledger rows and hook variables. | — |  |
 | `PUT` | `/api/runs/{run_id}/agent-notify` | Set this run's hook variables (e.g. `{"thread": "<id>"}`) or switch its notifications | — |  |
 | `GET` | `/api/runs/{run_id}/agents_md` | DEPRECATED. Serve a run's AGENTS.md. | — | yes |
@@ -269,11 +272,18 @@ vocabulary a client may append is `serve/protocol.py::CONTROL_EVENTS`.
 | `GET` | `/api/runs/{run_id}/protocol` | The run's pre-registered experiments, its amendment audit trail and the agent policy. | — |  |
 | `POST` | `/api/runs/{run_id}/protocol/amendments` | Append an experiment, or record a task/file/budget amendment with its reason and diff. | — |  |
 | `GET` | `/api/runs/{run_id}/prov` | W3C-PROV-style provenance of the search DAG AND of what the run claimed: each node's | — |  |
+| `GET` | `/api/runs/{run_id}/readiness-bindings` | Read late-binding receipts and current scope/attempt status, without granting authority. | — |  |
+| `POST` | `/api/runs/{run_id}/readiness-bindings` | Bind a terminal producer manifest to unchanged scientific scope; grants no execution. | — |  |
 | `POST` | `/api/runs/{run_id}/report-figures` | Copy ONE raster image artifact into the run's report-figure store and return its id | — |  |
 | `GET` | `/api/runs/{run_id}/report-figures/{figure_id}` | Serve one stored report figure (re-verified against its own sha256). | — |  |
 | `GET` | `/api/runs/{run_id}/report/versions` | Every `report_generated` row, newest first: seq, when, who published it, its content | — |  |
 | `GET` | `/api/runs/{run_id}/report/versions/{seq}` | The sanitized content of the report published at `seq` (the fold's own sanitizer). | — |  |
 | `POST` | `/api/runs/{run_id}/report_refresh` | Force a high-quality regeneration of the agent-authored run report NOW. Appends a | — |  |
+| `GET` | `/api/runs/{run_id}/research-briefing` | Current bounded research and action context; observations do not grant authority. | — |  |
+| `GET` | `/api/runs/{run_id}/research-export` | Export a bounded campaign overview and selected sanitized report versions. | — |  |
+| `GET` | `/api/runs/{run_id}/research-map` | Bounded read-only map of registered experiments, node references and reports. | — |  |
+| `POST` | `/api/runs/{run_id}/research-memo-review` | Advisory feedback on a draft research memo; this read does not publish or gate work. | — |  |
+| `GET` | `/api/runs/{run_id}/research-workflow` | Canonical external research process; this read grants no execution authority. | — |  |
 | `POST` | `/api/runs/{run_id}/reset` | round-7 "Replay": reset a run IN PLACE — archive its event log + spans + node workspaces and | — |  |
 | `POST` | `/api/runs/{run_id}/resolve-activity-claims` | Guarded operator recovery for an ownership claim that cannot be proven dead. | — |  |
 | `GET` | `/api/runs/{run_id}/result-notices` | Brief node/run completion evidence for Assistant chat. Pure read, no model call. | — |  |

@@ -36,6 +36,12 @@ class ProjectError(ValueError):
     """Invalid project operation (unknown id, cycle, …) — the server maps this to HTTP 400."""
 
 
+class ProjectProfileConflict(RuntimeError):
+    def __init__(self, expected: str, current: str):
+        self.expected, self.current = expected, current
+        super().__init__("project metric profile changed")
+
+
 class ProjectStoreLockError(RuntimeError):
     """A project mutation could not obtain its required cross-process serialization guarantee."""
 
@@ -172,6 +178,23 @@ class ProjectStore:
             out.add(cur)
             stack.extend(kids.get(cur, []))
         return out
+
+    def put_metric_profile(self, pid: str, profile: dict, expected_digest: str) -> dict:
+        from looplab.core.metric_profile import normalize_profile, profile_digest
+        try:
+            normalized = normalize_profile(profile)
+        except ValueError as exc:
+            raise ProjectError(str(exc)) from exc
+        with self._transaction():
+            data = self.load()
+            project = self._require(data, pid)
+            current = project.get("metric_profile")
+            actual = profile_digest(current)
+            if expected_digest != actual:
+                raise ProjectProfileConflict(expected_digest, actual)
+            project["metric_profile"] = normalized
+            self._save(data)
+            return {"profile": normalized, "digest": profile_digest(normalized)}
 
     # ------------------------------------------------------------------ CRUD
     def create(self, name: str, parent_id: str | None = None) -> Project:

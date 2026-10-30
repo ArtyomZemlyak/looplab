@@ -37,6 +37,8 @@ decision records, roadmap), see [`../00-INDEX.md`](../00-INDEX.md).
 | **[Memory & knowledge](memory.md)** | Every memory type (cases, lessons, meta-notes, skills, KB, belief cards, research), what each is for, the methodologies, and agentic retrieval |
 | **[LLM & coding agents](llm-and-agents.md)** | OpenAI-compatible backends, external coding agents, per-role models, reasoning, knowledge & skills |
 | **[External harness reference](external-harness.md)** | Agent capabilities, obligations, reconnect, and the separate delegated Developer mode |
+| **[Research workflow migration](research-workflow-migration.md)** | Historical reports, metric profiles, agent recovery and safe rollout |
+| **[Research workflow evidence](research-workflow-acceptance.md)** | Ticket-to-code and test mapping, limits and synthetic examples |
 
 ## Operating it
 

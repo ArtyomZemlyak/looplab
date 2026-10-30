@@ -901,6 +901,61 @@ def build_server(api: HarnessAPI):
         """
         return api.connection_check(run_id, expected_generation)
 
+    @mcp.tool(annotations=ToolAnnotations(readOnlyHint=True, destructiveHint=False, idempotentHint=True, openWorldHint=False))
+    def research_map(run_id: str, expected_generation: str, offset: int = 0, limit: int = 20) -> dict:
+        """Read a bounded scientific map of registered questions, nodes and report history. Declarations are not permissions."""
+        api._run_identity(run_id, expected_generation)
+        return api._checked_generation(api.request("GET", f"/api/runs/{quote(run_id, safe='')}/research-map"
+            f"?expected_generation={expected_generation}&offset={int(offset)}&limit={int(limit)}"), expected_generation)
+
+    @mcp.tool(annotations=ToolAnnotations(readOnlyHint=True, destructiveHint=False, idempotentHint=True, openWorldHint=False))
+    def review_research_memo(run_id: str, expected_generation: str, purpose: Literal["scientific", "technical"], memo: dict) -> dict:
+        """Preview advisory memo feedback; nothing is published or independently verified."""
+        api._run_identity(run_id, expected_generation)
+        return api._checked_generation(api.request("POST", f"/api/runs/{quote(run_id, safe='')}/research-memo-review",
+            {"expected_generation": expected_generation, "purpose": purpose, "memo": memo}), expected_generation)
+
+    @mcp.tool(annotations=ToolAnnotations(readOnlyHint=True, destructiveHint=False, idempotentHint=True, openWorldHint=False))
+    def research_briefing(run_id: str, expected_generation: str, language: Literal["en", "ru"] = "en") -> dict:
+        """Read current research, action and GPU context; refresh receipts before action."""
+        api._run_identity(run_id, expected_generation)
+        return api._checked_generation(api.request("GET", f"/api/runs/{quote(run_id, safe='')}/research-briefing"
+            f"?expected_generation={expected_generation}&language={language}"), expected_generation)
+
+    @mcp.tool(annotations=ToolAnnotations(readOnlyHint=True, destructiveHint=False, idempotentHint=True, openWorldHint=False))
+    def readiness_bindings(run_id: str, expected_generation: str) -> dict:
+        """Inspect existing late-binding receipts; manifest freshness and admission remain separate."""
+        api._run_identity(run_id, expected_generation)
+        return api._checked_generation(api.request("GET", f"/api/runs/{quote(run_id, safe='')}/readiness-bindings"
+            f"?expected_generation={expected_generation}"), expected_generation)
+
+    @mcp.tool()
+    def bind_readiness(run_id: str, body: dict) -> dict:
+        """Bind a producer manifest and optionally stream-verify an artifact against an unchanged scope.
+        A receipt describes bytes at read time and does not grant execution."""
+        api._run_identity(run_id, body.get("expected_generation", ""))
+        return api.request("POST", f"/api/runs/{quote(run_id, safe='')}/readiness-bindings", body)
+
+    @mcp.tool()
+    def send_agent_handoff(run_id: str, expected_generation: str, action_id: str,
+                           recipient_hook: str, reason: str, next_read: str,
+                           urgency: Literal["normal", "high"] = "normal") -> dict:
+        """Send a self-attested addressed event; it never authorizes or launches work."""
+        api._run_identity(run_id, expected_generation)
+        return api.request("POST", f"/api/runs/{quote(run_id, safe='')}/agent-handoff", {
+            "expected_generation": expected_generation, "action_id": action_id,
+            "recipient_hook": recipient_hook, "reason": reason, "next_read": next_read, "urgency": urgency})
+
+    @mcp.tool()
+    def acknowledge_agent_event(run_id: str, expected_generation: str, event_id: int,
+                                recipient: str, action_id: str,
+                                disposition: Literal["acknowledged", "resolved", "declined"] = "acknowledged") -> dict:
+        """Record a self-attested handoff receipt; it does not answer a checkpoint or authorize work."""
+        api._run_identity(run_id, expected_generation)
+        return api.request("POST", f"/api/runs/{quote(run_id, safe='')}/agent-event-ack", {
+            "expected_generation": expected_generation, "event_id": event_id,
+            "recipient": recipient, "action_id": action_id, "disposition": disposition})
+
     @mcp.tool()
     def phases(query: str = "") -> list[dict]:
         """Find standard/external decision phases by name, entity or purpose.

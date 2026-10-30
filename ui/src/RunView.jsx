@@ -2495,7 +2495,7 @@ export default function RunView({ runId, onBack, reviewMode = false, reviewMeta 
       {view === 'report'
         ? <div className="main"><div className="report-scroll">
             <LazyBoundary label={"run report"} resetKey={`${runId}:${history.resolvedSeq ?? 'live'}`}>
-              <ReportView state={state} runId={runId} onToast={showToast}
+              <ReportView state={state} runId={runId} onToast={showToast} onOpenConcepts={() => setView('concepts')} onOpenCards={() => setView('cards')}
                 runBackend={configResource.status === 'ready' ? configResource.data?.backend ?? null : null}
                 externalHarness={configResource.status === 'ready' && configResource.data?.external_harness === true}
                 readOnly={mutationReadOnlyMode} historySeq={history.resolvedSeq}

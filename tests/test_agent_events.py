@@ -792,3 +792,86 @@ def test_the_cli_switches_the_codex_preset_on_with_one_flag(tmp_path):
                                       "--thread", "T-9"])
     assert result.exit_code == 0, result.output
     assert ae.read_notify_config(root, ae.CODEX_HOOK)["vars"] == {"thread": "T-9"}
+
+
+def test_pending_reminder_recovers_after_restart_without_storing_message(tmp_path):
+    root = tmp_path / 'runs'; (root / 'r').mkdir(parents=True)
+    calls = []; clock = _Clock(); activity = _Activity()
+    srv = SimpleNamespace(root=root, agent_activity=activity)
+    runner = lambda argv, timeout: calls.append(argv) or {'ok': True, 'exit_code': 0}
+    ae.write_notify_config(root, {'command': ['wake', '{message}'], 'debounce_s': 0})
+    ae.append_events(root, [{'run_id': 'r', 'kind': 'node_failed', 'key': 'k', 'summary': 'private summary'}])
+    _rewrite_outbox_ts(root, clock() - 1)
+    first = ae.AgentEventPump(srv, clock=clock, runner=runner); first.deliver()
+    pending = (root / '.agent-events' / ae.PENDING_REACTIONS).read_text()
+    assert 'private summary' not in pending and 'wake' not in pending
+    second = ae.AgentEventPump(srv, clock=clock, runner=runner)
+    clock.t += ae.REACTION_WINDOW_S + 1
+    second.deliver()
+    assert len(calls) == 2 and calls[0] == calls[1]
+    third = ae.AgentEventPump(srv, clock=clock, runner=runner)
+    clock.t += ae.REACTION_WINDOW_S + 1
+    third.deliver()
+    assert len(calls) == 2
+    assert ae.ledger_rows(root)[0]['status'] == 'no_reaction'
+
+
+def test_changed_hook_after_restart_never_routes_old_reminder(tmp_path):
+    root = tmp_path / 'runs'; (root / 'r').mkdir(parents=True)
+    calls = []; clock = _Clock(); activity = _Activity(); srv = SimpleNamespace(root=root, agent_activity=activity)
+    runner = lambda argv, timeout: calls.append(argv) or {'ok': True, 'exit_code': 0}
+    ae.write_notify_config(root, {'command': ['first', '{message}'], 'debounce_s': 0})
+    ae.append_events(root, [{'run_id': 'r', 'kind': 'node_failed', 'key': 'k', 'summary': 'failure'}])
+    _rewrite_outbox_ts(root, clock() - 1)
+    ae.AgentEventPump(srv, clock=clock, runner=runner).deliver()
+    ae.write_notify_config(root, {'command': ['second', '{message}'], 'debounce_s': 0})
+    clock.t += ae.REACTION_WINDOW_S + 1
+    ae.AgentEventPump(srv, clock=clock, runner=runner).deliver()
+    assert len(calls) == 1
+
+
+def test_partially_stale_reminder_keeps_fresh_event_only_after_restart(tmp_path):
+    root = tmp_path / 'runs'; (root / 'r').mkdir(parents=True)
+    calls = []; clock = _Clock(); activity = _Activity(); srv = SimpleNamespace(root=root, agent_activity=activity)
+    runner = lambda argv, timeout: calls.append(argv) or {'ok': True, 'exit_code': 0}
+    ae.write_notify_config(root, {'command': ['wake', '{message}'], 'debounce_s': 0})
+    ae.append_events(root, [{'run_id': 'r', 'kind': 'node_failed', 'key': 'a', 'summary': 'old item'},
+                            {'run_id': 'r', 'kind': 'node_failed', 'key': 'b', 'summary': 'fresh item'}])
+    _rewrite_outbox_ts(root, clock() - 1)
+    ae.AgentEventPump(srv, clock=clock, runner=runner).deliver()
+    resumed = ae.AgentEventPump(srv, clock=clock, runner=runner)
+    resumed._still_actionable = lambda rows: ([rows[1]], [rows[0]])
+    clock.t += ae.REACTION_WINDOW_S + 1; resumed.deliver()
+    assert len(calls) == 2 and 'fresh item' in calls[1][1] and 'old item' not in calls[1][1]
+    assert any(r['status'] == 'dropped_stale' and r['event_ids'] == [0] for r in ae.ledger_rows(root))
+
+
+def test_coalesced_reminder_reconstructs_after_restart(tmp_path):
+    root = tmp_path / 'runs'; (root / 'r').mkdir(parents=True)
+    calls = []; clock = _Clock(); activity = _Activity(); srv = SimpleNamespace(root=root, agent_activity=activity)
+    runner = lambda argv, timeout: calls.append(argv) or {'ok': True, 'exit_code': 0}
+    ae.write_notify_config(root, {'command': ['wake', '{message}'], 'debounce_s': 0})
+    ae.append_events(root, [{'run_id': 'r', 'kind': 'monitor_question', 'key': 'a', 'summary': 'first'},
+                            {'run_id': 'r', 'kind': 'monitor_question', 'key': 'b', 'summary': 'second'}])
+    _rewrite_outbox_ts(root, clock() - 1)
+    ae.AgentEventPump(srv, clock=clock, runner=runner).deliver()
+    assert len(calls) == 1 and '2 monitor questions' in calls[0][1]
+    clock.t += ae.REACTION_WINDOW_S + 1
+    ae.AgentEventPump(srv, clock=clock, runner=runner).deliver()
+    assert len(calls) == 2 and calls[0] == calls[1]
+
+
+def test_unreadable_pending_ledger_never_sends_or_overwrites(tmp_path):
+    root = tmp_path / 'runs'; (root / 'r').mkdir(parents=True)
+    calls = []; clock = _Clock(); activity = _Activity(); srv = SimpleNamespace(root=root, agent_activity=activity)
+    ae.write_notify_config(root, {'command': ['wake', '{message}'], 'debounce_s': 0})
+    ae.append_events(root, [{'run_id': 'r', 'kind': 'node_failed', 'key': 'a', 'summary': 'event'}])
+    pending = root / '.agent-events' / ae.PENDING_REACTIONS
+    pending.write_text('{broken')
+    pump = ae.AgentEventPump(srv, clock=clock, runner=lambda argv, timeout: calls.append(argv) or {'ok': True})
+    pump.deliver()
+    assert not calls and pending.read_text() == '{broken'
+    assert ae.notify_status(root)['reaction_pending_readable'] is False
+    pending.write_text('{"default":[{"event_ids":"broken"}]}')
+    pump.deliver()
+    assert not calls and ae.notify_status(root)['reaction_pending_readable'] is False

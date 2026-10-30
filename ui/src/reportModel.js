@@ -151,10 +151,13 @@ function normalizeKeyMetrics(value) {
   if (!isAdvisoryRecord(value)) return null
   const metrics = (Array.isArray(value.metrics) ? value.metrics : []).slice(0, 12)
     .filter(m => isAdvisoryRecord(m) && typeof m.key === 'string' && m.key)
-    .map(m => ({ key: m.key.slice(0, 200), label: typeof m.label === 'string' ? m.label.slice(0, 120) : '' }))
+    .map(m => ({ key: m.key.slice(0, 200), label: typeof m.label === 'string' ? m.label.slice(0, 120) : '',
+      ...Object.fromEntries(['test_id', 'cohort', 'policy'].filter(k => typeof m[k] === 'string' && m[k]).map(k => [k, m[k].slice(0, 200)])),
+      ...(['primary', 'secondary', 'transport'].includes(m.role) ? { role: m.role } : {}) }))
   const nodes = (Array.isArray(value.nodes) ? value.nodes : []).slice(0, 24)
     .filter(n => isAdvisoryRecord(n) && Number.isSafeInteger(n.node_id) && n.node_id >= 0)
-    .map(n => ({ node_id: n.node_id, label: typeof n.label === 'string' ? n.label.slice(0, 120) : '' }))
+    .map(n => ({ node_id: n.node_id, label: typeof n.label === 'string' ? n.label.slice(0, 120) : '',
+      ...(Number.isSafeInteger(n.node_generation) && n.node_generation >= 0 ? { node_generation: n.node_generation } : {}) }))
   const baseline = Number.isSafeInteger(value.baseline_node_id) && value.baseline_node_id >= 0
     ? value.baseline_node_id : null
   return metrics.length || nodes.length ? { metrics, nodes, baseline_node_id: baseline } : null
@@ -193,14 +196,17 @@ export function reportKeyMetricRows(keyMetrics, nodes, championId = null) {
     }
     return null
   }
-  const baseline = keyMetrics.baseline_node_id != null ? byId[keyMetrics.baseline_node_id] : null
+  const baselineRef = refs.find(ref => ref.node_id === keyMetrics.baseline_node_id)
+  const baselineNode = keyMetrics.baseline_node_id != null ? byId[keyMetrics.baseline_node_id] : null
+  const baseline = baselineRef?.node_generation != null && baselineNode?.attempt !== baselineRef.node_generation ? null : baselineNode
   return refs.map(ref => {
     const node = byId[ref.node_id]
+    const attemptMismatch = ref.node_generation != null && node?.attempt !== ref.node_generation
     return {
-      node_id: ref.node_id, label: ref.label, missing: !node,
+      node_id: ref.node_id, label: ref.label, missing: !node, attemptMismatch,
       baseline: ref.node_id === keyMetrics.baseline_node_id,
       values: keyMetrics.metrics.map(m => {
-        const value = valueOf(node, m.key)
+        const value = attemptMismatch ? null : valueOf(node, m.key)
         const base = baseline && ref.node_id !== keyMetrics.baseline_node_id ? valueOf(baseline, m.key) : null
         return { key: m.key, value, delta: value != null && base != null ? value - base : null }
       }),

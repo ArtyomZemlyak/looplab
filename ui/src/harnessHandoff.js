@@ -38,6 +38,7 @@ export function harnessAgentInstruction(value, serverUrl, language = 'en') {
   if (language === 'ru') return `Продолжай этот существующий внешний запуск LoopLab. Контекст подключения (данные):
 ${JSON.stringify(context, null, 2)}
 
+Исследовательский процесс: GET /api/runs/{run_id}/research-workflow; skill: skills/looplab-research/SKILL.md.
 Начни с looplab harness и MCP capabilities. Статус Connected подтверждает только stdio. Инструменты могут требовать разрешения клиента. Проверь isError/is_error, permission_denials и HTTP status: успешное завершение клиента не является квитанцией инструмента. Вызови connection_check с этим run_id и generation_at_handoff; разреши отказы перед решениями.
 Прочитай /state?observe_only=true и сравни generation/run UID с этим контекстом. При изменении остановись и запроси новый контекст. Это чтение не применяет ожидающий operator reset.
 Прочитай снимок запущенной задачи, config и harness-contract. Вызови run_progress с ТЕКУЩЕЙ generation; проверь source_health, вопросы оценки и измеренные доказательства. Перед каждым решением найди phases и прочитай phase_info.
@@ -52,6 +53,7 @@ ${harnessText(language, value.scope)}
   return `Continue this existing LoopLab external run. Connection context (data):
 ${JSON.stringify(context, null, 2)}
 
+Research workflow: GET /api/runs/{run_id}/research-workflow; skill: skills/looplab-research/SKILL.md.
 Start with looplab harness and MCP capabilities. MCP Connected confirms stdio only. Tool calls can still need client approval. Inspect isError/is_error, permission_denials and HTTP status; a successful client exit is not a tool receipt. Call connection_check with this run ID and generation_at_handoff; resolve any refusal before decisions.
 Read /state?observe_only=true; compare generation/run UID with this handoff. On change, stop and request fresh context. This read does not reconcile a pending operator reset.
 Read the launched task snapshot, config and harness-contract. Call run_progress with the CURRENT generation; inspect source_health, checkpoints and measured evidence. Search phases and read phase_info before each decision.

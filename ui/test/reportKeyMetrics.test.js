@@ -33,3 +33,33 @@ test('without named nodes the champion is the row; legacy reports keep their aut
   assert.equal(reportAuthor(normalizeRunReport({ headline: 'h', trigger: 'cadence' })).kind, 'looplab_model')
   assert.equal(reportAuthor(normalizeRunReport({ headline: 'h', trigger: 'external' })).kind, 'external_agent')
 })
+
+
+test('recorded extra metrics remain available when the objective scalar is missing', () => {
+  const refs = normalizeRunReport({ key_metrics: {
+    metrics: [{ key: 'IC ProductRecall@200', label: 'Product' }, { key: 'metric' }],
+    nodes: [{ node_id: 31 }, { node_id: 39 }], baseline_node_id: 31,
+  } }).key_metrics
+  const rows = reportKeyMetricRows(refs, {
+    31: { metric: null, extra_metrics: { 'IC ProductRecall@200': .6 } },
+    39: { metric: null, extra_metrics: { 'IC ProductRecall@200': .59 } },
+  })
+  assert.equal(rows[0].values[0].value, .6)
+  assert.equal(rows[0].values[1].value, null)
+  assert.equal(rows[1].values[0].value, .59)
+  assert.equal(rows[1].values[1].value, null)
+})
+
+test('bound old attempt cannot silently display current attempt or its difference', () => {
+  const refs = normalizeRunReport({ key_metrics: {
+    metrics: [{ key: 'Recall', role: 'primary', test_id: 'test-1', cohort: 'users', policy: 'beam' }],
+    nodes: [{ node_id: 1, node_generation: 0 }, { node_id: 2, node_generation: 1 }], baseline_node_id: 1,
+  } }).key_metrics
+  const rows = reportKeyMetricRows(refs, { 1: { attempt: 1, extra_metrics: { Recall: .3 } },
+    2: { attempt: 1, extra_metrics: { Recall: .4 } } })
+  assert.equal(refs.metrics[0].test_id, 'test-1')
+  assert.equal(rows[0].attemptMismatch, true)
+  assert.equal(rows[0].values[0].value, null)
+  assert.equal(rows[1].values[0].value, .4)
+  assert.equal(rows[1].values[0].delta, null)
+})
