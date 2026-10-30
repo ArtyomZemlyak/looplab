@@ -8,6 +8,49 @@ Connect using the supported harness, check `capabilities` and `connection_check`
 
 The operator sets the goal, constraints and delegated authority. A single external agent may perform all delegated research and execution autonomously; a second owner or confirmation is not required unless the actual task or contract says so. The external researcher formulates questions, evaluates prior evidence and makes explicit proposals. The executor prepares and submits code through supported actions and checks actual receipts; LoopLab owns evaluation, budget and lease enforcement. A person may hold more than one role. A notification is not an admission, and no action is acceptable when evidence or authority is missing.
 
+## Execution discipline
+
+Use the operator's current delegated authority throughout the campaign. Do not invent a second
+owner's approval step for an already authorized launch, retry, publication or budget amendment.
+Missing authority is a real blocker; an optional collaborator review is not. A notification itself
+still grants no authority, and the actual source, protocol, budget and resource gates still apply.
+
+- Prepare at least one authorized next experiment while the current evaluation runs: reuse code
+  and data, perform the smallest meaningful checks, register its question and comparison, and
+  submit through the supported queue when dependencies permit. Prepare saved-model scoring
+  before training ends; bind the genuine producer artifact after completion. Never invent a
+  checkpoint, duplicate an accepted injection, or bypass a dependency to make a queue look full.
+- Before an expensive fit or inference run, measure representative throughput with a bounded
+  profile under the real resource gates. Consider batching, padding, precision, model heads,
+  decoding and checkpoint I/O. Preserve causal inputs, target coverage and correct global loss
+  normalization. A smaller update count is not a measured speedup. Disclose changes to batch,
+  optimizer schedule or objective rather than calling them equivalent optimizations.
+- Preserve the requested data, tasks and training scope. Do not silently substitute a subset to
+  meet an estimate or budget. State an actual resource shortfall promptly; when budget changes
+  are already delegated, apply a justified recorded amendment instead of waiting for permission
+  again. Preserve prior spend, failed attempts and unknown costs. A large budget is not a target
+  to consume; each evaluation still needs a finite resource envelope.
+- Reuse completed fits, saved controls, rankings and accepted audit evidence when their identity
+  matches the new question. Assign one owner to each launch, export and audit. Do not repeat a
+  full payload scan or test suite after a small metadata correction. Necessary artifact reads for
+  a genuinely new diagnostic remain allowed. Validate the changed boundary using the actual
+  library path on a small fixture; check training, evaluation, reload and distributed weighting
+  where that boundary changes, rather than rebuilding unrelated historical evidence.
+- Keep preparation proportional to its decision. Optional archaeology, diagnostics, figures and
+  collaborator replies must not idle a ready authorized job. Required native report cadence and
+  scientific gates remain obligations. When no job is ready, name the exact remaining blocker,
+  its owner and the next supported action, then continue independent preparation.
+- Act on current receipts and event-driven notifications rather than waiting for a supervisor's
+  periodic review. Reconcile delayed handoffs before acting. Keep a compatible campaign in one
+  run with recorded amendments; use separate runs for distinct topics or incompatible protocols,
+  never to reset spend or evade comparisons. Do not add seeds, repeats or speculative jobs just
+  because resources are available.
+
+These are execution instructions, not a new validation stage or a guarantee of utilization.
+Report actual active work, resource use and blockers; never claim that allocating several devices
+proves the implementation uses them efficiently. Keep the cumulative overview current, retain
+negative results, and use the operator's requested language and readable scientific labels.
+
 ## Research cycle
 
 1. State the goal and a decision-relevant question; distinguish scientific work from engineering recovery.
