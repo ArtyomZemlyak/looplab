@@ -55,6 +55,19 @@ def snapshot(rd: Path, generation: str) -> dict:
                          'metric': metric, 'extra_metrics': values,
                          'node_api': f'{root}/nodes/{nid}?expected_generation={generation}',
                          'after_overview': e.seq > last_overview_seq})
+    from looplab.harness.campaign import experiments_of, read_journal
+    journal, protocol_health = read_journal(rd)
+    experiments = experiments_of(journal, state.run_uid)
+    recent_ids = {row['node_id'] for row in outcomes[-10:]}
+    comparisons = []
+    for experiment_id, experiment in experiments.items():
+        arms = experiment.get('arms') if isinstance(experiment.get('arms'), dict) else {}
+        matched = [arm.get('node_id') for arm in arms.values() if isinstance(arm, dict)
+                   and arm.get('run_id') in (None, '', rd.name) and arm.get('node_id') in recent_ids]
+        if matched:
+            comparisons.append({'experiment_id': _text(experiment_id, 128), 'title': _text(experiment.get('title'), 200),
+                                'node_ids': sorted(set(matched)),
+                                'comparison_api': f"{root}/experiments/{quote(experiment_id, safe='')}/comparison"})
     warnings = []
     if not previous:
         warnings.append({'code': 'overview_missing', 'action': 'Read report history and author a cumulative overview.'})
@@ -80,5 +93,7 @@ def snapshot(rd: Path, generation: str) -> dict:
             'terminal_events_truncated': len(outcomes) > 10,
             'recent_report_versions': [{'seq': e.seq, 'api': f'{root}/report/versions/{e.seq}'} for e in reversed(versions[-10:])],
             'report_versions_truncated': len(versions) > 10,
+            'comparison_refs': comparisons[-10:], 'comparison_refs_truncated': len(comparisons) > 10,
+            'protocol_health': protocol_health,
             'warnings': warnings[:40], 'warnings_truncated': len(warnings) > 40,
             'meaning': 'Recorded pointers and deterministic checks only; read actual results, comparisons and full report versions. A node number is not a report event sequence; no scientific truth or action permission is inferred.'}

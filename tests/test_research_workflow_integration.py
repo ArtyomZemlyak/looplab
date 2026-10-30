@@ -37,6 +37,9 @@ def test_campaign_reconnect_and_replay_across_research_surfaces(tmp_path, monkey
         assert brief['operator_directions']['items'][-1] == 'Use the smaller-model direction next'
         assert brief['metric_profile']['profile']['metrics'][0]['key'] == 'IoU'
         assert brief['research']['campaign_overview']['content']['summary'] == 'Context study overview'
+        refs = brief['report_context']['comparison_refs']
+        assert any(x['experiment_id'] == 'exp1' and x['node_ids'] == [0, 1] for x in refs)
+        assert any(x['comparison_api'].endswith('/experiments/exp1/comparison') for x in refs)
         measurements = brief['research']['recent_profile_measurements']
         assert any(n['node_id'] == 2 and n['values'][0]['value'] == .42 for n in measurements['nodes'])
         assert measurements['caveat']
