@@ -73,3 +73,16 @@ def test_old_report_without_overview_still_loads_and_advice_is_not_gate(tmp_path
         result = c.post('/api/runs/r/commands', headers={'Idempotency-Key': 'old-shape'}, json={
             'type': 'report_generated', 'data': {'content': {'headline': 'New legacy-shaped report'}}, 'expected_generation': gen})
         assert result.status_code == 200 and result.json()['status'] == 'succeeded'
+
+
+def test_terminal_notification_and_phase_point_to_same_advisory_context():
+    from looplab.serve.agent_events import compose_message
+    row = {'id': 1, 'kind': 'node_evaluated', 'run_id': 'r', 'summary': 'node evaluated'}
+    message = compose_message([row], limit_chars=2000)
+    assert 'research_briefing.report_context' in message
+    assert 'not an execution gate' in message
+    phase = phase_detail('result_summary')
+    assert any('research-briefing' in path for path in phase['reads'])
+    assert any('research-workflow' in path for path in phase['reads'])
+    ordinary = compose_message([{'id': 2, 'kind': 'stage_failed', 'run_id': 'r', 'summary': 'retry'}], limit_chars=2000)
+    assert 'report_context' not in ordinary

@@ -677,6 +677,8 @@ def compose_message(rows: list[dict], *, limit_chars: int, failed_before: int = 
         if row.get("kind") == "agent_handoff":
             lines.append(f"  Recipient: {row.get('recipient_hook')}; urgency: {row.get('urgency')}; "
                          f"next read: {row.get('next_read')} (notification only).")
+    if any(row.get("kind") in ("node_evaluated", "run_finished") for row in rows):
+        lines.append("After a meaningful result, read research_briefing.report_context and the canonical report rubric; update the cumulative overview when appropriate. This is advisory, not an execution gate.")
     if failed_before:
         lines.append(f"({failed_before} earlier notification(s) could not be delivered.)")
     after = rows[0]["id"] - 1 if rows else -1
