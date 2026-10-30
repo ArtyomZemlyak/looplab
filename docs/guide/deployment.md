@@ -258,6 +258,16 @@ For protected mode enable `LOOPLAB_UI_REQUIRE_AUTH=1` and `LOOPLAB_UI_CHECK_ORIG
 then set `LOOPLAB_UI_HOSTS=hub.example.org`. With URL checks enabled, HTTP/non-default-port
 origins also need the full origin in `LOOPLAB_UI_CORS`.
 
+**UI shutdown.** `looplab ui` gives in-flight connections ten seconds to finish after a
+shutdown signal. After that Uvicorn cancels remaining ASGI tasks, including long-lived SSE
+and agent long polls, and runs normal application lifespan shutdown. Clients reconnect and
+inspect the existing command receipt with the same idempotency key before retrying; a lost
+HTTP response does not prove that a command was absent or failed. This is a connection-drain
+limit, not a hard process deadline: blocked synchronous filesystem operations and shutdown
+hooks can still delay exit. It does not change engine or mirror ownership. Check the launcher
+reaper marker below before stopping a UI that spawned an active engine; do not restart healthy
+experiments merely to update the UI.
+
 **Resource lifecycle.** Under JupyterHub the UI server the Launcher tile starts reaps the engines it
 spawned on shutdown (a hub cull would otherwise orphan a detached engine that keeps billing GPU/CPU
 and holds the run's lock). Only that server does: the launcher marks it with

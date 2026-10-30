@@ -1047,5 +1047,9 @@ def serve(run_root: str | os.PathLike, host: str = "127.0.0.1", port: int = 8765
     # its own prefix from the page path), so this is a no-op there.
     # `host` travels INTO the app, not only into uvicorn: it is the fact that decides whether an
     # unset owner token may mean "unauthenticated" (`serve/owner_token.py::on_shared_origin`).
+    # Long-lived SSE and agent long polls otherwise keep Uvicorn in its connection drain
+    # indefinitely (its default graceful timeout is None). Give in-flight requests time
+    # to finish, then let Uvicorn cancel outstanding ASGI tasks and run lifespan shutdown.
+    # This is not a hard process deadline for a blocked filesystem call or shutdown hook.
     uvicorn.run(make_app(run_root, bind_host=host), host=host, port=port, root_path=root_path,
-                log_level="info")
+                log_level="info", timeout_graceful_shutdown=10)
