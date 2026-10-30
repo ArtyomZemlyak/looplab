@@ -1,7 +1,7 @@
 {
   "schema": 1,
   "language": "ru",
-  "count": 8334,
+  "count": 8335,
   "messages": {
     "# LoopLab run report — {0}": "# Отчёт запуска LoopLab — {0}",
     "## Agent narrative (advisory)": "## Пояснения агента (рекомендации)",
@@ -8229,6 +8229,7 @@
     "No token needed: this UI runs without owner login.": "Токен не нужен: этот UI работает без входа владельца.",
     "Runs are in memory and may be lost on restart.": "Запуски хранятся в памяти и могут быть потеряны при перезапуске.",
     "Choose a durable folder with": "Укажите долговечную папку через",
+    "Last successful mirror:": "Последний успешный проход зеркала:",
     "Last mirror:": "Последний проход зеркала:",
     "Mirror needs attention.": "Проверьте состояние зеркала.",
     "Report version #{0}": "Версия отчёта #{0}",

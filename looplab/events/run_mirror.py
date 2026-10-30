@@ -659,6 +659,7 @@ def mirror_pass(cfg: MirrorConfig, *, state: Optional[dict] = None,
     ops_bucket = _Bucket(cfg.max_files_per_s, clock=clock, sleep=sleep)
     made_dirs: set = set()
     state["last_pass_started_at"] = time.time()
+    completed = False
     try:
         for run_dir in list_runs(cfg):
             try:
@@ -678,11 +679,14 @@ def mirror_pass(cfg: MirrorConfig, *, state: Optional[dict] = None,
                 save_state(cfg, state)
         else:
             state.pop("stuck", None)
+            completed = True
     finally:
         report.seconds = clock() - t0
         state["pass"] = pass_no + 1
         state["last_pass_finished_at"] = time.time()
-        state["last_pass"] = {"seconds": round(report.seconds, 3), "stuck": report.stuck,
+        if completed and not report.errors:
+            state["last_successful_pass_finished_at"] = state["last_pass_finished_at"]
+        state["last_pass"] = {"completed": completed, "error_count": len(report.errors),"seconds": round(report.seconds, 3), "stuck": report.stuck,
                               "copied": sum(r.get("copied", 0) for r in report.runs.values()),
                               "bytes": sum(r.get("bytes", 0) for r in report.runs.values())}
         state["errors"] = (state.get("errors", []) + [dict(e, at=time.time())
@@ -746,6 +750,7 @@ def mirror_status(cfg: MirrorConfig) -> dict:
     return {"src_root": str(cfg.src_root), "dst_root": str(cfg.dst_root),
             "passes": state.get("pass", 0), "last_pass": state.get("last_pass"),
             "last_pass_finished_at": state.get("last_pass_finished_at"),
+            "last_successful_pass_finished_at": state.get("last_successful_pass_finished_at"),
             "stuck": state.get("stuck"), "errors": state.get("errors", [])[-10:], "runs": runs}
 
 

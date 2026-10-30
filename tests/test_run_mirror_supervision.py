@@ -184,3 +184,75 @@ def test_mirror_diagnostic_does_not_confuse_running_with_healthy():
     assert mirror_diagnostic(view, now=1200)["state"] == "stale"
     view["status_readable"] = False
     assert mirror_diagnostic(view, now=1000)["state"] == "unknown"
+
+
+def test_failed_pass_does_not_advance_success_or_disguise_degradation(tmp_path, monkeypatch):
+    import looplab.events.run_mirror as mirror
+    from looplab.serve.mirror_supervisor import mirror_diagnostic, mirror_view
+    cfg = _root(tmp_path)
+    mirror_pass(cfg)
+    good = mirror.mirror_status(cfg)["last_successful_pass_finished_at"]
+    def stuck(*args, **kwargs):
+        raise mirror.MirrorStuck("simulated FUSE timeout")
+    monkeypatch.setattr(mirror, "mirror_run", stuck)
+    result = mirror_pass(cfg)
+    status = mirror.mirror_status(cfg)
+    assert result.stuck and status["last_pass"]["completed"] is False
+    assert status["last_successful_pass_finished_at"] == good
+    assert status["last_pass_finished_at"] >= good
+    monkeypatch.setenv("LOOPLAB_RUN_MIRROR_DST", str(cfg.dst_root))
+    sup = MirrorSupervisor(cfg.src_root, cfg.dst_root)
+    sup.state = "running"
+    view = mirror_view(cfg.src_root, sup)
+    assert view["diagnostic"]["state"] == "degraded"
+    assert view["last_successful_pass_finished_at"] == good
+    assert mirror_diagnostic({"dst_root": "x", "status_readable": True,
+                              "last_pass_finished_at": 990}, now=1000)["state"] == "unknown"
+
+
+def test_stuck_retry_rate_is_bounded_and_recovers_automatically(tmp_path):
+    children, clock = [], _Clock()
+    def popen(*args, **kwargs):
+        children.append(_Child())
+        return children[-1]
+    sup = MirrorSupervisor(tmp_path / "src", tmp_path / "dst", popen=popen, clock=clock)
+    for delay in (6, 11):
+        sup.tick()
+        children[-1].code = 3
+        sup.tick()
+        clock.t += delay
+    sup.tick()
+    children[-1].code = 3
+    sup.tick()
+    assert len(children) == 3
+    assert sup.status()["state"] == "stuck_cooldown"
+    clock.t = 1899
+    sup.tick()
+    assert len(children) == 3
+    clock.t = 1900
+    sup.tick()
+    assert len(children) == 4 and sup.status()["state"] == "running"
+
+
+def test_uninterruptible_child_shutdown_is_bounded_and_reported(tmp_path):
+    class CannotExit(_Child):
+        def terminate(self):
+            self.terminated = True
+        def kill(self):
+            pass
+        def wait(self, timeout=None):
+            raise subprocess.TimeoutExpired("fake mirror", timeout)
+    sup = MirrorSupervisor(tmp_path / "src", tmp_path / "dst")
+    sup.child = CannotExit()
+    sup.stop()
+    assert sup.status()["state"] == "stop_unconfirmed"
+    from looplab.serve.mirror_supervisor import mirror_diagnostic
+    assert mirror_diagnostic({"dst_root": "x", "supervisor": sup.status()})["state"] == "degraded"
+
+
+def test_freshness_uses_supervisor_interval_and_last_clean_pass():
+    from looplab.serve.mirror_supervisor import mirror_diagnostic
+    view = {"dst_root": "x", "status_readable": True, "last_pass_finished_at": 1000,
+            "last_successful_pass_finished_at": 1000, "supervisor": {"state": "running", "interval_s": 300}}
+    assert mirror_diagnostic(view, now=1400)["state"] == "observed_recent"
+    assert mirror_diagnostic(view, now=1721)["state"] == "stale"

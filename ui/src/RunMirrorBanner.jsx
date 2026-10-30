@@ -11,8 +11,8 @@ export default function RunMirrorBanner() {
   if (!data?.volatile) return null
   return <div className="notice warn" role="status">
     {uiText('Runs are in memory and may be lost on restart.')}{' '}
-    {data.last_pass_finished_at && <>{uiText('Last mirror:')} {new Date(data.last_pass_finished_at * 1000).toLocaleString()} </>}
-    {data.dst_root ? (data.errors || data.stuck ? uiText('Mirror needs attention.') : null) :
+    {data.last_successful_pass_finished_at && <>{uiText('Last successful mirror:')} {new Date(data.last_successful_pass_finished_at * 1000).toLocaleString()} </>}
+    {data.dst_root ? (data.diagnostic?.state !== 'observed_recent' ? uiText('Mirror needs attention.') : null) :
       <>{uiText('Choose a durable folder with')} <code>LOOPLAB_RUN_MIRROR_DST</code>.</>}
   </div>
 }

@@ -34,6 +34,8 @@ _log = logging.getLogger("looplab.server")
 MIRROR_DST_ENV = "LOOPLAB_RUN_MIRROR_DST"
 REFUSAL_EXIT = 2          # `cli.REFUSAL_EXIT_CODE`: another mirror holds the lock, or a bad --dst
 STUCK_EXIT = 3            # `run_mirror.mirror_loop`: a destination call hung
+STUCK_RETRY_WINDOW_S = 1800.0
+STUCK_RETRY_LIMIT = 3
 
 
 class MirrorSupervisor:
@@ -55,6 +57,7 @@ class MirrorSupervisor:
         self.started_at: Optional[float] = None
         self._next_start = 0.0
         self._failures = 0
+        self._stuck_exits = []
 
     def argv(self) -> list[str]:
         return [sys.executable, "-m", "looplab.cli", "run-mirror", "--src", str(self.src_root),
@@ -70,16 +73,21 @@ class MirrorSupervisor:
         self._stop.set()
         with self._lock:
             child = self.child
+        confirmed = True
         if child is not None and child.poll() is None:
             child.terminate()
             try:
                 child.wait(timeout=10)
             except subprocess.TimeoutExpired:
                 child.kill()
-                child.wait(timeout=5)
+                try:
+                    child.wait(timeout=5)
+                except subprocess.TimeoutExpired:
+                    confirmed = False
+                    _log.warning("run mirror termination remains unconfirmed")
         if self._thread is not None:
             self._thread.join(timeout=5)
-        self.state = "stopped"
+        self.state = "stopped" if confirmed else "stop_unconfirmed"
 
     def _run(self) -> None:
         while not self._stop.is_set():
@@ -110,6 +118,12 @@ class MirrorSupervisor:
                     self._failures += 1
                     self.state = "stuck" if code == STUCK_EXIT else "restarting"
                     self._next_start = now + min(self.max_backoff_s, 5.0 * 2 ** min(self._failures - 1, 20))
+                    if code == STUCK_EXIT:
+                        self._stuck_exits = [t for t in self._stuck_exits if now - t < STUCK_RETRY_WINDOW_S]
+                        self._stuck_exits.append(now)
+                        if len(self._stuck_exits) >= STUCK_RETRY_LIMIT:
+                            self.state = "stuck_cooldown"
+                            self._next_start = max(self._next_start, self._stuck_exits[0] + STUCK_RETRY_WINDOW_S)
                 return
             if now < self._next_start:
                 return
@@ -132,7 +146,8 @@ class MirrorSupervisor:
             child = self.child
         return {"state": self.state, "pid": getattr(child, "pid", None) if child else None,
                 "restarts": self.restarts, "last_exit_code": self.last_exit,
-                "started_at": self.started_at}
+                "started_at": self.started_at, "interval_s": self.interval_s,
+                "retry_in_s": max(0.0, self._next_start - self._clock()) if child is None else None}
 
 
 def mirror_view(run_root, supervisor: Optional[MirrorSupervisor]) -> dict:
@@ -145,15 +160,20 @@ def mirror_view(run_root, supervisor: Optional[MirrorSupervisor]) -> dict:
     dst = os.environ.get(MIRROR_DST_ENV) or None
     out = {"run_root": str(root), "volatile": is_volatile(root), "dst_root": dst,
            "supervisor": supervisor.status() if supervisor is not None else None,
-           "last_pass_finished_at": None, "stuck": None, "errors": 0,
+           "last_pass_finished_at": None, "last_successful_pass_finished_at": None,
+           "last_pass": None, "stuck": None, "errors": 0,
            "env": MIRROR_DST_ENV, "status_readable": False}
     if dst:
         try:
             status = mirror_status(MirrorConfig(src_root=root, dst_root=Path(dst)))
         except (OSError, ValueError):
-            return out
-        out.update(status_readable=True, last_pass_finished_at=status.get("last_pass_finished_at"),
-                   stuck=status.get("stuck"), errors=len(status.get("errors") or []))
+            pass
+        else:
+            out.update(status_readable=True, last_pass_finished_at=status.get("last_pass_finished_at"),
+                       last_successful_pass_finished_at=status.get("last_successful_pass_finished_at"),
+                       last_pass=status.get("last_pass"),
+                       stuck=status.get("stuck"), errors=len(status.get("errors") or []))
+    out["diagnostic"] = mirror_diagnostic(out)
     return out
 
 
@@ -163,17 +183,25 @@ def mirror_diagnostic(view: dict, *, now: float | None = None) -> dict:
     last = view.get("last_pass_finished_at")
     age = max(0, now - last) if isinstance(last, (int, float)) and not isinstance(last, bool) else None
     supervisor = view.get("supervisor") or {}
+    clean = view.get("last_successful_pass_finished_at")
+    clean_age = max(0, now - clean) if isinstance(clean, (int, float)) and not isinstance(clean, bool) else None
+    interval = supervisor.get("interval_s")
+    stale_after = max(180.0, 2 * interval + 120) if isinstance(interval, (int, float)) and not isinstance(interval, bool) and interval > 0 else 180.0
     if not view.get("dst_root"):
         state = "unconfigured"
-    elif view.get("stuck") or view.get("errors") or supervisor.get("state") in {"stuck", "restarting", "failed"}:
+    elif view.get("stuck") or view.get("errors") or supervisor.get("state") in {"stuck", "stuck_cooldown", "restarting", "failed", "stop_unconfirmed"}:
         state = "degraded"
     elif not view.get("status_readable") or age is None:
         state = "unknown"
-    elif age > 180:
+    elif age > stale_after or (clean_age is not None and clean_age > stale_after):
         state = "stale"
+    elif clean_age is None:
+        state = "unknown"
     else:
         state = "observed_recent"
     return {"state": state, "last_pass_finished_at": last, "last_pass_age_seconds": age,
+            "last_successful_pass_finished_at": clean, "last_successful_pass_age_seconds": clean_age,
+            "stale_after_seconds": stale_after,
             "stuck": bool(view.get("stuck")), "errors": view.get("errors"),
             "supervisor_state": supervisor.get("state"), "supervisor_restarts": supervisor.get("restarts"),
             "status_readable": view.get("status_readable", False),
