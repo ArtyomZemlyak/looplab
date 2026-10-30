@@ -1004,14 +1004,15 @@ class AgentEventPump:
 
     def _still_actionable(self, rows: list[dict]) -> tuple[list[dict], list[dict]]:
         """`(keep, stale)`: re-derive each run's CONDITIONS at delivery time and drop condition
-        events (question, obligation, idle) that no longer hold — a question already answered or
-        closed, an obligation met, an engine no longer idle. Facts from the log (a node evaluated
-        or failed, a stage failed, a pause/finish) and host events always stay."""
+        events (question, obligation, idle) that no longer hold. A proven agent-origin pause
+        followed by a resume is also stale as a wake-up; its original outbox and event remain.
+        Operator/unknown pauses, result/failure facts, handoffs and host events remain deliverable."""
         from looplab.core.config import read_config_snapshot
         from looplab.core.errors import OperatorRefusal
         from looplab.events.eventstore import EventStore
         from looplab.events.replay import fold
         current: dict[str, Optional[set]] = {}
+        lifecycle_cache = {}
         keep, stale = [], []
         for row in rows:
             run_id = row.get("run_id")
@@ -1023,6 +1024,11 @@ class AgentEventPump:
                 except HTTPException:
                     current_generation = None
                 if current_generation is not None and current_generation != row.get("generation"):
+                    stale.append(row)
+                    continue
+            if row.get("kind") == "run_paused" and run_id:
+                from looplab.serve.agent_lifecycle_filter import superseded_agent_pause
+                if superseded_agent_pause(self.root / run_id, row, lifecycle_cache):
                     stale.append(row)
                     continue
             if row.get("kind") not in CONDITION_KINDS or not run_id:
