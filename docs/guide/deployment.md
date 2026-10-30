@@ -341,6 +341,18 @@ looplab run-mirror-restore --src /dev/shm/looplab-runs --all-missing
 looplab resume /dev/shm/looplab-runs/<run>
 ```
 
+Monitor health through `GET /api/run-mirror`: a running child is not proof that copying
+progresses. `last_pass_finished_at` also advances on a failed pass; use
+`last_successful_pass_finished_at` and `diagnostic` for clean-pass freshness. Older
+metadata without a clean-pass timestamp remains unknown. Historical error entries
+remain visible and may keep the diagnostic degraded after a later clean pass.
+A timeout stops Python waiting; it cannot cancel an underlying FUSE kernel call.
+The managed supervisor permits three stuck exits per rolling 30-minute window,
+then retries when the window expires; this history is local to one supervisor
+process. `stop_unconfirmed` means termination was not confirmed. Storage still
+needs separate diagnosis and a verified backup. See
+[mirror health and FUSE limits](../mirror-fuse-supervision.md).
+
 What it guarantees (`looplab/events/run_mirror.py`):
 
 * only changed files are copied (state in `<src>/.looplab-mirror/state.json`, re-seeded from the
