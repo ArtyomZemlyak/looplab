@@ -1157,6 +1157,16 @@ seconds; it adds no evaluation wait of its own.
 | `resume_per_query_upload(run_id, action_id)` | Resend a spooled per-query upload exactly, without the file; `pending_per_query_uploads` lists unanswered ones. |
 | `Node.protocol_version`, `data_refresh` | Each node's campaign protocol version (comparisons flag mixed versions); `amend_protocol kind=task` records data-mount CONTENT fingerprints. |
 
+Before sending or reminding, LoopLab can mark a historical agent-attributed pause
+as `dropped_stale` when its matching successful command receipt and the same run's
+complete journal prove a subsequent resume. Unknown or operator-attributed pauses,
+user directions, open checkpoints, handoffs and measured results remain deliverable.
+The event stays in history. This cannot retract a message already handed to an
+external queue; always refresh `run_progress` before acting. `delivered` and observed
+activity do not prove that a particular message was read. Agent attribution on an
+anonymous UI is client-declared; the final generation read is not atomic with send.
+
+
 Task amendments accept both composable `repo`/`cmd` snapshots and legacy
 `editable_path`/`eval` snapshots. With a stopped engine, a direct command can be
 changed explicitly using `amend_protocol(kind="task", task={"eval_command":
