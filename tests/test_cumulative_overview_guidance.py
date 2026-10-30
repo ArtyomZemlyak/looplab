@@ -86,3 +86,18 @@ def test_terminal_notification_and_phase_point_to_same_advisory_context():
     assert any('research-workflow' in path for path in phase['reads'])
     ordinary = compose_message([{'id': 2, 'kind': 'stage_failed', 'run_id': 'r', 'summary': 'retry'}], limit_chars=2000)
     assert 'report_context' not in ordinary
+
+
+def test_report_context_is_bounded_without_guessing_missing_attempt(tmp_path):
+    from looplab.harness.report_guidance import snapshot
+    rd = tmp_path / 'r'; rd.mkdir(); store = EventStore(rd / 'events.jsonl')
+    store.append('run_started', {'run_id': 'r', 'run_uid': 'u', 'task_id': 't', 'goal': 'g', 'direction': 'max'})
+    gen = run_generation_token(store.read_all())
+    for n in range(15):
+        store.append('node_created', {'node_id': n, 'operator': 'score', 'parent_ids': [], 'idea': {'operator': 'score'}})
+        store.append('node_evaluated', {'node_id': n, 'metric': None, 'extra_metrics': {('m' * 300) + str(i): i for i in range(20)}})
+    context = snapshot(rd, gen)
+    assert context['terminal_event_count'] == 15 and context['terminal_events_truncated']
+    assert len(context['recent_terminal_events']) == 10
+    assert all(len(event['extra_metrics']) <= 8 and event['recorded_attempt'] is None for event in context['recent_terminal_events'])
+    assert len(json.dumps(context).encode()) < 64 * 1024
