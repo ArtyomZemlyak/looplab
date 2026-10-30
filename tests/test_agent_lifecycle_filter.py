@@ -136,3 +136,55 @@ def test_generation_changed_after_receipt_read_keeps_notification(tmp_path, monk
         return original(path)
     monkeypatch.setattr(journals, 'read_event_source', racing)
     assert not superseded_agent_pause(rd, pause, {})
+
+
+def test_wrong_or_unreadable_receipts_keep_pause(tmp_path):
+    _, rd, store = _run(tmp_path)
+    pause = _pause(rd, store, 'a'); store.append('resume', {})
+    path = rd / '.commands' / ('cmd_' + 'a' * 32 + '.json')
+    initial = json.loads(path.read_text())
+    for change in ({'run_generation': '0' * 64}, {'event_seq': 999}, {'status': 'failed'}, {'submitted_by': None}, {'event_type': 'hint'}):
+        path.write_text(json.dumps({**initial, **change}))
+        assert not superseded_agent_pause(rd, pause, {})
+    path.write_text('{broken')
+    assert not superseded_agent_pause(rd, pause, {})
+    path.unlink()
+    outside = tmp_path / 'outside.json'; outside.write_text(json.dumps(initial))
+    path.symlink_to(outside)
+    assert not superseded_agent_pause(rd, pause, {})
+
+
+def test_multiple_stale_pauses_share_one_snapshot_and_generation_fence(tmp_path, monkeypatch):
+    from looplab.harness import journals
+    _, rd, store = _run(tmp_path)
+    first = _pause(rd, store, 'a'); store.append('resume', {})
+    second = _pause(rd, store, 'b'); store.append('resume', {})
+    original = journals.read_event_source; calls = []
+    def read(path):
+        calls.append(path)
+        return original(path)
+    monkeypatch.setattr(journals, 'read_event_source', read)
+    cache = {}
+    assert superseded_agent_pause(rd, first, cache)
+    assert superseded_agent_pause(rd, second, cache)
+    assert len(calls) == 2  # one snapshot and one generation fence per run/delivery batch
+
+
+def test_multiple_open_checkpoints_are_preserved_and_existing_coalescing_discloses_count(tmp_path):
+    from looplab.events.replay import fold
+    from looplab.harness import checkpoints
+    root, rd, store = _run(tmp_path)
+    for node in (0, 1):
+        store.append('node_created', {'node_id': node, 'parent_ids': [], 'operator': 'draft', 'idea': {'operator': 'draft'}})
+    old = _pause(rd, store, 'a'); store.append('resume', {})
+    questions = [checkpoints.ask(rd, node, 0, 'train_monitor', stage='train', observation='needs human decision') for node in (0, 1)]
+    pump = ae.AgentEventPump(SimpleNamespace(root=root))
+    state = fold(store.read_all())
+    rows = pump._conditions(rd, None, state, store.read_all(), state.run_uid)
+    relevant = [row for row in rows if row['kind'] == 'monitor_question']
+    assert {row['details']['checkpoint_id'] for row in relevant} == {q['checkpoint_id'] for q in questions}
+    keep, stale = pump._still_actionable([old, *relevant])
+    assert stale == [old] and len(keep) == 2
+    coalesced = ae.coalesce(keep)
+    assert len(coalesced) == 1 and coalesced[0]['coalesced'] == 2
+    assert '2 monitor questions' in coalesced[0]['summary']

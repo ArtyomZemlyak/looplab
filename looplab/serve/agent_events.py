@@ -1004,7 +1004,7 @@ class AgentEventPump:
 
     def _still_actionable(self, rows: list[dict]) -> tuple[list[dict], list[dict]]:
         """`(keep, stale)`: re-derive each run's CONDITIONS at delivery time and drop condition
-        events (question, obligation, idle) that no longer hold. A proven agent-origin pause
+        events (question, obligation, idle) that no longer hold. A pause attributed to an agent by its matching receipt
         followed by a resume is also stale as a wake-up; its original outbox and event remain.
         Operator/unknown pauses, result/failure facts, handoffs and host events remain deliverable."""
         from looplab.core.config import read_config_snapshot

@@ -1,4 +1,4 @@
-"""Conservative delivery-time filtering of superseded agent-origin pauses.
+"""Conservative delivery-time filtering of superseded pauses attributed to an agent.
 
 The append-only outbox is unchanged. A pause can contain an operator's message, so an
 unknown author or unavailable/corrupt source always remains deliverable. This is a
@@ -36,7 +36,7 @@ def _snapshot(rd: Path):
 
 
 def superseded_agent_pause(rd: Path, row: dict, cache: dict) -> bool:
-    """True only with same-run event, later resume and matching agent command receipt."""
+    """True only with same-run event, later resume and receipt attributed to an agent."""
     seq = row.get('seq')
     if row.get('kind') != 'run_paused' or type(seq) is not int:
         return False
@@ -69,10 +69,14 @@ def superseded_agent_pause(rd: Path, row: dict, cache: dict) -> bool:
             and receipt.get('submitted_by') in ('agent_client', 'agent_token'))
     if not matched:
         return False
+    # Attribution is the recorded principal, not cryptographic proof on an anonymous UI.
     # The run may have been replaced while its receipt was read. Never suppress on an
     # uncertain incarnation; this read-side fence does not claim atomicity with delivery.
     from looplab.harness.journals import read_event_source
-    try:
-        return run_generation_token(read_event_source(rd)) == generation
-    except (HTTPException, OSError, ValueError, TypeError):
-        return False
+    fence_key = (rd, 'generation_fence')
+    if fence_key not in cache:
+        try:
+            cache[fence_key] = run_generation_token(read_event_source(rd))
+        except (HTTPException, OSError, ValueError, TypeError):
+            cache[fence_key] = None
+    return cache[fence_key] == generation
