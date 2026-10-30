@@ -630,22 +630,58 @@ def _recorded_data_fingerprints(rd: Path) -> dict:
 
 # ------------------------------------------------------------------------------- task amendments
 def _apply_task_amendment(rd: Path, changes) -> tuple[dict, Any]:
-    from looplab.adapters.tasks import validate_task
+    from looplab.adapters.tasks import normalize_task, validate_task
     from looplab.core.setup_identity import task_identity
 
     if not isinstance(changes, dict) or not changes:
         raise HTTPException(400, "task changes are required")
     allowed = {"inputs_add", "inputs_remove", "protect_add", "protect_remove", "data_add",
-               "data_remove", "data_refresh"}
+               "data_remove", "data_refresh", "eval_command", "eval_canary"}
     if set(changes) - allowed:
         raise HTTPException(400, f"task changes may only be {', '.join(sorted(allowed))}")
     snap = Path(rd) / "task.snapshot.json"
     before_bytes = snap.read_bytes()
-    task = json.loads(before_bytes)
+    raw = json.loads(before_bytes)
+    try:
+        task = normalize_task(raw) if isinstance(raw, dict) else {}
+    except ValueError as exc:
+        raise HTTPException(400, f"the task does not normalize: {str(exc)[:500]}") from None
     if not isinstance(task, dict) or not isinstance(task.get("eval"), dict):
         raise HTTPException(409, {"code": "task_shape_unsupported",
                                   "message": "only a repo task snapshot with an eval block can be amended"})
     before_identity = task_identity(validate_task(json.loads(before_bytes), existing_run=True))
+
+    if "eval_command" in changes:
+        update = changes["eval_command"]
+        def argv(value):
+            return (isinstance(value, list) and 1 <= len(value) <= 256
+                    and all(isinstance(s, str) and s and len(s) <= 4096 and "\0" not in s
+                            for s in value))
+        if (not isinstance(update, dict) or set(update) != {"expected", "command"}
+                or not argv(update["expected"]) or not argv(update["command"])):
+            raise HTTPException(400, "eval_command requires {expected: [argv], command: [argv]}")
+        ev = task["eval"]
+        if not ev.get("command") or ev.get("stages") or ev.get("host_scorer"):
+            raise HTTPException(400, "eval_command only amends a direct command, not stages or host scorers")
+        if ev["command"] != update["expected"]:
+            raise HTTPException(409, {"code": "eval_command_changed",
+                                      "message": "the eval command differs from expected; reread the snapshot"})
+        ev["command"] = list(update["command"])
+
+    if "eval_canary" in changes:
+        from looplab.adapters.repo_task import CanarySpec
+        update = changes["eval_canary"]
+        if not isinstance(update, dict) or set(update) != {"expected", "canary"}:
+            raise HTTPException(400, "eval_canary requires {expected: object|null, canary: object|null}")
+        if task["eval"].get("canary") != update["expected"]:
+            raise HTTPException(409, {"code": "eval_canary_changed",
+                                      "message": "the canary differs from expected; reread the snapshot"})
+        try:
+            value = update["canary"]
+            canary = None if value is None else CanarySpec.model_validate(value).model_dump()
+        except ValueError as exc:
+            raise HTTPException(400, "invalid eval canary declaration") from exc
+        task["eval"]["canary"] = canary
 
     def strings(name, *, absolute=False):
         value = changes.get(name, [])

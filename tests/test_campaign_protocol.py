@@ -10,6 +10,7 @@ import base64
 import json
 import math
 import random
+from pathlib import Path
 
 import pytest
 from fastapi.testclient import TestClient
@@ -339,6 +340,95 @@ def test_amendment_rolls_back_when_its_record_cannot_be_written(tmp_path, monkey
     monkeypatch.setattr("looplab.harness.campaign.append_jsonl_bytes_locked", boom)
     r = _amend(client, "camp", store, "task", task={"protect_add": ["x.py"]})
     assert r.status_code == 503
+    assert (rd / "task.snapshot.json").read_bytes() == before
+
+
+def _composable_snapshot(rd):
+    """Use the same spelling native start_run currently persists."""
+    task = json.loads((rd / "task.snapshot.json").read_text())
+    task["repo"] = task.pop("editable_path")
+    task["cmd"] = task.pop("eval")
+    task["cmd"]["metric"]["reader"] = task["cmd"]["metric"].pop("kind")
+    task["cmd"].update(timeout=300, profiles={"short": {"timeout": 120}},
+                       env={"OMP_NUM_THREADS": "4"}, canary={"timeout": 10})
+    (rd / "task.snapshot.json").write_text(json.dumps(task, indent=2) + "\n")
+    return task
+
+
+def test_composable_task_amendment_preserves_eval_and_semantic_identity(tmp_path, monkeypatch):
+    from looplab.adapters.tasks import normalize_task, validate_task
+    from looplab.core.setup_identity import task_identity
+    root, client = _client(tmp_path, monkeypatch)
+    rd, store = _make_run(root, "camp", _repo(tmp_path), nodes=())
+    raw = _composable_snapshot(rd)
+    before_identity = task_identity(validate_task(raw, existing_run=True))
+    r = _amend(client, "camp", store, "task", task={"protect_add": ["strict.py"]})
+    assert r.status_code == 200, r.text
+    task = json.loads((rd / "task.snapshot.json").read_text())
+    assert task["eval"] == normalize_task(raw)["eval"]
+    assert task["editable_path"] == raw["repo"]
+    assert task["protect"] == ["train.py", "strict.py"]
+    payload = r.json()["amendment"]["payload"]
+    assert payload["before_identity"] == before_identity
+    assert payload["after_identity"] == task_identity(validate_task(task, existing_run=True))
+    # Protected file CAS works against this same composable base root too.
+    import hashlib
+    trainer = Path(raw["repo"]) / "train.py"
+    fix = {"path": "train.py", "content": "print('strict')\n",
+           "expected_sha256": hashlib.sha256(trainer.read_bytes()).hexdigest()}
+    assert _amend(client, "camp", store, "files", files=[fix]).status_code == 200
+    assert _amend(client, "camp", store, "files", action="stale", files=[fix]).status_code == 409
+
+
+@pytest.mark.parametrize("composable", [False, True])
+def test_direct_eval_command_amendment_is_cas_scoped_and_stopped(tmp_path, monkeypatch, composable):
+    from looplab.adapters.tasks import normalize_task
+    root, client = _client(tmp_path, monkeypatch)
+    rd, store = _make_run(root, "camp", _repo(tmp_path), nodes=())
+    if composable:
+        _composable_snapshot(rd)
+    before = (rd / "task.snapshot.json").read_bytes()
+    old = normalize_task(json.loads(before))
+    command = ["python", "-m", "bench.models.sce_hpo_train"]
+    change = {"eval_command": {"expected": old["eval"]["command"], "command": command}}
+    commands = client.app.state.looplab.commands
+    monkeypatch.setattr(commands, "engine_liveness", lambda _rd: True)
+    live = _amend(client, "camp", store, "task", task=change)
+    assert live.status_code == 409 and live.json()["detail"]["code"] == "engine_running"
+    assert (rd / "task.snapshot.json").read_bytes() == before
+    monkeypatch.setattr(commands, "engine_liveness", lambda _rd: False)
+    for index, update in enumerate([{"command": command}, {"expected": [], "command": command},
+                                    {"expected": ["python"], "command": "python train.py"}]):
+        assert _amend(client, "camp", store, "task", action=f"invalid{index}",
+                      task={"eval_command": update}).status_code == 400
+        assert (rd / "task.snapshot.json").read_bytes() == before
+    stale = _amend(client, "camp", store, "task", action="stale",
+                   task={"eval_command": {"expected": ["old"], "command": command}})
+    assert stale.status_code == 409 and stale.json()["detail"]["code"] == "eval_command_changed"
+    assert (rd / "task.snapshot.json").read_bytes() == before
+    r = _amend(client, "camp", store, "task", action="switch", task=change)
+    assert r.status_code == 200, r.text
+    after = json.loads((rd / "task.snapshot.json").read_text())
+    assert after["eval"] == {**old["eval"], "command": command}
+    assert {k: v for k, v in after.items() if k != "eval"} == {k: v for k, v in old.items() if k != "eval"}
+    payload = r.json()["amendment"]["payload"]
+    assert payload["before_identity"] != payload["after_identity"] and "sce_hpo_train" in payload["diff"]
+    assert _amend(client, "camp", store, "task", action="switch", task=change).json()["replayed"]
+
+
+@pytest.mark.parametrize("command_change", [False, True])
+def test_composable_amendment_journal_failure_restores_original_bytes(tmp_path, monkeypatch, command_change):
+    root, client = _client(tmp_path, monkeypatch)
+    rd, store = _make_run(root, "camp", _repo(tmp_path), nodes=())
+    raw = _composable_snapshot(rd)
+    before = (rd / "task.snapshot.json").read_bytes()
+    change = {"protect_add": ["strict.py"]}
+    if command_change:
+        change["eval_command"] = {"expected": raw["cmd"]["command"], "command": ["python", "strict.py"]}
+    def boom(*_args, **_kwargs):
+        raise OSError("disk full")
+    monkeypatch.setattr("looplab.harness.campaign.append_jsonl_bytes_locked", boom)
+    assert _amend(client, "camp", store, "task", task=change).status_code == 503
     assert (rd / "task.snapshot.json").read_bytes() == before
 
 

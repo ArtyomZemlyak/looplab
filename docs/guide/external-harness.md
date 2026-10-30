@@ -1157,6 +1157,23 @@ seconds; it adds no evaluation wait of its own.
 | `resume_per_query_upload(run_id, action_id)` | Resend a spooled per-query upload exactly, without the file; `pending_per_query_uploads` lists unanswered ones. |
 | `Node.protocol_version`, `data_refresh` | Each node's campaign protocol version (comparisons flag mixed versions); `amend_protocol kind=task` records data-mount CONTENT fingerprints. |
 
+Task amendments accept both composable `repo`/`cmd` snapshots and legacy
+`editable_path`/`eval` snapshots. With a stopped engine, a direct command can be
+changed explicitly using `amend_protocol(kind="task", task={"eval_command":
+{"expected": ["python", "old.py"], "command": ["python", "strict.py"]}}, ...)`.
+The expected argv is mandatory CAS: a stale command returns HTTP 409. This changes
+only the direct argv, preserving the metric reader, inputs, environment, profiles,
+timeouts and canary. Operator stages and host scorers are excluded. The existing
+amendment policy, generation check, stopped-engine guard, validation, identity
+diff and journal rollback apply. Candidates still cannot rewrite `cmd`.
+
+A stopped task can also change its canary declaration with
+`task={"eval_canary": {"expected": old_canary, "canary": new_canary}}`.
+Both declarations may be null. The expected declaration is a mandatory CAS;
+the replacement is validated by `CanarySpec` and recorded with the task diff.
+Use `mode="smoke"` for a validation command that exits successfully without a
+numerical metric. This preserves the full evaluator and its metric reader.
+
 ## Reconnect and recovery
 
 The UI server, run engine, and coding agent are separate processes. If the agent

@@ -1178,7 +1178,9 @@ def _campaign_tools(mcp, api, ToolAnnotations) -> None:
         """Append to this run's protocol journal instead of starting a new run.
         kind=experiment pre-registers {experiment_id, hypothesis, arms, tests, metrics, contrasts,
         correction}; registrations are immutable (supersede with a new id). kind=task changes
-        eval inputs / protect list / data mounts; kind=files changes base-repo files (protected
+        eval inputs / protect list / data mounts, or eval_command={expected:[argv],command:[argv]}
+        for a CAS update of a direct command only (profiles, reader, inputs unchanged);
+        kind=files changes base-repo files (protected
         ones included) with expected_sha256 CAS — both need a STOPPED engine (pause first) and
         record a diff. kind=budget adds nodes with a reason within the operator's cap.
         Every row names you as author. Exact retry with the same action_id replays."""
