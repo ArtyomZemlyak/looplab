@@ -917,7 +917,7 @@ def build_server(api: HarnessAPI):
 
     @mcp.tool(annotations=ToolAnnotations(readOnlyHint=True, destructiveHint=False, idempotentHint=True, openWorldHint=False))
     def research_briefing(run_id: str, expected_generation: str, language: Literal["en", "ru"] = "en") -> dict:
-        """Read current research, action and GPU context; refresh receipts before action."""
+        """Read current research, action and GPU context plus report_context. After meaningful outcomes, use its previous overview and the canonical workflow report rubric; refresh receipts before action."""
         api._run_identity(run_id, expected_generation)
         return api._checked_generation(api.request("GET", f"/api/runs/{quote(run_id, safe='')}/research-briefing"
             f"?expected_generation={expected_generation}&language={language}"), expected_generation)
@@ -1419,7 +1419,9 @@ def _campaign_tools(mcp, api, ToolAnnotations) -> None:
                    dry_run: bool = False) -> dict:
         """Publish the final report (report_generated content), the run-end reviews
         ({phase_id, decision, reason, evidence?}) and finalize the run, after reading the finish
-        gates. dry_run=true shows the gates and plan. Same-key repeat resumes."""
+        gates. Before authoring, read research_briefing.report_context and the canonical workflow
+        report rubric; update the cumulative overview with evidence and limitations. This guidance
+        adds no gate. dry_run=true shows the gates and plan. Same-key repeat resumes."""
         return composite.finish_run(api, run_id, expected_generation, key=key, report=report,
                                     reviews=reviews, reason=reason, dry_run=dry_run)
 

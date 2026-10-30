@@ -41,6 +41,8 @@ def snapshot(rd: Path, generation: str, *, language: str = 'en') -> dict:
                           'state': phase, 'producer_run_id': relation.get('run_id') or rd.name, 'score_node_id': arm.get('node_id'), 'score_status': arm.get('node_status'),
                           'next_action': 'GET /api/runs/{run_id}/readiness-bindings',
                           'owner': 'external_agent', 'authority': 'none'})
+    from looplab.harness.report_guidance import snapshot as report_context
+    report = report_context(rd, generation)
     from looplab.harness.snapshot_settings import read_harness_settings
     configured_language = getattr(read_harness_settings(rd), 'output_language', 'auto')
     project_language = profile.get('profile', {}).get('authoring_language', 'auto')
@@ -50,6 +52,7 @@ def snapshot(rd: Path, generation: str, *, language: str = 'en') -> dict:
             'authoring_language': {'language': effective_language, 'run_config': configured_language,
                                    'project_preference': project_language,
                                    'meaning': 'Explicit run language takes precedence; otherwise use project preference. Preserve evidence, IDs and code; never translate a measurement.'},
+            'report_context': report,
             'operator_directions': progress.get('operator_directions'),
             'next_step': progress['next_step'], 'execution': progress['execution'],
             'recorded_lifecycle': progress['recorded_lifecycle'],
@@ -68,7 +71,7 @@ def snapshot(rd: Path, generation: str, *, language: str = 'en') -> dict:
                     'gate': {'hold': gate.get('hold'), 'drain': gate.get('drain'),
                              'reason': redact_persisted_text(str(gate.get('reason') or ''), max_chars=500, entropy=False)}},
             'observation': {'research_event_seq': research['event_seq'],
-                            'same_event_prefix': progress['event_seq'] == research['event_seq'] and (measured is None or measured['event_seq'] == progress['event_seq']),
+                            'same_event_prefix': progress['event_seq'] == research['event_seq'] == report['event_seq'] and (measured is None or measured['event_seq'] == progress['event_seq']),
                             'atomic_across_sources': False},
             'mirror': {'state': 'unavailable', 'meaning': 'Service mirror status is unavailable in this local view.'},
             'meaning': 'A briefing is an observation, not an authorization or proof of agent connection. Refresh progress and receipts before action.'}

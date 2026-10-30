@@ -215,8 +215,8 @@ PHASES: tuple[Phase, ...] = (
            "GET /api/runs/{run_id}/harness-checkpoints"),
           ("POST /api/runs/{run_id}/result-notices",)),
     Phase("report", "RunReport", "serve/report.py; engine/research_cadence.py",
-          "Write a narrative report over the measured run.",
-          ("GET /api/runs/{run_id}/state",), ("command:report_generated",),
+          "Write the current result and update the evidence-linked cumulative scientific overview; see the canonical report rubric.",
+          ("GET /api/runs/{run_id}/research-briefing", "GET /api/runs/{run_id}/research-workflow", "GET /api/runs/{run_id}/state"), ("command:report_generated",),
           legacy_prompt_family="report"),
     Phase("pilot", "NextAction", "agents/unified_agent.py; agents/strategist.py",
           "Decide which admissible action to take next, or finish.",
@@ -250,4 +250,9 @@ assert set(CHECKPOINT_DECISION_PHASES.values()) <= {phase.id for phase in PHASES
 
 
 def phase_detail(phase_id: str) -> dict | None:
-    return next((phase.public() for phase in PHASES if phase.id == phase_id), None)
+    row = next((phase.public() for phase in PHASES if phase.id == phase_id), None)
+    if row is not None and phase_id == 'report':
+        from looplab.harness.report_guidance import GUIDE, REPORT_INSTRUCTION
+        row['authoring_guidance'] = {'instruction': REPORT_INSTRUCTION, 'canonical_workflow': GUIDE,
+                                    'context': 'GET /api/runs/{run_id}/research-briefing'}
+    return row

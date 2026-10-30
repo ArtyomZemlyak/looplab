@@ -224,6 +224,10 @@ def snapshot(rd: Path, expected_generation: str, *, activity_reader,
                         "reviews": _page(reviews, offset, limit),
                         "checkpoints": _page(checkpoint_rows, offset, limit)},
             "review_phases_enabled": sorted(required_reviews(settings))}
+    from looplab.harness.report_guidance import REPORT_INSTRUCTION, GUIDE
+    result["report_authoring"] = {"instruction": REPORT_INSTRUCTION, "canonical_workflow": GUIDE,
+                                  "context": "/api/runs/{run_id}/research-briefing",
+                                  "report_due": bool(finish_due["report"] or any(b["phase_id"] == "report" for b in blockers))}
     from looplab.harness.progress_summary import next_step
     result["next_step"] = next_step(result, language)
     return result

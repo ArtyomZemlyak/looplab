@@ -159,6 +159,8 @@ def brief(progress: dict) -> dict:
             "candidate_requirements", "finish_reviews_due", "finish_report_due",
             "pending_checkpoint_count")
     result = {key: progress[key] for key in keys}
+    if "report_authoring" in progress:
+        result["report_authoring"] = progress["report_authoring"]
     if "agent_activity" in progress:
         result["agent_activity"] = progress["agent_activity"]
     if "operator_directions" in progress:
