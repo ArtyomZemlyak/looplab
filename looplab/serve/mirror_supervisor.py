@@ -161,7 +161,7 @@ def mirror_view(run_root, supervisor: Optional[MirrorSupervisor]) -> dict:
     out = {"run_root": str(root), "volatile": is_volatile(root), "dst_root": dst,
            "supervisor": supervisor.status() if supervisor is not None else None,
            "last_pass_finished_at": None, "last_successful_pass_finished_at": None,
-           "last_pass": None, "stuck": None, "errors": 0,
+           "last_pass": None, "stuck": None, "last_failure": None, "errors": 0,
            "env": MIRROR_DST_ENV, "status_readable": False}
     if dst:
         try:
@@ -171,7 +171,7 @@ def mirror_view(run_root, supervisor: Optional[MirrorSupervisor]) -> dict:
         else:
             out.update(status_readable=True, last_pass_finished_at=status.get("last_pass_finished_at"),
                        last_successful_pass_finished_at=status.get("last_successful_pass_finished_at"),
-                       last_pass=status.get("last_pass"),
+                       last_pass=status.get("last_pass"), last_failure=status.get("last_failure"),
                        stuck=status.get("stuck"), errors=len(status.get("errors") or []))
     out["diagnostic"] = mirror_diagnostic(out)
     return out

@@ -256,3 +256,58 @@ def test_freshness_uses_supervisor_interval_and_last_clean_pass():
             "last_successful_pass_finished_at": 1000, "supervisor": {"state": "running", "interval_s": 300}}
     assert mirror_diagnostic(view, now=1400)["state"] == "observed_recent"
     assert mirror_diagnostic(view, now=1721)["state"] == "stale"
+
+
+def test_timeout_detail_survives_worker_restart_and_success_in_api(tmp_path, monkeypatch):
+    import looplab.events.run_mirror as mirror
+    cfg = _root(tmp_path)
+    original = mirror.mirror_run
+    def timeout(*args, **kwargs):
+        raise mirror.MirrorStuck('writing /destination/r/events.jsonl did not return')
+    monkeypatch.setattr(mirror, 'mirror_run', timeout)
+    assert mirror_pass(cfg).stuck
+    before = mirror.mirror_status(cfg)['last_failure']
+    assert before['kind'] == 'stuck' and 'events.jsonl' in before['detail'] and before['run'] == 'r'
+    monkeypatch.setattr(mirror, 'mirror_run', original)
+    # A distinct CLI process reloads the state as a restarted mirror worker would.
+    restarted = subprocess.run([sys.executable, '-m', 'looplab.cli', 'run-mirror',
+                                '--src', str(cfg.src_root), '--dst', str(cfg.dst_root)],
+                               capture_output=True, text=True, timeout=120)
+    assert restarted.returncode == 0, restarted.stderr
+    fresh = MirrorConfig(src_root=cfg.src_root, dst_root=cfg.dst_root)
+    result = mirror.mirror_status(fresh)
+    assert result['stuck'] is None and result['last_pass']['completed'] and result['last_failure'] == before
+    monkeypatch.setenv('LOOPLAB_RUN_MIRROR_DST', str(cfg.dst_root))
+    api = TestClient(make_app(cfg.src_root)).get('/api/run-mirror').json()
+    assert api['last_failure'] == before and api['stuck'] is None
+    assert api['diagnostic']['state'] != 'degraded'
+
+
+def test_legacy_stuck_state_is_preserved_when_next_worker_recovers(tmp_path):
+    import looplab.events.run_mirror as mirror
+    cfg = _root(tmp_path)
+    state = mirror.load_state(cfg)
+    state['stuck'] = {'at': 123.0, 'run': 'r', 'detail': 'writing events.jsonl timed out'}
+    mirror.save_state(cfg, state)
+    assert mirror.mirror_status(cfg)['last_failure'] is None
+    mirror_pass(MirrorConfig(src_root=cfg.src_root, dst_root=cfg.dst_root))
+    status = mirror.mirror_status(cfg)
+    assert status['stuck'] is None
+    assert status['last_failure'] == {'kind': 'stuck', 'at': 123.0, 'run': 'r',
+                                       'detail': 'writing events.jsonl timed out'}
+
+
+def test_error_detail_retained_after_later_success_and_bounded(tmp_path, monkeypatch):
+    import looplab.events.run_mirror as mirror
+    cfg = _root(tmp_path)
+    original = mirror.mirror_run
+    def failure(*args, **kwargs):
+        return {'errors': [{'run': 'r', 'path': 'p' * 2000, 'error': 'e' * 2000}]}
+    monkeypatch.setattr(mirror, 'mirror_run', failure)
+    mirror_pass(cfg)
+    failure_record = mirror.mirror_status(cfg)['last_failure']
+    assert failure_record['kind'] == 'error' and len(failure_record['path']) == 1024
+    assert len(failure_record['detail']) == 1024
+    monkeypatch.setattr(mirror, 'mirror_run', original)
+    mirror_pass(MirrorConfig(src_root=cfg.src_root, dst_root=cfg.dst_root))
+    assert mirror.mirror_status(cfg)['last_failure'] == failure_record

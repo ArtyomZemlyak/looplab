@@ -658,8 +658,15 @@ def mirror_pass(cfg: MirrorConfig, *, state: Optional[dict] = None,
     bytes_bucket = _Bucket(cfg.max_bytes_per_s, clock=clock, sleep=sleep)
     ops_bucket = _Bucket(cfg.max_files_per_s, clock=clock, sleep=sleep)
     made_dirs: set = set()
+    # A pre-upgrade state may still carry the latest timeout; retain it before a clean pass clears it.
+    if not state.get("last_failure") and isinstance(state.get("stuck"), dict):
+        old = state["stuck"]
+        state["last_failure"] = {"kind": "stuck", "at": old.get("at"),
+                                 "run": str(old.get("run") or "")[:256],
+                                 "detail": str(old.get("detail") or "")[:1024]}
     state["last_pass_started_at"] = time.time()
     completed = False
+    unexpected_failure = None
     try:
         for run_dir in list_runs(cfg):
             try:
@@ -680,10 +687,27 @@ def mirror_pass(cfg: MirrorConfig, *, state: Optional[dict] = None,
         else:
             state.pop("stuck", None)
             completed = True
+    except Exception as exc:
+        # Preserve the original exception and propagation; the source-local state is best effort.
+        unexpected_failure = {"kind": "exception", "at": time.time(),
+                              "detail": f"{type(exc).__name__}: {exc}"[:1024]}
+        raise
     finally:
         report.seconds = clock() - t0
         state["pass"] = pass_no + 1
         state["last_pass_finished_at"] = time.time()
+        if unexpected_failure:
+            state["last_failure"] = unexpected_failure
+        elif report.stuck:
+            state["last_failure"] = {"kind": "stuck", "at": state["stuck"]["at"],
+                                     "run": str(state["stuck"]["run"])[:256],
+                                     "detail": str(report.stuck)[:1024]}
+        elif report.errors:
+            error = report.errors[-1]
+            state["last_failure"] = {"kind": "error", "at": time.time(),
+                                     "run": str(error.get("run") or "")[:256],
+                                     "path": str(error.get("path") or "")[:1024],
+                                     "detail": str(error.get("error") or "")[:1024]}
         if completed and not report.errors:
             state["last_successful_pass_finished_at"] = state["last_pass_finished_at"]
         state["last_pass"] = {"completed": completed, "error_count": len(report.errors),"seconds": round(report.seconds, 3), "stuck": report.stuck,
@@ -751,7 +775,8 @@ def mirror_status(cfg: MirrorConfig) -> dict:
             "passes": state.get("pass", 0), "last_pass": state.get("last_pass"),
             "last_pass_finished_at": state.get("last_pass_finished_at"),
             "last_successful_pass_finished_at": state.get("last_successful_pass_finished_at"),
-            "stuck": state.get("stuck"), "errors": state.get("errors", [])[-10:], "runs": runs}
+            "stuck": state.get("stuck"), "last_failure": state.get("last_failure"),
+            "errors": state.get("errors", [])[-10:], "runs": runs}
 
 
 # ------------------------------------------------------------------------------------- restore
