@@ -42,7 +42,7 @@ def _bounded(row: dict, max_bytes: int = 1200) -> dict:
     result = short(row)
     result['detail_truncated'] = True
     if size(result) > max_bytes:
-        result = {k: result[k] for k in ('experiment_id', 'memo_id', 'card_id', 'node_id', 'seq', 'published_seq', 'at_node', 'action_id', 'title', 'summary', 'scope_sha256', 'question_card_id', 'question_card_statement', 'quality_issues') if k in result}
+        result = {k: result[k] for k in ('experiment_id', 'memo_id', 'card_id', 'node_id', 'seq', 'published_seq', 'at_node', 'action_id', 'title', 'summary', 'scope_sha256', 'question_card_id', 'question_card_statement', 'quality_issues', 'status', 'durable_status', 'activity') if k in result}
         result['detail_truncated'] = True
     return result
 
@@ -56,6 +56,10 @@ def snapshot(rd: Path, expected_generation: str, offset: int = 0, limit: int = 2
     if not generation or generation != expected_generation.lower():
         raise HTTPException(409, 'run generation changed')
     state = fold(events)
+    from looplab.events.eval_occupancy import withheld_lifecycles
+    from looplab.serve.node_activity import public_node_activity
+    withheld = withheld_lifecycles(events)
+    activities = {nid: public_node_activity(state, nid, withheld=withheld) for nid in state.nodes}
     rows, health = read_journal(rd)
     experiments = experiments_of(rows, state.run_uid)
     from looplab.harness.research_quality import review_experiment
@@ -66,10 +70,13 @@ def snapshot(rd: Path, expected_generation: str, offset: int = 0, limit: int = 2
             if not isinstance(arm, dict):
                 continue
             nid = arm.get('node_id')
-            node = state.nodes.get(nid) if isinstance(nid, int) else None
+            local = arm.get('run_id') in (None, '', rd.name)
+            node = state.nodes.get(nid) if type(nid) is int and local else None
+            activity = activities.get(nid) if node is not None else None
             arms.append({'name': _text(name, 128), 'node_id': nid,
                          'run_id': _text(arm.get('run_id'), 256) or None,
-                         'node_status': getattr(node, 'status', None),
+                         'node_status': activity['status'] if activity else None,
+                         'node_durable_status': getattr(node, 'status', None), 'node_activity': activity,
                          'attempt': getattr(node, 'attempt', None),
                          'description': _text(arm.get('description'), 500), 'work_kind': _text(arm.get('work_kind'), 64) or None})
         scope = {k: v for k, v in exp.items() if k not in ('registration', 'superseded')}
@@ -106,7 +113,8 @@ def snapshot(rd: Path, expected_generation: str, offset: int = 0, limit: int = 2
     nodes = []
     for node in sorted(state.nodes.values(), key=lambda n: n.id):
         idea = node.idea
-        nodes.append({'node_id': node.id, 'attempt': node.attempt, 'status': node.status,
+        nodes.append({'node_id': node.id, 'attempt': node.attempt, 'status': activities[node.id]['status'],
+                      'durable_status': node.status, 'activity': activities[node.id],
                       'title': _text(node.operator, 256), 'hypothesis': _text(idea.hypothesis),
                       'rationale': _text(idea.rationale), 'parent_card_id': _text(idea.parent_card_id, 256) or None,
                       'parent_card_statement': _text(state.cards[idea.parent_card_id].statement, 500) if idea.parent_card_id in state.cards else '',
@@ -203,4 +211,5 @@ def snapshot(rd: Path, expected_generation: str, offset: int = 0, limit: int = 2
                         'truncated': versions['total'] > limit},
             'notes': ['The protocol and event journal are independent reads; refresh before action.',
                       'Links are declarations, not proof of a measured result or execution permission.',
-                      'Research questions in registrations are distinct from filed board cards.']}
+                      'Research questions in registrations are distinct from filed board cards.',
+                      'Node activity is recorded lifecycle evidence, not proof the engine is currently running; check run progress.']}

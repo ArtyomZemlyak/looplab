@@ -346,3 +346,39 @@ def test_export_publication_adapter_is_explicit_and_never_sends(tmp_path, monkey
         assert response.status_code == 200, response.text
         assert response.json()['publication_adapter'] == {'state': 'configured', 'adapter': 'manual_markdown', 'destination_label': 'Team research', 'operation': 'manual download only'}
     assert {path.name: path.read_bytes() for path in rd.iterdir()} == before
+
+
+def test_map_activity_distinguishes_active_queued_legacy_withheld_and_terminal(tmp_path, monkeypatch):
+    monkeypatch.setenv('LOOPLAB_UI_ANONYMOUS', '1')
+    monkeypatch.setenv('LOOPLAB_AGENT_EVENTS', '0')
+    monkeypatch.delenv('LOOPLAB_UI_TOKEN', raising=False)
+    monkeypatch.delenv('LOOPLAB_UI_REQUIRE_AUTH', raising=False)
+    rd = tmp_path / 'r'; rd.mkdir()
+    store = EventStore(rd / 'events.jsonl')
+    store.append('run_started', {'run_id': 'r', 'run_uid': 'u', 'task_id': 't', 'goal': 'g', 'direction': 'max'})
+    gen = run_generation_token(store.read_all())
+    for node_id in range(5):
+        store.append('node_created', {'node_id': node_id, 'operator': 'fit', 'parent_ids': [],
+                                      'eval_start_boundary': node_id != 2, 'idea': {'operator': 'fit'}})
+    store.append('node_eval_started', {'node_id': 0, 'generation': 0})
+    store.append('node_eval_started', {'node_id': 3, 'generation': 0})
+    store.append('eval_attempt_withheld', {'node_id': 3, 'generation': 0})
+    store.append('node_evaluated', {'node_id': 4, 'generation': 0, 'metric': .5})
+    row = {'amendment_id': 'a', 'version': 1, 'kind': 'experiment', 'run_uid': 'u', 'generation': gen,
+           'at_event_seq': 0, 'payload': {'experiment_id': 'e', 'title': 'test', 'arms': {
+               'local': {'node_id': 0}, 'external': {'node_id': 0, 'run_id': 'different-run'}}}}
+    (rd / 'protocol_amendments.jsonl').write_text(json.dumps(row) + '\n')
+    before = (rd / 'events.jsonl').read_bytes()
+    with TestClient(make_app(tmp_path)) as client:
+        first = client.get('/api/runs/r/research-map', params={'expected_generation': gen, 'limit': 2}).json()
+        later = client.get('/api/runs/r/research-map', params={'expected_generation': gen, 'offset': 2, 'limit': 3}).json()
+        nodes = first['nodes']['items'] + later['nodes']['items']
+        assert [n['status'] for n in nodes] == ['evaluating', 'queued', 'pending', 'queued', 'evaluated']
+        assert nodes[0]['durable_status'] == 'pending' and nodes[0]['activity']['evidence'] == 'node_eval_started'
+        assert nodes[3]['activity']['evidence'] == 'eval_attempt_withheld'
+        assert nodes[4]['durable_status'] == 'evaluated'
+        arms = {arm['name']: arm for arm in first['experiments']['items'][0]['arms']}
+        assert arms['local']['node_status'] == 'evaluating' and arms['local']['node_durable_status'] == 'pending'
+        assert arms['external']['node_status'] is None and arms['external']['node_activity'] is None
+        assert any('not proof the engine' in n for n in first['notes'])
+    assert (rd / 'events.jsonl').read_bytes() == before

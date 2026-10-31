@@ -76,7 +76,7 @@ Copy `skills/looplab-research/` to an agent's configured skills directory, or pa
 
 ## Research map
 
-`GET /api/runs/{run_id}/research-map?expected_generation=...` and MCP `research_map` expose registered questions, arm references and report history in bounded pages. The CLI `looplab research-map RUN_DIR --generation TOKEN` uses the same projection. A registration is not a measured result or a permission; protocol and event sources are separate reads.
+`GET /api/runs/{run_id}/research-map?expected_generation=...` and MCP `research_map` expose registered questions, arm references and report history in bounded pages. The CLI `looplab research-map RUN_DIR --generation TOKEN` uses the same projection. Node and local-arm `status`/`node_status` use the recorded activity lifecycle; `durable_status`/`node_durable_status` retain the folded terminal-or-pending value, and `activity` provides evidence and attempt. An evaluating record alone does not prove the engine is currently running: check run progress. A registration is not a measured result or a permission; protocol and event sources are separate reads.
 
 ## Notifications and optional handoffs
 
