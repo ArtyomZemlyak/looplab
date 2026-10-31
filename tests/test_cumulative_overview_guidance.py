@@ -54,6 +54,34 @@ def test_report_context_finds_new_terminal_event_and_real_reference_errors_then_
         assert after['report_context']['previous_overview_seq'] == response.json()['event_seq']
         assert not {w['code'] for w in after['report_context']['warnings']} & {'terminal_after_overview', 'invalid_report_reference'}
         assert after['research']['campaign_overview']['content']['summary'] == 'Earlier result and re-evaluation'
+        # An updated overview alone is not a complete ordinary report: the exact problem observed
+        # in production must reach the agent via both briefing and report guidance.
+        missing = after['research']['quality']['report_fields_empty']
+        assert {'verdict', 'champion_summary', 'key_metrics'} <= set(missing)
+        assert after['report_context']['report_fields_empty'] == missing
+        assert {'verdict', 'champion_summary', 'key_metrics'} <= {
+            w['field'] for w in after['report_context']['warnings'] if w['code'] == 'report_field_empty'}
+        version = c.get(f"/api/runs/r/report/versions/{response.json()['event_seq']}").json()
+        assert not version['content'].get('verdict')
+        corrected = dict(updated, verdict='No reliable winner yet', champion_summary='No justified champion: test identity unverified',
+            what_worked=['Recorded Recall@20 after retry is 0.45'], what_didnt=['No matched comparison'],
+            learnings=['The retry is measured but not independently matched'],
+            next_directions=['Compare against a control on the same test'], caveats=['Cohort and policy remain unverified'],
+            key_metrics={'metrics': [{'key': 'Recall@20', 'label': 'Recall@20', 'test_id': 'test'}],
+                         'nodes': [{'node_id': 0, 'label': 'Retried model', 'node_generation': 1}]})
+        corrected_response = c.post('/api/runs/r/commands', headers={'Idempotency-Key': 'report-update-corrected'}, json={
+            'type': 'report_generated', 'data': {'content': corrected}, 'expected_generation': gen})
+        assert corrected_response.status_code == 200 and corrected_response.json()['status'] == 'succeeded'
+        final = c.get('/api/runs/r/research-briefing', params=args).json()
+        assert final['report_context']['current_report_seq'] == corrected_response.json()['event_seq']
+        assert final['research']['quality']['report_fields_empty'] == []
+        assert final['report_context']['report_fields_empty'] == []
+        assert final['research']['campaign_overview']['content']['report_seqs'] == [old.seq]
+        assert final['research']['campaign_overview']['content']['summary'] == 'Earlier result and re-evaluation'
+        saved = c.get(f"/api/runs/r/report/versions/{corrected_response.json()['event_seq']}").json()['content']
+        assert saved['key_metrics']['metrics'][0]['key'] == 'Recall@20'
+        assert saved['key_metrics']['nodes'][0]['node_generation'] == 1
+        assert final['report_context']['recent_terminal_events'][0]['metric'] is None
         assert c.get('/api/runs/r/research-briefing', params={'expected_generation': '0' * 64}).status_code == 409
 
 
@@ -101,3 +129,46 @@ def test_report_context_is_bounded_without_guessing_missing_attempt(tmp_path):
     assert len(context['recent_terminal_events']) == 10
     assert all(len(event['extra_metrics']) <= 8 and event['recorded_attempt'] is None for event in context['recent_terminal_events'])
     assert len(json.dumps(context).encode()) < 64 * 1024
+
+
+def test_empty_metric_reference_envelope_is_not_reported_as_filled():
+    from looplab.harness.research_quality import report_fields_empty
+    assert 'key_metrics' in report_fields_empty({'key_metrics': {'metrics': [], 'nodes': [], 'baseline_node_id': None}})
+    assert 'key_metrics' in report_fields_empty({'key_metrics': {'metrics': [{'key': 'm'}], 'nodes': []}})
+    assert 'key_metrics' not in report_fields_empty({'key_metrics': {'metrics': [{'key': 'm'}], 'nodes': [{'node_id': 0}]}})
+
+
+def test_authoring_contract_points_to_post_publication_readback():
+    from looplab.harness.report_guidance import REPORT_INSTRUCTION
+    from pathlib import Path
+    assert 'report_fields_empty' in REPORT_INSTRUCTION and 'saved report' in REPORT_INSTRUCTION
+    guide = (Path(__file__).parents[1] / 'looplab/harness/external-research-workflow.md').read_text()
+    for field in ('verdict', 'champion_summary', 'what_worked', 'what_didnt', 'learnings', 'next_directions', 'caveats', 'key_metrics'):
+        assert f'`{field}`' in guide
+    assert 'extra_metrics' in guide and 'metric-bindings' in guide and 'report_fields_empty' in guide
+
+
+def test_engineering_only_report_is_advisory_without_fabricated_science(tmp_path, monkeypatch):
+    monkeypatch.setenv('LOOPLAB_UI_ANONYMOUS', '1')
+    monkeypatch.setenv('LOOPLAB_AGENT_EVENTS', '0')
+    monkeypatch.delenv('LOOPLAB_UI_TOKEN', raising=False)
+    monkeypatch.delenv('LOOPLAB_UI_REQUIRE_AUTH', raising=False)
+    monkeypatch.setattr(resources, 'default_gpu_host_lease_path', lambda: tmp_path / 'fixture-lease')
+    rd = tmp_path / 'r'; rd.mkdir()
+    (rd / 'config.snapshot.json').write_text(Settings(backend='toy', external_harness=True).model_dump_json())
+    store = EventStore(rd / 'events.jsonl')
+    store.append('run_started', {'run_id': 'r', 'run_uid': 'u', 'task_id': 't', 'goal': 'repair', 'direction': 'min'})
+    gen = run_generation_token(store.read_all())
+    store.append('node_created', {'node_id': 0, 'operator': 'repair', 'parent_ids': [], 'idea': {'operator': 'repair'}})
+    store.append('node_failed', {'node_id': 0, 'reason': 'configuration error'})
+    with TestClient(make_app(tmp_path)) as client:
+        response = client.post('/api/runs/r/commands', headers={'Idempotency-Key': 'technical-report'}, json={
+            'type': 'report_generated', 'data': {'content': {'headline': 'Configuration repair',
+                'verdict': 'No scientific result or champion: setup failed',
+                'caveats': ['No measurements were produced']}}, 'expected_generation': gen})
+        assert response.status_code == 200 and response.json()['status'] == 'succeeded'
+        body = client.get('/api/runs/r/research-briefing', params={'expected_generation': gen}).json()
+        assert 'key_metrics' in body['report_context']['report_fields_empty']
+        saved = client.get(f"/api/runs/r/report/versions/{response.json()['event_seq']}").json()['content']
+        assert 'key_metrics' not in saved and 'no scientific result' in saved['verdict'].lower()
+        assert not body['research']['experiments']['items']

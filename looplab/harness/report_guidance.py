@@ -16,7 +16,9 @@ REPORT_INSTRUCTION = (
     'current result report. For each important direction explain question, control, measured result, '
     'meaning, limitations and decision; retain negative results, cite actual evidence, and give a '
     'next discriminating question with possible outcomes. Review denominators, units, captions and '
-    'language. The agent authors the analysis; these checks do not verify scientific truth or gate GPU work.'
+    'language. After publication, read the saved report version and fresh briefing: review all eight '
+    'report_fields_empty, references and meaning; explain honestly when a field is inapplicable. '
+    'The agent authors the analysis; these checks do not verify scientific truth or gate GPU work.'
 )
 
 
@@ -85,7 +87,16 @@ def snapshot(rd: Path, generation: str) -> dict:
             if seq not in report_seqs:
                 warnings.append({'code': 'invalid_report_reference', 'report_seq': seq,
                                  'action': 'Use event sequence numbers of existing report_generated versions, not node IDs.'})
+    from looplab.harness.research_quality import report_fields_empty
+    current_report = state.report if isinstance(state.report, dict) else None
+    empty_fields = report_fields_empty(current_report) if current_report else []
+    if current_report:
+        warnings.extend({'code': 'report_field_empty', 'field': field,
+                         'action': 'Review the saved current report and fill or explain non-applicability; see the canonical workflow.'}
+                        for field in empty_fields)
     return {'generation': generation, 'event_seq': events[-1].seq,
+            'current_report_seq': current_report.get('published_seq') if current_report else None,
+            'report_fields_empty': empty_fields if current_report else None,
             'instruction': REPORT_INSTRUCTION, 'workflow': GUIDE.replace('{run_id}', quote(rd.name, safe='')),
             'previous_overview_seq': overview_event.seq if overview_event else None,
             'previous_overview_api': f'{root}/report/versions/{overview_event.seq}' if overview_event else None,

@@ -220,7 +220,7 @@ def run_obligations(task, settings, *, generation: str) -> dict:
         "research_workflow": RESEARCH_WORKFLOW,
         "report_authoring": {"context": "/api/runs/{run_id}/research-briefing",
                              "canonical_workflow": RESEARCH_WORKFLOW["guide"],
-                             "instruction": "Update the cumulative scientific overview after meaningful terminal results; follow the report rubric in the canonical workflow. Advisory, not a new admission gate."},
+                             "instruction": "Update the cumulative scientific overview after meaningful terminal results; follow the report rubric in the canonical workflow. After publication read the saved report and fresh briefing, including report_fields_empty and references; explain inapplicable fields. Advisory, not a new admission gate."},
         "reasoning_owner": "external_agent" if external else "looplab",
         "output_language": {
             "language": getattr(settings, "output_language", "auto"),

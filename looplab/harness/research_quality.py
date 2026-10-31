@@ -2,6 +2,21 @@
 from __future__ import annotations
 
 
+REPORT_FIELDS = ('verdict', 'champion_summary', 'what_worked', 'what_didnt',
+                 'learnings', 'next_directions', 'caveats', 'key_metrics')
+
+
+def report_fields_empty(report: dict) -> list[str]:
+    """Presence only: a metrics envelope needs both actual metric and node references."""
+    report = report if isinstance(report, dict) else {}
+    metrics = report.get('key_metrics')
+    return [field for field in REPORT_FIELDS if not (
+        bool(metrics.get('metrics')) and bool(metrics.get('nodes'))
+        if field == 'key_metrics' and isinstance(metrics, dict) else
+        False if field == 'key_metrics' else bool(report.get(field))
+    )]
+
+
 def project(state, experiments: dict) -> dict:
     research = [m for m in (state.research or []) if isinstance(m, dict)]
     linked_sources = 0
@@ -29,7 +44,7 @@ def project(state, experiments: dict) -> dict:
     engineering = {nid for nid, kinds in work.items() if kinds == {'engineering_recovery'}}
     applicable_nodes = [n for n in nodes if getattr(n, 'id', None) not in engineering]
     unclassified = [n for n in nodes if getattr(n, 'id', None) not in work]
-    fields = ('verdict', 'champion_summary', 'what_worked', 'what_didnt', 'learnings', 'next_directions', 'caveats', 'key_metrics')
+    empty = report_fields_empty(report)
     return {
         'memo_count': len(research),
         'memos_with_sources': sum(bool(m.get('sources')) for m in research),
@@ -48,8 +63,8 @@ def project(state, experiments: dict) -> dict:
         'registered_experiments': len(exp),
         'registrations_with_questions': sum(bool(e.get('question')) for e in exp),
         'registrations_with_question_card': sum(bool(e.get('question_card_id')) for e in exp),
-        'report_fields_present': [f for f in fields if report.get(f)],
-        'report_fields_empty': [f for f in fields if not report.get(f)],
+        'report_fields_present': [f for f in REPORT_FIELDS if f not in empty],
+        'report_fields_empty': empty,
         'interpretation': 'Counts are descriptive only. A source link does not verify a claim; engineering work may not need literature or a separate question. No quality score or admission gate is implied.',
     }
 

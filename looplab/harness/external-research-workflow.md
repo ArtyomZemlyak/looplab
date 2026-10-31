@@ -104,6 +104,41 @@ Register a `model_producer` relationship with the planned producer node, without
 
 A `report_generated` content may include `campaign_overview` with `summary`, `recommendation`, `recommendation_limits`, `what_worked`, `what_didnt`, `learnings`, `next_directions`, `caveats`, and `report_seqs` (event sequence references). Publish this as a current evidence-backed synthesis; the ordinary report body remains the latest local result. The research map presents the most recent published overview even when a later result omits it, with the original publication sequence and node watermark. An older overview can be stale and is not automatically updated; read its provenance and refresh it after meaningful results. Versions remain in the existing journal, and missing overview is stated explicitly. The export includes the latest overview and selected historical results.
 
+### Structured report and post-publication readback
+
+The cumulative `campaign_overview` and the ordinary report are separate parts of the same
+`report_generated` content. For a scientific report, review these eight ordinary fields:
+
+- `verdict`: the supported decision or why the evidence does not allow one.
+- `champion_summary`: the leading measured option and its scope, or why no champion is justified.
+- `what_worked` and `what_didnt`: distinct lists of measured positive and negative or ambiguous findings.
+- `learnings`: findings that change understanding, with their limitations.
+- `next_directions`: questions, controls and discriminating outcomes, not just task names.
+- `caveats`: test, cohort, policy, uncertainty and other material limitations.
+- `key_metrics`: references to recorded metric keys and nodes, not new numbers. For example,
+  `{"metrics":[{"key":"Recall@20","label":"Recall@20","role":"primary","test_id":"heldout"}],
+  "nodes":[{"node_id":3,"label":"Control","node_generation":0}],"baseline_node_id":3}`.
+  Use real keys, test IDs, nodes and attempts from this run. A node's `metric` can be null while
+  its `extra_metrics` contains the recorded key; never fabricate a scalar or a champion. If no
+  measured comparison or champion exists, say why in the relevant narrative; keep unavailable
+  references absent, rather than inventing them or filling lists with meaningless boilerplate.
+
+After the command receipt succeeds, read the exact saved version at
+`GET /api/runs/{run_id}/report/versions/{event_seq}` and refresh
+`GET /api/runs/{run_id}/research-briefing?expected_generation=...`. Compare the saved version and
+`report_context.current_report_seq` with the receipt: another writer or a refused publication can
+make a different version current. Review `research.quality.report_fields_empty` (also surfaced in
+`report_context.report_fields_empty` and its warnings), overview warnings, and any intake notices.
+For a duplicate/no-op or uncertain receipt, inspect the actual receipt/current history rather than
+assuming a new event. Empty fields are an advisory prompt, not proof of a defect: fill applicable
+fields from evidence or explain non-applicability in the saved prose. Read referenced report versions,
+node/attempt evidence, and `report/versions/{seq}/metric-bindings?expected_generation=...` when
+`test_id` is available; an unchecked/missing binding and matching numbers do not establish the same
+cohort, GT or policy. Check conclusions, meaningful captions, units, denominators and negative
+results yourself. Correct an actual mistake through the ordinary report command with a new intent;
+do not automatically publish duplicates. This review creates no GPU, training, or report gate and
+requires no extra scientific card for a technical retry.
+
 The report's research map offers a guided memo draft and an advisory review. The draft can publish through the ordinary `research_completed` command; technical recovery is allowed to omit scientific literature. The preview checks presence and explicit links only, never the truth of a claim. A command response may be pending or unknown; inspect its receipt and reuse the same exact intent rather than inventing another result.
 
 The research map also shows memo claims, their recorded source and experiment links, and submitted novelty/foresight/strategy reasons. Recorded verifier labels and URL links are evidence pointers, not proof of a scientific claim. The decision journal has its own health receipt; incomplete history must not be treated as an empty history.

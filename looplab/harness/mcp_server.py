@@ -1420,8 +1420,9 @@ def _campaign_tools(mcp, api, ToolAnnotations) -> None:
         """Publish the final report (report_generated content), the run-end reviews
         ({phase_id, decision, reason, evidence?}) and finalize the run, after reading the finish
         gates. Before authoring, read research_briefing.report_context and the canonical workflow
-        report rubric; update the cumulative overview with evidence and limitations. This guidance
-        adds no gate. dry_run=true shows the gates and plan. Same-key repeat resumes."""
+        report rubric; update the cumulative overview with evidence and limitations. After publication,
+        read the saved report and fresh briefing; review report_fields_empty, references and meaning.
+        Explain inapplicability rather than inventing evidence. This guidance adds no gate. dry_run=true shows the gates and plan. Same-key repeat resumes."""
         return composite.finish_run(api, run_id, expected_generation, key=key, report=report,
                                     reviews=reviews, reason=reason, dry_run=dry_run)
 
