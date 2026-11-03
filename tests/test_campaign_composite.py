@@ -268,3 +268,34 @@ def test_submit_experiment_forwards_artifact_kind_and_evaluated_uses(tmp_path, m
                                           code='print(2)')
     assert not ordinary['ok']
     assert 'novelty' in str(ordinary)
+
+
+def test_submit_experiment_materializes_external_pre_stages(tmp_path, monkeypatch):
+    root, rd, store, api, server, spawns = _setup(tmp_path, monkeypatch)
+    from looplab.adapters.repo_task import EvalSpec, RepoTask
+    src = tmp_path / 'src'
+    src.mkdir()
+    task = RepoTask(id='repo-pipeline', direction='max', editable_path=str(src),
+                    edit_surface=['*.py', '*.json'],
+                    eval=EvalSpec(command=['python', 'score.py'],
+                                  metric={'kind': 'stdout_json', 'key': 'metric'}))
+    (rd / 'task.snapshot.json').write_text(task.model_dump_json())
+    generation = run_generation_token(store.read_all())
+    idea = {'operator': 'inject', 'rationale': 'train then score', 'concepts': ['training']}
+    stages = [{'name': 'train', 'command': ['python', 'train.py'], 'timeout': 60,
+               'expect': {'files': ['model.txt']}}]
+    preview = composite.submit_experiment(
+        api, 'camp', generation, key='pipeline-preview', idea=idea,
+        code='print(1)', pre_stages=stages, dry_run=True)
+    assert preview['ok'] and 'operator score' in str(preview['steps'][-1]['plan'])
+    result = composite.submit_experiment(
+        api, 'camp', generation, key='pipeline', idea=idea,
+        code='print(1)', pre_stages=stages)
+    assert result['ok'], result
+    injected = next(e for e in reversed(store.read_all()) if e.type == 'inject_node')
+    assert 'pre_stages' not in injected.data
+    manifest = json.loads(injected.data['files']['looplab_stages.json'])
+    assert manifest == {'stages': stages}
+    schemas = {tool.name: tool.model_dump(by_alias=True)['inputSchema']['properties']
+               for tool in anyio.run(build_server(api).list_tools)}
+    assert 'pre_stages' in schemas['submit_experiment']

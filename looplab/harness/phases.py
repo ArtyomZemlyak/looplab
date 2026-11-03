@@ -130,7 +130,7 @@ PHASES: tuple[Phase, ...] = (
            "PUT /api/runs/{run_id}/config"),
           ("strategist_system", "tool_strategist_system")),
     Phase("stages", "StageSpec", "adapters/repo_developer.py",
-          "Design prep/train/eval stages when the task benefits from them.",
+          "Design prep/train stages with inject_node.pre_stages (or looplab_stages.json); the operator owns the final score and metric.",
           ("GET /api/runs/{run_id}/config",), ("command:inject_node",),
           ("repo_developer_system_intro", "repo_developer_system_body")),
     Phase("implementation", "Node/SourceSnapshot", "agents/roles.py::LLMDeveloper; adapters/repo_developer.py",

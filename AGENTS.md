@@ -31,11 +31,13 @@ and `looplab replay RUN_DIR`; read `docs/guide/external-harness.md` before steer
 
 The agent may decide whether a node needs a separate stages declaration or a detailed plan.
 If the operator supplied `cmd.stages`, that pipeline wins. For a single `cmd.command`, an
-agent authored `looplab_stages.json` can declare preceding work only when the task's editable
-surface permits that file. Never duplicate training already performed inside an opaque score
-command. Never edit protected scoring files, manufacture a metric, or treat a partial checkpoint
-as a completed run. LoopLab owns patch validation, stage execution, score provenance, event
-history and replay.
+agent can pass `pre_stages` to `submit_experiment` (or `inject_node`): the server validates them
+as preceding work and materializes `looplab_stages.json`; writing that JSON directly is also
+supported. Both forms require the task's editable surface to permit the manifest. LoopLab appends
+the operator's protected score and its genuine metric reader. Never duplicate training already
+performed inside an opaque score command. Never edit protected scoring files, manufacture a metric,
+or treat a partial checkpoint as a completed run. LoopLab owns patch validation, stage execution,
+score provenance, event history and replay.
 
 An `inject_node` command receipt marked `succeeded` proves admission, not successful
 training. For a failed node, read current generation/attempt-bound logs before

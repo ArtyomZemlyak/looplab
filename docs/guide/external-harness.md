@@ -744,9 +744,15 @@ The normal control cycle is:
    details can lag or lead state: comparison requires coherent current result evidence,
    not merely the presence of a parent score or matching input keys.
 2. Decide whether a proposal, stage split and plan help. The operator's declared
-   `cmd.stages` wins. For a single command, an agent may put preceding stages in
-   `looplab_stages.json` only if `edit_surface` allows that JSON path; LoopLab appends
-   the protected score command.
+   `cmd.stages` wins. For a single command, pass preceding stages as
+   `submit_experiment(pre_stages=[{"name":"train","command":["python","train.py"],
+   "expect":{"files":["model.safetensors"]}}])`, or write the equivalent
+   `looplab_stages.json`. The server applies the same stage validator to both forms,
+   requires `edit_surface` to permit the manifest, and appends the operator's protected
+   score command. `pre_stages` cannot name or replace the final `score`. `dry_run`
+   shows the preceding chain followed by `operator score`. A regular candidate must
+   produce the genuine metric through `eval.metric`; use `node_kind="artifact"` only
+   for an intentionally unranked preparation job, not to hide a scored experiment.
    Enabled `deep_research_every` requires a current `research_completed` memo;
    enabled `track_hypotheses` requires a nonempty candidate hypothesis statement;
    injection creates a fresh Card and does not attach a supplied `card_id`.

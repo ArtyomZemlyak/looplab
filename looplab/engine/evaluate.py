@@ -1413,11 +1413,11 @@ def _workdir_manifest_digest(node) -> str:
     `canary_already_passed` reads off the FINISHED rows, is this digest less the activation manifest
     (`_canary_code_digest`).
 
-    `attempt` in it makes every stamp stale after every `node_reset` — the only thing that sets
-    `rerun_stage` — and the reuse gate itself is off (`_eval_prepare_workdir`): a lifecycle's OWN
-    stamp matched on its re-dispatch after a pause or a crash and vouched for stages that never ran
-    there. Taking `attempt` out revived a path that trusted whatever was on disk and was reverted;
-    doc 68 68.3e names what reuse must prove first.
+    `attempt` makes a reset's previous-lifecycle stamp differ, as it must. `_reset_reuse_start`
+    validates the previous manifest explicitly, then requires durable successful stage records,
+    matching current input keys and unchanged declared outputs before stamping the new lifecycle.
+    Removing `attempt` instead would trust whatever happened to be on disk; doc 68 68.3e records
+    why that shortcut was refused.
 
     Module-level on purpose: `_evaluate` takes a lazy `import hashlib` further down, which would make
     `hashlib` an unbound function-local for any closure defined above it.
@@ -4675,60 +4675,100 @@ class EvaluateMixin:
             pipeline_stages=self._resolved_stages(a.node, a.workdir),
             enforce_drift=(getattr(self, "eval_trust_mode", "ratify_freeze") == "ratify_freeze_drift"))
 
+    def _protocol_inputs_changed_since(self, a: "EvalAttempt", seq: int) -> bool:
+        """Whether a task/files amendment landed after a completed stage."""
+        path = self.run_dir / "protocol_amendments.jsonl"
+        if not path.is_file():
+            return getattr(a.node, "protocol_version", None) is not None
+        try:
+            uid = next((e.data.get("run_uid") for e in a.events_at_start
+                        if e.type == "run_started" and isinstance(e.data, dict)
+                        and e.data.get("run_uid")), None)
+            with open(path, "rb") as fh:
+                for line in fh:
+                    import json
+                    row = json.loads(line)
+                    if not isinstance(row, dict) or (uid is not None and row.get("run_uid") != uid):
+                        continue
+                    if row.get("kind") not in ("task", "files"):
+                        continue
+                    at_seq = row.get("at_event_seq")
+                    if type(at_seq) is not int:
+                        return True
+                    if at_seq > seq:
+                        return True
+        except (OSError, ValueError, TypeError):
+            return True
+        return False
+
+    def _reset_reuse_start(self, a: "EvalAttempt"):
+        """The reset stage only while every preceding stage is proved complete and unchanged."""
+        from looplab.events.types import EV_STAGE_FINISHED
+        from looplab.runtime.stage_identity import reuse_refusal
+
+        stage = getattr(a.node, "rerun_stage", None)
+        if not stage or a.generation < 1 or not a.workdir.is_dir() or a._superseded_marker.exists():
+            return None
+        previous_node = a.node.model_copy(update={"attempt": a.node.attempt - 1})
+        if not a.workdir_matches(previous_node):
+            return None
+        stages = self._resolved_stages(a.node, a.workdir)
+        names = [str(s.get("name") or "") for s in stages]
+        if stage not in names:
+            return None
+        index = names.index(stage)
+        retained = list(getattr(a.node, "stages", None) or [])
+        if index == 0 or len(retained) != index:
+            return None
+        if [str(row.get("name") or "") for row in retained] != names[:index]:
+            return None
+        if any(row.get("status") != "ok" for row in retained):
+            return None
+        records = {}
+        for event in a.events_at_start:
+            data = event.data if isinstance(event.data, dict) else {}
+            if (event.type == EV_STAGE_FINISHED and data.get("node_id") == a.node_id
+                    and data.get("generation", a.generation) < a.generation
+                    and data.get("status") != "reused"):
+                records[str(data.get("name") or "")] = (event.seq, data)
+        cwd = (self._eval_spec or {}).get("cwd") if isinstance(self._eval_spec, dict) else None
+        key = self._stage_key_fn(a.workdir, cwd=cwd)
+        if key is None:
+            return None
+        for i, name in enumerate(names[:index]):
+            seq, candidate = records.get(name, (None, None))
+            if candidate is None or candidate.get("status") != "ok" or seq is None:
+                return None
+            if self._protocol_inputs_changed_since(a, seq):
+                return None
+            current_key, _reason = key(stages, i)
+            if reuse_refusal(current_key, candidate, a.workdir) is not None:
+                return None
+        return stage
+
     def _eval_prepare_workdir(self, a: "EvalAttempt") -> None:
-        """PREPARE_WORKDIR — the node directory, materialized afresh for every lifecycle (reuse
-        across a stage-scoped reset is OFF, doc 68 68.3e — see `_reuse` below), stamped with its
-        manifest; then the build delta and the metrics-sidecar binding. The stamp/superseded-marker
-        helpers live on `EvalAttempt`."""
+        """PREPARE_WORKDIR — safely reuse a reset stage's prefix, else materialize afresh."""
         a.workdir = self.run_dir / "nodes" / f"node_{a.node_id}"
-        # Phase 2 stage-scoped re-run was meant to REUSE the existing workdir (earlier stages'
-        # artifacts — the checkpoint `train` wrote) instead of re-seeding it, which wipes them; that
-        # reuse is off until its precondition can be proven (below).
         a._superseded_marker = a.workdir / ".looplab-superseded"
-        # Stage reuse is the ONE path that evaluates a workdir it did not just build, so it must
-        # prove the bytes on disk are the manifest the folded node claims. `node_repaired` is
-        # appended BEFORE the repaired files are written (both under the same attempt), so a
-        # process death in that window leaves state claiming the repair while the workdir still
-        # holds the pre-repair source. A later stage-scoped reset then sets `rerun_stage` without
-        # any superseded marker (only the live process writes one, and it died), and reuse would
-        # skip materialization and score the OLD bytes as if they were the repair.
-        # The stamp closes that: it is written only after the files are on disk, so a crash in the
-        # gap leaves it naming the previous manifest and reuse is refused. Fail-closed by
-        # construction — a missing/unreadable/mismatched stamp just forces the full materialize
-        # that every other entry path already does, costing artifacts, never correctness.
         a._manifest_stamp = a.workdir / ".looplab-manifest"
-        # …AND THE REUSE ITSELF IS OFF (doc 68 68.3e), because the stamp cannot carry it. The stamp
-        # says the workdir HOLDS this manifest's files; reuse needs every stage before `rerun_stage`
-        # to have COMPLETED here under it, and nothing on disk says so. With `attempt` in the digest
-        # a reset's first dispatch never matches (the feature has been dead since 2026-07-28), and
-        # the only dispatch that did match was the WRONG one: a lifecycle this method had rebuilt and
-        # stamped, re-dispatched after a pause or a crash before its stages ran — its `train` read as
-        # `reused` and its `score` scored a checkpoint that was not there (critic 2026-09-29, driven:
-        # 0.1 where the same code scored 0.9). Every lifecycle is materialized afresh until reuse
-        # can prove its precondition from the fold; the stamp keeps its other reader, settled
-        # recovery, which asks only whether the files are this manifest's.
-        _reuse = False
+        _reuse = self._reset_reuse_start(a)
         if not _reuse:
-            seed = self._materialize(a.node, a.workdir) # seed tree -> node edits -> task assets
-            # Attempt-local, never a shared seeder cache or a terminal-time source
-            # read. Legacy/patched materializers returning None mean unobserved.
+            seed = self._materialize(a.node, a.workdir)
             a.base_revision = ({**seed, "node_id": a.node_id, "generation": a.generation}
                                if isinstance(seed, dict) else None)
-            a.stamp_workdir(a.node)                # the workdir now IS this manifest
-        # THE BUILD DELTA, here rather than on the eval-start receipt: the question is about
-        # BYTES ON DISK, and until the line above there are none. Fold-ignored and diagnostic,
-        # so a concurrent eval task may append it (invariant #1); best-effort throughout, so it
-        # can never cost this node its evaluation.
+        else:
+            for event in reversed(a.events_at_start):
+                data = event.data if isinstance(event.data, dict) else {}
+                if (data.get("node_id") == a.node_id and data.get("generation") == a.generation - 1
+                        and event.type in ("node_evaluated", "node_failed")):
+                    provenance = data.get("metric_provenance") or {}
+                    revision = provenance.get("base_revision") if isinstance(provenance, dict) else None
+                    a.base_revision = revision if isinstance(revision, dict) else None
+                    break
+        a.stamp_workdir(a.node)
         self._record_node_build_delta(a.node)
-        if not _reuse:
-            # A stage-scoped re-run whose workdir was GONE has nothing to reuse — the re-seed just
-            # wiped any artifacts. Skipping earlier stages now would run the restarted stage against
-            # MISSING inputs, so drop the start_stage and re-run the FULL pipeline instead.
-            if a.node.rerun_stage:
-                a.node.rerun_stage = None
-        # Bind mutable TensorBoard/metric sidecars to this exact lifecycle before launching any
-        # user code.  A reset can reuse the node directory (stage restart), so the serving layer
-        # also filters points by this start time instead of relabelling an older curve.
+        if not _reuse and a.node.rerun_stage:
+            a.node.rerun_stage = None
         try:
             begin_metrics_attempt(a.workdir, a.generation)
         except Exception:  # noqa: BLE001 - telemetry must never block the evaluation itself

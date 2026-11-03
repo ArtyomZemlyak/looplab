@@ -163,7 +163,8 @@ def submit_experiment(api, run_id: str, expected_generation: str, *, key: str, i
                       dry_run: bool = False, code_from: Optional[dict] = None,
                       parent_ids: Optional[list] = None,
                       parent_generations: Optional[dict] = None,
-                      node_kind: Optional[str] = None, uses: Optional[list[int]] = None) -> dict:
+                      node_kind: Optional[str] = None, uses: Optional[list[int]] = None,
+                      pre_stages: Optional[list[dict]] = None) -> dict:
     """`code_from` (doc 79 §4) is the run-worktree / patch / foreign-branch alternative to
     `files`/`code`/`deleted` — exactly one of the two. It is PREVIEWED through the same route the
     intake converts it with (`POST .../code/overlay`, paths and sizes only) BEFORE anything is
@@ -209,9 +210,11 @@ def submit_experiment(api, run_id: str, expected_generation: str, *, key: str, i
             missing.append(code_from_shape_error(code_from))
         else:
             code_from = normalize_code_from(code_from)
-    elif not (files or code or deleted):
+    elif not (files or code or deleted or pre_stages):
         missing.append("code_from, or files or code (an external run evaluates ready-made "
                        "candidates; code_from={'worktree': name} is the default path)")
+    if pre_stages is not None and (not isinstance(pre_stages, list) or not pre_stages):
+        missing.append("pre_stages must be a non-empty list of preceding stage objects")
     if research_question is not None:
         if not isinstance(research_question, dict) or not research_question.get("id"):
             missing.append("research_question.id")
@@ -221,6 +224,10 @@ def submit_experiment(api, run_id: str, expected_generation: str, *, key: str, i
         (["add research question"] if research_question and research_question.get("statement") else []) + \
         (["publish research memo"] if memo else []) + \
         [f"decision {p}" for p in decisions] + ["inject_node"]
+    if pre_stages:
+        plan.append("preceding stages: " + " -> ".join(
+            str(stage.get("name") or "?") if isinstance(stage, dict) else "?"
+            for stage in pre_stages) + " -> operator score")
     if code_from is not None and not missing:
         # A same-key RESUME whose inject already landed must replay it, not re-judge a worktree
         # the agent has edited since (or a base that has moved): the preview is skipped then.
@@ -297,7 +304,7 @@ def submit_experiment(api, run_id: str, expected_generation: str, *, key: str, i
     for name, value in (("files", files), ("code", code), ("deleted", deleted),
                         ("parent_id", parent_id), ("parent_ids", parent_ids),
                         ("parent_generations", parent_generations), ("code_from", code_from),
-                        ("node_kind", node_kind), ("uses", uses)):
+                        ("node_kind", node_kind), ("uses", uses), ("pre_stages", pre_stages)):
         if value is not None:
             data[name] = value
     result = _command(api, run_id, expected_generation, "inject_node", data, f"{key}:inject",
