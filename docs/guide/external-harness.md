@@ -1156,7 +1156,7 @@ seconds; it adds no evaluation wait of its own.
 
 ## Orchestration ([doc 78](../78-external-agent-orchestration-2026-10-14.md))
 
-| `wait_for_next(after=…)` / `GET /api/agent-events` | Long poll of actionable events LoopLab derives itself: node evaluated/failed, stage failed, monitor question, obligation due, run idle, run paused/finished, GPU free. |
+| `wait_for_next(after=…, coalesce=true)` / `GET /api/agent-events` | Long poll of actionable events LoopLab derives itself: node evaluated/failed, stage failed, monitor question, obligation due, run idle, run paused/finished, GPU free. A backlog becomes one packet: the freshest direction/lifecycle action, bounded coalesced history, newest next_after and fresh progress; historical events do not renew execution authority. `coalesce=false` preserves chronological delivery. |
 |---|---|
 | `looplab agent-notify --command '…{message}…'` | Operator's wake-up command: debounced, retried, recorded in a ledger. `PUT /api/runs/{run_id}/agent-notify` sets your run's `vars` (thread). |
 | `PUT /api/runs/{run_id}/gpu-gate` | `hold` or `start_after` other runs' engines; the host GPU lease is served FIFO (`GET /api/gpu-queue`). `looplab gpu-gate` writes it before the run exists. |

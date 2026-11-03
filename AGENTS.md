@@ -177,6 +177,9 @@ Do not script orchestration LoopLab owns ([doc 78](docs/78-external-agent-orches
 Between decisions, block on MCP `wait_for_next(after=<last id>)` instead of polling: LoopLab
 records node evaluated/failed, stage failed, monitor question, obligation due, run idle, run
 paused/finished and GPU free itself; the operator's `looplab agent-notify` hook can also wake you.
+With the default `coalesce=true`, a backlog arrives as one packet: the freshest direction/lifecycle
+action, bounded `coalesced_history`, newest `next_after` and fresh progress. Historical events do
+not renew execution authority; use `coalesce=false` only when chronological delivery is required.
 Order GPU work across runs with `PUT /api/runs/{run_id}/gpu-gate` (`hold`, `start_after`).
 Declare routine monitor answers with `PUT /api/runs/{run_id}/harness-monitor-rules`; never
 answer checkpoints with an unattended bot under the agent's name. Read

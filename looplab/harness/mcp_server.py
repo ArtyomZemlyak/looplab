@@ -362,8 +362,9 @@ class HarnessAPI:
         return {**result, "client_request": saved} if saved is not None else result
 
     def wait_for_next(self, after: int | None = None, timeout_s: float = 120.0,
-                      run_id: str = "", kinds: str = "", limit: int = 50) -> dict:
-        """Long-poll the server's actionable-event outbox (doc 78). One GET; no retry."""
+                      run_id: str = "", kinds: str = "", limit: int = 50,
+                      coalesce: bool = True) -> dict:
+        """Long-poll the actionable outbox; coalesce a backlog behind the freshest direction."""
         if after is not None and (type(after) is not int or after < -1):
             raise ValueError("after must be an integer >= -1 (the last event id you processed)")
         if not isinstance(timeout_s, (int, float)) or not 0 <= timeout_s <= 600:
@@ -384,7 +385,49 @@ class HarnessAPI:
             return {"status": None, "code": "api_unreachable", "outcome": "unavailable",
                     "message": "Agent-event read unavailable. Check the UI/server and call "
                                "wait_for_next again with the same after cursor; no event was lost."}
-        return self._result(response, method="GET")
+        result = self._result(response, method="GET")
+        body = result.get("body")
+        if not coalesce or result.get("status") != 200 or not isinstance(body, dict):
+            return result
+        pending = [row for row in (body.get("events") or []) if isinstance(row, dict)]
+        if len(pending) < 2:
+            return result
+        priority = ("operator_direction", "agent_handoff", "run_paused", "run_finished",
+                    "node_failed", "stage_failed", "monitor_question", "obligation_due",
+                    "node_evaluated", "gpu_free", "run_idle")
+
+        def key(row):
+            kind = str(row.get("kind") or "")
+            rank = priority.index(kind) if kind in priority else len(priority)
+            return (-rank, int(row.get("id", -1)))
+
+        chosen = max(pending, key=key)
+        latest = max(int(row.get("id", -1)) for row in pending)
+        body = dict(body)
+        body["events"] = [chosen]
+        body["coalesced_count"] = len(pending) - 1
+        body["coalesced_history"] = [
+            {"id": row.get("id"), "kind": row.get("kind"), "run_id": row.get("run_id"),
+             "summary": str(row.get("summary") or "")[:300]}
+            for row in sorted((row for row in pending if row is not chosen),
+                              key=lambda row: int(row.get("id", -1)))[-20:]]
+        body["next_after"] = latest
+        if run_id:
+            state = self.request("GET", f"/api/runs/{run_id}/state?observe_only=true")
+            generation = ((state.get("body") or {}).get("generation")
+                          if state.get("status") == 200 and not state.get("code") else None)
+            if generation:
+                progress = self.run_progress(run_id, generation)
+                if progress.get("status") == 200 and not progress.get("code"):
+                    current = progress.get("body") or {}
+                    body["fresh_progress"] = {key: current.get(key) for key in (
+                        "recorded_lifecycle", "execution", "finish_pending_node_count",
+                        "pending_checkpoint_count", "next_step", "execution_scope") if key in current}
+                else:
+                    body["fresh_progress_unavailable"] = progress.get("code") or "progress_unavailable"
+            else:
+                body["fresh_progress_unavailable"] = state.get("code") or "state_unavailable"
+        return {**result, "body": body}
 
     def post_large(self, path: str, body: dict, *, max_bytes: int = 32_000_000,
                    spool: Optional[tuple] = None, source: str = "") -> dict:
@@ -1096,17 +1139,19 @@ def build_server(api: HarnessAPI):
     @mcp.tool(annotations=ToolAnnotations(readOnlyHint=True, destructiveHint=False,
                                         idempotentHint=True, openWorldHint=False))
     def wait_for_next(after: int | None = None, timeout_s: float = 120.0, run_id: str = "",
-                      kinds: str = "", limit: int = 50) -> dict:
+                      kinds: str = "", limit: int = 50, coalesce: bool = True) -> dict:
         """Block until LoopLab records an actionable event for you, then return it.
 
         Events: node_evaluated, node_failed (with root exception / signals), stage_failed,
         monitor_question, obligation_due, run_idle (engine waits for your next experiment),
         run_paused, run_finished, gpu_free. Pass the last processed event id as `after`
         (omit it once to subscribe from now; -1 reads the retained history) and keep
-        `next_after` for the next call. Returns early on the first event, else after
-        timeout_s (<= 600) with timed_out=true. An event is a nudge: read run_progress
-        for the run before acting. Filter with run_id or a comma list of kinds."""
-        return api.wait_for_next(after, timeout_s, run_id, kinds, limit)
+        `next_after` for the next call. With coalesce=true a backlog becomes one packet:
+        the freshest operator direction/lifecycle action first, bounded coalesced_history,
+        next_after at the newest id and fresh progress when run_id is supplied. coalesce=false
+        preserves chronological one-event delivery. timeout_s (<=600) applies when no event
+        arrives. Events are nudges, never renewed execution authority."""
+        return api.wait_for_next(after, timeout_s, run_id, kinds, limit, coalesce)
 
     @mcp.tool(annotations=ToolAnnotations(readOnlyHint=True, destructiveHint=False,
                                         idempotentHint=True, openWorldHint=False))
