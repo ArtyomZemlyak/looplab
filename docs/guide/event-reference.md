@@ -23,7 +23,7 @@ The event type itself is the contract's identity and is never renamed or reused;
 
 <!-- generated: event types -->
 
-189 event types — 130 folded into `RunState`, 59 diagnostic; 1286 declared payload keys; 32 types whose whole payload is stored by the fold.
+190 event types — 131 folded into `RunState`, 59 diagnostic; 1292 declared payload keys; 32 types whose whole payload is stored by the fold.
 
 | type | fold | records | required keys | optional keys |
 |---|---|---|---|---|
@@ -176,6 +176,7 @@ The event type itself is the contract's identity and is never renamed or reused;
 | `run_concepts` | folded | The run's BASE concept set, which nodes inherit. | `concepts` | — |
 | `run_finished` | folded | The run ended: the reason, the log position it ended at, and its final spend. | — | `after_seq`, `calls`, `completion_tokens`, `cost`, `error`, `finalization_required`, `finalize_scope`, `priced_calls`, `prompt_tokens`, `reason`, `total_tokens` |
 | `run_loop_exited` | diagnostic | Why the engine's outer loop exited (one of `RUN_EXIT_REASONS`). | `reason` | — |
+| `run_relocated` | folded | An explicit directory move that preserves run_uid and all pinned launch authority. | `from_run_id`, `previous_event_seq`, `previous_event_sha256`, `reason`, `run_uid`, `to_run_id` | — |
 | `run_reopened` | folded | A finished run was reopened for more work. | — | — |
 | `run_setup_finished` | folded | The task's setup command finished: exit code, environment delta, stderr tail. | `command`, `dropped_requirements`, `env_delta`, `exit_code`, `stderr_tail`, `timed_out` | — |
 | `run_setup_started` | folded | The task's setup command started, in a named working directory. | `after_interrupted_attempt`, `command`, `cwd` | `reverified_missing` |

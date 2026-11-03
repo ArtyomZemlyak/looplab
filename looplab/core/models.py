@@ -2506,6 +2506,8 @@ class RunState(BaseModel):
     # by independent run roots; cross-run stores key provenance and self-exclusion on this value.
     # Empty on legacy logs, where readers retain the historical run_id fallback.
     run_uid: str = ""
+    # Explicit directory relocations, excluded from legacy public payloads; launch authority stays pinned.
+    relocations: list[dict] = Field(default_factory=list, exclude=True)
     task_id: str = ""
     goal: str = ""
     direction: str = "min"  # "min" | "max"

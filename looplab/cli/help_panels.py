@@ -37,6 +37,7 @@ HELP_PANELS: tuple[tuple[str, tuple[tuple[str, str], ...]], ...] = (
         ("replay", "Rebuild a run's state from its event log and print it (read-only)."),
         ("upstream-auto", "Turn the automatic code-upstream switch on or off."),
         ("repair-log", "Repair a corrupted line in the middle of a run's event log."),
+        ("relocate", "Move a stopped run and record its new address without changing its identity."),
     )),
     ("External coding agent", (
         ("harness", "Print the external-agent capability contract as JSON."),

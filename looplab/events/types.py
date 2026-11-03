@@ -429,6 +429,8 @@ EV_SPECULATION_DEPTH_SETTLED = "speculation_depth_settled"
 # reader-side default is `None` = "the run never repinned" = the `run_started` pin, unchanged.
 EV_RUN_WIDTH_SETTLED = "run_width_settled"
 EV_RUN_REOPENED = "run_reopened"
+# Offline owner operation: the directory moved, while run_uid and all launch authority stay unchanged.
+EV_RUN_RELOCATED = "run_relocated"
 EV_RESUME_REQUESTED = "resume_requested"   # P1-1: durable resume intent, appended pre-spawn
 EV_TRUST_GATE_CHANGED = "trust_gate_changed"   # server config edit; folded last-write-wins
 # Predict-before-execute pick among K ideas / N code candidates. FOLDED into RunState.foresight_selected
@@ -2475,6 +2477,11 @@ EVENT_PAYLOAD_KEYS: dict[str, PayloadContract] = {
     "run_loop_exited": PayloadContract(
         "Why the engine's outer loop exited (one of `RUN_EXIT_REASONS`).",
         required=("reason",),
+        optional=(),
+    ),
+    "run_relocated": PayloadContract(
+        "An explicit directory move that preserves run_uid and all pinned launch authority.",
+        required=("from_run_id", "previous_event_seq", "previous_event_sha256", "reason", "run_uid", "to_run_id"),
         optional=(),
     ),
     "run_reopened": PayloadContract(

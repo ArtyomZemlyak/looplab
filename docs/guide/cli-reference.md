@@ -15,6 +15,7 @@ looplab resume          Resume/continue a run (crash, stopped, or finished) by r
 looplab stop            Stop a run: freeze it, NO wrap-up (resumable)
 looplab finalize        Finalize a run: stop AND wrap up (report/lessons/cost)
 looplab repair-log      Repair a mid-file-corrupted event log (FUSE/NFS/S3)
+looplab relocate        Move a stopped run and record its new address without changing run_uid
 looplab inspect         Show the best result, stop reason, trust and comparability (--config: + raw launch snapshot)
 looplab comparability   What each run's number may be RANKED against — refuses across evaluations
 looplab replay          Pure fold of the event log → state (read-only)
@@ -758,6 +759,29 @@ the undecoded lines behind it).
 
 The numbers are the honest denominator, not a warning to dismiss: everything else the surface prints
 is derived from the readable prefix, and a prefix is **not** evidence that the rest did not happen.
+
+---
+
+## `relocate`
+
+Move a stopped run to a new directory without rewriting its launch history. Use the dry run first,
+then apply the atomic rename on the same filesystem:
+
+```bash
+looplab relocate runs/old-name runs/new-name
+looplab relocate runs/old-name runs/new-name --apply --reason "Group this campaign"
+```
+
+The command takes the run lifecycle and engine locks, appends `run_relocated` with the old and new
+IDs, unchanged `run_uid` and the previous event's identity, then renames the directory. Replay keeps
+all measured results and launch settings; speculation and calibration pins remain enforced. A
+legacy log without a `run_uid`, a live engine, an existing destination, a cross-filesystem move or
+an unreadable journal is refused rather than copied or overwritten. If the event was recorded but
+the rename outcome is uncertain, retry the same command: it does not append a duplicate event.
+
+The old directory name and old run ID are not silently retained as aliases. Rebind review links,
+notification filters and other external capabilities to the new address explicitly. This operation
+is an owner-side offline maintenance action, not an external-agent permission and not a new score.
 
 ---
 
