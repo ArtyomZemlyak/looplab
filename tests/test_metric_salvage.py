@@ -100,6 +100,24 @@ def test_a_crashed_stage_is_not_salvageable_unless_the_stall_watchdog_authentica
     assert ms.salvage_condition(stalled, "crash") == "stage_failed"
 
 
+def test_a_completed_pipeline_salvages_a_later_teardown_crash():
+    completed = _res(exit_code=2, metric=0.75,
+                     stages=_stages(("train", "ok"), ("score", "ok")))
+    assert ms.salvage_condition(completed, "crash") == "eval_failed"
+    recovered = ms.salvage(completed, "crash", {"kind": "stdout_json", "key": "metric"},
+                           ".", None, mode="select", operator_stages=({"name": "score"},))
+    assert recovered is not None and recovered.metric == 0.75
+    assert recovered.source == "eval_result"
+
+
+def test_a_nonzero_exit_without_completed_pipeline_evidence_still_refuses():
+    single = _res(exit_code=2, metric=0.75)
+    assert ms.salvage_condition(single, "crash") is None
+    intermediate = _res(exit_code=2, metric=0.75,
+                        stages=_stages(("train", "ok"), ("score", "fail")), failed_stage="score")
+    assert ms.salvage_condition(intermediate, "crash") is None
+
+
 def test_an_unknown_future_stage_status_refuses_rather_than_inheriting_a_neighbours_answer():
     res = _res(stages=_stages(("train", "quarantined")), failed_stage="train")
     assert ms.salvage_condition(res, "no_metric") is None

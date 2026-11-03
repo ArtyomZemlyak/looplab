@@ -349,19 +349,13 @@ def salvage_condition(res, reason: str) -> Optional[str]:
     reachable by driving a whole sandboxed evaluation that failed in exactly the right way — the
     same cost `engine/evaluate.py`'s other named rules were extracted for (doc 25 ES-03).
 
-    THE PROCESS MUST HAVE FINISHED. A non-zero exit is not salvageable, and that is a deliberate
-    refusal of one of the cases the brief named ("a late-stage crash"). A process the OS or the
-    runtime stopped did not complete, so a metric line in its output is a line it printed on the way
-    somewhere — a per-epoch `RECALL@100:` from epoch 4 of 20 reads identically to a final one, and
-    promoting it would make the search compare a partial run against complete ones. That is the
-    false promotion this module must not create, and it is not a hypothetical shape: intermediate
-    per-epoch metric lines are what `asha_monitor` exists to read.
-    The ONE non-zero exit that IS evidence of completion is already carved out and shipped:
-    `RunResult.stalled` is the authenticated verdict that the process went SILENT while alive, i.e.
-    that it had finished talking before the watchdog killed it (`_salvageable_stall`, which also
-    subtracts the DIVERGED case). `evaluate.py`'s `ok` gate has salvaged that since before this
-    module existed; admitting it here too is what lets a stalled stage's FILE artifact be read, not
-    just the value it happened to have already printed.
+    THE PROCESS MUST HAVE FINISHED. A non-zero exit alone is not that proof: a metric line may be a
+    per-epoch `RECALL@100:` from epoch 4 of 20, indistinguishable from the final one, and promoting
+    it would compare a partial run against complete ones. The two authenticated exceptions are a
+    stall verdict (the process had stopped talking) and a pipeline whose every stage completed and
+    whose protected reader already returned a metric. The latter is the scored-then-teardown-crashed
+    case. A failed/intermediate stage, a single command with no stage completion evidence, a hard
+    deadline and numerical divergence remain unsalvageable.
 
     Reads only `res`'s own fields and the classifier's `reason`; no I/O, no model.
     """
@@ -394,13 +388,17 @@ def salvage_condition(res, reason: str) -> Optional[str]:
     # defence-in-depth check safe to add.
     if getattr(res, "drift", None) is not None or getattr(res, "setup_failed", False):
         return None
-    if getattr(res, "exit_code", 0) != 0 and not getattr(res, "stalled", False):
-        return None
     stages = [s for s in (getattr(res, "stages", None) or []) if isinstance(s, dict)]
+    completed = (bool(stages) and _usable(getattr(res, "metric", None)) is not None
+                 and all(str(s.get("status") or "") in ("ok", "reused") for s in stages))
+    if getattr(res, "exit_code", 0) != 0 and not getattr(res, "stalled", False) and not completed:
+        return None
     if not stages:
         # Single-command eval: there is no per-stage record to consult. `read_metric` has already
         # run over this exact stdout in that path, so rung 1 is very nearly a no-op here — what can
         # still differ is a FILE reader whose relocated twin exists (rung 2).
+        return "eval_failed"
+    if completed:
         return "eval_failed"
     status = str(stages[-1].get("status") or "")
     if status in VETO_STAGE_STATUSES:
