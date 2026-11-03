@@ -117,7 +117,7 @@ _ABSENT = object()
 # them: they are inputs to normalization, never event data.  Named once here because two sites must
 # agree about them — the pop, and the residual allow-list that refuses whatever the pop did not
 # take.  See `_normalize_inject_node` for why that residual check is not `data_fields` itself.
-_INJECT_IMPORT_FIELDS = frozenset({"source_run", "source_node", "code_from", "pre_stages"})
+_INJECT_IMPORT_FIELDS = frozenset({"source_run", "source_node", "code_from"})
 
 
 def task_file_for(rd: Path) -> Optional[str]:
@@ -531,6 +531,11 @@ def _normalize_node_reset(ctx: _ControlIntake) -> dict:
         raise HTTPException(400, "from_stage must be a non-empty stage name")
     data["from_stage"] = stage
     _normalize_lifecycle_target(ctx)
+    from looplab.harness.campaign import optimization_scope_error
+    scope_error = optimization_scope_error(
+        ctx.rd, getattr(ctx.state().nodes[data["node_id"]], "job_role", None))
+    if scope_error is not None:
+        raise HTTPException(409, scope_error)
     return data
 
 
@@ -1257,6 +1262,12 @@ def _normalize_inject_node(ctx: _ControlIntake) -> dict:
         raise HTTPException(
             400, f"inject_node has unknown field(s): {', '.join(sorted(unknown_inject))}")
     pre_stages = data.pop("pre_stages", None)
+    from looplab.harness.campaign import JOB_ROLES, optimization_scope_error
+    if data.get("job_role") is not None and data["job_role"] not in JOB_ROLES:
+        raise HTTPException(400, f"job_role must be one of {', '.join(JOB_ROLES)}")
+    scope_error = optimization_scope_error(ctx.rd, data.get("job_role"))
+    if scope_error is not None:
+        raise HTTPException(409, scope_error)
     if data.get("parent_id") is not None and data.get("parent_ids") is not None:
         raise HTTPException(400, "inject_node accepts parent_id or parent_ids, not both")
     _normalize_artifact_fields(ctx)
@@ -2383,6 +2394,16 @@ def _decide_resume(service, rd: Path, event_type: str, state, alive: bool,
             "finalize_in_progress", "cannot resume while finalization is pending",
             "wait for finalization to finish, then submit a new resume command",
             retryable=True)
+    from looplab.harness.campaign import optimization_scope_error
+    for node in state.nodes.values():
+        if node.status.value != "pending":
+            continue
+        scope_error = optimization_scope_error(rd, getattr(node, "job_role", None))
+        if scope_error is not None:
+            return "reject", _error(
+                scope_error["code"], scope_error["message"],
+                f"allowed job roles: {', '.join(scope_error['allowed_job_roles'])}; "
+                "change the operator's execution mode before resuming scientific work")
     if state.finished and alive:
         return "reject", _error(
             "engine_finishing", "the engine is still completing its terminal write-out",

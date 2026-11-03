@@ -164,7 +164,7 @@ def submit_experiment(api, run_id: str, expected_generation: str, *, key: str, i
                       parent_ids: Optional[list] = None,
                       parent_generations: Optional[dict] = None,
                       node_kind: Optional[str] = None, uses: Optional[list[int]] = None,
-                      pre_stages: Optional[list[dict]] = None) -> dict:
+                      pre_stages: Optional[list[dict]] = None, job_role: Optional[str] = None) -> dict:
     """`code_from` (doc 79 §4) is the run-worktree / patch / foreign-branch alternative to
     `files`/`code`/`deleted` — exactly one of the two. It is PREVIEWED through the same route the
     intake converts it with (`POST .../code/overlay`, paths and sizes only) BEFORE anything is
@@ -184,6 +184,9 @@ def submit_experiment(api, run_id: str, expected_generation: str, *, key: str, i
         raise ConfigRefusal("give parent_id or parent_ids, not both")
     if node_kind not in (None, "artifact"):
         raise ConfigRefusal("node_kind must be artifact or omitted")
+    from looplab.harness.campaign import JOB_ROLES
+    if job_role is not None and job_role not in JOB_ROLES:
+        raise ConfigRefusal(f"job_role must be one of {', '.join(JOB_ROLES)}")
     idea = dict(idea)
     progress = api.run_progress(run_id, expected_generation)
     if not steps.add("read_progress", progress):
@@ -304,7 +307,8 @@ def submit_experiment(api, run_id: str, expected_generation: str, *, key: str, i
     for name, value in (("files", files), ("code", code), ("deleted", deleted),
                         ("parent_id", parent_id), ("parent_ids", parent_ids),
                         ("parent_generations", parent_generations), ("code_from", code_from),
-                        ("node_kind", node_kind), ("uses", uses), ("pre_stages", pre_stages)):
+                        ("node_kind", node_kind), ("uses", uses), ("pre_stages", pre_stages),
+                        ("job_role", job_role)):
         if value is not None:
             data[name] = value
     result = _command(api, run_id, expected_generation, "inject_node", data, f"{key}:inject",

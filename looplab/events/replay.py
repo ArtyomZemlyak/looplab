@@ -605,6 +605,7 @@ def _on_node_created(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
             # on its idea (doc 73 §1.4, stage 3) — absent on every other idea, so nothing changes.
             kind=("artifact" if d.get("node_kind") == "artifact" or idea.node_kind == "artifact"
                   else None),
+            job_role=(str(d.get("job_role"))[:32] if d.get("job_role") is not None else None),
             uses=uses,
             uses_attempts=_use_pins(st, d, parent_ids, uses, declared),
             research_origin=d.get("research_origin"),   # 💡 proposed just after a deep-research memo

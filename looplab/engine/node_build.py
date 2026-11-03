@@ -544,6 +544,7 @@ class NodeBuildMixin:
         that was pinned is re-pinned (`rebuilt_use_pins`): an unpinned one (a log from before the
         key) keeps the historical rule."""
         return {**({"node_kind": "artifact"} if getattr(node, "kind", None) == "artifact" else {}),
+                **({"job_role": node.job_role} if getattr(node, "job_role", None) is not None else {}),
                 **({"uses": list(node.uses)} if getattr(node, "uses", None) else {}),
                 **({"uses_attempts": rebuilt_use_pins(node, state)}
                    if getattr(node, "uses_attempts", None) else {})}
@@ -2715,6 +2716,7 @@ class NodeBuildMixin:
                        if isinstance(req.get("forked_from"), dict) else {}),
                     # doc 73 §1.4, validated by `_normalize_artifact_fields`; OMITTED when absent.
                     **({"node_kind": "artifact"} if req.get("node_kind") == "artifact" else {}),
+                    **({"job_role": req["job_role"]} if req.get("job_role") is not None else {}),
                     **({"uses": [x for x in req["uses"] if type(x) is int]}
                        if isinstance(req.get("uses"), list) and req["uses"] else {}),
                     # …and the producer LIFECYCLE each use was accepted against, server-stamped at

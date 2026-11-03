@@ -753,6 +753,11 @@ The normal control cycle is:
    shows the preceding chain followed by `operator score`. A regular candidate must
    produce the genuine metric through `eval.metric`; use `node_kind="artifact"` only
    for an intentionally unranked preparation job, not to hide a scored experiment.
+   Independently declare `job_role` (`prepare`, `profile`, `fit`, `score`, `recovery`).
+   The owner may set `harness_policy.execution` to `optimization_only` with a bounded
+   `allowed_job_roles` list and version. Inject, node reset and resume enforce it;
+   a successful profile never grants a scientific fit. Read the current mode in
+   `harness-progress.execution_scope` and the full policy in `/harness-policy`.
    Enabled `deep_research_every` requires a current `research_completed` memo;
    enabled `track_hypotheses` requires a nonempty candidate hypothesis statement;
    injection creates a fresh Card and does not attach a supplied `card_id`.

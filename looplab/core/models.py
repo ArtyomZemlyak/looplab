@@ -2158,6 +2158,8 @@ class Node(BaseModel):
     # experiment, which is every node of every log before this field. `uses`: the produced
     # nodes this node reads (`LOOPLAB_USES_WORKDIRS`). Both folded from `node_created`.
     kind: Optional[str] = None
+    # Declared job semantics for UI and the operator's execution-scope fence; independent of kind.
+    job_role: Optional[str] = None
     uses: list[int] = Field(default_factory=list)
     # THE PRODUCER LIFECYCLE each use is pinned to, `{str(artifact_id): generation}` (doc 73 §1.4,
     # round 3): the lifecycle the operator saw produced when the inject was accepted, stamped by

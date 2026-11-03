@@ -61,6 +61,8 @@ POLICY_LEVELS = ("off", "experiments", "inputs", "all")
 _LEVEL_FOR_KIND = {"experiment": "experiments", "task": "inputs", "files": "all", "budget": "experiments"}
 DEFAULT_POLICY = {"amendments": "all", "max_agent_added_nodes": None, "implicit_canary": "off",
                   "implicit_canary_timeout": 120.0}
+JOB_ROLES = ("prepare", "profile", "fit", "score", "recovery")
+EXECUTION_MODES = ("science", "optimization_only")
 
 SLUG_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
 METRIC_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9@._:/+-]{0,63}$")
@@ -121,6 +123,18 @@ def experiments_of(rows: list[dict], run_uid: Optional[str] = None) -> dict[str,
     return out
 
 
+def _validate_execution(raw, *, status: int) -> Optional[dict]:
+    if raw is None:
+        return None
+    if not isinstance(raw, dict) or raw.get("mode") not in EXECUTION_MODES:
+        raise HTTPException(status, "execution.mode must be science or optimization_only")
+    roles = raw.get("allowed_job_roles")
+    if (not isinstance(roles, list) or not roles
+            or any(role not in JOB_ROLES for role in roles) or len(set(roles)) != len(roles)):
+        raise HTTPException(status, f"execution.allowed_job_roles must be unique values from {JOB_ROLES}")
+    return {"mode": raw["mode"], "allowed_job_roles": list(roles), "version": 1}
+
+
 def read_policy(rd: Path) -> dict:
     path = Path(rd) / POLICY
     try:
@@ -141,6 +155,8 @@ def read_policy(rd: Path) -> dict:
         timeout = raw.get("implicit_canary_timeout")
         if type(timeout) in (int, float) and 0 < timeout <= 3600:
             policy["implicit_canary_timeout"] = float(timeout)
+        if "execution" in raw:
+            policy["execution"] = _validate_execution(raw["execution"], status=503)
         for key in ("updated_at", "updated_by", "note"):
             if key in raw:
                 policy[key] = raw[key]
@@ -165,11 +181,26 @@ def write_policy(rd: Path, body: dict) -> dict:
     timeout = body.get("implicit_canary_timeout", 120.0)
     if type(timeout) not in (int, float) or not 0 < timeout <= 3600:
         raise HTTPException(400, "implicit_canary_timeout must be within (0, 3600] seconds")
+    execution = _validate_execution(body.get("execution"), status=400)
     policy = {"amendments": level, "max_agent_added_nodes": cap, "implicit_canary": implicit,
               "implicit_canary_timeout": float(timeout), "updated_at": time.time(),
-              "updated_by": "operator", **({"note": note} if note else {})}
+              "updated_by": "operator", **({"note": note} if note else {}),
+              **({"execution": execution} if execution is not None else {})}
     atomic_write_text(Path(rd) / POLICY, json.dumps(policy, indent=2))
     return {**policy, "source": POLICY}
+
+
+def optimization_scope_error(rd: Path, role) -> Optional[dict]:
+    execution = read_policy(rd).get("execution")
+    if not execution or execution.get("mode") != "optimization_only":
+        return None
+    allowed = execution.get("allowed_job_roles") or []
+    if role in allowed:
+        return None
+    return {"code": "optimization_scope_refused",
+            "message": f"job_role {role!r} is outside the operator's optimization-only scope",
+            "allowed_job_roles": allowed,
+            "execution_version": execution.get("version", 1)}
 
 
 def protocol_view(rd: Path) -> dict:

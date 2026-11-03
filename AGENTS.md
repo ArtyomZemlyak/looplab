@@ -39,6 +39,11 @@ performed inside an opaque score command. Never edit protected scoring files, ma
 or treat a partial checkpoint as a completed run. LoopLab owns patch validation, stage execution,
 score provenance, event history and replay.
 
+Declare `job_role` as `prepare`, `profile`, `fit`, `score` or `recovery` independently of
+`node_kind`. The owner may set `harness_policy.execution` to `optimization_only` with a bounded
+`allowed_job_roles` list. Inject, retry and resume enforce that declaration; a profile is not
+permission to resume scientific training. `execution_scope` is visible in harness progress.
+
 An `inject_node` command receipt marked `succeeded` proves admission, not successful
 training. For a failed node, read current generation/attempt-bound logs before
 submitting a corrected child with a new key and parent generation. An exact retry

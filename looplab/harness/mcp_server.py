@@ -1344,7 +1344,7 @@ def _campaign_tools(mcp, api, ToolAnnotations) -> None:
                           code_from: dict | None = None, parent_ids: list[int] | None = None,
                           parent_generations: dict | None = None,
                           node_kind: str | None = None, uses: list[int] | None = None,
-                          pre_stages: list[dict] | None = None) -> dict:
+                          pre_stages: list[dict] | None = None, job_role: str | None = None) -> dict:
         """One call for the whole admission ceremony: pre-register `experiment` (protocol
         journal), add `research_question` {id, statement?, concepts?} and file the idea under it,
         publish `memo`, record `decisions` {phase: {reason, alternatives?}} the run requires,
@@ -1357,7 +1357,8 @@ def _campaign_tools(mcp, api, ToolAnnotations) -> None:
         task's stage-manifest edit surface. code_from is previewed first, so a refusal writes nothing.
         parent_ids lists every merged node (exclusive with parent_id). node_kind="artifact" prepares
         unranked data; uses names evaluated nodes whose lifecycle-pinned workdirs this candidate reads.
-        dry_run=true lists missing obligations, the plan and the changed paths without writing.
+        job_role declares prepare/profile/fit/score/recovery for UI and the operator's optimization-only
+        execution fence. dry_run=true lists missing obligations, the plan and the changed paths without writing.
         Stops at the first failed step; repeat with the SAME key to resume — completed steps replay
         their receipts; a new candidate needs a new key."""
         return composite.submit_experiment(
@@ -1366,7 +1367,7 @@ def _campaign_tools(mcp, api, ToolAnnotations) -> None:
             experiment=experiment, experiment_reason=experiment_reason, memo=memo,
             decisions=decisions, dry_run=dry_run, code_from=code_from, parent_ids=parent_ids,
             parent_generations=parent_generations, node_kind=node_kind, uses=uses,
-            pre_stages=pre_stages)
+            pre_stages=pre_stages, job_role=job_role)
 
     def _code_path(run_id: str, expected_generation: str, suffix: str) -> str:
         api._run_identity(run_id, expected_generation)
