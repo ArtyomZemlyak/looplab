@@ -76,6 +76,14 @@ settings to bypass obligations. The config view stays readable for diagnostics b
 approves nothing. Refresh explicitly after repair; these refusals rewrite, retry and
 resume nothing, and legacy and retired settings stay readable.
 
+### Operator notes
+
+An owner may record durable operator guidance with `POST /api/runs/{run_id}/operator-notes`:
+`{expected_generation, action_id, task_family, note}`. The harness token is refused. The server binds
+run UID, direction and task fingerprint; the note is later shown by exact fingerprint, not by an
+arbitrary family label or the old `task_id`. Exact retries replay; changing content under one action
+ID conflicts. These notes do not authorize work or certify a scientific claim.
+
 ### Nested campaign runs
 
 A run at `<run-root>/<campaign>/<seed>` is listed by `GET /api/campaign-runs` and opens directly.

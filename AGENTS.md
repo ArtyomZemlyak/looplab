@@ -158,6 +158,9 @@ scope-report generation. Author the corresponding run decisions and reports
 through the durable commands and guarded knowledge APIs.
 When the evidence supports a reusable conclusion, publish it through `/lessons`
 with terminal node IDs; never include a claimed score in place of evaluation.
+`POST /operator-notes` is owner-only, not an external-agent channel: it records operator guidance
+bound by task fingerprint and direction. Do not use it to manufacture operator authority or to make
+a note apply to a different task.
 Keep lesson/skill bodies and action IDs for lost replies. Exact retries acknowledge
 prior publication without refreshing evidence or restoring a retired claim. Fresh
 writes validate current outcomes. Lesson roles default to shared; researcher and

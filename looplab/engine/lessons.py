@@ -721,7 +721,7 @@ class LessonMemory(LessonPriorsMixin, LessonDistillMixin, LessonReconcileMixin,
                 f"case for run {final.run_id!r} was rejected by the case store's validity fence")
         lib.add(record)
 
-    def store_concept_capsule(self, final: RunState) -> None:
+    def store_concept_capsule(self, final: RunState, *, provisional: bool = False) -> None:
         """PART IV cross-run Step 2 (§21.20): persist this run's CONCEPT capsule to the shared
         `memory_dir` so a later SIMILAR run can surface "this was tried before -> outcome". Best-effort
         and self-contained: reuses the shipped per-run `node_concepts` tags (no new tagger) and the
@@ -850,7 +850,7 @@ class LessonMemory(LessonPriorsMixin, LessonDistillMixin, LessonReconcileMixin,
                 concept_effects=effects,
                 concept_evidence_nodes_total=evidence_nodes_total,
                 concept_evidence_nodes_incomplete=evidence_nodes_incomplete,
-                concept_evidence_observed=classifier_observed)
+                concept_evidence_observed=classifier_observed, provisional=provisional)
         except Exception:  # noqa: BLE001 — BUILD is best-effort: a projection hiccup must never fail a run
             return
         # The WRITE is NOT swallowed (mirrors store_case): a real persistence failure must reach finalize's

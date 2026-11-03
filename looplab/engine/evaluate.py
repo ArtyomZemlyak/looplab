@@ -7311,6 +7311,11 @@ class EvaluateMixin:
                     data["withheld_metric"] = _withheld
                 self.store.append(EV_NODE_FAILED, data)
             self._maybe_crash()
+        if getattr(self, "_cross_run_concepts", False):
+            try:
+                self.lessons.store_concept_capsule(fold(self.store.read_all()), provisional=True)
+            except Exception as exc:  # noqa: BLE001 - provisional memory never cancels a measured terminal
+                _LOG.warning("provisional concept capsule could not be written: %s", exc)
         # CODE IDENTITY AFTER THE TERMINAL (doc 79, `engine/code_identity.py`): the effective
         # configuration this evaluation ran with, and — when an in-place repair changed the overlay
         # during evaluation — a second commit parented on the materialized one, so the repair is a

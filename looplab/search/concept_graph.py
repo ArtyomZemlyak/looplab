@@ -421,20 +421,14 @@ def _signature_text(text: str) -> str:
     return " " + " ".join(t for t in _NON_WORD.split(str(text or "").lower()) if t) + " "
 
 
-def _signature_concepts(pack: str, text: str) -> int:
-    """How many DISTINCT domain concepts of `pack` this text names.
-
-    Word-ANCHORED prefix matching (` hard negative` matches "hard negatives" and refuses "ance"
-    inside "balance"), deliberately not `concept_tagging.py::tag_text`: that answers "what is this
-    experiment about" over a grown vocabulary, this answers "is this pack's domain the task's
-    domain" over the curated one — and this module is the BOTTOM of the concept cluster's layer
-    order, so it may not import its own taggers.
-    """
+def _signature_scope(pack: str, text: str) -> tuple[set[str], set[str]]:
+    """Distinct concept IDs and domain axes named by the task's own text, with anchored aliases."""
     axes = set(_SKELETON_SIGNATURE_AXES.get(pack, ()))
     haystack = _signature_text(text)
-    if not haystack.strip() or pack not in _SKELETONS:
-        return 0
     hits: set[str] = set()
+    hit_axes: set[str] = set()
+    if not haystack.strip() or pack not in _SKELETONS:
+        return hits, hit_axes
     for concept in _SKELETONS[pack]().concepts():
         if axes and not (set(concept.axes) & axes):
             continue
@@ -442,8 +436,21 @@ def _signature_concepts(pack: str, text: str) -> int:
             token = _signature_text(alias).strip()
             if token and f" {token}" in haystack:
                 hits.add(concept.id)
+                hit_axes.update(set(concept.axes) & axes)
                 break
-    return len(hits)
+    return hits, hit_axes
+
+
+def _signature_concepts(pack: str, text: str) -> int:
+    """Backward-compatible concept count; pack selection additionally requires the scope gate below."""
+    return len(_signature_scope(pack, text)[0])
+
+
+def _text_supports_pack(pack: str, text: str) -> bool:
+    """Reject a generic recommendation/ML goal as a retrieval task, without banning the word itself."""
+    concepts, axes = _signature_scope(pack, text)
+    return (len(concepts) >= _SKELETON_TEXT_MIN_CONCEPTS and len(axes) >= 2
+            and bool(axes & {"negatives", "distillation", "pooling"}))
 
 
 def skeleton_for(task_type: str, *, text: str = "") -> ConceptGraph:
@@ -462,13 +469,13 @@ def skeleton_for(task_type: str, *, text: str = "") -> ConceptGraph:
         return _SKELETONS[t]()
     if t and t not in _GENERIC_ADAPTER_TASK_IDS:
         for pack, aliases in _SKELETON_ALIASES.items():
-            if any(a in t for a in aliases):
+            if any(a in t for a in aliases) and (not text.strip() or _text_supports_pack(pack, text)):
                 return _SKELETONS[pack]()
     # The id said nothing. Ask the task's own words, and take the pack with the strongest signature
     # (ties by pack name, so the answer is deterministic with more than one curated pack).
-    scored = sorted(((_signature_concepts(pack, text), pack) for pack in _SKELETONS),
-                    key=lambda row: (-row[0], row[1]))
-    if scored and scored[0][0] >= _SKELETON_TEXT_MIN_CONCEPTS:
+    scored = sorted(((_signature_scope(pack, text)[0], pack) for pack in _SKELETONS),
+                    key=lambda row: (-len(row[0]), row[1]))
+    if scored and _text_supports_pack(scored[0][1], text):
         return _SKELETONS[scored[0][1]]()
     return ConceptGraph(task_type=task_type or "")
 

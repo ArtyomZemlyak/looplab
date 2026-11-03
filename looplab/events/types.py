@@ -2365,7 +2365,7 @@ EVENT_PAYLOAD_KEYS: dict[str, PayloadContract] = {
         # spread (the last two under `Settings.lesson_prior_claim_decisions`, doc 69 69.21) and were
         # missing here until critic 2026-09-30 (F6) read the builder against this row.
         optional=(
-            "at_node", "case", "chars", "claim_decisions_unavailable", "notes", "operator",
+            "at_node", "case", "chars", "claim_decisions_unavailable", "notes", "operator", "operator_notes",
             "operator_rejected", "operator_scoped", "phase", "quarantined_useless", "regime",
             "role", "rows", "source"
         ),

@@ -345,6 +345,11 @@ SELECTION policy (`trust_gate`) and buys confirm evals — so the arms are: knob
 gate alone, ≥3 seeds per arm, `generalization_gap` reported. FML-bench: strategy complexity alone
 does not guarantee performance; measure, do not flip. proof:`present:profile: str = "default"@looplab/core/config.py`
 
+**Повторная проверка 2026-11-03:** default не переключён. Логический A/B сохранён: исправления
+external execution, reports, memory и addressing не дают основания включать thorough, semantic
+novelty, parallel builds или Landlock глобально. Требуются те самые отдельные arms и реальные
+измерения, а не ещё один рефакторинг или больше повторов вне разрешённого scope.
+
 OPEN[embedding-novelty-gate-declined-on-one-incident] `PROFILES["thorough"]` excludes
 `novelty_semantic` on one live incident (node 61) while ShinkaEvolve's ablation reports "substantial
 performance gains" from embedding rejection and only "marginal" gains from the LLM judge — LoopLab's

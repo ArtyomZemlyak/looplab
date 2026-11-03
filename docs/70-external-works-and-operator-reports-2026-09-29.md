@@ -233,9 +233,7 @@ read-only*, источник *Process environment*. Это не ошибка д�
   `cross_run_index`; UI сравнивает свёрнутый `state.run_id` с id маршрута (`Report.jsx`,
   `panels.jsx`). Кодирование в один сегмент (раздел 4, вариант 2) — всё ещё рекомендация, но с этими
   пунктами, и не ослабляя правило «потомок рана — не ран».
-- **70.2** OPEN[concept-capsule-only-at-finalize] концепт-капсула (и кейс) пишутся только при
-  финализации: ран без финализации не оставляет знания, параллельные сиды не видят друг друга;
-  промежуточная капсула должна нести признак `provisional` (раздел 5). proof:absent:_store_concept_capsule@looplab/engine/concept_cadence.py
+- **70.2** *Закрыто 2026-11-03, ветка `kimi-review-03-11-2026`: `_eval_write_terminal` публикует concept capsule сразу после настоящего terminal вне write lock, с `provisional: true`; finalize заменяет её обычной записью без флага. Старые capsule shapes не меняются, metric и concept outcomes берутся только из реальных terminals, shared-store ошибка не отменяет измеренный результат. Проверка полного toy eval и upsert: `tests/test_provisional_capsules.py`.*
 - **70.3** *Закрыто 2026-09-29: здесь стоял `endpoint-mismatch-names-neither-endpoint`. Состояние
   учётных данных несёт `endpoints` (адрес привязки ключа и `llm_base_url` в нормализованном
   написании, только при `endpoint_mismatch`) и `variables` (имена переменных окружения/`.env`, откуда

@@ -468,7 +468,8 @@ def build_concept_capsule(*, run_id: str, fingerprint: list[str], direction: str
                           concept_evidence_nodes_total: Optional[int] = None,
                           concept_evidence_nodes_incomplete: int = 0,
                           concept_evidence_observed: Optional[bool] = None,
-                          concept_effects: Optional[dict] = None) -> dict:
+                          concept_effects: Optional[dict] = None,
+                          provisional: bool = False) -> dict:
     """A compact per-run CONCEPT capsule — the cross-run bridge (§21.20 Step 2). It records WHICH
     concepts a run explored (the shipped per-run `node_concepts` tags — no new tagger) and how it went,
     keyed by `task_fingerprint`, so a later SIMILAR run can answer "was this tried across runs, and
@@ -585,6 +586,7 @@ def build_concept_capsule(*, run_id: str, fingerprint: list[str], direction: str
         # Legacy rank signs stay available as associations; they cannot answer an ablation question.
         "concept_effects": {key: concept_effects[key] for key in bounded_outcomes
                             if isinstance(concept_effects, dict) and key in concept_effects},
+        **({"provisional": True} if provisional else {}),
     }
 
 class ConceptCapsuleStore:

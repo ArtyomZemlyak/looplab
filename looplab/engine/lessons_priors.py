@@ -373,7 +373,20 @@ class LessonPriorsMixin:
         health["complete"] = bool(health["complete"] and not (
             case_health["source_window_truncated"] or case_health["skipped"]
             or case_health["unavailable"]))
-        return notes, parsed, fp, _memoized_embed(self._e._embedder), health, case_line
+        operator_rows, operator_health = read_memory_jsonl_window(base / "operator_notes.jsonl")
+        from looplab.harness.operator_notes import scope_fingerprint, valid_operator_note
+        operator_fp = scope_fingerprint(self._e.task)
+        operator_notes = [row for _index, row in operator_rows if valid_operator_note(row)
+                          and row["direction"] == self._e.task.direction
+                          and row["fingerprint"] == operator_fp]
+        health["invalid"] += int(operator_health["skipped"])
+        health["source"] += int(operator_health["source_rows"])
+        health["truncated"] = bool(health["truncated"] or operator_health["source_window_truncated"])
+        health["complete"] = bool(health["complete"] and not (
+            operator_health["source_window_truncated"] or operator_health["skipped"]
+            or operator_health["unavailable"]))
+        health["operator_notes_digest"] = operator_health["window_digest"]
+        return notes, parsed, fp, _memoized_embed(self._e._embedder), health, case_line, operator_notes
 
     def _render_role_prior(self, ctx, role: Optional[str]) -> str:
         """Render ONE role's prior text (the historical surface; `_pick_role_prior` is the pair)."""
@@ -471,7 +484,7 @@ class LessonPriorsMixin:
         threshold moves, and `operator=None` (every historical caller) reproduces the old order
         exactly."""
         from looplab.engine.memory import prompt_slot_key      # both slot budgets below key on it
-        notes, parsed, fp, embed, health, case_line = ctx
+        notes, parsed, fp, embed, health, case_line, operator_notes = ctx
         receipt: dict = {
             "notes": 0, "case": False, "rows": [], "quarantined_useless": 0,
             # NOT a copy of the argument for its own sake: the citation instrument has to be able to
@@ -480,7 +493,9 @@ class LessonPriorsMixin:
             **({"operator_scoped": str(operator)} if operator else {}),
             "source": {"lessons_sha256": health["lessons_digest"],
                        "notes_sha256": health["notes_digest"],
+                       "operator_notes_sha256": health["operator_notes_digest"],
                        "complete": bool(health["complete"])},
+            "operator_notes": [row["note_id"] for row in operator_notes],
         }
         out = (f"\n[MEMORY_SOURCE: canonical recent snapshot; rows={health['source']}; "
                f"notes_sha256={health['notes_digest']}; lessons_sha256={health['lessons_digest']}; "
@@ -529,6 +544,11 @@ class LessonPriorsMixin:
             out += ("\nBest known configuration for this task (the winning run's own parameters, "
                     "not a recommendation): " + case_line)
             receipt["case"] = True
+        if operator_notes:
+            out += "\nDurable operator guidance for this exact task fingerprint: " + " | ".join(
+                f"{cross_run_text(row['task_family'], max_chars=128, single_line=True, entropy=True)} — "
+                f"{cross_run_text(row['note'], max_chars=1_000, single_line=True, entropy=True)}"
+                for row in operator_notes[-3:])
         if not parsed:
             text = cross_run_text(out, max_chars=8_000, single_line=False, entropy=True)
             receipt["chars"] = len(text)

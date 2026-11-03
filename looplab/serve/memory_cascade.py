@@ -658,6 +658,8 @@ def _tier_rules(memory_dir: str | Path, run: "RunIdentity") -> list[tuple[str, s
         "lessons.jsonl": lesson_keep_reason,
         "meta_notes.jsonl": note_keep_reason,
         "cases.jsonl": case_keep_reason,
+        # Operator notes are one run's authored evidence, not a preservation claim of another run.
+        "operator_notes.jsonl": lambda row, ident: "",
         "research_claims.jsonl":
             lambda row, ident: claim_keep_reason(row, ident, curated_tasks=curated),
         "concept_capsules.jsonl":

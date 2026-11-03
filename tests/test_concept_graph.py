@@ -1211,3 +1211,20 @@ def test_a_model_concept_id_keeps_every_real_concept():
                  # …nor a version tag or a one-letter filler (the next pass: each of these passed)
                  "axis/slug-v2", "axis/slug-x", "concept/slug-2a"):
         assert model_concept_id(echo) == "", echo
+
+
+def test_generic_recommendation_does_not_inherit_dense_retrieval_taxonomy():
+    from looplab.search.concept_graph import skeleton_for
+    goal = "Train Qwen for sequential next-item recommendation on user history with NLL and retrieval metrics."
+    seeded = skeleton_for("e5-generative-recommendations", text=goal)
+    assert seeded.task_type == "e5-generative-recommendations" and seeded.concepts() == []
+    fuzzy = skeleton_for("vectorizer", text="Learn item embeddings for generative next-item recommendation")
+    assert fuzzy.task_type == "vectorizer" and fuzzy.concepts() == []
+
+
+def test_fuzzy_retrieval_alias_requires_specific_domain_evidence():
+    from looplab.search.concept_graph import skeleton_for
+    seeded = skeleton_for("vectorizer", text="Retrieve relevant documents with hard-negative mining, InfoNCE and mean pooling")
+    assert seeded.task_type == "dense-retrieval"
+    assert "negatives/hard-mining-inbatch" in seeded
+    assert skeleton_for("dense-retrieval").concepts(), "an explicit curated task id is unchanged"

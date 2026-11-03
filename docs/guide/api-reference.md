@@ -10,7 +10,7 @@ vocabulary a client may append is `serve/protocol.py::CONTROL_EVENTS`.
 
 <!-- generated: api routes -->
 
-219 routes on 188 paths; 10 deprecated; 27 with a declared response model.
+220 routes on 189 paths; 10 deprecated; 27 with a declared response model.
 
 ### `/api`
 
@@ -270,6 +270,7 @@ vocabulary a client may append is `serve/protocol.py::CONTROL_EVENTS`.
 | `GET` | `/api/runs/{run_id}/notify-scope` | Whether the run is excluded from each existing hook's run filter. | — |  |
 | `POST` | `/api/runs/{run_id}/notify-scope/attach` | Attach exactly this run to one existing hook, preserving all other configuration. | — |  |
 | `POST` | `/api/runs/{run_id}/novelty-preview` | Compare an idea with tried nodes using LoopLab's pure graded novelty rubric. | — |  |
+| `POST` | `/api/runs/{run_id}/operator-notes` | Record durable operator guidance, never agent-authored operator authority. | — |  |
 | `GET` | `/api/runs/{run_id}/per-query` | The run's current per-query uploads (latest per node and test) and their test ids. | — |  |
 | `POST` | `/api/runs/{run_id}/per-query` | Upload a terminal node's per-query arrays; LoopLab derives the shared test id. | — |  |
 | `GET` | `/api/runs/{run_id}/profile-measurements` | Read declared profile keys from current node measurements without recomputation. | — |  |

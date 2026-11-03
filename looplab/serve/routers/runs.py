@@ -825,6 +825,14 @@ class ExternalValueBody(BaseModel):
     estimates: list[ExternalValueMember] = Field(min_length=1, max_length=6)
 
 
+class OperatorNoteBody(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    expected_generation: str = Field(pattern=r"^[0-9a-f]{64}$")
+    action_id: str = Field(pattern=r"^[A-Za-z0-9_.:-]{1,128}$")
+    task_family: str = Field(min_length=1, max_length=128)
+    note: str = Field(min_length=1, max_length=4000)
+
+
 class NoveltyPreviewBody(BaseModel):
     """Candidate idea to compare with the current run; this call never admits it."""
 
@@ -1386,6 +1394,14 @@ def build_router(srv) -> APIRouter:
         """Estimate remaining headroom for the complete live MCTS candidate batch."""
         from looplab.harness.selection import estimate_values
         return estimate_values(srv, _run_dir(run_id), body)
+
+    @router.post("/api/runs/{run_id}/operator-notes")
+    def publish_operator_note_route(run_id: str, body: OperatorNoteBody, request: Request):
+        """Record durable operator guidance, never agent-authored operator authority."""
+        from looplab.serve.routers.orchestration import _owner_only
+        from looplab.harness.operator_notes import publish_operator_note
+        _owner_only(request, "publish operator notes")
+        return publish_operator_note(srv, _run_dir(run_id), body)
 
     @router.post("/api/runs/{run_id}/lessons")
     def publish_external_lesson(run_id: str, body: ExternalLessonBody):
