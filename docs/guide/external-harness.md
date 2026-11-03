@@ -76,24 +76,10 @@ settings to bypass obligations. The config view stays readable for diagnostics b
 approves nothing. Refresh explicitly after repair; these refusals rewrite, retry and
 resume nothing, and legacy and retired settings stay readable.
 
-### Operator notes
+### Operator notes and nested runs
 
-An owner may record durable operator guidance with `POST /api/runs/{run_id}/operator-notes`:
-`{expected_generation, action_id, task_family, note}`. The harness token is refused. The server binds
-run UID, direction and task fingerprint; the note is later shown by exact fingerprint, not by an
-arbitrary family label or the old `task_id`. Exact retries replay; changing content under one action
-ID conflicts. These notes do not authorize work or certify a scientific claim.
-
-### Nested campaign runs
-
-A run at `<run-root>/<campaign>/<seed>` is listed by `GET /api/campaign-runs` and opens directly.
-Its canonical `run_id` is `nested-` plus URL-safe base64 of the whole relative UTF-8 path (no
-padding), not the leaf name and not a slash replacement. Use that exact ID in `/api/runs/{run_id}`
-and MCP calls; `run_path` keeps the readable `campaign/seed` label. `run_started.run_id` and
-`run_uid` are not rewritten. Symlinks, service directories, traversal, ID collisions and directories
-inside another run are refused. A missing path is resolved only for post-delete receipts, never
-opened as a live run. New runs may be created by CLI with `--out runs/<campaign>/<seed>`; API launch
-continues to create direct children and refuses to occupy an existing nested ID.
+Owner notes grant no authority. Nested IDs come from `GET /api/campaign-runs`; unsafe addresses are
+refused ([doc 70](../70-external-works-and-operator-reports-2026-09-29.md)).
 
 ### Brief results in Assistant chat
 
@@ -762,33 +748,9 @@ The normal control cycle is:
    refuses node detail. Building nodes have no comparison receipt. For live Inspector reads,
    details can lag or lead state: comparison requires coherent current result evidence,
    not merely the presence of a parent score or matching input keys.
-2. Decide whether a proposal, stage split and plan help. The operator's declared
-   `cmd.stages` wins. For a single command, pass preceding stages as
-   `submit_experiment(pre_stages=[{"name":"train","command":["python","train.py"],
-   "expect":{"files":["model.safetensors"]}}])`, or write the equivalent
-   `looplab_stages.json`. The server applies the same stage validator to both forms,
-   requires `edit_surface` to permit the manifest, and appends the operator's protected
-   score command. `pre_stages` cannot name or replace the final `score`. `dry_run`
-   shows the preceding chain followed by `operator score`. A regular candidate must
-   produce the genuine metric through `eval.metric`; use `node_kind="artifact"` only
-   for an intentionally unranked preparation job, not to hide a scored experiment.
-   Independently declare `job_role` (`prepare`, `profile`, `fit`, `score`, `recovery`). The DAG
-   role filter dims unrelated nodes but never deletes them; selecting a node still opens its exact
-   attempt, stages and logs. Inspector → Resources lists numeric secondary outputs with their
-   evidence channel, original units and any score-log reconstruction. An operator-declared reader,
-   job-reported stdout and an engine-recorded value are different evidence; an absent value stays
-   unknown. Compare only matching conditions: these outputs do not establish overall speedup or
-   model quality and do not replace the Product/FUR objective.
-   The owner may set `harness_policy.execution` to `optimization_only` with a bounded
-   `allowed_job_roles` list and version. Inject, node reset and resume enforce it;
-   a successful profile never grants a scientific fit. Read the current mode in
-   `harness-progress.execution_scope` and the full policy in `/harness-policy`.
-   Notification scope is independent: `GET /api/runs/{run_id}/notify-scope` reports
-   `excluded_by_run_filter`; the owner may `POST /notify-scope/attach?hook=<name>`
-   to add exactly this run while preserving command, vars, kinds and watermark.
-   Before the first materialization `code_repo_missing` means no base exists: submit
-   the first real candidate with ready files and optional `pre_stages`, then use a
-   worktree after `workspace_seeded`; do not create a dummy bootstrap node.
+2. Decide whether a proposal, stage split and plan help. `cmd.stages` wins; `pre_stages` or
+   `looplab_stages.json` declares preceding work, then the protected genuine score runs.
+   `job_role` and `optimization_only` scope roles. Compare secondary outputs only under matching conditions.
    Enabled `deep_research_every` requires a current `research_completed` memo;
    enabled `track_hypotheses` requires a nonempty candidate hypothesis statement;
    injection creates a fresh Card and does not attach a supplied `card_id`.
@@ -897,19 +859,8 @@ The normal control cycle is:
    Publish `report_generated` at each enabled `report_every` node interval
    before the next candidate, and cover the latest candidate before finishing.
    No particular number of implementation stages is required.
-6. Pause or finalize the run through the same command API. Pause only withholds new
-   evaluations; it is not a process-stop or GPU-release receipt. To stop an exact active
-   attempt, call `stop_node(node_id, generation, reason, key)`. It submits the fenced
-   `node_abort`, then returns the fresh node status, engine/GPU observations and
-   `checkpoint=not_collected`: abort alone never proves save-on-stop or that unsaved
-   steps became a checkpoint. Resume from the durable state after a client restart.
-   A run does not finish merely because the external agent has no immediate action.
-
-Choose the run boundary by one coherent research question and decision scope, not by scorer
-compatibility alone. Related arms and the profiles/recovery needed for that decision belong
-together. A separate question may use a new run on the same evaluator; connect it through a
-super-task and explicit producer/control references instead of repeating completed fits or
-presenting a new run ID as a new result. Technical retries stay in their existing run.
+6. Pause or finalize through the command API. Pause only withholds evaluations. `stop_node`
+   returns `checkpoint=not_collected`. Group by question; retries stay.
 
 The obligation settings of an external run are fixed at launch (including concept,
 novelty, monitoring, review and report switches). Per-run config rejects changes to these
@@ -1193,7 +1144,7 @@ seconds; it adds no evaluation wait of its own.
 
 ## Orchestration ([doc 78](../78-external-agent-orchestration-2026-10-14.md))
 
-| `wait_for_next(after=…, coalesce=true)` / `GET /api/agent-events` | Long poll of actionable events LoopLab derives itself: node evaluated/failed, stage failed, monitor question, obligation due, run idle, run paused/finished, GPU free. A backlog becomes one packet: the freshest direction/lifecycle action, bounded coalesced history, newest next_after and fresh progress; historical events do not renew execution authority. `coalesce=false` preserves chronological delivery. |
+| `wait_for_next(after=…, coalesce=true)` / `GET /api/agent-events` | Long poll. Coalescing returns fresh direction/progress; history grants no authority. `coalesce=false` is chronological. |
 |---|---|
 | `looplab agent-notify --command '…{message}…'` | Operator's wake-up command: debounced, retried, recorded in a ledger. `PUT /api/runs/{run_id}/agent-notify` sets your run's `vars` (thread). |
 | `PUT /api/runs/{run_id}/gpu-gate` | `hold` or `start_after` other runs' engines; the host GPU lease is served FIFO (`GET /api/gpu-queue`). `looplab gpu-gate` writes it before the run exists. |
