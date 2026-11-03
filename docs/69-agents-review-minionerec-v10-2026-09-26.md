@@ -429,7 +429,7 @@ UnseenRecall@20=0.03328)» уйдёт в межпрогонные claims как 
   команду стартом движка. UI, TUI и ассистент говорят «записано, ждёт resume», а не «применено».
   Пакетная команда не нужна: на стопе восемь инжектов и hint ложатся в журнал до первого решения
   стратега, а один resume обслуживает всё. Тест: `tests/test_queued_intent_on_a_stopped_run.py`.*
-- **69.30a** OPEN[acked-intent-on-a-stopping-loop-reads-applied] намерение, подтверждённое головой
+- **69.30a** *Закрыто 2026-11-03, ветка `kimi-review-03-11-2026`:* `CommandObservation.engine_ack_before_stop` использует фактический seq `command_ack`. `_succeeded` на standing stop помечает intent `deferred_until_resume`, если ack не доказан до pause; ack до pause остаётся применённым, drain served не перепутан. `tests/test_stopping_ack.py` проверяет обе границы, command-service/drain/observation suites проходят. Исходная формулировка: намерение, подтверждённое головой
   цикла, которая затем встаёт на паузу, завершается просто `succeeded` («Inject applied»), хотя ждёт
   того же resume (`inject_requests=1`, `injects_done=0`); индекс подтверждений не хранит seq
   подтверждения, и отличить подтверждение до паузы от подтверждения на паузе нечем (критик

@@ -36,8 +36,8 @@ from looplab.events.types import (EV_CARD_DROPPED, EV_COMMAND_ACK, EV_PAUSE, EV_
                                   EV_RESUME, EV_RUN_ABORT, EV_RUN_FINISHED, EV_RUN_REOPENED)
 from looplab.serve._log_index import LogIndexCursor, PathLocks, validated_index_bound
 from looplab.serve.protocol import (CONTROL_EVENTS, PAUSE_BOUNDARY_EVENTS, ack_observed,
-                                    engine_ack_observed, file_command_ack, file_deferred_ack,
-                                    file_drain_ack, next_standing_pause,
+                                    command_intent_marker, engine_ack_observed, file_command_ack,
+                                    file_deferred_ack, file_drain_ack, next_standing_pause,
                                     stop_holds_queued_intents)
 
 
@@ -325,6 +325,19 @@ class CommandObservation:
         """`record`'s `engine_ack` postcondition against this revision's acknowledgements — the
         rule `looplab stop --wait` asks too (`serve/protocol.py::engine_ack_observed`)."""
         return engine_ack_observed(record, self._acknowledgements)
+
+    def engine_ack_before_stop(self, record: dict) -> bool:
+        """Whether this intent has an ack event strictly before the latest pause boundary."""
+        boundary = self._latest_pause_boundary
+        if boundary is None:
+            return False
+        marker = command_intent_marker(record, str(record.get("id") or ""))
+        event_seq = record.get("event_seq")
+        return any(event.type == EV_COMMAND_ACK
+                   and (event.data or {}).get("command_id") == marker
+                   and (event.data or {}).get("event_seq") == event_seq
+                   and event.seq < boundary.seq
+                   for event in self.events_view())
 
     def drain_ack_observed(self, record: dict) -> bool:
         """The same rule over the acks a DRAIN engine wrote: whether `record`'s intent was served

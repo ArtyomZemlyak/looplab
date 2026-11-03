@@ -2497,6 +2497,11 @@ class RunCommandService:
             # operator's resume — which is what the record says, never "applied"
             # (`_left_for_the_operators_resume`).
             record = {**record, "deferred_until_resume": True}
+        elif (record.get("postcondition") == "engine_ack"
+              and observation.stop_holds_queued_intents()
+              and not observation.drain_ack_observed(record)
+              and not observation.engine_ack_before_stop(record)):
+            record = {**record, "deferred_until_resume": True}
         elif (record.get("drain_only") is not True
               and record.get("postcondition") == "engine_ack"
               and observation.drain_ack_observed(record)):
