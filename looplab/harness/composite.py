@@ -352,6 +352,39 @@ def finish_run(api, run_id: str, expected_generation: str, *, key: str,
                       gates=gates)
 
 
+def stop_node(api, run_id: str, expected_generation: str, *, node_id: int, key: str,
+              reason: str, generation: Optional[int] = None) -> dict:
+    """Abort one exact active attempt; pause remains a separate new-work boundary."""
+    steps = _Steps()
+    if generation is None:
+        node = api.request("GET", _run_path(
+            run_id, f"/nodes/{int(node_id)}?expected_generation={expected_generation}"))
+        if not steps.add("read_node", node):
+            return steps.done(message="")
+        generation = node["body"].get("attempt", 0)
+    result = _command(api, run_id, expected_generation, "node_abort", {
+        "node_id": int(node_id), "generation": int(generation), "reason": reason},
+        f"{key}:abort:{node_id}:{generation}", settle_seconds=5.0)
+    if not steps.add("abort", result):
+        return steps.done(message="")
+    observed = api.request("GET", _run_path(
+        run_id, f"/nodes/{int(node_id)}?expected_generation={expected_generation}"))
+    steps.add("observed_node", observed)
+    progress = api.run_progress(run_id, expected_generation)
+    steps.add("observed_progress", progress)
+    gpu = api.request("GET", "/api/gpu-queue")
+    steps.add("observed_gpu_queue", gpu)
+    execution = (progress.get("body") or {}).get("execution") or {}
+    return steps.done(
+        message="abort admitted for the exact attempt; engine/GPU and checkpoint are separate observations",
+        stop_kind="active_evaluator_abort", node_id=int(node_id), generation=int(generation),
+        node_status=(observed.get("body") or {}).get("status"),
+        engine_running=execution.get("engine_running"),
+        gpu_queue=gpu.get("body"),
+        checkpoint={"status": "not_collected",
+                    "reason": "abort does not prove a checkpoint or save-on-stop; unsaved steps are not claimed"})
+
+
 def retry_node(api, run_id: str, expected_generation: str, *, node_id: int, key: str,
                from_stage: str = "eval", generation: Optional[int] = None) -> dict:
     """Retry a node's setup/launch as a new ATTEMPT of the same node. The engine keeps the earlier

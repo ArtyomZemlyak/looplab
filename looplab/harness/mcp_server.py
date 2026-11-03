@@ -1433,6 +1433,15 @@ def _campaign_tools(mcp, api, ToolAnnotations) -> None:
                                     reviews=reviews, reason=reason, dry_run=dry_run)
 
     @mcp.tool()
+    def stop_node(run_id: str, expected_generation: str, node_id: int, key: str,
+                  reason: str, generation: int | None = None) -> dict:
+        """Abort one exact active attempt, unlike pause (which only withholds new work).
+        Returns the abort receipt, fresh node/engine/GPU observations and checkpoint=not_collected:
+        abort never proves save-on-stop or that unsaved steps became a checkpoint."""
+        return composite.stop_node(api, run_id, expected_generation, node_id=node_id,
+                                   key=key, reason=reason, generation=generation)
+
+    @mcp.tool()
     def retry_node(run_id: str, expected_generation: str, node_id: int, key: str,
                    from_stage: str = "eval", generation: int | None = None) -> dict:
         """Retry a failed node's setup/launch as a NEW ATTEMPT of the same node (node_reset from

@@ -866,9 +866,13 @@ The normal control cycle is:
    Publish `report_generated` at each enabled `report_every` node interval
    before the next candidate, and cover the latest candidate before finishing.
    No particular number of implementation stages is required.
-6. Pause or finalize the run through the same command API. Resume from the durable
-   state after a client restart. A run does not finish merely because the external
-   agent has no immediate action.
+6. Pause or finalize the run through the same command API. Pause only withholds new
+   evaluations; it is not a process-stop or GPU-release receipt. To stop an exact active
+   attempt, call `stop_node(node_id, generation, reason, key)`. It submits the fenced
+   `node_abort`, then returns the fresh node status, engine/GPU observations and
+   `checkpoint=not_collected`: abort alone never proves save-on-stop or that unsaved
+   steps became a checkpoint. Resume from the durable state after a client restart.
+   A run does not finish merely because the external agent has no immediate action.
 
 The obligation settings of an external run are fixed at launch (including concept,
 novelty, monitoring, review and report switches). Per-run config rejects changes to these

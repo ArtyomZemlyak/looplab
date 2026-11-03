@@ -44,6 +44,11 @@ Declare `job_role` as `prepare`, `profile`, `fit`, `score` or `recovery` indepen
 `allowed_job_roles` list. Inject, retry and resume enforce that declaration; a profile is not
 permission to resume scientific training. `execution_scope` is visible in harness progress.
 
+Use `pause` only to withhold new evaluations; it does not prove the active evaluator or its GPU
+lease stopped. Use `stop_node` to abort an exact active attempt and read its fresh node status,
+engine/GPU observations and `checkpoint=not_collected`. Never infer save-on-stop or unsaved-step
+persistence from an abort receipt.
+
 An `inject_node` command receipt marked `succeeded` proves admission, not successful
 training. For a failed node, read current generation/attempt-bound logs before
 submitting a corrected child with a new key and parent generation. An exact retry
