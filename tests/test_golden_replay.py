@@ -91,6 +91,9 @@ the diff that justified it:
 * 2026-10-08 — `RunState.upstream_auto_paused` (`core/models.py`, doc 73 §4.2 G2: the upstream
   automation's kill switch). The diff was 1 insertion and 0 deletions — `"upstream_auto_paused":
   false`, what a log with no `upstream_auto_set` folds to — and no shared leaf changed.
+* 2026-11-03 — `Node.job_role` (`core/models.py`, external engineering roles). The diff was
+  8 insertions and 0 deletions — `"job_role": null` per node, what an older `node_created`
+  without the declaration folds to — and no shared leaf changed.
 """
 from __future__ import annotations
 

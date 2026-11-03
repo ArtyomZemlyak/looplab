@@ -2500,6 +2500,7 @@ class RunCommandService:
             # (`_left_for_the_operators_resume`).
             record = {**record, "deferred_until_resume": True}
         elif (record.get("postcondition") == "engine_ack"
+              and not record.get("spawned_by_command")
               and observation.stop_holds_queued_intents()
               and not observation.drain_ack_observed(record)
               and not observation.engine_ack_before_stop(record)):

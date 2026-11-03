@@ -3116,7 +3116,8 @@ def build_router(srv) -> APIRouter:
                         break
                     digest.update(chunk)
                 after = os.fstat(handle.fileno())
-                if (before.st_size, before.st_mtime_ns, before.st_ino) != (after.st_size, after.st_mtime_ns, after.st_ino):
+                from looplab.core.atomicio import file_identity
+                if file_identity(before) != file_identity(after):
                     raise HTTPException(409, "artifact changed during verification")
                 return digest.hexdigest()
             digest, _, identity = _read_artifact_fenced(run_id, "run", path, body.expected_generation,
