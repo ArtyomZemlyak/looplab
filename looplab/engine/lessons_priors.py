@@ -386,7 +386,8 @@ class LessonPriorsMixin:
             operator_health["source_window_truncated"] or operator_health["skipped"]
             or operator_health["unavailable"]))
         health["operator_notes_digest"] = operator_health["window_digest"]
-        return notes, parsed, fp, _memoized_embed(self._e._embedder), health, case_line, operator_notes
+        health["operator_notes"] = operator_notes
+        return notes, parsed, fp, _memoized_embed(self._e._embedder), health, case_line
 
     def _render_role_prior(self, ctx, role: Optional[str]) -> str:
         """Render ONE role's prior text (the historical surface; `_pick_role_prior` is the pair)."""
@@ -484,7 +485,8 @@ class LessonPriorsMixin:
         threshold moves, and `operator=None` (every historical caller) reproduces the old order
         exactly."""
         from looplab.engine.memory import prompt_slot_key      # both slot budgets below key on it
-        notes, parsed, fp, embed, health, case_line, operator_notes = ctx
+        notes, parsed, fp, embed, health, case_line = ctx
+        operator_notes = health.get("operator_notes", [])
         receipt: dict = {
             "notes": 0, "case": False, "rows": [], "quarantined_useless": 0,
             # NOT a copy of the argument for its own sake: the citation instrument has to be able to
@@ -493,7 +495,7 @@ class LessonPriorsMixin:
             **({"operator_scoped": str(operator)} if operator else {}),
             "source": {"lessons_sha256": health["lessons_digest"],
                        "notes_sha256": health["notes_digest"],
-                       "operator_notes_sha256": health["operator_notes_digest"],
+                       "operator_notes_sha256": health.get("operator_notes_digest", ""),
                        "complete": bool(health["complete"])},
             "operator_notes": [row["note_id"] for row in operator_notes],
         }

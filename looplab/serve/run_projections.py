@@ -380,11 +380,11 @@ def campaign_folder(entry) -> bool:
     the direct-child rule). Hidden, reserved and service entries are the root's own stores; a link or
     reparse point is not followed, as the run list follows none."""
     from looplab.serve.appstate import (_DELETE_SERVICE_PREFIXES, _LIFECYCLE_LOCK_PREFIX,
-                                        _RESERVED_RUN_IDS, _RESET_RECEIPT_PREFIX,
+                                        RESERVED_RUN_IDS, _RESET_RECEIPT_PREFIX,
                                         _TRACE_CLEAR_RECEIPT_PREFIX)
     name = entry.name
     lowered = name.lower()
-    if (name.startswith(".") or lowered in _RESERVED_RUN_IDS
+    if (name.startswith(".") or lowered in RESERVED_RUN_IDS
             or lowered.startswith((_LIFECYCLE_LOCK_PREFIX, _TRACE_CLEAR_RECEIPT_PREFIX,
                                    _RESET_RECEIPT_PREFIX, *_DELETE_SERVICE_PREFIXES))):
         return False

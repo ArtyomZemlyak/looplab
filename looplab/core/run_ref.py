@@ -19,11 +19,12 @@ from looplab.core.run_discovery import has_run_marker, is_run_dir
 NESTED_RUN_PREFIX = "nested-"
 MAX_NESTED_RUN_DEPTH = 4
 MAX_NESTED_RUN_BYTES = 4096
-_RESERVED_RUN_IDS = {
+RESERVED_RUN_IDS = {
     "reports", "assistant", ".reviews", ".reviews.lock", ".command-locks",
     "ui_settings.json", "ui_settings.json.lock", "secrets.json", "secrets.json.lock",
     ".settings-launch.lock", "projects.json", "projects.json.lock", ".agent-events",
 }
+_RESERVED_RUN_IDS = RESERVED_RUN_IDS
 _NESTED_ID = re.compile(r"[A-Za-z0-9_-]+")
 
 

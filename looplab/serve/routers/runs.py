@@ -1398,9 +1398,9 @@ def build_router(srv) -> APIRouter:
     @router.post("/api/runs/{run_id}/operator-notes")
     def publish_operator_note_route(run_id: str, body: OperatorNoteBody, request: Request):
         """Record durable operator guidance, never agent-authored operator authority."""
-        from looplab.serve.routers.orchestration import _owner_only
+        from looplab.serve.principal import require_owner
         from looplab.harness.operator_notes import publish_operator_note
-        _owner_only(request, "publish operator notes")
+        require_owner(request, "publish operator notes")
         return publish_operator_note(srv, _run_dir(run_id), body)
 
     @router.post("/api/runs/{run_id}/lessons")

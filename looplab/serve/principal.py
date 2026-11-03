@@ -137,6 +137,14 @@ def request_agent_token(request) -> bool:
         return False
 
 
+def require_owner(request, what: str) -> None:
+    """Refuse an owner-only write reached through the scoped agent channel."""
+    if request_agent_token(request):
+        from fastapi import HTTPException
+        raise HTTPException(403, f"the harness token cannot {what}; ask the operator "
+                                 "(`looplab agent-notify` or the owner UI)")
+
+
 def request_agent_credential(request) -> Optional[str]:
     """`"token"` (authenticated), `"client"` (the open UI's declared agent) or None."""
     if not request_agent_token(request):

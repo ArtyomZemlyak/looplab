@@ -81,9 +81,8 @@ def _hook_param(hook: Optional[str]) -> Optional[str]:
 
 
 def _owner_only(request: Request, what: str) -> None:
-    if request_agent_token(request):
-        raise HTTPException(403, f"the harness token cannot {what}; ask the operator "
-                                 "(`looplab agent-notify` or the owner UI)")
+    from looplab.serve.principal import require_owner
+    require_owner(request, what)
 
 
 def build_router(srv) -> APIRouter:

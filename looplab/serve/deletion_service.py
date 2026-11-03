@@ -25,7 +25,7 @@ from looplab.events.eventstore import (
 from looplab.events.span_index import (
     invalidate as invalidate_span_index, span_destructive_write_guard)
 from looplab.serve.appstate import (
-    _LIFECYCLE_LOCK_PREFIX, _RESERVED_RUN_IDS, _RESET_RECEIPT_PREFIX,
+    _LIFECYCLE_LOCK_PREFIX, RESERVED_RUN_IDS, _RESET_RECEIPT_PREFIX,
     _TRACE_CLEAR_RECEIPT_PREFIX)
 from looplab.serve.deletion_transaction import (
     DELETE_IDENTITY_PREFIX, DELETE_QUARANTINE_PREFIX, DELETE_RECEIPT_PREFIX, DeletionReceiptError,
@@ -78,7 +78,7 @@ def _plain_run_path(srv, run_id: str) -> Path:
     from looplab.core.run_ref import resolve_run_address
     root = srv.root.resolve()
     requested = resolve_run_address(root, run_id, allow_missing=True)
-    if requested.defect is not None or requested.path.name.lower() in _RESERVED_RUN_IDS:
+    if requested.defect is not None or requested.path.name.lower() in RESERVED_RUN_IDS:
         raise HTTPException(404, _detail(
             "run_not_found", "No run exists with that exact direct-child identity."))
     return requested.path

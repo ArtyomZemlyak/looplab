@@ -19,10 +19,9 @@
    explicitly when done. LoopLab evaluates; never claim a score it did not measure.
 
 An operator can launch instead: `looplab run task.json --out runs/my-run -s external_harness=true`.
-A CLI-created `runs/<campaign>/<seed>` uses the canonical `run_id` from `/api/campaign-runs` in
-all MCP calls; never substitute the leaf name. On a protected UI the MCP process needs a distinct
-`LOOPLAB_HARNESS_TOKEN`. The rest of this file
-is the contract; `docs/guide/external-harness.md` is the full guide, including recovery.
+For `runs/<campaign>/<seed>`, use the canonical `run_id` from `/api/campaign-runs`, never the leaf
+name. A protected UI needs a distinct `LOOPLAB_HARNESS_TOKEN`. The contract follows;
+`docs/guide/external-harness.md` covers recovery.
 
 ## The contract
 

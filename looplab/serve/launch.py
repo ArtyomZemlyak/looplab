@@ -30,7 +30,7 @@ from looplab.core.config import (Settings, canonicalize_parallelism_source,
 from looplab.core.run_deletion import RunDeletionStorageError, load_run_deletion_fence
 from looplab.core.run_proposal import RunProposal
 from looplab.serve.appstate import (
-    _DELETE_SERVICE_PREFIXES, _LIFECYCLE_LOCK_PREFIX, _RESERVED_RUN_IDS, _RESET_RECEIPT_PREFIX,
+    _DELETE_SERVICE_PREFIXES, _LIFECYCLE_LOCK_PREFIX, RESERVED_RUN_IDS, _RESET_RECEIPT_PREFIX,
     _TRACE_CLEAR_RECEIPT_PREFIX)
 from looplab.serve.settings_store import _ALLOWED_FIELDS, _SECRET_FIELDS, LAUNCH_ONLY_FIELDS
 
@@ -89,7 +89,7 @@ def safe_run_dir(root: Path, run_id: Any, *, check_conflict: bool = True) -> Pat
     alias = resolve_run_address(root, run_id)
     if alias.defect == "collision" or (alias.nested and alias.path is not None and alias.path != resolved):
         _reject(409, "run_path_conflict", "run_id is already a canonical nested run address", "run_id")
-    if (resolved.name.lower() in _RESERVED_RUN_IDS
+    if (resolved.name.lower() in RESERVED_RUN_IDS
             or resolved.name.lower().startswith((
                 _LIFECYCLE_LOCK_PREFIX, _TRACE_CLEAR_RECEIPT_PREFIX,
                 _RESET_RECEIPT_PREFIX, *_DELETE_SERVICE_PREFIXES))):

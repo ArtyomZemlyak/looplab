@@ -37,6 +37,7 @@ looplab concept-coverage Concept-graph coverage + uncovered-region alarm (PART I
 looplab asset-brief     Prior-art & on-disk asset brief for a task repo (PART IV D1)
 looplab lock-in         Action-space lock-in detector (PART IV D7)
 looplab board-dedup     Taxonomy-aware hypothesis-board dedup analysis (PART IV D4)
+looplab research-map    Bounded read-only research questions, experiments and report history
 looplab research-targets Axis-structured deep-research targets from coverage (PART IV D2)
 looplab novelty-recall  Audit executed proposals for paraphrases the novelty gate missed (PART IV E3)
 looplab lesson-guard    Audit distilled lessons for over-generalization and contradiction (PART IV D6/E4)
@@ -3410,6 +3411,16 @@ looplab harness [--settings]
 | Option | Default | Description |
 |---|---|---|
 | `--settings` | off | Include the full `Settings` JSON Schema and the curated field help |
+
+## `research-map`
+
+Read a bounded page of registered research questions, experiments and report history without starting
+or changing work. `--generation` must be the run's current generation token; `--briefing` returns the
+current action context instead of the map page.
+
+```bash
+looplab research-map RUN_DIR --generation TOKEN [--offset 0] [--limit 20] [--briefing]
+```
 
 ## `harness-mcp`
 

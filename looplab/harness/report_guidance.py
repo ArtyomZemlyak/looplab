@@ -4,12 +4,6 @@ from __future__ import annotations
 import math
 from pathlib import Path
 from urllib.parse import quote
-from fastapi import HTTPException
-from looplab.events.replay import fold
-from looplab.events.run_generation import run_generation_token
-from looplab.harness.journals import read_event_source
-from looplab.harness.research_map import _text
-from looplab.core.run_ref import run_address
 
 GUIDE = '/api/runs/{run_id}/research-workflow'
 REPORT_INSTRUCTION = (
@@ -24,6 +18,12 @@ REPORT_INSTRUCTION = (
 
 
 def snapshot(rd: Path, generation: str) -> dict:
+    from fastapi import HTTPException
+    from looplab.core.run_ref import run_address
+    from looplab.events.replay import fold
+    from looplab.events.run_generation import run_generation_token
+    from looplab.harness.journals import read_event_source
+    from looplab.harness.research_map import _text
     from looplab.serve.report_history import report_version
     events = read_event_source(rd)
     if run_generation_token(events) != generation:

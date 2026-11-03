@@ -32,7 +32,7 @@ from looplab.core.atomicio import file_identity
 from looplab.core.models import Event
 from looplab.core.node_evidence import node_attempt
 from looplab.core.pathsafe import is_reparse
-from looplab.core.run_ref import _RESERVED_RUN_IDS, resolve_run_address, run_address
+from looplab.core.run_ref import RESERVED_RUN_IDS, resolve_run_address, run_address
 from looplab.core.run_deletion import RUN_DELETION_FENCE_PREFIX
 from looplab.core.trace_files import open_private_trace_file, trace_file_change_token
 from looplab.engine.finalize import incomplete_finalize_scope, is_guarded_abort
@@ -358,7 +358,7 @@ class AppState:
             raise HTTPException(404, "no such run")
         rd = resolved.path
         first = rd.relative_to(root).parts[0].lower()
-        if (first in _RESERVED_RUN_IDS or first.startswith((
+        if (first in RESERVED_RUN_IDS or first.startswith((
                 _LIFECYCLE_LOCK_PREFIX, _TRACE_CLEAR_RECEIPT_PREFIX, _RESET_RECEIPT_PREFIX,
                 *_DELETE_SERVICE_PREFIXES))):
             raise HTTPException(404, "no such run")

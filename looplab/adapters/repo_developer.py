@@ -2860,8 +2860,7 @@ class LLMRepoDeveloper:
                     f"The operator's SCORING command is FIXED (you may NOT change it): `{cmd_desc}`; it reads "
                     f"the metric via {metric}. The engine appends it as the final, protected `score` stage. "
                     "Your job: declare the ordered stages that run BEFORE it (do NOT include a `score` stage — "
-                    "it's reserved), producing the artifacts that scorer reads. If that code also prepares "
-                    "or trains, declare only the work it does not already do; never duplicate it.")
+                    "it's reserved), producing whatever that scorer reads (a trained checkpoint, prepared data).")
             # doc 69 69.5: "FIXED … protected" is true of the COMMAND and the stage, and of the code
             # it runs only when the write tools refuse that code. When they would not (or nobody can
             # name it), say so — appended, so a frozen scorer's turn is byte for byte the old one.
