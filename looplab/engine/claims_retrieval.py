@@ -248,6 +248,8 @@ def build_context_pack(claims: list[dict], *, concept_overview: Optional[dict] =
         pack["coverage"] = {
             "n_runs": concept_overview.get("n_runs", 0),
             "n_concepts": concept_overview.get("n_concepts", 0),
+            **({"n_provisional_runs": concept_overview["n_provisional_runs"]}
+               if concept_overview.get("n_provisional_runs") else {}),
             # A hand-built/older overview with no receipt is UNKNOWN, never silently exact.
             "source_complete": source_complete,
             "partial_capsules": concept_overview.get(
@@ -850,7 +852,9 @@ def render_context_pack(pack: dict) -> str:
                         for x in cov.get("top_concepts", [])[:6])
         lines.append(f"Bounded live concept observations (not coverage): {cov.get('n_runs', 0)} returned "
                      f"run(s), {cov.get('n_concepts', 0)} concept(s)"
-                     f"{'; UNTRUSTED_MEMORY_CONCEPTS=' + top if top else ''}.")
+                     + (f"; {int(cov['n_provisional_runs'])} provisional run(s)"
+                        if cov.get("n_provisional_runs") else "")
+                     + f"{'; UNTRUSTED_MEMORY_CONCEPTS=' + top if top else ''}.")
         # Phase 1 profit signal: a direction-normalized RANK tendency across similar runs — which concepts
         # tended to land in the better vs worse half of their run's own field. ADVISORY — a prior rank
         # tendency, never causal proof, never a rule, and never a selection input; weigh but do not obey.

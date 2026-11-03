@@ -4797,14 +4797,14 @@ class EvaluateMixin:
             a.base_revision = ({**seed, "node_id": a.node_id, "generation": a.generation}
                                if isinstance(seed, dict) else None)
         else:
-            for event in reversed(a.events_at_start):
-                data = event.data if isinstance(event.data, dict) else {}
-                if (data.get("node_id") == a.node_id and data.get("generation") == a.generation - 1
-                        and event.type in ("node_evaluated", "node_failed")):
-                    provenance = data.get("metric_provenance") or {}
-                    revision = provenance.get("base_revision") if isinstance(provenance, dict) else None
-                    a.base_revision = revision if isinstance(revision, dict) else None
-                    break
+            data = next((event.data for event in reversed(a.events_at_start)
+                         if isinstance(event.data, dict)
+                         and event.data.get("node_id") == a.node_id
+                         and event.data.get("generation") == a.generation - 1
+                         and event.type in ("node_evaluated", "node_failed")), {})
+            provenance = data.get("metric_provenance") or {}
+            revision = provenance.get("base_revision") if isinstance(provenance, dict) else None
+            a.base_revision = revision if isinstance(revision, dict) else None
         a.stamp_workdir(a.node)
         self._record_node_build_delta(a.node)
         if not _reuse and a.node.rerun_stage:
@@ -7311,11 +7311,20 @@ class EvaluateMixin:
                     data["withheld_metric"] = _withheld
                 self.store.append(EV_NODE_FAILED, data)
             self._maybe_crash()
-        if getattr(self, "_cross_run_concepts", False):
+        if getattr(self, "memory_dir", None):
+            writers = [("case", self.lessons.store_case)]
+            if getattr(self, "_cross_run_concepts", False):
+                writers.append(("concept capsule", self.lessons.store_concept_capsule))
             try:
-                self.lessons.store_concept_capsule(fold(self.store.read_all()), provisional=True)
+                final = fold(self.store.read_all())
             except Exception as exc:  # noqa: BLE001 - provisional memory never cancels a measured terminal
-                _LOG.warning("provisional concept capsule could not be written: %s", exc)
+                _LOG.warning("provisional memory state could not be read: %s", exc)
+            else:
+                for label, writer in writers:
+                    try:
+                        writer(final, provisional=True)
+                    except Exception as exc:  # noqa: BLE001 - provisional memory never cancels a measured terminal
+                        _LOG.warning("provisional %s could not be written: %s", label, exc)
         # CODE IDENTITY AFTER THE TERMINAL (doc 79, `engine/code_identity.py`): the effective
         # configuration this evaluation ran with, and — when an in-place repair changed the overlay
         # during evaluation — a second commit parented on the materialized one, so the repair is a

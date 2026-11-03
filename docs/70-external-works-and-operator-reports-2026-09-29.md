@@ -233,7 +233,7 @@ read-only*, источник *Process environment*. Это не ошибка д�
   `cross_run_index`; UI сравнивает свёрнутый `state.run_id` с id маршрута (`Report.jsx`,
   `panels.jsx`). Кодирование в один сегмент (раздел 4, вариант 2) — всё ещё рекомендация, но с этими
   пунктами, и не ослабляя правило «потомок рана — не ран».
-- **70.2** *Закрыто 2026-11-03, ветка `kimi-review-03-11-2026`: `_eval_write_terminal` публикует concept capsule сразу после настоящего terminal вне write lock, с `provisional: true`; finalize заменяет её обычной записью без флага. Старые capsule shapes не меняются, metric и concept outcomes берутся только из реальных terminals, shared-store ошибка не отменяет измеренный результат. Проверка полного toy eval и upsert: `tests/test_provisional_capsules.py`.*
+- **70.2** *Закрыто 2026-11-03, ветка `kimi-review-03-11-2026`: `_eval_write_terminal` публикует case и (при включённом `cross_run_concepts`) concept capsule сразу после настоящего terminal вне write lock, с `provisional: true`; finalize заменяет их обычными записями без флага. Case и явные читатели помечают промежуточные данные; Researcher/Strategist aggregates и пороги поддержки используют только финализированные capsules. Metric и concept outcomes берутся только из реальных terminals, shared-store ошибка не отменяет измеренный результат, старые записи без флага остаются совместимыми. Проверка полного toy eval, upsert и support threshold: `tests/test_provisional_capsules.py`.*
 - **70.3** *Закрыто 2026-09-29: здесь стоял `endpoint-mismatch-names-neither-endpoint`. Состояние
   учётных данных несёт `endpoints` (адрес привязки ключа и `llm_base_url` в нормализованном
   написании, только при `endpoint_mismatch`) и `variables` (имена переменных окружения/`.env`, откуда

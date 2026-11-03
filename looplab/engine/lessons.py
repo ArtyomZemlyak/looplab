@@ -624,7 +624,7 @@ class LessonMemory(LessonPriorsMixin, LessonDistillMixin, LessonReconcileMixin,
         except Exception:  # noqa: BLE001 — compaction is best-effort; never fail the run for it
             pass
 
-    def store_case(self, final: RunState) -> None:
+    def store_case(self, final: RunState, *, provisional: bool = False) -> None:
         """Cross-run memory (I19): persist the best result as a retrievable case."""
         if not self._e.memory_dir:
             return
@@ -666,6 +666,7 @@ class LessonMemory(LessonPriorsMixin, LessonDistillMixin, LessonReconcileMixin,
             "params": best.idea.params,
             "metric": task_scale,
             **({"objective_key": objective} if objective else {}),
+            **({"provisional": True} if provisional else {}),
             "rationale": (best.idea.rationale or "") + idea_report_note(best, final.nodes)
             if substituted else best.idea.rationale,
             # Both fields are ADDITIVE and reader-defaulted (invariant 5): `valid_case_record` gates on

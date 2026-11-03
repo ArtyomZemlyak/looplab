@@ -234,6 +234,7 @@ class LessonPriorsMixin:
         # unreadable one is folded into the health receipt below and the prior says it is partial.
         from looplab.engine.memory import valid_case_record
         case_line = ""
+        case_provisional = False
         case_rows, case_health = read_memory_jsonl_window(base / "cases.jsonl")
         for _index, c in case_rows:
             if not isinstance(c, dict):
@@ -251,6 +252,7 @@ class LessonPriorsMixin:
             case_line = (f"metric {c.get('metric')} (run {c.get('run_id') or 'unknown'}) with params "
                          + cross_run_text(c.get("params"), max_chars=CASE_PARAMS_CHARS,
                                           single_line=True, entropy=True))
+            case_provisional = c.get("provisional") is True
         # (2) fingerprint-matched lessons (M2/M3), incl. negatives — parsed once; the role filter and
         # similarity scoring happen per role in `_render_role_prior`.
         parsed: list[tuple[int, dict]] = []
@@ -373,6 +375,7 @@ class LessonPriorsMixin:
         health["complete"] = bool(health["complete"] and not (
             case_health["source_window_truncated"] or case_health["skipped"]
             or case_health["unavailable"]))
+        health["case_provisional"] = case_provisional
         operator_rows, operator_health = read_memory_jsonl_window(base / "operator_notes.jsonl")
         from looplab.harness.operator_notes import scope_fingerprint, valid_operator_note
         operator_fp = scope_fingerprint(self._e.task)
@@ -543,8 +546,13 @@ class LessonPriorsMixin:
         # "what won on this exact task" fact, in the form a next run can act on. One line, after the
         # prose, because the prose says WHY it won and this says WHAT to set.
         if case_line and role != LESSON_ROLE_DEVELOPER:
-            out += ("\nBest known configuration for this task (the winning run's own parameters, "
-                    "not a recommendation): " + case_line)
+            if health.get("case_provisional"):
+                out += ("\nBest provisional configuration for this task (the run is still in progress; "
+                        "its measured parameters, not a final result or a recommendation): " + case_line)
+                receipt["case_provisional"] = True
+            else:
+                out += ("\nBest known configuration for this task (the winning run's own parameters, "
+                        "not a recommendation): " + case_line)
             receipt["case"] = True
         if operator_notes:
             out += "\nDurable operator guidance for this exact task fingerprint: " + " | ".join(
