@@ -92,7 +92,7 @@ from looplab.engine.eval_attempt_rules import (  # noqa: F401 — the ladder's r
     _REPAIR_ANSWER_EDIT, _REPAIR_ANSWER_PROVIDER_FAILURE, _REPAIR_ANSWER_STUCK,
     RepairGateContext, _classify_repair_answer, _repair_change_set, _repair_provider_failure,
     attempt_succeeded, coerce_judge_deferred, deferred_triage_verdict, evaluated_terminal,
-    repair_gate, triage_verdict_outcome)
+    repair_gate, scorer_training_advisory, triage_verdict_outcome)
 from looplab.engine.crash_repair import developer_repair_history
 from looplab.engine.eval_stages import STAGE_MANIFEST_NAME
 from looplab.engine.shared import (canary_failure_account, host_refusal_deferral,
@@ -7123,6 +7123,14 @@ class EvaluateMixin:
                 _eval_payload["violations"] = _terminal.violations
                 if _terminal.metric_provenance is not None:
                     _eval_payload["metric_provenance"] = _terminal.metric_provenance
+                from looplab.events.types import EV_STAGE_FINISHED
+                _stage_rows = [e.data for e in self.store.read_all()
+                               if e.type == EV_STAGE_FINISHED and isinstance(e.data, dict)
+                               and e.data.get("node_id") == a.node_id]
+                _score_advisory = scorer_training_advisory(a.res.stages, _stage_rows)
+                if _score_advisory is not None:
+                    _eval_payload.setdefault("metric_provenance", {})[
+                        "scorer_training_advisory"] = _score_advisory
                 if a.base_revision is not None:
                     _eval_payload.setdefault("metric_provenance", {})["base_revision"] = a.base_revision
                 # …and WHICH ARTIFACTS the number was measured on (`engine/artifact_fence.py`): per

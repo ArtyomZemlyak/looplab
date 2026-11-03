@@ -87,6 +87,34 @@ def attempt_succeeded(res, *, artifact: bool, objective_key=None, run_direction=
     return bool(measured and not res.timed_out
                 and (res.exit_code == 0 or getattr(res, "stalled", False)))
 
+def scorer_training_advisory(stages, previous_stage_rows=()):
+    """A non-authoritative warning that the score stage may duplicate earlier work."""
+    rows = [s for s in (stages or []) if isinstance(s, dict)]
+    if len(rows) < 2:
+        return None
+    final = rows[-1]
+    if str(final.get("name") or "") not in ("score", "self_score"):
+        return None
+    previous_rows = [s for s in (previous_stage_rows or []) if isinstance(s, dict)]
+
+    def actual_seconds(stage):
+        if stage.get("status") != "reused":
+            return float(stage.get("seconds") or 0.0)
+        name = str(stage.get("name") or "")
+        candidates = [row for row in previous_rows
+                      if str(row.get("name") or "") == name and row.get("status") == "ok"]
+        return float(candidates[-1].get("seconds") or 0.0) if candidates else 0.0
+
+    preceding = sum(actual_seconds(stage) for stage in rows[:-1])
+    score = actual_seconds(final)
+    if preceding <= 0.0 or score <= 0.0 or score <= preceding / 2.0:
+        return None
+    return {"kind": "possible_duplicate_training", "score_seconds": round(score, 3),
+            "preceding_seconds": round(preceding, 3), "ratio": round(score / preceding, 3),
+            "evidence": "score stage exceeded half the earlier stages' actual duration; "
+                        "this is advisory, not proof of training"}
+
+
 # ---------------------------------------------------- was the repair's answer a repair at all?
 # Moved VERBATIM from `engine/evaluate.py` (ENG2-06), private spellings and all: the attempt
 # loop, the salvage-cause fix and `tests/test_evaluate_named_rules.py` name them there.

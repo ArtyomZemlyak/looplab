@@ -296,3 +296,23 @@ def test_each_phase_asks_its_rule_exactly_once():
     write_src = inspect.getsource(ev.EvaluateMixin._eval_write_terminal)
     for gone in ("unbound_subject_violation_rows(", "violation_rows(", "as_event()"):
         assert gone not in write_src, gone
+
+
+def test_scorer_training_advisory_is_advisory_and_uses_real_reused_duration():
+    from looplab.engine.eval_attempt_rules import scorer_training_advisory
+    stages = [{"name": "train", "status": "reused", "seconds": 0.0},
+              {"name": "score", "status": "ok", "seconds": 60.0}]
+    previous = [{"name": "train", "status": "ok", "seconds": 100.0}]
+    warning = scorer_training_advisory(stages, previous)
+    assert warning["kind"] == "possible_duplicate_training"
+    assert warning["preceding_seconds"] == 100.0 and warning["ratio"] == 0.6
+    assert "not proof" in warning["evidence"]
+    assert scorer_training_advisory([stages[0], dict(stages[1], seconds=50.0)], previous) is None
+
+
+def test_scorer_training_advisory_ignores_other_stages_and_unbounded_reuse():
+    from looplab.engine.eval_attempt_rules import scorer_training_advisory
+    assert scorer_training_advisory([{"name": "train", "status": "ok", "seconds": 10}]) is None
+    assert scorer_training_advisory([
+        {"name": "train", "status": "reused", "seconds": 0.0},
+        {"name": "score", "status": "ok", "seconds": 100.0}], []) is None
