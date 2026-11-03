@@ -18,6 +18,7 @@ def _run(tmp_path):
     (src / "train.py").write_text(
         "import os\n"
         "from pathlib import Path\n"
+        "print('TRAIN_ACTIVE')\n"
         "Path('model.txt').write_text('trained')\n"
         "with open(os.environ['TEST_CALLS'], 'a') as fh: fh.write('train\\n')\n",
         encoding="utf-8")
@@ -50,7 +51,8 @@ def _run(tmp_path):
     engine.store.append("node_created", {
         "node_id": 0, "parent_ids": [], "operator": "full",
         "idea": {"operator": "full", "params": {}}, "code": "",
-        "files": {"looplab_stages.json": manifest}})
+        "files": {"looplab_stages.json": manifest,
+                  "looplab_activation.json": json.dumps({"markers": ["TRAIN_ACTIVE"]})}})
     return engine, calls
 
 
@@ -128,3 +130,17 @@ def test_only_input_protocol_amendments_invalidate_reuse(tmp_path):
     _reset(engine)
     _evaluate(engine)
     assert calls.read_text().splitlines() == ["train", "score", "score", "train", "score"]
+
+
+def test_reused_stage_uses_its_last_successful_activation_span(tmp_path):
+    engine, calls = _run(tmp_path)
+    _evaluate(engine)
+    first = next(e for e in engine.store.read_all()
+                 if e.type == "stage_finished" and e.data["name"] == "train")
+    assert first.data["log_spans"]
+    _reset(engine)
+    _evaluate(engine)
+    terminal = next(e for e in reversed(engine.store.read_all()) if e.type == "node_evaluated")
+    assert terminal.data["metric"] == 1.0
+    assert terminal.data["activation"]["verdict"] == "ok"
+    assert calls.read_text().splitlines() == ["train", "score", "score"]

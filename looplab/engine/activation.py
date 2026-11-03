@@ -951,8 +951,9 @@ def _fresh_logs(workdir, since: Optional[float], snapshot=None, engine_logs=None
     fallback that printed no marker). A log whose boundary cannot be established is not read — no
     credit, the refusing direction. `since` (the attempt's start) still drops a whole log last written
     before it; with no snapshot it is the only floor, and the appended case is then credited.
-    A stage this attempt REUSED wrote nothing, so its earlier markers are not credited either way —
-    doc 69, 69.10b.
+    A stage this attempt REUSED wrote nothing of its own. Its markers are credited only from the
+    last successful attempt's durable `log_spans`, after the reset/inline reuse was proved and the
+    log's identity is unchanged — never by reading the whole historical log (doc 69, 69.10b).
 
     `engine_logs` names the logs the ENGINE appends to — the case-folded basenames of this attempt's
     `EvalLogPlan.roles`: `setup.log`, one `<stage>.log` per resolved stage, or `eval.log` — and only

@@ -2149,6 +2149,45 @@ class EvaluateMixin:
     # are the engine half of `engine/activation.py`: the verdict (in a worker thread, it walks the
     # tree), applying it to the attempt, and re-check without re-run after a manifest-only repair.
 
+    def _reused_stage_log_texts(self, a: "EvalAttempt") -> list:
+        from looplab.engine import activation as act
+        from looplab.events.types import EV_STAGE_FINISHED
+        latest = {}
+        for event in self.store.read_all():
+            data = event.data if isinstance(event.data, dict) else {}
+            if (event.type == EV_STAGE_FINISHED and data.get("node_id") == a.node_id
+                    and data.get("status") == "ok" and data.get("log_spans")):
+                latest[str(data.get("name") or "")] = data["log_spans"]
+        out = []
+        for stage in a.res.stages or []:
+            if not isinstance(stage, dict) or stage.get("status") != "reused":
+                continue
+            raw = latest.get(str(stage.get("name") or ""))
+            if not raw:
+                continue
+            try:
+                spans = [act.LogSpan(
+                    path=str(row["path"]),
+                    identity=(tuple(row["identity"]) if row.get("identity") is not None else None),
+                    floor=int(row["floor"]), end=int(row["end"])) for row in raw]
+            except (KeyError, TypeError, ValueError):
+                continue
+            texts = act.read_log_spans(spans)
+            if texts is not None:
+                out.extend(texts)
+        return out
+
+    def _successful_stage_log_spans(self, a: "EvalAttempt") -> dict:
+        if a._marker_snapshot is None:
+            return {}
+        from looplab.engine import activation as act
+        from looplab.engine.eval_log_plan import _log_name_key
+        _texts, spans = act.attempt_log_texts(
+            a.workdir, a._t0, a._marker_snapshot, a._marker_engine_logs)
+        return {_log_name_key(str(span.path).rsplit("/", 1)[-1]): {
+            "path": span.path, "identity": span.identity, "floor": span.floor, "end": span.end}
+            for span in spans}
+
     def _activation_verdict(self, a: "EvalAttempt", entries) -> tuple:
         """`(ActivationVerdict, evidence)` for THIS attempt's declaration `entries`. Worker thread.
 
@@ -2186,6 +2225,7 @@ class EvaluateMixin:
         if not all(printed.values()) and a.workdir is not None:
             more, spans = act.attempt_log_texts(a.workdir, a._t0, a._marker_snapshot,
                                                 a._marker_engine_logs)
+            more.extend(self._reused_stage_log_texts(a))
             printed = {label: seen or act.log_entry_seen(e, more)
                        for (label, seen), e in zip(printed.items(), logs)}
         satisfied = {}
@@ -5427,7 +5467,13 @@ class EvaluateMixin:
         # what changes is the RATE, bounded by attempts x stages. Making them diagnostic
         # instead is not available: the fold reads them.
         async with self._write_lock:
+            from looplab.engine.eval_log_plan import _log_name_key
+            stage_log_spans = self._successful_stage_log_spans(a)
             for _st in (a.res.stages or []):
+                if isinstance(_st, dict) and _st.get("status") == "ok":
+                    span = stage_log_spans.get(_log_name_key(str(_st.get("name") or "") + ".log"))
+                    if span is not None:
+                        _st = {**_st, "log_spans": [span]}
                 self.store.append(EV_STAGE_FINISHED,
                                   {"node_id": a.node_id, **_st, "generation": a.generation})
         if a.ok:

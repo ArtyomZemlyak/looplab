@@ -117,7 +117,7 @@ _ABSENT = object()
 # them: they are inputs to normalization, never event data.  Named once here because two sites must
 # agree about them — the pop, and the residual allow-list that refuses whatever the pop did not
 # take.  See `_normalize_inject_node` for why that residual check is not `data_fields` itself.
-_INJECT_IMPORT_FIELDS = frozenset({"source_run", "source_node", "code_from"})
+_INJECT_IMPORT_FIELDS = frozenset({"source_run", "source_node", "code_from", "pre_stages"})
 
 
 def task_file_for(rd: Path) -> Optional[str]:

@@ -2227,7 +2227,7 @@ EVENT_PAYLOAD_KEYS: dict[str, PayloadContract] = {
         optional=(
             "activation", "attempt", "extra_metrics_direction", "extra_metrics_omitted",
             "extra_metrics_provenance", "metric_provenance", "resource_curve", "self_metric",
-            "stderr_tail"
+            "stderr_tail", "task_metric"
         ),
     ),
     "node_failed": PayloadContract(
@@ -2589,7 +2589,7 @@ EVENT_PAYLOAD_KEYS: dict[str, PayloadContract] = {
     "stage_finished": PayloadContract(
         "One stage of a multi-stage eval pipeline finished: name, status, exit code, seconds.",
         required=(),
-        optional=("attempt", "exit_code", "generation", "name", "node_id", "seconds", "status"),
+        optional=("attempt", "exit_code", "generation", "log_spans", "name", "node_id", "seconds", "status"),
     ),
     "stage_rollback": PayloadContract(
         "A failed stage's rollback to a checkpoint — accepted, or refused with a reason.",
