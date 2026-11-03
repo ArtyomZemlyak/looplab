@@ -4,6 +4,7 @@ import { uiMessage, uiText, useUILanguage } from './uiLanguage.js'
 import { get, runApiPath } from './api.js'
 import { useScopedResource } from './hooks.js'
 import { fmtSeconds, resourceSnapshot } from './resourceSnapshotModel.js'
+import { jobLabel } from './jobFilterModel.js'
 
 const _num = value => (Math.abs(value) >= 100 ? value.toFixed(0) : value.toPrecision(3))
 
@@ -22,7 +23,7 @@ export default function ResourceSnapshotPanel({ runId, node }) {
   const snap = resourceSnapshot(node, { effectiveConfig })
   if (!snap) return null
   return <details className="resource-snapshot" onToggle={event => setOpen(event.currentTarget.open)}>
-    <summary>{uiText('Resources of this attempt')}</summary>
+    <summary>{uiText('Resources of this attempt')} · {uiText(jobLabel(node))}</summary>
     {open && <>
       <dl className="kv">
         <dt>{uiText('attempt')}</dt><dd>{uiMessage('generation {0} · {1} repair(s)', [snap.attempt, snap.repairs])}</dd>
@@ -35,6 +36,11 @@ export default function ResourceSnapshotPanel({ runId, node }) {
           : <span className="muted">{uiText('not derivable: no max_steps in the effective config or no timed training stage')}</span>}</dd>
         {snap.trainerRates.length > 0 && <><dt>{uiText('trainer reported')}</dt><dd>{snap.trainerRates.map(row =>
           <div key={row.key}><code>{row.key}</code> {_num(row.value)}</div>)}<span className="muted">{uiText('as the trainer reported them, in its own units')}</span></dd></>}
+        {snap.jobOutputs.length > 0 && <><dt>{uiText('job outputs')}</dt><dd>{snap.jobOutputs.map(row =>
+          <div key={row.key}><code>{row.key}</code> {_num(row.value)} <span className="muted">· {uiText(({
+            declared: 'operator-declared reader', auto: 'job-reported stdout', engine: 'engine-recorded output',
+          })[row.channel] || 'unknown provenance')}{row.reconstructed && ` · ${uiText('recovered from the score log')}`}</span></div>)}
+          <span className="muted">{uiText('Recorded values in their original units, not a Product/FUR substitute. Compare only matching conditions; no overall speedup or model quality is inferred.')}</span></dd></>}
         <dt>{uiText('peak memory')}</dt><dd>{snap.peakMemory.length
           ? snap.peakMemory.map(row => <div key={row.key}><code>{row.key}</code> {_num(row.value)}</div>)
           : <span className="muted">{uiText('not recorded')}</span>}</dd>

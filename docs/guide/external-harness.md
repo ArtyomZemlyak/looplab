@@ -753,7 +753,13 @@ The normal control cycle is:
    shows the preceding chain followed by `operator score`. A regular candidate must
    produce the genuine metric through `eval.metric`; use `node_kind="artifact"` only
    for an intentionally unranked preparation job, not to hide a scored experiment.
-   Independently declare `job_role` (`prepare`, `profile`, `fit`, `score`, `recovery`).
+   Independently declare `job_role` (`prepare`, `profile`, `fit`, `score`, `recovery`). The DAG
+   role filter dims unrelated nodes but never deletes them; selecting a node still opens its exact
+   attempt, stages and logs. Inspector → Resources lists numeric secondary outputs with their
+   evidence channel, original units and any score-log reconstruction. An operator-declared reader,
+   job-reported stdout and an engine-recorded value are different evidence; an absent value stays
+   unknown. Compare only matching conditions: these outputs do not establish overall speedup or
+   model quality and do not replace the Product/FUR objective.
    The owner may set `harness_policy.execution` to `optimization_only` with a bounded
    `allowed_job_roles` list and version. Inject, node reset and resume enforce it;
    a successful profile never grants a scientific fit. Read the current mode in

@@ -14,6 +14,7 @@ import { seedContractText, seedSource } from './seedProvenance.js'
 import { baseChoices, baseMatches } from './baseRevision.js'
 import { nodeTheme } from './conceptId.js'
 import { nodeCanonicalConcepts } from './conceptChips.js'
+import { jobChoices, jobLabel, jobMatches } from './jobFilterModel.js'
 import { conceptMaterializationStatus, orderConceptTags, runConstantConcepts } from './nodeProjection.js'
 import { dagCollapsedKey, dagLayoutProjection } from './dagProjection.js'
 import { OpIcon } from './icons.jsx'
@@ -393,6 +394,7 @@ function ExpNode({ data }) {
           : node.research_origin ? <span className="origin-chip rsch compact" role="img"
           aria-label={uiText("Proposed from deep research directions")}
           title={uiMessage("proposed just after deep research ({0}) at node {1} — its directions were steering", [node.research_origin.trigger || 'auto', node.research_origin.at_node])}><OpIcon name="bulb" size={11} /></span> : null}
+        {node.job_role && <span className="origin-chip compact" title={uiMessage("Job role: {0}", [node.job_role])}>{uiText(node.job_role)}</span>}
         {node.kind === 'artifact' && <span className="origin-chip artifact compact" role="img"
           aria-label={uiText("Artifact node")}
           title={uiText("Artifact node: prepares data for later nodes, succeeds without a metric and is never ranked")}>▣</span>}
@@ -541,12 +543,22 @@ export default function Dag({ state, selectedId, onSelect, groupMode = 'none', c
 
   const workIds = useMemo(() => workingNodeIds(state), [state])
   const [baseFilter, setBaseFilter] = useState('')
+  const [jobFilter, setJobFilter] = useState('')
   const bases = useMemo(() => baseChoices(state.nodes), [state.nodes])
+  const jobs = useMemo(() => jobChoices(state.nodes), [state.nodes])
   useEffect(() => { if (baseFilter && !bases.some(row => row.digest === baseFilter)) setBaseFilter('') }, [bases, baseFilter])
-  const highlightIds = useMemo(() => baseFilter
-    ? new Set(Object.values(state.nodes || {}).filter(n => baseMatches(n, baseFilter) && (!conceptIds || conceptIds.has(n.id))).map(n => n.id))
-    : conceptIds, [state.nodes, baseFilter, conceptIds])
-  const highlightLabel = baseFilter ? `recorded base ${baseFilter === 'unknown' ? 'unknown' : baseFilter.slice(0, 12)}${conceptIds ? ' and selected concepts' : ''}` : 'selected concepts'
+  useEffect(() => { if (jobFilter && !jobs.includes(jobFilter)) setJobFilter('') }, [jobs, jobFilter])
+  const highlightIds = useMemo(() => {
+    let ids = conceptIds ? new Set(conceptIds) : null
+    if (baseFilter) ids = new Set(Object.values(state.nodes || {}).filter(n => baseMatches(n, baseFilter) && (!ids || ids.has(n.id))).map(n => n.id))
+    if (jobFilter) ids = new Set(Object.values(state.nodes || {}).filter(n => jobMatches(n, jobFilter) && (!ids || ids.has(n.id))).map(n => n.id))
+    return ids
+  }, [state.nodes, baseFilter, jobFilter, conceptIds])
+  const highlightLabel = [
+    baseFilter ? `recorded base ${baseFilter === 'unknown' ? 'unknown' : baseFilter.slice(0, 12)}` : null,
+    jobFilter ? `job ${jobFilter}` : null,
+    conceptIds ? 'selected concepts' : null,
+  ].filter(Boolean).join(' · ') || 'selected concepts'
   const [menu, setMenu] = useState(null)   // U3: right-click node menu {x,y,nodeId}
   const [groupActionKey, setGroupActionKey] = useState('')
   useEffect(() => setGroupActionKey(''), [groupMode])
@@ -906,6 +918,10 @@ export default function Dag({ state, selectedId, onSelect, groupMode = 'none', c
         {bases.some(row => row.digest !== 'unknown') && <label className="base-filter">{uiText("base")}{' '}
           <select className="text" aria-label={uiText("Filter experiments by recorded code base")} value={baseFilter} onChange={e => setBaseFilter(e.target.value)}>
             <option value="">{uiText("All bases")}</option>{bases.map(row => <option key={row.digest} value={row.digest}>{((row.digest === 'unknown' ? uiText('Unknown') : row.digest.slice(0, 12)))} · {row.count}</option>)}
+          </select></label>}
+        {jobs.length > 0 && <label className="base-filter">{uiText("job")}{' '}
+          <select className="text" aria-label={uiText("Filter jobs by role")} value={jobFilter} onChange={e => setJobFilter(e.target.value)}>
+            <option value="">{uiText("All jobs")}</option>{jobs.map(role => <option key={role} value={role}>{uiText(role)}</option>)}
           </select></label>}
         <span className="muted">{uiText("group by")}</span>
         <select className="text" aria-label={uiText("Group experiments by")} value={groupMode} onChange={e => onSetMode && onSetMode(e.target.value)}>

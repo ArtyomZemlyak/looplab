@@ -74,6 +74,8 @@ test('opened, the panel reads the attempt effective config once and shows each k
     assert.match(text, /derived: declared GPUs × stage wall time/)
     assert.match(text, /8\.89 steps\/s/)
     assert.match(text, /train_samples_per_second/)
+    assert.match(text, /unknown provenance/)
+    assert.match(text, /Compare only matching conditions/)
     assert.match(text, /peak memory\s*not recorded/)
     assert.equal(h.fetch.calls.filter(call => call.path === '/api/runs/r/code').length, 1)
   } finally { await h.close() }

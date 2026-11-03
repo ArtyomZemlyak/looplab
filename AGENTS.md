@@ -43,6 +43,10 @@ Declare `job_role` as `prepare`, `profile`, `fit`, `score` or `recovery` indepen
 `node_kind`. The owner may set `harness_policy.execution` to `optimization_only` with a bounded
 `allowed_job_roles` list. Inject, retry and resume enforce that declaration; a profile is not
 permission to resume scientific training. `execution_scope` is visible in harness progress.
+The DAG filters by role without deleting evidence. Inspector → Resources shows recorded secondary
+outputs with their provenance (`declared` reader, `auto` stdout, `engine` or unknown), original
+units and reconstruction marker. Do not compare profiles with different conditions or treat those
+outputs as an overall speedup or the model-quality objective.
 
 Use `pause` only to withhold new evaluations; it does not prove the active evaluator or its GPU
 lease stopped. Use `stop_node` to abort an exact active attempt and read its fresh node status,

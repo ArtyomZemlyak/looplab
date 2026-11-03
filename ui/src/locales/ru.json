@@ -1,7 +1,7 @@
 {
   "schema": 1,
   "language": "ru",
-  "count": 8335,
+  "count": 8351,
   "messages": {
     "# LoopLab run report — {0}": "# Отчёт запуска LoopLab — {0}",
     "## Agent narrative (advisory)": "## Пояснения агента (рекомендации)",
@@ -8337,7 +8337,23 @@
     "No saved notices on this page.": "На этой странице сохранённых предупреждений нет.",
     "Read the command receipt and correct the original content if needed.": "Проверьте квитанцию команды и при необходимости исправьте исходное содержание.",
     "Manual publication destination label (optional)": "Название назначения для ручной публикации (необязательно)",
-    "Manual export does not send or publish to an external service.": "Ручная выгрузка не отправляет и не публикует материалы во внешнем сервисе."
+    "Manual export does not send or publish to an external service.": "Ручная выгрузка не отправляет и не публикует материалы во внешнем сервисе.",
+    "Job role: {0}": "Роль задачи: {0}",
+    "recorded base {0}": "зарегистрированная база {0}",
+    "job": "задача",
+    "Filter jobs by role": "Фильтр задач по роли",
+    "All jobs": "Все задачи",
+    "job outputs": "результаты задачи",
+    "operator-declared reader": "ридер, объявленный оператором",
+    "job-reported stdout": "stdout, сообщённый задачей",
+    "engine-recorded output": "результат, записанный движком",
+    "unknown provenance": "происхождение неизвестно",
+    "recovered from the score log": "восстановлено из журнала оценки",
+    "Recorded values in their original units, not a Product/FUR substitute. Compare only matching conditions; no overall speedup or model quality is inferred.": "Записанные значения в исходных единицах, а не замена Product/FUR. Сравнивайте только совпадающие условия; общее ускорение и качество модели отсюда не следуют.",
+    "fit": "обучение",
+    "prepare": "подготовка",
+    "recovery": "восстановление",
+    "artifact": "артефакт"
   },
   "plurals": {
     "({0} paraphrases folded)": {

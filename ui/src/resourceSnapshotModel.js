@@ -50,6 +50,7 @@ export function resourceSnapshot(node, { effectiveConfig = null } = {}) {
     .map(([key, value]) => ({ key, value }))
     .sort((a, b) => a.key.localeCompare(b.key))
   return {
+    jobRole: node.job_role || (node.kind === 'artifact' ? 'artifact' : 'experiment'),
     attempt: Number.isSafeInteger(node.attempt) ? node.attempt : 0,
     repairs: Number.isSafeInteger(node.repairs) ? node.repairs : 0,
     gpus, worldSize,
@@ -63,6 +64,14 @@ export function resourceSnapshot(node, { effectiveConfig = null } = {}) {
     stepsPerSecond: train && maxSteps != null ? maxSteps / train.seconds : null,
     maxSteps,
     trainerRates: reported(TRAINER_RATE),
+    jobOutputs: Object.entries(extras)
+      .filter(([, value]) => finite(value))
+      .map(([key, value]) => ({
+        key, value, channel: node.extra_metrics_provenance?.[key] || 'unknown',
+        reconstructed: node.extra_metrics_backfill?.backfilled === true
+          && (!Array.isArray(node.extra_metrics_backfill?.keys) || node.extra_metrics_backfill.keys.includes(key)),
+      }))
+      .sort((a, b) => a.key.localeCompare(b.key)),
     peakMemory: reported(PEAK_MEMORY),
   }
 }
