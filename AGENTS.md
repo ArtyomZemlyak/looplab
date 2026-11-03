@@ -82,14 +82,16 @@ Refresh after events or responses; inspect `source_health` if the event
 log or a sidecar journal is incomplete. Commands and measured results remain in
 the event timeline. External obligation settings are fixed for a launched run;
 change operational settings on resume or start another run to change obligations.
-A campaign of several experiments stays in ONE run while the task and scorer are
-compatible: pre-register each experiment and submit it with MCP `submit_experiment`;
-change evaluation inputs or protected base files with a recorded `amend_protocol`
-(engine paused) instead of a new run; retry a failed setup with `retry_node`; add
-nodes with `amend_protocol kind=budget` and a reason. Upload per-query arrays with
-`upload_per_query` and quote `compare_experiment` (LoopLab's paired CIs and Holm).
-Only an incompatible task needs a new run: group runs with `campaign_supertask`.
-Finish with `finish_run`. See docs/81-campaign-in-one-run-2026-10-14.md.
+Keep one coherent question and decision scope in ONE run, not every technically compatible
+experiment: pre-register related arms with MCP `submit_experiment`; change evaluation inputs or
+protected base files with a recorded `amend_protocol` (engine paused) instead of a new run; retry
+a failed setup with `retry_node`; add nodes with `amend_protocol kind=budget` and a reason.
+Technical profiles needed for the same decision stay beside the experiment. A different scientific
+question or incompatible task gets a new run even with the same scorer; group runs with
+`campaign_supertask` and explicit producer/control links. Never use a run boundary to reset spend,
+create a second result or force retraining. Upload per-query arrays with `upload_per_query` and
+quote `compare_experiment` (LoopLab's paired CIs and Holm). Finish with `finish_run`.
+See docs/81-campaign-in-one-run-2026-10-14.md.
 Search `policy` is an agent choice: submit `set_strategy` to switch the live
 evaluation policy (including `greedy` or `mcts`), or leave the current policy.
 Read `harness-progress.policy_preview` for the active policy's suggested next

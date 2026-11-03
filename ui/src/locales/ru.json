@@ -1,7 +1,7 @@
 {
   "schema": 1,
   "language": "ru",
-  "count": 8351,
+  "count": 8366,
   "messages": {
     "# LoopLab run report — {0}": "# Отчёт запуска LoopLab — {0}",
     "## Agent narrative (advisory)": "## Пояснения агента (рекомендации)",
@@ -8353,7 +8353,22 @@
     "fit": "обучение",
     "prepare": "подготовка",
     "recovery": "восстановление",
-    "artifact": "артефакт"
+    "artifact": "артефакт",
+    "The research map is newer than this report snapshot. Reload the run instead of combining two points in time.": "Карта исследований новее этого снимка отчёта. Перезагрузите запуск вместо объединения двух моментов времени.",
+    "cumulative · not one experiment": "накопленный итог · не один эксперимент",
+    "No cumulative campaign overview has been published. The latest local report does not replace it.": "Накопленный обзор кампании ещё не опубликован. Последний локальный отчёт его не заменяет.",
+    "Published in report": "Опубликовано в отчёте",
+    "node watermark {0}": "отметка по нодам {0}",
+    "node watermark not recorded": "отметка по нодам не записана",
+    "details shortened; inspect the original report": "подробности сокращены; откройте исходный отчёт",
+    "A terminal result was recorded after this overview (event #{0}). Review its recommendation before relying on it.": "После этого обзора записан терминальный результат (событие #{0}). Проверьте рекомендацию, прежде чем полагаться на неё.",
+    "An operator direction was recorded after this overview (event #{0}). The old recommendation may no longer match the current task.": "После этого обзора записано указание оператора (событие #{0}). Прежняя рекомендация может больше не соответствовать текущей задаче.",
+    "This overview covers {0} of {1} visible nodes. Review the later results before relying on its recommendation.": "Этот обзор охватывает {0} из {1} видимых нод. Проверьте более поздние результаты, прежде чем полагаться на рекомендацию.",
+    "Newer evidence was recorded after this overview. Review it before relying on the recommendation.": "После этого обзора записаны новые свидетельства. Проверьте их, прежде чем полагаться на рекомендацию.",
+    "Coverage cannot be judged from a node count. Check the original report and later evidence.": "По числу нод нельзя оценить покрытие. Проверьте исходный отчёт и более поздние свидетельства.",
+    "Loading campaign overview…": "Загрузка обзора кампании…",
+    "Campaign overview is unavailable. Refresh the run; the latest local report is still shown separately.": "Обзор кампании недоступен. Обновите запуск; последний локальный отчёт по-прежнему показан отдельно.",
+    "latest local result": "последний локальный результат"
   },
   "plurals": {
     "({0} paraphrases folded)": {

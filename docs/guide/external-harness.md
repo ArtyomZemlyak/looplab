@@ -886,6 +886,12 @@ The normal control cycle is:
    steps became a checkpoint. Resume from the durable state after a client restart.
    A run does not finish merely because the external agent has no immediate action.
 
+Choose the run boundary by one coherent research question and decision scope, not by scorer
+compatibility alone. Related arms and the profiles/recovery needed for that decision belong
+together. A separate question may use a new run on the same evaluator; connect it through a
+super-task and explicit producer/control references instead of repeating completed fits or
+presenting a new run ID as a new result. Technical retries stay in their existing run.
+
 The obligation settings of an external run are fixed at launch (including concept,
 novelty, monitoring, review and report switches). Per-run config rejects changes to these
 fields. The

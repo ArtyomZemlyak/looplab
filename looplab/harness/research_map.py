@@ -17,6 +17,7 @@ from looplab.events.replay import fold
 from looplab.events.run_generation import run_generation_token
 from looplab.harness.campaign import experiments_of, read_journal
 from looplab.harness.journals import read_event_source, read_source
+from looplab.harness.overview import overview_freshness
 
 
 def _text(value, limit=1000):
@@ -42,7 +43,7 @@ def _bounded(row: dict, max_bytes: int = 1200) -> dict:
     result = short(row)
     result['detail_truncated'] = True
     if size(result) > max_bytes:
-        result = {k: result[k] for k in ('experiment_id', 'memo_id', 'card_id', 'node_id', 'seq', 'published_seq', 'at_node', 'action_id', 'title', 'summary', 'scope_sha256', 'question_card_id', 'question_card_statement', 'quality_issues', 'status', 'durable_status', 'activity') if k in result}
+        result = {k: result[k] for k in ('experiment_id', 'memo_id', 'card_id', 'node_id', 'seq', 'published_seq', 'at_node', 'action_id', 'title', 'summary', 'scope_sha256', 'question_card_id', 'question_card_statement', 'quality_issues', 'status', 'durable_status', 'activity', 'freshness') if k in result}
         result['detail_truncated'] = True
     return result
 
@@ -185,6 +186,8 @@ def snapshot(rd: Path, expected_generation: str, offset: int = 0, limit: int = 2
                 overview = {'published_seq': event.seq, 'at_node': content.get('at_node'),
                             'content': content['campaign_overview']}
                 break
+    if overview:
+        overview['freshness'] = overview_freshness(events, overview['published_seq'], overview['at_node'], len(nodes))
     from looplab.harness.progress import _operator_directions
     from looplab.harness.research_quality import project as research_quality
     return {'version': 1, 'run_id': rd.name, 'run_uid': state.run_uid, 'generation': generation,

@@ -73,8 +73,15 @@ def snapshot(rd: Path, generation: str) -> dict:
     warnings = []
     if not previous:
         warnings.append({'code': 'overview_missing', 'action': 'Read report history and author a cumulative overview.'})
-    elif any(row['after_overview'] for row in outcomes):
-        warnings.append({'code': 'terminal_after_overview', 'action': 'Review terminal outcomes and update the overview if scientifically relevant.'})
+    else:
+        from looplab.harness.overview import overview_freshness
+        freshness = overview_freshness(events, last_overview_seq, previous.get('at_node'), len(state.nodes))
+        actions = {'newer_terminal': ('terminal_after_overview', 'Review terminal outcomes and update the overview if scientifically relevant.'),
+                   'newer_operator_direction': ('direction_after_overview', 'Read the latest operator direction and review the overview recommendation.'),
+                   'newer_nodes': ('nodes_after_overview', 'Review later nodes and update the overview if scientifically relevant.')}
+        for reason in freshness['reasons']:
+            code, action = actions[reason['code']]
+            warnings.append({'code': code, 'event_seq': reason.get('event_seq'), 'action': action})
     if previous:
         for key in ('summary', 'recommendation', 'recommendation_limits', 'next_directions'):
             if not overview.get(key):

@@ -83,7 +83,7 @@ def test_campaign_overview_survives_a_later_experiment_report(tmp_path, monkeypa
     rd = tmp_path / 'r'; rd.mkdir(); store = EventStore(rd / 'events.jsonl')
     store.append('run_started', {'run_id': 'r', 'run_uid': 'u', 'task_id': 't', 'goal': 'g', 'direction': 'max'})
     gen = run_generation_token(store.read_all())
-    first = store.append('report_generated', {'content': {'headline': 'First', 'campaign_overview': {
+    first = store.append('report_generated', {'content': {'at_node': 0, 'headline': 'First', 'campaign_overview': {
         'summary': 'The full campaign so far.', 'learnings': ['Earlier result'], 'report_seqs': []}}})
     second = store.append('report_generated', {'content': {'headline': 'Latest experiment', 'body_markdown': 'New result'}})
     with TestClient(make_app(tmp_path)) as c:
@@ -93,6 +93,17 @@ def test_campaign_overview_survives_a_later_experiment_report(tmp_path, monkeypa
         assert page['reports']['items'][0]['seq'] == second.seq
         hist = c.get(f'/api/runs/r/report/versions/{first.seq}').json()
         assert hist['content']['campaign_overview']['summary'] == 'The full campaign so far.'
+        store.append('node_created', {'node_id': 0, 'operator': 'score', 'parent_ids': [], 'idea': {'operator': 'score'}})
+        terminal = store.append('node_evaluated', {'node_id': 0, 'metric': 0.5})
+        direction = store.append('hint', {'text': 'Stop the old fit'})
+        fresh = c.get('/api/runs/r/research-map', params={'expected_generation': gen}).json()['campaign_overview']
+        assert fresh['published_seq'] == first.seq
+        assert fresh['freshness']['status'] == 'stale'
+        assert fresh['freshness']['reasons'] == [
+            {'code': 'newer_nodes', 'at_node': 0, 'current_nodes': 1},
+            {'code': 'newer_terminal', 'event_seq': terminal.seq},
+            {'code': 'newer_operator_direction', 'event_seq': direction.seq},
+        ]
 
 
 def test_memo_guidance_distinguishes_technical_from_scientific_without_gating(tmp_path, monkeypatch):

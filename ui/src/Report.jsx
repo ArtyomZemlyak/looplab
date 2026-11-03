@@ -24,6 +24,7 @@ import './report-trust-polish.css'
 import { ReportFigures, ReportVersions } from './ReportExtras.jsx'
 import ResearchMap from './ResearchMap.jsx'
 import ReportMetricBindings from './ReportMetricBindings.jsx'
+import CampaignOverviewResource from './CampaignOverview.jsx'
 
 const TRUST_CLASS = { unverified: 'neutral', caveats: 'warn', suspect: 'alarm' }
 const TRUST_LABEL = { unverified: 'not fully verified', caveats: 'with caveats', suspect: 'flags found' }
@@ -157,6 +158,7 @@ function AgentNarrative({ rep, coverage, generation, snapshotSeq, nodes, champio
     aria-labelledby="agent-report-heading">
     <div className="agent-report-head">
       <h2 id="agent-report-heading" tabIndex={-1}>{uiText("Agent narrative")}</h2>
+      <span className="pill">{uiText('latest local result')}</span>
       <span className="pill">{uiText("advisory · not deterministic")}</span>
     </div>
     <p className="report-section-intro">
@@ -663,6 +665,10 @@ export default function ReportView({ state, runId, onOpenPanel, canOpenPanel, on
       </dl>
       {!Object.keys(a.failures).length && !a.infeasible.length && <p className="muted">{uiText('No execution failures or constraint violations are recorded.')}</p>}
 
+      <CampaignOverviewResource runId={runId} generation={expectedGeneration}
+        publicationSeq={rep?.published_seq} snapshotSeq={solutionSeq} visibleNodeCount={nodeCount}
+        enabled={readOnlyReason !== 'review' && solutionIdentityReady}
+        onViewReport={seq => setRequestedReport({ seq })} />
       {readOnlyReason !== 'review' && <ResearchMap runId={runId} generation={expectedGeneration} onPickNode={onPickNode} onOpenConcepts={onOpenConcepts} onOpenCards={onOpenCards} onViewReport={seq => setRequestedReport({ seq })} readOnly={readOnly} />}
 
       <AgentNarrative rep={rep} coverage={coverage} generation={expectedGeneration} snapshotSeq={observedSeq}
