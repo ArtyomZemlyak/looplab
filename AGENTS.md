@@ -191,7 +191,10 @@ Every candidate's code is recorded as a commit of the run's private repository
 (`RUN_DIR/code/repo.git`, `docs/guide/code-identity.md`), and the operator exports
 the run's fixes into the task repository with `looplab code-export`. Code edited in
 a copy outside the run — a scratch clone, a campaign directory, the editable source
-between runs — reaches neither. The worktree is the default way to write code:
+between runs — reaches neither. Before the first materialization `code_repo_missing`
+means the base does not exist yet: submit the first real candidate with ready files
+(and optional `pre_stages`), then use the worktree; do not create a dummy bootstrap node.
+The worktree is the default way to write code after that base exists:
 
 1. MCP `code_worktree(run_id, expected_generation, name)` (or `looplab code-worktree RUN NAME`)
    checks out the run's current base — `start="node:<id>"` for an experiment — on branch

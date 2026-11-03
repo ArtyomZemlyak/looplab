@@ -758,6 +758,12 @@ The normal control cycle is:
    `allowed_job_roles` list and version. Inject, node reset and resume enforce it;
    a successful profile never grants a scientific fit. Read the current mode in
    `harness-progress.execution_scope` and the full policy in `/harness-policy`.
+   Notification scope is independent: `GET /api/runs/{run_id}/notify-scope` reports
+   `excluded_by_run_filter`; the owner may `POST /notify-scope/attach?hook=<name>`
+   to add exactly this run while preserving command, vars, kinds and watermark.
+   Before the first materialization `code_repo_missing` means no base exists: submit
+   the first real candidate with ready files and optional `pre_stages`, then use a
+   worktree after `workspace_seeded`; do not create a dummy bootstrap node.
    Enabled `deep_research_every` requires a current `research_completed` memo;
    enabled `track_hypotheses` requires a nonempty candidate hypothesis statement;
    injection creates a fresh Card and does not attach a supplied `card_id`.

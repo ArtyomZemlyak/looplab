@@ -298,7 +298,11 @@ def add_worktree(run_dir, name: str, *, start: str = "base", path=None) -> dict:
     sync_run(run_dir)
     repo = CodeRepo(run_dir)
     if not repo.exists():
-        raise OverlayRefusal("code_repo_missing", "this run has no code repository yet (no seed)")
+        raise OverlayRefusal(
+            "code_repo_missing",
+            "this run has no code repository yet (no seed). Submit the first real candidate with "
+            "ready files (and optional pre_stages), not code_from/worktree; materialization creates "
+            "the base. Retry code_worktree after that candidate's workspace_seeded/node_created")
     path, outside = _worktree_location(run_dir, name, path)
     # An existing EMPTY directory is a mount point an operator prepared; anything else is somebody's.
     occupied = path.exists() and not (path.is_dir() and not any(path.iterdir()))
@@ -532,7 +536,11 @@ def overlay_from_patch(run_dir, patch: str, *, start: str = "base", **kw) -> dic
     sync_run(run_dir)
     repo = CodeRepo(run_dir)
     if not repo.exists():
-        raise OverlayRefusal("code_repo_missing", "this run has no code repository yet (no seed)")
+        raise OverlayRefusal(
+            "code_repo_missing",
+            "this run has no code repository yet (no seed). Submit the first real candidate with "
+            "ready files (and optional pre_stages), not code_from/worktree; materialization creates "
+            "the base. Retry code_worktree after that candidate's workspace_seeded/node_created")
     commit = _resolve_start(repo, start)
     with tempfile.TemporaryDirectory(prefix="looplab-patch-") as tmp:
         env = {"GIT_INDEX_FILE": str(Path(tmp) / "index")}

@@ -590,6 +590,28 @@ def write_notify_config(root, body: dict, hook: Optional[str] = None) -> dict:
     return config
 
 
+def notify_scope(root, run_id: str) -> dict:
+    """Which configured hooks include this run, without changing their scope."""
+    hooks = notify_hooks(root)
+    included = sorted(name for name, config in hooks.items()
+                      if config.get("runs") is None or run_id in (config.get("runs") or []))
+    return {"run_id": run_id, "included_hooks": included,
+            "available_hooks": sorted(hooks),
+            "excluded_by_run_filter": bool(hooks and not included)}
+
+
+def attach_notify_scope(root, run_id: str, hook: str) -> dict:
+    """Attach exactly one run to an existing hook, preserving command/vars/kinds/watermark."""
+    config = read_notify_config(root, hook)
+    if config is None:
+        raise HTTPException(404, {"code": "notify_hook_not_found", "hook": hook})
+    runs = config.get("runs")
+    if runs is not None and run_id not in runs:
+        config = {**config, "runs": list(runs) + [run_id]}
+        write_notify_config(root, config, hook)
+    return notify_scope(root, run_id)
+
+
 def clear_notify_config(root, hook: Optional[str] = None) -> None:
     """Remove a hook. A named connection's delivery watermark goes with it (per-connection state
     nothing else reads); a re-added hook is pinned FROM NOW by `write_notify_config`."""
