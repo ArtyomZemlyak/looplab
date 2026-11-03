@@ -5298,7 +5298,9 @@ class EvaluateMixin:
         # deadlock / wedged CUDA op) still counts: the metric is real, the non-zero exit is only
         # the kill. Self-gating — `res.metric is not None` on a stall means the value WAS emitted
         # before the silence. NOT for a real deadline timeout (that is still mid-training).
-        a.ok = attempt_succeeded(a.res, artifact=False)
+        a.ok = attempt_succeeded(a.res, artifact=False,
+                                 objective_key=getattr(a.state, "objective_key", None),
+                                 run_direction=getattr(a.state, "direction", None))
         # AN ARTIFACT NODE (doc 73 §1.4) succeeds on a CLEAN pipeline with no metric: the engine's own
         # classifier says the run exited 0, broke no stage contract and only printed no number
         # (`triage._failure_reason == "no_metric"`). Any other reason — a crash, a timeout, a missing
@@ -7005,6 +7007,9 @@ class EvaluateMixin:
                     # the whole-sweep wall-clock; per-trial seconds are audit-only). [] normally.
                     "trials": a.res.trials or [],
                 }
+                if (a.res.metric is None and getattr(a.node, "kind", None) != "artifact"
+                        and getattr(a.state, "objective_key", None) is not None):
+                    _eval_payload["task_metric"] = None
                 # THE CANDIDATE'S OWN NUMBER (doc 52 row 10a), only on a host-scored node that
                 # printed one — absent otherwise, on the rule the two keys below state.
                 if getattr(a.res, "self_metric", None) is not None:

@@ -909,8 +909,10 @@ def _on_node_evaluated(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None
                     continue
             n.trials = trials
             # doc 68 68.2: `metric` is the OBJECTIVE's value; the task's own number stays beside it,
-            # so a retarget folded before or after this terminal ranks it on one key.
-            n.task_metric = n.metric
+            # so a retarget folded before or after this terminal ranks it on one key. A terminal
+            # written under the metric-less-task retarget exception carries an explicit null here;
+            # every older row defaults to its task-scale metric exactly as before.
+            n.task_metric = d.get("task_metric", n.metric) if st.objective_key is not None else n.metric
             _apply_objective(st, n)
             _charge_terminal_cost(st, n, d, ctx)
 
