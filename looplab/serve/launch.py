@@ -85,6 +85,10 @@ def safe_run_dir(root: Path, run_id: Any, *, check_conflict: bool = True) -> Pat
         _reject(400, "invalid_run_id", "run_id must be a plain name, not a path", "run_id")
     requested = root / run_id
     resolved = child.path
+    from looplab.core.run_ref import resolve_run_address
+    alias = resolve_run_address(root, run_id)
+    if alias.defect == "collision" or (alias.nested and alias.path is not None and alias.path != resolved):
+        _reject(409, "run_path_conflict", "run_id is already a canonical nested run address", "run_id")
     if (resolved.name.lower() in _RESERVED_RUN_IDS
             or resolved.name.lower().startswith((
                 _LIFECYCLE_LOCK_PREFIX, _TRACE_CLEAR_RECEIPT_PREFIX,

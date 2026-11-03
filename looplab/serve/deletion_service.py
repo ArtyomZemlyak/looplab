@@ -13,7 +13,7 @@ from fastapi import HTTPException
 
 from looplab.core.atomicio import (
     durable_no_replace_rename, rmtree_readonly_aware, strict_fsync_parent)
-from looplab.core.pathsafe import is_reparse, run_child_name_defect, validate_run_child
+from looplab.core.pathsafe import is_reparse, run_child_name_defect
 from looplab.core.run_deletion import (
     RUN_DELETION_FENCE_PREFIX, RUN_DELETION_OPERATION_RE, RunDeletionStorageError,
     assert_run_deletion_write_allowed, clear_run_deletion_fence,
@@ -75,29 +75,18 @@ def _plain_run_path(srv, run_id: str) -> Path:
     if run_child_name_defect(run_id, strict=True) is not None:
         raise HTTPException(404, _detail(
             "run_not_found", "No run exists with that exact direct-child identity."))
+    from looplab.core.run_ref import resolve_run_address
     root = srv.root.resolve()
-    requested = root / run_id
-    if (requested.name.lower() in _RESERVED_RUN_IDS
-            or requested.name.lower().startswith(_SERVICE_PREFIXES)):
+    requested = resolve_run_address(root, run_id, allow_missing=True)
+    if requested.defect is not None or requested.path.name.lower() in _RESERVED_RUN_IDS:
         raise HTTPException(404, _detail(
             "run_not_found", "No run exists with that exact direct-child identity."))
-    if requested.parent != root:
-        raise HTTPException(404, _detail("run_not_found", "No such run."))
-    return requested
+    return requested.path
 
 
 def _strict_existing_run(srv, run_id: str) -> Path:
     requested = _plain_run_path(srv, run_id)
-    # One predicate, two vocabularies preserved: an unreadable/absent entry is still "No such run."
-    # while a STRUCTURAL defect still names the canonical-direct-directory rule, because those tell
-    # the operator different things about what to do next.
-    child = validate_run_child(srv.root, requested, must_exist=True)
-    if child.defect in ("missing", "unreadable"):
-        raise HTTPException(404, _detail("run_not_found", "No such run."))
-    if child.defect is not None:
-        raise HTTPException(404, _detail(
-            "run_not_found", "The requested run path is not a canonical direct directory."))
-    canonical = child.path
+    canonical = requested
     events = canonical / "events.jsonl"
     try:
         event_entry = events.lstat()

@@ -339,9 +339,8 @@ def _run_row(srv, rd, fence_names: set, *, cache_key: str):
 
 # THE CAMPAIGN FOLDERS (doc 70 70.1): `looplab run --out runs/<campaign>/<seed>` is as ordinary as
 # `runs/<run>`, and the run list above sees only the root's children. Its runs are listed HERE, apart
-# from `run_summaries`, and never inside it: every per-run route addresses a run by ONE path segment
-# through `AppState.run_dir`'s direct-child rule, so a nested run has no id a route can open yet, and
-# a row in `/api/runs` is a row every caller (the compare view, the portfolio, the assistant) opens.
+# from `run_summaries`, and never inside it: rows carry canonical one-segment nested IDs that
+# `AppState.run_dir` resolves, while `/api/runs` keeps its historical direct-child-only contract.
 # Bounded work: at most this many folders and, per folder, this many runs are folded; what a bound
 # cut is COUNTED on the payload, never silently dropped.
 CAMPAIGN_FOLDERS_CAP = 200
@@ -402,9 +401,9 @@ def campaign_runs(srv) -> dict:
     """The runs one level inside each campaign folder, grouped by folder — the same rows as the run
     list (`_run_row`, the same fold cache), each keyed `<folder>/<run>` in that cache.
 
-    READ-ONLY by construction: nothing here spawns, reconciles or writes, and a row carries no id a
-    per-run route accepts. `run_root` is the folder itself, the argument `looplab ui --run-root` takes
-    to serve it as a root where its runs ARE addressable. A folder holding no run is not listed.
+    This listing itself spawns, reconciles and writes nothing. Each row carries a canonical nested
+    ID accepted by the per-run routes; `run_root` also offers the alternative of serving the folder
+    as a root with leaf IDs. A folder holding no run is not listed.
 
     A ROOT THAT IS ITSELF A RUN lists nothing (critic 2026-09-29, LOW-1, driven: `looplab ui
     --run-root runs/demo` listed `nodes/` as a campaign and folded `nodes/node_0/events.jsonl`, a
@@ -452,6 +451,8 @@ def campaign_runs(srv) -> dict:
                 continue
             row = _run_row(srv, rd, fence_names, cache_key=f"{folder.name}/{rd.name}")
             if row is not None:
+                from looplab.core.run_ref import run_address
+                row = {**row, "run_id": run_address(root, rd), "run_path": f"{folder.name}/{rd.name}"}
                 runs.append(row)
         if runs:
             groups.append({"folder": folder.name, "run_root": str(folder), "runs": runs,

@@ -1,10 +1,8 @@
 """The runs inside CAMPAIGN folders — `looplab run --out runs/<campaign>/<seed>` (doc 70 70.1).
 
-`/api/runs` lists the root's children only, so a campaign's runs were invisible in the UI. They are
-listed by `GET /api/campaign-runs`, grouped by folder, as the run list's own rows — and READ-ONLY: a
-nested run is not addressable by the per-run routes (one path segment, `AppState.run_dir`'s
-direct-child rule), which is exactly why they are NOT rows of `/api/runs`, where every caller opens
-what it lists. The one property this must never trade away is that rule's reason: a run's own node
+`/api/runs` lists the root's children only, so a campaign's runs are listed separately by
+`GET /api/campaign-runs`, grouped by folder, as the run list's own rows with canonical nested IDs.
+The one property this must never trade away is the direct-child rule's reason: a run's own node
 workspaces are sandbox-writable, so a directory INSIDE a run is never read as a run.
 """
 from __future__ import annotations
@@ -18,6 +16,7 @@ pytest.importorskip("fastapi")
 from fastapi.testclient import TestClient  # noqa: E402
 
 from looplab.events.eventstore import EventStore  # noqa: E402
+from looplab.core.run_ref import run_address  # noqa: E402
 from looplab.serve import run_projections  # noqa: E402
 from looplab.serve.server import make_app  # noqa: E402
 
@@ -51,8 +50,10 @@ def test_a_campaign_s_runs_are_listed_by_folder_and_not_as_runs(tmp_path):
     assert [f["folder"] for f in view["folders"]] == ["campA", "campB"]
     camp_a = view["folders"][0]
     assert camp_a["run_root"] == str(root / "campA")
-    assert [(r["run_id"], r["best_metric"]) for r in camp_a["runs"]] == [("seed1", 0.5),
-                                                                          ("seed2", 0.25)]
+    assert [(r["run_id"], r["best_metric"]) for r in camp_a["runs"]] == [
+        (run_address(root, root / "campA" / "seed1"), 0.5),
+        (run_address(root, root / "campA" / "seed2"), 0.25)]
+    assert [r["run_path"] for r in camp_a["runs"]] == ["campA/seed1", "campA/seed2"]
     assert all(r["engine_running"] is False for r in camp_a["runs"])
     assert view["folders_skipped"] == 0 and camp_a["runs_skipped"] == 0
     # The run list's own row, keyed apart in the fold cache (`campA/seed1`), so two campaigns'
@@ -62,11 +63,15 @@ def test_a_campaign_s_runs_are_listed_by_folder_and_not_as_runs(tmp_path):
     assert set(camp_a["runs"][0]) >= set(solo[0]) - {"project_id", "label", "supertask_id"}
 
 
-def test_nothing_nested_becomes_addressable(tmp_path):
-    """Listing is not addressing: the per-run routes keep the direct-child rule for every spelling."""
+def test_nested_run_opens_only_by_its_canonical_address(tmp_path):
     root = tmp_path / "runs"
-    _run(root / "campA" / "seed1")
+    rd = _run(root / "campA" / "seed1")
     client = _client(root)
+    address = run_address(root, rd)
+    response = client.get(f"/api/runs/{address}/state")
+    assert response.status_code == 200, response.text
+    assert response.json()["state"]["run_id"] == address
+    assert response.json()["state"]["best_node_id"] == 0
     for run_id in ("seed1", "campA", "campA%2Fseed1", "campA:seed1", "campA~seed1"):
         assert client.get(f"/api/runs/{run_id}/state").status_code == 404, run_id
 
@@ -105,7 +110,8 @@ def test_a_linked_folder_or_run_is_not_followed(tmp_path):
     os.symlink(tmp_path / "elsewhere" / "seed1", root / "campA" / "alias", target_is_directory=True)
     view = _client(root).get("/api/campaign-runs").json()
     assert [f["folder"] for f in view["folders"]] == ["campA"]
-    assert [r["run_id"] for r in view["folders"][0]["runs"]] == ["seed1"]
+    assert [r["run_path"] for r in view["folders"][0]["runs"]] == ["campA/seed1"]
+    assert [r["run_id"] for r in view["folders"][0]["runs"]] == [run_address(root, root / "campA" / "seed1")]
 
 
 def test_the_bounds_are_counted_never_silent(tmp_path, monkeypatch):
@@ -185,7 +191,7 @@ def test_what_a_bound_skipped_is_only_what_would_have_been_listed(tmp_path, monk
     (root / "campA" / "e_empty").mkdir()
     view = _client(root).get("/api/campaign-runs").json()
     (camp,) = view["folders"]
-    assert [r["run_id"] for r in camp["runs"]] == ["a_seed"] and camp["runs_skipped"] == 0, camp
+    assert [r["run_path"] for r in camp["runs"]] == ["campA/a_seed"] and camp["runs_skipped"] == 0, camp
     _run(root / "campA" / "f_seed")
     again = _client(root).get("/api/campaign-runs").json()
     assert again["folders"][0]["runs_skipped"] == 1
@@ -198,4 +204,5 @@ def test_a_hidden_directory_inside_a_campaign_is_never_a_run(tmp_path):
     _run(root / "campA" / "seed1")
     _run(root / "campA" / ".trash_seed")
     view = _client(root).get("/api/campaign-runs").json()
-    assert [r["run_id"] for r in view["folders"][0]["runs"]] == ["seed1"]
+    assert [r["run_path"] for r in view["folders"][0]["runs"]] == ["campA/seed1"]
+    assert [r["run_id"] for r in view["folders"][0]["runs"]] == [run_address(root, root / "campA" / "seed1")]

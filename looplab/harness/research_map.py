@@ -18,6 +18,7 @@ from looplab.events.run_generation import run_generation_token
 from looplab.harness.campaign import experiments_of, read_journal
 from looplab.harness.journals import read_event_source, read_source
 from looplab.harness.overview import overview_freshness
+from looplab.core.run_ref import run_address
 
 
 def _text(value, limit=1000):
@@ -57,6 +58,7 @@ def snapshot(rd: Path, expected_generation: str, offset: int = 0, limit: int = 2
     if not generation or generation != expected_generation.lower():
         raise HTTPException(409, 'run generation changed')
     state = fold(events)
+    canonical_id = run_address(rd.parent, rd)
     from looplab.events.eval_occupancy import withheld_lifecycles
     from looplab.serve.node_activity import public_node_activity
     withheld = withheld_lifecycles(events)
@@ -71,7 +73,7 @@ def snapshot(rd: Path, expected_generation: str, offset: int = 0, limit: int = 2
             if not isinstance(arm, dict):
                 continue
             nid = arm.get('node_id')
-            local = arm.get('run_id') in (None, '', rd.name)
+            local = arm.get('run_id') in (None, '', canonical_id)
             node = state.nodes.get(nid) if type(nid) is int and local else None
             activity = activities.get(nid) if node is not None else None
             arms.append({'name': _text(name, 128), 'node_id': nid,
@@ -102,11 +104,11 @@ def snapshot(rd: Path, expected_generation: str, offset: int = 0, limit: int = 2
                                         for r in (exp.get('relationships') or [])[:32] if isinstance(r, dict)],
                       'superseded': bool(exp.get('superseded')), 'supersedes': _text(exp.get('supersedes'), 128) or None,
                       'registration': {k: exp.get('registration', {}).get(k) for k in ('amendment_id', 'version', 'recorded_at', 'at_event_seq', 'at_node_count', 'generation')},
-                      'comparison': f'/api/runs/{quote(rd.name, safe="")}/experiments/{quote(eid, safe="")}/comparison'})
+                      'comparison': f'/api/runs/{quote(canonical_id, safe="")}/experiments/{quote(eid, safe="")}/comparison'})
     work_kinds = {}
     for exp in experiments.values():
         for arm in (exp.get('arms') or {}).values():
-            if not isinstance(arm, dict) or arm.get('run_id') not in (None, rd.name):
+            if not isinstance(arm, dict) or arm.get('run_id') not in (None, canonical_id):
                 continue
             nid, kind = arm.get('node_id'), arm.get('work_kind')
             if type(nid) is int and kind in ('scientific_experiment', 'fit', 'score_only', 'engineering_recovery'):
@@ -190,7 +192,7 @@ def snapshot(rd: Path, expected_generation: str, offset: int = 0, limit: int = 2
         overview['freshness'] = overview_freshness(events, overview['published_seq'], overview['at_node'], len(nodes))
     from looplab.harness.progress import _operator_directions
     from looplab.harness.research_quality import project as research_quality
-    return {'version': 1, 'run_id': rd.name, 'run_uid': state.run_uid, 'generation': generation,
+    return {'version': 1, 'run_id': canonical_id, 'run_uid': state.run_uid, 'generation': generation,
             'event_seq': events[-1].seq, 'goal': _text(state.goal, 2000),
             'operator_directions': _operator_directions(state),
             'quality': research_quality(state, experiments),

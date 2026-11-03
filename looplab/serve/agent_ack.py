@@ -21,7 +21,11 @@ ACKS = 'acknowledgements.jsonl'
 def acknowledge(root: Path, run_id: str, generation: str, event_id: int,
                 recipient: str, action_id: str, disposition: str) -> dict:
     from looplab.harness.journals import read_event_source, read_source
-    rd = root / run_id
+    from looplab.core.run_ref import resolve_run_address
+    address = resolve_run_address(root, run_id)
+    if address.defect is not None:
+        raise HTTPException(404, 'no such run')
+    rd = address.path
     events = read_event_source(rd)
     if run_generation_token(events) != generation:
         raise HTTPException(409, 'run generation changed')

@@ -19,7 +19,7 @@ from looplab.adapters.tasks import load_task
 from looplab.core.atomicio import (
     durable_no_replace_rename, strict_atomic_write_bytes, strict_fsync_parent)
 from looplab.core.config import settings_from_snapshot
-from looplab.core.pathsafe import run_child_name_defect, validate_run_child
+from looplab.core.pathsafe import run_child_name_defect
 from looplab.core.run_reset import (
     RUN_RESET_OPERATION_ENV, RUN_RESET_OPERATION_RE, RUN_RESET_SEED_ENV, RunResetFenceError,
     RunResetStorageError, load_run_reset_marker, publish_run_reset_marker)
@@ -1305,7 +1305,8 @@ def _resolve_reset_target(
                 _LIFECYCLE_LOCK_PREFIX, _TRACE_CLEAR_RECEIPT_PREFIX,
                 _RESET_RECEIPT_PREFIX, *_DELETE_SERVICE_PREFIXES))):
         raise HTTPException(404, "no such run")
-    child = validate_run_child(root, run_id)
+    from looplab.core.run_ref import resolve_run_address
+    child = resolve_run_address(root, run_id)
     if child.defect is not None:
         raise HTTPException(404, "no such run")
     rd = child.path

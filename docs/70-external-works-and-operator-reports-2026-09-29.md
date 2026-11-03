@@ -219,8 +219,7 @@ read-only*, источник *Process environment*. Это не ошибка д�
   ран в настройке — любой маркер), никогда не читается как кампания: её дети — рабочие каталоги узлов,
   куда пишет кандидат. В `/api/runs` они не попадают сознательно: всё, что там перечислено, кто-то
   открывает по id. Тесты: `tests/test_campaign_runs.py`, `ui/test/campaignRunsModel.test.js`.*
-- **70.1a** OPEN[nested-runs-not-addressable] вложенный ран виден, но не открывается: `run_id` в
-  маршрутах — один сегмент, а `AppState.run_dir` пускает только детей корня. proof:`present:child = validate_run_child(root, run_id)@looplab/serve/appstate.py`
+- **70.1a** *Закрыто 2026-11-03, ветка `kimi-review-03-11-2026`: `core/run_ref.py` выдаёт канонический nested ID как URL-safe base64 всего относительного пути, без lossy-замены разделителей. `AppState.run_dir`, commands, reset/deletion, harness, agent и assistant paths используют один resolver; public `state.run_id`, research map и campaign rows несут тот же ID. Symlink/reparse, traversal, service paths, collision и любой каталог внутри существующего run отклоняются; post-delete receipts получают отдельный `allow_missing`, не открывающий run. Launch не может занять чужой canonical ID. Тесты: `tests/test_run_address.py`, `test_campaign_runs.py`, command/deletion suites.*
   Карта того, что придётся менять (разведка 2026-09-29): около 50 мест, превращающих `run_id` в путь
   (`serve/appstate.py::AppState.run_dir` и те, кто сам склеивает `root / run_id`: `launch.safe_run_dir`,
   `deletion_service`, `reset_route`, `scope_sources`, `routers/control.py`, инструменты ассистента

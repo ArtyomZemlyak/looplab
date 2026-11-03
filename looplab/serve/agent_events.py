@@ -1033,6 +1033,7 @@ class AgentEventPump:
         from looplab.core.errors import OperatorRefusal
         from looplab.events.eventstore import EventStore
         from looplab.events.replay import fold
+        from looplab.core.run_ref import resolve_run_address
         current: dict[str, Optional[set]] = {}
         lifecycle_cache = {}
         keep, stale = [], []
@@ -1041,8 +1042,9 @@ class AgentEventPump:
             if row.get("kind") == "agent_handoff" and run_id:
                 from looplab.events.run_generation import run_generation_token
                 from looplab.harness.journals import read_event_source
+                rd = resolve_run_address(self.root, run_id).path
                 try:
-                    current_generation = run_generation_token(read_event_source(self.root / run_id))
+                    current_generation = run_generation_token(read_event_source(rd)) if rd is not None else None
                 except HTTPException:
                     current_generation = None
                 if current_generation is not None and current_generation != row.get("generation"):
@@ -1050,7 +1052,8 @@ class AgentEventPump:
                     continue
             if row.get("kind") == "run_paused" and run_id:
                 from looplab.serve.agent_lifecycle_filter import superseded_agent_pause
-                if superseded_agent_pause(self.root / run_id, row, lifecycle_cache):
+                rd = resolve_run_address(self.root, run_id).path
+                if rd is not None and superseded_agent_pause(rd, row, lifecycle_cache):
                     stale.append(row)
                     continue
             if row.get("kind") not in CONDITION_KINDS or not run_id:
@@ -1058,17 +1061,18 @@ class AgentEventPump:
                 continue
             if run_id not in current:
                 keys = None
-                rd = self.root / run_id
-                try:
-                    settings = read_config_snapshot(rd / "config.snapshot.json")
-                    events = EventStore(rd / "events.jsonl").read_all()
-                    state = fold(events)
-                    run_uid = str(getattr(state, "run_uid", "") or run_id)
-                    rows_now = self._conditions(rd, settings, state, events, run_uid)
-                    keys = None if rows_now is None else {_condition_identity(r)
-                                                          for r in rows_now}
-                except (OperatorRefusal, OSError, ValueError):
-                    keys = None
+                rd = resolve_run_address(self.root, run_id).path
+                if rd is not None:
+                    try:
+                        settings = read_config_snapshot(rd / "config.snapshot.json")
+                        events = EventStore(rd / "events.jsonl").read_all()
+                        state = fold(events)
+                        run_uid = str(getattr(state, "run_uid", "") or run_id)
+                        rows_now = self._conditions(rd, settings, state, events, run_uid)
+                        keys = None if rows_now is None else {_condition_identity(r)
+                                                              for r in rows_now}
+                    except (OperatorRefusal, OSError, ValueError):
+                        keys = None
                 current[run_id] = keys
             keys = current[run_id]
             if keys is None or _condition_identity(row) in keys:

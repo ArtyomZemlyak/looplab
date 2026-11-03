@@ -2,9 +2,9 @@
 // plain module `node --test` drives; the component keeps only the fetch and the markup).
 //
 // `GET /api/campaign-runs` lists the runs inside the root's campaign folders (`<root>/<folder>/<run>`,
-// doc 70 70.1), which `/api/runs` does not: every per-run route addresses a run by ONE path segment,
-// so a nested run has no id a route accepts. The rows are therefore READ-ONLY here — a row opens
-// nothing, and its folder says how to serve that folder as a root, where its runs ARE addressable.
+// doc 70 70.1), which `/api/runs` does not. Each row carries a canonical one-segment nested ID that
+// opens the run directly; `run_path` preserves the readable folder/leaf label. The alternate command
+// serves that folder as a root, where its leaf IDs remain valid.
 
 export const MAX_CAMPAIGN_FOLDERS = 200
 export const MAX_CAMPAIGN_RUNS = 500
@@ -25,7 +25,7 @@ export function campaignFolders(payload) {
         const runId = text(run?.run_id)
         if (!runId) return []
         return [{
-          runId,
+          runId, runPath: text(run.run_path) || null,
           taskId: text(run.task_id) || null,
           phase: text(run.phase, 64) || null,
           bestMetric: Number.isFinite(run.best_metric) ? run.best_metric : null,

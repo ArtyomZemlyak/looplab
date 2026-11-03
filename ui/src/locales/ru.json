@@ -1,7 +1,7 @@
 {
   "schema": 1,
   "language": "ru",
-  "count": 8366,
+  "count": 8367,
   "messages": {
     "# LoopLab run report — {0}": "# Отчёт запуска LoopLab — {0}",
     "## Agent narrative (advisory)": "## Пояснения агента (рекомендации)",
@@ -8368,7 +8368,8 @@
     "Coverage cannot be judged from a node count. Check the original report and later evidence.": "По числу нод нельзя оценить покрытие. Проверьте исходный отчёт и более поздние свидетельства.",
     "Loading campaign overview…": "Загрузка обзора кампании…",
     "Campaign overview is unavailable. Refresh the run; the latest local report is still shown separately.": "Обзор кампании недоступен. Обновите запуск; последний локальный отчёт по-прежнему показан отдельно.",
-    "latest local result": "последний локальный результат"
+    "latest local result": "последний локальный результат",
+    "Open a nested run directly, or serve its folder as a separate root:": "Откройте вложенный запуск напрямую или запустите его папку как отдельный корень:"
   },
   "plurals": {
     "({0} paraphrases folded)": {

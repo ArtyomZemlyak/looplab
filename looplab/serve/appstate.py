@@ -31,7 +31,8 @@ from fastapi import HTTPException
 from looplab.core.atomicio import file_identity
 from looplab.core.models import Event
 from looplab.core.node_evidence import node_attempt
-from looplab.core.pathsafe import is_reparse, run_child_name_defect, validate_run_child
+from looplab.core.pathsafe import is_reparse
+from looplab.core.run_ref import _RESERVED_RUN_IDS, resolve_run_address, run_address
 from looplab.core.run_deletion import RUN_DELETION_FENCE_PREFIX
 from looplab.core.trace_files import open_private_trace_file, trace_file_change_token
 from looplab.engine.finalize import incomplete_finalize_scope, is_guarded_abort
@@ -70,15 +71,6 @@ from looplab.serve.settings_store import SettingsStore
 # to test. `safe_run_dir` additionally rejects any run_id that names an existing non-directory, which
 # covers server-owned files added later, and the digest-suffixed lifecycle/trace-clear receipts by
 # prefix (they cannot be enumerated).
-_RESERVED_RUN_IDS = {
-    "reports", "assistant", ".reviews", ".reviews.lock", ".command-locks",
-    "ui_settings.json", "ui_settings.json.lock",
-    "secrets.json", "secrets.json.lock",
-    ".settings-launch.lock",
-    "projects.json", "projects.json.lock",
-    # The external-agent outbox, its delivery ledger and hook config (`serve/agent_events.py`).
-    ".agent-events",
-}
 # `engine_proc._lifecycle_lock_path` builds `<run-root>/.looplab-lifecycle-<digest>.lock`.
 _LIFECYCLE_LOCK_PREFIX = ".looplab-lifecycle-"
 # `control._trace_clear_receipt_path` builds
@@ -356,21 +348,22 @@ class AppState:
             RunDeletionStorageError, load_run_deletion_fence)
 
         root = self.root.resolve()
-        # The LEXICAL rule first and on its own, because the two fences below must be answered
-        # BEFORE the directory is inspected: a run whose directory is already gone mid-deletion has
-        # to keep reading as 410 "being deleted", not 404. `core/pathsafe.py` owns both halves
-        # (doc 25 SC-03); the read path deliberately takes the non-strict name tier, so a directory
-        # the CLI created out of band with an unusual-but-legal name stays openable.
-        if run_child_name_defect(run_id) is not None:
+        resolved = resolve_run_address(root, run_id)
+        if resolved.defect == "collision":
+            raise HTTPException(409, {
+                "code": "run_address_collision",
+                "message": "This nested run ID also names a root entry. Rename one explicitly; no run was opened.",
+            })
+        if resolved.defect is not None:
             raise HTTPException(404, "no such run")
-        requested = root / run_id
-        lowered = requested.name.lower()
-        if (lowered in _RESERVED_RUN_IDS or lowered.startswith((
+        rd = resolved.path
+        first = rd.relative_to(root).parts[0].lower()
+        if (first in _RESERVED_RUN_IDS or first.startswith((
                 _LIFECYCLE_LOCK_PREFIX, _TRACE_CLEAR_RECEIPT_PREFIX, _RESET_RECEIPT_PREFIX,
                 *_DELETE_SERVICE_PREFIXES))):
             raise HTTPException(404, "no such run")
         try:
-            fence = load_run_deletion_fence(requested)
+            fence = load_run_deletion_fence(rd)
         except RunDeletionStorageError as exc:
             raise HTTPException(503, {
                 "code": "run_deletion_fence_unavailable",
@@ -382,22 +375,6 @@ class AppState:
                 "operation_id": fence["operation_id"],
                 "message": "This run is being deleted.",
             })
-        # A run is a DIRECT CHILD of the root, and nothing else. Accepting any DESCENDANT (root is in
-        # the parents of root/a/b/c) let a run_id like "run1/nodes/n3_ws" resolve to a sandbox-WRITABLE
-        # node workspace: any events.jsonl the evaluated candidate wrote there became addressable as a
-        # fake "run" by every caller — read routes, inject_node's `source_run` before commands
-        # .validate_paths tightens it, assistant tooling — so candidate-authored events would be folded
-        # and rendered to the operator, with unbounded server-side fold work behind it. Single-segment
-        # HTTP route params largely masked it, but the command service had already had to re-restrict
-        # to `canonical.parent == root`; this is the base helper, so it enforces the same rule (and
-        # rejects the root itself EXPLICITLY, rather than relying on root never having an events.jsonl).
-        # That whole rule — reparse, junction, directory, resolved-identity, direct child — is
-        # `pathsafe.validate_run_child` now. This site used to re-spell `is_reparse` INLINE out of the
-        # attribute and the mode bit, which is exactly the copy `core/pathsafe.py` exists to end.
-        child = validate_run_child(root, run_id)
-        if child.defect is not None:
-            raise HTTPException(404, "no such run")
-        rd = child.path
         events = rd / "events.jsonl"
         try:
             event_entry = events.lstat()
@@ -733,6 +710,7 @@ class AppState:
         # exclude open event journals before Pydantic copies them, then publish only the
         # bounded derived DTO. This shared boundary feeds owner state, SSE, and review state.
         d = st.model_dump(mode="json", exclude=INTERNAL_CARD_STATE_FIELDS | {"cards"})
+        d["run_id"] = run_address(self.root, rd)
         # Scrub the broad folded state before inserting the independently bounded/redacted Card DTO.
         # Otherwise valid action params/search dimensions named "raw" or "code" are removed after the
         # Card projection has declared them exact, leaving a completeness receipt that describes data
@@ -953,10 +931,9 @@ class AppState:
         except Exception:  # noqa: BLE001 — a malformed log must not 500 the trace; degrade to spans-only
             facts = TraceFacts(run_id="", task_id="", total_eval_seconds=0.0,
                                attempts=MappingProxyType({}))
-        # Fall back to the run dir name for run_id (rd == root/run_id, so rd.name IS the run id) when the
-        # log can't be folded — so a corrupt-log `/trace` still carries the correct run_id, matching the
-        # pre-index endpoint's degraded response (which returned the URL's run_id) rather than an empty one.
-        return facts if facts.run_id else facts._replace(run_id=rd.name)
+        # Use the root-local canonical run address even when the log cannot be folded, so a nested
+        # corrupt-log trace still matches the requested run instead of reverting to its leaf name.
+        return facts._replace(run_id=run_address(self.root, rd))
 
     def trace_view(self, rd: Path) -> dict:
         """The run-level LIGHT trace view (`build_trace_view(light=True)`), read via the incremental

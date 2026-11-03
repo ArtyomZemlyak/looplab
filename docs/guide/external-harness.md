@@ -76,6 +76,17 @@ settings to bypass obligations. The config view stays readable for diagnostics b
 approves nothing. Refresh explicitly after repair; these refusals rewrite, retry and
 resume nothing, and legacy and retired settings stay readable.
 
+### Nested campaign runs
+
+A run at `<run-root>/<campaign>/<seed>` is listed by `GET /api/campaign-runs` and opens directly.
+Its canonical `run_id` is `nested-` plus URL-safe base64 of the whole relative UTF-8 path (no
+padding), not the leaf name and not a slash replacement. Use that exact ID in `/api/runs/{run_id}`
+and MCP calls; `run_path` keeps the readable `campaign/seed` label. `run_started.run_id` and
+`run_uid` are not rewritten. Symlinks, service directories, traversal, ID collisions and directories
+inside another run are refused. A missing path is resolved only for post-delete receipts, never
+opened as a live run. New runs may be created by CLI with `--out runs/<campaign>/<seed>`; API launch
+continues to create direct children and refuses to occupy an existing nested ID.
+
 ### Brief results in Assistant chat
 
 The Assistant transcript for the attached run shows a free completion brief

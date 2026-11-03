@@ -17,6 +17,7 @@ from looplab.engine.run_lifecycle import engine_liveness
 from looplab.events.eventstore import EventStore, log_integrity
 from looplab.events.replay import fold
 from looplab.events.run_generation import run_generation_token
+from looplab.core.run_ref import run_address
 from looplab.harness.obligations import run_obligations
 
 
@@ -79,7 +80,7 @@ def snapshot(rd: Path, expected_generation: str, *, credential_configured: bool,
     return {
         "version": 1, "generation": generation,
         "research_workflow": {"version": 1, "guide": "/api/runs/{run_id}/research-workflow", "skill": "skills/looplab-research/SKILL.md"},
-        "run_id": redact_persisted_identity(rd.name, max_chars=256),
+        "run_id": redact_persisted_identity(run_address(rd.parent, rd), max_chars=256),
         "run_uid": redact_persisted_identity(state.run_uid, max_chars=256),
         "event_seq": events[-1].seq, "mode": "external_harness",
         "server_paths": {"run_root": text(str(rd.parent.resolve())),

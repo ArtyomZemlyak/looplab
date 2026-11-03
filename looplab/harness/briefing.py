@@ -8,6 +8,7 @@ from looplab.harness.progress import snapshot as progress_snapshot
 from looplab.harness.progress_summary import brief
 from looplab.harness.research_map import snapshot as map_snapshot
 from looplab.harness.readiness_binding import snapshot as binding_snapshot
+from looplab.core.run_ref import run_address
 
 
 def snapshot(rd: Path, generation: str, *, language: str = 'en') -> dict:
@@ -26,6 +27,7 @@ def snapshot(rd: Path, generation: str, *, language: str = 'en') -> dict:
         measured_profile = measured.pop('profile')
         measured['profile_digest'] = measured_profile.get('digest')
         measured['same_profile_as_briefing'] = measured_profile.get('digest') == profile.get('digest')
+    canonical_id = run_address(rd.parent, rd)
     plans = []
     by_binding = {(b.get('experiment_id'), b.get('subject_arm'), b.get('node_id')): b for b in bindings['items']}
     for experiment in research['experiments']['items']:
@@ -35,10 +37,10 @@ def snapshot(rd: Path, generation: str, *, language: str = 'en') -> dict:
             key = (experiment.get('experiment_id'), relation.get('subject_arm'), relation.get('node_id'))
             binding = by_binding.get(key)
             arm = next((a for a in experiment.get('arms') or [] if a.get('name') == relation.get('subject_arm')), {})
-            external = relation.get('run_id') not in (None, '', rd.name)
+            external = relation.get('run_id') not in (None, '', rd.name, canonical_id)
             phase = 'external_producer_unverified' if external else ('binding_current' if binding and binding.get('scope_and_attempt_current') else ('binding_stale' if binding else 'awaiting_producer_or_binding'))
             plans.append({'experiment_id': key[0], 'subject_arm': key[1], 'producer_node_id': key[2],
-                          'state': phase, 'producer_run_id': relation.get('run_id') or rd.name, 'score_node_id': arm.get('node_id'), 'score_status': arm.get('node_status'),
+                          'state': phase, 'producer_run_id': relation.get('run_id') or canonical_id, 'score_node_id': arm.get('node_id'), 'score_status': arm.get('node_status'),
                           'next_action': 'GET /api/runs/{run_id}/readiness-bindings',
                           'owner': 'external_agent', 'authority': 'none'})
     from looplab.harness.report_guidance import snapshot as report_context
