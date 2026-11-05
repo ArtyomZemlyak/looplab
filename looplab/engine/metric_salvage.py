@@ -1,14 +1,6 @@
 """Metric SALVAGE — recover a metric a failed eval had ALREADY produced, deterministically.
 
-THE RUN THIS EXISTS FOR. `runs/rubertlite-dr-unified-v5` node 0 trained for 76 minutes on two
-H200s, exited 0, wrote a complete SentenceTransformer checkpoint, ran the scorer at the end of its
-own `train` stage and printed `RECALL@100: 0.743250` — the EXACT line the operator's declared
-metric reader matches (`{"kind":"stdout_regex","pattern":"RECALL@100: ([0-9.]+)"}`). The node was
-failed with `reason: no_metric` because the stage manifest declared the checkpoint at
-`.../unified-baseline_rubert-tiny-lite/final/model.safetensors` while the testbed composes its
-output dir as `<run_name>_<model>`. A one-line path error threw away 76 GPU-minutes AND the number
-those minutes bought — a number that was sitting in the captured stdout of the very stage that
-failed.
+Historical incident details omitted.
 
 TWO INDEPENDENT GATES had to hold for that to happen, and both are in `command_eval._run_stages`:
 
@@ -349,19 +341,13 @@ def salvage_condition(res, reason: str) -> Optional[str]:
     reachable by driving a whole sandboxed evaluation that failed in exactly the right way — the
     same cost `engine/evaluate.py`'s other named rules were extracted for (doc 25 ES-03).
 
-    THE PROCESS MUST HAVE FINISHED. A non-zero exit is not salvageable, and that is a deliberate
-    refusal of one of the cases the brief named ("a late-stage crash"). A process the OS or the
-    runtime stopped did not complete, so a metric line in its output is a line it printed on the way
-    somewhere — a per-epoch `RECALL@100:` from epoch 4 of 20 reads identically to a final one, and
-    promoting it would make the search compare a partial run against complete ones. That is the
-    false promotion this module must not create, and it is not a hypothetical shape: intermediate
-    per-epoch metric lines are what `asha_monitor` exists to read.
-    The ONE non-zero exit that IS evidence of completion is already carved out and shipped:
-    `RunResult.stalled` is the authenticated verdict that the process went SILENT while alive, i.e.
-    that it had finished talking before the watchdog killed it (`_salvageable_stall`, which also
-    subtracts the DIVERGED case). `evaluate.py`'s `ok` gate has salvaged that since before this
-    module existed; admitting it here too is what lets a stalled stage's FILE artifact be read, not
-    just the value it happened to have already printed.
+    THE PROCESS MUST HAVE FINISHED. A non-zero exit alone is not that proof: a metric line may be a
+    per-epoch `RECALL@100:` from epoch 4 of 20, indistinguishable from the final one, and promoting
+    it would compare a partial run against complete ones. The two authenticated exceptions are a
+    stall verdict (the process had stopped talking) and a pipeline whose every stage completed and
+    whose protected reader already returned a metric. The latter is the scored-then-teardown-crashed
+    case. A failed/intermediate stage, a single command with no stage completion evidence, a hard
+    deadline and numerical divergence remain unsalvageable.
 
     Reads only `res`'s own fields and the classifier's `reason`; no I/O, no model.
     """
@@ -394,13 +380,21 @@ def salvage_condition(res, reason: str) -> Optional[str]:
     # defence-in-depth check safe to add.
     if getattr(res, "drift", None) is not None or getattr(res, "setup_failed", False):
         return None
-    if getattr(res, "exit_code", 0) != 0 and not getattr(res, "stalled", False):
-        return None
     stages = [s for s in (getattr(res, "stages", None) or []) if isinstance(s, dict)]
+    if _stage_carries_veto_key(stages):
+        # Completion permits recovering a teardown crash; it never removes an
+        # upstream checker's explicit doubt about the work that produced it.
+        return None
+    completed = (bool(stages) and _usable(getattr(res, "metric", None)) is not None
+                 and all(str(s.get("status") or "") in ("ok", "reused") for s in stages))
+    if getattr(res, "exit_code", 0) != 0 and not getattr(res, "stalled", False) and not completed:
+        return None
     if not stages:
         # Single-command eval: there is no per-stage record to consult. `read_metric` has already
         # run over this exact stdout in that path, so rung 1 is very nearly a no-op here — what can
         # still differ is a FILE reader whose relocated twin exists (rung 2).
+        return "eval_failed"
+    if completed:
         return "eval_failed"
     status = str(stages[-1].get("status") or "")
     if status in VETO_STAGE_STATUSES:
@@ -830,23 +824,9 @@ def cause_repair_context(salvaged: SalvagedMetric, error: str) -> str:
     return SALVAGE_CAUSE_DIRECTIVE.format(metric=salvaged.metric, error=(error or "").strip())
 
 
-# --- THE RE-CHECK: A CORRECTED DECLARATION IS RE-ASKED, NOT RE-RUN (backlog F1e) -----------------
-# THE CASE THIS EXISTS FOR, measured on `runs/rubertlite-dr-unified-v6` node 3 on 2026-08-13. Its
-# Developer authored a fresh config with a new `run_name` and declared the checkpoint at a path
-# missing the testbed's composed `<run_name>_<model>` suffix. The stage exited 0, WROTE the
-# checkpoint, printed the number, and failed its declared artifact contract on the path alone — the
-# near-miss diagnostic named the exact file it had written. The metric (0.728113) was recovered from
-# its stdout, and under the default `audit` rung a salvaged metric carries a `metric_salvaged`
-# violation and is excluded from `feasible_nodes()`, so the best number the run had at that point
-# could neither become champion nor be bred from.
+# Historical incident details omitted.
 #
-# ONE NODE, NOT A PATTERN, and the distinction is load-bearing because the first write-up of this
-# claimed otherwise. "Every DRAFT is measured, every MERGE is salvaged" was n=1 plus a prediction
-# that turned out wrong: node 4 was another merge, declared `unified-baseline_rubert-tiny-lite/
-# final/...`, the repo composed exactly that, and it measured normally. So nothing here — and
-# nothing anywhere else — may special-case an operator or assume merges get paths wrong more often.
-# The change stands on the single honest case: a manifest-only repair that makes an artifact the
-# pipeline ALREADY produced satisfy its contract. Let the frequency be whatever it turns out to be.
+# Historical incident details omitted.
 #
 # WHY THIS IS NOT ANSWERED BY `select`. That rung admits agent-produced bytes wholesale, which is
 # the boundary salvage exists to keep (see the module docstring's second condition). The answer here
@@ -967,14 +947,7 @@ def declared_pipeline_completed(stages, rows, stage) -> bool:
     """Did EVERY stage the resolved pipeline declares actually RUN, with the contract failure on the
     LAST of them? The first and most categorical of the four admission rules.
 
-    A NODE IS ITS WHOLE PIPELINE, not its first stage. `runs/rubertlite-dr-unified-v6` node 3
-    declared `train` → `merge` (plus the operator's appended `score`); `train` failed its artifact
-    contract, `_run_stages` returned early, and `merge` and `score` never executed — the workdir has
-    `train.log` and no `score.log`. Its recovered metric is a plain training run's number. Correcting
-    the path proves the file was where the fixed declaration says; it proves nothing about two stages
-    that never ran, and promoting on it would file a train-only result under a node claiming to be
-    something else. A pipeline that aborted early has not produced the thing the node claims to be,
-    whatever the contract now says about one stage's output.
+Historical incident details omitted.
 
     `stages` is the resolved chain (`Engine._resolved_stages`) and `rows` is `RunResult.stages` — the
     per-stage records the run really produced, where `reused` is a genuine "ran on an earlier attempt

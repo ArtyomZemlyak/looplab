@@ -152,7 +152,7 @@ GROUPS = {
     # declared `eval.tracks` argv over each node's preserved workdir — appended beside the live
     # values under `engine.lock`, never over them.
     "maintenance_cmds": {"backfill-applied-params", "backfill-score-metrics", "import-metrics",
-                         "evaluate-track"},
+                         "evaluate-track", "relocate"},
 }
 
 

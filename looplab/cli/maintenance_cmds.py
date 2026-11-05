@@ -176,3 +176,23 @@ def backfill_score_metrics(
     """
     from looplab.maintenance.backfill_score_metrics import backfill
     typer.echo(backfill(run_root, dry_run=not apply, only=only))
+
+
+@app.command(name="relocate")
+def relocate_cmd(
+    source: Path = typer.Argument(..., help="Current run directory."),
+    destination: Path = typer.Argument(..., help="New run directory on the same filesystem."),
+    reason: str = typer.Option("", "--reason", help="Why this address change is needed."),
+    apply: bool = typer.Option(False, "--apply", help="Append the event and rename; default is a dry run."),
+):
+    """Move a stopped run without rewriting its immutable launch identity.\f
+
+    Records `run_relocated` with the old/new run IDs, unchanged run_uid and previous-event identity,
+    then atomically renames the directory. Launch settings, measured results and speculation pins
+    stay in force. A retry after an uncertain rename does not append a duplicate event. Cross-run
+    URLs and external filters are capabilities: rebind them explicitly to the new address.
+    """
+    import json
+    from looplab.maintenance.relocation import relocate_run
+    typer.echo(json.dumps(relocate_run(source, destination, apply=apply, reason=reason),
+                          ensure_ascii=False, sort_keys=True))

@@ -44,7 +44,8 @@ from dataclasses import dataclass, field
 from typing import Optional
 
 from looplab.core.evidence import EVIDENCE_LABEL, fenced_tail
-from looplab.core.models import developer_stuck_reason, is_developer_error, is_developer_stuck
+from looplab.core.models import (developer_stuck_reason, is_developer_error, is_developer_stuck,
+                                 objective_value)
 from looplab.engine.failure_diagnosis import REASON_SOURCE_ENGINE
 from looplab.engine.metric_salvage import unbound_subject_violation_rows
 from looplab.engine.triage import (UNANSWERABLE_TRIAGE_ACTION, UNREADABLE_TRIAGE_ACTION,
@@ -53,7 +54,18 @@ from looplab.engine.triage import (UNANSWERABLE_TRIAGE_ACTION, UNREADABLE_TRIAGE
 
 # ---------------------------------------------------- did the attempt SUCCEED, by the engine's rule?
 
-def attempt_succeeded(res, *, artifact: bool) -> bool:
+def retarget_objective_value(res, objective_key, run_direction):
+    """The declared objective of an otherwise metric-less result, or None."""
+    if not objective_key or getattr(res, "metric", None) is not None:
+        return None
+    if _failure_reason(res) != "no_metric":
+        return None
+    return objective_value(getattr(res, "extra_metrics", None),
+                           getattr(res, "extra_metrics_provenance", None), objective_key,
+                           getattr(res, "extra_metrics_direction", None), run_direction)
+
+
+def attempt_succeeded(res, *, artifact: bool, objective_key=None, run_direction=None) -> bool:
     """THE ENGINE's success rule for one evaluated attempt — what SETTLE_OUTCOME binds `a.ok` to
     before the activation contract may overturn it (`engine/evaluate.py::_eval_settle_outcome`),
     and what the external harness's monitor asks to know whether a live question is moot
@@ -63,14 +75,45 @@ def attempt_succeeded(res, *, artifact: bool) -> bool:
     tree-kill, so a non-zero exit) and an ARTIFACT node (exit 0, no metric by design).
 
     An ordinary node: a metric, no deadline timeout, and exit 0 — or a stall, whose non-zero exit
-    is only the kill (a real deadline `timed_out` is still mid-training, never salvaged). An
-    ARTIFACT (doc 73 §1.4): a CLEAN pipeline with no metric, which the engine's own classifier
-    names `no_metric` (`triage._failure_reason`, which never reads the metric); any other reason —
-    a crash, a timeout, a missing declared output — is a failure."""
+    is only the kill (a real deadline `timed_out` is still mid-training, never salvaged). Under a
+    retarget, a declared objective is sufficient only when the sole defect is the missing task
+    metric; auto/engine values and every other failure remain refused. An ARTIFACT (doc 73 §1.4):
+    a CLEAN pipeline with no metric, which the engine's own classifier names `no_metric`; any other
+    reason — a crash, a timeout, a missing declared output — is a failure."""
     if artifact:
         return _failure_reason(res) == "no_metric"
-    return bool(res.metric is not None and not res.timed_out
+    measured = (res.metric is not None
+                or retarget_objective_value(res, objective_key, run_direction) is not None)
+    return bool(measured and not res.timed_out
                 and (res.exit_code == 0 or getattr(res, "stalled", False)))
+
+def scorer_training_advisory(stages, previous_stage_rows=()):
+    """A non-authoritative warning that the score stage may duplicate earlier work."""
+    rows = [s for s in (stages or []) if isinstance(s, dict)]
+    if len(rows) < 2:
+        return None
+    final = rows[-1]
+    if str(final.get("name") or "") not in ("score", "self_score"):
+        return None
+    previous_rows = [s for s in (previous_stage_rows or []) if isinstance(s, dict)]
+
+    def actual_seconds(stage):
+        if stage.get("status") != "reused":
+            return float(stage.get("seconds") or 0.0)
+        name = str(stage.get("name") or "")
+        candidates = [row for row in previous_rows
+                      if str(row.get("name") or "") == name and row.get("status") == "ok"]
+        return float(candidates[-1].get("seconds") or 0.0) if candidates else 0.0
+
+    preceding = sum(actual_seconds(stage) for stage in rows[:-1])
+    score = actual_seconds(final)
+    if preceding <= 0.0 or score <= 0.0 or score <= preceding / 2.0:
+        return None
+    return {"kind": "possible_duplicate_training", "score_seconds": round(score, 3),
+            "preceding_seconds": round(preceding, 3), "ratio": round(score / preceding, 3),
+            "evidence": "score stage exceeded half the earlier stages' actual duration; "
+                        "this is advisory, not proof of training"}
+
 
 # ---------------------------------------------------- was the repair's answer a repair at all?
 # Moved VERBATIM from `engine/evaluate.py` (ENG2-06), private spellings and all: the attempt

@@ -873,7 +873,8 @@ class KnowledgeTools:
                           f"{redact_persisted_text(ranked, max_chars=256, single_line=True)!r}, "
                           "an operator retarget)"
                           if isinstance(ranked, str) and ranked else "")
-                text = (f"PAST CASE ({c.get('task_id')}, objective={c.get('direction')}) "
+                label = "PROVISIONAL PAST CASE" if c.get("provisional") is True else "PAST CASE"
+                text = (f"{label} ({c.get('task_id')}, objective={c.get('direction')}) "
                         f"metric={c.get('metric')}{ranked}, run {c.get('run_id') or 'unknown'}:\n"
                         f"params={params}\n"
                         f"why: {rationale}\n"
@@ -882,7 +883,8 @@ class KnowledgeTools:
                              {"path": f"case:{c.get('task_id')}", "text": text,
                               "source_kind": "case", "task_id": c.get("task_id"),
                               "direction": c.get("direction"), "run_id": c.get("run_id"),
-                              "run_uid": c.get("run_uid"), "member_ids": [f"case:{i}"]}))
+                              "run_uid": c.get("run_uid"), "member_ids": [f"case:{i}"],
+                              **({"provisional": True} if c.get("provisional") is True else {})}))
         return recs
 
     def _embed_cached(self, text: str, previous: dict) -> list:

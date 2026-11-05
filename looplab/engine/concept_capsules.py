@@ -289,6 +289,8 @@ def _valid_capsule_record(capsule) -> bool:
     """
     if not isinstance(capsule, dict):
         return False
+    if "provisional" in capsule and type(capsule["provisional"]) is not bool:
+        return False
     # missing `v` is legacy, never the current schema. Defaulting it to the current version
     # would silently bless old proposer-authored labels after a schema bump.
     version = capsule.get("v", _LEGACY_CONCEPT_CAPSULE_VERSION)
@@ -468,7 +470,8 @@ def build_concept_capsule(*, run_id: str, fingerprint: list[str], direction: str
                           concept_evidence_nodes_total: Optional[int] = None,
                           concept_evidence_nodes_incomplete: int = 0,
                           concept_evidence_observed: Optional[bool] = None,
-                          concept_effects: Optional[dict] = None) -> dict:
+                          concept_effects: Optional[dict] = None,
+                          provisional: bool = False) -> dict:
     """A compact per-run CONCEPT capsule — the cross-run bridge (§21.20 Step 2). It records WHICH
     concepts a run explored (the shipped per-run `node_concepts` tags — no new tagger) and how it went,
     keyed by `task_fingerprint`, so a later SIMILAR run can answer "was this tried across runs, and
@@ -585,6 +588,7 @@ def build_concept_capsule(*, run_id: str, fingerprint: list[str], direction: str
         # Legacy rank signs stay available as associations; they cannot answer an ablation question.
         "concept_effects": {key: concept_effects[key] for key in bounded_outcomes
                             if isinstance(concept_effects, dict) and key in concept_effects},
+        **({"provisional": True} if provisional else {}),
     }
 
 class ConceptCapsuleStore:
@@ -798,19 +802,24 @@ def portfolio_concept_overview_data(capsules: list[dict], *, aliases: Optional[d
                 "direction": direction,
                 "sign": sign,
                 "effect": effect,
+                **({"provisional": True} if c.get("provisional") is True else {}),
             }
     concepts = []
     for e in per_concept.values():
         all_runs = [e["_runs"][run_id] for run_id in sorted(e["_runs"])]
+        settled_runs = [r for r in all_runs if r.get("provisional") is not True]
         # Phase 1 profit rollup: signs are direction-normalized, so counting them ACROSS runs is legitimate
         # even though raw metrics above are deliberately NOT aggregated (§21.20.1). Runs with no signal omit.
+        # In-flight observations remain visible, but do not meet a settled support threshold.
         row = {"concept": e["concept"], "n_runs": len(all_runs),
-               "n_helped": sum(1 for r in all_runs if r.get("sign") == 1),
-               "n_neutral": sum(1 for r in all_runs if r.get("sign") == 0),
-               "n_hurt": sum(1 for r in all_runs if r.get("sign") == -1),
+               "n_helped": sum(1 for r in settled_runs if r.get("sign") == 1),
+               "n_neutral": sum(1 for r in settled_runs if r.get("sign") == 0),
+               "n_hurt": sum(1 for r in settled_runs if r.get("sign") == -1),
                "runs": all_runs[:_MAX_OVERVIEW_RUNS_PER_CONCEPT]}
         if len(all_runs) > len(row["runs"]):
             row["runs_omitted"] = len(all_runs) - len(row["runs"])
+        if len(settled_runs) != len(all_runs):
+            row["n_provisional_runs"] = len(all_runs) - len(settled_runs)
         concepts.append(row)
     concepts.sort(key=lambda e: (-e["n_runs"], e["concept"]))   # most-explored first, then name
     cards = []
@@ -838,6 +847,8 @@ def portfolio_concept_overview_data(capsules: list[dict], *, aliases: Optional[d
                  "source_outcomes_total": outcome_meta[0],
                  "source_outcomes_omitted": outcome_meta[1],
                  "source_outcomes_complete": outcome_meta[2]}
+        if c.get("provisional") is True:
+            card["provisional"] = True
         if len(canonical) > len(card["concepts"]):
             card["concepts_omitted"] = len(canonical) - len(card["concepts"])
         cards.append(card)
@@ -848,6 +859,9 @@ def portfolio_concept_overview_data(capsules: list[dict], *, aliases: Optional[d
                "concepts": concepts[:_MAX_OVERVIEW_CONCEPTS],
                "runs": cards[:_MAX_OVERVIEW_RUN_CARDS],
                **capsule_source_summary(valid_capsules)}
+    n_provisional = sum(c.get("provisional") is True for c in valid_capsules)
+    if n_provisional:
+        result["n_provisional_runs"] = n_provisional
     if len(concepts) > len(result["concepts"]):
         result["concepts_omitted"] = len(concepts) - len(result["concepts"])
     if len(cards) > len(result["runs"]):

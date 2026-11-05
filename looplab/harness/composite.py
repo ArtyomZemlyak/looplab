@@ -1,12 +1,6 @@
 """Composite harness operations: one MCP call for the steps an external agent otherwise scripts.
 
-The 2026-10-12..14 audit (doc 81) counted ~11 API calls per submitted experiment and 24 copies of a
-`submit.py` an agent wrote to make them, and found the steps the agent skipped were exactly the
-ones with no script: filing the experiment under its research question, pre-registering its
-contrasts, finishing the run. These functions compose the EXISTING durable routes — nothing here
-writes an event or a sidecar itself, every step goes through the same HTTP API, validation and
-authorship stamping as a single call would — and stop at the first step that does not succeed,
-returning every receipt so a retry can resume with the same keys:
+Historical incident details omitted.
 
 * `submit_experiment` — (optional) pre-register the experiment in the run's protocol journal,
   (optional) add the research question it answers, (optional) publish the research memo, record
@@ -163,7 +157,8 @@ def submit_experiment(api, run_id: str, expected_generation: str, *, key: str, i
                       dry_run: bool = False, code_from: Optional[dict] = None,
                       parent_ids: Optional[list] = None,
                       parent_generations: Optional[dict] = None,
-                      node_kind: Optional[str] = None, uses: Optional[list[int]] = None) -> dict:
+                      node_kind: Optional[str] = None, uses: Optional[list[int]] = None,
+                      pre_stages: Optional[list[dict]] = None, job_role: Optional[str] = None) -> dict:
     """`code_from` (doc 79 §4) is the run-worktree / patch / foreign-branch alternative to
     `files`/`code`/`deleted` — exactly one of the two. It is PREVIEWED through the same route the
     intake converts it with (`POST .../code/overlay`, paths and sizes only) BEFORE anything is
@@ -183,6 +178,9 @@ def submit_experiment(api, run_id: str, expected_generation: str, *, key: str, i
         raise ConfigRefusal("give parent_id or parent_ids, not both")
     if node_kind not in (None, "artifact"):
         raise ConfigRefusal("node_kind must be artifact or omitted")
+    from looplab.core.execution_scope import JOB_ROLES
+    if job_role is not None and job_role not in JOB_ROLES:
+        raise ConfigRefusal(f"job_role must be one of {', '.join(JOB_ROLES)}")
     idea = dict(idea)
     progress = api.run_progress(run_id, expected_generation)
     if not steps.add("read_progress", progress):
@@ -209,9 +207,11 @@ def submit_experiment(api, run_id: str, expected_generation: str, *, key: str, i
             missing.append(code_from_shape_error(code_from))
         else:
             code_from = normalize_code_from(code_from)
-    elif not (files or code or deleted):
+    elif not (files or code or deleted or pre_stages):
         missing.append("code_from, or files or code (an external run evaluates ready-made "
                        "candidates; code_from={'worktree': name} is the default path)")
+    if pre_stages is not None and (not isinstance(pre_stages, list) or not pre_stages):
+        missing.append("pre_stages must be a non-empty list of preceding stage objects")
     if research_question is not None:
         if not isinstance(research_question, dict) or not research_question.get("id"):
             missing.append("research_question.id")
@@ -221,6 +221,10 @@ def submit_experiment(api, run_id: str, expected_generation: str, *, key: str, i
         (["add research question"] if research_question and research_question.get("statement") else []) + \
         (["publish research memo"] if memo else []) + \
         [f"decision {p}" for p in decisions] + ["inject_node"]
+    if pre_stages:
+        plan.append("preceding stages: " + " -> ".join(
+            str(stage.get("name") or "?") if isinstance(stage, dict) else "?"
+            for stage in pre_stages) + " -> operator score")
     if code_from is not None and not missing:
         # A same-key RESUME whose inject already landed must replay it, not re-judge a worktree
         # the agent has edited since (or a base that has moved): the preview is skipped then.
@@ -229,9 +233,7 @@ def submit_experiment(api, run_id: str, expected_generation: str, *, key: str, i
         record = (prior.get("body") or {}).get("command") if prior and _ok(prior) else None
         status = record.get("status") if isinstance(record, dict) else None
         if status in ("rejected", "failed", "timed_out"):
-            # NOT landed (review 2026-10-16): a same-key retry would skip the preview and replay
-            # this receipt forever — a durable command key is bound to its first outcome, and the
-            # same key with the same payload resolves to that record (`run_commands.py::submit`).
+            # Historical incident details omitted.
             return _settled_inject_refusal(steps, record, status)
         if isinstance(record, dict):
             steps.steps.append({"step": "preview_code", "ok": True,
@@ -257,11 +259,7 @@ def submit_experiment(api, run_id: str, expected_generation: str, *, key: str, i
             "expected_generation": expected_generation, "action_id": f"{key}:experiment",
             "kind": "experiment", "experiment": experiment,
             "reason": experiment_reason or "pre-registered with the experiment's first candidate"})
-        # `experiment_exists` continues ONLY when the server says the registered declaration
-        # is this one (`same_declaration`): a second candidate filed under the same experiment.
-        # A different hypothesis/arms/correction under a reused id stops here, before anything
-        # is injected — it used to count as a replay, inject, and report success while the
-        # journal kept the original (review 2026-10-15, weekly-registration-conflict).
+        # Historical incident details omitted.
         body = result.get("body") if isinstance(result.get("body"), dict) else {}
         detail = body.get("detail") if isinstance(body.get("detail"), dict) else {}
         registered = (result.get("status") == 409 and detail.get("code") == "experiment_exists"
@@ -297,7 +295,8 @@ def submit_experiment(api, run_id: str, expected_generation: str, *, key: str, i
     for name, value in (("files", files), ("code", code), ("deleted", deleted),
                         ("parent_id", parent_id), ("parent_ids", parent_ids),
                         ("parent_generations", parent_generations), ("code_from", code_from),
-                        ("node_kind", node_kind), ("uses", uses)):
+                        ("node_kind", node_kind), ("uses", uses), ("pre_stages", pre_stages),
+                        ("job_role", job_role)):
         if value is not None:
             data[name] = value
     result = _command(api, run_id, expected_generation, "inject_node", data, f"{key}:inject",
@@ -339,6 +338,68 @@ def finish_run(api, run_id: str, expected_generation: str, *, key: str,
     steps.add("finalize", result)
     return steps.done(message="finalize submitted; the run is finished when its command settles",
                       gates=gates)
+
+
+def stop_node(api, run_id: str, expected_generation: str, *, node_id: int, key: str,
+              reason: str, generation: Optional[int] = None) -> dict:
+    """Abort one exact active attempt; pause remains a separate new-work boundary."""
+    steps = _Steps()
+    # A reconnect's key names the ORIGINAL abort, even if another operator has since
+    # retried the node. Resolve it before reading the current (possibly newer) attempt.
+    inferred = generation is None
+    step_key = (f"{key}:abort:{node_id}" if inferred
+                else f"{key}:abort:{node_id}:{generation}")
+    if inferred:
+        prior = api.command_receipt(run_id, expected_generation, idempotency_key=step_key)
+        record = (prior.get("body") or {}).get("command") if _ok(prior) else None
+        if isinstance(record, dict) and record.get("id"):
+            status = record.get("status")
+            out = {"status": 200, "body": {
+                "id": record["id"], "status": status, "event_type": "node_abort",
+                "event_seq": record.get("event_seq"), "replayed": True,
+                "error": record.get("error") or record.get("error_code")}}
+            if status in ("failed", "rejected", "timed_out"):
+                out["code"] = f"command_{status}"
+            steps.add("abort", out)
+            return steps.done(
+                message=f"node {node_id}: this key's original abort was already submitted",
+                stop_kind="active_evaluator_abort", node_id=int(node_id),
+                checkpoint={"status": "not_collected",
+                            "reason": "abort does not prove a checkpoint or save-on-stop; unsaved steps are not claimed"})
+        if prior.get("status") != 404:
+            steps.add("read_abort_receipt", prior, ok=False)
+            return steps.done(message="")
+    if generation is None:
+        node = api.request("GET", _run_path(
+            run_id, f"/nodes/{int(node_id)}?expected_generation={expected_generation}"))
+        if not steps.add("read_node", node):
+            return steps.done(message="")
+        generation = (node.get("body") or {}).get("attempt")
+        if node.get("truncated") or type(generation) is not int or generation < 0:
+            steps.steps.append({"step": "exact_attempt", "ok": False,
+                                "message": "complete node attempt unavailable; pass generation= explicitly"})
+            return steps.done(message="")
+    result = _command(api, run_id, expected_generation, "node_abort", {
+        "node_id": int(node_id), "generation": int(generation), "reason": reason},
+        step_key, settle_seconds=5.0)
+    if not steps.add("abort", result):
+        return steps.done(message="")
+    observed = api.request("GET", _run_path(
+        run_id, f"/nodes/{int(node_id)}?expected_generation={expected_generation}"))
+    steps.add("observed_node", observed)
+    progress = api.run_progress(run_id, expected_generation)
+    steps.add("observed_progress", progress)
+    gpu = api.request("GET", "/api/gpu-queue")
+    steps.add("observed_gpu_queue", gpu)
+    execution = (progress.get("body") or {}).get("execution") or {}
+    return steps.done(
+        message="abort admitted for the exact attempt; engine/GPU and checkpoint are separate observations",
+        stop_kind="active_evaluator_abort", node_id=int(node_id), generation=int(generation),
+        node_status=(observed.get("body") or {}).get("status"),
+        engine_running=execution.get("engine_running"),
+        gpu_queue=gpu.get("body"),
+        checkpoint={"status": "not_collected",
+                    "reason": "abort does not prove a checkpoint or save-on-stop; unsaved steps are not claimed"})
 
 
 def retry_node(api, run_id: str, expected_generation: str, *, node_id: int, key: str,

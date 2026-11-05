@@ -39,6 +39,9 @@ REGISTRY_FILE = PKG / "engine" / "memory_stores.py"
 # Bare `*.jsonl` literals that are NOT cross-run stores, each with the directory it lives in. Two-way:
 # a name here the tree no longer spells is a stale row.
 NOT_MEMORY_JSONL = {
+    "readiness_bindings.jsonl": "per-run harness/readiness_binding.py journal, not cross-run memory",
+    "acknowledgements.jsonl": "run-root .agent-events/agent_ack.py notification acknowledgements",
+    "research_notice_dispositions.jsonl": "per-run serve/research_notices.py dispositions",
     "events.jsonl": "the run's event log (run directory)",
     ".metrics.jsonl": "a training script's own metric curves in a node workdir, read by "
                       "`serve/metrics_adapters.py::FileMetricsAdapter`",

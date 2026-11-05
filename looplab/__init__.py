@@ -430,6 +430,7 @@ _LAYOUT = {
     "run_discovery": "core",  # which directories under a runs root are runs, at any depth
     "run_generation": "events",   # one event-log generation's token (moved down from serve 2026-09-29)
     "run_identity": "core",   # the two run-identity shapes: grouping vs cascade attribution
+    "run_ref": "core",        # canonical nested run addresses and their safe resolver
     "run_lifecycle": "engine",  # the run dir's lifecycle fences + config-write lock, moved DOWN out
                                 # of `serve/` so `tools/` takes its defaults downward (doc 25 XP-03)
     "run_proposal": "core",   # the ONE launch-proposal schema the CLI, TUI and Web planners share

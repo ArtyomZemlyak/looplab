@@ -215,7 +215,7 @@ def answer_source(answer: dict) -> str:
         str(answer.get("answerer") or ""), "external_agent")
 
 
-def attempt_failed(res, node=None) -> bool:
+def attempt_failed(res, node=None, objective_key=None, run_direction=None) -> bool:
     """Did the evaluation this attempt ran FAIL, by the engine's own success rule
     (`eval_attempt_rules.py::attempt_succeeded`)? Then every live monitor question about it is moot.
 
@@ -228,7 +228,8 @@ def attempt_failed(res, node=None) -> bool:
         return False
     from looplab.engine.eval_attempt_rules import attempt_succeeded
     try:
-        return not attempt_succeeded(res, artifact=getattr(node, "kind", None) == "artifact")
+        return not attempt_succeeded(res, artifact=getattr(node, "kind", None) == "artifact",
+                                     objective_key=objective_key, run_direction=run_direction)
     except (AttributeError, TypeError, ValueError):
         return True
 
@@ -242,7 +243,9 @@ async def settle_external_observations(engine, a) -> None:
 
     if a._seen.get("kind"):
         return  # explicit operator abort/reset owns the lifecycle
-    if attempt_failed(getattr(a, "res", None), getattr(a, "node", None)):
+    if attempt_failed(getattr(a, "res", None), getattr(a, "node", None),
+                      objective_key=getattr(getattr(a, "state", None), "objective_key", None),
+                      run_direction=getattr(getattr(a, "state", None), "direction", None)):
         # A FAILED EVALUATION DOES NOT WAIT FOR AN ADVISORY ANSWER (audit 2026-10-14 L-05, incident
         # C2: the failed stage sat 139 s on a `train_monitor` question). The question asked whether
         # to stop a process that has already ended; the engine closes it, saying so, and the

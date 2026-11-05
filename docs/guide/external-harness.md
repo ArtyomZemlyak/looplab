@@ -76,6 +76,11 @@ settings to bypass obligations. The config view stays readable for diagnostics b
 approves nothing. Refresh explicitly after repair; these refusals rewrite, retry and
 resume nothing, and legacy and retired settings stay readable.
 
+### Operator notes and nested runs
+
+Owner notes grant no authority. Nested IDs come from `GET /api/campaign-runs`; unsafe addresses are
+refused ([doc 70](../70-external-works-and-operator-reports-2026-09-29.md)).
+
 ### Brief results in Assistant chat
 
 The Assistant transcript for the attached run shows a free completion brief
@@ -743,10 +748,9 @@ The normal control cycle is:
    refuses node detail. Building nodes have no comparison receipt. For live Inspector reads,
    details can lag or lead state: comparison requires coherent current result evidence,
    not merely the presence of a parent score or matching input keys.
-2. Decide whether a proposal, stage split and plan help. The operator's declared
-   `cmd.stages` wins. For a single command, an agent may put preceding stages in
-   `looplab_stages.json` only if `edit_surface` allows that JSON path; LoopLab appends
-   the protected score command.
+2. Decide whether a proposal, stage split and plan help. `cmd.stages` wins; `pre_stages` or
+   `looplab_stages.json` declares preceding work, then the protected genuine score runs.
+   `job_role` and `optimization_only` scope roles. Compare secondary outputs only under matching conditions.
    Enabled `deep_research_every` requires a current `research_completed` memo;
    enabled `track_hypotheses` requires a nonempty candidate hypothesis statement;
    injection creates a fresh Card and does not attach a supplied `card_id`.
@@ -855,9 +859,8 @@ The normal control cycle is:
    Publish `report_generated` at each enabled `report_every` node interval
    before the next candidate, and cover the latest candidate before finishing.
    No particular number of implementation stages is required.
-6. Pause or finalize the run through the same command API. Resume from the durable
-   state after a client restart. A run does not finish merely because the external
-   agent has no immediate action.
+6. Pause or finalize through the command API. Pause only withholds evaluations. `stop_node`
+   returns `checkpoint=not_collected`. Group by question; retries stay.
 
 The obligation settings of an external run are fixed at launch (including concept,
 novelty, monitoring, review and report switches). Per-run config rejects changes to these
@@ -1141,7 +1144,7 @@ seconds; it adds no evaluation wait of its own.
 
 ## Orchestration ([doc 78](../78-external-agent-orchestration-2026-10-14.md))
 
-| `wait_for_next(after=…)` / `GET /api/agent-events` | Long poll of actionable events LoopLab derives itself: node evaluated/failed, stage failed, monitor question, obligation due, run idle, run paused/finished, GPU free. |
+| `wait_for_next(after=…, coalesce=true)` / `GET /api/agent-events` | Long poll. Coalescing returns fresh direction/progress; history grants no authority. `coalesce=false` is chronological. |
 |---|---|
 | `looplab agent-notify --command '…{message}…'` | Operator's wake-up command: debounced, retried, recorded in a ledger. `PUT /api/runs/{run_id}/agent-notify` sets your run's `vars` (thread). |
 | `PUT /api/runs/{run_id}/gpu-gate` | `hold` or `start_after` other runs' engines; the host GPU lease is served FIFO (`GET /api/gpu-queue`). `looplab gpu-gate` writes it before the run exists. |

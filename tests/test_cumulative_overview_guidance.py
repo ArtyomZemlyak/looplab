@@ -27,6 +27,7 @@ def test_report_context_finds_new_terminal_event_and_real_reference_errors_then_
     # The same node count can get a later terminal event after a retry: at_node alone misses it.
     store.append('node_reset', {'node_id': 0, 'generation': 0, 'from_stage': 'eval'})
     outcome = store.append('node_evaluated', {'node_id': 0, 'generation': 1, 'metric': None, 'extra_metrics': {'Recall@20': .45}})
+    direction = store.append('hint', {'text': 'Stop the old fit'})
     with TestClient(make_app(tmp_path)) as c:
         args = {'expected_generation': gen}
         brief = c.get('/api/runs/r/research-briefing', params=args)
@@ -35,7 +36,8 @@ def test_report_context_finds_new_terminal_event_and_real_reference_errors_then_
         assert context['previous_overview_seq'] == old.seq
         assert context['recent_terminal_events'][0]['event_seq'] == outcome.seq
         assert context['recent_terminal_events'][0]['extra_metrics'][0]['value'] == .45
-        assert {w['code'] for w in context['warnings']} >= {'terminal_after_overview', 'invalid_report_reference'}
+        assert {w['code'] for w in context['warnings']} >= {'terminal_after_overview', 'direction_after_overview', 'invalid_report_reference'}
+        assert next(w for w in context['warnings'] if w['code'] == 'direction_after_overview')['event_seq'] == direction.seq
         assert 'no scientific truth' in context['meaning']
         assert c.get(context['previous_overview_api']).json()['content']['campaign_overview']['summary'] == 'Earlier study'
         assert c.get('/api/runs/r/harness-contract').json()['report_authoring']['canonical_workflow'].endswith('/research-workflow')

@@ -429,6 +429,8 @@ EV_SPECULATION_DEPTH_SETTLED = "speculation_depth_settled"
 # reader-side default is `None` = "the run never repinned" = the `run_started` pin, unchanged.
 EV_RUN_WIDTH_SETTLED = "run_width_settled"
 EV_RUN_REOPENED = "run_reopened"
+# Offline owner operation: the directory moved, while run_uid and all launch authority stay unchanged.
+EV_RUN_RELOCATED = "run_relocated"
 EV_RESUME_REQUESTED = "resume_requested"   # P1-1: durable resume intent, appended pre-spawn
 EV_TRUST_GATE_CHANGED = "trust_gate_changed"   # server config edit; folded last-write-wins
 # Predict-before-execute pick among K ideas / N code candidates. FOLDED into RunState.foresight_selected
@@ -2095,7 +2097,7 @@ EVENT_PAYLOAD_KEYS: dict[str, PayloadContract] = {
         # were declared from the request allow-list, the same misreading as the comment rows
         # (review 2026-09-22, EVT-05).
         optional=(
-            "code", "code_commit", "deleted", "files", "forked_from", "idea", "node_kind",
+            "code", "code_commit", "deleted", "files", "forked_from", "idea", "job_role", "node_kind",
             "origin", "parent_generations", "parent_id", "parent_ids", "uses", "uses_attempts"
         ),
         stored_whole=True,
@@ -2208,7 +2210,7 @@ EVENT_PAYLOAD_KEYS: dict[str, PayloadContract] = {
         optional=(
             "attempt", "base_selector", "card_build_generation", "code_commit", "deleted",
             "eval_start_boundary",
-            "footprint_finalized", "forked_from", "generation", "materialize_aborted_intent",
+            "footprint_finalized", "forked_from", "generation", "job_role", "materialize_aborted_intent",
             "model_arm", "node_kind", "origin", "parent_generations", "protocol_version",
             "research_origin", "seed", "simplified", "speculative", "uses", "uses_attempts"
         ),
@@ -2227,7 +2229,7 @@ EVENT_PAYLOAD_KEYS: dict[str, PayloadContract] = {
         optional=(
             "activation", "attempt", "extra_metrics_direction", "extra_metrics_omitted",
             "extra_metrics_provenance", "metric_provenance", "resource_curve", "self_metric",
-            "stderr_tail"
+            "stderr_tail", "task_metric"
         ),
     ),
     "node_failed": PayloadContract(
@@ -2363,7 +2365,7 @@ EVENT_PAYLOAD_KEYS: dict[str, PayloadContract] = {
         # spread (the last two under `Settings.lesson_prior_claim_decisions`, doc 69 69.21) and were
         # missing here until critic 2026-09-30 (F6) read the builder against this row.
         optional=(
-            "at_node", "case", "chars", "claim_decisions_unavailable", "notes", "operator",
+            "at_node", "case", "chars", "claim_decisions_unavailable", "notes", "operator", "operator_notes",
             "operator_rejected", "operator_scoped", "phase", "quarantined_useless", "regime",
             "role", "rows", "source"
         ),
@@ -2475,6 +2477,11 @@ EVENT_PAYLOAD_KEYS: dict[str, PayloadContract] = {
     "run_loop_exited": PayloadContract(
         "Why the engine's outer loop exited (one of `RUN_EXIT_REASONS`).",
         required=("reason",),
+        optional=(),
+    ),
+    "run_relocated": PayloadContract(
+        "An explicit directory move that preserves run_uid and all pinned launch authority.",
+        required=("from_run_id", "previous_event_seq", "previous_event_sha256", "reason", "run_uid", "to_run_id"),
         optional=(),
     ),
     "run_reopened": PayloadContract(
@@ -2589,7 +2596,7 @@ EVENT_PAYLOAD_KEYS: dict[str, PayloadContract] = {
     "stage_finished": PayloadContract(
         "One stage of a multi-stage eval pipeline finished: name, status, exit code, seconds.",
         required=(),
-        optional=("attempt", "exit_code", "generation", "name", "node_id", "seconds", "status"),
+        optional=("attempt", "exit_code", "generation", "log_spans", "name", "node_id", "seconds", "status"),
     ),
     "stage_rollback": PayloadContract(
         "A failed stage's rollback to a checkpoint — accepted, or refused with a reason.",

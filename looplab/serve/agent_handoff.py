@@ -21,7 +21,11 @@ from looplab.serve.agent_events import (_lock, _rotate_if_large,
 def publish(root: Path, run_id: str, generation: str, action_id: str, recipient: str,
             reason: str, next_read: str, urgency: str) -> dict:
     from looplab.harness.journals import read_event_source, read_source
-    rd = root / run_id
+    from looplab.core.run_ref import resolve_run_address
+    address = resolve_run_address(root, run_id)
+    if address.defect is not None:
+        raise HTTPException(404, 'no such run')
+    rd = address.path
     events = read_event_source(rd)
     if run_generation_token(events) != generation:
         raise HTTPException(409, 'run generation changed')

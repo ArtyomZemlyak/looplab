@@ -1,0 +1,200 @@
+from __future__ import annotations
+
+import json
+import sys
+from pathlib import Path
+
+import anyio
+
+from looplab.adapters.repo_task import EvalSpec, RepoTask
+from looplab.engine.orchestrator import Engine
+from looplab.events.replay import fold
+from looplab.runtime.sandbox import SubprocessSandbox
+from looplab.search.policy import GreedyTree
+
+
+def _run(tmp_path, *, job_role=None):
+    src = tmp_path / "src"
+    src.mkdir()
+    (src / "train.py").write_text(
+        "import os\n"
+        "from pathlib import Path\n"
+        "print('TRAIN_ACTIVE')\n"
+        "Path('model.txt').write_text('trained')\n"
+        "with open(os.environ['TEST_CALLS'], 'a') as fh: fh.write('train\\n')\n",
+        encoding="utf-8")
+    (src / "score.py").write_text(
+        "import os\n"
+        "from pathlib import Path\n"
+        "assert Path('model.txt').read_text() == 'trained'\n"
+        "with open(os.environ['TEST_CALLS'], 'a') as fh: fh.write('score\\n')\n"
+        "print('{\"metric\": 1.0}')\n",
+        encoding="utf-8")
+    calls = tmp_path / "calls.log"
+    task = RepoTask(
+        id="reset-reuse", direction="max", editable_path=str(src),
+        edit_surface=["*.py", "*.json"],
+        eval=EvalSpec(
+            command=[sys.executable, "score.py"],
+            metric={"kind": "stdout_json", "key": "metric"},
+            env={"TEST_CALLS": str(calls)}, cwd="."))
+    researcher, developer = task.build_roles()
+    engine = Engine(
+        tmp_path / "run", task=task, researcher=researcher, developer=developer,
+        sandbox=SubprocessSandbox(), policy=GreedyTree(n_seeds=1, max_nodes=1),
+        auto_install_deps=False, inline_repair=False)
+    engine.store.append("run_started", {
+        "run_id": "reset-reuse", "run_uid": "uid-reset-reuse", "task_id": task.id,
+        "goal": "exercise safe reset reuse", "direction": "max"})
+    manifest = json.dumps({"stages": [{
+        "name": "train", "command": [sys.executable, "train.py"],
+        "expect": {"files": ["model.txt"]}}]})
+    engine.store.append("node_created", {
+        "node_id": 0, "parent_ids": [], "operator": "full",
+        "idea": {"operator": "full", "params": {}}, "code": "",
+        "job_role": job_role,
+        "files": {"looplab_stages.json": manifest,
+                  "looplab_activation.json": json.dumps({"markers": ["TRAIN_ACTIVE"]})}})
+    return engine, calls
+
+
+def _evaluate(engine):
+    anyio.run(engine._evaluate, 0, anyio.CapacityLimiter(1))
+
+
+def _reset(engine):
+    attempt = fold(engine.store.read_all()).nodes[0].attempt
+    engine.store.append("node_reset", {
+        "node_id": 0, "generation": attempt, "from_stage": "score"})
+
+
+def _strip_identity(engine):
+    rows = []
+    for line in (engine.run_dir / "events.jsonl").read_text().splitlines():
+        row = json.loads(line)
+        if row.get("type") == "stage_finished":
+            row["data"].pop("stage_input_key", None)
+            row["data"].pop("stage_outputs", None)
+        rows.append(json.dumps(row))
+    (engine.run_dir / "events.jsonl").write_text("\n".join(rows) + "\n")
+
+
+def _amend(engine, kind):
+    with open(engine.run_dir / "protocol_amendments.jsonl", "a") as fh:
+        fh.write(json.dumps({
+            "run_uid": "uid-reset-reuse", "kind": kind, "at_event_seq": 999,
+            "payload": {"applied": True}}) + "\n")
+
+
+def test_score_reset_reuses_verified_train_on_consecutive_retries(tmp_path):
+    engine, calls = _run(tmp_path)
+    _evaluate(engine)
+    _reset(engine)
+    _evaluate(engine)
+    _reset(engine)
+    _evaluate(engine)
+    assert calls.read_text().splitlines() == ["train", "score", "score", "score"]
+    state = fold(engine.store.read_all())
+    reused = [row for row in state.nodes[0].stage_attempts
+              if row["name"] == "train" and row["status"] == "reused"]
+    assert len(reused) == 2
+    assert state.nodes[0].metric == 1.0
+
+
+def test_changed_declared_output_refuses_implicit_full_rerun(tmp_path):
+    engine, calls = _run(tmp_path)
+    _evaluate(engine)
+    workdir = engine.run_dir / "nodes" / "node_0"
+    (workdir / "model.txt").write_text("foreign")
+    _reset(engine)
+    _evaluate(engine)
+    assert calls.read_text().splitlines() == ["train", "score"]
+    assert (workdir / "model.txt").read_text() == "foreign"
+    state = fold(engine.store.read_all())
+    assert state.nodes[0].error_reason == "stage_reuse_unavailable" and state.paused
+    # The operator explicitly requests the whole pipeline with a NEW native attempt.
+    engine.store.append("node_reset", {"node_id": 0, "generation": 1, "from_stage": "eval"})
+    engine.store.append("resume", {})
+    _evaluate(engine)
+    assert calls.read_text().splitlines() == ["train", "score", "train", "score"]
+    assert (workdir / "model.txt").read_text() == "trained"
+
+
+def test_legacy_stage_rows_without_identity_refuse_unproved_reuse(tmp_path):
+    engine, calls = _run(tmp_path)
+    _evaluate(engine)
+    _strip_identity(engine)
+    _reset(engine)
+    _evaluate(engine)
+    assert calls.read_text().splitlines() == ["train", "score"]
+    assert fold(engine.store.read_all()).nodes[0].error_reason == "stage_reuse_unavailable"
+
+
+def test_only_input_protocol_amendments_invalidate_reuse(tmp_path):
+    engine, calls = _run(tmp_path)
+    _evaluate(engine)
+    _amend(engine, "budget")
+    _reset(engine)
+    _evaluate(engine)
+    assert calls.read_text().splitlines() == ["train", "score", "score"]
+    _amend(engine, "task")
+    _reset(engine)
+    _evaluate(engine)
+    assert calls.read_text().splitlines() == ["train", "score", "score"]
+    assert fold(engine.store.read_all()).nodes[0].error_reason == "stage_reuse_unavailable"
+
+
+def test_reused_stage_uses_its_last_successful_activation_span(tmp_path):
+    engine, calls = _run(tmp_path)
+    _evaluate(engine)
+    first = next(e for e in engine.store.read_all()
+                 if e.type == "stage_finished" and e.data["name"] == "train")
+    assert first.data["log_spans"]
+    _reset(engine)
+    _evaluate(engine)
+    terminal = next(e for e in reversed(engine.store.read_all()) if e.type == "node_evaluated")
+    assert terminal.data["metric"] == 1.0
+    assert terminal.data["activation"]["verdict"] == "ok"
+    assert calls.read_text().splitlines() == ["train", "score", "score"]
+
+
+def test_actual_engine_launch_enforces_latest_optimization_scope(tmp_path):
+    engine, calls = _run(tmp_path, job_role="fit")
+    (engine.run_dir / "harness_policy.json").write_text(json.dumps({
+        "execution": {"mode": "optimization_only", "allowed_job_roles": ["profile"]}}))
+    _evaluate(engine)  # direct engine dispatch/CLI resume, bypassing HTTP intake
+    state = fold(engine.store.read_all())
+    assert state.nodes[0].error_reason == "optimization_scope_refused"
+    assert state.paused and not calls.exists()
+    assert not (engine.run_dir / "nodes" / "node_0").exists()
+
+
+def test_protocol_amendment_at_exact_stage_event_revokes_reuse(tmp_path):
+    engine, calls = _run(tmp_path)
+    _evaluate(engine)
+    stage = next(e for e in engine.store.read_all()
+                 if e.type == "stage_finished" and e.data["name"] == "train")
+    (engine.run_dir / "protocol_amendments.jsonl").write_text(json.dumps({
+        "run_uid": "uid-reset-reuse", "kind": "files", "at_event_seq": stage.seq}) + "\n")
+    _reset(engine)
+    _evaluate(engine)
+    assert calls.read_text().splitlines() == ["train", "score"]
+    assert fold(engine.store.read_all()).nodes[0].error_reason == "stage_reuse_unavailable"
+
+
+def test_reused_activation_cannot_trust_an_in_place_rewritten_historical_log(tmp_path):
+    engine, calls = _run(tmp_path)
+    source = Path(engine.task.editable_path) / 'train.py'
+    source.write_text(source.read_text().replace('TRAIN_ACTIVE', 'TRAIN_DORMANT'))
+    _evaluate(engine)
+    first = fold(engine.store.read_all()).nodes[0]
+    assert first.status.value == 'failed' and first.error_reason == 'inert_path'
+    log = engine.run_dir / 'nodes' / 'node_0' / 'train.log'
+    raw = log.read_bytes()
+    # Same inode, same byte count, unchanged actual model/source: only the old evidence is forged.
+    log.write_bytes(raw.replace(b'TRAIN_DORMANT', b'TRAIN_ACTIVE '))
+    _reset(engine)
+    _evaluate(engine)
+    result = fold(engine.store.read_all()).nodes[0]
+    assert calls.read_text().splitlines() == ['train', 'score', 'score']
+    assert result.status.value == 'failed' and result.error_reason == 'inert_path'

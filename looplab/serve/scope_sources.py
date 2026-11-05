@@ -252,9 +252,12 @@ def _run_path(root: Path, run_id: str) -> tuple[Path, os.stat_result]:
     except (OSError, RuntimeError, ValueError) as exc:
         raise ScopeSourceError("scope root is unavailable") from exc
     _require_real_directory(root, label="scope root")
-    run_dir = root / run_id
-    if run_dir.parent != root:
-        raise ScopeSourceCorruptError("run id is not a lexical direct child")
+    from looplab.core.run_ref import resolve_run_address
+    address = resolve_run_address(root, run_id)
+    run_dir = address.path
+    if run_dir is None:
+        detail = "symlink/reparse or indirect path" if address.defect == "indirect" else address.defect
+        raise ScopeSourceCorruptError(f"run id is not an addressable run: {detail}")
     return run_dir, _require_real_directory(run_dir, label="run directory")
 
 

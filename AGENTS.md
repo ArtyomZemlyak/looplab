@@ -19,8 +19,9 @@
    explicitly when done. LoopLab evaluates; never claim a score it did not measure.
 
 An operator can launch instead: `looplab run task.json --out runs/my-run -s external_harness=true`.
-On a protected UI the MCP process needs a distinct `LOOPLAB_HARNESS_TOKEN`. The rest of this file
-is the contract; `docs/guide/external-harness.md` is the full guide, including recovery.
+For `runs/<campaign>/<seed>`, use the canonical `run_id` from `/api/campaign-runs`, never the leaf
+name. A protected UI needs a distinct `LOOPLAB_HARNESS_TOKEN`. The contract follows;
+`docs/guide/external-harness.md` covers recovery.
 
 ## The contract
 
@@ -31,11 +32,32 @@ and `looplab replay RUN_DIR`; read `docs/guide/external-harness.md` before steer
 
 The agent may decide whether a node needs a separate stages declaration or a detailed plan.
 If the operator supplied `cmd.stages`, that pipeline wins. For a single `cmd.command`, an
-agent authored `looplab_stages.json` can declare preceding work only when the task's editable
-surface permits that file. Never duplicate training already performed inside an opaque score
-command. Never edit protected scoring files, manufacture a metric, or treat a partial checkpoint
-as a completed run. LoopLab owns patch validation, stage execution, score provenance, event
-history and replay.
+agent can pass `pre_stages` to `submit_experiment` (or `inject_node`): the server validates them
+as preceding work and materializes `looplab_stages.json`; writing that JSON directly is also
+supported. Both forms require the task's editable surface to permit the manifest. LoopLab appends
+the operator's protected score and its genuine metric reader. Never duplicate training already
+performed inside an opaque score command. Never edit protected scoring files, manufacture a metric,
+or treat a partial checkpoint as a completed run. LoopLab owns patch validation, stage execution,
+score provenance, event history and replay.
+
+Declare `job_role` as `prepare`, `profile`, `fit`, `score` or `recovery` independently of
+`node_kind`. The owner may set `harness_policy.execution` to `optimization_only` with a bounded
+`allowed_job_roles` list. Inject, retry, resume and each actual engine launch enforce that declaration; a profile is not
+permission to resume scientific training. `execution_scope` is visible in harness progress.
+The DAG filters by role without deleting evidence. Inspector → Resources shows recorded secondary
+outputs with their provenance (`declared` reader, `auto` stdout, `engine` or unknown), original
+units and reconstruction marker. Do not compare profiles with different conditions or treat those
+outputs as an overall speedup or the model-quality objective.
+
+A later-stage retry requires proven reuse of every preceding stage. If that proof is unavailable,
+`stage_reuse_unavailable` preserves the workdir and pauses; inspect the cause, then explicitly
+request `retry_node(from_stage="eval")` and resume only when a full pipeline is intended.
+Never treat a score-only retry as permission to repeat training.
+
+Use `pause` only to withhold new evaluations; it does not prove the active evaluator or its GPU
+lease stopped. Use `stop_node` to abort an exact active attempt and read its fresh node status,
+engine/GPU observations and `checkpoint=not_collected`. Never infer save-on-stop or unsaved-step
+persistence from an abort receipt.
 
 An `inject_node` command receipt marked `succeeded` proves admission, not successful
 training. For a failed node, read current generation/attempt-bound logs before
@@ -66,14 +88,16 @@ Refresh after events or responses; inspect `source_health` if the event
 log or a sidecar journal is incomplete. Commands and measured results remain in
 the event timeline. External obligation settings are fixed for a launched run;
 change operational settings on resume or start another run to change obligations.
-A campaign of several experiments stays in ONE run while the task and scorer are
-compatible: pre-register each experiment and submit it with MCP `submit_experiment`;
-change evaluation inputs or protected base files with a recorded `amend_protocol`
-(engine paused) instead of a new run; retry a failed setup with `retry_node`; add
-nodes with `amend_protocol kind=budget` and a reason. Upload per-query arrays with
-`upload_per_query` and quote `compare_experiment` (LoopLab's paired CIs and Holm).
-Only an incompatible task needs a new run: group runs with `campaign_supertask`.
-Finish with `finish_run`. See docs/81-campaign-in-one-run-2026-10-14.md.
+Keep one coherent question and decision scope in ONE run, not every technically compatible
+experiment: pre-register related arms with MCP `submit_experiment`; change evaluation inputs or
+protected base files with a recorded `amend_protocol` (engine paused) instead of a new run; retry
+a failed setup with `retry_node`; add nodes with `amend_protocol kind=budget` and a reason.
+Technical profiles needed for the same decision stay beside the experiment. A different scientific
+question or incompatible task gets a new run even with the same scorer; group runs with
+`campaign_supertask` and explicit producer/control links. Never use a run boundary to reset spend,
+create a second result or force retraining. Upload per-query arrays with `upload_per_query` and
+quote `compare_experiment` (LoopLab's paired CIs and Holm). Finish with `finish_run`.
+See docs/81-campaign-in-one-run-2026-10-14.md.
 Search `policy` is an agent choice: submit `set_strategy` to switch the live
 evaluation policy (including `greedy` or `mcts`), or leave the current policy.
 Read `harness-progress.policy_preview` for the active policy's suggested next
@@ -138,6 +162,9 @@ scope-report generation. Author the corresponding run decisions and reports
 through the durable commands and guarded knowledge APIs.
 When the evidence supports a reusable conclusion, publish it through `/lessons`
 with terminal node IDs; never include a claimed score in place of evaluation.
+`POST /operator-notes` is owner-only, not an external-agent channel: it records operator guidance
+bound by task fingerprint and direction. Do not use it to manufacture operator authority or to make
+a note apply to a different task.
 Keep lesson/skill bodies and action IDs for lost replies. Exact retries acknowledge
 prior publication without refreshing evidence or restoring a retired claim. Fresh
 writes validate current outcomes. Lesson roles default to shared; researcher and
@@ -165,6 +192,9 @@ Do not script orchestration LoopLab owns ([doc 78](docs/78-external-agent-orches
 Between decisions, block on MCP `wait_for_next(after=<last id>)` instead of polling: LoopLab
 records node evaluated/failed, stage failed, monitor question, obligation due, run idle, run
 paused/finished and GPU free itself; the operator's `looplab agent-notify` hook can also wake you.
+With the default `coalesce=true`, a backlog arrives as one packet per run: its newest direction/lifecycle
+action, bounded `coalesced_history`, newest `next_after` and fresh progress. Historical events do
+not renew execution authority; use `coalesce=false` only when chronological delivery is required.
 Order GPU work across runs with `PUT /api/runs/{run_id}/gpu-gate` (`hold`, `start_after`).
 Declare routine monitor answers with `PUT /api/runs/{run_id}/harness-monitor-rules`; never
 answer checkpoints with an unattended bot under the agent's name. Read
@@ -176,7 +206,10 @@ Every candidate's code is recorded as a commit of the run's private repository
 (`RUN_DIR/code/repo.git`, `docs/guide/code-identity.md`), and the operator exports
 the run's fixes into the task repository with `looplab code-export`. Code edited in
 a copy outside the run — a scratch clone, a campaign directory, the editable source
-between runs — reaches neither. The worktree is the default way to write code:
+between runs — reaches neither. Before the first materialization `code_repo_missing`
+means the base does not exist yet: submit the first real candidate with ready files
+(and optional `pre_stages`), then use the worktree; do not create a dummy bootstrap node.
+The worktree is the default way to write code after that base exists:
 
 1. MCP `code_worktree(run_id, expected_generation, name)` (or `looplab code-worktree RUN NAME`)
    checks out the run's current base — `start="node:<id>"` for an experiment — on branch

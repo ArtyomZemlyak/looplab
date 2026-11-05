@@ -1066,10 +1066,10 @@ class EvalStagesMixin:
         different workdir from the same authored files. Two runs must never share a key; a resume of
         the SAME run must, which is why it is the config hash and not a per-process nonce.
 
-        It RECORDS and decides nothing. `stage_identity.py`'s docstring holds the measurement that
-        decided a cross-node cache would not be built (7 hits / 4 wrong on the declared-params key
-        the request proposed; 1 hit / 0 wrong and 0.64 h on this one), and `reuse_refusal` is the
-        decision half a cache would call, driven today only by `looplab stage-dups`.
+        `stage_identity.py`'s docstring holds the measurement that refused a cross-node cache
+        (7 hits / 4 wrong on declared params; 1 hit / 0 wrong on this content key). The same strict
+        `reuse_refusal` now also guards same-workdir reset reuse, where the scope and lifecycle can
+        be proved, beside its read-only use by `looplab stage-dups`.
         """
         from looplab.core.setup_identity import setup_config_hash
         from looplab.runtime.stage_identity import stage_input_key

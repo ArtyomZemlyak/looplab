@@ -4,9 +4,9 @@ import { get } from './api.js'
 import { fmt, fmtAgo } from './format.js'
 import { campaignFolders, foldersSkipped, openCommand, rootListingCut } from './campaignRunsModel.js'
 
-// The runs inside the root's CAMPAIGN folders, read-only (doc 70 70.1; the rules live in
-// `campaignRunsModel.js`). One read when the list mounts: the rows are a finder, and each folder's
-// command serves it as a root, where its runs open live.
+// The runs inside the root's CAMPAIGN folders (doc 70 70.1; the rules live in
+// `campaignRunsModel.js`). One read when the list mounts: canonical nested links open runs directly;
+// each folder's alternate command serves it as a root with leaf IDs.
 export default function CampaignRuns() {
   useUILanguage()
 
@@ -26,14 +26,14 @@ export default function CampaignRuns() {
   const skipped = foldersSkipped(payload)
   return <section aria-label={uiText("Campaign folders")}>
     <h2 className="muted" style={{ fontSize: 13, margin: '16px 2px 4px' }}>{uiText("Campaign folders")}</h2>
-    <p className="muted" style={{ fontSize: 12, margin: '0 2px 8px' }}>{uiText("Runs inside a folder of the runs root, listed read-only. To open them, serve the folder as the root:")}</p>
+    <p className="muted" style={{ fontSize: 12, margin: '0 2px 8px' }}>{uiText("Open a nested run directly, or serve its folder as a separate root:")}</p>
     {folders.map(f => <details key={f.folder} className="notice compact">
       <summary>{f.folder} · {uiPlural(f.runs.length, '{0} run', '{0} runs')}
         {(f.runsSkipped > 0 && uiMessage(" ({0} more not listed)", [f.runsSkipped]))}
         {((f.listingCut && uiText(' (its listing was cut at the entry bound)')))}</summary>
       <code style={{ userSelect: 'all' }}>{openCommand(f.runRoot)}</code>
       <ul>{f.runs.map(r => <li key={r.runId}>
-        <strong>{r.runId}</strong>{r.taskId && ` · ${r.taskId}`}{r.phase && ` · ${r.phase}`}
+        <a href={`#/run/${encodeURIComponent(r.runId)}`}><strong>{r.runPath || r.runId}</strong></a>{r.taskId && ` · ${r.taskId}`}{r.phase && ` · ${r.phase}`}
         {((r.external && uiText(' · External agent')))}
         {(r.bestMetric !== null && uiMessage(" · best {0}", [fmt(r.bestMetric)]))}{((r.running && uiText(' · engine active')))}
         {r.updated !== null && <span className="muted"> · {fmtAgo(r.updated)}</span>}

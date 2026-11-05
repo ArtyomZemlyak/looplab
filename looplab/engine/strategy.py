@@ -357,7 +357,8 @@ class StrategyCadenceMixin:
                 current_direction, task_id=task_id, excluded_run=run_id,
                 excluded_run_uid=str(getattr(state, "run_uid", "") or ""))
             lessons = filter_claim_source_rows(lessons, _visible, research=False)
-            caps = filter_capsule_rows(caps, _visible)
+            caps = filter_capsule_rows(
+                caps, lambda row: _visible(row) and row.get("provisional") is not True)
             research = filter_claim_source_rows(research, _visible, research=True)
             capsule_source = capsule_source_summary(caps)
             # Use the same scope+polarity-safe projection as the Researcher advisory while

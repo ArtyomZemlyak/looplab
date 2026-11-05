@@ -437,6 +437,8 @@ CONTROL_DATA_FIELDS: dict[str, frozenset[str]] = {
     EV_FORK: frozenset({"from_node_id", "generation"}),
     EV_INJECT_NODE: frozenset({
         "idea", "parent_id", "parent_ids", "parent_generations", "code", "files", "deleted", "origin",
+        # External preceding stages, validated and materialized as looplab_stages.json at intake.
+        "pre_stages",
         # The operator's fork-from-a-snapshot receipt (`_normalize_fork_receipt`): which node this
         # idea was branched FROM, at which lifecycle generation, from which observed seq — plus the
         # two SERVER-STAMPED fields that make "what the operator changed" checkable.
@@ -444,7 +446,7 @@ CONTROL_DATA_FIELDS: dict[str, frozenset[str]] = {
         # An ARTIFACT node (doc 73 §1.4): `node_kind: "artifact"` succeeds on a clean pipeline with no
         # metric and is never ranked; `uses` names produced nodes whose workdirs this node's
         # eval reads (`LOOPLAB_USES_WORKDIRS`).
-        "node_kind", "uses",
+        "node_kind", "uses", "job_role",
         "source_run", "source_node",
         # Doc 79: `{"worktree": name}`, `{"patch": text, "start"?}` or `{"git": {"repo", "ref"}}` (a
         # foreign branch merged onto the run's base, `engine/code_foreign.py`) — an external agent's

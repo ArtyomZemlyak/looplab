@@ -10,15 +10,17 @@ from fastapi import HTTPException
 
 from looplab.events.run_generation import run_generation_token
 from looplab.core.metric_profile import profile_for_run
+from looplab.core.run_ref import run_address
 from looplab.harness.journals import read_event_source
 from looplab.harness.research_map import snapshot
 
 
-def export(rd: Path, generation: str, selected: list[int], question_card_id: str | None = None) -> dict:
+def export(rd: Path, generation: str, selected: list[int], question_card_id: str | None = None, *, root: Path | None = None) -> dict:
+    root = root if root is not None else rd.parent
     from looplab.serve.report_history import report_version, report_digest
     if len(selected) > 10 or len(set(selected)) != len(selected) or any(type(s) is not int or s < 0 for s in selected):
         raise HTTPException(400, 'select at most ten distinct report sequences')
-    research = snapshot(rd, generation, limit=100)
+    research = snapshot(rd, generation, limit=100, root=root)
     events = read_event_source(rd)
     if run_generation_token(events) != generation:
         raise HTTPException(409, 'run generation changed')
@@ -50,7 +52,7 @@ def export(rd: Path, generation: str, selected: list[int], question_card_id: str
     lines = ['# Research campaign export', '', f"Run: {research['run_id']}",
              f"Generation: {generation}", f"Event prefix: {events[-1].seq}", '',
              research['goal']]
-    profile = profile_for_run(rd.parent, rd.name)
+    profile = profile_for_run(root, run_address(root, rd))
     if profile.get('state') == 'configured':
         value = profile['profile']
         lines += ['', f"## Project metric profile at export: {value['name']}",

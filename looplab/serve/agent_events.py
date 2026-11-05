@@ -1,12 +1,6 @@
 """WAKING AN EXTERNAL AGENT: a durable outbox of actionable events, a long-poll read, and a hook.
 
-WHY (audit 2026-10-14, L-01, S1). The harness was pull-only: an external agent learned that a node
-finished, a stage failed or a monitor question opened only by polling. Codex closed that gap with
-its own bridge — 33 call sites of `codex queue --thread <hard-coded id> --message <text>` spread
-over supervisor/handoff scripts with a hand-kept `notification-ledger.json` — and the bridge was
-where the night's incidents happened: bursts (5 notifications in 46 s), duplicates, stale alerts
-25 minutes after the run they described had been replaced, failed deliveries never retried. And
-when the agent's own turn died (`server_overloaded`), nothing woke it: 8 GPUs idled ~12 h.
+Historical incident details omitted.
 
 WHAT. The UI server — the one long-lived LoopLab process — runs `AgentEventPump`, which derives
 ACTIONABLE events from what LoopLab itself recorded (never from agent scripts) and appends them to
@@ -74,10 +68,7 @@ LEDGER = "deliveries.jsonl"
 PENDING_REACTIONS = "pending-reactions.json"
 RUN_NOTIFY = "agent_notify.json"
 HOOKS_DIR = "hooks"
-# THE DEFAULT HOOK is the historical single `notify.json`; every other hook is a NAMED AGENT
-# CONNECTION (doc 78 leftover, 2026-10-14): one per agent that wants waking — `codex`, `claude` —
-# each with its own command, vars, kinds, run filter, delivery watermark and retry state, so a
-# failing Codex bridge neither delays nor re-delivers what a Claude Code session is told.
+# Historical incident details omitted.
 DEFAULT_HOOK = "default"
 _HOOK_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,31}$")
 
@@ -102,9 +93,7 @@ _MIN_RUN_INTERVAL_S = 3.0
 MAX_WAIT_S = 600
 
 _VAR_NAME = re.compile(r"^[A-Za-z_][A-Za-z0-9_]{0,31}$")
-# A var value never STARTS with `-`: a run's vars are writable by the harness token and land as a
-# whole argv element of the operator's command, so `--thread {thread}` with `thread=--exec=x` would
-# hand the agent an OPTION of the operator's program, not a value (review 2026-10-15).
+# Historical incident details omitted.
 _VAR_VALUE = re.compile(r"^(?!-)[A-Za-z0-9._:@/+=,-]{0,256}$")
 _BUILTIN_FIELDS = frozenset({"message", "run_id", "runs", "kinds", "count", "after", "last_id",
                              "first_id"})
@@ -554,40 +543,64 @@ def _template_fields(command: list[str]) -> set[str]:
 
 def write_notify_config(root, body: dict, hook: Optional[str] = None) -> dict:
     config = validate_notify_config(body)
+    with _lock(root):
+        return _write_notify_config_locked(root, config, hook)
+
+
+def _write_notify_config_locked(root, config: dict, hook: Optional[str]) -> dict:
+    """Publish an already validated configuration while holding the outbox lock."""
     path = _hook_path(root, hook)
     name = check_hook_name(hook)
-    with _lock(root):
-        previous = _read_json(path, {})
-        path.parent.mkdir(parents=True, exist_ok=True)
-        _write_json(path, config)
-        state_path = events_dir(root) / STATE
-        state = _read_json(state_path, {})
-        hooks = state.get("delivery_hooks") if isinstance(state.get("delivery_hooks"), dict) else {}
-        # A hook that was NOT delivering — removed, or switched off — resumes FROM NOW when it is
-        # (re)configured to deliver: its old watermark sits behind every event that landed while it
-        # was gone, and resuming there is a burst of old events past the debounce (each older than
-        # `max_delay_s`), not a wake-up (review 2026-10-15). A reconfiguration of a hook that was
-        # delivering keeps its position.
-        was_delivering = bool(previous) and previous.get("enabled", True) is not False
-        resumes = bool(config.get("enabled", True)) and not was_delivering
-        if name != DEFAULT_HOOK:
-            # A new connection is woken for what happens FROM NOW: pin its watermark at the
-            # outbox's end when it is first configured (a reconfiguration keeps its position).
-            pin = name not in hooks or resumes
+    previous = _read_json(path, {})
+    path.parent.mkdir(parents=True, exist_ok=True)
+    _write_json(path, config)
+    state_path = events_dir(root) / STATE
+    state = _read_json(state_path, {})
+    hooks = state.get("delivery_hooks") if isinstance(state.get("delivery_hooks"), dict) else {}
+    # Historical incident details omitted.
+    was_delivering = bool(previous) and previous.get("enabled", True) is not False
+    resumes = bool(config.get("enabled", True)) and not was_delivering
+    if name != DEFAULT_HOOK:
+        # A new connection is woken for what happens FROM NOW: pin its watermark at the
+        # outbox's end when it is first configured (a reconfiguration keeps its position).
+        pin = name not in hooks or resumes
+    else:
+        # The default hook's FIRST configuration keeps its historical start (the retained
+        # outbox); only a default hook that had a watermark and stopped delivering is re-pinned.
+        pin = resumes and isinstance(state.get("delivery"), dict)
+    if pin:
+        row = {"through": int(state.get("next_id", 0) or 0) - 1, "attempts": 0,
+               "next_try": 0, "failed": 0}
+        if name == DEFAULT_HOOK:
+            state["delivery"] = row
         else:
-            # The default hook's FIRST configuration keeps its historical start (the retained
-            # outbox); only a default hook that had a watermark and stopped delivering is re-pinned.
-            pin = resumes and isinstance(state.get("delivery"), dict)
-        if pin:
-            row = {"through": int(state.get("next_id", 0) or 0) - 1, "attempts": 0,
-                   "next_try": 0, "failed": 0}
-            if name == DEFAULT_HOOK:
-                state["delivery"] = row
-            else:
-                hooks[name] = row
-                state["delivery_hooks"] = hooks
-            _write_json(state_path, state)
+            hooks[name] = row
+            state["delivery_hooks"] = hooks
+        _write_json(state_path, state)
     return config
+
+
+def notify_scope(root, run_id: str) -> dict:
+    """Which configured hooks include this run, without changing their scope."""
+    hooks = notify_hooks(root)
+    included = sorted(name for name, config in hooks.items()
+                      if config.get("runs") is None or run_id in (config.get("runs") or []))
+    return {"run_id": run_id, "included_hooks": included,
+            "available_hooks": sorted(hooks),
+            "excluded_by_run_filter": bool(hooks and not included)}
+
+
+def attach_notify_scope(root, run_id: str, hook: str) -> dict:
+    """Attach exactly one run to an existing hook, preserving command/vars/kinds/watermark."""
+    with _lock(root):
+        config = read_notify_config(root, hook)
+        if config is None:
+            raise HTTPException(404, {"code": "notify_hook_not_found", "hook": hook})
+        runs = config.get("runs")
+        if runs is not None and run_id not in runs:
+            config = {**config, "runs": list(runs) + [run_id]}
+            _write_notify_config_locked(root, validate_notify_config(config), hook)
+    return notify_scope(root, run_id)
 
 
 def clear_notify_config(root, hook: Optional[str] = None) -> None:
@@ -738,13 +751,7 @@ def _question_row(rd: Path, checkpoint_id) -> tuple[Optional[dict], list[dict]]:
 def _condition_identity(row: dict) -> tuple:
     """WHAT a condition event says holds, for the delivery-time re-check — not its dedupe key.
 
-    The dedupe key also names WHEN the condition was seen (`run_idle` the log's seq,
-    `obligation_due` the node count and evidence revision), so it answers "is this the same
-    sighting?", which is the outbox's question. Delivery asks "does it still hold?": an engine
-    still idle after an unrelated diagnostic row, or a finish report still due after a new
-    evidence revision, is still worth the wake-up — compared by key, every such append made a true
-    condition read stale, dropped it and restarted the debounce, possibly forever (review
-    2026-10-15). A question stays its own checkpoint id (the key already is exactly that)."""
+Historical incident details omitted."""
     kind = row.get("kind")
     run_uid = row.get("run_uid")
     if kind == "run_idle":
@@ -927,10 +934,7 @@ class AgentEventPump:
             candidates += conditions
         appended = append_events(self.root, candidates,
                                  run_state={rd.name: {"seq": events[-1].seq, "run_uid": run_uid}})
-        # The signature taken BEFORE the read, never a fresh one: a row appended between
-        # `read_all` and here is not in `events`, and a signature that already covered it would
-        # read "nothing moved" on every later tick — for a stopped engine, forever (review
-        # 2026-10-15). An append in that window now costs one more scan, which is the point.
+        # Historical incident details omitted.
         self._run_marks[rd.name] = (sig, now)
         return appended
 
@@ -959,19 +963,7 @@ class AgentEventPump:
     def _routine_by_rules(self, rd: Path, row: dict) -> bool:
         """Is this pending question ROUTINE under the agent's declared monitor rules?
 
-        Live check 2026-10-14 (run minionerec-new-all-two-epochs-e7): an engine started BEFORE the
-        rules shipped never applies them, so every train_monitor tick reached the agent as a wake-up
-        although the agent had declared it routine. The pump evaluates the SAME rules
-        (`harness/monitor_rules.py::evaluate`) on the question's observation and does not wake
-        anyone for a routine one. It answers nothing — the question stays for the engine's own
-        deadline or a newer engine's rule answer; this only decides whether waking is warranted.
-        `progress_advances` compares against the progress the journal's RULE answers recorded for
-        the same node lifecycle and phase before this question (`checkpoints.
-        rule_previous_progress`, the reading `ask` decides with), and against the last progress
-        this pump itself accepted (in memory: the only record when the engine applies no rules) —
-        the HIGHER of the two, so the pump never calls routine a question whose progress `ask`
-        already judged stalled (review 2026-10-15: with only its own memory, a question `ask`
-        left open was routine here at `previous=None`, and nobody was woken)."""
+Historical incident details omitted."""
         from looplab.harness.checkpoints import rule_previous_progress
         from looplab.harness.monitor_rules import evaluate, read_rules
         rules = read_rules(rd)
@@ -1011,6 +1003,7 @@ class AgentEventPump:
         from looplab.core.errors import OperatorRefusal
         from looplab.events.eventstore import EventStore
         from looplab.events.replay import fold
+        from looplab.core.run_ref import resolve_run_address
         current: dict[str, Optional[set]] = {}
         lifecycle_cache = {}
         keep, stale = [], []
@@ -1019,8 +1012,9 @@ class AgentEventPump:
             if row.get("kind") == "agent_handoff" and run_id:
                 from looplab.events.run_generation import run_generation_token
                 from looplab.harness.journals import read_event_source
+                rd = resolve_run_address(self.root, run_id).path
                 try:
-                    current_generation = run_generation_token(read_event_source(self.root / run_id))
+                    current_generation = run_generation_token(read_event_source(rd)) if rd is not None else None
                 except HTTPException:
                     current_generation = None
                 if current_generation is not None and current_generation != row.get("generation"):
@@ -1028,7 +1022,8 @@ class AgentEventPump:
                     continue
             if row.get("kind") == "run_paused" and run_id:
                 from looplab.serve.agent_lifecycle_filter import superseded_agent_pause
-                if superseded_agent_pause(self.root / run_id, row, lifecycle_cache):
+                rd = resolve_run_address(self.root, run_id).path
+                if rd is not None and superseded_agent_pause(rd, row, lifecycle_cache):
                     stale.append(row)
                     continue
             if row.get("kind") not in CONDITION_KINDS or not run_id:
@@ -1036,17 +1031,18 @@ class AgentEventPump:
                 continue
             if run_id not in current:
                 keys = None
-                rd = self.root / run_id
-                try:
-                    settings = read_config_snapshot(rd / "config.snapshot.json")
-                    events = EventStore(rd / "events.jsonl").read_all()
-                    state = fold(events)
-                    run_uid = str(getattr(state, "run_uid", "") or run_id)
-                    rows_now = self._conditions(rd, settings, state, events, run_uid)
-                    keys = None if rows_now is None else {_condition_identity(r)
-                                                          for r in rows_now}
-                except (OperatorRefusal, OSError, ValueError):
-                    keys = None
+                rd = resolve_run_address(self.root, run_id).path
+                if rd is not None:
+                    try:
+                        settings = read_config_snapshot(rd / "config.snapshot.json")
+                        events = EventStore(rd / "events.jsonl").read_all()
+                        state = fold(events)
+                        run_uid = str(getattr(state, "run_uid", "") or run_id)
+                        rows_now = self._conditions(rd, settings, state, events, run_uid)
+                        keys = None if rows_now is None else {_condition_identity(r)
+                                                              for r in rows_now}
+                    except (OperatorRefusal, OSError, ValueError):
+                        keys = None
                 current[run_id] = keys
             keys = current[run_id]
             if keys is None or _condition_identity(row) in keys:
@@ -1298,11 +1294,7 @@ class AgentEventPump:
                 and now - oldest_ts < float(config.get("max_delay_s", 120))
                 and not page["has_more"]):
             return None
-        # NOTHING STALE WAKES AN AGENT (live check 2026-10-14): a condition is re-derived NOW, and a
-        # question answered or closed during the debounce, an obligation met or an engine no
-        # longer idle is dropped (recorded in the ledger, never sent); a burst of questions of one
-        # run is ONE line. A retry is re-checked too: a question that closed while the hook was
-        # failing is not worth a wake-up either.
+        # Historical incident details omitted.
         fresh, stale = self._still_actionable(rows)
         if stale and int(delivery.get("attempts", 0)) == 0:      # logged once, not per retry
             _append_ledger(self.root, {
@@ -1317,11 +1309,7 @@ class AgentEventPump:
                                 failed=delivery.get("failed", 0), hook=hook)
             return None
         last_seen = rows[-1]["id"]
-        # A RETRY sends only what has not been delivered: with several per-run var groups (one
-        # thread per run), one failing group keeps `through` where it was, and before this every
-        # retry re-sent the groups that had already succeeded — the duplicates the hook exists to
-        # end (review 2026-10-15). `delivered` is the ids sent within the pending window; it is
-        # cleared whenever the window closes (all sent, abandoned, or nothing left to send).
+        # Historical incident details omitted.
         delivered = {i for i in (delivery.get("delivered") or []) if isinstance(i, int)}
         rows = [r for r in coalesce(fresh) if r["id"] not in delivered]
         # Per-run variables: a run may name its own thread; one delivery per distinct var set.
@@ -1484,10 +1472,7 @@ async def wait_for_events(pump: Optional[AgentEventPump], root, *, after: int, t
     """The long poll: return as soon as something past `after` exists, else after `timeout` with
     an empty page.
 
-    The WAIT is on the event loop and only each outbox READ borrows a worker thread (review
-    2026-10-15): the whole poll used to run in one `anyio.to_thread.run_sync`, so each waiting
-    agent held one of the threadpool's 40 tokens for up to `MAX_WAIT_S`, and 40 idle polls starved
-    every sync route of the server."""
+Historical incident details omitted."""
     import anyio
 
     sleep = sleep or anyio.sleep

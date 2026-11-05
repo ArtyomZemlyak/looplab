@@ -21,7 +21,7 @@ from looplab.core.atomicio import atomic_write_bytes, atomic_write_text
 from looplab.core.config import Settings
 from looplab.core.errors import LLMError
 from looplab.events.eventstore import EventStoreLockError
-from looplab.serve.appstate import _RESERVED_RUN_IDS, _RESET_RECEIPT_PREFIX
+from looplab.serve.appstate import RESERVED_RUN_IDS, _RESET_RECEIPT_PREFIX
 from looplab.serve.http import json_object
 from looplab.serve.engine_proc import _engine_alive, _engine_liveness
 from looplab.serve.launch import (
@@ -300,7 +300,7 @@ def build_router(srv) -> APIRouter:
             # `resolve()` walks the filesystem (a symlink per component), so it runs here, on the
             # worker, with the claim resolution — not on the loop every SSE stream shares.
             rd = (root / run_id).resolve()
-            if (rd == root or rd.parent != root or rd.name.lower() in _RESERVED_RUN_IDS
+            if (rd == root or rd.parent != root or rd.name.lower() in RESERVED_RUN_IDS
                     or rd.name.lower().startswith(_RESET_RECEIPT_PREFIX)):
                 raise HTTPException(400, "bad run_id")
             return srv.commands.resolve_spawn_claim(rd, confirmation)

@@ -9,14 +9,7 @@ own defaults was a function-local import UPWARD into `serve/`: a package cycle h
 but import timing. The injection seam (`RunLifecycleFns`) made the dependency explicit but did not
 remove it, because the DEFAULT still reached up whenever nothing injected.
 
-`engine/` is the home rather than a new package because it is the lowest unit BOTH `tools` and
-`serve` may already import, and because the subject is the ENGINE's own process and run directory:
-`engine.lock` is the engine's singleton lock, the launch markers fence the engine's own
-claim -> Popen -> child-lock startup gap, and `engine/resources.py` already keeps the sibling
-cross-process lease here. Nothing in this module imports `serve`, and nothing in it spawns: spawning,
-the JupyterHub reaper and the HTTP-shaped wrappers (`run_lifecycle_lock_http`,
-`engine_write_lock_http`) stay in `serve/engine_proc.py`, which re-exports every name below so the
-historical `looplab.serve.engine_proc.<name>` import and monkeypatch paths keep working unchanged.
+Historical incident details omitted.
 
 The leading underscores came off in the move, and that is the point rather than tidiness: doc 25
 XP-01's recommendation for exactly this shape is "promote the functions … into a public read-model
@@ -40,6 +33,7 @@ from typing import Iterator, Optional
 from looplab.core.atomicio import same_file_entry, same_file_kind
 from looplab.core.pathsafe import is_reparse
 from looplab.core.run_deletion import assert_run_deletion_write_allowed
+from looplab.core.run_relocation import assert_run_relocation_write_allowed
 from looplab.core.run_reset import assert_run_reset_write_allowed
 from looplab.events.eventstore import interprocess_lock
 
@@ -354,8 +348,11 @@ def run_config_write_lock(
         snapshot_path: Path, *, operation_id: Optional[str] = None,
         deletion_operation_id: Optional[str] = None) -> Iterator[None]:
     """Own the config transaction and enforce every whole-run writer fence."""
+    # A moved address must not even recreate its old directory to place a lock.
+    assert_run_relocation_write_allowed(snapshot_path.parent)
     with (run_config_thread_lock(snapshot_path),
           interprocess_lock(Path(str(snapshot_path) + ".lock"), required=True)):
         assert_run_reset_write_allowed(snapshot_path.parent, operation_id)
         assert_run_deletion_write_allowed(snapshot_path.parent, deletion_operation_id)
+        assert_run_relocation_write_allowed(snapshot_path.parent)
         yield

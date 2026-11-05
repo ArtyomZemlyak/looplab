@@ -134,6 +134,8 @@ def _project_memory_row(tier: str, row) -> Optional[dict]:
         run_id = _memory_text(row.get("run_id"), 500, entropy=False)
         if run_id:
             out["run_id"] = run_id
+        if row.get("provisional") is True:
+            out["provisional"] = True
         _carry_row_concepts(row, out)
         return out
     if tier == "lessons":

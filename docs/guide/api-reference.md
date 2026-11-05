@@ -10,7 +10,7 @@ vocabulary a client may append is `serve/protocol.py::CONTROL_EVENTS`.
 
 <!-- generated: api routes -->
 
-211 routes on 182 paths; 10 deprecated; 27 with a declared response model.
+220 routes on 189 paths; 10 deprecated; 27 with a declared response model.
 
 ### `/api`
 
@@ -159,6 +159,8 @@ vocabulary a client may append is `serve/protocol.py::CONTROL_EVENTS`.
 | `POST` | `/api/projects` | *Create Project* (no docstring) | — |  |
 | `DELETE` | `/api/projects/{pid}` | *Delete Project* (no docstring) | — |  |
 | `PATCH` | `/api/projects/{pid}` | *Patch Project* (no docstring) | — |  |
+| `GET` | `/api/projects/{pid}/metric-profile` | *Get Metric Profile* (no docstring) | — |  |
+| `PUT` | `/api/projects/{pid}/metric-profile` | *Put Metric Profile* (no docstring) | — |  |
 
 ### `/api/research`
 
@@ -265,9 +267,13 @@ vocabulary a client may append is `serve/protocol.py::CONTROL_EVENTS`.
 | `GET` | `/api/runs/{run_id}/nodes/{nid}/seed-files` | Verified pre-overlay base inventory/text, explicitly read for one current measured attempt. | — |  |
 | `GET` | `/api/runs/{run_id}/nodes/{nid}/trace` | The LIGHT trace tree for ONE node — the hot path for expanding a node's trace card. Reads | — |  |
 | `GET` | `/api/runs/{run_id}/nodes/{node_id}/failure-forensics` | Every recorded forensic record of a node's failed attempts (newest first) — the | — |  |
+| `GET` | `/api/runs/{run_id}/notify-scope` | Whether the run is excluded from each existing hook's run filter. | — |  |
+| `POST` | `/api/runs/{run_id}/notify-scope/attach` | Attach exactly this run to one existing hook, preserving all other configuration. | — |  |
 | `POST` | `/api/runs/{run_id}/novelty-preview` | Compare an idea with tried nodes using LoopLab's pure graded novelty rubric. | — |  |
+| `POST` | `/api/runs/{run_id}/operator-notes` | Record durable operator guidance, never agent-authored operator authority. | — |  |
 | `GET` | `/api/runs/{run_id}/per-query` | The run's current per-query uploads (latest per node and test) and their test ids. | — |  |
 | `POST` | `/api/runs/{run_id}/per-query` | Upload a terminal node's per-query arrays; LoopLab derives the shared test id. | — |  |
+| `GET` | `/api/runs/{run_id}/profile-measurements` | Read declared profile keys from current node measurements without recomputation. | — |  |
 | `POST` | `/api/runs/{run_id}/project` | *Assign Run* (no docstring) | — |  |
 | `GET` | `/api/runs/{run_id}/protocol` | The run's pre-registered experiments, its amendment audit trail and the agent policy. | — |  |
 | `POST` | `/api/runs/{run_id}/protocol/amendments` | Append an experiment, or record a task/file/budget amendment with its reason and diff. | — |  |
@@ -278,11 +284,14 @@ vocabulary a client may append is `serve/protocol.py::CONTROL_EVENTS`.
 | `GET` | `/api/runs/{run_id}/report-figures/{figure_id}` | Serve one stored report figure (re-verified against its own sha256). | — |  |
 | `GET` | `/api/runs/{run_id}/report/versions` | Every `report_generated` row, newest first: seq, when, who published it, its content | — |  |
 | `GET` | `/api/runs/{run_id}/report/versions/{seq}` | The sanitized content of the report published at `seq` (the fold's own sanitizer). | — |  |
+| `GET` | `/api/runs/{run_id}/report/versions/{seq}/metric-bindings` | Resolve report references to matching native per-query upload metadata. | — |  |
 | `POST` | `/api/runs/{run_id}/report_refresh` | Force a high-quality regeneration of the agent-authored run report NOW. Appends a | — |  |
 | `GET` | `/api/runs/{run_id}/research-briefing` | Current bounded research and action context; observations do not grant authority. | — |  |
 | `GET` | `/api/runs/{run_id}/research-export` | Export a bounded campaign overview and selected sanitized report versions. | — |  |
 | `GET` | `/api/runs/{run_id}/research-map` | Bounded read-only map of registered experiments, node references and reports. | — |  |
 | `POST` | `/api/runs/{run_id}/research-memo-review` | Advisory feedback on a draft research memo; this read does not publish or gate work. | — |  |
+| `GET` | `/api/runs/{run_id}/research-notices` | Read bounded saved command notices; missing historical notices remain unknown. | — |  |
+| `POST` | `/api/runs/{run_id}/research-notices` | Record an optional self-attested notice disposition, without creating a gate. | — |  |
 | `GET` | `/api/runs/{run_id}/research-workflow` | Canonical external research process; this read grants no execution authority. | — |  |
 | `POST` | `/api/runs/{run_id}/reset` | round-7 "Replay": reset a run IN PLACE — archive its event log + spans + node workspaces and | — |  |
 | `POST` | `/api/runs/{run_id}/resolve-activity-claims` | Guarded operator recovery for an ownership claim that cannot be proven dead. | — |  |

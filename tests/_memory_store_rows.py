@@ -32,6 +32,10 @@ CASCADED_ROWS = {
         **_identity(rid, uid), "task_id": "t", "statement": f"{rid} alone", "outcome": "won"},
     "meta_notes.jsonl": lambda rid, uid: {
         **_identity(rid, uid), "task_id": "t", "note": "finished", "direction": "max"},
+    "operator_notes.jsonl": lambda rid, uid: {
+        **_identity(rid, uid), "record_kind": "operator_note", "note_id": "on-test",
+        "task_id": "t", "task_family": "toy", "direction": "max",
+        "fingerprint": ["kind:quadratic"], "note": "Keep the measured baseline."},
     "cases.jsonl": lambda rid, uid: {
         **_identity(rid, uid), "task_id": "t", "direction": "max", "goal": "g", "metric": 0.5},
     "research_claims.jsonl": lambda rid, uid: {

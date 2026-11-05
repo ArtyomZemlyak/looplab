@@ -84,6 +84,7 @@ class PolicyBody(BaseModel):
     # (`engine/eval_canary.py::implicit_canary_policy`); `off` = no canary, as before.
     implicit_canary: Literal["off", "sandboxed"] = "off"
     implicit_canary_timeout: float = Field(default=120.0, gt=0, le=3600)
+    execution: Optional[dict] = None
 
 
 def build_router(srv) -> APIRouter:

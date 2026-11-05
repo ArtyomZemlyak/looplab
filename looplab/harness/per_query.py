@@ -446,7 +446,10 @@ class _Root:
 
     def run(self, run_id: str):
         if run_id not in self._runs:
-            rd = self.root / run_id
+            from looplab.core.run_ref import resolve_run_address
+            rd = resolve_run_address(self.root, run_id).path
+            if rd is None:
+                raise KeyError(run_id)
             try:
                 events = EventStore(rd / "events.jsonl").read_all()
                 state = fold(events)

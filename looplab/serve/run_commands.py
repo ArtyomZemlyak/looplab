@@ -37,7 +37,7 @@ from fastapi import HTTPException
 import orjson
 
 from looplab.core.atomicio import atomic_write_text, same_file_entry
-from looplab.core.pathsafe import filesystem_identity, is_reparse, validate_run_child
+from looplab.core.pathsafe import filesystem_identity, is_reparse
 from looplab.core.models import Event
 from looplab.core.run_deletion import RunDeletionStorageError, load_run_deletion_fence
 from looplab.core.run_reset import RunResetStorageError, load_run_reset_marker
@@ -814,7 +814,8 @@ class RunCommandService:
         # (doc 25 SC-03). This copy had lost the Windows JUNCTION probe the others make, so a
         # junction was admitted here and refused everywhere else — the drift a shared predicate is
         # for. The events.jsonl half stays below because only THIS reader tolerates its absence.
-        child = validate_run_child(root, rd, must_exist=True)
+        from looplab.core.run_ref import resolve_run_address
+        child = resolve_run_address(root, rd)
         if child.defect is not None:
             raise HTTPException(404, "no such run")
         canonical = child.path
@@ -1599,7 +1600,8 @@ class RunCommandService:
         # always asked of the directory (`AppState.run_dir` already judged the entry itself, and a
         # caller reaching here with a bare path gets the same answer it used to). The service-file
         # rules below are this method's own and stay here — a run may legitimately be mid-creation.
-        child = validate_run_child(root, rd, must_exist=False)
+        from looplab.core.run_ref import resolve_run_address
+        child = resolve_run_address(root, rd)
         if child.defect is not None:
             raise HTTPException(404, "no such run")
         canonical = child.path
@@ -2496,6 +2498,12 @@ class RunCommandService:
             # A QUEUED intent on a STOPPED run (doc 69 69.30): recorded, and its queue waits for the
             # operator's resume — which is what the record says, never "applied"
             # (`_left_for_the_operators_resume`).
+            record = {**record, "deferred_until_resume": True}
+        elif (record.get("postcondition") == "engine_ack"
+              and not record.get("spawned_by_command")
+              and observation.stop_holds_queued_intents()
+              and not observation.drain_ack_observed(record)
+              and not observation.engine_ack_before_stop(record)):
             record = {**record, "deferred_until_resume": True}
         elif (record.get("drain_only") is not True
               and record.get("postcondition") == "engine_ack"

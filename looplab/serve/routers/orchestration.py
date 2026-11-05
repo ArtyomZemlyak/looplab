@@ -81,9 +81,8 @@ def _hook_param(hook: Optional[str]) -> Optional[str]:
 
 
 def _owner_only(request: Request, what: str) -> None:
-    if request_agent_token(request):
-        raise HTTPException(403, f"the harness token cannot {what}; ask the operator "
-                                 "(`looplab agent-notify` or the owner UI)")
+    from looplab.serve.principal import require_owner
+    require_owner(request, what)
 
 
 def build_router(srv) -> APIRouter:
@@ -175,6 +174,22 @@ def build_router(srv) -> APIRouter:
 
         response.headers["Cache-Control"] = "no-store"
         return {**notify_status(srv.root), "kinds": describe_event_kinds()}
+
+    @router.get("/api/runs/{run_id}/notify-scope")
+    def get_notify_scope(run_id: str):
+        """Whether the run is excluded from each existing hook's run filter."""
+        from looplab.serve.agent_events import notify_scope
+        srv.run_dir(run_id)
+        return notify_scope(srv.root, run_id)
+
+    @router.post("/api/runs/{run_id}/notify-scope/attach")
+    def post_notify_scope_attach(run_id: str, request: Request,
+                                 hook: Optional[str] = Query(None, max_length=32)):
+        """Attach exactly this run to one existing hook, preserving all other configuration."""
+        from looplab.serve.agent_events import attach_notify_scope
+        _owner_only(request, "attach a run to the notification scope")
+        srv.run_dir(run_id)
+        return attach_notify_scope(srv.root, run_id, _hook_param(hook))
 
     @router.put("/api/agent-notify")
     async def put_agent_notify(request: Request,

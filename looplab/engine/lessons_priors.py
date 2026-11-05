@@ -10,13 +10,7 @@ prior renders (`_render_role_prior`), with a per-build memoized embedder (`_memo
 a shared/untagged lesson embeds once, not once per role. The role constants live here with the
 renderer that filters on them; lessons.py re-exports them for back-compat.
 
-Since 2026-09-08 the retrieval can also be scoped to the OPERATOR about to fire
-(`operator_scoped_prior`, `Settings.lesson_operator_scope`, OFF by default) — the arm that was
-missing from the memory stack: fingerprint + role and nothing about the action, while the in-run
-context has had parent-plus-sibling scoping since `events/digest.py::lineage_lessons`. It reuses the
-retained scan, so it costs no store read and no provider call, and it RANKS rather than filters —
-the field's only per-operator ablation (AIRA-dojo) is null, so the design refuses to spend a real
-loss on an unmeasured effect and instead makes the effect measurable through `prior_injected`.
+Historical incident details omitted.
 
 Layering: like lessons.py, no runtime import of the orchestrator (or lessons.py — the mixin is
 consumed there) and never serve — only engine.memory, events, core and stdlib (the retrieval/
@@ -29,8 +23,7 @@ from typing import Optional
 from looplab.core.memory_window import read_memory_jsonl_window
 from looplab.trust.cross_run import (LessonScope, cross_run_text, scope_terms,
                                      strip_retarget_clause)
-# The retarget clause's two helpers moved to `trust/cross_run.py` (2026-09-27) so the agent-facing
-# memory readers in `tools/` apply the same one; re-exported here under their first home.
+# Historical incident details omitted.
 from looplab.trust.cross_run import (  # noqa: F401 — re-exported
     retargeted_lesson_note, with_retarget_clause)
 
@@ -48,33 +41,7 @@ LESSON_ROLE_DEVELOPER = "developer"
 #: the params render is 490 chars over 15 keys.
 CASE_PARAMS_CHARS = 1_200
 
-#: VISIBLE characters one lesson statement may occupy in a role prior. Sized from the shared store
-#: rather than chosen: statements run 66..382 chars, median 211, so 400 lets every one of them
-#: arrive WHOLE and anything longer still truncates honestly with its receipt.
-#:
-#: THE BUG THIS NUMBER REPLACES, measured 2026-08-23. The render asked for `max_chars=200` — but a
-#: cap is a budget for the visible text AND for the truncation receipt, and that receipt is 111
-#: characters of sha256. Eighty-nine characters survived. Measured THROUGH THE REAL RENDER against
-#: the live store: 19 of 33 statements (58%) reached BOTH roles cut mid-sentence, and 0 do after
-#: this change. (A first estimate said 27/82% by comparing RAW statement lengths to the visible
-#: budget; that over-counts, because `single_line=True` collapses whitespace before the cap and
-#: several statements fit once collapsed. The number that counts is the one the renderer produces.)
-#: The one that would have stopped `runs/e5small-dr-unified-v4` nodes 6, 8 and 9 from repeating the
-#: same stage failure arrived as "A pipeline stage that short-circuits and skips (re)writing its
-#: declared artifact when the [redacted preview: ...]" — the sentence stops exactly before "so every
-#: stage must write its declared artifact unconditionally on each run".
-#:
-#: The whole delivery chain was already correct: role scoping (untagged = shared), task scoping
-#: (exact match), the priors block reaching `card_build`/`plan`/`stages`/`inline_repair`, and top-5
-#: ranking, which that lesson WON. It was destroyed in the last inch.
-#:
-#: RAISED 400 -> 1000 on 2026-10-14, to the WRITE cap. `POST /api/runs/{id}/lessons`
-#: (`serve/routers/runs.py::ExternalLessonBody.statement`) admits 1000 characters, and the external
-#: agent's MiniOneRec lessons run 462-873 — so 13 of 112 rows in the shared store reached every
-#: internal role cut mid-sentence, the exact defect above, and `test_the_budget_covers_the_whole_
-#: live_store` was red. A read budget below the write cap is that defect by construction; the two
-#: are now pinned together (`tests/test_lesson_prior_render_budget.py`). Cost: at most five priors
-#: per role, so <= ~5 KB of prompt in the worst case, against a store whose median row is far shorter.
+# Historical incident details omitted.
 LESSON_STATEMENT_CHARS = 1000
 
 
@@ -103,15 +70,7 @@ class LessonPriorsMixin:
     def load_reflection_priors(self, exclude_run_id: Optional[str] = None,
                                exclude_run_uid: Optional[str] = None,
                                role: Optional[str] = None) -> str:
-        """E4 + M2/M3: build the cross-run prior injected into a role's prompt. Two parts:
-        (1) exact-task "what won" — the meta-note (meta_notes.jsonl, unchanged E4 warm start) and, since
-        2026-08-19, the active CASE beside it (cases.jsonl: the winning run's own parameter dict,
-        which the note's prose does not carry), and
-        (2) LESSONS retrieved by task-FINGERPRINT similarity (M2), so a *similar but new* task also
-        benefits — including NEGATIVE lessons (what was tested/abandoned/failed, M3) so the search
-        doesn't re-tread a known dead end. Empty unless enabled + present. `exclude_run_id` drops
-        lessons THIS run wrote (M6 mid-run distillation / resume): a run must not read its own
-        output back as another run's experience — those results are already in its digest.
+        """Historical incident details omitted.
 
         `role` (§role-split): return only the lessons FOR that role — the Researcher gets R&D
         "what technique to try" lessons, the Developer only its own "what code change fixed a crash"
@@ -184,14 +143,7 @@ class LessonPriorsMixin:
             if o.get("task_id") != self._e.task.id or not o.get("note"):
                 continue
             if not scope.allows(o):
-                # COUNTED, not silent. `scope.allows` is fail-closed on missing polarity and
-                # meta-note writers only started persisting `direction` on 2026-08-13, so on an
-                # existing shared store every LEGACY note fails here and the exact-task "what won"
-                # tier (E4) goes dark until each task re-finalizes. That direction is deliberate —
-                # a note whose polarity is unknown must not be read as agreeing with this run — but
-                # a filtered row used to increment nothing at all, so the prior read as "N rows,
-                # none relevant" rather than "N rows withheld for missing polarity". The two are
-                # very different facts for an operator wondering why the tier is empty.
+                # Historical incident details omitted.
                 scope_filtered += 1
                 continue
             notes.append(with_retarget_clause(cross_run_text(
@@ -205,18 +157,7 @@ class LessonPriorsMixin:
         # embeds it into the `kb` index where it must first win a top-3 semantic ranking against
         # every knowledge note).
         #
-        # WHY THE NOTE DOES NOT ALREADY COVER IT, which is the whole argument and is a measurement
-        # rather than a preference. The shared store's 30 cases are 29 `toy_quadratic` and ONE real
-        # row, and on the toy task the meta-note genuinely IS the case's twin — "best metric 4.483
-        # via op 'improve' params {'x': 0.885, 'y': -0.9026}" carries both parameters inline, which
-        # is why folding cases into notes looks correct from that corpus. On the one real row it is
-        # not: `rubertlite-dr-unified-v8`'s note is a causal narrative ("R-Drop … at alpha=0.5
-        # stacked onto the DCL nll_cos loss … lifted recall from 0.7384 to 0.762") naming ONE
-        # hyperparameter, while its case carries fifteen — `loss.temperature 0.05`, `loss.thr 0.1`,
-        # `train.negatives.mining_type 1`, `train.training.batch_size 8192`,
-        # `gradient_accumulation_steps 2`, `learning_rate 0.001`, `max_grad_norm 1.0` — beside
-        # `metric 0.762048`. Prose is the CAUSE; the case is the CONFIGURATION, and only one of
-        # those can be re-run.
+        # Historical incident details omitted.
         #
         # Bounded to ONE row on purpose: `_add_locked` already keeps a single `active` winner per
         # (task, direction), so "the best configuration for this task" is a store-level fact and not
@@ -234,6 +175,7 @@ class LessonPriorsMixin:
         # unreadable one is folded into the health receipt below and the prior says it is partial.
         from looplab.engine.memory import valid_case_record
         case_line = ""
+        case_provisional = False
         case_rows, case_health = read_memory_jsonl_window(base / "cases.jsonl")
         for _index, c in case_rows:
             if not isinstance(c, dict):
@@ -251,6 +193,7 @@ class LessonPriorsMixin:
             case_line = (f"metric {c.get('metric')} (run {c.get('run_id') or 'unknown'}) with params "
                          + cross_run_text(c.get("params"), max_chars=CASE_PARAMS_CHARS,
                                           single_line=True, entropy=True))
+            case_provisional = c.get("provisional") is True
         # (2) fingerprint-matched lessons (M2/M3), incl. negatives — parsed once; the role filter and
         # similarity scoring happen per role in `_render_role_prior`.
         parsed: list[tuple[int, dict]] = []
@@ -288,14 +231,7 @@ class LessonPriorsMixin:
             utility_rows, _u_health = read_memory_jsonl_window(base / "lesson_utility.jsonl")
         except OSError:
             utility_rows = []
-        # ONE ROW PER (RUN, LESSON): the LATEST (review 2026-09-22, ENG3-03). The writer appends at
-        # every finalize a row computed over the run's WHOLE event log, so a reopened run's second
-        # finalize re-states its first segment — and summing every row counted that segment twice
-        # (driven: `shown` 2 -> 4 for one lesson after a re-finalize that showed it nothing new).
-        # The last row per `run_ref` is that run's cumulative answer, so keeping it heals existing
-        # ledgers too. The ledger is append-only, so file order is age: a later line wins. A row
-        # naming no run at all (`run_ref` == "") cannot be matched to its own earlier row and is
-        # summed as before rather than folded into an anonymous bucket.
+        # Historical incident details omitted.
         latest: dict[tuple[str, str], tuple[int, int]] = {}
         unattributed: list[tuple[str, int, int]] = []
         for _index, u in utility_rows:
@@ -319,17 +255,7 @@ class LessonPriorsMixin:
                 hit = totals.get(lesson_id(o))
                 if hit is not None:
                     o["utility"] = dict(hit)
-        # THE OPERATOR'S CLAIM DECISIONS (doc 69 69.21, `Settings.lesson_prior_claim_decisions`). An
-        # operator's `claim-decide --reject` was read by the claims surface and by nothing that writes
-        # a prompt, so the rejected lesson kept arriving in every proposal. A row is withheld when
-        # `claim_assessments`' own groups over the rows this scan kept mark its claim
-        # `operator-rejected` (`operator_rejected_claim_uids`, the surface's representative-spelling
-        # lookup included) OR its own claim resolves to a rejection through the surface's candidate
-        # chain (`lesson_rejected`) — the second because the surface REFUSES rows the prior still
-        # renders (an over-fence fingerprint) and this window may not hold the row that makes the group
-        # visible (critic 2026-09-30, F2). With no rejection in the ledger nothing is projected at all
-        # (`rejects_anything`, F4). An unreadable ledger withholds nothing and SAYS so, in the prompt
-        # and the receipt: a guessed subset of an operator's decisions is not a decision.
+        # Historical incident details omitted.
         claim_rejected: frozenset = frozenset()
         decisions_unavailable = False
         if getattr(self._e, "_lesson_prior_claim_decisions", False) and parsed:
@@ -373,6 +299,21 @@ class LessonPriorsMixin:
         health["complete"] = bool(health["complete"] and not (
             case_health["source_window_truncated"] or case_health["skipped"]
             or case_health["unavailable"]))
+        health["case_provisional"] = case_provisional
+        operator_rows, operator_health = read_memory_jsonl_window(base / "operator_notes.jsonl")
+        from looplab.engine.operator_notes import scope_fingerprint, valid_operator_note
+        operator_fp = scope_fingerprint(self._e.task)
+        operator_notes = [row for _index, row in operator_rows if valid_operator_note(row)
+                          and row["direction"] == self._e.task.direction
+                          and row["fingerprint"] == operator_fp]
+        health["invalid"] += int(operator_health["skipped"])
+        health["source"] += int(operator_health["source_rows"])
+        health["truncated"] = bool(health["truncated"] or operator_health["source_window_truncated"])
+        health["complete"] = bool(health["complete"] and not (
+            operator_health["source_window_truncated"] or operator_health["skipped"]
+            or operator_health["unavailable"]))
+        health["operator_notes_digest"] = operator_health["window_digest"]
+        health["operator_notes"] = operator_notes
         return notes, parsed, fp, _memoized_embed(self._e._embedder), health, case_line
 
     def _render_role_prior(self, ctx, role: Optional[str]) -> str:
@@ -437,13 +378,7 @@ class LessonPriorsMixin:
         the two load sites; DIAGNOSTIC, so fold-ignored and fence-excluded. Best-effort."""
         from looplab.events.types import DIAGNOSTIC_EVENTS, EV_PRIOR_INJECTED
         assert EV_PRIOR_INJECTED in DIAGNOSTIC_EVENTS
-        # AN EXTERNAL RUN INJECTS NOTHING (Codex audit 2026-10-14 L-10b, doc 80 §9 #10). The load
-        # still runs on an external-harness run (its lessons are scanned for the run-end reconcile),
-        # but no LoopLab Researcher/Developer prompt is ever rendered there, and the text it built
-        # is the `[MEMORY_SOURCE: …]` header alone whenever no lesson matches — 229 chars, `rows: []`.
-        # Each start/resume wrote two such rows (44 on one MiniOneRec campaign), which the citation
-        # instrument read as "shown to the proposals that followed" — proposals the external agent
-        # wrote without ever seeing them. No row is the honest record.
+        # Historical incident details omitted.
         if getattr(self._e, "external_harness", False):
             return
         receipts = getattr(self, "prior_receipts", None) or {}
@@ -472,6 +407,7 @@ class LessonPriorsMixin:
         exactly."""
         from looplab.engine.memory import prompt_slot_key      # both slot budgets below key on it
         notes, parsed, fp, embed, health, case_line = ctx
+        operator_notes = health.get("operator_notes", [])
         receipt: dict = {
             "notes": 0, "case": False, "rows": [], "quarantined_useless": 0,
             # NOT a copy of the argument for its own sake: the citation instrument has to be able to
@@ -480,7 +416,9 @@ class LessonPriorsMixin:
             **({"operator_scoped": str(operator)} if operator else {}),
             "source": {"lessons_sha256": health["lessons_digest"],
                        "notes_sha256": health["notes_digest"],
+                       "operator_notes_sha256": health.get("operator_notes_digest", ""),
                        "complete": bool(health["complete"])},
+            "operator_notes": [row["note_id"] for row in operator_notes],
         }
         out = (f"\n[MEMORY_SOURCE: canonical recent snapshot; rows={health['source']}; "
                f"notes_sha256={health['notes_digest']}; lessons_sha256={health['lessons_digest']}; "
@@ -526,9 +464,19 @@ class LessonPriorsMixin:
         # "what won on this exact task" fact, in the form a next run can act on. One line, after the
         # prose, because the prose says WHY it won and this says WHAT to set.
         if case_line and role != LESSON_ROLE_DEVELOPER:
-            out += ("\nBest known configuration for this task (the winning run's own parameters, "
-                    "not a recommendation): " + case_line)
+            if health.get("case_provisional"):
+                out += ("\nBest provisional configuration for this task (the run is still in progress; "
+                        "its measured parameters, not a final result or a recommendation): " + case_line)
+                receipt["case_provisional"] = True
+            else:
+                out += ("\nBest known configuration for this task (the winning run's own parameters, "
+                        "not a recommendation): " + case_line)
             receipt["case"] = True
+        if operator_notes:
+            out += "\nDurable operator guidance for this exact task fingerprint: " + " | ".join(
+                f"{cross_run_text(row['task_family'], max_chars=128, single_line=True, entropy=True)} — "
+                f"{cross_run_text(row['note'], max_chars=1_000, single_line=True, entropy=True)}"
+                for row in operator_notes[-3:])
         if not parsed:
             text = cross_run_text(out, max_chars=8_000, single_line=False, entropy=True)
             receipt["chars"] = len(text)
@@ -630,10 +578,7 @@ class LessonPriorsMixin:
             outcome = cross_run_text(
                 o.get("outcome", "?"), max_chars=40, single_line=True, entropy=True).strip()
             picked.append(f"{stmt} [{outcome}{dtxt}]")   # store is shared/free-text
-            # The RECEIPT keeps what the lesson claims — not the clause shown after it, whose words
-            # doubled a short lesson's tokens, so a proposal quoting it verbatim was not counted as
-            # citing it and `filter_useless` quarantined every retargeted lesson after eight
-            # showings (`events/prior_citations.py`; critic 2026-09-27, driven).
+            # Historical incident details omitted.
             receipt["rows"].append({
                 "id": lesson_id(o), "statement": strip_retarget_clause(stmt)[:160],
                 "outcome": outcome,
@@ -663,8 +608,7 @@ class LessonPriorsMixin:
                 from looplab.engine.regime_contrast import regime_prior_line
                 rows, _health = read_memory_jsonl_window(
                     Path(self._e.memory_dir) / "regime_contrast.jsonl")
-                # Ranked under THIS task's objective (review 2026-09-22, ENG3-04) — the same
-                # `task.direction` `_scan_prior_context` scopes every other prior tier by.
+                # Historical incident details omitted.
                 line, rec = regime_prior_line(
                     [o for _i, o in rows], self._e.task.id,
                     direction=str(getattr(self._e.task, "direction", "") or ""))

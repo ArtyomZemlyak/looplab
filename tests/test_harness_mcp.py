@@ -21,7 +21,7 @@ def test_mcp_advertises_run_controls_and_full_settings_discovery():
             "amend_protocol", "run_protocol", "upload_per_query", "compare_experiment",
             "shared_test_leaderboard", "campaign_supertask", "campaign_report",
             "publish_campaign_narrative", "submit_experiment", "finish_run",
-            "retry_node", "resume_per_query_upload",
+            "retry_node", "stop_node", "resume_per_query_upload",
             "pending_per_query_uploads",
             # The run-code surface (doc 79 §4, tests/test_code_identity_agent.py).
             "code_worktree", "code_worktrees", "code_overlay",

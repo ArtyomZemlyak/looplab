@@ -531,6 +531,11 @@ def _normalize_node_reset(ctx: _ControlIntake) -> dict:
         raise HTTPException(400, "from_stage must be a non-empty stage name")
     data["from_stage"] = stage
     _normalize_lifecycle_target(ctx)
+    from looplab.harness.campaign import optimization_scope_error
+    scope_error = optimization_scope_error(
+        ctx.rd, getattr(ctx.state().nodes[data["node_id"]], "job_role", None))
+    if scope_error is not None:
+        raise HTTPException(409, scope_error)
     return data
 
 
@@ -1256,6 +1261,13 @@ def _normalize_inject_node(ctx: _ControlIntake) -> dict:
     if unknown_inject:
         raise HTTPException(
             400, f"inject_node has unknown field(s): {', '.join(sorted(unknown_inject))}")
+    pre_stages = data.pop("pre_stages", None)
+    from looplab.harness.campaign import JOB_ROLES, optimization_scope_error
+    if data.get("job_role") is not None and data["job_role"] not in JOB_ROLES:
+        raise HTTPException(400, f"job_role must be one of {', '.join(JOB_ROLES)}")
+    scope_error = optimization_scope_error(ctx.rd, data.get("job_role"))
+    if scope_error is not None:
+        raise HTTPException(409, scope_error)
     if data.get("parent_id") is not None and data.get("parent_ids") is not None:
         raise HTTPException(400, "inject_node accepts parent_id or parent_ids, not both")
     _normalize_artifact_fields(ctx)
@@ -1369,6 +1381,8 @@ def _normalize_inject_node(ctx: _ControlIntake) -> dict:
             # agent's main command landed on this unguarded read once the intent rule stopped
             # pre-empting it (critic 2026-09-29, driven).
             raise refusal("config_snapshot_unreadable") from exc
+    if pre_stages is not None and (run_settings is None or not run_settings.external_harness):
+        raise HTTPException(400, "pre_stages requires an external_harness run")
     if run_settings is not None and run_settings.external_harness:
         from looplab.adapters.tasks import load_task
         from looplab.harness.contract import candidate_surface_refusal
@@ -1380,6 +1394,18 @@ def _normalize_inject_node(ctx: _ControlIntake) -> dict:
             repo_spec = task.repo_spec() if callable(getattr(task, "repo_spec", None)) else None
         except (OSError, ValueError) as exc:
             raise HTTPException(409, "cannot verify the external candidate's task surface") from exc
+        if pre_stages is not None:
+            if getattr(getattr(task, "eval", None), "stages", None):
+                raise HTTPException(400, "pre_stages cannot replace operator-declared eval.stages")
+            if "looplab_stages.json" in normalized_files:
+                raise HTTPException(400, "give pre_stages or files.looplab_stages.json, not both")
+            from looplab.runtime.command_eval import validate_stages
+            clean, error = validate_stages(pre_stages)
+            if error is not None:
+                raise HTTPException(400, f"invalid pre_stages: {error}")
+            normalized_files["looplab_stages.json"] = json.dumps(
+                {"stages": clean}, ensure_ascii=False, indent=2) + "\n"
+            data["files"] = normalized_files
         # Not `refusal`: that name is this module's coded-refusal helper, which the snapshot read
         # above raises through — a local of the same name made that raise an UnboundLocalError.
         surface_refused = candidate_surface_refusal(repo_spec, normalized_files, data["deleted"])
@@ -2368,6 +2394,16 @@ def _decide_resume(service, rd: Path, event_type: str, state, alive: bool,
             "finalize_in_progress", "cannot resume while finalization is pending",
             "wait for finalization to finish, then submit a new resume command",
             retryable=True)
+    from looplab.harness.campaign import optimization_scope_error
+    for node in state.nodes.values():
+        if node.status.value != "pending":
+            continue
+        scope_error = optimization_scope_error(rd, getattr(node, "job_role", None))
+        if scope_error is not None:
+            return "reject", _error(
+                scope_error["code"], scope_error["message"],
+                f"allowed job roles: {', '.join(scope_error['allowed_job_roles'])}; "
+                "change the operator's execution mode before resuming scientific work")
     if state.finished and alive:
         return "reject", _error(
             "engine_finishing", "the engine is still completing its terminal write-out",
@@ -2654,6 +2690,7 @@ def external_intent_refusal(event_type: str, data: dict) -> Optional[HTTPExcepti
         return None
     if event_type == EV_INJECT_NODE and not (data.get("code") or data.get("files") or
                                               data.get("deleted") or data.get("code_from") or
+                                              data.get("pre_stages") or
                                               (data.get("source_run") and
                                                data.get("source_node") is not None)):
         return HTTPException(400, "external harness requires code or files for inject_node")

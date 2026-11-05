@@ -19,7 +19,7 @@ from looplab.adapters.tasks import load_task
 from looplab.core.atomicio import (
     durable_no_replace_rename, strict_atomic_write_bytes, strict_fsync_parent)
 from looplab.core.config import settings_from_snapshot
-from looplab.core.pathsafe import run_child_name_defect, validate_run_child
+from looplab.core.pathsafe import run_child_name_defect
 from looplab.core.run_reset import (
     RUN_RESET_OPERATION_ENV, RUN_RESET_OPERATION_RE, RUN_RESET_SEED_ENV, RunResetFenceError,
     RunResetStorageError, load_run_reset_marker, publish_run_reset_marker)
@@ -31,7 +31,7 @@ from looplab.serve.engine_proc import (
     _engine_alive, _engine_liveness, _fresh_resume_launch_pending,
     _resolve_task_file, engine_write_lock_http, run_lifecycle_lock_http)
 from looplab.serve.appstate import (
-    _DELETE_SERVICE_PREFIXES, _LIFECYCLE_LOCK_PREFIX, _RESERVED_RUN_IDS, _RESET_RECEIPT_PREFIX,
+    _DELETE_SERVICE_PREFIXES, _LIFECYCLE_LOCK_PREFIX, RESERVED_RUN_IDS, _RESET_RECEIPT_PREFIX,
     _TRACE_CLEAR_RECEIPT_PREFIX)
 from looplab.serve.durable_op import refuse_unless_quiescent
 from looplab.serve.http import generation_conflict, json_object
@@ -1300,12 +1300,13 @@ def _resolve_reset_target(
     # compared `normcase(abspath(...))` by hand, which is `filesystem_identity` minus its macOS
     # half: an NFC-typed name for an NFD-stored directory compared unequal and 404'd a real run.
     if (run_child_name_defect(run_id) is not None
-            or run_id.lower() in _RESERVED_RUN_IDS
+            or run_id.lower() in RESERVED_RUN_IDS
             or run_id.lower().startswith((
                 _LIFECYCLE_LOCK_PREFIX, _TRACE_CLEAR_RECEIPT_PREFIX,
                 _RESET_RECEIPT_PREFIX, *_DELETE_SERVICE_PREFIXES))):
         raise HTTPException(404, "no such run")
-    child = validate_run_child(root, run_id)
+    from looplab.core.run_ref import resolve_run_address
+    child = resolve_run_address(root, run_id)
     if child.defect is not None:
         raise HTTPException(404, "no such run")
     rd = child.path

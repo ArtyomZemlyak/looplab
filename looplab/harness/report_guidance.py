@@ -4,11 +4,6 @@ from __future__ import annotations
 import math
 from pathlib import Path
 from urllib.parse import quote
-from fastapi import HTTPException
-from looplab.events.replay import fold
-from looplab.events.run_generation import run_generation_token
-from looplab.harness.journals import read_event_source
-from looplab.harness.research_map import _text
 
 GUIDE = '/api/runs/{run_id}/research-workflow'
 REPORT_INSTRUCTION = (
@@ -22,13 +17,20 @@ REPORT_INSTRUCTION = (
 )
 
 
-def snapshot(rd: Path, generation: str) -> dict:
+def snapshot(rd: Path, generation: str, *, root: Path | None = None) -> dict:
+    from fastapi import HTTPException
+    from looplab.core.run_ref import run_address
+    from looplab.events.replay import fold
+    from looplab.events.run_generation import run_generation_token
+    from looplab.harness.journals import read_event_source
+    from looplab.harness.research_map import _text
     from looplab.serve.report_history import report_version
     events = read_event_source(rd)
     if run_generation_token(events) != generation:
         raise HTTPException(409, 'run generation changed')
     state = fold(events)
-    root = '/api/runs/' + quote(rd.name, safe='')
+    canonical_id = run_address(root if root is not None else rd.parent, rd)
+    root = '/api/runs/' + quote(canonical_id, safe='')
     versions = [e for e in events if e.type == 'report_generated']
     report_seqs = {e.seq for e in versions}
     overview_event = next((e for e in reversed(versions) if isinstance(e.data, dict)
@@ -65,7 +67,7 @@ def snapshot(rd: Path, generation: str) -> dict:
     for experiment_id, experiment in experiments.items():
         arms = experiment.get('arms') if isinstance(experiment.get('arms'), dict) else {}
         matched = [arm.get('node_id') for arm in arms.values() if isinstance(arm, dict)
-                   and arm.get('run_id') in (None, '', rd.name) and arm.get('node_id') in recent_ids]
+                   and arm.get('run_id') in (None, '', canonical_id) and arm.get('node_id') in recent_ids]
         if matched:
             comparisons.append({'experiment_id': _text(experiment_id, 128), 'title': _text(experiment.get('title'), 200),
                                 'node_ids': sorted(set(matched)),
@@ -73,8 +75,15 @@ def snapshot(rd: Path, generation: str) -> dict:
     warnings = []
     if not previous:
         warnings.append({'code': 'overview_missing', 'action': 'Read report history and author a cumulative overview.'})
-    elif any(row['after_overview'] for row in outcomes):
-        warnings.append({'code': 'terminal_after_overview', 'action': 'Review terminal outcomes and update the overview if scientifically relevant.'})
+    else:
+        from looplab.harness.overview import overview_freshness
+        freshness = overview_freshness(events, last_overview_seq, previous.get('at_node'), len(state.nodes))
+        actions = {'newer_terminal': ('terminal_after_overview', 'Review terminal outcomes and update the overview if scientifically relevant.'),
+                   'newer_operator_direction': ('direction_after_overview', 'Read the latest operator direction and review the overview recommendation.'),
+                   'newer_nodes': ('nodes_after_overview', 'Review later nodes and update the overview if scientifically relevant.')}
+        for reason in freshness['reasons']:
+            code, action = actions[reason['code']]
+            warnings.append({'code': code, 'event_seq': reason.get('event_seq'), 'action': action})
     if previous:
         for key in ('summary', 'recommendation', 'recommendation_limits', 'next_directions'):
             if not overview.get(key):
@@ -97,7 +106,7 @@ def snapshot(rd: Path, generation: str) -> dict:
     return {'generation': generation, 'event_seq': events[-1].seq,
             'current_report_seq': current_report.get('published_seq') if current_report else None,
             'report_fields_empty': empty_fields if current_report else None,
-            'instruction': REPORT_INSTRUCTION, 'workflow': GUIDE.replace('{run_id}', quote(rd.name, safe='')),
+            'instruction': REPORT_INSTRUCTION, 'workflow': GUIDE.replace('{run_id}', quote(canonical_id, safe='')),
             'previous_overview_seq': overview_event.seq if overview_event else None,
             'previous_overview_api': f'{root}/report/versions/{overview_event.seq}' if overview_event else None,
             'recent_terminal_events': list(reversed(outcomes[-10:])), 'terminal_event_count': len(outcomes),

@@ -202,8 +202,7 @@ class HarnessAPI:
 
     def _result(self, response: httpx.Response, *, method: str = "GET",
                 read_only: bool = False) -> dict:
-        # `read_only`: a POST that writes nothing the caller must recover (the code overlay
-        # preview) reads a 5xx as unavailable, never as an unknown write outcome (review 2026-10-16).
+        # Historical incident details omitted.
         write = method != "GET" and not read_only
         if len(response.content) > MAX_RESPONSE_BYTES:
             result = {"status": response.status_code, "truncated": True, "bytes": len(response.content)}
@@ -362,8 +361,9 @@ class HarnessAPI:
         return {**result, "client_request": saved} if saved is not None else result
 
     def wait_for_next(self, after: int | None = None, timeout_s: float = 120.0,
-                      run_id: str = "", kinds: str = "", limit: int = 50) -> dict:
-        """Long-poll the server's actionable-event outbox (doc 78). One GET; no retry."""
+                      run_id: str = "", kinds: str = "", limit: int = 50,
+                      coalesce: bool = True) -> dict:
+        """Long-poll the actionable outbox; coalesce a backlog behind the freshest direction."""
         if after is not None and (type(after) is not int or after < -1):
             raise ValueError("after must be an integer >= -1 (the last event id you processed)")
         if not isinstance(timeout_s, (int, float)) or not 0 <= timeout_s <= 600:
@@ -384,7 +384,62 @@ class HarnessAPI:
             return {"status": None, "code": "api_unreachable", "outcome": "unavailable",
                     "message": "Agent-event read unavailable. Check the UI/server and call "
                                "wait_for_next again with the same after cursor; no event was lost."}
-        return self._result(response, method="GET")
+        result = self._result(response, method="GET")
+        body = result.get("body")
+        if not coalesce or result.get("status") != 200 or not isinstance(body, dict):
+            return result
+        pending = [row for row in (body.get("events") or []) if isinstance(row, dict)]
+        if len(pending) < 2:
+            return result
+        priority = ("operator_direction", "agent_handoff", "run_paused", "run_finished",
+                    "node_failed", "stage_failed", "monitor_question", "obligation_due",
+                    "node_evaluated", "gpu_free", "run_idle")
+
+        def key(row):
+            kind = str(row.get("kind") or "")
+            rank = priority.index(kind) if kind in priority else len(priority)
+            return (-rank, int(row.get("id", -1)))
+
+        # A cursor is global unless the caller filters by run. Never consume a
+        # different run's actionable payload merely because this run has higher
+        # priority. Within a run, the latest direction/stop supersedes older ones.
+        authority = {"operator_direction", "agent_handoff", "run_paused", "run_finished"}
+        groups = {}
+        for row in pending:
+            groups.setdefault(str(row.get("run_id") or ""), []).append(row)
+        chosen_rows = []
+        for rows in groups.values():
+            directions = [row for row in rows if row.get("kind") in authority]
+            chosen_rows.append(max(directions, key=lambda row: int(row.get("id", -1)))
+                               if directions else max(rows, key=key))
+        chosen_rows.sort(key=lambda row: int(row.get("id", -1)), reverse=True)
+        selected_ids = {id(row) for row in chosen_rows}
+        latest = max(int(row.get("id", -1)) for row in pending)
+        body = dict(body)
+        body["events"] = chosen_rows
+        body["coalesced_count"] = len(pending) - len(chosen_rows)
+        body["coalesced_history"] = [
+            {"id": row.get("id"), "kind": row.get("kind"), "run_id": row.get("run_id"),
+             "summary": str(row.get("summary") or "")[:300]}
+            for row in sorted((row for row in pending if id(row) not in selected_ids),
+                              key=lambda row: int(row.get("id", -1)))[-20:]]
+        body["next_after"] = latest
+        if run_id:
+            state = self.request("GET", f"/api/runs/{run_id}/state?observe_only=true")
+            generation = ((state.get("body") or {}).get("generation")
+                          if state.get("status") == 200 and not state.get("code") else None)
+            if generation:
+                progress = self.run_progress(run_id, generation)
+                if progress.get("status") == 200 and not progress.get("code"):
+                    current = progress.get("body") or {}
+                    body["fresh_progress"] = {key: current.get(key) for key in (
+                        "recorded_lifecycle", "execution", "finish_pending_node_count",
+                        "pending_checkpoint_count", "next_step", "execution_scope") if key in current}
+                else:
+                    body["fresh_progress_unavailable"] = progress.get("code") or "progress_unavailable"
+            else:
+                body["fresh_progress_unavailable"] = state.get("code") or "state_unavailable"
+        return {**result, "body": body}
 
     def post_large(self, path: str, body: dict, *, max_bytes: int = 32_000_000,
                    spool: Optional[tuple] = None, source: str = "") -> dict:
@@ -975,8 +1030,7 @@ def build_server(api: HarnessAPI):
             return {"error": "unknown phase", "phase_id": phase_id}
         from looplab.serve.protocol import control_request_fields, control_server_fields
         phase["commands"] = {
-            # Stamped fields (`origin`, `code_commit`) are server-side: offered as request fields
-            # they were refused at intake as forged (review 2026-10-16).
+            # Historical incident details omitted.
             name: {"request_fields": sorted(control_request_fields(name)),
                    "server_derived": sorted(control_server_fields(name))}
             for ref in phase["writes"] if ref.startswith("command:")
@@ -1096,17 +1150,19 @@ def build_server(api: HarnessAPI):
     @mcp.tool(annotations=ToolAnnotations(readOnlyHint=True, destructiveHint=False,
                                         idempotentHint=True, openWorldHint=False))
     def wait_for_next(after: int | None = None, timeout_s: float = 120.0, run_id: str = "",
-                      kinds: str = "", limit: int = 50) -> dict:
+                      kinds: str = "", limit: int = 50, coalesce: bool = True) -> dict:
         """Block until LoopLab records an actionable event for you, then return it.
 
         Events: node_evaluated, node_failed (with root exception / signals), stage_failed,
         monitor_question, obligation_due, run_idle (engine waits for your next experiment),
         run_paused, run_finished, gpu_free. Pass the last processed event id as `after`
         (omit it once to subscribe from now; -1 reads the retained history) and keep
-        `next_after` for the next call. Returns early on the first event, else after
-        timeout_s (<= 600) with timed_out=true. An event is a nudge: read run_progress
-        for the run before acting. Filter with run_id or a comma list of kinds."""
-        return api.wait_for_next(after, timeout_s, run_id, kinds, limit)
+        `next_after` for the next call. With coalesce=true a backlog becomes one packet:
+        the newest operator direction/lifecycle action per run first, bounded coalesced_history,
+        next_after at the newest id and fresh progress when run_id is supplied. coalesce=false
+        preserves chronological one-event delivery. timeout_s (<=600) applies when no event
+        arrives. Events are nudges, never renewed execution authority."""
+        return api.wait_for_next(after, timeout_s, run_id, kinds, limit, coalesce)
 
     @mcp.tool(annotations=ToolAnnotations(readOnlyHint=True, destructiveHint=False,
                                         idempotentHint=True, openWorldHint=False))
@@ -1343,7 +1399,8 @@ def _campaign_tools(mcp, api, ToolAnnotations) -> None:
                           decisions: dict | None = None, dry_run: bool = False,
                           code_from: dict | None = None, parent_ids: list[int] | None = None,
                           parent_generations: dict | None = None,
-                          node_kind: str | None = None, uses: list[int] | None = None) -> dict:
+                          node_kind: str | None = None, uses: list[int] | None = None,
+                          pre_stages: list[dict] | None = None, job_role: str | None = None) -> dict:
         """One call for the whole admission ceremony: pre-register `experiment` (protocol
         journal), add `research_question` {id, statement?, concepts?} and file the idea under it,
         publish `memo`, record `decisions` {phase: {reason, alternatives?}} the run requires,
@@ -1351,17 +1408,22 @@ def _campaign_tools(mcp, api, ToolAnnotations) -> None:
         name} (the default: a code_worktree you edited/committed, `git merge nodes/n<id>` to
         combine experiments), {"patch": diff} or {"git": {"repo": abs path, "ref": branch}} (your
         own branch, merged onto the run's base; overlaps are named conflicts) — OR files/code.
-        code_from is previewed first, so a refusal writes nothing. parent_ids lists every merged
-        node (exclusive with parent_id). node_kind="artifact" prepares unranked data; uses names
-        evaluated nodes whose lifecycle-pinned workdirs this candidate reads. dry_run=true lists missing obligations, the plan and the
-        changed paths without writing. Stops at the first failed step; repeat with the SAME key to
-        resume — completed steps replay their receipts; a new candidate needs a new key."""
+        pre_stages declares preceding prep/train stages through the same server validator as
+        looplab_stages.json; LoopLab still appends the operator's protected score and enforces the
+        task's stage-manifest edit surface. code_from is previewed first, so a refusal writes nothing.
+        parent_ids lists every merged node (exclusive with parent_id). node_kind="artifact" prepares
+        unranked data; uses names evaluated nodes whose lifecycle-pinned workdirs this candidate reads.
+        job_role declares prepare/profile/fit/score/recovery for UI and the operator's optimization-only
+        execution fence. dry_run=true lists missing obligations, the plan and the changed paths without writing.
+        Stops at the first failed step; repeat with the SAME key to resume — completed steps replay
+        their receipts; a new candidate needs a new key."""
         return composite.submit_experiment(
             api, run_id, expected_generation, key=key, idea=idea, files=files, code=code,
             deleted=deleted, parent_id=parent_id, research_question=research_question,
             experiment=experiment, experiment_reason=experiment_reason, memo=memo,
             decisions=decisions, dry_run=dry_run, code_from=code_from, parent_ids=parent_ids,
-            parent_generations=parent_generations, node_kind=node_kind, uses=uses)
+            parent_generations=parent_generations, node_kind=node_kind, uses=uses,
+            pre_stages=pre_stages, job_role=job_role)
 
     def _code_path(run_id: str, expected_generation: str, suffix: str) -> str:
         api._run_identity(run_id, expected_generation)
@@ -1425,6 +1487,15 @@ def _campaign_tools(mcp, api, ToolAnnotations) -> None:
         Explain inapplicability rather than inventing evidence. This guidance adds no gate. dry_run=true shows the gates and plan. Same-key repeat resumes."""
         return composite.finish_run(api, run_id, expected_generation, key=key, report=report,
                                     reviews=reviews, reason=reason, dry_run=dry_run)
+
+    @mcp.tool()
+    def stop_node(run_id: str, expected_generation: str, node_id: int, key: str,
+                  reason: str, generation: int | None = None) -> dict:
+        """Abort one exact active attempt, unlike pause (which only withholds new work).
+        Returns the abort receipt, fresh node/engine/GPU observations and checkpoint=not_collected:
+        abort never proves save-on-stop or that unsaved steps became a checkpoint."""
+        return composite.stop_node(api, run_id, expected_generation, node_id=node_id,
+                                   key=key, reason=reason, generation=generation)
 
     @mcp.tool()
     def retry_node(run_id: str, expected_generation: str, node_id: int, key: str,

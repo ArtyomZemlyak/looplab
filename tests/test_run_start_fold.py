@@ -51,7 +51,8 @@ def _owned() -> set[str]:
 
 # The one field the handler writes that is not the run-start's ALONE — and why that is safe here.
 NOT_OWNED_ALONE = {"trust_gate": "`trust_gate_changed` moves it; the /config overlay never reads it",
-                   "goal": "a `metric_retarget` may restate it (doc 68 68.2); the overlay never reads it"}
+                   "goal": "a `metric_retarget` may restate it (doc 68 68.2); the overlay never reads it",
+                   "run_id": "a `run_relocated` changes the address, not the launch record; the overlay never reads it"}
 
 
 def test_the_handler_reads_nothing_but_the_identity_it_writes():

@@ -1264,6 +1264,8 @@ class ProposalCuesMixin:
 
             scope_unknown = fingerprint_unknown = fingerprint_omitted = direction_unknown = 0
             for row in capsules:
+                if row.get("provisional") is True:
+                    continue
                 if current_run.is_current_run(row):
                     continue
                 persisted_direction = row.get("direction")
@@ -1293,6 +1295,8 @@ class ProposalCuesMixin:
             }
 
             def _scoped(row, *, capsule: bool = False):
+                if capsule and row.get("provisional") is True:
+                    return False
                 if current_run.is_current_run(row):
                     return False
                 # Direction is a hard semantic boundary even for an exact task id: support for a

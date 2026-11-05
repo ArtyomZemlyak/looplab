@@ -1278,6 +1278,8 @@ def valid_case_record(case) -> bool:
     """
     if not isinstance(case, dict) or "v" in case or "record_kind" in case:
         return False
+    if "provisional" in case and type(case["provisional"]) is not bool:
+        return False
     task_id = case.get("task_id")
     if (not isinstance(task_id, str) or not task_id.strip()
             or len(task_id) > 500):

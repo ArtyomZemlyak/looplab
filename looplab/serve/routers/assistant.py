@@ -349,7 +349,13 @@ def watch_observe_run(srv, run_id: str):
         if exc.status_code in (404, 410):
             return None
         raise
-    rows = [row for row in srv.run_summaries(only={rd.name}) if row.get("run_id") == rd.name]
+    from looplab.core.run_ref import run_address
+    canonical_id = run_address(srv.root, rd)
+    if rd.parent.resolve() == srv.root.resolve():
+        rows = [row for row in srv.run_summaries(only={canonical_id}) if row.get("run_id") == canonical_id]
+    else:
+        rows = [row for folder in srv.campaign_runs()["folders"] for row in folder["runs"]
+                if row.get("run_id") == canonical_id]
     if not rows:
         # `run_dir` proved the directory and its event log are there, so this is a run whose
         # summary fold could not be completed right now (a half-written log, a racing reset).

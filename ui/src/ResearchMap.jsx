@@ -8,6 +8,7 @@ import ProjectMetricProfileEditor from './ProjectMetricProfileEditor.jsx'
 import { downloadBlob } from './accessibility.jsx'
 import ProfileMeasurements from './ProfileMeasurements.jsx'
 import ResearchNotices from './ResearchNotices.jsx'
+import { CampaignOverview } from './CampaignOverview.jsx'
 
 // This is a read-only projection. It cannot schedule an experiment or grant permission.
 export default function ResearchMap({ runId, generation, onPickNode, onOpenConcepts, onOpenCards, onViewReport, readOnly = false }) {
@@ -98,22 +99,8 @@ export default function ResearchMap({ runId, generation, onPickNode, onOpenConce
           <ResearchNotices runId={runId} generation={generation} />
           {!!page.quality.report_fields_empty?.length && <p>{uiText('Unfilled report sections')}: {page.quality.report_fields_empty.join(', ')}</p>}
         </section>}
-        <section><h3>{uiText('Campaign overview')}</h3>
-          {page.campaign_overview ? <>
-            <p>{uiMessage('Published in report #{0}', [page.campaign_overview.published_seq])}</p>
-            {page.campaign_overview.detail_truncated && <p>{uiText('Details shortened; inspect the original report.')}</p>}
-            {Number.isInteger(page.campaign_overview.at_node) && page.campaign_overview.at_node < page.nodes.total && <p role="status">{uiText('This overview predates some experiments; refresh its conclusions.')}</p>}
-            <Markdown text={page.campaign_overview.content?.summary || ''} />
-            {page.campaign_overview.content?.recommendation && <section><h4>{uiText('Current recommendation')}</h4><Markdown text={page.campaign_overview.content.recommendation} /></section>}
-            {page.campaign_overview.content?.recommendation_limits && <section><h4>{uiText('Recommendation limits')}</h4><Markdown text={page.campaign_overview.content.recommendation_limits} /></section>}
-            {!!page.campaign_overview.content?.report_seqs?.length && <p>{uiText('Related report versions')}: {page.campaign_overview.content.report_seqs.map(seq => onViewReport ? <button type="button" key={seq} onClick={() => onViewReport(seq)}>#{seq}</button> : `#${seq} `)}</p>}
-            {['what_worked', 'what_didnt', 'learnings', 'next_directions', 'caveats'].map(key =>
-              page.campaign_overview.content?.[key]?.length ? <section key={key}>
-                <h4>{uiText(({ what_worked: 'What worked', what_didnt: "What didn't work", learnings: 'Learnings', next_directions: 'Next directions', caveats: 'Caveats' })[key])}</h4>
-                <ul>{page.campaign_overview.content[key].map((item, i) => <li key={i}>{item}</li>)}</ul>
-              </section> : null)}
-          </> : <p>{uiText('No cumulative campaign overview has been published.')}</p>}
-        </section>
+        <CampaignOverview overview={page.campaign_overview} visibleNodeCount={page.nodes.total}
+          mapEventSeq={page.event_seq} snapshotSeq={page.event_seq} onViewReport={onViewReport} headingLevel={3} />
         <section><h3>{uiText('Research questions and directions')}</h3>
           <p>{uiText('Card verdicts are derived from recorded evidence and do not establish causality.')}</p>
           {onOpenCards && <button type="button" onClick={onOpenCards}>{uiText('Open question board')}</button>}

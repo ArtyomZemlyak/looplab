@@ -196,7 +196,10 @@ def snapshot(rd: Path, expected_generation: str, *, activity_reader,
                  "agent_connection": "not_measured",
                  "recorded_node_counts": {kind: activity[kind] for kind in
                      ("building", "queued", "evaluating", "pending")}}
+    from looplab.harness.campaign import read_policy
     result = {"generation": generation, "run_uid": uid,
+            "execution_scope": read_policy(rd).get("execution")
+                                 or {"mode": "science", "version": 1},
             "recorded_lifecycle": {"paused": bool(state.paused),
                                    "finished": bool(state.finished),
                                    "stop_requested": bool(state.stop_requested)},

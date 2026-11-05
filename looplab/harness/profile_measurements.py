@@ -5,18 +5,20 @@ import math
 from pathlib import Path
 from fastapi import HTTPException
 from looplab.core.metric_profile import profile_for_run
+from looplab.core.run_ref import run_address
 from looplab.core.redact import redact_persisted_text
 from looplab.events.replay import fold
 from looplab.events.run_generation import run_generation_token
 from looplab.harness.journals import read_event_source
 
 
-def snapshot(rd: Path, generation: str, offset: int = 0, limit: int = 10) -> dict:
+def snapshot(rd: Path, generation: str, offset: int = 0, limit: int = 10, *, root: Path | None = None) -> dict:
+    root = root if root is not None else rd.parent
     events = read_event_source(rd)
     if run_generation_token(events) != generation:
         raise HTTPException(409, 'run generation changed')
     state = fold(events)
-    profile = profile_for_run(rd.parent, rd.name)
+    profile = profile_for_run(root, run_address(root, rd))
     metrics = profile.get('profile', {}).get('metrics', []) if profile.get('state') == 'configured' else []
     nodes = sorted(state.nodes.values(), key=lambda node: node.id)
     result = []

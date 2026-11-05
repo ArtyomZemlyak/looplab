@@ -24,6 +24,7 @@ from looplab.core.atomicio import (best_effort_fsync, file_identity, same_file_e
                                    strict_fsync, strict_fsync_parent)
 from looplab.core.models import Event
 from looplab.core.run_deletion import assert_run_deletion_write_allowed
+from looplab.core.run_relocation import assert_run_relocation_write_allowed
 from looplab.core.run_reset import assert_run_reset_write_allowed
 from looplab.core.tracing import current_ids
 
@@ -427,14 +428,7 @@ def log_divergence(path: str | os.PathLike) -> Optional[dict]:
 # above answers the WRITER's question ("may I append?"); this answers the READER's ("is what I am
 # about to show you the run?"), and until 2026-08-14 nothing asked it on a display path.
 #
-# The cost of not asking, measured on the shipped corpus: `runs/rubertlite-dense-retrieval` has 1,624
-# physical rows, ALL of them valid JSON, and `read_all()` returns 20 — seqs 20-24 are absent, so the
-# dense-prefix fence ends the recoverable prefix at line 21 and 1,603 records are dropped from every
-# fold. `EventStore` computed exactly that divergence and it went nowhere an operator looks: on the
-# same server in the same second the timeline pager reported `total_events: 1624, torn_tail: false`
-# while `/state` reported `event_count: 20`, and the run-list row read `nodes: 2, best_metric: 0.8077`
-# for a run whose own `budget` row says `nodes: 81`. Every one of those numbers is arithmetically
-# correct on 1.2 % of the run and none of them said so.
+# Historical incident details omitted.
 #
 # Two rules this receipt keeps (docs/36, and invariant #5 one file over):
 #   * it is DERIVED FROM THE BYTES and never inferred. There is no heuristic here and no softening —
@@ -532,6 +526,7 @@ def repair_log(path: str | os.PathLike) -> dict:
     with interprocess_lock(Path(str(p) + ".lock"), required=True):
         assert_run_reset_write_allowed(p.parent)
         assert_run_deletion_write_allowed(p.parent)
+        assert_run_relocation_write_allowed(p.parent)
         # Authoritative INSIDE the lock. A caller's earlier peek proves nothing: the log may have been
         # repaired, extended past the divergence, or replaced entirely while we waited for the lock.
         div = log_divergence(p)
@@ -933,6 +928,9 @@ class EventStore:
         callback here: `cur` is only knowable inside the critical section, and a payload serialized
         against a tail read outside it would carry a seq another writer already used.
         """
+        # A relocated address no longer has its journal's lock directory. Refuse
+        # before opening that old path, and re-check inside the lock for races.
+        assert_run_relocation_write_allowed(self.path.parent)
         with self._append_lock, interprocess_lock(
                 Path(str(self.path) + ".lock"), required=require_lock):
             # Reset publishes its marker while owning this SAME append lock.  Checking inside the
@@ -940,6 +938,7 @@ class EventStore:
             # admitted only when it inherited the exact operation id.
             assert_run_reset_write_allowed(self.path.parent)
             assert_run_deletion_write_allowed(self.path.parent)
+            assert_run_relocation_write_allowed(self.path.parent)
             # Revalidate bytes written or replaced since the last read WHILE holding the writer lock.
             # A construction-time snapshot is insufficient on FUSE/network mounts: corruption can
             # appear mid-run, and appending after it would make every new event invisible to replay.
@@ -1324,12 +1323,7 @@ class EventStore:
         fails_closed`). What it cannot do is TELL anyone it stopped, and a bounded reader that does
         not name its bound reads as complete coverage.
 
-        Measured 2026-08-21 on `runs/rubertlite-dense-retrieval`: seq jumps 19 -> 25 at file line 21,
-        so the store serves **20 events of 1,624 lines** and a run with 81 `node_created` and 71
-        `node_evaluated` rows on disk folds to TWO nodes. Anything built on the fold — both offline
-        backfills, any audit, any coverage claim — silently describes that prefix and calls it the
-        run. `backfill-applied-params` shipped exactly that way; its "23 events" is the prefix's
-        answer, not the corpus's.
+Historical incident details omitted.
 
         Lives here, beside `read_all`, because it is a property of the STORE rather than of any
         consumer: two copies of "how far can this be read" is the drift `tests/

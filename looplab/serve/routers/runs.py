@@ -50,9 +50,7 @@ from looplab.events.trust_gate import (
 from looplab.events.traceview import (
     TRACE_NODE_EPISODE_CAP, TRACE_PROJECTION_SCHEMA, TraceEpisodeCursorUnknown,
     trace_file_revision, trace_projection_json_bytes, unavailable_projection)
-# Per-theme rollup for the cross-run map: {theme: {count, best_metric}}. Now lives in `digest` so the
-# Researcher's working-set digest and this UI endpoint share one definition.
-# Advisory readability notices on the harness POST receipts (review 2026-10-14 section 8.3.3).
+# Historical incident details omitted.
 from looplab.serve.intake_notices import with_readability
 from looplab.serve.artifacts import (
     _ART_MAX_BYTES, _LOG_TAIL_MAX, ART_RAW_MAX_BYTES, ArtifactPolicyUnavailable, artifact_meta,
@@ -825,6 +823,14 @@ class ExternalValueBody(BaseModel):
     estimates: list[ExternalValueMember] = Field(min_length=1, max_length=6)
 
 
+class OperatorNoteBody(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    expected_generation: str = Field(pattern=r"^[0-9a-f]{64}$")
+    action_id: str = Field(pattern=r"^[A-Za-z0-9_.:-]{1,128}$")
+    task_family: str = Field(min_length=1, max_length=128)
+    note: str = Field(min_length=1, max_length=4000)
+
+
 class NoveltyPreviewBody(BaseModel):
     """Candidate idea to compare with the current run; this call never admits it."""
 
@@ -1109,7 +1115,7 @@ def build_router(srv) -> APIRouter:
         """Current bounded research and action context; observations do not grant authority."""
         from looplab.harness.briefing import snapshot
         response.headers["Cache-Control"] = "no-store"
-        result = snapshot(_run_dir(run_id), expected_generation, language=language)
+        result = snapshot(_run_dir(run_id), expected_generation, language=language, root=srv.root)
         from looplab.serve.mirror_supervisor import mirror_view, mirror_diagnostic
         result["mirror"] = mirror_diagnostic(mirror_view(srv.root, getattr(srv, "run_mirror", None)))
         return result
@@ -1145,7 +1151,7 @@ def build_router(srv) -> APIRouter:
         """Read declared profile keys from current node measurements without recomputation."""
         from looplab.harness.profile_measurements import snapshot
         response.headers["Cache-Control"] = "no-store"
-        return snapshot(_run_dir(run_id), expected_generation, offset, limit)
+        return snapshot(_run_dir(run_id), expected_generation, offset, limit, root=srv.root)
 
     @router.get("/api/runs/{run_id}/research-export")
     def get_research_export(run_id: str, response: Response,
@@ -1155,7 +1161,7 @@ def build_router(srv) -> APIRouter:
         """Export a bounded campaign overview and selected sanitized report versions."""
         from looplab.harness.research_export import export
         response.headers["Cache-Control"] = "no-store"
-        return export(_run_dir(run_id), expected_generation, report_seq, question_card_id)
+        return export(_run_dir(run_id), expected_generation, report_seq, question_card_id, root=srv.root)
 
     @router.get("/api/runs/{run_id}/research-map")
     def get_research_map(run_id: str, response: Response,
@@ -1167,7 +1173,7 @@ def build_router(srv) -> APIRouter:
         if _RUN_GENERATION_RE.fullmatch(expected_generation) is None:
             raise HTTPException(400, "expected_generation must be a SHA-256 token")
         response.headers["Cache-Control"] = "no-store"
-        return snapshot(_run_dir(run_id), expected_generation, offset, limit)
+        return snapshot(_run_dir(run_id), expected_generation, offset, limit, root=srv.root)
 
     @router.get("/api/runs/{run_id}/research-workflow")
     def get_research_workflow(run_id: str):
@@ -1212,7 +1218,7 @@ def build_router(srv) -> APIRouter:
         try:
             return snapshot(_run_dir(run_id), expected_generation,
                             credential_configured=srv.harness_auth_configured,
-                            owner_login=bool(getattr(srv, "owner_auth_enabled", False)))
+                            owner_login=bool(getattr(srv, "owner_auth_enabled", False)), root=srv.root)
         except OSError as exc:
             raise refusal("event_log_unreadable") from exc
 
@@ -1386,6 +1392,14 @@ def build_router(srv) -> APIRouter:
         """Estimate remaining headroom for the complete live MCTS candidate batch."""
         from looplab.harness.selection import estimate_values
         return estimate_values(srv, _run_dir(run_id), body)
+
+    @router.post("/api/runs/{run_id}/operator-notes")
+    def publish_operator_note_route(run_id: str, body: OperatorNoteBody, request: Request):
+        """Record durable operator guidance, never agent-authored operator authority."""
+        from looplab.serve.principal import require_owner
+        from looplab.harness.operator_notes import publish_operator_note
+        require_owner(request, "publish operator notes")
+        return publish_operator_note(srv, _run_dir(run_id), body)
 
     @router.post("/api/runs/{run_id}/lessons")
     def publish_external_lesson(run_id: str, body: ExternalLessonBody):
@@ -2253,14 +2267,7 @@ def build_router(srv) -> APIRouter:
                             expected_generation: Optional[str] = Query(default=None)):
         """THE MAP of one node's trace: every episode (band) it recorded, with none of their contents.
 
-        This is the surface F6 was missing. The two per-node trace reads are bounded windows over the
-        TAIL of `(node_id, generation)`, so on a heavily-repaired node most of the history is not
-        reachable by asking for more — measured on `runs/rubert-dr-0804` node 1 (14,507 spans, 2,345
-        inline repairs, 3 h 50 m): the 512-span default window shows its last 7.6 minutes and the
-        4,096-span ceiling its last 59.3. The attempt picker does not help either, because inline
-        repair does not open a lifecycle generation — every one of those spans is generation 0. So
-        the operator gets a map instead: each row names an episode and carries the `anchor` to put a
-        window on it (`?before=` on `/trace` and `/conversation`).
+Historical incident details omitted.
 
         Cheap by construction: the map comes from the in-memory light index and reads no
         spans.jsonl bytes (measured 82 ms for 7,048 bands). A response is nevertheless capped at
@@ -2626,11 +2633,7 @@ def build_router(srv) -> APIRouter:
         Reading it as current would invite restoring a refusal that breaks the Inspector's attempt
         picker and every historical Dock event row.
 
-        ``before`` (a span id from `/nodes/{nid}/episodes`) SEEKS the window: the same `limit` spans,
-        ending at the anchored step rather than at the node's newest one. `attempt` and `before`
-        answer two different questions and neither substitutes for the other — `attempt` picks a
-        lifecycle GENERATION (what `node_reset` creates), `before` a position INSIDE one, which is
-        where the inline repairs live (2,345 of them in generation 0 of rubert-dr-0804 node 1).
+Historical incident details omitted.
 
         Successful stable snapshots carry an opaque ``cursor`` equal to their ETag. A caller may
         return it as ``If-None-Match``; an unchanged node/generation/window then answers 304 before
@@ -2902,11 +2905,7 @@ def build_router(srv) -> APIRouter:
         than claiming file-level production provenance it cannot prove. The response is fenced to the
         required run generation; files in a current node workdir carry their node id and attempt.
 
-        Paged and filterable (UI review 2026-10-14 section 7.6): `root` lists one root, `node_id` lists
-        only that experiment's workdir (inside the run root, paths unchanged), and `offset`/`limit` page
-        through a root of any size — each root reports `next_offset` while files remain. Without them
-        the response is the historical one: every root, the first 1,500 files each.
-        """
+Historical incident details omitted."""
         rd = _run_dir(run_id)
         generation = _assert_artifact_generation(rd, expected_generation, phase="before")
         before_state = srv.state(rd)
@@ -3100,7 +3099,8 @@ def build_router(srv) -> APIRouter:
                         break
                     digest.update(chunk)
                 after = os.fstat(handle.fileno())
-                if (before.st_size, before.st_mtime_ns, before.st_ino) != (after.st_size, after.st_mtime_ns, after.st_ino):
+                from looplab.core.atomicio import file_identity
+                if file_identity(before) != file_identity(after):
                     raise HTTPException(409, "artifact changed during verification")
                 return digest.hexdigest()
             digest, _, identity = _read_artifact_fenced(run_id, "run", path, body.expected_generation,
@@ -3177,10 +3177,7 @@ def build_router(srv) -> APIRouter:
             lambda f, size: artifact_meta(f, size, path))
         return {"root": root, "path": path, **meta, **identity}
 
-    # ---- the report's figures and its version history (review 2026-10-14 section 6, section 6.3) -------------
-    # A figure is UPLOADED from an artifact through `_read_artifact_fenced` — the same fences as
-    # `/artifact/raw`, raster only — and stored content-addressed beside the run
-    # (`serve/report_figures.py`); `report_generated.content.figures` then names it by id.
+    # Historical incident details omitted.
 
     @router.post("/api/runs/{run_id}/report-figures")
     def report_figure_upload(run_id: str, body: ReportFigureUpload):
@@ -3307,14 +3304,7 @@ def build_router(srv) -> APIRouter:
         inside, so eventstore stamps it), and the UI shows only THAT trace here, not the node's whole
         Researcher+Developer trace.
 
-        `limit` (>0) is the same "reach for earlier steps" window the node surfaces page by, and it
-        is here for the same reason: this route's default cap is TRACE_DETAIL_SPAN_CAP (256) and a
-        real Researcher proposal exceeds it (measured 2026-08-12: 252 spans in
-        `runs/rubertlite-dr-unified-v5` card-0, 272 in the v3 backup's), so the operator reading a
-        proposal on the ONE shared trace surface would otherwise hit a bound the identical surface
-        lifts for a node. 0/absent keeps the default; the ceiling is the shared
-        TRACE_NODE_SPAN_CAP_MAX and a negative limit is refused at the boundary (422), the same wire
-        contract as both node twins."""
+Historical incident details omitted."""
         rd = _run_dir(run_id)
         before_generation = _begin_trace_read(rd, expected_generation)
         from looplab.events.traceview import (
@@ -3367,11 +3357,7 @@ def build_router(srv) -> APIRouter:
                                     expected_generation: Optional[str] = Query(default=None)):
         """ONE operation's trace as the LINEAR conversation, the twin of `/nodes/{nid}/conversation`.
 
-        A Researcher proposal's spans carry no node_id (they precede the node they argue for, and
-        may argue for no node at all), so no node conversation can contain them: the proposal was
-        readable only as a raw span tree while the identical surface offered a node both readings.
-        Measured on `runs/rubertlite-dr-unified-v5` card-0, this answers with one `propose` band of
-        269 turns over 86 generations and 165 tool calls — the Researcher's actual reasoning.
+Historical incident details omitted.
 
         No ETag here, deliberately. The node twin's conditional machinery is keyed on the node
         window snapshot (`SpanIndex.node_window_snapshot`) and exists because that surface polls
@@ -4067,10 +4053,7 @@ def build_router(srv) -> APIRouter:
     def run_cost(run_id: str):
         rd = _run_dir(run_id)
         st = srv.state(rd)
-        # A THIRD state, and it reads exactly like the second: `rubertlite-dense-retrieval` answers
-        # `{cost: 0.0, recorded: false}` for a run whose own `llm_cost` rows record 3,497 calls and
-        # 76.9 M tokens — the roll-up is behind the log's readable boundary. "Absent is not zero" is
-        # the rule this body already states; "unreadable is not absent" is the same rule one step up.
+        # Historical incident details omitted.
         integrity = srv.log_integrity(rd)
         if st.llm_cost is None:
             # No roll-up exists yet (offline/toy run, or one that has not finalized). The historical

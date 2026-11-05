@@ -15,6 +15,7 @@ looplab resume          Resume/continue a run (crash, stopped, or finished) by r
 looplab stop            Stop a run: freeze it, NO wrap-up (resumable)
 looplab finalize        Finalize a run: stop AND wrap up (report/lessons/cost)
 looplab repair-log      Repair a mid-file-corrupted event log (FUSE/NFS/S3)
+looplab relocate        Move a stopped run and record its new address without changing run_uid
 looplab inspect         Show the best result, stop reason, trust and comparability (--config: + raw launch snapshot)
 looplab comparability   What each run's number may be RANKED against — refuses across evaluations
 looplab replay          Pure fold of the event log → state (read-only)
@@ -36,6 +37,7 @@ looplab concept-coverage Concept-graph coverage + uncovered-region alarm (PART I
 looplab asset-brief     Prior-art & on-disk asset brief for a task repo (PART IV D1)
 looplab lock-in         Action-space lock-in detector (PART IV D7)
 looplab board-dedup     Taxonomy-aware hypothesis-board dedup analysis (PART IV D4)
+looplab research-map    Bounded read-only research questions, experiments and report history
 looplab research-targets Axis-structured deep-research targets from coverage (PART IV D2)
 looplab novelty-recall  Audit executed proposals for paraphrases the novelty gate missed (PART IV E3)
 looplab lesson-guard    Audit distilled lessons for over-generalization and contradiction (PART IV D6/E4)
@@ -761,14 +763,28 @@ is derived from the readable prefix, and a prefix is **not** evidence that the r
 
 ---
 
+## `relocate`
+
+Move a stopped run within one filesystem:
+
+```bash
+looplab relocate runs/old-name runs/new-name
+looplab relocate runs/old-name runs/new-name --apply --reason "Group this campaign"
+```
+
+Lifecycle and stale writers are fenced. No-replace rename
+records addresses, `run_uid` and prior event identity; the old name remains reserved.
+After interruption, inspect destination and retry exactly. Unsupported renames
+fail visibly. Rebind external capabilities: moving grants no score, alias or launch authority.
+Readback never proves S3 flush.
+
+---
+
 ## `inspect`
 
-Print what a run got: its current folded best result, why it stopped, its trust scans and the
-comparability key of its best number. `--config` also prints the raw on-disk launch config snapshot
-first (before 2026-10-09 every `inspect` did, and its 10 KB scrolled the result off-screen, doc 74
-EB-10). The snapshot is a diagnostic view, not the effective per-run config API: the latter overlays
-the seven `run_started`-pinned fields and the event-sourced trust gate. A run with a snapshot and no
-event log yet prints the snapshot, since that is all there is.
+Print the folded best result, stop reason, trust scans and comparability key. `--config` adds the raw
+launch snapshot; the effective-config API separately overlays `run_started` pins and the event-sourced
+trust gate. A snapshot without an event log is printed as the only available record.
 
 ```bash
 looplab inspect RUN_DIR            # the result
@@ -3374,33 +3390,26 @@ looplab build-ui [--force]
 
 ## `harness`
 
-Print the external-agent capability contract as JSON — the versioned manifest an MCP client or a
-coding agent reads first: the run modes, which decisions the agent owns and which the engine keeps,
-the decision phases, and the knowledge cadences (`harness/manifest.py::harness_manifest`; the same
-object `harness-mcp` serves). Read-only. See [External harness](external-harness.md).
+Print the external-agent capability contract as JSON; `--settings` adds its schema and field help.
+Read-only. See [External harness](external-harness.md).
 
 ```bash
 looplab harness [--settings]
 ```
 
-| Option | Default | Description |
-|---|---|---|
-| `--settings` | off | Include the full `Settings` JSON Schema and the curated field help |
+## `research-map`
+
+Read research questions, experiments and reports without changing work. `--generation` is required;
+`--briefing` returns action context. `looplab research-map RUN_DIR --generation TOKEN`.
 
 ## `harness-mcp`
 
-Serve the UI's API to a coding agent over stdio MCP (`harness/mcp_server.py`). Needs
-`pip install 'looplab[ui]'` and a running `looplab ui`; register once:
-`codex mcp add looplab -- looplab harness-mcp`. Open UI: no token; protected: the scoped
-`LOOPLAB_HARNESS_TOKEN` (never `LOOPLAB_UI_TOKEN`); `LOOPLAB_HARNESS_URL`: another UI. No options.
-
-```bash
-looplab harness-mcp
-```
+Serve a UI over stdio MCP: `codex mcp add looplab -- looplab harness-mcp`. Protected UI:
+`LOOPLAB_HARNESS_TOKEN`; remote UI: `LOOPLAB_HARNESS_URL`.
 
 ## `agent-notify`
 
-| `[--run-root R] [--command 'ARGV {message}'] [--var K=V] [--debounce S] [--kinds a,b] [--disable] [--clear] [--codex [--thread T]]` | The command the UI server runs, without a shell, to wake an external agent on new events; debounced, retried, every attempt in a ledger. No option prints the hook and ledger. `--codex` switches on the fixed `codex queue --thread {thread} --message {message}` preset (hook `codex`); each run's agent sets its `thread` via `PUT /api/runs/{run}/agent-notify`. A delivery with no agent request to the run within 10 minutes is resent once, then recorded `no_reaction`. [Doc 78](../78-external-agent-orchestration-2026-10-14.md) |
+| `[--run-root R] [--command 'ARGV {message}'] [--var K=V] [--debounce S] [--kinds a,b] [--disable] [--clear] [--codex [--thread T]]` | Configure the debounced external-agent wake-up command and inspect its ledger. `--codex` uses `codex queue`; per-run `thread` is set through `PUT /api/runs/{run}/agent-notify`. [Doc 78](../78-external-agent-orchestration-2026-10-14.md) |
 
 ## `agent-events`
 
@@ -3416,7 +3425,7 @@ looplab harness-mcp
 
 ## `run-mirror`
 
-| `--src ROOT --dst DIR [--loop] [--interval S] [--max-mbps M] [--max-files-per-s N] [--max-file-mb M] [--op-timeout S] [--run R]... [--exclude GLOB]... [--exit-on-stuck]` | Copies the run directories under `--src` (e.g. tmpfs `/dev/shm/looplab-runs`) to `--dst` (default `$LOOPLAB_RUN_MIRROR_DST`, e.g. an S3 FUSE mount): only changed files, `*.jsonl` cut at the last newline, one SHA-256 manifest per run, throttled, never listing the destination during a pass; a hung destination call stops the pass (exit 3 with `--exit-on-stuck`). Skips locks, SQLite read models, `code/repo.git`, `code/worktrees` and `canary/` (rebuildable); `code/blobs` is copied, and an agent worktree's unsubmitted branch and uncommitted files ride as a `code/agent_backup/` bundle that `code-status --sync` re-creates after a restore; a deleted source file leaves the manifest. [Doc 80](../80-open-items-triage-2026-10-14.md) |
+| `--src ROOT --dst DIR [--loop] [--interval S] [--max-mbps M] [--max-files-per-s N] [--max-file-mb M] [--op-timeout S] [--run R]... [--exclude GLOB]... [--exit-on-stuck]` | Mirrors changed run files to durable storage, throttled: JSONL complete lines only, SHA-256 manifest per run, hung destination stops the pass. Rebuildable locks/read models/repositories/canaries are skipped; `code/blobs` and an agent backup are retained. [Doc 80](../80-open-items-triage-2026-10-14.md) |
 
 ## `run-mirror-status`
 

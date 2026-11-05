@@ -22,6 +22,7 @@ test('report refresh is receipt-scoped, double-submit safe, and immune to an old
   const realClearTimeout = globalThis.clearTimeout
   const safetyTimers = []
   const requests = []
+  const researchReads = []
   const queuedResults = []
   let fetches = 0
   let nextReceipt = 10
@@ -37,8 +38,16 @@ test('report refresh is receipt-scoped, double-submit safe, and immune to an old
     cancelAnimationFrame: handle => realClearTimeout(handle),
     IS_REACT_ACT_ENVIRONMENT: true,
     fetch: async (url, options) => {
+      const request = { url: String(url), options }
+      if (options?.method !== 'POST') {
+        researchReads.push(request)
+        return { ok: true, json: async () => ({
+          generation: GENERATION, run_id: 'demo', event_seq: 9,
+          campaign_overview: null, questions: [], experiments: [], reports: [],
+        }) }
+      }
       fetches += 1
-      requests.push({ url: String(url), options })
+      requests.push(request)
       const seq = nextReceipt++
       return { ok: true, json: async () => ({
         ...(queuedResults.shift() || {
@@ -109,6 +118,7 @@ test('report refresh is receipt-scoped, double-submit safe, and immune to an old
 
     await render(9)
     assert.equal(fetches, 0, 'mounting a saved paid request must remain read-only')
+    assert.ok(researchReads.length > 0, 'the cumulative overview may issue its independent read-only GET')
     assert.match(button().textContent, /Resume paid refresh/)
     assert.match(document.querySelector('#paid-report-refresh-status')?.textContent || '',
       /paid request saved.*same request.*cannot start a second job.*safely leave/i)

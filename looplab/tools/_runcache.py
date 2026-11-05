@@ -73,11 +73,9 @@ class RunStateCache:
         directory must sit directly under run_root and carry an events.jsonl. Returns None otherwise."""
         if not run_id:
             return None
-        rd = (self.run_root / str(run_id)).resolve()
-        root = self.run_root.resolve()
-        if rd.parent != root:
-            return None
-        if not (rd / "events.jsonl").exists():
+        from looplab.core.run_ref import resolve_run_address
+        rd = resolve_run_address(self.run_root, str(run_id)).path
+        if rd is None or not (rd / "events.jsonl").exists():
             return None
         return rd
 
@@ -121,7 +119,9 @@ class RunStateCache:
         from looplab.core.models import Event
         from looplab.events.replay import fold
         try:
+            from looplab.core.run_ref import run_address
             st = fold(Event(**o) for o in iter_event_jsonl(rd / "events.jsonl"))
+            st.run_id = run_address(self.run_root, rd)
         except (OSError, ValueError, TypeError):
             return None
         # `iter_event_jsonl` deliberately STOPS at the first corrupt/non-dense record, and the

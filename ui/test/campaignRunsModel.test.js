@@ -22,7 +22,7 @@ test('a folder lists its runs, and what cannot be shown is dropped rather than t
   assert.equal(campA.runRoot, '/runs/campA')
   assert.equal(campA.runsSkipped, 2)
   assert.deepEqual(campA.runs.map(r => r.runId), ['seed1', 'seed2'])
-  assert.deepEqual(campA.runs[1], { runId: 'seed2', taskId: 't', phase: 'finished',
+  assert.deepEqual(campA.runs[1], { runId: 'seed2', runPath: null, taskId: 't', phase: 'finished',
     bestMetric: null, nodes: null, running: false, external: false, updated: null })
   assert.equal(campA.runs[0].bestMetric, 0.5)
   assert.deepEqual(campaignFolders(null), [])
@@ -67,4 +67,18 @@ test('a listing the server cut at its entry bound says so, per folder and for th
   assert.equal(rootListingCut({ listing_cut: true }), true)
   assert.equal(rootListingCut({ listing_cut: 1 }), false)
   assert.equal(rootListingCut(null), false)
+})
+
+test('a campaign row renders its readable path as a canonical direct link', async () => {
+  const { mountLive, until } = await import('./_mount.js')
+  const campaign = { folder: 'campA', run_root: '/runs/campA',
+    runs: [row('nested-Y2FtcEEvc2VlZDE', { run_path: 'campA/seed1' })] }
+  const h = await mountLive({ visible: true, routes: { '/api/campaign-runs': { folders: [campaign] } } })
+  try {
+    const { default: CampaignRuns } = await h.load('/src/CampaignRuns.jsx')
+    const view = await h.mount(CampaignRuns)
+    await until(() => view.container.textContent.includes('campA/seed1'), 'campaign row')
+    assert.equal(view.container.querySelector('a').getAttribute('href'), '#/run/nested-Y2FtcEEvc2VlZDE')
+    await view.unmount()
+  } finally { await h.close() }
 })

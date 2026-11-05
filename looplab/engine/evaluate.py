@@ -92,7 +92,7 @@ from looplab.engine.eval_attempt_rules import (  # noqa: F401 — the ladder's r
     _REPAIR_ANSWER_EDIT, _REPAIR_ANSWER_PROVIDER_FAILURE, _REPAIR_ANSWER_STUCK,
     RepairGateContext, _classify_repair_answer, _repair_change_set, _repair_provider_failure,
     attempt_succeeded, coerce_judge_deferred, deferred_triage_verdict, evaluated_terminal,
-    repair_gate, triage_verdict_outcome)
+    repair_gate, scorer_training_advisory, triage_verdict_outcome)
 from looplab.engine.crash_repair import developer_repair_history
 from looplab.engine.eval_stages import STAGE_MANIFEST_NAME
 from looplab.engine.shared import (canary_failure_account, host_refusal_deferral,
@@ -266,18 +266,7 @@ def _attempt_failure_forensics(root, names, snapshot, *, redact, **record) -> Op
 def _redacted_tail(redact, raw, chars: int) -> str:
     """The ONE order for a durable output tail: REDACT THE WHOLE STREAM, THEN CAP IT.
 
-    Hoisted rather than spelled at each site because the order is a SECURITY property and the two
-    spellings are one character apart. `redact(text[-chars:])` shows the redactor a stream whose
-    front has already been cut, so a secret STRADDLING the cut arrives with its shape gone and the
-    remainder lands verbatim on a durable row. Driven, not argued
-    (`tests/test_scored_output_evidence.py::test_a_secret_straddling_the_cut_is_not_left_as_a_fragment`):
-    `export TOKEN=sk-live-A9fQ2xLm7ZpR4tVw8YbN1cJdKe` cut eleven characters into the token leaves
-    `Q2xLm7ZpR4tVw8YbN1cJdKe` — the `sk-` rule no longer matches it and the 23-character remainder
-    is below what the entropy rule fires on, so `redact` returns it UNCHANGED, while redacting first
-    masks the whole token. `core/redact.py`'s own docstring names this channel (an eval that prints
-    `os.environ`) as the reason the redactor exists, and `serve/appstate.py` states the same rule for
-    its PREFIX cut ("Redact BEFORE truncating"); this is the same rule for a SUFFIX cut, where the
-    fragment that survives is the secret's TAIL rather than its head.
+Historical incident details omitted.
 
     Cost is a regex pass over the eval's bounded ~64 KB capture instead of over the window, once per
     node terminal. `""` for nothing-to-keep, so a caller can tell "the stream was empty" from "this
@@ -305,12 +294,7 @@ def _redacted_tail(redact, raw, chars: int) -> str:
 # WHAT THE RECORD KEEPS ABOUT A NODE THAT SCORED, as opposed to one that failed — the ONE window
 # onto the eval's own output on that terminal, applied to BOTH streams.
 #
-# The block above is about a FAILURE. The same defect one terminal over was worse: `node_evaluated`
-# carried `res.stdout[-500:]` and never read `res.stderr` at all, so a node that exited 0 and scored
-# badly kept LESS of its own account than one that crashed. Measured on `runs-armb/spectral_clustering`
-# node 0 — 55 `node_evaluated` rows across that corpus, every one of them a metric plus a
-# ~140-character stdout line and no stderr channel to land in. The next `hint` read that scalar and
-# concluded the HYPOTHESIS was answered and failed; the cause was 95 of 100 instances valid.
+# Historical incident details omitted.
 #
 # BOTH STREAMS, because the eval chooses which one it says it on and the record may not care.
 # `benchmarks/algotune/looplab_eval.py` says it on STDOUT, inside the same JSON line the metric
@@ -336,9 +320,7 @@ def _redacted_tail(redact, raw, chars: int) -> str:
 # scored nodes a GPU run produces — against the +8.8 MB / +27 % that was measured and refused.
 _SCORED_EVIDENCE_CHARS = 4_000
 
-# WHAT AN OPERATOR WITH `inline_repair_attempts: 0` GETS, stated plainly because it is the setting
-# most preserved runs actually carry (38 of 46 snapshots under `runs/`, INCLUDING `rubert-dr-0804` —
-# the 2345-repair incident this whole redesign was built for).
+# Historical incident details omitted.
 #
 # `0` still means "no OPERATOR cap": the grandfathering decision in
 # `core/config.py::LEGACY_CONFIG_SNAPSHOT_DEFAULTS` stands, an operator who chose unlimited in-node
@@ -401,15 +383,7 @@ def _durable_row_belongs(d, node_id: int, generation: int) -> bool:
     with a comment claiming it keyed "exactly as `replay._generation_matches` keys the same event".
     It did not, in both directions — measured over 18 raw values, three disagree:
 
-      * `generation: true` (or `node_id: true`) against lifecycle/node **1**. `bool` is a subclass
-        of `int`, so `True != 1` is False and the raw compare ADMITS the row, while
-        `core/models.py::coerce_node_id` rejects a bool on purpose (its docstring: `int(True) == 1`
-        would spuriously match node 1) and the fold therefore drops it. The inline comment on
-        `_durable_repair_ledger` worried about exactly this case — "a corrupt row the fold refuses"
-        — and then admitted one.
-      * `generation: "1"` / `node_id: " 1 "`. The fold coerces a numeric string and KEEPS the row;
-        the raw compare rejects it, so a resume reads a node's repair chain as empty and hands it a
-        fresh budget — the very defect the durable ledger exists to fix.
+Historical incident details omitted.
 
     A budget charged against rows the fold does not have (or refunded for rows it does) is not the
     log's budget, which is this whole family's premise. `_event_generation` is imported rather than
@@ -793,14 +767,7 @@ def abandoned_lifecycle_charges(events, state) -> list:
 def _durable_monitor_verdicts(events, node_id: int, generation: int) -> list[dict]:
     """This node's TRAINING-WATCHDOG verdicts as the event log records them, oldest first.
 
-    WHY THE REPAIR NEEDS THEM, measured in production on 2026-08-20/21. `runs/e5small-dr-unified-v4`
-    node 3 drew ELEVEN `train_monitor_alert` rows over ten hours, converging on a mechanism the
-    watchdog named precisely — the DCL mask sentinel is a FINITE `-1e9`, so a row whose mask removes
-    every negative drags the batch mean by ~`-1e9/batch` and the objective is unbounded below. The
-    stage then timed out, and the repair that followed opened: "Healthy training run ... a pure speed
-    failure, not a correctness one." It cut `n_epochs` 15 -> 3, left `dcl_threshold` and the sentinel
-    untouched, and the next attempt re-ran the same degenerate objective. ~17 GPU-hours, on one node,
-    because the agent that ACTS could not see what the agent that WATCHES had said eleven times.
+Historical incident details omitted.
 
     Nothing here is new evidence — the rows were already durable, already keyed to this node, and
     already paid for. This is a READ.
@@ -980,17 +947,7 @@ def _earlier_host_refusals(events, node_id: int, generation: int, attempt: int,
                            stage_name: str) -> int:
     """How many HOST-contract refusals this lifecycle recorded BEFORE this attempt was claimed.
 
-    The durable question `eval_attempt_rules.deferred_triage_verdict` asks as "is this the FIRST
-    host refusal?" — deliberately not "has this lifecycle repaired yet": inf13 node 6's first
-    refusal came after a crash repair. Counted off the `stage_finished` rows the attempt loop
-    appends (keyed by the fold's own generation rule, `_durable_row_belongs`): the refusing stage's
-    NAME (the caller has already proved, from the resolved pipeline, that this name is the host
-    stage — with a host scorer declared the candidate's own `score` is renamed `self_score`),
-    `expect_failed` WITH `numeric_declared`, and a seq before this attempt's FIRST
-    `eval_invocation_claimed` — the first, so rows a process that died mid-attempt appended for this
-    same attempt (a resume re-claims it) are not counted as an earlier refusal. With no claim row
-    found the newest matching row is this attempt's own and is not counted. Read from the log, so a
-    resume counts what an earlier process saw."""
+Historical incident details omitted."""
     from looplab.runtime.command_eval import NUMERIC_DECLARED_KEY
     claim_seq = None
     rows = []
@@ -1029,10 +986,7 @@ _INERT_CAUSE_TEXT = {
 
 
 def inert_path_account(inert: dict) -> str:
-    """The graded `[inert_path]` failure text: what was withheld, the change class and declared
-    kinds, and per marker the cause the matrix named (`activation.check_activation`). A marker no
-    code prints that is spelled `NAME=value` is said to be a config assignment -- not a printed
-    marker -- with the re-declaration that fits it, never an `echo` (minionerec-lora-v1 node 2)."""
+    """Historical incident details omitted."""
     import re as _re
     causes = inert.get("causes") or {}
     lines = []
@@ -1077,10 +1031,7 @@ def effective_canary_spec(engine) -> Optional[dict]:
 
 
 def withheld_metric(res) -> Optional[dict]:
-    """`{"metric": m, "reason": "inert_path"}` when `res` withheld a finite metric as `inert_path`,
-    else None -- the `withheld_metric` column `node_repaired` and `node_failed` carry so the number a
-    6.8 h run printed is a field, not a substring (minionerec-lora-v1 node 2, 2026-10-01). Never
-    read by selection, salvage or ranking."""
+    """Historical incident details omitted."""
     inert = getattr(res, "inert_path", None)
     value = inert.get("metric") if isinstance(inert, dict) else None
     if (not isinstance(value, (int, float)) or isinstance(value, bool)
@@ -1413,11 +1364,11 @@ def _workdir_manifest_digest(node) -> str:
     `canary_already_passed` reads off the FINISHED rows, is this digest less the activation manifest
     (`_canary_code_digest`).
 
-    `attempt` in it makes every stamp stale after every `node_reset` — the only thing that sets
-    `rerun_stage` — and the reuse gate itself is off (`_eval_prepare_workdir`): a lifecycle's OWN
-    stamp matched on its re-dispatch after a pause or a crash and vouched for stages that never ran
-    there. Taking `attempt` out revived a path that trusted whatever was on disk and was reverted;
-    doc 68 68.3e names what reuse must prove first.
+    `attempt` makes a reset's previous-lifecycle stamp differ, as it must. `_reset_reuse_start`
+    validates the previous manifest explicitly, then requires durable successful stage records,
+    matching current input keys and unchanged declared outputs before stamping the new lifecycle.
+    Removing `attempt` instead would trust whatever happened to be on disk; doc 68 68.3e records
+    why that shortcut was refused.
 
     Module-level on purpose: `_evaluate` takes a lazy `import hashlib` further down, which would make
     `hashlib` an unbound function-local for any closure defined above it.
@@ -1534,6 +1485,13 @@ _EVAL_DELIBERATE_STOPS = (KeyboardInterrupt, SystemExit, BudgetExceeded,
 
 
 
+class EvaluationAdmissionRefusal(ValueError):
+    """No user code ran: preserve the workdir and require a fresh explicit native retry."""
+    def __init__(self, code: str, detail: str):
+        self.code = code
+        super().__init__(detail)
+
+
 # THE ATTEMPT LOOP'S SIGNAL VOCABULARY (doc 52 row 21). A phase method reports the `break` /
 # `continue` / `return` it cannot execute on the driver's loop as ONE of these, and the driver
 # dispatches on identity. CLOSED: `tests/test_eval_attempt_phases.py` resolves every `return`
@@ -1605,11 +1563,7 @@ def _take_handed_admission_fold(node_id, tail_seq: int):
 
 
 def box_seen_working(state, events) -> bool:
-    """Has this run's box ever been seen WORKING — the precondition under which a missing declared
-    mount or interpreter is a fault (`runtime/infra_probe.py::admissible_faults`)? A node evaluated,
-    a run setup that finished, or any stage that ran to `ok` (critic 2026-10-08, second round: a run
-    whose every node had FAILED so far still ran its stages on that box, and a restart wiping the
-    env then sent each node to triage instead of pausing)."""
+    """Historical incident details omitted."""
     if state.evaluated_nodes():
         return True
     from looplab.events.types import EV_RUN_SETUP_FINISHED
@@ -1742,10 +1696,7 @@ class EvalAttempt:
     # the logs the engine itself appends to — the only ones read past those cursors.
     _marker_snapshot: Any = None
     _marker_engine_logs: Any = None
-    # What a graded BLOCK leaves for re-check without re-run (`_activation_recheck`): the exact log
-    # bytes this attempt wrote (`activation.LogSpan`s), the digest of the node's changed files as the
-    # attempt left them, those paths, and the withheld metric. Bound by SETTLE_OUTCOME, cleared by
-    # RUN_ATTEMPT — never carried past the attempt it describes (minionerec-lora-v1 node 2).
+    # Historical incident details omitted.
     activation_evidence: Any = None
     _live_questions: list = field(default_factory=list)
     _external_observed_phases: set = field(default_factory=set)
@@ -1852,10 +1803,7 @@ class EvalAttempt:
             pass          # unstamped => the next reuse check fails closed and rematerializes
 
     def workdir_matches(self, n) -> bool:
-        # Through THE reader of a file a candidate can write (review 2026-10-08, round 3): the stamp
-        # sits in the candidate's own cwd, and `read_text` on a FIFO planted in its place blocked a
-        # worker thread of settled recovery forever. `None` (absent, a link, not regular, swapped)
-        # is "no match", which fails closed into a re-run, as an unreadable stamp always did.
+        # Historical incident details omitted.
         raw = read_bounded_regular_file(self._manifest_stamp, 256)
         if raw is None:
             return False
@@ -1971,42 +1919,7 @@ class EvaluateMixin:
         introduces NO third spelling: it calls `SpeculationMixin._speculative_link_matches`, the
         engine's own one, already used by `_run_card_session`'s admission gate.
 
-        A MID-BUILD FRESHNESS RE-CHECK WOULD RECOVER NOTHING, measured 2026-08-29 so nobody builds
-        one on the intuition that checking earlier must help. The build is paid FIRST and freshness
-        is re-checked LAST, which reads like a lever: catch the staleness halfway through and refund
-        half the build. Over every event log preserved on this box there are 104 card builds, of
-        which 20 produced no evaluation — 11 closed with no node (3.37 h) and NINE minted a node the
-        run then passed over (7.75 h). For each of those nine, the first board-moving event inside
-        its own build window (`node_evaluated` / `node_failed` / `card_added` / `hypothesis_merged` /
-        `card_dropped`) is: NONE. Zero, on all nine. The board did not move DURING any discarded
-        build, so an earlier check had nothing to detect and the recoverable upper bound is
-        0.00 h of 7.75 h. Staleness arises at or after the build's end, which is exactly where the
-        check already runs.
-        THE REAL LEVER IS THE REBUILD DECISION, not the check's timing: `e5small-dr-unified-v9`
-        built card-3 twice (42.8 min -> node 3, 69.0 min -> node 6) and card-4 twice (51.2 min ->
-        node 4, 53.2 min -> node 7), and all four nodes were passed over — 3.6 h buying nothing on
-        two cards.
-        BUT A BLANKET BAR ON RE-ELECTING A DISCARDED CARD IS REFUSED, and the number is why. Over
-        the corpus EIGHT cards were built more than once, giving NINE rebuilds, and TWO produced an
-        evaluated node — `e5small-dr-unified-v9` card-2 -> node 2 -> **0.789466, which is that run's
-        CHAMPION**, and `e5small-dr-unified-v4` card-105 -> node 8 -> 0.792092, that run's
-        second-best number. A rule barring re-election after a discard would have destroyed v9's
-        best result outright. `producer_failed` bars a card for a reason that does not apply here:
-        it means the producer DIED, which is evidence about the card; a discard means the BOARD
-        MOVED, which is evidence about a moment.
-        WHAT THE SPLIT ACTUALLY SHOWS, and it is sharper than either rule: the outcome tracks WHAT
-        THE FIRST BUILD DID. Where the first build was SKIPPED with no node minted, 6 rebuilds gave
-        2 evaluated (one a champion), 2 failed nodes and 2 with no terminal in the log. Where the
-        first build MINTED a node that was then passed over, 3 rebuilds gave ZERO evaluated — v9
-        card-3 (three builds) and card-4 (two) between them. So the candidate rule is narrow: bar
-        re-election only after a MINTED-then-discarded node, never after a skipped build. n=3 in
-        that class, which is too few to ship on; this is recorded so the next reader starts from the
-        split rather than from the blanket bar the corpus refutes.
-        A COUNTING TRAP WORTH INHERITING: "minted a node that never started an eval" is NOT the
-        discard population. Nine further nodes match it and were merely QUEUED when their log ended
-        (8.69 h, including all six of `rubertlite-dr-unified-v7`'s), so the naive predicate reports
-        19.81 h of waste against a true 11.12 h. A discard needs proof the lane later freed and the
-        node was passed over anyway.
+Historical incident details omitted.
 
         The producer appends the link only after the consumer claims the build as the selection it
         actually wanted, and `_run_card_session` re-runs `speculative_card_is_fresh` immediately
@@ -2125,12 +2038,7 @@ class EvaluateMixin:
         row = {"node_id": a.node_id, "generation": a.generation, "attempt": a.attempt,
                "invocation_id": a.invocation_id, "outcome": outcome,
                "eval_seconds": round(float(seconds), 3)}
-        # AN `ok` SETTLE CARRIES WHAT IT MEASURED. The terminal is appended several statements (and,
-        # on a busy lock, seconds) later, and a process killed in between used to leave only this
-        # row — which says the evaluation succeeded and not what it found — so the resume re-ran it
-        # (run minionerec-backbones-v10 node 0: 26,830 s). With the parsed result here, the resumed
-        # process writes the terminal from it instead (`_eval_recover_settled`). Only on `ok`: every
-        # other outcome's next step is a repair or a terminal that re-reads nothing from this row.
+        # Historical incident details omitted.
         if outcome == "ok" and a.res is not None:
             row["result"] = _settled.settled_result_record(
                 a.res,
@@ -2142,12 +2050,57 @@ class EvaluateMixin:
 
     # ------------------------------------------------------------ the activation check
     #
-    # minionerec-lora-v1 node 2, 2026-10-01: the node changed ONLY `MiniOneRec/looplab/experiment.env`
-    # and declared `SFT_EVAL_SAMPLE=-2` / `SFT_RESUME_EVERY_MIN=0` -- env ASSIGNMENTS, which no code
-    # prints. Attempt 3 trained 6.8 h, printed 0.1126388, and the metric was withheld as `inert_path`;
-    # the repair added `echo` lines for the check and paid a full 7 h re-run. The three methods below
-    # are the engine half of `engine/activation.py`: the verdict (in a worker thread, it walks the
-    # tree), applying it to the attempt, and re-check without re-run after a manifest-only repair.
+    # Historical incident details omitted.
+
+    def _reused_stage_log_texts(self, a: "EvalAttempt") -> list:
+        from looplab.engine import activation as act
+        from looplab.events.types import EV_STAGE_FINISHED
+        latest = {}
+        for event in self.store.read_all():
+            data = event.data if isinstance(event.data, dict) else {}
+            if (event.type == EV_STAGE_FINISHED and data.get("node_id") == a.node_id
+                    and data.get("status") == "ok" and data.get("log_spans")):
+                latest[str(data.get("name") or "")] = data["log_spans"]
+        out = []
+        for stage in a.res.stages or []:
+            if not isinstance(stage, dict) or stage.get("status") != "reused":
+                continue
+            raw = latest.get(str(stage.get("name") or ""))
+            if not raw:
+                continue
+            try:
+                spans = [act.LogSpan(
+                    path=str(row["path"]),
+                    identity=(tuple(row["identity"]) if row.get("identity") is not None else None),
+                    floor=int(row["floor"]), end=int(row["end"])) for row in raw]
+            except (KeyError, TypeError, ValueError):
+                continue
+            from looplab.core.jsonutil import canonical_json_digest
+            for row, span in zip(raw, spans):
+                texts = act.read_log_spans([span])
+                expected = row.get("text_sha256")
+                if (texts is not None and isinstance(expected, str)
+                        and canonical_json_digest(texts, prefix="log1:") == expected):
+                    out.extend(texts)
+        return out
+
+    def _successful_stage_log_spans(self, a: "EvalAttempt") -> dict:
+        if a._marker_snapshot is None:
+            return {}
+        from looplab.engine import activation as act
+        from looplab.engine.eval_log_plan import _log_name_key
+        _texts, spans = act.attempt_log_texts(
+            a.workdir, a._t0, a._marker_snapshot, a._marker_engine_logs)
+        from looplab.core.jsonutil import canonical_json_digest
+        out = {}
+        for span in spans:
+            texts = act.read_log_spans([span])
+            if texts is not None:
+                out[_log_name_key(str(span.path).rsplit("/", 1)[-1])] = {
+                    "path": span.path, "identity": span.identity,
+                    "floor": span.floor, "end": span.end,
+                    "text_sha256": canonical_json_digest(texts, prefix="log1:")}
+        return out
 
     def _activation_verdict(self, a: "EvalAttempt", entries) -> tuple:
         """`(ActivationVerdict, evidence)` for THIS attempt's declaration `entries`. Worker thread.
@@ -2172,11 +2125,7 @@ class EvaluateMixin:
         changed, code_changed = act.node_change(a.node, ())
         cls = act.change_class(changed, code_changed)
         if mode == "graded" and cls == act.CHANGE_CONFIG_ONLY:
-            # An assignment-shaped marker a CONFIG-ONLY change's own config sets IS an env entry,
-            # whatever else in the tree contains its text (`activation.config_assignment_entry`;
-            # the sft_resume.py `why_off` literal of minionerec-lora-v1 node 2, 2026-10-01). On a
-            # CODE change it stays a log marker: the new code may print it only when its path runs,
-            # and reading it as "the value is set" scored a swallowed fallback (TP1, critic probe).
+            # Historical incident details omitted.
             entries, _ = act.normalize_config_assignments(
                 entries, act.touched_configs(a.workdir, changed))
         logs = act.log_entries(entries)
@@ -2186,6 +2135,7 @@ class EvaluateMixin:
         if not all(printed.values()) and a.workdir is not None:
             more, spans = act.attempt_log_texts(a.workdir, a._t0, a._marker_snapshot,
                                                 a._marker_engine_logs)
+            more.extend(self._reused_stage_log_texts(a))
             printed = {label: seen or act.log_entry_seen(e, more)
                        for (label, seen), e in zip(printed.items(), logs)}
         satisfied = {}
@@ -2252,8 +2202,7 @@ class EvaluateMixin:
           * (c) every new marker is in the attempt's captured streams or its own log bytes
             (`activation.read_log_spans`: the same file, not truncated, nothing appended counted).
 
-        minionerec-lora-v1 node 2, 2026-10-01: a declaration fixed after a 6.8 h run cost a full 7 h
-        re-run of code that had not changed."""
+Historical incident details omitted."""
         evidence, a.activation_evidence = a.activation_evidence, None
         if (evidence is None or getattr(self, "_activation_check", "graded") != "graded"
                 or a._engine_reason != "inert_path" or not getattr(a.res, "inert_path", None)
@@ -2329,11 +2278,7 @@ class EvaluateMixin:
         the 47 parent edges the feature cites. Only a reset or a stage-scoped re-run, whose workdir
         already exists, could produce one.
 
-        MEASURED across the three e5small runs with workspaces — 2 of 47 parent edges are nodes
-        whose source is byte-identical to a parent's, each having trained a full recipe to
-        re-measure it. One was proposed on a false premise about that parent ("node 10's UNCLIPPED
-        footprint"; node 10's config.yaml:279 reads `max_grad_norm: 1.0`), the other restated an
-        experiment ten nodes earlier in different words.
+Historical incident details omitted.
 
         RECORDED, NOT REFUSED. A refusal here would have destroyed both, and they are the only
         replicates this box has produced — they are what answers the noise question (|delta| 0.000573
@@ -2831,11 +2776,7 @@ class EvaluateMixin:
         `_SCORED_EVIDENCE_CHARS` window applied in place at the write site, because `stdout_tail`
         already exists and is on no prompt path.
 
-        Measured on `runs-armb/spectral_clustering` node 0 — metric 0.0, exit 0, and the whole
-        durable account of it is `{"speedup": 0.0, ...}`, one scalar. The loop then reasoned
-        correctly from the only thing it was given and concluded the HYPOTHESIS was answered and
-        failed, when what the eval knew (and did not get to say) was that 95 of 100 instances were
-        valid — an implementation fact, not a verdict on the idea.
+Historical incident details omitted.
 
         IT IS A RECORD AND NOT A VERDICT (invariant: text may nominate, never decide). The metric
         stays `res.metric`, read by the operator's own reader; `ok`, `feasible`, `violations` and
@@ -2924,26 +2865,14 @@ class EvaluateMixin:
                     + ". Do NOT edit the score stage: it is the operator's, "
                     "protected. Repair the candidate's own code. The scorer's own account:\n"
                     + fence_untrusted(self._redact(_host_diag.strip()), EVIDENCE_LABEL))
-        # A FAILED CANARY'S OWN ACCOUNT (doc 69 69.7), under `Settings.canary_failure_account`. The
-        # tail below is 500 characters of the canary header, the canary's stderr and an engine
-        # footer run together, so a traceback of a few lines cut the header off, the footer spent a
-        # fifth of the window, and the canary's stdout was never read at all: MiniOneRec v10 node 0
-        # was triaged for 44 min over the wrapper's own text while a one-line `EADDRINUSE` sat in
-        # the canary's log. The account is the header whole, both streams' tails labelled and fenced,
-        # and the footer (`eval_canary.py::canary_account`), within `CANARY_ACCOUNT_CHARS`. Built
-        # only through this engine's funnel — each stream redacted WHOLE, then cut — so it is not
-        # redacted again here: its fences are the engine's own text.
+        # Historical incident details omitted.
         _canary = getattr(res, "canary_account", None)
         if canary_failure_account(self) and isinstance(_canary, str) and _canary.strip():
             return _canary
         _stderr_tail = self._redact(res.stderr[-500:])
         _inert = getattr(res, "inert_path", None)
         if _inert and _inert.get("change_class"):
-            # THE GRADED ACCOUNT (`activation_check=graded`, minionerec-lora-v1 node 2, 2026-10-01):
-            # the matrix said WHY each marker blocks, and the repair needs that more than the
-            # historical sentence -- which listed "a flag or environment variable that was never
-            # set" and sent a config-only node to add `echo` lines for the check. Only the graded
-            # check stamps `change_class`, so a strict run's text below is byte for byte unchanged.
+            # Historical incident details omitted.
             return inert_path_account(_inert) + (_stderr_tail if _stderr_tail.strip() else "")
         if _inert:
             # Said FIRST and in full: this attempt did not fail in any way its stderr shows, so the
@@ -2983,22 +2912,7 @@ class EvaluateMixin:
                   and getattr(res, "metric", None) is None
                   and not getattr(res, "failed_stage", None)):
                 _text = f"[no_metric{_no_metric_hint}]\n{_text}"
-        # WHICH STAGE BROKE, KEPT WHERE THE READER WILL SEE IT. `command_eval._run_stages` writes its
-        # `stage '<name>' failed:` marker at the FRONT of `res.stderr`, and the 500-char TAIL above
-        # cuts it off for every failure whose stderr is longer than that — i.e. for every real
-        # traceback. So the four things this string IS (the repair prompt, `node_repaired.error_in`,
-        # the judge's history rows, the terminal's `error`) stopped naming the failing stage exactly
-        # when the pipeline had more than one thing that could have broken. Measured on
-        # runs/rubert-dr-0807: 9 of 12 `node_repaired` rows carried no stage name at all, including
-        # every `train` failure on a node whose FIRST stage was a Developer-declared `mine`. Nothing
-        # else on the repair path carries it — `Developer.repair` receives this text and nothing more
-        # (the `failed_stage` column exists only on the TERMINAL, which is written after the repair
-        # loop is over), so the model was left to infer the stage from the traceback's filename. That
-        # is not the same fact: two stages can run the same script, a stage can fail before printing
-        # anything, and a pipeline bug (a wrong argv in `looplab_stages.json`) has no filename at all.
-        # Attached AFTER the slice so the tail keeps its whole 500-char budget, and only when the text
-        # does not already name the stage — a short stderr, and every single-command eval (no
-        # `failed_stage`), stay byte-identical to what they were.
+        # Historical incident details omitted.
         _failed = str(getattr(res, "failed_stage", "") or "")
         if _failed and f"stage '{_failed}'" not in _text:
             _text = f"[failed stage: {_failed}]\n{_text}"
@@ -3135,10 +3049,7 @@ class EvaluateMixin:
             # (`eval_spec["stages"]` wins over the manifest), the corrected file is not what the eval
             # reads, the same failing declaration comes back, and the check fails again as it should.
             chain = self._resolved_stages(node, workdir)
-            # FIRST, and the most categorical: a node is its WHOLE pipeline. A contract failure
-            # aborts the run, so on v6 node 3 the declared `merge` stage and the operator's appended
-            # `score` never executed and the recovered number is a plain training run's. A corrected
-            # path cannot speak for stages that never ran.
+            # Historical incident details omitted.
             if not declared_pipeline_completed(chain, getattr(res, "stages", None) or (), stage):
                 return None
             if not recheckable_salvage(salvaged):
@@ -3522,27 +3433,11 @@ class EvaluateMixin:
         detail = self._crash_detail(exc)
         try:
             with anyio.CancelScope(shield=True):
-                # AN OSError ON A BROKEN BOX IS NOT THIS NODE'S END (incident 2026-10-06). A dead data
-                # mount under `_materialize`'s seed copy raises ENOTCONN here, and `engine_error` closed
-                # the node for good: after the operator remounted and resumed, the idea was gone. When
-                # the engine's own probe of the declared paths (`runtime/infra_probe.py`) finds the box
-                # broken, NO terminal is written — the node stays pending and is re-dispatched on the
-                # resume, like an attempt a pause withheld — and the pause names the fault. Asked only
-                # for an OSError: a KeyError on a hand-edited node is not about the box, whatever its
-                # mounts say. The attempt the raise cut short goes uncharged, as below.
+                # Historical incident details omitted.
                 #
-                # Asked of every LEAF, not of `exc` itself (critic 2026-10-08, driven): `_run_eval`
-                # runs inside RUN_ATTEMPT's task group, and anyio wraps even its own body's raise in
-                # an `ExceptionGroup`, so a stage-log write hitting ENOTCONN mid-eval reached this
-                # handler as a group and closed the node `engine_error` — the very end this branch
-                # exists to prevent. Only `_eval_prepare_workdir`, outside the group, arrived bare.
+                # Historical incident details omitted.
                 #
-                # The paths the raise NAMED ride along (review 2026-10-08): before the box was seen
-                # working, an absent declared mount counts only when the OSError was about it
-                # (`infra_probe.admissible_faults`) — an unrelated raise on a box whose `run_setup`
-                # has yet to create a mount used to pause over that mount, and the resume met the
-                # same raise before the setup ever ran. `_infra_verdict` is TOTAL: a probe that
-                # itself fails answers "no verdict" and the terminal path below runs.
+                # Historical incident details omitted.
                 verdict = InfraVerdict()
                 os_leaves = [leaf for leaf in exception_leaves(exc) if isinstance(leaf, OSError)]
                 if os_leaves:
@@ -3772,6 +3667,20 @@ class EvaluateMixin:
             # timing; only the record survives it.
             await self._land_terminal_before_ceiling(a, exc)
             raise
+        except EvaluationAdmissionRefusal as exc:
+            # Refusing a later-stage retry must never turn into an implicit full fit.
+            async with self._write_lock:
+                events = self.store.read_all()
+                state = fold(events)
+                node = state.nodes.get(node_id)
+                if (node is not None and node.attempt == a.generation
+                        and node.status is NodeStatus.pending and not node.tombstoned
+                        and node_id not in state.aborted_nodes):
+                    self.store.append(EV_NODE_FAILED, {
+                        "node_id": node_id, "generation": a.generation,
+                        "error": str(exc), "reason": exc.code,
+                        "eval_seconds": _durable_prior_seconds(events, node_id, a.generation)})
+                    self.store.append(EV_PAUSE, {"reason": exc.code, "detail": str(exc)})
         except Exception as exc:                                       # noqa: BLE001 — see above
             # `Exception`, NOT `BaseException`, and the line is deliberate. Every measured production
             # shape is an `Exception` — an OSError from `_materialize`/`_write_node_files`, an ENOSPC
@@ -3838,13 +3747,7 @@ class EvaluateMixin:
                                  run=None) -> bool:
         """Does a PAUSE withhold the evaluation work this attempt is about to START (doc 69 69.12)?
 
-        Asked where an attempt begins heavy work with no phase in front of it that re-read the run:
-        the canary -> full-eval hand-off (driven on 26.09: a pause at 03:47:52, the node's canary
-        passed at 03:55:01, and its full eval on 4xH200 was claimed the same second), and the HEAD of
-        every launch after the first — a repair (LLM work, measured at 1h40m), a dependency install
-        and the device reclaim (which can wait on the GPU pool) all sit between DECIDE_REPAIR's fold
-        and the next launch, and a pause landing there started the repaired attempt's canary or full
-        eval, canary on or off (critic 2026-09-29, driven). ADMIT asks before the first launch.
+Historical incident details omitted.
 
         Three conditions, each against a measured failure of a broader rule:
           * PAUSED, and not stopping. A finalize DRAINS in-flight evaluation (`docs/guide/
@@ -3875,19 +3778,9 @@ class EvaluateMixin:
         (`abandoned_lifecycle_charges`). A pause still never kills a RUNNING eval; it only refuses
         to START one.
 
-        `box_fault` — the run was paused THIS moment by the engine's own probe of the box before
-        the launch (`_eval_infra_pause(failed=False)`) — waives the second clause (review
-        2026-10-08): a later-stage reuse point is worth nothing to an attempt launched onto a dead
-        mount, which only holds its devices until the stage's own timeout (hours, on a hung NFS
-        `stat`) and then fails into the same pause. The re-dispatch after the operator fixes the box
-        re-runs the pipeline from its first stage; that is the cost, and it is the one the operator
-        sees. The other two clauses stand: a stop still drains, an intervention still owns its
-        terminal.
+Historical incident details omitted.
 
-        `run` — a fold of the log the caller took with NO await since — spares the rule its own
-        fold (review 2026-10-08: RUN_ATTEMPT folded before every launch and the rule folded again).
-        A caller that awaited anything after its fold (the box probe, the device reclaim) passes
-        nothing: a pause landing in that await must be read."""
+Historical incident details omitted."""
         if (not box_fault and a.next_start is not _UNSET and a.next_start is not None):
             # TOTAL (`[]` on a resolution hiccup): an unreadable manifest names no first stage, so the
             # reuse point stands and the attempt runs on.
@@ -3953,10 +3846,7 @@ class EvaluateMixin:
         targets = declared_targets(run_dir=getattr(self, "run_dir", None), repo_spec=spec,
                                    interpreter=getattr(getattr(self, "sandbox", None), "python", None),
                                    env=env)
-        # …and the TASK's own interpreter (`RepoTask.task_python`, the declared `eval.python`), which
-        # is what the incident's wiped `/var/tmp` conda env was (critic 2026-10-08): the sandbox's is
-        # the engine's own binary and can hardly vanish under it. Host tiers only — a Docker tier
-        # names an interpreter inside the image.
+        # Historical incident details omitted.
         task_python = spec.get("task_python") if isinstance(spec, dict) else None
         if (isinstance(task_python, str) and os.path.isabs(task_python)
                 and getattr(getattr(self, "sandbox", None), "python", None) is not None
@@ -3977,12 +3867,7 @@ class EvaluateMixin:
         lifecycle ran — is the precondition for any blame: the probe before a launch passes False,
         so it never blames. `baseline` is the attempt's `EvalAttempt.fill_baseline`. Writes nothing.
 
-        TOTAL (review 2026-10-08): it answers "no verdict" (an empty `InfraVerdict`) on anything
-        unexpected rather than raise. Its caller in the containment sits inside that handler's
-        last-resort swallow, so an error here — a malformed `_repo_spec` making `declared_targets`
-        raise `AttributeError`, no worker thread to probe in — lost BOTH the terminal and the pause,
-        leaving the node pending with nothing said; without a verdict the ordinary terminal path
-        runs, as on a healthy box."""
+Historical incident details omitted."""
         try:
             return await self._infra_verdict_unguarded(
                 node_id, generation, ran=ran, seen_working=seen_working,
@@ -4191,19 +4076,7 @@ class EvaluateMixin:
         and the full eval runs exactly as it would with the canary off — where the same fault, if it
         is real, meets the handler that already owns it. The deliberate stops are never contained.
 
-        ONE MECHANICAL RETRY ON THE CLOCK (doc 69 69.10). A canary the CLOCK stopped — over the chain
-        or on one stage's cap — with no engine fault and no operator intervention runs ONCE more, from
-        a fresh scratch tree, at `eval_canary.CANARY_RETRY_CAP_FACTOR` x its cap, and no model is
-        asked; that round's two rows carry `retry: 1`. A pass there lets the full eval start. A second
-        expiry is `canary_failure_result(expired=True)`, which `triage._failure_reason` names
-        `canary_timeout`: out of `REPAIRABLE_REASONS`, so the default gate ends the node with no
-        triage and no repair. Measured on MiniOneRec v10 before this: three triage -> repair rounds
-        on one such node (2 h 54 min, no metric) and a 1520-second triage that abandoned a backbone
-        which had passed twice. NOT retried: any other failure (one run, the ordinary crash path), and
-        an expiry recorded after the operator intervened or the run stopped taking work (`halted`) —
-        a retry is new work; that attempt fails on the one expiry it had, and DECIDE_REPAIR's own
-        fold then holds a paused node pending or settles a stopping one.
-        """
+Historical incident details omitted."""
         spec = self._effective_canary_spec()
         digest = _canary_code_digest(a.node)
         scratch = self._canary_scratch(a.node_id)
@@ -4463,6 +4336,10 @@ class EvaluateMixin:
         # cross into the sandbox. See `_assert_speculative_selection_confirmed`.
         self._assert_speculative_selection_confirmed(a.state, a.node)
         a.generation = a.node.attempt       # immutable identity of THIS worker's node lifecycle
+        from looplab.core.execution_scope import launch_scope_error
+        scope = launch_scope_error(self.run_dir, getattr(a.node, "job_role", None))
+        if scope is not None:
+            raise EvaluationAdmissionRefusal(scope["code"], scope["message"])
         # ...and read by the containment handler at the top through `a.generation`, which has no
         # other way to name the lifecycle it is closing. Re-folding there would read whatever
         # generation is CURRENT at failure time, which after a concurrent reset is a different
@@ -4675,60 +4552,110 @@ class EvaluateMixin:
             pipeline_stages=self._resolved_stages(a.node, a.workdir),
             enforce_drift=(getattr(self, "eval_trust_mode", "ratify_freeze") == "ratify_freeze_drift"))
 
+    def _protocol_inputs_changed_since(self, a: "EvalAttempt", seq: int) -> bool:
+        """Whether a task/files amendment landed after a completed stage."""
+        path = self.run_dir / "protocol_amendments.jsonl"
+        if not path.is_file():
+            return getattr(a.node, "protocol_version", None) is not None
+        try:
+            uid = next((e.data.get("run_uid") for e in a.events_at_start
+                        if e.type == "run_started" and isinstance(e.data, dict)
+                        and e.data.get("run_uid")), None)
+            with open(path, "rb") as fh:
+                for line in fh:
+                    import json
+                    row = json.loads(line)
+                    if not isinstance(row, dict) or (uid is not None and row.get("run_uid") != uid):
+                        continue
+                    if row.get("kind") not in ("task", "files"):
+                        continue
+                    at_seq = row.get("at_event_seq")
+                    if type(at_seq) is not int:
+                        return True
+                    # The sidecar names the LAST existing event, not a new event
+                    # of its own: equality is an amendment after this stage too.
+                    if at_seq >= seq:
+                        return True
+        except (OSError, ValueError, TypeError):
+            return True
+        return False
+
+    def _reset_reuse_start(self, a: "EvalAttempt"):
+        """The reset stage only while every preceding stage is proved complete and unchanged."""
+        from looplab.events.types import EV_STAGE_FINISHED
+        from looplab.runtime.stage_identity import reuse_refusal
+
+        stage = getattr(a.node, "rerun_stage", None)
+        if not stage or a.generation < 1 or not a.workdir.is_dir() or a._superseded_marker.exists():
+            return None
+        previous_node = a.node.model_copy(update={"attempt": a.node.attempt - 1})
+        if not a.workdir_matches(previous_node):
+            return None
+        stages = self._resolved_stages(a.node, a.workdir)
+        names = [str(s.get("name") or "") for s in stages]
+        if stage not in names:
+            return None
+        index = names.index(stage)
+        retained = list(getattr(a.node, "stages", None) or [])
+        if index == 0 or len(retained) != index:
+            return None
+        if [str(row.get("name") or "") for row in retained] != names[:index]:
+            return None
+        if any(row.get("status") != "ok" for row in retained):
+            return None
+        records = {}
+        for event in a.events_at_start:
+            data = event.data if isinstance(event.data, dict) else {}
+            if (event.type == EV_STAGE_FINISHED and data.get("node_id") == a.node_id
+                    and data.get("generation", a.generation) < a.generation
+                    and data.get("status") != "reused"):
+                records[str(data.get("name") or "")] = (event.seq, data)
+        cwd = (self._eval_spec or {}).get("cwd") if isinstance(self._eval_spec, dict) else None
+        key = self._stage_key_fn(a.workdir, cwd=cwd)
+        if key is None:
+            return None
+        for i, name in enumerate(names[:index]):
+            seq, candidate = records.get(name, (None, None))
+            if candidate is None or candidate.get("status") != "ok" or seq is None:
+                return None
+            if self._protocol_inputs_changed_since(a, seq):
+                return None
+            current_key, _reason = key(stages, i)
+            if reuse_refusal(current_key, candidate, a.workdir) is not None:
+                return None
+        return stage
+
     def _eval_prepare_workdir(self, a: "EvalAttempt") -> None:
-        """PREPARE_WORKDIR — the node directory, materialized afresh for every lifecycle (reuse
-        across a stage-scoped reset is OFF, doc 68 68.3e — see `_reuse` below), stamped with its
-        manifest; then the build delta and the metrics-sidecar binding. The stamp/superseded-marker
-        helpers live on `EvalAttempt`."""
+        """PREPARE_WORKDIR — safely reuse a reset stage's prefix, else materialize afresh."""
         a.workdir = self.run_dir / "nodes" / f"node_{a.node_id}"
-        # Phase 2 stage-scoped re-run was meant to REUSE the existing workdir (earlier stages'
-        # artifacts — the checkpoint `train` wrote) instead of re-seeding it, which wipes them; that
-        # reuse is off until its precondition can be proven (below).
         a._superseded_marker = a.workdir / ".looplab-superseded"
-        # Stage reuse is the ONE path that evaluates a workdir it did not just build, so it must
-        # prove the bytes on disk are the manifest the folded node claims. `node_repaired` is
-        # appended BEFORE the repaired files are written (both under the same attempt), so a
-        # process death in that window leaves state claiming the repair while the workdir still
-        # holds the pre-repair source. A later stage-scoped reset then sets `rerun_stage` without
-        # any superseded marker (only the live process writes one, and it died), and reuse would
-        # skip materialization and score the OLD bytes as if they were the repair.
-        # The stamp closes that: it is written only after the files are on disk, so a crash in the
-        # gap leaves it naming the previous manifest and reuse is refused. Fail-closed by
-        # construction — a missing/unreadable/mismatched stamp just forces the full materialize
-        # that every other entry path already does, costing artifacts, never correctness.
         a._manifest_stamp = a.workdir / ".looplab-manifest"
-        # …AND THE REUSE ITSELF IS OFF (doc 68 68.3e), because the stamp cannot carry it. The stamp
-        # says the workdir HOLDS this manifest's files; reuse needs every stage before `rerun_stage`
-        # to have COMPLETED here under it, and nothing on disk says so. With `attempt` in the digest
-        # a reset's first dispatch never matches (the feature has been dead since 2026-07-28), and
-        # the only dispatch that did match was the WRONG one: a lifecycle this method had rebuilt and
-        # stamped, re-dispatched after a pause or a crash before its stages ran — its `train` read as
-        # `reused` and its `score` scored a checkpoint that was not there (critic 2026-09-29, driven:
-        # 0.1 where the same code scored 0.9). Every lifecycle is materialized afresh until reuse
-        # can prove its precondition from the fold; the stamp keeps its other reader, settled
-        # recovery, which asks only whether the files are this manifest's.
-        _reuse = False
+        _reuse = self._reset_reuse_start(a)
+        requested_stage = a.node.rerun_stage
+        first_stage = next((s.get("name") for s in self._resolved_stages(a.node, a.workdir)), None)
+        if not _reuse and requested_stage and requested_stage not in ("eval", first_stage):
+            raise EvaluationAdmissionRefusal(
+                "stage_reuse_unavailable",
+                "The requested later-stage retry cannot prove its retained stages unchanged. "
+                "No stage ran and the workdir is preserved. Inspect the changed inputs/outputs; "
+                "a full pipeline requires an explicit retry from_stage=eval and fresh admission checks.")
         if not _reuse:
-            seed = self._materialize(a.node, a.workdir) # seed tree -> node edits -> task assets
-            # Attempt-local, never a shared seeder cache or a terminal-time source
-            # read. Legacy/patched materializers returning None mean unobserved.
+            seed = self._materialize(a.node, a.workdir)
             a.base_revision = ({**seed, "node_id": a.node_id, "generation": a.generation}
                                if isinstance(seed, dict) else None)
-            a.stamp_workdir(a.node)                # the workdir now IS this manifest
-        # THE BUILD DELTA, here rather than on the eval-start receipt: the question is about
-        # BYTES ON DISK, and until the line above there are none. Fold-ignored and diagnostic,
-        # so a concurrent eval task may append it (invariant #1); best-effort throughout, so it
-        # can never cost this node its evaluation.
+        else:
+            data = next((event.data for event in reversed(a.events_at_start)
+                         if isinstance(event.data, dict)
+                         and event.data.get("node_id") == a.node_id
+                         and event.data.get("generation") == a.generation - 1
+                         and event.type in ("node_evaluated", "node_failed")), {})
+            provenance = data.get("metric_provenance") or {}
+            revision = provenance.get("base_revision") if isinstance(provenance, dict) else None
+            a.base_revision = revision if isinstance(revision, dict) else None
+        a.stamp_workdir(a.node)
         self._record_node_build_delta(a.node)
-        if not _reuse:
-            # A stage-scoped re-run whose workdir was GONE has nothing to reuse — the re-seed just
-            # wiped any artifacts. Skipping earlier stages now would run the restarted stage against
-            # MISSING inputs, so drop the start_stage and re-run the FULL pipeline instead.
-            if a.node.rerun_stage:
-                a.node.rerun_stage = None
-        # Bind mutable TensorBoard/metric sidecars to this exact lifecycle before launching any
-        # user code.  A reset can reuse the node directory (stage restart), so the serving layer
-        # also filters points by this start time instead of relabelling an older curve.
+        if not _reuse and a.node.rerun_stage:
+            a.node.rerun_stage = None
         try:
             begin_metrics_attempt(a.workdir, a.generation)
         except Exception:  # noqa: BLE001 - telemetry must never block the evaluation itself
@@ -4944,6 +4871,10 @@ class EvaluateMixin:
         # raised before that — a spend ceiling above all — found the PREVIOUS attempt's result still
         # bound, and `_land_terminal_before_ceiling`, whose guard reads None as "nothing was
         # measured", wrote that stale result as this lifecycle's terminal.
+        from looplab.core.execution_scope import launch_scope_error
+        scope = launch_scope_error(self.run_dir, getattr(a.node, "job_role", None))
+        if scope is not None:
+            raise EvaluationAdmissionRefusal(scope["code"], scope["message"])
         a.res = None
         a.canary_failed = False
         a.canary_failed_stage = None
@@ -4951,32 +4882,12 @@ class EvaluateMixin:
         a.infra_note = ""
         a.infra_verdict = None
         a.fill_baseline = None
-        # THE BOX BEFORE THE LAUNCH (`runtime/infra_probe.py`, incident 2026-10-06). A launch on a dead
-        # data mount or a vanished interpreter is hours of GPU spent to learn what a `stat` answers in
-        # milliseconds — and, on a resume after a container restart, it is the FIRST thing the run does.
-        # A fault pauses the run here, and the one pause decision below withholds this attempt exactly
-        # as it withholds one under an operator pause: no terminal, the node stays pending.
+        # Historical incident details omitted.
         _events_now = self.store.read_all()
         _run_now = fold(_events_now)
         infra_paused = (not _run_now.halted
                         and await self._eval_infra_pause(a, failed=False))
-        # ONE pause decision, and the devices follow it (critic 2026-09-29, MEDIUM-1): a withheld
-        # attempt takes nothing back — on a busy pool the reclaim WAITS, and a paused engine sat on
-        # the pool for devices it would never use — and a launching one is re-pinned before it
-        # launches. The rule is asked again only when the reclaim took devices back, because that
-        # take may have waited: a pause landing during the wait withholds the attempt, and the
-        # devices it took go back when the lane settles (`_settle_eval_resource_reservation`).
-        # The FIRST launch is asked too when the probe just paused the run: ADMIT asked before it, on a
-        # run that was not paused yet. …AND WHEN THE RUN WAS ALREADY HALTED HERE (review 2026-10-08):
-        # with `eval_parallel > 1` a sibling's probe pauses the run over a dead mount while this
-        # lifecycle is between ADMIT and its first launch (PREPARE_WORKDIR runs in a worker and can
-        # take minutes), and the halted run skipped this probe — so the first launch asked neither
-        # the probe nor the pause rule, the reclaim (nothing given back) answered False, and the
-        # node launched onto the box its sibling had just found dead. The rule then reads the fold
-        # taken above (`run=`: no await since); the probe is not asked again on a halted run, whose
-        # pause already says the box was found broken.
-        # `box_fault=` only when the probe paused, `run=` only on the halted branch: every other
-        # launch asks the rule with the argument alone.
+        # Historical incident details omitted.
         if (((a.launches or infra_paused or _run_now.halted)
              and (self._pause_withholds_attempt(a, box_fault=True) if infra_paused
                   else self._pause_withholds_attempt(a, run=_run_now) if _run_now.halted
@@ -4996,11 +4907,7 @@ class EvaluateMixin:
         # because a producer reset during a repair is as real as one before the first.
         if await self._refuse_unusable_artifacts(a):
             return PHASE_RETURN
-        # THE "BEFORE" OF A SECOND FULL-DISK MEETING (review 2026-10-08, `infra_probe.FillBaseline`):
-        # a lifecycle that already met a full run directory is blamed at its next meeting only on
-        # its OWN growth during that attempt, measured against this. Only for such a lifecycle —
-        # the walk is bounded but not free, and every other launch owes it nothing. In a worker:
-        # the run directory may be the slow filesystem the probe exists for.
+        # Historical incident details omitted.
         if (getattr(a, "workdir", None) is not None
                 and run_dir_full_met(_events_now, a.node_id, a.generation)):
             from looplab.runtime.infra_probe import fill_baseline
@@ -5020,15 +4927,7 @@ class EvaluateMixin:
         # not asked for anything yet. See that function for the whole argument.
         _watching_logs = needs_log_snapshot(self, _eval_spec)
         a._log_snapshot = snapshot_training_logs(a.workdir) if _watching_logs else None
-        # THE FOURTH READER: the activation-marker check after a success (below) reads the stage
-        # logs for a declared marker, and a stage that re-ran APPENDS to its log — without this
-        # attempt's "before" an earlier attempt's marker vouched for a path the scored run never
-        # took (critic crit_v51 F1b / crit_v52 F2, driven). The watchers' snapshot when there is
-        # one, else its own, taken only for a node that declares a marker (a node that declares
-        # none costs one bounded manifest read here and nothing else).
-        # Typed since the graded check (minionerec-lora-v1 node 2, 2026-10-01): a node declares
-        # MARKERS when its manifest holds a `log` entry; `env`/`file` entries read no log. A run
-        # with the check `off` reads no manifest at all.
+        # Historical incident details omitted.
         from looplab.engine.activation import log_entries, read_manifest, read_markers
         a.activation_evidence = None
         _mode = getattr(self, "_activation_check", "graded")
@@ -5258,7 +5157,9 @@ class EvaluateMixin:
         # deadlock / wedged CUDA op) still counts: the metric is real, the non-zero exit is only
         # the kill. Self-gating — `res.metric is not None` on a stall means the value WAS emitted
         # before the silence. NOT for a real deadline timeout (that is still mid-training).
-        a.ok = attempt_succeeded(a.res, artifact=False)
+        a.ok = attempt_succeeded(a.res, artifact=False,
+                                 objective_key=getattr(a.state, "objective_key", None),
+                                 run_direction=getattr(a.state, "direction", None))
         # AN ARTIFACT NODE (doc 73 §1.4) succeeds on a CLEAN pipeline with no metric: the engine's own
         # classifier says the run exited 0, broke no stage contract and only printed no number
         # (`triage._failure_reason == "no_metric"`). Any other reason — a crash, a timeout, a missing
@@ -5276,13 +5177,7 @@ class EvaluateMixin:
         # that nothing printed means the number measured the path this node meant to replace. The
         # metric is withheld as `drift` withholds one, and `_failure_reason` names it `inert_path`.
         #
-        # HOW it is asked is `Settings.activation_check` (minionerec-lora-v1 node 2, 2026-10-01: a
-        # config-only node's 6.8 h metric withheld over two `NAME=value` markers no code prints).
-        # `strict` is the historical rule, the same `missing` list for the same manifest; `graded` is
-        # the deterministic matrix (`activation.check_activation`), whose WARN keeps `a.ok` and the
-        # metric and rides on `a.res.activation` -- the terminal's `activation` record, never a
-        # violation (a violation makes the node infeasible); `off` reads nothing. In a WORKER thread:
-        # the graded matrix walks the node's tree for each marker's printer.
+        # Historical incident details omitted.
         if a.ok and getattr(self, "_activation_check", "graded") != "off":
             from looplab.engine.activation import KIND_LOG, read_manifest, read_markers
             # `strict` reads exactly what master read (`read_markers`: the manifest's STRINGS, typed
@@ -5357,22 +5252,7 @@ class EvaluateMixin:
         # mine ✓ / train ✗, and a later stage-scoped re-run knows which stages already passed.
         # Empty on the classic single-command eval, so that path appends nothing, as before.
         #
-        # This used to be appended ONLY after the attempt loop, from the LAST attempt's `res`,
-        # and that made the log lie about every REPAIRED multi-stage node. Once the reuse
-        # predicate starts skipping a completed earlier stage, every later attempt reports it
-        # as `{"status": "reused", "exit_code": 0, "seconds": 0.0}` — so the ONE record the log
-        # ever received was the zero-work marker, and the fold's own defence against exactly
-        # that (`events/replay.py::_on_stage_finished`: "a reused marker must NOT clobber that
-        # attempt's REAL completion record ... else the node reads as if it trained in 0s") was
-        # VACUOUS, because the real record it protects was never written by anyone.
-        # `tests/test_events_replay.py::test_fold_reused_stage_marker_does_not_clobber_real_record`
-        # drove that guard from hand-built events, so nothing went red.
-        # Measured on runs/rubert-dr-0807: node 2 trained for ~6,900 s and its folded stage
-        # record read `train reused / exit 0 / 0.0 s`; node 0's Developer-declared `mine` stage
-        # ran four times (two crashes, then two successes) and read `mine reused / 0.0 s`.
-        # The replayable stage-state authority could not tell "this stage succeeded and its
-        # artifacts were reused" from "this stage never ran in this run at all", which is the
-        # difference between a healthy pipeline and a silently skipped one.
+        # Historical incident details omitted.
         #
         # One append per attempt is what the fold was always written to read, and the
         # de-duplication rule stays THERE (last-wins by name, a real record beats a reused
@@ -5385,7 +5265,13 @@ class EvaluateMixin:
         # what changes is the RATE, bounded by attempts x stages. Making them diagnostic
         # instead is not available: the fold reads them.
         async with self._write_lock:
+            from looplab.engine.eval_log_plan import _log_name_key
+            stage_log_spans = self._successful_stage_log_spans(a)
             for _st in (a.res.stages or []):
+                if isinstance(_st, dict) and _st.get("status") == "ok":
+                    span = stage_log_spans.get(_log_name_key(str(_st.get("name") or "") + ".log"))
+                    if span is not None:
+                        _st = {**_st, "log_spans": [span]}
                 self.store.append(EV_STAGE_FINISHED,
                                   {"node_id": a.node_id, **_st, "generation": a.generation})
         if a.ok:
@@ -5514,15 +5400,7 @@ class EvaluateMixin:
                     await self._repair_salvaged_cause(
                         a.node, a.state, a.workdir, a.generation, a.salvaged, a.err, a.reason, a.attempt,
                         a.stamp_workdir))
-                # THE CONTRACT, RE-ASKED AGAINST THE CORRECTED DECLARATION (backlog F1e).
-                # Measured on `rubertlite-dr-unified-v6` node 3: its stage exited 0, WROTE
-                # its checkpoint, printed the number, and failed its declared artifact
-                # contract because the declaration missed the testbed's composed
-                # `<run_name>_<model>` suffix. The best number the run had (0.728113) then
-                # carried a `metric_salvaged` violation, was excluded from
-                # `feasible_nodes()`, and could neither become champion nor be bred from.
-                # ONE node — see `metric_salvage.py`'s RE-CHECK section for why this is
-                # deliberately not a claim about any operator.
+                # Historical incident details omitted.
                 #
                 # The metric was never actually unmeasured: the pipeline DID write the
                 # artifact, and the fix above has just corrected the sentence that named it.
@@ -5590,15 +5468,7 @@ class EvaluateMixin:
             a.triage_outcome = ("abandon", "the run is stopping (a finalize was requested): no further "
                                 "repair of this node")
             return PHASE_SETTLED
-        # THE BOX, BEFORE THE CANDIDATE (incident 2026-10-06, `runtime/infra_probe.py`). Everything
-        # below treats this failure as the CANDIDATE's — a dependency round, a paid triage, a Developer
-        # repair, a `reject_idea` that closes the lineage. When the engine's own probe of the paths the
-        # operator declared finds the box broken (a dead data mount, a full or read-only run directory,
-        # a vanished interpreter), none of that can help: the run is paused HERE and the attempt is
-        # withheld exactly as the paused branch below withholds one, so the node stays pending and its
-        # chain resumes, uncharged, once the operator fixes the box and resumes. AFTER the stop check
-        # (a stop is final and the finish waits on this worker), BEFORE the pause check (that branch is
-        # what withholds the attempt, and it must name why).
+        # Historical incident details omitted.
         #
         # ASKED ON A PAUSED RUN TOO (round 3): with `max_parallel > 1` one node fills the shared run
         # directory and a sibling that died ENOSPC usually reaches this point first and pauses, so
@@ -5720,15 +5590,7 @@ class EvaluateMixin:
         floor_stop = repair_floor_stop(
             attempt=a.attempt, operator_cap=int(self._inline_repair_attempts or 0),
             ceiling=_UNLIMITED_REPAIR_CEILING)
-        # THE COST FLOOR, and it is the one that reaches the chains the retrain cap cannot.
-        # `_repair_forces_full_retrain` charges `inline_repair_retrain_cap` only for a
-        # repair that DISCARDS completed earlier-stage work, which is correct and is why a
-        # first-stage chain — v8 node 3 re-running an 82-minute `mine`, driven to 51 full
-        # evaluations and 0 charges with no judge wired — is charged nothing at all. So the
-        # same operator number is also spent in SECONDS, against what the task DECLARES one
-        # full pipeline costs. Read `repair_judgment.repair_redone_work_stop` for why this
-        # is not simply "charge the cap for a first-stage repair too" (measured: that
-        # abandons v8 node 3 one attempt before its `mine` stage passed).
+        # Historical incident details omitted.
         #
         # Checked SECOND so the message order matches `repair_floor_stop`'s own rule — an
         # operator who spelled a count cap must read about the bound they set — and computed
@@ -5852,16 +5714,7 @@ class EvaluateMixin:
         # construction, none of them — this is the one place in the node loop where that
         # distinction is the whole point of the read.
         #
-        # IT RODE HERE ON THE LOOP THREAD UNTIL 2026-08-30, and the honest number is small:
-        # `read_all()` warm plus the O(whole log) `_durable_monitor_verdicts` walk measured
-        # 1.0 + 0.51 ms on the largest healthy log on this box (e5small-dr-unified-v4, 10.3
-        # MB, 12,579 events) and 0.7 + 0.22 ms on rubertlite-dr-unified-v8 — once per FAILED
-        # attempt, i.e. tens of milliseconds across a whole run. The note that used to sit
-        # here said "every concurrent eval's terminal and the whole serve/read side stall
-        # behind them", which overstates it by three orders of magnitude against the paid
-        # propose call that motivated the comparison. It is folded in anyway because the
-        # hop is ALREADY PAID one line up and the term is O(log) in a run that only grows:
-        # what the loop thread is worth is not decided per call site.
+        # Historical incident details omitted.
         #
         # A worker-thread READ is sanctioned by invariant #1's own note — `EventStore`
         # serializes `append`/`read_all` through its own locks — and nothing in this hop
@@ -6116,15 +5969,7 @@ class EvaluateMixin:
                         "resolved": self._drain_dep_receipts(installed),
                         "eval_seconds": a.attempt_eval_seconds})
                 return PHASE_RETRY   # re-run with the library present (no repair attempt spent)
-        # THE CRITIC (F8). The triage judge just said "repair" — the question it answers is
-        # "given this failure, do I know what to change?", and a model answers that
-        # optimistically and one step at a time. The question nothing was asking is about the
-        # SHAPE of the chain: are the attempts addressing different causes, or circling one?
-        # That is what defeated every counter here. `rubert-dr-0804` produced 369 distinct
-        # error signatures on one wall, so the anti-stuck recurrence counter never saw a
-        # repetition; v6 node 5 halved a batch size three times, so no count was near its cap.
-        # Both are obvious to something reading the trajectory and invisible to something
-        # counting it.
+        # Historical incident details omitted.
         #
         # DELIBERATELY BELOW THE INSTALL BRANCHES. A dependency round spends no repair
         # attempt and changes the environment, so a chain that looks repetitive across two
@@ -6147,14 +5992,7 @@ class EvaluateMixin:
             critic = await self._offload_under_proposal_sink(functools.partial(
                 self._repair_critic, a.state, a.node, _judged, a.attempt + 1,
                 monitor_verdicts=a._monitor_verdicts))
-            # THE VERDICT REACHES THE DURABLE RECORD, WHATEVER IT IS. Until 2026-08-15 the
-            # critic left no trace of what it ANSWERED: its span carried
-            # `{attempt, node_id, generation}`, a `continue` appended nothing at all, and a
-            # stop was visible only indirectly as the `abandon` prose below. Measured on
-            # `rubertlite-dr-unified-v8`, whose chains were genuinely progressing: 0
-            # occurrences of the word "critic" in `events.jsonl` against several
-            # consultations — i.e. exactly the case where a missing record goes unnoticed,
-            # because the verdicts happened to be right.
+            # Historical incident details omitted.
             #
             # WHY THE ROW EXISTS AT ALL, given that `continue` moves nothing: F8's premise is
             # that a JUDGEMENT replaces a counter as the stop rule, and a judgement that
@@ -6602,10 +6440,7 @@ class EvaluateMixin:
                 # charge in counts.
                 "eval_seconds": a.attempt_eval_seconds,
                 "unparseable_repairs": a.unparseable_repairs,
-                # THE NUMBER `inert_path` WITHHELD, as a structured column rather than a substring of
-                # `error_in` (minionerec-lora-v1 node 2: 0.1126388 after 6.8 h). A RECORD: nothing
-                # selects, salvages or ranks on it -- the reason stays engine-final and never
-                # salvaged. Omitted on every other failure, so no other row changes shape.
+                # Historical incident details omitted.
                 **({"withheld_metric": _withheld} if _withheld else {})}
             if repaired_footprint is not None:
                 repair_payload.update({
@@ -6645,16 +6480,7 @@ class EvaluateMixin:
         # a repair chain that is working from one that is rewriting the same lines: the developer's
         # own rationale says what it INTENDED to change, `changed` says what it did.
         a.repair_log.append(repair_ledger_row(repair_payload, attempts=a.attempt))
-        # AN INERT CHAIN CANNOT MAKE PROGRESS, AND THE ENGINE CAN PROVE IT. `REPAIR_INERT`
-        # means the engine compared the bytes and nothing the evaluation runs moved: the files
-        # this loop is about to re-materialize are the ones already on disk (bar the activation
-        # manifest, 69.10a — which the engine's marker check reads and no pipeline of its own
-        # does; a candidate whose code reads its own manifest is outside that rule), and
-        # `_safe_reuse_start` below will reuse every completed stage because
-        # the change set it is asked about is empty, and the eval it is about to pay for is the
-        # eval that just failed. Repeating that is not a retry, it is a
-        # transcription error with a GPU attached — rubertlite-dr-unified-v4 node 6 spent two
-        # in a row at ~2.7 h each, and rubertlite-dense-retrieval node 57 three.
+        # Historical incident details omitted.
         #
         # ONE is allowed: a developer can legitimately burn a turn budget reading before it
         # edits, and stopping a node on that would be a regression. The bound is on the
@@ -6689,11 +6515,7 @@ class EvaluateMixin:
                 "run; abandoning in-node repair — the node ends here, and the loop's next "
                 "proposal is fresh work rather than another attempt at this one"))
             return PHASE_SETTLED
-        # RE-CHECK WITHOUT RE-RUN (`_activation_recheck`, minionerec-lora-v1 node 2): a repair that
-        # rewrote only the activation manifest after `inert_path`, whose new markers' printers are in
-        # the node's changed code, is held to the failed attempt's own output instead of being run
-        # again. The row above is already durable; the terminal follows with the metric that
-        # attempt printed and no new `eval_invocation_claimed`.
+        # Historical incident details omitted.
         if await self._activation_recheck(a, changed, new_deleted, _code_changed):
             return PHASE_SETTLED
         _stages = self._resolved_stages(a.node, a.workdir)
@@ -6913,17 +6735,7 @@ class EvaluateMixin:
                 # probe source (`EXTRA_METRIC_ENGINE`), turning the flag off no longer deletes
                 # the CUDA proof the calibration receipt gate re-derives from this very payload.
                 #
-                # A GATE HERE AND NOT AT CAPTURE, deliberately: both auto-capture channels
-                # (`command_eval` for repo tasks, the two `sandbox.py` tiers for solution.py)
-                # funnel through this payload, so one choke point covers both instead of two
-                # half-plumbed switches. And this is a WRITE-side policy only — the fold never
-                # consults it, so an already-recorded run replays identically under either value
-                # (`tests/test_auto_extra_metrics.py`), which is what keeps invariant #6 honest
-                # without adding a key to the `run_started` payload whose exact key SET
-                # `search/speculation_quality.py` compares for equality.
-                # The DECLARED names survive the map's bound whatever their position, and what
-                # the bound left out is COUNTED on the row (`extra_metrics_omitted`) rather than
-                # vanishing (review 2026-10-14 section 7: ~615 stdout keys, 3 of 4 key metrics lost).
+                # Historical incident details omitted.
                 _declared_extras = [
                     k for k, c in (a.res.extra_metrics_provenance or {}).items()
                     if c == EXTRA_METRIC_DECLARED] if isinstance(
@@ -6931,9 +6743,7 @@ class EvaluateMixin:
                 _extras = normalize_extra_metrics(a.res.extra_metrics, priority=_declared_extras)
                 _extras_omitted = extra_metrics_overflow(
                     a.res.extra_metrics, priority=_declared_extras)
-                # The TAGS of the kept values survive the bound too, or a declared value kept
-                # past it would read `unknown` (the channel map is built auto-first) and the
-                # gate below would drop it (review g8, 2026-10-15).
+                # Historical incident details omitted.
                 _extra_channels = normalize_extra_metric_channels(
                     a.res.extra_metrics_provenance, priority=_extras)
                 _extra_dirs = normalize_extra_metric_directions(a.res.extra_metrics_direction)
@@ -6965,6 +6775,9 @@ class EvaluateMixin:
                     # the whole-sweep wall-clock; per-trial seconds are audit-only). [] normally.
                     "trials": a.res.trials or [],
                 }
+                if (a.res.metric is None and getattr(a.node, "kind", None) != "artifact"
+                        and getattr(a.state, "objective_key", None) is not None):
+                    _eval_payload["task_metric"] = None
                 # THE CANDIDATE'S OWN NUMBER (doc 52 row 10a), only on a host-scored node that
                 # printed one — absent otherwise, on the rule the two keys below state.
                 if getattr(a.res, "self_metric", None) is not None:
@@ -7032,6 +6845,14 @@ class EvaluateMixin:
                 _eval_payload["violations"] = _terminal.violations
                 if _terminal.metric_provenance is not None:
                     _eval_payload["metric_provenance"] = _terminal.metric_provenance
+                from looplab.events.types import EV_STAGE_FINISHED
+                _stage_rows = [e.data for e in self.store.read_all()
+                               if e.type == EV_STAGE_FINISHED and isinstance(e.data, dict)
+                               and e.data.get("node_id") == a.node_id]
+                _score_advisory = scorer_training_advisory(a.res.stages, _stage_rows)
+                if _score_advisory is not None:
+                    _eval_payload.setdefault("metric_provenance", {})[
+                        "scorer_training_advisory"] = _score_advisory
                 if a.base_revision is not None:
                     _eval_payload.setdefault("metric_provenance", {})["base_revision"] = a.base_revision
                 # …and WHICH ARTIFACTS the number was measured on (`engine/artifact_fence.py`): per
@@ -7039,11 +6860,7 @@ class EvaluateMixin:
                 # uses nothing, so those rows are byte-identical.
                 if a.uses_receipt:
                     _eval_payload.setdefault("metric_provenance", {})["uses"] = a.uses_receipt
-                # THE GRADED ACTIVATION RECORD (`_apply_activation_verdict`): its grade, and on a WARN
-                # what could not be verified and the gate decision made for it. NOT a `violations`
-                # row -- `feasible = not violations` would exclude a node whose metric stands
-                # (minionerec-lora-v1 node 2). Absent under `strict`/`off` and on every node that
-                # declared nothing, so those rows are byte-identical to what they were.
+                # Historical incident details omitted.
                 if isinstance(getattr(a.res, "activation", None), dict):
                     _eval_payload["activation"] = a.res.activation
                 self.store.append(EV_NODE_EVALUATED, _eval_payload)
@@ -7212,6 +7029,20 @@ class EvaluateMixin:
                     data["withheld_metric"] = _withheld
                 self.store.append(EV_NODE_FAILED, data)
             self._maybe_crash()
+        if getattr(self, "memory_dir", None):
+            writers = [("case", self.lessons.store_case)]
+            if getattr(self, "_cross_run_concepts", False):
+                writers.append(("concept capsule", self.lessons.store_concept_capsule))
+            try:
+                final = fold(self.store.read_all())
+            except Exception as exc:  # noqa: BLE001 - provisional memory never cancels a measured terminal
+                _LOG.warning("provisional memory state could not be read: %s", exc)
+            else:
+                for label, writer in writers:
+                    try:
+                        writer(final, provisional=True)
+                    except Exception as exc:  # noqa: BLE001 - provisional memory never cancels a measured terminal
+                        _LOG.warning("provisional %s could not be written: %s", label, exc)
         # CODE IDENTITY AFTER THE TERMINAL (doc 79, `engine/code_identity.py`): the effective
         # configuration this evaluation ran with, and — when an in-place repair changed the overlay
         # during evaluation — a second commit parented on the materialized one, so the repair is a

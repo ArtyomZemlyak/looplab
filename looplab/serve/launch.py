@@ -30,7 +30,7 @@ from looplab.core.config import (Settings, canonicalize_parallelism_source,
 from looplab.core.run_deletion import RunDeletionStorageError, load_run_deletion_fence
 from looplab.core.run_proposal import RunProposal
 from looplab.serve.appstate import (
-    _DELETE_SERVICE_PREFIXES, _LIFECYCLE_LOCK_PREFIX, _RESERVED_RUN_IDS, _RESET_RECEIPT_PREFIX,
+    _DELETE_SERVICE_PREFIXES, _LIFECYCLE_LOCK_PREFIX, RESERVED_RUN_IDS, _RESET_RECEIPT_PREFIX,
     _TRACE_CLEAR_RECEIPT_PREFIX)
 from looplab.serve.settings_store import _ALLOWED_FIELDS, _SECRET_FIELDS, LAUNCH_ONLY_FIELDS
 
@@ -84,8 +84,19 @@ def safe_run_dir(root: Path, run_id: Any, *, check_conflict: bool = True) -> Pat
     if child.defect is not None:
         _reject(400, "invalid_run_id", "run_id must be a plain name, not a path", "run_id")
     requested = root / run_id
+    from looplab.core.run_relocation import load_relocation_fence, RunRelocationStorageError
+    try:
+        relocated = load_relocation_fence(requested)
+    except RunRelocationStorageError as exc:
+        raise HTTPException(503, {"code": "run_relocation_fence_unavailable"}) from exc
+    if relocated is not None:
+        _reject(409, "run_address_relocated", "This run name belongs to an explicit relocation; use its destination.", "run_id")
     resolved = child.path
-    if (resolved.name.lower() in _RESERVED_RUN_IDS
+    from looplab.core.run_ref import resolve_run_address
+    alias = resolve_run_address(root, run_id)
+    if alias.defect == "collision" or (alias.nested and alias.path is not None and alias.path != resolved):
+        _reject(409, "run_path_conflict", "run_id is already a canonical nested run address", "run_id")
+    if (resolved.name.lower() in RESERVED_RUN_IDS
             or resolved.name.lower().startswith((
                 _LIFECYCLE_LOCK_PREFIX, _TRACE_CLEAR_RECEIPT_PREFIX,
                 _RESET_RECEIPT_PREFIX, *_DELETE_SERVICE_PREFIXES))):
@@ -225,16 +236,7 @@ def task_file_roots(root: Path) -> list[Path]:
     decided about would supply the rule that admits it. The only non-circular declaration available
     before a task exists is the catalogue, which is what this is.
 
-    WHY NOT the operator's home or data mount as a default root, measured on this box: the four real
-    task files here live in `/home/jovyan/data/*-task.json`, and adding that directory would admit
-    the whole data mount — datasets, model caches, every other tenant's files — i.e. an allow-list
-    that allows almost everything. It is also not the path that was in use: all four were launched
-    through `looplab run <path>` (the CLI reads its argument directly and never enters this module),
-    and every HTTP-launched run in the corpus that recorded a `ui_meta.json` carried an INLINE task
-    with no `source_task_file` at all. So this list refuses no launch that has actually happened —
-    but an operator who moves those files into the UI needs a way to say so that does not amount to
-    "declare my whole disk", which is what `LOOPLAB_TASKS_DIR` is, and why it takes a LIST: having to
-    choose one of two task directories is a reason to point it at their common ancestor instead.
+Historical incident details omitted.
 
     Resolved here so the containment compare below is against real directories: an allowed root that
     is itself a symlink must be compared by its target, or containment answers about a name.
@@ -260,13 +262,7 @@ def task_file_roots(root: Path) -> list[Path]:
 def _confine_task_file(root: Path, expanded: str) -> Path:
     """Resolve a requested `task_file` and REFUSE it unless it sits under a declared root.
 
-    Backlog C3's surviving half. `POST /api/start` took an arbitrary absolute path from the request
-    body: `os.path.expandvars(os.path.expanduser(...))` then `Path(...).resolve()`, then straight to
-    `load_document`. Nothing compared it to `srv.root` or to anything else. That is a privilege bug
-    the UI token does NOT fix — an authenticated operator's own browser session, or any same-origin
-    page on a shared JupyterHub, could name `/etc/…`, `~/.ssh/…` or `/proc/self/environ`, and the
-    `400 invalid_task_file` message embeds the parser's error, which is an oracle for a file's
-    existence, size and partial CONTENT.
+Historical incident details omitted.
 
     Two orderings are load-bearing:
 

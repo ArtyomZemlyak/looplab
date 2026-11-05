@@ -43,10 +43,11 @@ both facts per stage, so the next person asking this question reads it off the e
   * `stage_output_identity` — the content identity of what the stage declared and produced, bound at
     the instant the artifact contract passed.
 
-Together they make the two numbers that decide whether a cache may ever ship computable from a live
-run: equal keys are candidate hits, and equal keys with UNEQUAL outputs are WRONG hits. `looplab
-stage-dups <run_dir>` reports both. This records; it decides nothing. No metric, champion,
-selectability or violation can move on it.
+Together they make the two numbers that decide whether a cross-node cache may ever ship computable
+from a live run: equal keys are candidate hits, and equal keys with UNEQUAL outputs are WRONG hits.
+`looplab stage-dups <run_dir>` reports both. No cross-node cache or champion selection consumes them.
+The same evidence also guards same-workdir reset reuse, where a previous manifest, successful stage
+records and unchanged outputs must all agree before an earlier stage may be skipped.
 
 AND IT HAD TO BE A WRITER RATHER THAN A SCRIPT OVER `runs/`, which is the other half of why this
 module exists. A key describes the workdir as it stood BEFORE its stage ran; every preserved workdir
@@ -120,8 +121,8 @@ WHAT A WRONG HIT WOULD COST, and why the artifact check is stricter than `expect
 ------------------------------------------------------------------------------------
 A stale negatives set feeding a 5-hour training silently produces a number at coordinates the run
 never occupied — worse than the 47 minutes it saves, and unrecoverable after the fact, because
-nothing downstream records what the negatives were. So `reuse_refusal` (the decision half, which the
-reporter drives and no cache consumes yet) requires more than the key: every declared output of the
+nothing downstream records what the negatives were. So `reuse_refusal` (the decision half used by
+the reporter and same-workdir reset reuse, not a cross-node cache) requires more than the key: every declared output of the
 candidate row must STILL have the exact `file_identity` AND the exact digest the row recorded.
 `verify_stage_artifacts` proves "written after this stage's start", which is the right rule for a
 stage that RAN; it cannot distinguish the artifact this key names from a different one written since.

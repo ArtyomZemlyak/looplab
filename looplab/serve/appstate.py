@@ -31,7 +31,8 @@ from fastapi import HTTPException
 from looplab.core.atomicio import file_identity
 from looplab.core.models import Event
 from looplab.core.node_evidence import node_attempt
-from looplab.core.pathsafe import is_reparse, run_child_name_defect, validate_run_child
+from looplab.core.pathsafe import is_reparse
+from looplab.core.run_ref import RESERVED_RUN_IDS, resolve_run_address, run_address
 from looplab.core.run_deletion import RUN_DELETION_FENCE_PREFIX
 from looplab.core.trace_files import open_private_trace_file, trace_file_change_token
 from looplab.engine.finalize import incomplete_finalize_scope, is_guarded_abort
@@ -70,15 +71,6 @@ from looplab.serve.settings_store import SettingsStore
 # to test. `safe_run_dir` additionally rejects any run_id that names an existing non-directory, which
 # covers server-owned files added later, and the digest-suffixed lifecycle/trace-clear receipts by
 # prefix (they cannot be enumerated).
-_RESERVED_RUN_IDS = {
-    "reports", "assistant", ".reviews", ".reviews.lock", ".command-locks",
-    "ui_settings.json", "ui_settings.json.lock",
-    "secrets.json", "secrets.json.lock",
-    ".settings-launch.lock",
-    "projects.json", "projects.json.lock",
-    # The external-agent outbox, its delivery ledger and hook config (`serve/agent_events.py`).
-    ".agent-events",
-}
 # `engine_proc._lifecycle_lock_path` builds `<run-root>/.looplab-lifecycle-<digest>.lock`.
 _LIFECYCLE_LOCK_PREFIX = ".looplab-lifecycle-"
 # `control._trace_clear_receipt_path` builds
@@ -356,21 +348,24 @@ class AppState:
             RunDeletionStorageError, load_run_deletion_fence)
 
         root = self.root.resolve()
-        # The LEXICAL rule first and on its own, because the two fences below must be answered
-        # BEFORE the directory is inspected: a run whose directory is already gone mid-deletion has
-        # to keep reading as 410 "being deleted", not 404. `core/pathsafe.py` owns both halves
-        # (doc 25 SC-03); the read path deliberately takes the non-strict name tier, so a directory
-        # the CLI created out of band with an unusual-but-legal name stays openable.
-        if run_child_name_defect(run_id) is not None:
+        # The root-side deletion fence survives the quarantine rename. Resolve its
+        # lexical address even after the run directory is gone, then consult the fence.
+        resolved = resolve_run_address(root, run_id, allow_missing=True)
+        if resolved.defect == "collision":
+            raise HTTPException(409, {
+                "code": "run_address_collision",
+                "message": "This nested run ID also names a root entry. Rename one explicitly; no run was opened.",
+            })
+        if resolved.defect is not None:
             raise HTTPException(404, "no such run")
-        requested = root / run_id
-        lowered = requested.name.lower()
-        if (lowered in _RESERVED_RUN_IDS or lowered.startswith((
+        rd = resolved.path
+        first = rd.relative_to(root).parts[0].lower()
+        if (first in RESERVED_RUN_IDS or first.startswith((
                 _LIFECYCLE_LOCK_PREFIX, _TRACE_CLEAR_RECEIPT_PREFIX, _RESET_RECEIPT_PREFIX,
                 *_DELETE_SERVICE_PREFIXES))):
             raise HTTPException(404, "no such run")
         try:
-            fence = load_run_deletion_fence(requested)
+            fence = load_run_deletion_fence(rd)
         except RunDeletionStorageError as exc:
             raise HTTPException(503, {
                 "code": "run_deletion_fence_unavailable",
@@ -382,22 +377,14 @@ class AppState:
                 "operation_id": fence["operation_id"],
                 "message": "This run is being deleted.",
             })
-        # A run is a DIRECT CHILD of the root, and nothing else. Accepting any DESCENDANT (root is in
-        # the parents of root/a/b/c) let a run_id like "run1/nodes/n3_ws" resolve to a sandbox-WRITABLE
-        # node workspace: any events.jsonl the evaluated candidate wrote there became addressable as a
-        # fake "run" by every caller — read routes, inject_node's `source_run` before commands
-        # .validate_paths tightens it, assistant tooling — so candidate-authored events would be folded
-        # and rendered to the operator, with unbounded server-side fold work behind it. Single-segment
-        # HTTP route params largely masked it, but the command service had already had to re-restrict
-        # to `canonical.parent == root`; this is the base helper, so it enforces the same rule (and
-        # rejects the root itself EXPLICITLY, rather than relying on root never having an events.jsonl).
-        # That whole rule — reparse, junction, directory, resolved-identity, direct child — is
-        # `pathsafe.validate_run_child` now. This site used to re-spell `is_reparse` INLINE out of the
-        # attribute and the mode bit, which is exactly the copy `core/pathsafe.py` exists to end.
-        child = validate_run_child(root, run_id)
-        if child.defect is not None:
-            raise HTTPException(404, "no such run")
-        rd = child.path
+        from looplab.core.run_relocation import load_relocation_fence, RunRelocationStorageError
+        try:
+            relocated = load_relocation_fence(rd)
+        except RunRelocationStorageError as exc:
+            raise HTTPException(503, {"code": "run_relocation_fence_unavailable"}) from exc
+        if relocated is not None:
+            raise HTTPException(410, {"code": "run_address_relocated",
+                                      "message": "This run address was relocated or is being relocated; inspect its destination."})
         events = rd / "events.jsonl"
         try:
             event_entry = events.lstat()
@@ -476,24 +463,9 @@ class AppState:
     def log_integrity(self, rd: Path) -> dict:
         """Is the prefix `events()` just returned the WHOLE log? — cached per file identity.
 
-        `events()` reads through `iter_event_jsonl`, which STOPS at the first corrupt or non-dense
-        record and reports nothing, and no READ path here builds an `EventStore` (`event_store`
-        above serves the control-plane WRITERS and is not on this receipt's path) — so until 2026-08-14
-        the divergence receipt was structurally unreachable from every HTTP surface: `/api/runs`,
-        `/state`, the SSE stream, `/lifecycle`, `/nodes`, `/prov`, `/cost`, the review payload, the
-        assistant's run context and the whole TUI. `runs/rubertlite-dense-retrieval` is what that
-        costs: a 1,624-record log served as a confident 20-event run with `nodes: 2`.
-        (Three surfaces had already solved it in isolation and each with its own vocabulary — the
-        ConceptFrame's `source_integrity`, the attention feed's omit-and-flag, `RunStateCache`'s
-        `[PARTIAL SOURCE]` note. This publishes the ConceptFrame's spelling from the SHARED reader so
-        a fourth does not appear, and `eventstore.log_integrity` is the one derivation all of them
-        can reach.)
+Historical incident details omitted.
 
-        Keyed by `file_identity` exactly like `summary_cache` and the payload slots, so a finished run
-        pays the scan once and a live run pays it on the same ticks it already re-folds on. Cost, measured
-        on the corpus: 62 ms for the 12 MB rubertlite log and 33 ms for the 5.2 MB `rubert-dr-0807` —
-        at or below the `iter_event_jsonl` + `Event(**o)` pass this sits beside (3.5 ms / 44 ms), and
-        a divergent log stops the scan at its boundary rather than reading on.
+Historical incident details omitted.
 
         **IT IS A SECOND PASS OVER THE SAME FILE, AND THAT IS NOT REMOVABLE FROM HERE** (checked
         2026-08-15, because it reads like an obvious duplicate of the fold's own read and will again
@@ -733,6 +705,7 @@ class AppState:
         # exclude open event journals before Pydantic copies them, then publish only the
         # bounded derived DTO. This shared boundary feeds owner state, SSE, and review state.
         d = st.model_dump(mode="json", exclude=INTERNAL_CARD_STATE_FIELDS | {"cards"})
+        d["run_id"] = run_address(self.root, rd)
         # Scrub the broad folded state before inserting the independently bounded/redacted Card DTO.
         # Otherwise valid action params/search dimensions named "raw" or "code" are removed after the
         # Card projection has declared them exact, leaving a completeness receipt that describes data
@@ -781,11 +754,7 @@ class AppState:
                 for c in st.research_cards()
                 if isinstance((dto := _card_dtos.get(c.id)), dict)
             }
-        # THE MEMO QUESTIONS THE BOARD DOES NOT HOLD (review 2026-10-14 section 4.2): a DERIVED read model,
-        # never folded, so no recorded run's board moves (`serve/memo_questions.py`). Computed from
-        # the same fold as the cards beside it, so the two cannot disagree about one frame.
-        # The projection is total over junk memos/cards (driven in `tests/test_memo_question_projection.py`),
-        # so it needs no blind handler here.
+        # Historical incident details omitted.
         from looplab.serve.memo_questions import memo_question_projection
         d["memo_questions"] = _public_state_value(memo_question_projection(st))
         better = (lambda a, b: a < b) if st.direction == "min" else (lambda a, b: a > b)
@@ -846,14 +815,7 @@ class AppState:
             incomplete_finalize_scope(evs) is not None or st.finalization_pending())
         d["finalization_incomplete"] = finalize_incomplete
         d["phase"] = self.phase(st, finalize_incomplete=finalize_incomplete)
-        # In-flight AUTHORING (derived, never folded — `events/authoring_projection.py`): the open
-        # card-build head, which the fold cannot express as `Card.status` (see
-        # `card_ledger.py::_card_building_ids` — folding the request would make the servicer of that
-        # very head unable to claim it, and every speculative build would return "stale"). Measured on
-        # rubertlite-dr-unified-v5: the board said "has not started" for 2,130 s of a 2,128 s build,
-        # i.e. the Building lane was occupied for 0.3 seconds of it. Derived from `evs`, so an
-        # `upto_seq` fold reports what was in flight THEN, and so it caches with the rest of the
-        # payload.
+        # Historical incident details omitted.
         d["card_authoring"] = card_authoring(evs, st)
         # THE LIVE UPSTREAM LANE (doc 73 §2.5): the mode this run serves (a fact of its LAUNCHED
         # settings, not of the log), its queue with receipts and the automated author's rows. Absent
@@ -953,10 +915,9 @@ class AppState:
         except Exception:  # noqa: BLE001 — a malformed log must not 500 the trace; degrade to spans-only
             facts = TraceFacts(run_id="", task_id="", total_eval_seconds=0.0,
                                attempts=MappingProxyType({}))
-        # Fall back to the run dir name for run_id (rd == root/run_id, so rd.name IS the run id) when the
-        # log can't be folded — so a corrupt-log `/trace` still carries the correct run_id, matching the
-        # pre-index endpoint's degraded response (which returned the URL's run_id) rather than an empty one.
-        return facts if facts.run_id else facts._replace(run_id=rd.name)
+        # Use the root-local canonical run address even when the log cannot be folded, so a nested
+        # corrupt-log trace still matches the requested run instead of reverting to its leaf name.
+        return facts._replace(run_id=run_address(self.root, rd))
 
     def trace_view(self, rd: Path) -> dict:
         """The run-level LIGHT trace view (`build_trace_view(light=True)`), read via the incremental
@@ -1098,14 +1059,7 @@ class AppState:
                          snapshot: Optional[str] = None) -> dict:
         """The node's EPISODE MAP — every band of its trace, with no band's contents.
 
-        Sits beside `node_trace_view` because it is the control that makes that view's window
-        usable: the window is bounded and a heavily-repaired node is far larger than any window the
-        server can afford, so the operator needs somewhere to point it (`?before=`). Reads only the
-        in-memory light index — no spans.jsonl bytes at all — so a bounded episode page can sit beside
-        a bounded span read (measured 82 ms to derive the 7,048 bands of rubert-dr-0804 node 1).
-        An unreadable/absent index degrades to the same explicit unavailable receipt every other
-        trace surface uses, never to an empty map.
-        """
+Historical incident details omitted."""
         from looplab.events.span_index import get_index
         from looplab.events.traceview import (TRACE_NODE_EPISODE_CAP, node_episodes,
                                               unavailable_projection)
@@ -1190,21 +1144,7 @@ class AppState:
             return PHASE_SPEC_APPROVAL
         if st.proposed_spec is not None and not st.spec_confirmed:
             return PHASE_ONBOARDING
-        # GROUNDING means "setup is still running", and it is folded from `setup_finished` — not
-        # derived from the ABSENCE of a data profile, which is what it used to be. That derivation
-        # was true only for the task kinds that have a `columns()` hook: a `RepoTask` has none, so
-        # `data_profiled` never fires, `data_profile` stays None, and the phase stayed "grounding"
-        # until the first node existed. Measured on rubertlite-dr-unified-v5: setup finished at
-        # 6.5 s and the UI said "Setting up task and data…" for the next 40 minutes, across a
-        # 13-minute proposal and a 23-minute build. A phase derived from what has NOT happened
-        # names the wrong thing as soon as one task kind stops emitting it.
-        # …and a legacy log that never emitted `setup_finished` is set-up-complete once a NODE exists.
-        # That is not a guess, it is the engine's OWN rule: `engine/setup_phase.py::_setup_phase` skips
-        # setup entirely on `state.setup_done or state.nodes or state.finished`, so such a resumed run
-        # never appends `setup_finished` and `st.setup_done` stays False for the rest of its life —
-        # this phase would read "grounding" while nodes are being built and evaluated. The clause
-        # cannot mask the defect the comment above records: a modern run folds `setup_done` seconds
-        # in, long before its first node exists.
+        # Historical incident details omitted.
         if st.run_id and not st.setup_done and not st.nodes:
             return PHASE_GROUNDING
         return PHASE_SEARCH

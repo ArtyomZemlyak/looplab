@@ -1,19 +1,11 @@
 """METRIC SALVAGE — a node that failed for something other than "the metric is absent", and whose
 metric the operator's own declared reader can still find, comes out EVALUATED with provenance.
 
-THE RUN. `runs/rubertlite-dr-unified-v5` node 0 trained for 76 minutes on two H200s, exited 0, ran
-the scorer at the end of its own `train` stage and printed
+Historical incident details omitted.
 
     RECALL@100: 0.743250
 
-which is EXACTLY what the run's declared metric reader matches
-(`{"kind": "stdout_regex", "pattern": "RECALL@100: ([0-9.]+)"}`). The node was failed with
-`reason: no_metric` because the stage manifest declared the checkpoint at
-`.../unified-baseline_rubert-tiny-lite/final/model.safetensors` while the testbed composes its
-output dir as `<run_name>_<model>`. Two independent gates in `command_eval._run_stages` had to hold
-for that: the `expect_failed` early return hard-codes `metric=None`, and the crash branch's salvage
-read is gated on `_i == len(stages) - 1` while `train` is not last (the operator's protected `score`
-stage is appended after it).
+Historical incident details omitted.
 
 The end-to-end cases below drive the REAL `Engine._evaluate` over a REAL subprocess pipeline shaped
 exactly like that one — a `train` stage that prints the metric and then fails its declared artifact
@@ -43,7 +35,7 @@ from looplab.search.policy import GreedyTree
 ROOT = Path(__file__).resolve().parents[1]
 TASK = ROOT / "examples" / "toy_task.json"
 
-# The v5 spec, verbatim from `runs/rubertlite-dr-unified-v5/task.snapshot.json`.
+# Historical incident details omitted.
 V5_METRIC = {"kind": "stdout_regex", "pattern": "RECALL@100: ([0-9.]+)"}
 V5_VALUE = 0.743250
 DECLARED = "vectorsearch/experiments/unified-baseline_rubert-tiny-lite/final/model.safetensors"
@@ -98,6 +90,24 @@ def test_a_crashed_stage_is_not_salvageable_unless_the_stall_watchdog_authentica
     stalled = _res(exit_code=-9, stalled=True, stages=_stages(("train", "fail")),
                    failed_stage="train")
     assert ms.salvage_condition(stalled, "crash") == "stage_failed"
+
+
+def test_a_completed_pipeline_salvages_a_later_teardown_crash():
+    completed = _res(exit_code=2, metric=0.75,
+                     stages=_stages(("train", "ok"), ("score", "ok")))
+    assert ms.salvage_condition(completed, "crash") == "eval_failed"
+    recovered = ms.salvage(completed, "crash", {"kind": "stdout_json", "key": "metric"},
+                           ".", None, mode="select", operator_stages=({"name": "score"},))
+    assert recovered is not None and recovered.metric == 0.75
+    assert recovered.source == "eval_result"
+
+
+def test_a_nonzero_exit_without_completed_pipeline_evidence_still_refuses():
+    single = _res(exit_code=2, metric=0.75)
+    assert ms.salvage_condition(single, "crash") is None
+    intermediate = _res(exit_code=2, metric=0.75,
+                        stages=_stages(("train", "ok"), ("score", "fail")), failed_stage="score")
+    assert ms.salvage_condition(intermediate, "crash") is None
 
 
 def test_an_unknown_future_stage_status_refuses_rather_than_inheriting_a_neighbours_answer():
@@ -900,11 +910,7 @@ def test_a_cause_fix_that_did_change_something_is_committed_with_its_own_delta(t
 # against the CORRECTED declaration (never the stage: no re-evaluation). A node that passes is
 # recorded as MEASURED, with no `metric_salvaged` violation and no salvage provenance.
 #
-# THE CASE, `runs/rubertlite-dr-unified-v6` node 3: its stage exited 0, WROTE its checkpoint, printed
-# the number and failed its declared artifact contract because the declaration missed the testbed's
-# composed `<run_name>_<model>` suffix. ONE node — the "every merge is salvaged" reading of that run
-# was n=1 plus a prediction node 4 disproved, and nothing here tests or assumes anything about which
-# operator authored the declaration.
+# Historical incident details omitted.
 #
 # AND NODE 3 IS STILL NOT PROMOTED, which is the first thing these cases pin. Its manifest declared
 # `train` → `merge`; the contract failure aborted the pipeline, so `merge` and the operator's
@@ -1361,3 +1367,10 @@ def test_a_repair_that_left_the_FAILING_declaration_untouched_is_refused_at_the_
     assert eng._recheck_repaired_contract(
         res, node, workdir, _seam_salvage(), _FIX, "e") is None, (
         "an unchanged declaration was promoted: the re-check asked a filename, not a correction")
+
+
+def test_teardown_crash_does_not_bypass_an_upstream_inconclusive_check():
+    rows = _stages(('train', 'ok'), ('score', 'ok'))
+    rows[0]['check_inconclusive'] = 'checker could not establish full training'
+    result = _res(exit_code=2, metric=.75, stages=rows)
+    assert ms.salvage_condition(result, 'crash') is None

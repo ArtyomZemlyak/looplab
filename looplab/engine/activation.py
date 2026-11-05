@@ -1,10 +1,9 @@
 """Did the path a candidate built actually RUN during its evaluation?
 
-Measured 2026-09-23 on a MiniOneRec inference run. A node added a prefix-cached prefill behind a
-self-check. The check died on an attribute transformers 5 removed, a fallback switched the new path
-off, and the node scored 1.004 with every list byte-identical to its parent -- the unchanged tree
-measured again, and recorded as an idea that does not help. Nothing in the engine could tell "this
-change is worthless" from "this change never executed": both finish cleanly and print a number.
+An inference candidate added a cached prefill behind a self-check. The check failed, a fallback
+switched the new path off, and the candidate scored the unchanged path. Nothing in the engine
+could tell "this change is worthless" from "this change never executed": both finish cleanly
+and print a number.
 
 So a Developer may DECLARE, per node, lines its new code prints only when the new path is active
 (`activation_markers` on its `done`, persisted as `looplab_activation.json` beside
@@ -20,11 +19,9 @@ choice of words deciding the verdict. A declared marker is a CONTRACT, like a st
 node said what running looks like, and the engine only checks that it happened. A node that declares
 nothing is judged exactly as before.
 
-TYPED ENTRIES AND A GRADED VERDICT (minionerec-lora-v1 node 2, 2026-10-01). That node changed ONLY
-`MiniOneRec/looplab/experiment.env` and declared `SFT_EVAL_SAMPLE=-2` and `SFT_RESUME_EVERY_MIN=0`
--- env ASSIGNMENTS, which no code prints. Its third attempt trained for 6.8 h, printed 0.1126388, and
-the metric was withheld as `inert_path`; the repair directive made the Developer add `echo` lines and
-a full 7 h re-run followed. A string is still a `log` entry (`{"kind": "log", "text": s}`), so every
+TYPED ENTRIES AND A GRADED VERDICT. A config-only change declared environment assignments as
+markers, although no code printed them. Its metric was withheld as `inert_path`, leading to an
+unnecessary rerun. A string is still a `log` entry (`{"kind": "log", "text": s}`), so every
 manifest written before is read exactly as it was; three more kinds say what a config change CAN
 show: `env` (a static check of the last `NAME=` assignment in a named file), `file` (an artefact
 predicate, the stage `expect` shape) and `none` (a stated reason). WHICH declarations can be proven
@@ -113,9 +110,8 @@ def read_markers(workdir) -> list:
 
 # ---------------------------------------------------------------- typed entries (manifest v2)
 #
-# minionerec-lora-v1 node 2, 2026-10-01: a node that changes only a config file has nothing to PRINT --
-# its declared "markers" were `NAME=value` assignments, which no code echoes, and the metric of a
-# 6.8 h run was withheld for it. A string is still a log line; the other kinds say what a config
+# A node that changes only a config file has nothing to PRINT: its declared markers can be
+# `NAME=value` assignments which no code echoes. A string is still a log line; the other kinds say what a config
 # change can show. NO python probe kind, deliberately: a probe is candidate code run by the engine
 # after the eval, which is a second evaluation the fence and the budget do not cover.
 KIND_LOG = "log"
@@ -426,8 +422,8 @@ def check_file_entry(entry, workdir, since: Optional[float]) -> bool:
 
 # ---------------------------------------------------------------- where a marker's printer lives
 #
-# A config file SETS values; it prints nothing. minionerec-lora-v1 node 2 (2026-10-01): the
-# declaration-time check took `experiment.env` whole, found `SFT_EVAL_SAMPLE=-2` in it and passed a
+# A config file SETS values; it prints nothing. A declaration-time check once found a
+# `NAME=value` assignment in a config file and passed a
 # marker that no code could ever print. So an occurrence in a config file, or on an assignment line
 # anywhere, is not an EMITTER.
 CONFIG_SUFFIXES = (".env", ".yaml", ".yml", ".toml", ".ini", ".cfg", ".json")
@@ -697,9 +693,8 @@ def scan_texts(files, needles, *, complete: bool = True) -> EmitterScan:
 # touched assigns is ALWAYS the `env` entry `{"kind": "env", "name": NAME, "equals": value, "file": that config}` -- at the
 # declaration lint and again at settle, whatever else in the tree contains the same text. The
 # declared intent is "this value is set", and the static env check verifies exactly that. A code
-# literal that merely contains the same text proves nothing more: minionerec-lora-v1 node 2,
-# 2026-10-01, where `MiniOneRec/sft_resume.py` holds `why_off = "SFT_RESUME_EVERY_MIN=0"` -- a reason
-# string stored in a dict, never printed on the run's path -- which the emitter scan reads as an
+# literal that merely contains the same text proves nothing more: a reason string stored in a
+# dict, never printed on the run's path, can cause the emitter scan to find an
 # EXISTING printer, so the node's config-only fix would have been blocked as TP2. TP2 (a flag that
 # should enable an existing path with a silent fallback) is still caught by a log marker the PATH
 # prints, which stays blocking. A value the touched config does NOT assign (or no touched config
@@ -951,8 +946,9 @@ def _fresh_logs(workdir, since: Optional[float], snapshot=None, engine_logs=None
     fallback that printed no marker). A log whose boundary cannot be established is not read — no
     credit, the refusing direction. `since` (the attempt's start) still drops a whole log last written
     before it; with no snapshot it is the only floor, and the appended case is then credited.
-    A stage this attempt REUSED wrote nothing, so its earlier markers are not credited either way —
-    doc 69, 69.10b.
+    A stage this attempt REUSED wrote nothing of its own. Its markers are credited only from the
+    last successful attempt's durable `log_spans`, after the reset/inline reuse was proved and the
+    log's identity and bounded text digest are unchanged — never by reading the whole historical log (doc 69, 69.10b).
 
     `engine_logs` names the logs the ENGINE appends to — the case-folded basenames of this attempt's
     `EvalLogPlan.roles`: `setup.log`, one `<stage>.log` per resolved stage, or `eval.log` — and only

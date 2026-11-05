@@ -1,11 +1,6 @@
 """A research CAMPAIGN inside one run: pre-registered experiments and recorded amendments (doc 81).
 
-WHY. On 2026-10-12..14 an external agent ran a MiniOneRec campaign through LoopLab and created 22
-runs, mostly one experiment per run, because a run froze its protocol, its evaluation inputs and its
-protected files, and the contract said "start a new run" to change any of them. The grid the
-campaign was about — about twelve models on ONE frozen 40k-user test — was then invisible inside
-LoopLab. This module is the in-run alternative: an append-only PROTOCOL JOURNAL
-(`protocol_amendments.jsonl`, a run-directory sidecar like `harness_decisions.jsonl`) whose rows are
+Historical incident details omitted.
 
 * ``experiment`` — a pre-registered experiment appended to the run: hypothesis, arms, shared test
   sets, metrics, the declared contrast family and its multiplicity correction. Immutable once
@@ -61,6 +56,7 @@ POLICY_LEVELS = ("off", "experiments", "inputs", "all")
 _LEVEL_FOR_KIND = {"experiment": "experiments", "task": "inputs", "files": "all", "budget": "experiments"}
 DEFAULT_POLICY = {"amendments": "all", "max_agent_added_nodes": None, "implicit_canary": "off",
                   "implicit_canary_timeout": 120.0}
+from looplab.core.execution_scope import JOB_ROLES, EXECUTION_MODES, normalize_execution, scope_error
 
 SLUG_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
 METRIC_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9@._:/+-]{0,63}$")
@@ -121,6 +117,13 @@ def experiments_of(rows: list[dict], run_uid: Optional[str] = None) -> dict[str,
     return out
 
 
+def _validate_execution(raw, *, status: int) -> Optional[dict]:
+    try:
+        return normalize_execution(raw)
+    except ValueError as exc:
+        raise HTTPException(status, str(exc)) from exc
+
+
 def read_policy(rd: Path) -> dict:
     path = Path(rd) / POLICY
     try:
@@ -141,6 +144,8 @@ def read_policy(rd: Path) -> dict:
         timeout = raw.get("implicit_canary_timeout")
         if type(timeout) in (int, float) and 0 < timeout <= 3600:
             policy["implicit_canary_timeout"] = float(timeout)
+        if "execution" in raw:
+            policy["execution"] = _validate_execution(raw["execution"], status=503)
         for key in ("updated_at", "updated_by", "note"):
             if key in raw:
                 policy[key] = raw[key]
@@ -165,11 +170,17 @@ def write_policy(rd: Path, body: dict) -> dict:
     timeout = body.get("implicit_canary_timeout", 120.0)
     if type(timeout) not in (int, float) or not 0 < timeout <= 3600:
         raise HTTPException(400, "implicit_canary_timeout must be within (0, 3600] seconds")
+    execution = _validate_execution(body.get("execution"), status=400)
     policy = {"amendments": level, "max_agent_added_nodes": cap, "implicit_canary": implicit,
               "implicit_canary_timeout": float(timeout), "updated_at": time.time(),
-              "updated_by": "operator", **({"note": note} if note else {})}
+              "updated_by": "operator", **({"note": note} if note else {}),
+              **({"execution": execution} if execution is not None else {})}
     atomic_write_text(Path(rd) / POLICY, json.dumps(policy, indent=2))
     return {**policy, "source": POLICY}
+
+
+def optimization_scope_error(rd: Path, role) -> Optional[dict]:
+    return scope_error(read_policy(rd).get("execution"), role)
 
 
 def protocol_view(rd: Path) -> dict:
@@ -400,11 +411,7 @@ def normalize_experiment(raw: Any, *, root: Optional[Path] = None) -> dict:
     return exp
 
 
-# What a re-filed declaration must AGREE on to count as the registered one (`same_declaration`):
-# the statistics and the design. Strict equality of the whole stored payload refused a legitimate
-# second candidate over a row an older `normalize_experiment` wrote (a default key added or gone)
-# or over a cosmetic title/notes/description edit (review 2026-10-16). `primary_metric` is kept: it
-# picks the default contrast metric and what a report leads with.
+# Historical incident details omitted.
 DECLARATION_FIELDS = ("hypothesis", "arms", "tests", "metrics", "primary_metric", "contrasts",
                       "correction", "alpha", "ci", "bootstrap_replicates", "supersedes", "relationships", "research_context")
 
@@ -576,9 +583,7 @@ def _mount_path(spec) -> Optional[str]:
     return os.path.expanduser(os.path.expandvars(path)) if isinstance(path, str) else None
 
 
-# The fingerprint's VERSION. `lfp2` (2026-10-16) hashes a directory LINK by its target, which `lfp1`
-# never saw, so the two digest the same tree differently: a fingerprint of another method is NOT
-# COMPARABLE (`data_content_incomparable`), never evidence that the data changed.
+# Historical incident details omitted.
 FINGERPRINT_METHOD = "lfp2"
 
 
@@ -605,11 +610,7 @@ def content_fingerprint(path: Optional[str]) -> dict:
             return
         for dirpath, dirnames, filenames in os.walk(root):
             dirnames.sort()
-            # A link to a DIRECTORY lands in `dirnames` and is never descended (no followlinks,
-            # so a link cycle is never walked), so it was recorded nowhere: retargeting
-            # `mount/train` from dataset A to B left the digest unchanged with files=0 (review
-            # 2026-10-15, weekly-data-directory-links). It is yielded beside the files and
-            # hashed by its TARGET like any inner link, in one sorted name order.
+            # Historical incident details omitted.
             names = sorted(set(filenames) | {d for d in dirnames
                                              if os.path.islink(os.path.join(dirpath, d))})
             for name in names:
@@ -966,10 +967,7 @@ def agent_added_nodes(srv, rd: Path) -> int:
 
 def agent_budget_level_refusal(rd: Path, policy: Optional[dict] = None
                                ) -> Optional[HTTPException]:
-    """The operator's policy LEVEL for any agent budget extension — nodes, wall-clock or eval
-    clocks alike. Spelled apart from the node cap below because it binds every budget field: while it
-    lived inside `agent_budget_refusal` it ran only when `add_nodes` was sent, so an agent under
-    `amendments: off` could still extend `max_seconds` / `timeout` (review 2026-10-15)."""
+    """Historical incident details omitted."""
     policy = read_policy(rd) if policy is None else policy
     if POLICY_LEVELS.index(policy["amendments"]) < POLICY_LEVELS.index(_LEVEL_FOR_KIND["budget"]):
         return HTTPException(403, {"code": "amendment_not_permitted",

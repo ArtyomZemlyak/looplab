@@ -122,6 +122,8 @@ DEFERRED: dict[tuple[str, str], str] = {
                           "`client_requests` derives a saved command's durable id per save; "
                           "`composite.submit_experiment` checks a code_from with the shared "
                           "vocabulary, per call",
+    ("maintenance", "core"): "offline relocation reads identity/path/refusal primitives only when "
+                              "the operator invokes it, keeping maintenance's engine/events import boundary",
     ("judgebench", "adapters"): "`bait` reads the MLE-bench extras at audit time",
     ("judgebench", "agents"): "the agent-trajectory ladder drives the real `drive_tool_loop` "
                               "inside one bench case (doc 27 §4 rungs 2/4/5); deferred so the "

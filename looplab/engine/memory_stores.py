@@ -102,6 +102,9 @@ MEMORY_STORES: tuple[MemoryStore, ...] = (
         "meta_notes.jsonl", "notes", CASCADED, key=f"{_RUN}; finish_seq", names_run=True,
         reason="", writer="engine/lessons_distill.py::LessonDistillMixin.write_reflection_note"),
     MemoryStore(
+        "operator_notes.jsonl", "operator notes", CASCADED, key=f"{_RUN}; note_id", names_run=True,
+        reason="", writer="harness/operator_notes.py::publish_operator_note"),
+    MemoryStore(
         "cases.jsonl", "cases", CASCADED, key=f"{_RUN}, per (task_id, direction) group",
         names_run=True, reason="",
         writer="engine/lessons.py::LessonMemory.store_case"),

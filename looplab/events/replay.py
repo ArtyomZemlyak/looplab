@@ -112,7 +112,7 @@ from looplab.events.types import (
     EV_RESTART, EV_RESUME, EV_RESUME_REQUESTED,
     EV_RESUME_SERVED,
     EV_RUN_ABORT,
-    EV_RUN_FINISHED, EV_RUN_REOPENED, EV_RUN_SETUP_FINISHED, EV_RUN_SETUP_STARTED, EV_RUN_STARTED,
+    EV_RUN_FINISHED, EV_RUN_RELOCATED, EV_RUN_REOPENED, EV_RUN_SETUP_FINISHED, EV_RUN_SETUP_STARTED, EV_RUN_STARTED,
     EV_RUN_WIDTH_SETTLED,
     EV_SETUP_FINISHED, EV_SPEC_APPROVAL_REQUESTED, EV_SPEC_APPROVED, EV_SPEC_DRIFT, EV_SPEC_PROPOSED,
     EV_SPECULATION_DEPTH_SETTLED)
@@ -153,6 +153,25 @@ def _settle_folded_speculation_depth(st: RunState) -> None:
     floor = st.speculation_depth_settled
     st.speculation_depth = (st.speculation_depth_pinned if floor is None
                             else min(st.speculation_depth_pinned, floor))
+
+
+def _on_run_relocated(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
+    to = d.get("to_run_id")
+    previous_seq = d.get("previous_event_seq")
+    if (not st.run_uid or d.get("run_uid") != st.run_uid or d.get("from_run_id") != st.run_id
+            or not isinstance(to, str) or not to or to in (".", "..") or to.strip() != to
+            or any(part in to for part in ("/", "\\", "\x00"))
+            or type(previous_seq) is not int or e.seq != previous_seq + 1
+            or not isinstance(d.get("previous_event_sha256"), str)
+            or len(d["previous_event_sha256"]) != 64):
+        return
+    st.relocations.append({
+        "from_run_id": st.run_id, "to_run_id": to, "run_uid": st.run_uid,
+        "previous_event_seq": previous_seq, "previous_event_sha256": d["previous_event_sha256"],
+        "reason": d.get("reason", "") if isinstance(d.get("reason"), str) else "",
+        "event_seq": e.seq,
+    })
+    st.run_id = to
 
 
 def _on_run_started(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
@@ -605,6 +624,7 @@ def _on_node_created(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
             # on its idea (doc 73 §1.4, stage 3) — absent on every other idea, so nothing changes.
             kind=("artifact" if d.get("node_kind") == "artifact" or idea.node_kind == "artifact"
                   else None),
+            job_role=(str(d.get("job_role"))[:32] if d.get("job_role") is not None else None),
             uses=uses,
             uses_attempts=_use_pins(st, d, parent_ids, uses, declared),
             research_origin=d.get("research_origin"),   # 💡 proposed just after a deep-research memo
@@ -909,8 +929,10 @@ def _on_node_evaluated(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None
                     continue
             n.trials = trials
             # doc 68 68.2: `metric` is the OBJECTIVE's value; the task's own number stays beside it,
-            # so a retarget folded before or after this terminal ranks it on one key.
-            n.task_metric = n.metric
+            # so a retarget folded before or after this terminal ranks it on one key. A terminal
+            # written under the metric-less-task retarget exception carries an explicit null here;
+            # every older row defaults to its task-scale metric exactly as before.
+            n.task_metric = d.get("task_metric", n.metric) if st.objective_key is not None else n.metric
             _apply_objective(st, n)
             _charge_terminal_cost(st, n, d, ctx)
 
@@ -2826,6 +2848,7 @@ def _on_run_width_settled(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> N
 # `_HANDLERS` below is the union `fold` dispatches through.
 _OWN_HANDLERS = {
     EV_RUN_STARTED: _on_run_started,
+    EV_RUN_RELOCATED: _on_run_relocated,
     EV_METRIC_RETARGET: _on_metric_retarget,
     EV_NODE_BUILDING: _on_node_building,
     EV_NODE_CREATED: _on_node_created,

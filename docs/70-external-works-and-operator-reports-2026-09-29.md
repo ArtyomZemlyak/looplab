@@ -219,8 +219,7 @@ read-only*, источник *Process environment*. Это не ошибка д�
   ран в настройке — любой маркер), никогда не читается как кампания: её дети — рабочие каталоги узлов,
   куда пишет кандидат. В `/api/runs` они не попадают сознательно: всё, что там перечислено, кто-то
   открывает по id. Тесты: `tests/test_campaign_runs.py`, `ui/test/campaignRunsModel.test.js`.*
-- **70.1a** OPEN[nested-runs-not-addressable] вложенный ран виден, но не открывается: `run_id` в
-  маршрутах — один сегмент, а `AppState.run_dir` пускает только детей корня. proof:`present:child = validate_run_child(root, run_id)@looplab/serve/appstate.py`
+- **70.1a** *Закрыто 2026-11-03, ветка `kimi-review-03-11-2026`: `core/run_ref.py` выдаёт канонический nested ID как URL-safe base64 всего относительного пути, без lossy-замены разделителей. `AppState.run_dir`, commands, reset/deletion, harness, agent и assistant paths используют один resolver; public `state.run_id`, research map и campaign rows несут тот же ID. Symlink/reparse, traversal, service paths, collision и любой каталог внутри существующего run отклоняются; post-delete receipts получают отдельный `allow_missing`, не открывающий run. Launch не может занять чужой canonical ID. Тесты: `tests/test_run_address.py`, `test_campaign_runs.py`, command/deletion suites.*
   Карта того, что придётся менять (разведка 2026-09-29): около 50 мест, превращающих `run_id` в путь
   (`serve/appstate.py::AppState.run_dir` и те, кто сам склеивает `root / run_id`: `launch.safe_run_dir`,
   `deletion_service`, `reset_route`, `scope_sources`, `routers/control.py`, инструменты ассистента
@@ -234,9 +233,7 @@ read-only*, источник *Process environment*. Это не ошибка д�
   `cross_run_index`; UI сравнивает свёрнутый `state.run_id` с id маршрута (`Report.jsx`,
   `panels.jsx`). Кодирование в один сегмент (раздел 4, вариант 2) — всё ещё рекомендация, но с этими
   пунктами, и не ослабляя правило «потомок рана — не ран».
-- **70.2** OPEN[concept-capsule-only-at-finalize] концепт-капсула (и кейс) пишутся только при
-  финализации: ран без финализации не оставляет знания, параллельные сиды не видят друг друга;
-  промежуточная капсула должна нести признак `provisional` (раздел 5). proof:absent:_store_concept_capsule@looplab/engine/concept_cadence.py
+- **70.2** *Закрыто 2026-11-03, ветка `kimi-review-03-11-2026`: `_eval_write_terminal` публикует case и (при включённом `cross_run_concepts`) concept capsule сразу после настоящего terminal вне write lock, с `provisional: true`; finalize заменяет их обычными записями без флага. Case и явные читатели помечают промежуточные данные; Researcher/Strategist aggregates и пороги поддержки используют только финализированные capsules. Metric и concept outcomes берутся только из реальных terminals, shared-store ошибка не отменяет измеренный результат, старые записи без флага остаются совместимыми. Проверка полного toy eval, upsert и support threshold: `tests/test_provisional_capsules.py`.*
 - **70.3** *Закрыто 2026-09-29: здесь стоял `endpoint-mismatch-names-neither-endpoint`. Состояние
   учётных данных несёт `endpoints` (адрес привязки ключа и `llm_base_url` в нормализованном
   написании, только при `endpoint_mismatch`) и `variables` (имена переменных окружения/`.env`, откуда

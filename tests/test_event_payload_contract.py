@@ -375,7 +375,7 @@ def _consumed_request_fields() -> dict[str, frozenset[str]]:
     return {
         "comment_edited": frozenset({"expected_version"}),
         "comment_resolution_changed": frozenset({"expected_version"}),
-        "inject_node": frozenset(_INJECT_IMPORT_FIELDS),
+        "inject_node": frozenset(set(_INJECT_IMPORT_FIELDS) | {"pre_stages"}),
     }
 
 
