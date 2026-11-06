@@ -183,7 +183,8 @@ def test_index_mentions_every_numbered_document():
     #   index and nav together.
     # 80 -> 81 (2026-10-19): doc 82, the simplicity plan for the two beginner entries (Assistant,
     #   external agent); index and nav together.
-    assert len(numbered) == 81, "the derived numbered-document inventory changed"
+    # 81 -> 82 (2026-11-06): doc 83, autoresearch and harness improvement; index and nav together.
+    assert len(numbered) == 82, "the derived numbered-document inventory changed"
     #   51 -> 52 (2026-09-05): the development plan (doc 52). No collision — the number was
     #   claimed by checking the glob AND the index table together.
     #   52 -> 53 (2026-09-06): the agent guide's narratives, archived verbatim when `CLAUDE.md`
