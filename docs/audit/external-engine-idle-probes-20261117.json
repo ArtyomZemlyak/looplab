@@ -1,0 +1,38 @@
+{
+  "baseline": "7c45d5d9f04533751e2b04a05d3c4fdbb70fe7cb",
+  "scope": "Offline CPU source probes, no live/ML/GPU/lease mutation. Source selections and destructive-workdir behavior are designed current contracts; additional OPEN requests are early integration fences, not claims current authorization was bypassed.",
+  "monitor_wait": {
+    "revision": "7c45d5d9",
+    "probe": "successful returned artifact with unanswered advisory monitor",
+    "external_answer_supplied": false,
+    "bounded_cancel_seconds": 0.75,
+    "cancelled_instead_of_returning": true,
+    "elapsed_seconds": 0.7507313545793295,
+    "answer_poll_count": 3,
+    "gpu_used": false,
+    "live_runtime_mutated": false,
+    "interpretation": "Successful evaluator return alone does not let settle_external_observations finish. Resource occupancy is not measured by this isolated unit seam."
+  },
+  "shared_command_and_retry_workspace": {
+    "resolved_shared_command": [
+      "python",
+      "old_a0_score.py"
+    ],
+    "node_intent_role_does_not_replace_eval_command": true,
+    "prior_receipt_in_disposable_workdir_removed": true,
+    "external_receipt_untouched": true,
+    "qualification": "These are current designed behaviors; reproduction demonstrates the integration hazards, not unauthorized engine mutation or an integrity bypass."
+  },
+  "test_results": {
+    "baseline_replay_and_open_index": "206 passed in14.17s",
+    "CAS_stopped_pause_positive_negative": "4 passed in2.29s",
+    "remote_existing_rebuild_freshness": "8 passed in2.46s (temporary extractor); integrated real regression rerun follows",
+    "unpublished_completed_monitor_fix": "16 passed in9.02s on existing isolated5a1e6ef6; not deployed"
+  },
+  "rejected_overclaims": [
+    "Node generation is retained in terminal outbox details; no lost-attempt-identity OPEN added.",
+    "Paused vs stopped API already distinguishes states; no broken-guard claim.",
+    "No-op app canary does not prove native engine canary executed a different chain.",
+    "Candidate publisher I/O does not prove engine-owned unbounded I/O or S3 failure."
+  ]
+}

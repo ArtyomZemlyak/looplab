@@ -200,6 +200,10 @@ Declare routine monitor answers with `PUT /api/runs/{run_id}/harness-monitor-rul
 answer checkpoints with an unattended bot under the agent's name. Read
 `node_failed.failure_forensics` and `/attempt-logs` before repairing; declare `eval.canary`.
 
+## Avoiding preparation and handoff stalls
+
+Before continuing an existing run, identify your own client session and the actual run UID/generation; do not hand work to your own session while waiting for another owner. Keep one concrete unfinished next action. Prepared inputs or modules are not an admitted executable pipeline. Before retry, move declared resume dependencies outside the node workdir, which rematerialization rebuilds; verify durable identity before cleanup. Validate the actual application config in its canary branch before model load. These are preparation checks, not additional approval gates. See [the dated engine/recipe audit](docs/84-external-engine-idle-review-2026-11-17.md) for scope and unresolved limits. The current native monitor/terminal contract above still applies until a supported implementation changes it.
+
 ## Code changes belong in the run, not in copies
 
 Every candidate's code is recorded as a commit of the run's private repository

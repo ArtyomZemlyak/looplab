@@ -1,0 +1,1415 @@
+{
+  "audit_date": "2026-11-17",
+  "remote_baseline": "7c45d5d9f04533751e2b04a05d3c4fdbb70fe7cb",
+  "comparison_only_unpublished": "5a1e6ef699b6038702e67ea9bde23e2ff2e83216",
+  "baseline_open_count": 58,
+  "scope": "Every existing canonical OPEN: own predicate, semantic scope, source identity and unpublished implementation/measurement distinction. No baseline item closed by promise or missing marker alone.",
+  "rows": [
+    {
+      "slug": "meter-ceiling-blind-to-tool-call-runaways",
+      "path": "benchmarks/meter/proxy.py",
+      "proof": "missing:docs/audit/meter-ceiling-on-tool-call-deltas.md",
+      "predicate_holds": true,
+      "predicate_detail": "",
+      "predicate_limit": "Source presence/absence alone does not establish behavioral correctness, utility or target-platform acceptance.",
+      "master_disposition": "retain",
+      "prior_isolated_category": "measurement_required",
+      "acceptance": "Measure complete tool-call/text cut behavior and arm parity; do not change the ruler from one runaway.",
+      "semantic_review": {
+        "actual_master": "Text delta ceiling still differs from tool-call deltas; no arm-parity measurement exists.",
+        "fresh_check": "Marker/predicate and deciding source or absence of accepted measurement rechecked on remote7c45d5d9; no new measurement or platform run.",
+        "limit": "Source predicate is structural evidence only; absence of a runtime/measurement result is not filled by unit tests. Queued software implementation is not claimed complete."
+      },
+      "source_identities": [
+        {
+          "path": "docs/audit/meter-ceiling-on-tool-call-deltas.md",
+          "exists": false,
+          "sha256": null
+        }
+      ]
+    },
+    {
+      "slug": "structured-claims-setting-retirement",
+      "path": "docs/25-architecture-modularity-review-2026-08-01.md",
+      "proof": "present:cross_run_structured_claims@looplab/core/config.py",
+      "predicate_holds": true,
+      "predicate_detail": "",
+      "predicate_limit": "Source presence/absence alone does not establish behavioral correctness, utility or target-platform acceptance.",
+      "master_disposition": "retain",
+      "prior_isolated_category": "implemented",
+      "acceptance": "Retire compatibly, update the calibration identity/catalogue and verify old snapshots; do not delete only the field.",
+      "semantic_review": {
+        "actual_master": "Existing declaration still describes an implementation gap on this remote revision; its exact predicate was rerun.",
+        "isolated_comparison": "Implementation exists only in unpublished5a1e6ef6 series; prior acceptance is not remote/live acceptance.",
+        "source_feature": "Active Settings/legacy-default/profile/catalogue field retired; original snapshots recognized explicitly. Reserved inert False v1 identity slot preserves exact historical profile/runtime hashes; no active/source/receipt/pair guard weakened.364CPU+6UI+strictdocs pass incl complete old/new evidence readers, exact SHA pins and negative drift/unknown/mixed-pair cases. Old presence predicate still finds retired-name compatibility text; active Settings/model and behavioral acceptance are the stronger checks.",
+        "source_feature_limit": "This describes isolated source, not shipped master."
+      },
+      "source_identities": [
+        {
+          "path": "looplab/core/config.py",
+          "exists": true,
+          "sha256": "191bdc7f62866764c6c83176b935fbe58f54fab97d524b2d6276538652144a13"
+        }
+      ]
+    },
+    {
+      "slug": "unconverted-stat-signature-ledger",
+      "path": "docs/25-architecture-modularity-review-2026-08-01.md",
+      "proof": "line:UNCONVERTED_SIGNATURE_SITES&&= 2@tests/test_file_identity_tiers.py",
+      "predicate_holds": true,
+      "predicate_detail": "",
+      "predicate_limit": "Source presence/absence alone does not establish behavioral correctness, utility or target-platform acceptance.",
+      "master_disposition": "retain",
+      "prior_isolated_category": "conservative_or_deliberate_limit",
+      "acceptance": "Resolve or explicitly retain both exceptional semantics and shrink the measured ledger; zero is not assumed.",
+      "semantic_review": {
+        "actual_master": "The guarded ledger is still two deliberate unconverted stat-signature sites.",
+        "fresh_check": "Marker/predicate and deciding source or absence of accepted measurement rechecked on remote7c45d5d9; no new measurement or platform run.",
+        "limit": "Source predicate is structural evidence only; absence of a runtime/measurement result is not filled by unit tests. Queued software implementation is not claimed complete."
+      },
+      "source_identities": [
+        {
+          "path": "tests/test_file_identity_tiers.py",
+          "exists": true,
+          "sha256": "a93f57c4280617a9ef9f864b792eab0e030f48377360b61932b73eb2d31f61b2"
+        }
+      ]
+    },
+    {
+      "slug": "research-grade-profile-is-not-the-default",
+      "path": "docs/52-development-plan-2026-09-05.md",
+      "proof": "present:profile: str = \"default\"@looplab/core/config.py",
+      "predicate_holds": true,
+      "predicate_detail": "",
+      "predicate_limit": "Source presence/absence alone does not establish behavioral correctness, utility or target-platform acceptance.",
+      "master_disposition": "retain",
+      "prior_isolated_category": "measurement_required",
+      "acceptance": "Run only a separately authorized matched harness benchmark separating selection gates and extra evaluations.",
+      "semantic_review": {
+        "actual_master": "Default remains default; thorough is available. This is an unmeasured default decision, not a missing feature.",
+        "fresh_check": "Marker/predicate and deciding source or absence of accepted measurement rechecked on remote7c45d5d9; no new measurement or platform run.",
+        "limit": "Source predicate is structural evidence only; absence of a runtime/measurement result is not filled by unit tests. Queued software implementation is not claimed complete."
+      },
+      "source_identities": [
+        {
+          "path": "looplab/core/config.py",
+          "exists": true,
+          "sha256": "191bdc7f62866764c6c83176b935fbe58f54fab97d524b2d6276538652144a13"
+        }
+      ]
+    },
+    {
+      "slug": "embedding-novelty-gate-declined-on-one-incident",
+      "path": "docs/52-development-plan-2026-09-05.md",
+      "proof": "missing:docs/audit/novelty-gate-ab.md",
+      "predicate_holds": true,
+      "predicate_detail": "",
+      "predicate_limit": "Source presence/absence alone does not establish behavioral correctness, utility or target-platform acceptance.",
+      "master_disposition": "retain",
+      "prior_isolated_category": "measurement_required",
+      "acceptance": "Measure the preregistered gate comparison before any default change.",
+      "semantic_review": {
+        "actual_master": "Semantic novelty remains optional; no accepted local ablation is recorded.",
+        "fresh_check": "Marker/predicate and deciding source or absence of accepted measurement rechecked on remote7c45d5d9; no new measurement or platform run.",
+        "limit": "Source predicate is structural evidence only; absence of a runtime/measurement result is not filled by unit tests. Queued software implementation is not claimed complete."
+      },
+      "source_identities": [
+        {
+          "path": "docs/audit/novelty-gate-ab.md",
+          "exists": false,
+          "sha256": null
+        }
+      ]
+    },
+    {
+      "slug": "eval-noise-floor-is-never-measured",
+      "path": "docs/52-development-plan-2026-09-05.md",
+      "proof": "missing:docs/audit/eval-noise-floor.md",
+      "predicate_holds": true,
+      "predicate_detail": "",
+      "predicate_limit": "Source presence/absence alone does not establish behavioral correctness, utility or target-platform acceptance.",
+      "master_disposition": "retain",
+      "prior_isolated_category": "measurement_required",
+      "acceptance": "An authorized separate benchmark records spread, protocol and costs; this audit grants no repeat ML seeds.",
+      "semantic_review": {
+        "actual_master": "The noise-floor mechanism exists; the missing result is a real-task spread, not implementation.",
+        "fresh_check": "Marker/predicate and deciding source or absence of accepted measurement rechecked on remote7c45d5d9; no new measurement or platform run.",
+        "limit": "Source predicate is structural evidence only; absence of a runtime/measurement result is not filled by unit tests. Queued software implementation is not claimed complete."
+      },
+      "source_identities": [
+        {
+          "path": "docs/audit/eval-noise-floor.md",
+          "exists": false,
+          "sha256": null
+        }
+      ]
+    },
+    {
+      "slug": "no-external-benchmark-number-exists",
+      "path": "docs/52-development-plan-2026-09-05.md",
+      "proof": "absent:RESULT 20@docs/audit/mlebench-lite-campaign.md",
+      "predicate_holds": true,
+      "predicate_detail": "",
+      "predicate_limit": "Source presence/absence alone does not establish behavioral correctness, utility or target-platform acceptance.",
+      "master_disposition": "retain",
+      "prior_isolated_category": "measurement_required",
+      "acceptance": "Publish the frozen campaign result and its coverage, not a smoke/unit-test score.",
+      "semantic_review": {
+        "actual_master": "The MLE-bench adapter and campaign protocol exist; the audit file has no accepted result.",
+        "fresh_check": "Marker/predicate and deciding source or absence of accepted measurement rechecked on remote7c45d5d9; no new measurement or platform run.",
+        "limit": "Source predicate is structural evidence only; absence of a runtime/measurement result is not filled by unit tests. Queued software implementation is not claimed complete."
+      },
+      "source_identities": [
+        {
+          "path": "docs/audit/mlebench-lite-campaign.md",
+          "exists": true,
+          "sha256": "7ac94f4d94a008ea03a156b6b332736fbef83c75bfec720c9b01cf107be66b5d"
+        }
+      ]
+    },
+    {
+      "slug": "developer-hack-rate-unmeasured",
+      "path": "docs/52-development-plan-2026-09-05.md",
+      "proof": "absent:RESULT 20@docs/audit/developer-hack-rate.md",
+      "predicate_holds": true,
+      "predicate_detail": "",
+      "predicate_limit": "Source presence/absence alone does not establish behavioral correctness, utility or target-platform acceptance.",
+      "master_disposition": "retain",
+      "prior_isolated_category": "measurement_required",
+      "acceptance": "Measure Developer shortcut rate under the declared arms and contamination controls.",
+      "semantic_review": {
+        "actual_master": "Bait construction/audit tooling exists; the audit remains a protocol.",
+        "fresh_check": "Marker/predicate and deciding source or absence of accepted measurement rechecked on remote7c45d5d9; no new measurement or platform run.",
+        "limit": "Source predicate is structural evidence only; absence of a runtime/measurement result is not filled by unit tests. Queued software implementation is not claimed complete."
+      },
+      "source_identities": [
+        {
+          "path": "docs/audit/developer-hack-rate.md",
+          "exists": true,
+          "sha256": "70d492977bfc33453bb59db72f8ffb092184f422e40069c1affcb1b964cfb8f8"
+        }
+      ]
+    },
+    {
+      "slug": "foresight-selective-accuracy-unmeasured",
+      "path": "docs/52-development-plan-2026-09-05.md",
+      "proof": "missing:docs/audit/foresight-hit-rate.md",
+      "predicate_holds": true,
+      "predicate_detail": "",
+      "predicate_limit": "Source presence/absence alone does not establish behavioral correctness, utility or target-platform acceptance.",
+      "master_disposition": "retain",
+      "prior_isolated_category": "measurement_required",
+      "acceptance": "Record prediction/outcome coverage and accuracy by run position, including abstentions.",
+      "semantic_review": {
+        "actual_master": "foresight_scoreboard is available; no accepted position-stratified accuracy result exists.",
+        "fresh_check": "Marker/predicate and deciding source or absence of accepted measurement rechecked on remote7c45d5d9; no new measurement or platform run.",
+        "limit": "Source predicate is structural evidence only; absence of a runtime/measurement result is not filled by unit tests. Queued software implementation is not claimed complete."
+      },
+      "source_identities": [
+        {
+          "path": "docs/audit/foresight-hit-rate.md",
+          "exists": false,
+          "sha256": null
+        }
+      ]
+    },
+    {
+      "slug": "smoke-full-rank-fidelity-unmeasured",
+      "path": "docs/52-development-plan-2026-09-05.md",
+      "proof": "missing:docs/audit/smoke-full-rank-fidelity.md",
+      "predicate_holds": true,
+      "predicate_detail": "",
+      "predicate_limit": "Source presence/absence alone does not establish behavioral correctness, utility or target-platform acceptance.",
+      "master_disposition": "retain",
+      "prior_isolated_category": "measurement_required",
+      "acceptance": "Measure paired rank agreement and uncertainty before relying on smoke promotion.",
+      "semantic_review": {
+        "actual_master": "The fidelity instrument exists; no accepted task-corpus smoke/full ranking result is recorded.",
+        "fresh_check": "Marker/predicate and deciding source or absence of accepted measurement rechecked on remote7c45d5d9; no new measurement or platform run.",
+        "limit": "Source predicate is structural evidence only; absence of a runtime/measurement result is not filled by unit tests. Queued software implementation is not claimed complete."
+      },
+      "source_identities": [
+        {
+          "path": "docs/audit/smoke-full-rank-fidelity.md",
+          "exists": false,
+          "sha256": null
+        }
+      ]
+    },
+    {
+      "slug": "no-research-lifecycle-benchmark-number",
+      "path": "docs/52-development-plan-2026-09-05.md",
+      "proof": "missing:docs/audit/research-lifecycle-benchmark.md",
+      "predicate_holds": true,
+      "predicate_detail": "",
+      "predicate_limit": "Source presence/absence alone does not establish behavioral correctness, utility or target-platform acceptance.",
+      "master_disposition": "retain",
+      "prior_isolated_category": "measurement_required",
+      "acceptance": "Run an authorized frozen lifecycle benchmark and report genuine decision-level outcomes.",
+      "semantic_review": {
+        "actual_master": "Task adapters do not supply an accepted experiment-level research benchmark result.",
+        "fresh_check": "Marker/predicate and deciding source or absence of accepted measurement rechecked on remote7c45d5d9; no new measurement or platform run.",
+        "limit": "Source predicate is structural evidence only; absence of a runtime/measurement result is not filled by unit tests. Queued software implementation is not claimed complete."
+      },
+      "source_identities": [
+        {
+          "path": "docs/audit/research-lifecycle-benchmark.md",
+          "exists": false,
+          "sha256": null
+        }
+      ]
+    },
+    {
+      "slug": "parallel-build-is-a-bulk-synchronous-barrier",
+      "path": "docs/52-development-plan-2026-09-05.md",
+      "proof": "present:self.tracer.span(\"parallel_build_batch\"@looplab/engine/orchestrator.py",
+      "predicate_holds": true,
+      "predicate_detail": "",
+      "predicate_limit": "Source presence/absence alone does not establish behavioral correctness, utility or target-platform acceptance.",
+      "master_disposition": "retain",
+      "prior_isolated_category": "measurement_required",
+      "acceptance": "Compare wall time and proposal quality before changing the default; absence of the mechanism is not claimed.",
+      "semantic_review": {
+        "actual_master": "The default bulk join remains; steady_state_build already provides an opt-in alternative.",
+        "fresh_check": "Marker/predicate and deciding source or absence of accepted measurement rechecked on remote7c45d5d9; no new measurement or platform run.",
+        "limit": "Source predicate is structural evidence only; absence of a runtime/measurement result is not filled by unit tests. Queued software implementation is not claimed complete."
+      },
+      "source_identities": [
+        {
+          "path": "looplab/engine/orchestrator.py",
+          "exists": true,
+          "sha256": "5eb29a80f619025879afba0133bab069509f64e656eff014f2911d3599bec6d8"
+        }
+      ]
+    },
+    {
+      "slug": "report-review-nominates-no-experiment",
+      "path": "docs/67-external-works-synergy-2026-09-25.md",
+      "proof": "absent:report_review@looplab",
+      "predicate_holds": true,
+      "predicate_detail": "",
+      "predicate_limit": "Source presence/absence alone does not establish behavioral correctness, utility or target-platform acceptance.",
+      "master_disposition": "retain",
+      "prior_isolated_category": "implemented",
+      "acceptance": "A reviewer records independent evidence and an approval card; it never launches a suggested experiment directly.",
+      "semantic_review": {
+        "actual_master": "Existing declaration still describes an implementation gap on this remote revision; its exact predicate was rerun.",
+        "isolated_comparison": "Implementation exists only in unpublished5a1e6ef6 series; prior acceptance is not remote/live acceptance.",
+        "source_feature": "Optional native paid independent-context review binds exact report/native prefix and original node outcomes; manual UI/API with at-most-once paid recovery. HIGH explicit approval records only retractable research consideration through native command service, fresh approval/tail-CAS checks, exact approved-command recovery.496CPU+201overlappingCPU/2skip+77UI+localizedViteBuild+strictdocs PASS. No scientific execution/grant, provider independence/quality/production utility unmeasured; no deployment.",
+        "source_feature_limit": "This describes isolated source, not shipped master."
+      },
+      "source_identities": [
+        {
+          "path": "looplab",
+          "exists": true,
+          "sha256": null
+        }
+      ]
+    },
+    {
+      "slug": "discarded-card-rebuild-cost-unmeasured",
+      "path": "docs/67-external-works-synergy-2026-09-25.md",
+      "proof": "missing:docs/audit/discarded-card-rebuild.md",
+      "predicate_holds": true,
+      "predicate_detail": "",
+      "predicate_limit": "Source presence/absence alone does not establish behavioral correctness, utility or target-platform acceptance.",
+      "master_disposition": "retain",
+      "prior_isolated_category": "measurement_required",
+      "acceptance": "Measure repeated work over a fixed corpus before choosing reuse semantics.",
+      "semantic_review": {
+        "actual_master": "Single historical rebuild evidence exists; no corpus-level rebuild-cost result is recorded.",
+        "fresh_check": "Marker/predicate and deciding source or absence of accepted measurement rechecked on remote7c45d5d9; no new measurement or platform run.",
+        "limit": "Source predicate is structural evidence only; absence of a runtime/measurement result is not filled by unit tests. Queued software implementation is not claimed complete."
+      },
+      "source_identities": [
+        {
+          "path": "docs/audit/discarded-card-rebuild.md",
+          "exists": false,
+          "sha256": null
+        }
+      ]
+    },
+    {
+      "slug": "best-of-n-ranks-without-executing",
+      "path": "docs/67-external-works-synergy-2026-09-25.md",
+      "proof": "absent:pilot_rank@looplab/search/best_of_n.py",
+      "predicate_holds": true,
+      "predicate_detail": "",
+      "predicate_limit": "Source presence/absence alone does not establish behavioral correctness, utility or target-platform acceptance.",
+      "master_disposition": "retain",
+      "prior_isolated_category": "implemented",
+      "acceptance": "A bounded pilot preserves immutable scorer/budget and demonstrates full-rank fidelity.",
+      "semantic_review": {
+        "actual_master": "Existing declaration still describes an implementation gap on this remote revision; its exact predicate was rerun.",
+        "isolated_comparison": "Implementation exists only in unpublished5a1e6ef6 series; prior acceptance is not remote/live acceptance.",
+        "source_feature": "Optional null-default code-only method bundles candidates without executing at build; real pilots and chosen fresh full run execute only after original native proposal/admission/resource/start boundary, one invocation/terminal and all time charged. Usable finite actual pilot metrics rank; no failed/timeout metric or all-fail fallback may elect a winner; only original-env full result is quality. Explicit resource envelope, digest-checked text assets, exact source/raw-output receipts and process session cleanup; config/task preflight precedes paid client and old snapshot ignores ambient setting.326CPU runtime overlap+122final source/config+40native role-composition cases+60registry/architecture+strictdocs PASS, including actual Engine/subprocess, stop/timeout/fork cleanup, provenance invalid UTF8 and unchanged legacy/null behavior. Source feature only: fidelity review authored, cheap/full agreement/scientific gain/Docker-GPU-Windows/production utility not measured; existing smoke-full-rank-fidelity measurement OPEN retained, no deployment.",
+        "source_feature_limit": "This describes isolated source, not shipped master."
+      },
+      "source_identities": [
+        {
+          "path": "looplab/search/best_of_n.py",
+          "exists": true,
+          "sha256": "621875951da2a4a8e5135839ae3906c2b699f0aa30fde4bf3e239ca2ab25bade"
+        }
+      ]
+    },
+    {
+      "slug": "skills-have-no-external-source",
+      "path": "docs/67-external-works-synergy-2026-09-25.md",
+      "proof": "absent:skill-distill@looplab",
+      "predicate_holds": true,
+      "predicate_detail": "",
+      "predicate_limit": "Source presence/absence alone does not establish behavioral correctness, utility or target-platform acceptance.",
+      "master_disposition": "retain",
+      "prior_isolated_category": "implemented",
+      "acceptance": "Imported skills pass execution and contamination checks before promotion; source text alone is insufficient.",
+      "semantic_review": {
+        "actual_master": "Existing declaration still describes an implementation gap on this remote revision; its exact predicate was rerun.",
+        "isolated_comparison": "Implementation exists only in unpublished5a1e6ef6 series; prior acceptance is not remote/live acceptance.",
+        "source_feature": "Optional pinned Git text snapshot + declared exact task/article exclusions and authored review; real confined CPU smoke, then exact native own measured lesson/evidence/objective recheck outside smoke locks. Immutable source/validation artifact outside skills library; hidden auto candidate and same native cross-task promotion, no support from repeated imports.379CPU+64final source/CLI+52registry/architecture/API/help+strictdocs PASS, including actual smoke refusal/timeout, native second-run promotion, MCP/HTTP/restart/reset race. Prior CLI registry/cap drift repaired without increasing cap. Client origin, semantic contamination freedom, manual global skill utility/scientific transfer and deployment not attested; existing memory outcome bound remains OPEN.",
+        "source_feature_limit": "This describes isolated source, not shipped master."
+      },
+      "source_identities": [
+        {
+          "path": "looplab",
+          "exists": true,
+          "sha256": null
+        }
+      ]
+    },
+    {
+      "slug": "concurrent-runs-share-no-work-claims",
+      "path": "docs/67-external-works-synergy-2026-09-25.md",
+      "proof": "absent:work_claims@looplab/engine/memory_stores.py",
+      "predicate_holds": true,
+      "predicate_detail": "",
+      "predicate_limit": "Source presence/absence alone does not establish behavioral correctness, utility or target-platform acceptance.",
+      "master_disposition": "retain",
+      "prior_isolated_category": "implemented",
+      "acceptance": "Concurrent claims conflict/cooperate by exact topic/task and expire/recover without duplicating work.",
+      "semantic_review": {
+        "actual_master": "Existing declaration still describes an implementation gap on this remote revision; its exact predicate was rerun.",
+        "isolated_comparison": "Implementation exists only in unpublished5a1e6ef6 series; prior acceptance is not remote/live acceptance.",
+        "source_feature": "Optional bounded native authored work_intents across run modes; selected same-task generation-bound HTTP/MCP peer read, exact subject/operation possible overlap, authored current-hint conflict/deferred and independently retained ACK receipts. Strict integer ACK identity fixed at HTTP and MCP boundaries with real positive/negative acceptance; no authority, exclusivity, comprehension, atomicity or Root/ML gate. Public commands/native writers/restart, source refusal and whole-peer budget recovery accepted; production adoption/duplicate prevention/cross-machine utility unmeasured, not deployed.",
+        "source_feature_limit": "This describes isolated source, not shipped master."
+      },
+      "source_identities": [
+        {
+          "path": "looplab/engine/memory_stores.py",
+          "exists": true,
+          "sha256": "3344a89b2b2ad48a26b14222b16e407896390e9ad0376162f45d8ffe5dfe8fc5"
+        }
+      ]
+    },
+    {
+      "slug": "stuck-rebuild-always-superseded",
+      "path": "docs/69-agents-review-minionerec-v10-2026-09-26.md",
+      "proof": "present:or card.evidence != [node_id]@looplab/search/card_selection.py",
+      "predicate_holds": true,
+      "predicate_detail": "",
+      "predicate_limit": "Source presence/absence alone does not establish behavioral correctness, utility or target-platform acceptance.",
+      "master_disposition": "remove_refuted_with_real_behavior_regression",
+      "prior_isolated_category": "existing_fix_revalidated",
+      "acceptance": "A stuck/unexecuted rebuild is freshness-eligible while real competing evidence still supersedes it.",
+      "semantic_review": {
+        "slug": "stuck-rebuild-always-superseded",
+        "remote_status": "REFUTED on current remote production code",
+        "deciding_symbols": [
+          "events/card_ledger.py::_apply_card_returns",
+          "search/card_selection.py::_counterfactual_owned_card_state"
+        ],
+        "proof_problem": "present downstream evidence guard is true while upstream fold already excludes forgiven node during own rebuild",
+        "isolated": "c2c5154 adds meaningful regression and corrects prose, no relevant production fix",
+        "action": "Add real regression to remote and delete false OPEN with evidence note; not marker-only closure"
+      },
+      "source_identities": [
+        {
+          "path": "looplab/search/card_selection.py",
+          "exists": true,
+          "sha256": "6669ec5d09049d416c4d3d8b98cd11bb58cc772975682a2cdd09620db341f367"
+        }
+      ]
+    },
+    {
+      "slug": "repair-holds-the-only-eval-slot",
+      "path": "docs/69-agents-review-minionerec-v10-2026-09-26.md",
+      "proof": "present:while len(session.eval_inflight) < max(1, int(self._eval_parallel)):@looplab/engine/speculation.py",
+      "predicate_holds": true,
+      "predicate_detail": "",
+      "predicate_limit": "Source presence/absence alone does not establish behavioral correctness, utility or target-platform acceptance.",
+      "master_disposition": "retain",
+      "prior_isolated_category": "implemented",
+      "acceptance": "A slow repair and ready independent eval prove slot release without duplicate dispatch or lost costs.",
+      "semantic_review": {
+        "slug": "repair-holds-the-only-eval-slot",
+        "remote_status": "still present",
+        "deciding_symbols": [
+          "engine/speculation.py dispatcher eval_inflight width",
+          "engine/evaluate.py repair lifecycle"
+        ],
+        "isolated": "4d85007 repair_slots.py and physical occupancy yielding with behavioral tests; unshipped",
+        "scope": "internal LLM repair lane; do not attribute this Nov16 external preparation delay to this mechanism"
+      },
+      "source_identities": [
+        {
+          "path": "looplab/engine/speculation.py",
+          "exists": true,
+          "sha256": "a001a85597c69d760955e5dc5fef2cb36466c1e5953d003298e40b4c5d4dc9c7"
+        }
+      ]
+    },
+    {
+      "slug": "no-metric-behaviour-detector",
+      "path": "docs/69-agents-review-minionerec-v10-2026-09-26.md",
+      "proof": "present:TRUST_DETECTOR_CODE_LEAKAGE, TRUST_DETECTOR_CRITIC, TRUST_DETECTOR_FEATURE_CV)@looplab/trust/scan_receipt.py",
+      "predicate_holds": true,
+      "predicate_detail": "",
+      "predicate_limit": "Source presence/absence alone does not establish behavioral correctness, utility or target-platform acceptance.",
+      "master_disposition": "retain",
+      "prior_isolated_category": "implemented",
+      "acceptance": "An evidence-bound detector exposes behavior anomalies without claiming scientific intent was attested.",
+      "semantic_review": {
+        "slug": "no-metric-behaviour-detector",
+        "remote_status": "still absent",
+        "deciding_symbols": [
+          "trust/scan_receipt.py detector registry"
+        ],
+        "isolated": "2027dca adds native co-metric regime observations/tests, unshipped",
+        "scope": "advisory change detection does not prove scorer correctness or relevance"
+      },
+      "source_identities": [
+        {
+          "path": "looplab/trust/scan_receipt.py",
+          "exists": true,
+          "sha256": "d0df8a19c7ea0d6e6f04c1fb57e0af5efadd3decf80303c74f626be14200238e"
+        }
+      ]
+    },
+    {
+      "slug": "board-rotation-by-attempt-only",
+      "path": "docs/69-agents-review-minionerec-v10-2026-09-26.md",
+      "proof": "present:offset = attempt % len(cards)@looplab/agents/state_brief.py",
+      "predicate_holds": true,
+      "predicate_detail": "",
+      "predicate_limit": "Source presence/absence alone does not establish behavioral correctness, utility or target-platform acceptance.",
+      "master_disposition": "retain",
+      "prior_isolated_category": "implemented",
+      "acceptance": "Demonstrate the chosen alternative selection behavior and preserved ordering under replay.",
+      "semantic_review": {
+        "slug": "board-rotation-by-attempt-only",
+        "remote_status": "still present",
+        "deciding_symbols": [
+          "agents/state_brief.py::board_prompt_lines fallback offset"
+        ],
+        "isolated": "71994fb goal-ordered context with retained coverage/tests, unshipped",
+        "scope": "internal prompt context, not external Codex task queue"
+      },
+      "source_identities": [
+        {
+          "path": "looplab/agents/state_brief.py",
+          "exists": true,
+          "sha256": "bb6a934b09233dd0762b4e2716a050b0ac7af73a5d69f5071edb57a339e51569"
+        }
+      ]
+    },
+    {
+      "slug": "card-plan-counts-hidden-nodes",
+      "path": "docs/69-agents-review-minionerec-v10-2026-09-26.md",
+      "proof": "present:reserve_frac=self._endgame_reserve_frac, at_node=len(state.nodes),@looplab/engine/orchestrator.py",
+      "predicate_holds": true,
+      "predicate_detail": "",
+      "predicate_limit": "Source presence/absence alone does not establish behavioral correctness, utility or target-platform acceptance.",
+      "master_disposition": "retain",
+      "prior_isolated_category": "implemented",
+      "acceptance": "Hidden/manual/tombstoned nodes obey one denominator in plan, dispatch and endgame transitions.",
+      "semantic_review": {
+        "slug": "card-plan-counts-hidden-nodes",
+        "remote_status": "still present",
+        "deciding_symbols": [
+          "engine/orchestrator.py planning at_node=len(state.nodes)",
+          "engine/plan.py population math"
+        ],
+        "isolated": "f381eee eligible population shared by plan/gates, unshipped"
+      },
+      "source_identities": [
+        {
+          "path": "looplab/engine/orchestrator.py",
+          "exists": true,
+          "sha256": "5eb29a80f619025879afba0133bab069509f64e656eff014f2911d3599bec6d8"
+        }
+      ]
+    },
+    {
+      "slug": "lesson-from-pre-repair-prose",
+      "path": "docs/69-agents-review-minionerec-v10-2026-09-26.md",
+      "proof": "absent:prose_authored@looplab/engine/lessons_reconcile.py",
+      "predicate_holds": true,
+      "predicate_detail": "",
+      "predicate_limit": "Source presence/absence alone does not establish behavioral correctness, utility or target-platform acceptance.",
+      "master_disposition": "retain",
+      "prior_isolated_category": "implemented",
+      "acceptance": "A post-repair lesson cannot falsely attribute pre-repair prose to the repaired implementation.",
+      "semantic_review": {
+        "slug": "lesson-from-pre-repair-prose",
+        "remote_status": "still present",
+        "deciding_symbols": [
+          "engine/lessons_reconcile.py::LessonReconcileMixin self-pair rationale"
+        ],
+        "isolated": "c2c5154 uses current repair ledger rationale, unshipped"
+      },
+      "source_identities": [
+        {
+          "path": "looplab/engine/lessons_reconcile.py",
+          "exists": true,
+          "sha256": "4f9b41156c4414a3a11bb83ee1d0dad5d9e60eea28ffa6cefd423a1249c1eaab"
+        }
+      ]
+    },
+    {
+      "slug": "ready-dispatch-waits-for-cadence",
+      "path": "docs/69-agents-review-minionerec-v10-2026-09-26.md",
+      "proof": "present:is not None or speculative_state.buildings)@looplab/engine/orchestrator.py",
+      "predicate_holds": true,
+      "predicate_detail": "",
+      "predicate_limit": "Source presence/absence alone does not establish behavioral correctness, utility or target-platform acceptance.",
+      "master_disposition": "retain",
+      "prior_isolated_category": "implemented",
+      "acceptance": "A ready independent result dispatches before an unrelated cadence while freshness and pause still hold.",
+      "semantic_review": {
+        "slug": "ready-dispatch-waits-for-cadence",
+        "remote_status": "still present",
+        "deciding_symbols": [
+          "engine/orchestrator.py pre-cadence speculative session predicate"
+        ],
+        "isolated": "053922b admits committed consumers before cadence through same guards, unshipped",
+        "scope": "internal speculative session cadence; not all time external agent spends preparing nodes"
+      },
+      "source_identities": [
+        {
+          "path": "looplab/engine/orchestrator.py",
+          "exists": true,
+          "sha256": "5eb29a80f619025879afba0133bab069509f64e656eff014f2911d3599bec6d8"
+        }
+      ]
+    },
+    {
+      "slug": "canary-never-reused-across-nodes",
+      "path": "docs/69-agents-review-minionerec-v10-2026-09-26.md",
+      "proof": "present:coerce_node_id(d) == node_id@looplab/engine/eval_canary.py",
+      "predicate_holds": true,
+      "predicate_detail": "",
+      "predicate_limit": "Source presence/absence alone does not establish behavioral correctness, utility or target-platform acceptance.",
+      "master_disposition": "retain",
+      "prior_isolated_category": "conservative_or_deliberate_limit",
+      "acceptance": "Any reuse design proves equivalent source/config/inputs/environment and invalidation; no broad cache is assumed safe.",
+      "semantic_review": {
+        "slug": "canary-never-reused-across-nodes",
+        "remote_status": "still present intentionally conservative",
+        "deciding_symbols": [
+          "engine/eval_canary.py::canary_already_passed"
+        ],
+        "isolated": "unchanged",
+        "scope": "cross-node reuse speed feature, distinct from no-op canary validation error; require full source/env/protocol equivalence to relax"
+      },
+      "source_identities": [
+        {
+          "path": "looplab/engine/eval_canary.py",
+          "exists": true,
+          "sha256": "d2b08fedd9ac52881f649c77e90668c5a66baf604dbac65b6c993902171747a7"
+        }
+      ]
+    },
+    {
+      "slug": "dotenv-files-unreadable",
+      "path": "docs/69-agents-review-minionerec-v10-2026-09-26.md",
+      "proof": "present:return p.suffix.lower() in TEXT_EXT or p.name.lower() in SAFE_NAMES@looplab/core/_pathsafe.py",
+      "predicate_holds": true,
+      "predicate_detail": "",
+      "predicate_limit": "Source presence/absence alone does not establish behavioral correctness, utility or target-platform acceptance.",
+      "master_disposition": "retain",
+      "prior_isolated_category": "conservative_or_deliberate_limit",
+      "acceptance": "A proposed reader must survive the documented multiline/encoding/staged-overlay secret cases; no raw dotenv access is authorized.",
+      "semantic_review": {
+        "slug": "dotenv-files-unreadable",
+        "remote_status": "still present with documented unsafe attempted relaxation",
+        "deciding_symbols": [
+          "core/_pathsafe.py text file recognition"
+        ],
+        "isolated": "unchanged",
+        "scope": "readability limitation, not authority to print secrets; robust all-channel parsing/redaction acceptance needed"
+      },
+      "source_identities": [
+        {
+          "path": "looplab/core/_pathsafe.py",
+          "exists": true,
+          "sha256": "817508acfed87492b9597152b62b372e348f8840cadd86a99d6996e68fff8f7d"
+        }
+      ]
+    },
+    {
+      "slug": "no-offline-policy-replay",
+      "path": "docs/70-external-works-and-operator-reports-2026-09-29.md",
+      "proof": "missing:looplab/search/policy_replay.py",
+      "predicate_holds": true,
+      "predicate_detail": "",
+      "predicate_limit": "Source presence/absence alone does not establish behavioral correctness, utility or target-platform acceptance.",
+      "master_disposition": "retain",
+      "prior_isolated_category": "implemented",
+      "acceptance": "Report policy result only where recorded choices support it, with explicit coverage and no invented outcomes.",
+      "semantic_review": {
+        "slug": "no-offline-policy-replay",
+        "remote_status": "still absent",
+        "deciding_symbols": [
+          "search/policy_replay.py missing"
+        ],
+        "isolated": "c717078 conditional recorded-tree replay and unsupported coverage; unshipped",
+        "scope": "must not claim counterfactual outcomes for unevaluated candidates"
+      },
+      "source_identities": [
+        {
+          "path": "looplab/search/policy_replay.py",
+          "exists": false,
+          "sha256": null
+        }
+      ]
+    },
+    {
+      "slug": "no-cluster-executor",
+      "path": "docs/70-external-works-and-operator-reports-2026-09-29.md",
+      "proof": "absent:sbatch@looplab/runtime/sandbox.py",
+      "predicate_holds": true,
+      "predicate_detail": "",
+      "predicate_limit": "Source presence/absence alone does not establish behavioral correctness, utility or target-platform acceptance.",
+      "master_disposition": "retain",
+      "prior_isolated_category": "target_platform_validation_required",
+      "acceptance": "Pass cluster-executor-acceptance.md with remote placement, stop/retry identity, protected inputs and costs.",
+      "semantic_review": {
+        "slug": "no-cluster-executor",
+        "remote_status": "still absent; single-machine implementation",
+        "deciding_symbols": [
+          "runtime/sandbox.py subprocess execution"
+        ],
+        "isolated": "5a1e6ef adds CPU local durable worker/invocation reconciliation, unshipped; real remote platform acceptance remains UNKNOWN",
+        "scope": "do not close platform capability with local CPU tests or literal sbatch token; local docs narrow and retain platform item"
+      },
+      "source_identities": [
+        {
+          "path": "looplab/runtime/sandbox.py",
+          "exists": true,
+          "sha256": "fe5802b88742121ab9f5231d5b545d53c830d8a2c097205fb00a4af180751dfb"
+        }
+      ]
+    },
+    {
+      "slug": "external-russian-readability",
+      "path": "docs/76-external-agent-ux-open-items-2026-10-13.md",
+      "proof": "absent:RESULT 20@docs/audit/external-russian-readability-20261013.md",
+      "predicate_holds": true,
+      "predicate_detail": "",
+      "predicate_limit": "Source presence/absence alone does not establish behavioral correctness, utility or target-platform acceptance.",
+      "master_disposition": "retain",
+      "prior_isolated_category": "existing_implementation_acceptance_required",
+      "acceptance": "Complete the existing human reading protocol across current and historical screens; a catalogue test alone does not close it.",
+      "semantic_review": {
+        "actual_master": "Translation/quality guards exist, including further candidate fixes; no accepted live RU/EN reading protocol result exists.",
+        "fresh_check": "Marker/predicate and deciding source or absence of accepted measurement rechecked on remote7c45d5d9; no new measurement or platform run.",
+        "limit": "Source predicate is structural evidence only; absence of a runtime/measurement result is not filled by unit tests. Queued software implementation is not claimed complete."
+      },
+      "source_identities": [
+        {
+          "path": "docs/audit/external-russian-readability-20261013.md",
+          "exists": true,
+          "sha256": "040a21a5d6aab4a20caea03ca6850daffc75c82c2611cae5289eb0491642c451"
+        }
+      ]
+    },
+    {
+      "slug": "external-report-presentation",
+      "path": "docs/76-external-agent-ux-open-items-2026-10-13.md",
+      "proof": "absent:RESULT 20@docs/audit/external-report-presentation-20261013.md",
+      "predicate_holds": true,
+      "predicate_detail": "",
+      "predicate_limit": "Source presence/absence alone does not establish behavioral correctness, utility or target-platform acceptance.",
+      "master_disposition": "retain",
+      "prior_isolated_category": "existing_implementation_acceptance_required",
+      "acceptance": "Run the existing presentation protocol with real claims, figures, caveats and historical versions.",
+      "semantic_review": {
+        "actual_master": "Markdown, figures, history and external authorship are implemented; whole-presentation acceptance remains unrecorded.",
+        "fresh_check": "Marker/predicate and deciding source or absence of accepted measurement rechecked on remote7c45d5d9; no new measurement or platform run.",
+        "limit": "Source predicate is structural evidence only; absence of a runtime/measurement result is not filled by unit tests. Queued software implementation is not claimed complete."
+      },
+      "source_identities": [
+        {
+          "path": "docs/audit/external-report-presentation-20261013.md",
+          "exists": true,
+          "sha256": "67c60ab67c57d72618f05ec4199ea2569255aea81c3a0414c5a3193e4ba48925"
+        }
+      ]
+    },
+    {
+      "slug": "experiment-runtime-parameters",
+      "path": "docs/77-experiment-tracking-open-items-2026-10-13.md",
+      "proof": "absent:RESULT 20@docs/audit/experiment-runtime-parameters-20261014.md",
+      "predicate_holds": true,
+      "predicate_detail": "",
+      "predicate_limit": "Source presence/absence alone does not establish behavioral correctness, utility or target-platform acceptance.",
+      "master_disposition": "retain",
+      "prior_isolated_category": "existing_implementation_acceptance_required",
+      "acceptance": "The protocol matches actual values/sources/conflicts and keeps candidate declarations distinct from observation.",
+      "semantic_review": {
+        "actual_master": "Reworded contradictory prose: RuntimeSnapshotPanel exists; remaining work is real attempt-bound acceptance.",
+        "fresh_check": "Marker/predicate and deciding source or absence of accepted measurement rechecked on remote7c45d5d9; no new measurement or platform run.",
+        "limit": "Source predicate is structural evidence only; absence of a runtime/measurement result is not filled by unit tests. Queued software implementation is not claimed complete."
+      },
+      "source_identities": [
+        {
+          "path": "docs/audit/experiment-runtime-parameters-20261014.md",
+          "exists": true,
+          "sha256": "c6f585017675b2079e5cc81be174fef75db63059e6e1db6fe7b264ec805a38f2"
+        }
+      ]
+    },
+    {
+      "slug": "experiment-artifact-previews",
+      "path": "docs/77-experiment-tracking-open-items-2026-10-13.md",
+      "proof": "absent:RESULT 20@docs/audit/experiment-artifact-previews-20261014.md",
+      "predicate_holds": true,
+      "predicate_detail": "",
+      "predicate_limit": "Source presence/absence alone does not establish behavioral correctness, utility or target-platform acceptance.",
+      "master_disposition": "retain",
+      "prior_isolated_category": "existing_implementation_acceptance_required",
+      "acceptance": "Run the existing bounded real-file protocol, including active-content/path refusal and honest fallback.",
+      "semantic_review": {
+        "actual_master": "Images/PDF/metadata/paging/RecordedSeedFiles support exists; real-artifact acceptance remains open.",
+        "fresh_check": "Marker/predicate and deciding source or absence of accepted measurement rechecked on remote7c45d5d9; no new measurement or platform run.",
+        "limit": "Source predicate is structural evidence only; absence of a runtime/measurement result is not filled by unit tests. Queued software implementation is not claimed complete."
+      },
+      "source_identities": [
+        {
+          "path": "docs/audit/experiment-artifact-previews-20261014.md",
+          "exists": true,
+          "sha256": "c17704231f9530233a208d3d01fb05473278da72c9551aaa4f9e3a1af5544f67"
+        }
+      ]
+    },
+    {
+      "slug": "experiment-resource-snapshot",
+      "path": "docs/77-experiment-tracking-open-items-2026-10-13.md",
+      "proof": "absent:RESULT 20@docs/audit/experiment-resource-snapshot-20261014.md",
+      "predicate_holds": true,
+      "predicate_detail": "",
+      "predicate_limit": "Source presence/absence alone does not establish behavioral correctness, utility or target-platform acceptance.",
+      "master_disposition": "retain",
+      "prior_isolated_category": "existing_implementation_acceptance_required",
+      "acceptance": "Validate units, lifecycle/cost separation and actual versus derived resources against the saved receipts.",
+      "semantic_review": {
+        "actual_master": "The resource panel exists; the accepted real-attempt comparison is missing.",
+        "fresh_check": "Marker/predicate and deciding source or absence of accepted measurement rechecked on remote7c45d5d9; no new measurement or platform run.",
+        "limit": "Source predicate is structural evidence only; absence of a runtime/measurement result is not filled by unit tests. Queued software implementation is not claimed complete."
+      },
+      "source_identities": [
+        {
+          "path": "docs/audit/experiment-resource-snapshot-20261014.md",
+          "exists": true,
+          "sha256": "08a35d1154d51e57920fe3592c6acd721f8d8ab2424be10a24a9ed9308e5ccec"
+        }
+      ]
+    },
+    {
+      "slug": "job-role-lost-at-node-creation",
+      "path": "docs/83-autoresearch-harness-ai-rd-2026-11-06.md",
+      "proof": "absent:job_role=_OMIT@looplab/engine/node_build.py",
+      "predicate_holds": true,
+      "predicate_detail": "",
+      "predicate_limit": "Source presence/absence alone does not establish behavioral correctness, utility or target-platform acceptance.",
+      "master_disposition": "retain",
+      "prior_isolated_category": "already_implemented",
+      "acceptance": "Exercise the corrected emitter, replay/rebuild and historical unknown roles on the deployed revision; isolated tests alone do not prove deployment.",
+      "semantic_review": {
+        "slug": "job-role-lost-at-node-creation",
+        "actual_master": "master missing optional job_role emitter/replay preservation",
+        "isolated_implementation": "isolated implemented, tests/test_job_role_materialization.py",
+        "commits": "e72ba2b/afbc48d",
+        "decision": "implementation-unpublished; unrelated to client session identity proof"
+      },
+      "source_identities": [
+        {
+          "path": "looplab/engine/node_build.py",
+          "exists": true,
+          "sha256": "79a85a198cbe5f161d48ff82a7aaa74b36d1c6fa6db6d0d52505b507f99bef71"
+        }
+      ]
+    },
+    {
+      "slug": "external-reads-lack-end-to-end-bounds",
+      "path": "docs/83-autoresearch-harness-ai-rd-2026-11-06.md",
+      "proof": "present:state = read(\"/state?observe_only=true\", \"state\")@looplab/harness/mcp_server.py",
+      "predicate_holds": true,
+      "predicate_detail": "",
+      "predicate_limit": "Source presence/absence alone does not establish behavioral correctness, utility or target-platform acceptance.",
+      "master_disposition": "retain",
+      "prior_isolated_category": "implemented",
+      "acceptance": "A long-run bounded summary and continuations work without raising a global response cap or silently losing records.",
+      "semantic_review": {
+        "slug": "external-reads-lack-end-to-end-bounds",
+        "actual_master": "connection_check still fetches broad state",
+        "isolated_implementation": "bounded identity90fa02f + whole-map budget a0aaa02 + export3bc8607",
+        "commits": "90fa02f,a0aaa02,3bc8607",
+        "decision": "implementation-unpublished, live adoption unmeasured"
+      },
+      "source_identities": [
+        {
+          "path": "looplab/harness/mcp_server.py",
+          "exists": true,
+          "sha256": "14af09af9d96b962ee1d5d921a3bef5a56d1da1ebfc9e5b3dc80e8590f58c37c"
+        }
+      ]
+    },
+    {
+      "slug": "evaluation-faithfulness-not-attested",
+      "path": "docs/83-autoresearch-harness-ai-rd-2026-11-06.md",
+      "proof": "absent:RESULT 20@docs/audit/evaluation-faithfulness.md",
+      "predicate_holds": true,
+      "predicate_detail": "",
+      "predicate_limit": "Source presence/absence alone does not establish behavioral correctness, utility or target-platform acceptance.",
+      "master_disposition": "retain",
+      "prior_isolated_category": "existing_implementation_acceptance_required",
+      "acceptance": "Pass evaluation-faithfulness.md, retaining conservative protocol warnings and independent semantic evidence.",
+      "semantic_review": {
+        "slug": "evaluation-faithfulness-not-attested",
+        "actual_master": "protocol has no accepted result",
+        "isolated_implementation": "still OPEN, no semantic intent attestation",
+        "commits": "none",
+        "decision": "measurement/semantic review OPEN; do not close by deterministic integrity tests"
+      },
+      "source_identities": [
+        {
+          "path": "docs/audit/evaluation-faithfulness.md",
+          "exists": true,
+          "sha256": "621d9e32ddb4c589a98b237e4ffa89ca3c595c69899313765f258cde41c80ca4"
+        }
+      ]
+    },
+    {
+      "slug": "external-harness-version-and-spend-unrecorded",
+      "path": "docs/83-autoresearch-harness-ai-rd-2026-11-06.md",
+      "proof": "absent:RESULT 20@docs/audit/external-harness-telemetry.md",
+      "predicate_holds": true,
+      "predicate_detail": "",
+      "predicate_limit": "Source presence/absence alone does not establish behavioral correctness, utility or target-platform acceptance.",
+      "master_disposition": "retain",
+      "prior_isolated_category": "implemented",
+      "acceptance": "Pass telemetry protocol with observed versus declared usage, unknown coverage and no double counting.",
+      "semantic_review": {
+        "slug": "external-harness-version-and-spend-unrecorded",
+        "actual_master": "no native external revision/usage receipts",
+        "isolated_implementation": "isolated telemetry receipts + API/MCP/UI acceptance; provider coverage/authenticity unknown",
+        "commits": "d4773b6",
+        "decision": "source implementation unpublished; live billing measurement remains UNKNOWN"
+      },
+      "source_identities": [
+        {
+          "path": "docs/audit/external-harness-telemetry.md",
+          "exists": true,
+          "sha256": "78a17a81a1b6710b1fcfe184664b7e2d9b6573ffa6acac813d2bca24c442f0d1"
+        }
+      ]
+    },
+    {
+      "slug": "external-work-state-has-no-authored-checkpoint",
+      "path": "docs/83-autoresearch-harness-ai-rd-2026-11-06.md",
+      "proof": "absent:RESULT 20@docs/audit/external-work-state-recovery.md",
+      "predicate_holds": true,
+      "predicate_detail": "",
+      "predicate_limit": "Source presence/absence alone does not establish behavioral correctness, utility or target-platform acceptance.",
+      "master_disposition": "retain",
+      "prior_isolated_category": "implemented",
+      "acceptance": "Recover exact current intent/artifacts/tools without executing historical notices or duplicating fit/score.",
+      "semantic_review": {
+        "slug": "external-work-state-has-no-authored-checkpoint",
+        "actual_master": "saved commands exist, no bounded authored goal/blocker state",
+        "isolated_implementation": "native agent_checkpointed work notes + cold-process native/MCP recovery; declared identities unverified",
+        "commits": "e1ace13",
+        "decision": "implementation-unpublished; not a proof that a client is the sole physical session"
+      },
+      "source_identities": [
+        {
+          "path": "docs/audit/external-work-state-recovery.md",
+          "exists": true,
+          "sha256": "ed69fb32f68a1f20098aafab3f99c7269fa02fe8b9e4da8b3961db83c6f482c4"
+        }
+      ]
+    },
+    {
+      "slug": "operator-directions-lack-explicit-retirement",
+      "path": "docs/83-autoresearch-harness-ai-rd-2026-11-06.md",
+      "proof": "present:texts = operator_directive_texts(getattr(state, \"pending_hints\", None))@looplab/harness/progress.py",
+      "predicate_holds": true,
+      "predicate_detail": "",
+      "predicate_limit": "Source presence/absence alone does not establish behavioral correctness, utility or target-platform acceptance.",
+      "master_disposition": "retain",
+      "prior_isolated_category": "implemented",
+      "acceptance": "Retire only the completed topic, preserve independent work and display a new user correction before old handoffs.",
+      "semantic_review": {
+        "slug": "operator-directions-lack-explicit-retirement",
+        "actual_master": "replace exists; scoped completed/cancelled lifecycle absent",
+        "isolated_implementation": "topic/id retirement, immutable supersession, replay/race acceptance; exact ACK visibility separate",
+        "commits": "b6716fa,622e9b4",
+        "decision": "implementation-unpublished; delivery is not comprehension/execution"
+      },
+      "source_identities": [
+        {
+          "path": "looplab/harness/progress.py",
+          "exists": true,
+          "sha256": "8499e85d4cc6c105776bff8cc51eab38d3e5de7b067a2d432e186c66bcddd107"
+        }
+      ]
+    },
+    {
+      "slug": "harness-revisions-lack-matched-eval",
+      "path": "docs/83-autoresearch-harness-ai-rd-2026-11-06.md",
+      "proof": "absent:RESULT 20@docs/audit/harness-revision-benchmark.md",
+      "predicate_holds": true,
+      "predicate_detail": "",
+      "predicate_limit": "Source presence/absence alone does not establish behavioral correctness, utility or target-platform acceptance.",
+      "master_disposition": "retain",
+      "prior_isolated_category": "measurement_required",
+      "acceptance": "Quality, behavior and complete costs come from paired frozen tasks, with keep-current and explicit adoption.",
+      "semantic_review": {
+        "slug": "harness-revisions-lack-matched-eval",
+        "actual_master": "protocol exists, matched result absent",
+        "isolated_implementation": "still OPEN",
+        "commits": "none",
+        "decision": "measurement OPEN"
+      },
+      "source_identities": [
+        {
+          "path": "docs/audit/harness-revision-benchmark.md",
+          "exists": true,
+          "sha256": "19bae78875e3d3d7d434583fb78fa252cd3f74e9796c1f1b94b854b35f47413b"
+        }
+      ]
+    },
+    {
+      "slug": "research-evidence-acceptance-missing",
+      "path": "docs/83-autoresearch-harness-ai-rd-2026-11-06.md",
+      "proof": "absent:RESULT 20@docs/audit/external-research-evidence.md",
+      "predicate_holds": true,
+      "predicate_detail": "",
+      "predicate_limit": "Source presence/absence alone does not establish behavioral correctness, utility or target-platform acceptance.",
+      "master_disposition": "retain",
+      "prior_isolated_category": "existing_implementation_acceptance_required",
+      "acceptance": "Traverse question/card/arm/attempt/metric/claim/report and back; verify deployed behavior rather than infer it from unit tests.",
+      "semantic_review": {
+        "slug": "research-evidence-acceptance-missing",
+        "actual_master": "native journals/projections exist; end-to-end acceptance absent",
+        "isolated_implementation": "projection improvements, full deployed graph acceptance absent",
+        "commits": "e72ba2b/afbc48d",
+        "decision": "acceptance OPEN, do not call all evidence graphs absent"
+      },
+      "source_identities": [
+        {
+          "path": "docs/audit/external-research-evidence.md",
+          "exists": true,
+          "sha256": "fce40faf85aba07e2f4278ce63f6153596d232e96721b3941b10f311b466edf9"
+        }
+      ]
+    },
+    {
+      "slug": "memory-injection-outcome-unmeasured",
+      "path": "docs/83-autoresearch-harness-ai-rd-2026-11-06.md",
+      "proof": "absent:RESULT 20@docs/audit/memory-injection-outcomes.md",
+      "predicate_holds": true,
+      "predicate_detail": "",
+      "predicate_limit": "Source presence/absence alone does not establish behavioral correctness, utility or target-platform acceptance.",
+      "master_disposition": "retain",
+      "prior_isolated_category": "measurement_required",
+      "acceptance": "Pass on/off outcome protocol; do not promote shared knowledge from citation frequency.",
+      "semantic_review": {
+        "slug": "memory-injection-outcome-unmeasured",
+        "actual_master": "citation utility exists; causal outcome/context cost absent",
+        "isolated_implementation": "still OPEN",
+        "commits": "none",
+        "decision": "measurement OPEN"
+      },
+      "source_identities": [
+        {
+          "path": "docs/audit/memory-injection-outcomes.md",
+          "exists": true,
+          "sha256": "e428cab84309dde27330124f173a935ef053fb4857e421084f95889141a4aa87"
+        }
+      ]
+    },
+    {
+      "slug": "research-acceleration-attribution-missing",
+      "path": "docs/83-autoresearch-harness-ai-rd-2026-11-06.md",
+      "proof": "absent:RESULT 20@docs/audit/research-acceleration.md",
+      "predicate_holds": true,
+      "predicate_detail": "",
+      "predicate_limit": "Source presence/absence alone does not establish behavioral correctness, utility or target-platform acceptance.",
+      "master_disposition": "retain",
+      "prior_isolated_category": "measurement_required",
+      "acceptance": "Measure decision-relevant quality and complete costs with credible paired counterfactuals, not an idle-gap total.",
+      "semantic_review": {
+        "slug": "research-acceleration-attribution-missing",
+        "actual_master": "protocol exists; accepted causal quality/cost/wait result absent",
+        "isolated_implementation": "still OPEN, local timing instrument extended but not causal outcome",
+        "commits": "none",
+        "decision": "measurement OPEN; 13.5h outsideattempt is not a proved avoidable idle total"
+      },
+      "source_identities": [
+        {
+          "path": "docs/audit/research-acceleration.md",
+          "exists": true,
+          "sha256": "be46846f42f2d5b569d484c2da8ad7b972e88074e8df138ec25fbc18d7403131"
+        }
+      ]
+    },
+    {
+      "slug": "landlock-is-opt-in-by-default",
+      "path": "docs/BACKLOG.md",
+      "proof": "present:landlock: str = \"off\"@looplab/core/config.py",
+      "predicate_holds": true,
+      "predicate_detail": "",
+      "predicate_limit": "Source presence/absence alone does not establish behavioral correctness, utility or target-platform acceptance.",
+      "master_disposition": "retain",
+      "prior_isolated_category": "target_platform_validation_required",
+      "acceptance": "Only separately authorized platform evaluation can justify a default change; this review runs none.",
+      "semantic_review": {
+        "actual_master": "landlock remains off by default; the required real target-platform acceptance is not recorded.",
+        "fresh_check": "Marker/predicate and deciding source or absence of accepted measurement rechecked on remote7c45d5d9; no new measurement or platform run.",
+        "limit": "Source predicate is structural evidence only; absence of a runtime/measurement result is not filled by unit tests. Queued software implementation is not claimed complete."
+      },
+      "source_identities": [
+        {
+          "path": "looplab/core/config.py",
+          "exists": true,
+          "sha256": "191bdc7f62866764c6c83176b935fbe58f54fab97d524b2d6276538652144a13"
+        }
+      ]
+    },
+    {
+      "slug": "eval-parallelism-is-in-process-only",
+      "path": "docs/BACKLOG.md",
+      "proof": "present:res = await anyio.to_thread.run_sync(@looplab/engine/evaluate.py",
+      "predicate_holds": true,
+      "predicate_detail": "",
+      "predicate_limit": "Source presence/absence alone does not establish behavioral correctness, utility or target-platform acceptance.",
+      "master_disposition": "retain",
+      "prior_isolated_category": "deduplicated",
+      "acceptance": "Use the surviving cluster acceptance; removal of this duplicate is not a shipped implementation.",
+      "semantic_review": {
+        "actual_master": "Single-host in-process dispatch is still the implementation; a second H200 is NOT a general ceiling. Any allowed number of local devices can be declared; no cross-machine dispatcher exists.",
+        "overlap": "Overlaps no-cluster-executor; retained as the in-process scheduling claim, no extra capability inferred."
+      },
+      "source_identities": [
+        {
+          "path": "looplab/engine/evaluate.py",
+          "exists": true,
+          "sha256": "1094910ed965d304df018f4c13a7e9453ab978de52df0fee4d8de5597dc4e48a"
+        }
+      ]
+    },
+    {
+      "slug": "asha-inert-on-this-task-family",
+      "path": "docs/BACKLOG.md",
+      "proof": "absent:resource_key@looplab/adapters/repo_task.py",
+      "predicate_holds": true,
+      "predicate_detail": "",
+      "predicate_limit": "Source presence/absence alone does not establish behavioral correctness, utility or target-platform acceptance.",
+      "master_disposition": "retain",
+      "prior_isolated_category": "measurement_required",
+      "acceptance": "Measure resource/rung coverage and preserve unknown/unreadable; no-curve data cannot grant a kill.",
+      "semantic_review": {
+        "actual_master": "Repo-task resource_key remains undeclared; the curve instrumentation exists but not the required corpus outcome.",
+        "fresh_check": "Marker/predicate and deciding source or absence of accepted measurement rechecked on remote7c45d5d9; no new measurement or platform run.",
+        "limit": "Source predicate is structural evidence only; absence of a runtime/measurement result is not filled by unit tests. Queued software implementation is not claimed complete."
+      },
+      "source_identities": [
+        {
+          "path": "looplab/adapters/repo_task.py",
+          "exists": true,
+          "sha256": "e4ba2c26e562f69afa6279cbfdb34f08943d8c1046e5ed57b7367cab9bc4c7ad"
+        }
+      ]
+    },
+    {
+      "slug": "first-propose-runs-with-every-gpu-idle",
+      "path": "docs/BACKLOG.md",
+      "proof": "present:def _ground_run_start@looplab/engine/research_cadence.py",
+      "predicate_holds": true,
+      "predicate_detail": "",
+      "predicate_limit": "Source presence/absence alone does not establish behavioral correctness, utility or target-platform acceptance.",
+      "master_disposition": "retain",
+      "prior_isolated_category": "measurement_required",
+      "acceptance": "Measure startup phases before changing overlap; do not attribute external terminal gaps to this internal path.",
+      "semantic_review": {
+        "actual_master": "Reworded to the enabled built-in startup path; external preparation and unrelated host GPU work are excluded.",
+        "fresh_check": "Marker/predicate and deciding source or absence of accepted measurement rechecked on remote7c45d5d9; no new measurement or platform run.",
+        "limit": "Source predicate is structural evidence only; absence of a runtime/measurement result is not filled by unit tests. Queued software implementation is not claimed complete."
+      },
+      "source_identities": [
+        {
+          "path": "looplab/engine/research_cadence.py",
+          "exists": true,
+          "sha256": "99444371319d7dad043434163b9cff2a542104daf3978f773ffaf7578f72007c"
+        }
+      ]
+    },
+    {
+      "slug": "claim-refutation-undercut",
+      "path": "docs/BACKLOG.md",
+      "proof": "absent:undercut@looplab/events/card_ledger.py",
+      "predicate_holds": true,
+      "predicate_detail": "",
+      "predicate_limit": "Source presence/absence alone does not establish behavioral correctness, utility or target-platform acceptance.",
+      "master_disposition": "retain",
+      "prior_isolated_category": "implemented",
+      "acceptance": "Failed parent evidence updates child interpretation without erasing independent child measurements.",
+      "semantic_review": {
+        "actual_master": "Existing declaration still describes an implementation gap on this remote revision; its exact predicate was rerun.",
+        "isolated_comparison": "Implementation exists only in unpublished5a1e6ef6 series; prior acceptance is not remote/live acceptance.",
+        "source_feature": "Original filing-parent/failed-child trigger was not logical refutation: tested != refuted and hierarchy != premise. Optional native claim_reviewed explicitly binds immutable claim seeds, directed premises and own usable evidence/attempt/source/protocol/objective stamps; prior-review and strict-tail CAS rechecked. Only current authored direct-premise refutation yields an advisory undercut, with child evidence/verdict/champion/gates unchanged.735CPU including actual CPU native evaluator, native CAS race, restart/API, full/cursor replay, old goldens and invalid imported cycles;70UI plus build/localization/strictdocs PASS. Scientific correctness and production utility unmeasured, no live deployment.",
+        "source_feature_limit": "This describes isolated source, not shipped master."
+      },
+      "source_identities": [
+        {
+          "path": "looplab/events/card_ledger.py",
+          "exists": true,
+          "sha256": "f8e5eef95cb4153dadc839031259471cacdcd54a6dd7371a73627c48e2c52086"
+        }
+      ]
+    },
+    {
+      "slug": "belief-identity-text-keyed",
+      "path": "docs/BACKLOG.md",
+      "proof": "present:hypothesis_statement_digest(seed)@looplab/events/card_ledger.py",
+      "predicate_holds": true,
+      "predicate_detail": "",
+      "predicate_limit": "Source presence/absence alone does not establish behavioral correctness, utility or target-platform acceptance.",
+      "master_disposition": "retain",
+      "prior_isolated_category": "conservative_or_deliberate_limit",
+      "acceptance": "A new identity must unite genuine rewordings while preserving the observed conflicting concept-equal groups.",
+      "semantic_review": {
+        "actual_master": "belief_id still hashes seed text. Concept-only identity was declined for measured conflicting verdicts.",
+        "fresh_check": "Marker/predicate and deciding source or absence of accepted measurement rechecked on remote7c45d5d9; no new measurement or platform run.",
+        "limit": "Source predicate is structural evidence only; absence of a runtime/measurement result is not filled by unit tests. Queued software implementation is not claimed complete."
+      },
+      "source_identities": [
+        {
+          "path": "looplab/events/card_ledger.py",
+          "exists": true,
+          "sha256": "f8e5eef95cb4153dadc839031259471cacdcd54a6dd7371a73627c48e2c52086"
+        }
+      ]
+    },
+    {
+      "slug": "windows-tree-kill-is-not-atomic",
+      "path": "docs/CODE_REVIEW.md",
+      "proof": "absent:AssignProcessToJobObject@looplab/runtime/sandbox.py",
+      "predicate_holds": true,
+      "predicate_detail": "",
+      "predicate_limit": "Source presence/absence alone does not establish behavioral correctness, utility or target-platform acceptance.",
+      "master_disposition": "retain",
+      "prior_isolated_category": "target_platform_validation_required",
+      "acceptance": "Run actual Windows process-tree/race cases and verify lifetime semantics; do not close from a Linux mock.",
+      "semantic_review": {
+        "actual_master": "No Windows Job Object assignment is shipped. Windows CI now exists; historical POSIX-only prose is not evidence of current coverage.",
+        "fresh_check": "Marker/predicate and deciding source or absence of accepted measurement rechecked on remote7c45d5d9; no new measurement or platform run.",
+        "limit": "Source predicate is structural evidence only; absence of a runtime/measurement result is not filled by unit tests. Queued software implementation is not claimed complete."
+      },
+      "source_identities": [
+        {
+          "path": "looplab/runtime/sandbox.py",
+          "exists": true,
+          "sha256": "fe5802b88742121ab9f5231d5b545d53c830d8a2c097205fb00a4af180751dfb"
+        }
+      ]
+    },
+    {
+      "slug": "categorical-leak-rung-never-measured",
+      "path": "docs/CODE_REVIEW.md",
+      "proof": "missing:docs/audit/categorical-leak-rate.md",
+      "predicate_holds": true,
+      "predicate_detail": "",
+      "predicate_limit": "Source presence/absence alone does not establish behavioral correctness, utility or target-platform acceptance.",
+      "master_disposition": "retain",
+      "prior_isolated_category": "measurement_required",
+      "acceptance": "Measure legitimate-column triggers before changing an abort gate.",
+      "semantic_review": {
+        "actual_master": "Categorical leakage is advisory; no accepted real-task false-positive rate supports arming it.",
+        "fresh_check": "Marker/predicate and deciding source or absence of accepted measurement rechecked on remote7c45d5d9; no new measurement or platform run.",
+        "limit": "Source predicate is structural evidence only; absence of a runtime/measurement result is not filled by unit tests. Queued software implementation is not claimed complete."
+      },
+      "source_identities": [
+        {
+          "path": "docs/audit/categorical-leak-rate.md",
+          "exists": false,
+          "sha256": null
+        }
+      ]
+    },
+    {
+      "slug": "atomicio-windows-parent-publication",
+      "path": "looplab/core/atomicio.py",
+      "proof": "present:_ensure_strict_parent@looplab/core/atomicio.py",
+      "predicate_holds": true,
+      "predicate_detail": "",
+      "predicate_limit": "Source presence/absence alone does not establish behavioral correctness, utility or target-platform acceptance.",
+      "master_disposition": "retain",
+      "prior_isolated_category": "target_platform_validation_required",
+      "acceptance": "Prove parent publication durability and bounded cleanup/races on Windows; a tolerant mkdir alone weakens the contract.",
+      "semantic_review": {
+        "actual_master": "Reworded the stale POSIX-only CI claim at the marker: Windows CI exists; the parent race/temp residue and specific acceptance remain unverified.",
+        "fresh_check": "Marker/predicate and deciding source or absence of accepted measurement rechecked on remote7c45d5d9; no new measurement or platform run.",
+        "limit": "Source predicate is structural evidence only; absence of a runtime/measurement result is not filled by unit tests. Queued software implementation is not claimed complete."
+      },
+      "source_identities": [
+        {
+          "path": "looplab/core/atomicio.py",
+          "exists": true,
+          "sha256": "0377dafa4945cf370b74ef468a05a3195599f645824597d09b59d215c6f3926d"
+        }
+      ]
+    },
+    {
+      "slug": "stream-idle-kill-unproven-on-windows",
+      "path": "looplab/core/llm_streaming.py",
+      "proof": "absent:_unblock_on_winsock@looplab/core/llm_streaming.py",
+      "predicate_holds": true,
+      "predicate_detail": "",
+      "predicate_limit": "Source presence/absence alone does not establish behavioral correctness, utility or target-platform acceptance.",
+      "master_disposition": "retain",
+      "prior_isolated_category": "target_platform_validation_required",
+      "acceptance": "Drive a real httpx stream/blocked receive on Windows and prove the worker is released within the declared bound.",
+      "semantic_review": {
+        "actual_master": "The Winsock close/recv path lacks the proposed unblock mechanism and accepted real-stream verification.",
+        "fresh_check": "Marker/predicate and deciding source or absence of accepted measurement rechecked on remote7c45d5d9; no new measurement or platform run.",
+        "limit": "Source predicate is structural evidence only; absence of a runtime/measurement result is not filled by unit tests. Queued software implementation is not claimed complete."
+      },
+      "source_identities": [
+        {
+          "path": "looplab/core/llm_streaming.py",
+          "exists": true,
+          "sha256": "6e43728f7e98e9a7cae622645b3be1dca756b23c0fdaff1074fb633f00a351c4"
+        }
+      ]
+    },
+    {
+      "slug": "crash-predictability-unmeasured",
+      "path": "looplab/engine/loss_trajectory.py",
+      "proof": "absent:crash_lead_time@looplab/judgebench/judge_corpus.py",
+      "predicate_holds": true,
+      "predicate_detail": "",
+      "predicate_limit": "Source presence/absence alone does not establish behavioral correctness, utility or target-platform acceptance.",
+      "master_disposition": "retain",
+      "prior_isolated_category": "measurement_required",
+      "acceptance": "Measure first-crash position in each attempt byte range before claiming predictive benefit.",
+      "semantic_review": {
+        "actual_master": "The corpus builder does not record crash lead time, so alleged saveable work is not measured.",
+        "fresh_check": "Marker/predicate and deciding source or absence of accepted measurement rechecked on remote7c45d5d9; no new measurement or platform run.",
+        "limit": "Source predicate is structural evidence only; absence of a runtime/measurement result is not filled by unit tests. Queued software implementation is not claimed complete."
+      },
+      "source_identities": [
+        {
+          "path": "looplab/judgebench/judge_corpus.py",
+          "exists": true,
+          "sha256": "ed555de03f2ba9d02fdac02a5dea6d00724ce871421b994c5276a8faf4de16a1"
+        }
+      ]
+    },
+    {
+      "slug": "raw-stage-card-and-audit-are-separate-appends",
+      "path": "looplab/engine/speculation.py",
+      "proof": "present:self.store.append(EV_CARD_ADDED, plan.payload, expected_last_seq=tail)@looplab/engine/card_reservation.py",
+      "predicate_holds": true,
+      "predicate_detail": "",
+      "predicate_limit": "Source presence/absence alone does not establish behavioral correctness, utility or target-platform acceptance.",
+      "master_disposition": "retain",
+      "prior_isolated_category": "implemented",
+      "acceptance": "Crash every boundary and prove a selectable Card cannot lack its required audit prefix.",
+      "semantic_review": {
+        "actual_master": "Existing declaration still describes an implementation gap on this remote revision; its exact predicate was rerun.",
+        "isolated_comparison": "Implementation exists only in unpublished5a1e6ef6 series; prior acceptance is not remote/live acceptance.",
+        "source_feature": "Card+required audit now share one bounded tail-CAS envelope preserving individual traces.239checks incl every physical crash prefix pass; strictdocs pass.",
+        "source_feature_limit": "This describes isolated source, not shipped master."
+      },
+      "source_identities": [
+        {
+          "path": "looplab/engine/card_reservation.py",
+          "exists": true,
+          "sha256": "b80c24ec96f3c579932844999934f64db7158739ab9c1c48aa25c1566be1810d"
+        }
+      ]
+    },
+    {
+      "slug": "read-fence-inputs-are-writable-by-the-fenced-process",
+      "path": "looplab/runtime/read_fence.py",
+      "proof": "absent:_POLICY_CELL@looplab/runtime/read_fence.py",
+      "predicate_holds": true,
+      "predicate_detail": "",
+      "predicate_limit": "Source presence/absence alone does not establish behavioral correctness, utility or target-platform acceptance.",
+      "master_disposition": "retain",
+      "prior_isolated_category": "conservative_or_deliberate_limit",
+      "acceptance": "Adversarial same-interpreter policy mutations cannot disable the declared rung; retain tier limits honestly.",
+      "semantic_review": {
+        "actual_master": "The interpreter hook still consults assignable globals; no protected policy cell is implemented.",
+        "fresh_check": "Marker/predicate and deciding source or absence of accepted measurement rechecked on remote7c45d5d9; no new measurement or platform run.",
+        "limit": "Source predicate is structural evidence only; absence of a runtime/measurement result is not filled by unit tests. Queued software implementation is not claimed complete."
+      },
+      "source_identities": [
+        {
+          "path": "looplab/runtime/read_fence.py",
+          "exists": true,
+          "sha256": "1191b771dc72e3dd6b3a91c54fbf88b18b16295018af6a130d9299864bdc8c8b"
+        }
+      ]
+    },
+    {
+      "slug": "read-fence-self-protection-ends-at-an-unfenced-child",
+      "path": "looplab/runtime/read_fence.py",
+      "proof": "present:FENCE_FILE_MODE@looplab/runtime/read_fence.py",
+      "predicate_holds": true,
+      "predicate_detail": "",
+      "predicate_limit": "Source presence/absence alone does not establish behavioral correctness, utility or target-platform acceptance.",
+      "master_disposition": "retain",
+      "prior_isolated_category": "conservative_or_deliberate_limit",
+      "acceptance": "Exercise the documented child mutation attack on the actual protection tier; chmod alone is insufficient.",
+      "semantic_review": {
+        "actual_master": "File-mode protection does not prevent a writable-directory unlink by an unfenced child.",
+        "fresh_check": "Marker/predicate and deciding source or absence of accepted measurement rechecked on remote7c45d5d9; no new measurement or platform run.",
+        "limit": "Source predicate is structural evidence only; absence of a runtime/measurement result is not filled by unit tests. Queued software implementation is not claimed complete."
+      },
+      "source_identities": [
+        {
+          "path": "looplab/runtime/read_fence.py",
+          "exists": true,
+          "sha256": "1191b771dc72e3dd6b3a91c54fbf88b18b16295018af6a130d9299864bdc8c8b"
+        }
+      ]
+    },
+    {
+      "slug": "punched-dir-is-not-listable",
+      "path": "looplab/tools/dev_probe.py",
+      "proof": "present:_grant_expansion@looplab/runtime/read_fence.py",
+      "predicate_holds": true,
+      "predicate_detail": "",
+      "predicate_limit": "Source presence/absence alone does not establish behavioral correctness, utility or target-platform acceptance.",
+      "master_disposition": "retain",
+      "prior_isolated_category": "target_platform_validation_required",
+      "acceptance": "Prove ordinary import/listing works while fenced grader content remains denied on the actual kernel tier.",
+      "semantic_review": {
+        "actual_master": "Hole-punch expansion grants children, not directory-listing permission, so ordinary imports can fail.",
+        "fresh_check": "Marker/predicate and deciding source or absence of accepted measurement rechecked on remote7c45d5d9; no new measurement or platform run.",
+        "limit": "Source predicate is structural evidence only; absence of a runtime/measurement result is not filled by unit tests. Queued software implementation is not claimed complete."
+      },
+      "source_identities": [
+        {
+          "path": "looplab/runtime/read_fence.py",
+          "exists": true,
+          "sha256": "1191b771dc72e3dd6b3a91c54fbf88b18b16295018af6a130d9299864bdc8c8b"
+        }
+      ]
+    }
+  ]
+}

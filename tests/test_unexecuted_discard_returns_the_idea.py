@@ -277,3 +277,35 @@ def test_a_returned_cards_research_origin_and_footprint_survive_the_return(
     assert card.discarded_nodes == [node_id]
     assert card.footprint == {"gpus": 1, "proposed_by": "researcher"}
     assert card.research_origin == "memo:sha256:" + "c" * 64
+
+
+def test_developer_stuck_return_survives_its_own_rebuild_with_real_freshness(tmp_path):
+    """Recheck the historical69.1 shape without editing folded evidence or bypassing freshness."""
+    engine = _one_card_engine(tmp_path, "stuck-own-rebuild")
+    first = _commit_speculative_node(engine)
+    engine.store.append("node_failed", {"node_id": first, "generation": 0,
+        "error": "developer stuck before dispatch", "reason": "developer_stuck",
+        "never_evaluated": True, "eval_seconds": 0.0})
+    returned = fold(engine.store.read_all())
+    assert is_unevaluated_speculative_discard(returned, returned.nodes[first])
+    assert returned.cards["card-1"].discarded_nodes == [first]
+    assert returned.cards["card-1"].selection_ready
+    second = _commit_speculative_node(engine)
+    events = engine.store.read_all()
+    state = fold(events)
+    card = state.cards["card-1"]
+    assert card.discarded_nodes == [first]
+    assert card.evidence == [second]
+    assert card.selection_provenance.owner_state == "in_flight"
+    assert cs.speculative_card_is_fresh(state, engine.policy,
+        engine._speculative_selection_node_limit(state), card_id="card-1", node_id=second)
+    assert anyio.run(engine._drop_stale_speculation) is False
+    assert len(engine.store.read_all()) == len(events)
+
+    # A real independent outcome must remain evidence and must prevent this exemption.
+    engine.store.append("node_eval_started", {"node_id": second, "generation": 0})
+    engine.store.append("node_evaluated", {"node_id": second, "generation": 0,
+                                          "metric": .5, "eval_seconds": 1.0})
+    settled = fold(engine.store.read_all())
+    assert settled.cards["card-1"].evidence == [first, second]
+    assert not settled.cards["card-1"].selection_ready

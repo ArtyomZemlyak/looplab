@@ -736,9 +736,10 @@ site that proves it is open.
     `orchestrator.py:2885`, not `:2966`; and `per_experiment_gpu_budget` is DEFINED in
     `engine/widths.py`, merely imported by `proposal_cues.py`. Four dead citations in one entry, the
     exact rot `claimpin.LINE_CITATION` was written to refuse.
-    OPEN[eval-parallelism-is-in-process-only] evals are bounded by one box's task group, so the
-    second H200 is the ceiling and a queued node waits rather than dispatching; retire this when a
-    cross-machine dispatcher exists.
+    OPEN[eval-parallelism-is-in-process-only] evals are bounded by one host's in-process task group;
+    there is no cross-machine dispatcher. This is not a ceiling of two GPUs: the task may declare
+    any allowed local device footprint. This overlaps `no-cluster-executor`; keep remote-platform
+    acceptance distinct from local CPU worker tests (review 2026-11-17).
     proof:`present:res = await anyio.to_thread.run_sync(@looplab/engine/evaluate.py`
     *Mutated before it was written:* True as shipped, False the moment that import lands. Re-pointed
     2026-09-06 (doc 52 §2.2): `import ray` named one library of several; the line that decides the
