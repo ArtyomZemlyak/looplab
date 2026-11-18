@@ -45,6 +45,19 @@ test('absent inputs stay absent', () => {
   assert.equal(fmtSeconds(10901), '3.03 h')
 })
 
+test('single-command evaluation derives GPU-hours and fit throughput from evaluation wall time', () => {
+  const fitNode = { id: 86, attempt: 0, job_role: 'fit', eval_seconds: 3600, idea: { footprint: { gpus: 4 } } }
+  const snap = resourceSnapshot(fitNode, { effectiveConfig: { effective: { world_size: 4, max_steps: 977 } } })
+  assert.equal(snap.gpuHours, 4)
+  assert.equal(snap.gpuHoursSource, 'eval_wall')
+  assert.ok(Math.abs(snap.stepsPerSecond - (977 / 3600)) < 1e-9)
+
+  const scoreNode = { id: 80, attempt: 0, job_role: 'score', eval_seconds: 1800, idea: { footprint: { gpus: 4 } } }
+  const scoreSnap = resourceSnapshot(scoreNode, { effectiveConfig: { effective: { world_size: 4, max_steps: 977 } } })
+  assert.equal(scoreSnap.gpuHours, 2)
+  assert.equal(scoreSnap.stepsPerSecond, null, 'score role never reports training steps/s')
+})
+
 test('the panel is closed until opened and reads nothing before that', async () => {
   const vite = await sharedVite()
   try {

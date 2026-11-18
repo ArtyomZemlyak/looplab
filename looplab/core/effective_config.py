@@ -110,6 +110,8 @@ def canonical_key(raw) -> Optional[str]:
     if "epochs" in tset or toks == ["epoch"] or (
             "epoch" in tset and tset & {"num", "n", "max", "total"}):
         return "epochs"
+    if "updates" in tset:
+        return "max_steps"
     if "steps" in tset or "iters" in tset or "iterations" in tset:
         if tset & {"max", "train", "total", "num"} or toks in (["steps"], ["iters"]):
             return "max_steps"
@@ -188,23 +190,178 @@ def _same(a, b) -> bool:
     return str(a).strip().lower() == str(b).strip().lower()
 
 
+_SKIP_CONFIG_SECTIONS = frozenset({
+    "inputs", "source_sha256", "expected_native_budget", "measured_profile",
+    "measured_profile_receipt", "input_stats", "budget", "data",
+})
+_CONFIG_FLAGS = frozenset({"--config", "--config-file", "--cfg"})
+_WORLD_FLAGS = frozenset({"--nproc_per_node", "--nproc-per-node", "--num_processes", "--num-processes", "--world_size", "--world-size"})
+
+
+def _cuda_visible_count(raw: str) -> Optional[float]:
+    devs = [d.strip() for d in str(raw).split(",") if d.strip() and d.strip() != "-1"]
+    return float(len(devs)) if devs else None
+
+
+def _scan_structured_doc(doc, values: dict, *, source: str, where_prefix: str,
+                         stage: Optional[str]) -> None:
+    from looplab.core.envsafe import is_secret_env
+    from looplab.core.redact import is_secret_key_name
+    budget = [4000]
+
+    def walk(node, parts: tuple[str, ...]) -> None:
+        if budget[0] <= 0 or len(parts) > 12:
+            return
+        budget[0] -= 1
+        if isinstance(node, dict):
+            for k, child in node.items():
+                ks = str(k)
+                if ks.lower() in _SKIP_CONFIG_SECTIONS or is_secret_key_name(ks):
+                    continue
+                walk(child, parts + (ks,))
+            return
+        if isinstance(node, (list, tuple, bool)) or node is None or not parts:
+            return
+        leaf = parts[-1]
+        if is_secret_env(leaf, str(node)):
+            return
+        canon = canonical_key(leaf) or canonical_key("_".join(parts[-2:]))
+        if not canon:
+            return
+        st, _ = split_stage("_".join(parts))
+        val = float(node) if isinstance(node, (int, float)) and math.isfinite(float(node)) else parse_value(node)
+        _offer(values, canon, val, source=source, where=f"{where_prefix}:{'.'.join(parts)}",
+               raw=".".join(parts), stage=st or stage)
+
+    walk(doc, ())
+
+
+def _load_structured_config(text: str, suffix: str):
+    from looplab.core.jsonutil import bounded_json_loads
+    low = suffix.lower()
+    if low == ".json":
+        return bounded_json_loads(text)
+    if low in (".yaml", ".yml"):
+        import yaml
+        try:
+            return yaml.safe_load(text)
+        except yaml.YAMLError:
+            return None
+    if low == ".toml":
+        import tomllib
+        return tomllib.loads(text)
+    return None
+
+
+def _scan_config_path(path: Path, shown: str, values: dict, sources_read: list,
+                      *, source: str, stage: Optional[str]) -> None:
+    from looplab.core._pathsafe import looks_secret
+    if looks_secret(Path(shown)) or looks_secret(path):
+        return
+    low = shown.lower()
+    text = _read_head(path, LOG_HEAD_BYTES * 4)
+    if text is None:
+        return
+    tag = f"{source}:{shown}"
+    if tag not in sources_read:
+        sources_read.append(tag)
+    if low.endswith((".env", ".cfg", ".ini", ".sh")):
+        _scan_env_lines(text, values, source=source, where_prefix=tag, stage=stage)
+        return
+    for ext in (".json", ".yaml", ".yml", ".toml"):
+        if low.endswith(ext):
+            try:
+                doc = _load_structured_config(text, ext)
+            except (ValueError, TypeError, KeyError, RecursionError, MemoryError):
+                doc = None
+            if isinstance(doc, dict):
+                _scan_structured_doc(doc, values, source=source, where_prefix=tag, stage=stage)
+            return
+
+
+def _scan_command_argv(argv, root: Path, values: dict, sources_read: list,
+                       *, stage: Optional[str]) -> None:
+    from looplab.core.envsafe import is_secret_env
+    from looplab.core.pathsafe import contained_member
+    if not isinstance(argv, (list, tuple)):
+        return
+    tokens = [str(x) for x in argv if isinstance(x, str) and x]
+    idx = 0
+    while idx < len(tokens):
+        tok = tokens[idx]
+        if tok == "env":
+            idx += 1
+            continue
+        if not tok.startswith("-") and "=" in tok and "/" not in tok.partition("=")[0]:
+            k, _, v = tok.partition("=")
+            if k == "CUDA_VISIBLE_DEVICES":
+                cnt = _cuda_visible_count(v)
+                if cnt is not None:
+                    _offer(values, "world_size", cnt, source="command",
+                           where="command:CUDA_VISIBLE_DEVICES", raw=k, stage=stage)
+            elif not is_secret_env(k, v):
+                canon = canonical_key(k)
+                if canon:
+                    _offer(values, canon, parse_value(v), source="command",
+                           where=f"command:{k}", raw=k, stage=stage)
+            idx += 1
+            continue
+        flag, eq, inline_val = tok.partition("=") if tok.startswith("-") else ("", "", "")
+        val = inline_val if eq else (tokens[idx + 1] if tok.startswith("-") and idx + 1 < len(tokens) else "")
+        step = 1 if eq or not tok.startswith("-") else 2
+        key_tok = flag if eq else tok
+        if key_tok in _CONFIG_FLAGS and val:
+            import os as _os
+            expanded = _os.path.expanduser(_os.path.expandvars(val))
+            target = Path(expanded) if _os.path.isabs(expanded) else contained_member(root, val)
+            if target is not None:
+                _scan_config_path(target, val, values, sources_read, source="config", stage=stage)
+            idx += step
+            continue
+        if key_tok in _WORLD_FLAGS and val and not val.startswith("-"):
+            _offer(values, "world_size", parse_value(val), source="command",
+                   where=f"command:{key_tok}", raw=key_tok.lstrip("-"), stage=stage)
+            idx += step
+            continue
+        if tok.startswith("--") and val and (eq or not val.startswith("-")):
+            raw_name = key_tok.lstrip("-")
+            if not is_secret_env(raw_name, val):
+                canon = canonical_key(raw_name)
+                if canon:
+                    _offer(values, canon, parse_value(val), source="command",
+                           where=f"command:{key_tok}", raw=raw_name, stage=stage)
+            idx += step
+            continue
+        idx += 1
+
+
 def capture(workdir, *, env: Optional[dict] = None, overlay_files: Iterable = (),
-            stage_names: Iterable = (), declared: Optional[dict] = None) -> Optional[dict]:
+            stage_names: Iterable = (), declared: Optional[dict] = None,
+            command: Optional[Iterable] = None,
+            stage_commands: Iterable = ()) -> Optional[dict]:
     """The `effective_config` record for one evaluation, or None when nothing was seen or declared."""
     try:
         return _capture(workdir, env=env, overlay_files=overlay_files, stage_names=stage_names,
-                        declared=declared)
+                        declared=declared, command=command, stage_commands=stage_commands)
     except Exception:  # noqa: BLE001 - a record may never cost a node its terminal
         return None
 
 
-def _capture(workdir, *, env, overlay_files, stage_names, declared) -> Optional[dict]:
+def _capture(workdir, *, env, overlay_files, stage_names, declared,
+             command=None, stage_commands=()) -> Optional[dict]:
     from looplab.core.envsafe import is_secret_env
+    from looplab.core.pathsafe import contained_member
     root = Path(workdir)
     values: dict = {}
     sources_read: list = []
     for key, raw in sorted((env or {}).items()):
         if not isinstance(key, str) or is_secret_env(key, str(raw)):
+            continue
+        if key == "CUDA_VISIBLE_DEVICES":
+            cnt = _cuda_visible_count(str(raw))
+            if cnt is not None:
+                _offer(values, "world_size", cnt, source="env", where="env:CUDA_VISIBLE_DEVICES",
+                       raw=key, stage=None)
             continue
         canon = canonical_key(key)
         if canon:
@@ -212,13 +369,18 @@ def _capture(workdir, *, env, overlay_files, stage_names, declared) -> Optional[
             _offer(values, canon, parse_value(raw), source="env", where=f"env:{key}", raw=key,
                    stage=stage)
     for name in sorted(set(overlay_files or ())):
-        if not str(name).endswith((".env", ".cfg", ".ini", ".sh")):
+        sname = str(name)
+        if not sname.lower().endswith((".env", ".cfg", ".ini", ".sh", ".json", ".yaml", ".yml", ".toml")):
             continue
-        text = _read_head(root / str(name), LOG_HEAD_BYTES)
-        if text is None:
-            continue
-        sources_read.append(f"file:{name}")
-        _scan_env_lines(text, values, source="file", where_prefix=f"file:{name}", stage=None)
+        target = contained_member(root, sname)
+        if target is not None:
+            _scan_config_path(target, sname, values, sources_read, source="file", stage=None)
+    if command is not None:
+        _scan_command_argv(command, root, values, sources_read, stage=None)
+    for item in stage_commands or ():
+        if isinstance(item, tuple) and len(item) == 2:
+            st_name, st_cmd = item
+            _scan_command_argv(st_cmd, root, values, sources_read, stage=str(st_name) if st_name else None)
     stages = [s for s in dict.fromkeys(str(s) for s in (stage_names or ()) if s)]
     for stage in stages:
         log = root / f"{stage}.log"
@@ -227,6 +389,12 @@ def _capture(workdir, *, env, overlay_files, stage_names, declared) -> Optional[
             continue
         sources_read.append(f"log:{stage}.log")
         _scan_log(text, values, where=f"{stage}.log", stage=stage)
+    if not stages:
+        eval_log = root / "eval.log"
+        text = _read_head(eval_log, LOG_HEAD_BYTES)
+        if text is not None:
+            sources_read.append("log:eval.log")
+            _scan_log(text, values, where="eval.log", stage=None)
     declared_numeric = {}
     for name, value in (declared or {}).items():
         if isinstance(value, bool):

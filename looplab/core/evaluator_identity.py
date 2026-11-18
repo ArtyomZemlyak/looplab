@@ -30,6 +30,8 @@ from looplab.core.pathsafe import contained_member
 EVALUATOR_DIGEST_RE = re.compile(r"^[0-9a-f]{64}$")
 _MAX_PROTECTED_HASH_BYTES = 16 * 1024 * 1024
 _MAX_PROTECTED_MEMBERS = 4096
+_CMD_FILE_SUFFIXES = (".py", ".sh", ".json", ".yaml", ".yml", ".toml", ".env", ".cfg", ".ini")
+_CONFIG_FLAGS = frozenset({"--config", "--config-file", "--cfg"})
 
 
 
@@ -172,6 +174,66 @@ def protocol_data_content(run_dir: Optional[Path], run_uid: Optional[str] = None
     return out
 
 
+def command_referenced_files(
+    eval_spec: Optional[dict], repo_spec: Optional[dict] = None
+) -> dict[str, str]:
+    """Content digests of script and `--config` files explicitly named in `eval_spec` commands."""
+    if not isinstance(eval_spec, dict) or not eval_spec:
+        return {}
+    argvs: list[list[str]] = []
+    cmd = eval_spec.get("command")
+    if isinstance(cmd, (list, tuple)):
+        argvs.append([str(x) for x in cmd if isinstance(x, str) and x])
+    for st in eval_spec.get("stages") or ():
+        if isinstance(st, dict) and isinstance(st.get("command"), (list, tuple)):
+            argvs.append([str(x) for x in st["command"] if isinstance(x, str) and x])
+    if not argvs:
+        return {}
+    candidates: list[str] = []
+    for argv in argvs:
+        idx = 0
+        while idx < len(argv):
+            tok = argv[idx]
+            if tok in _CONFIG_FLAGS and idx + 1 < len(argv):
+                candidates.append(argv[idx + 1])
+                idx += 2
+                continue
+            if "=" in tok:
+                flag, _, rhs = tok.partition("=")
+                if flag in _CONFIG_FLAGS and rhs:
+                    candidates.append(rhs)
+                    idx += 1
+                    continue
+            if not tok.startswith("-") and tok.lower().endswith(_CMD_FILE_SUFFIXES):
+                candidates.append(tok)
+            idx += 1
+    if not candidates:
+        return {}
+    default_root: Optional[Path] = None
+    if isinstance(repo_spec, dict):
+        editables = [ed for ed in (repo_spec.get("editables") or ()) if isinstance(ed, dict) and ed.get("path")]
+        chosen = next((ed for ed in editables if str(ed.get("name") or ".") in (".", "")), editables[0] if editables else None)
+        if chosen is not None:
+            default_root = Path(os.path.expanduser(os.path.expandvars(str(chosen["path"]))))
+    out: dict[str, str] = {}
+    for raw in sorted(set(candidates)):
+        expanded = os.path.expanduser(os.path.expandvars(raw))
+        if os.path.isabs(expanded):
+            out[f"abs:{expanded}"] = _hash_regular_file(Path(expanded))
+        elif default_root is not None:
+            rel = raw.replace("\\", "/")
+            while rel.startswith("./"):
+                rel = rel[2:]
+            if not rel:
+                continue
+            if not default_root.is_dir():
+                out[f"rel:{rel}"] = "root_missing"
+                continue
+            target = contained_member(default_root, rel)
+            out[f"rel:{rel}"] = "outside_root" if target is None else _hash_regular_file(target)
+    return out
+
+
 def evaluator_digest_from_specs(
     *,
     eval_spec: Optional[dict],
@@ -200,20 +262,23 @@ def evaluator_digest_from_specs(
             "task_python": repo_spec.get("task_python"),
             "protected_files_sha256": protected_files_digest_map(repo_spec),
         }
+    cmd_files = command_referenced_files(eval_spec, repo_spec)
     asset_hashes: dict[str, str] = {}
     for name, content in sorted((assets or {}).items(), key=lambda kv: str(kv[0])):
         raw = content.encode("utf-8") if isinstance(content, str) else bytes(content)
         asset_hashes[str(name)] = hashlib.sha256(raw).hexdigest()
     # A failed content observation is never a stable evaluator identity.
-    if any(value in ("unreadable", "outside_root") or value.startswith(("non_regular:", "unavailable:"))
-           for value in repo_summary.get("protected_files_sha256", {}).values()):
-        return ""
+    for digest_map in (repo_summary.get("protected_files_sha256", {}), cmd_files):
+        if any(value in ("unreadable", "outside_root") or value.startswith(("non_regular:", "unavailable:"))
+               for value in digest_map.values()):
+            return ""
     if "__journal_error__" in (data_content or {}):
         return ""
     material = {
         "v": 1,
         "eval_spec": _json_safe(eval_spec or {}),
         "repo_spec": repo_summary,
+        "command_files_sha256": cmd_files,
         "assets_sha256": asset_hashes,
         "data_content": _json_safe(data_content or {}),
     }

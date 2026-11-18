@@ -124,16 +124,52 @@ def snapshot(rd: Path, expected_generation: str, offset: int = 0, limit: int = 2
                       'registration': {k: exp.get('registration', {}).get(k) for k in ('amendment_id', 'version', 'recorded_at', 'at_event_seq', 'at_node_count', 'generation')},
                       'comparison': f'/api/runs/{quote(canonical_id, safe="")}/experiments/{quote(eid, safe="")}/comparison'})
     work_kinds = {}
-    for exp in experiments.values():
-        for arm in (exp.get('arms') or {}).values():
-            if not isinstance(arm, dict) or arm.get('run_id') not in (None, canonical_id):
+    node_exp_arms: dict[int, list[dict]] = {}
+    card_exps: dict[str, list[str]] = {}
+    for eid, exp in experiments.items():
+        q_cid = exp.get('question_card_id')
+        if isinstance(q_cid, str) and q_cid:
+            card_exps.setdefault(q_cid, []).append(_text(eid, 128))
+        for arm_name, arm in (exp.get('arms') or {}).items():
+            if not isinstance(arm, dict) or arm.get('run_id') not in (None, '', canonical_id):
                 continue
             nid, kind = arm.get('node_id'), arm.get('work_kind')
-            if type(nid) is int and kind in ('scientific_experiment', 'fit', 'score_only', 'engineering_recovery'):
-                work_kinds.setdefault(nid, set()).add(kind)
+            if type(nid) is int:
+                node_exp_arms.setdefault(nid, []).append({'experiment_id': _text(eid, 128), 'arm': _text(arm_name, 128)})
+                if kind in ('scientific_experiment', 'fit', 'score_only', 'engineering_recovery'):
+                    work_kinds.setdefault(nid, set()).add(kind)
+    memo_citations: dict[int, list[str]] = {}
+    for memo in state.research or []:
+        if not isinstance(memo, dict):
+            continue
+        mid = _text(memo.get('memo_id'), 128)
+        if not mid:
+            continue
+        cited_nids: set[int] = set()
+        for lesson in (memo.get('local_lessons') or []):
+            if isinstance(lesson, dict):
+                cited_nids.update(n for n in (lesson.get('node_ids') or []) if type(n) is int)
+        for claim in (memo.get('claims') or []):
+            if isinstance(claim, dict):
+                cited_nids.update(n for n in (claim.get('node_ids') or []) if type(n) is int)
+        for nid in sorted(cited_nids):
+            memo_citations.setdefault(nid, []).append(mid)
+    from looplab.harness.per_query import current_uploads, read_manifest
+    upload_rows, upload_health = read_manifest(rd)
+    upload_rows = [r for r in upload_rows if r.get('run_uid') == state.run_uid and r.get('generation') == generation]
+    current_upload_list = list(current_uploads(upload_rows, state))
+    node_uploads: dict[int, list[str]] = {}
+    for u in current_upload_list:
+        unid = u.get('node_id')
+        uid_str = _text(u.get('upload_id'), 128)
+        if type(unid) is int and uid_str:
+            node_uploads.setdefault(unid, []).append(uid_str)
+    card_nodes: dict[str, list[int]] = {}
     nodes = []
     for node in sorted(state.nodes.values(), key=lambda n: n.id):
         idea = node.idea
+        if idea.parent_card_id:
+            card_nodes.setdefault(idea.parent_card_id, []).append(node.id)
         nodes.append({'node_id': node.id, 'attempt': node.attempt, 'status': activities[node.id]['status'],
                       'durable_status': node.status, 'activity': activities[node.id],
                       'title': _text(node.operator, 256), 'hypothesis': _text(idea.hypothesis),
@@ -146,12 +182,17 @@ def snapshot(rd: Path, expected_generation: str, offset: int = 0, limit: int = 2
                       'concepts': list(state.node_concepts.get(node.id, [])),
                       'questions': [_text(x) for x in (idea.open_questions or [])[:16]],
                       'declared_work_kinds': sorted(work_kinds.get(node.id, set())),
+                      'experiment_arms': node_exp_arms.get(node.id, [])[:16],
+                      'citing_memo_ids': memo_citations.get(node.id, [])[:16],
+                      'upload_ids': node_uploads.get(node.id, [])[:16],
                       'metric_present': node.metric is not None,
                       'extra_metric_keys': list((node.extra_metrics or {}).keys())[:64]})
     cards = [{'card_id': _text(card.id, 160), 'kind': _text(card.card_kind, 64),
               'statement': _text(card.statement), 'status': _text(card.status, 64),
               'verdict': _text(card.verdict, 64), 'parent_card_id': _text(card.parent_card_id, 160) or None,
-              'evidence': list(card.evidence or [])[:32], 'discarded_nodes': list(card.discarded_nodes or [])[:32]}
+              'evidence': list(card.evidence or [])[:32], 'discarded_nodes': list(card.discarded_nodes or [])[:32],
+              'linked_experiment_ids': card_exps.get(card.id, [])[:32],
+              'linked_node_ids': card_nodes.get(card.id, [])[:32]}
              for card in state.cards.values()]
     memos = []
     for memo in state.research or []:
@@ -186,18 +227,24 @@ def snapshot(rd: Path, expected_generation: str, offset: int = 0, limit: int = 2
                 'at_node': r.get('at_node'), 'reason': _text(r.get('reason')), 'action_ref': _text(r.get('action_ref'), 160),
                 'action_id': _text(r.get('action_id'), 160), 'evidence': [n for n in (r.get('evidence') if isinstance(r.get('evidence'), list) else []) if type(n) is int][:32]}
                for r in reviews if r.get('run_uid') == state.run_uid and r.get('generation') == generation]
-    from looplab.harness.per_query import current_uploads, read_manifest
-    upload_rows, upload_health = read_manifest(rd)
-    upload_rows = [r for r in upload_rows if r.get('run_uid') == state.run_uid and r.get('generation') == generation]
     uploads = []
-    for upload in current_uploads(upload_rows, state):
+    for upload in current_upload_list:
         consistency = upload.get('consistency') if isinstance(upload.get('consistency'), dict) else {}
         metric_rows = upload.get('metrics') if isinstance(upload.get('metrics'), dict) else {}
+        target_node = state.nodes.get(upload.get('node_id'))
+        c_status = consistency.get('status') or ''
+        if c_status in ('consistent', 'inconsistent'):
+            scalar_app = 'checked'
+        elif target_node is not None and target_node.kind == 'artifact' and target_node.metric is None:
+            scalar_app = 'not_applicable_artifact'
+        else:
+            scalar_app = 'unchecked'
         uploads.append({'upload_id': _text(upload.get('upload_id'), 128), 'node_id': upload.get('node_id'),
                         'attempt': upload.get('node_generation'), 'stale': upload.get('stale'),
                         'test_id': _text(upload.get('test_id'), 128), 'experiment_id': _text(upload.get('experiment_id'), 128),
                         'arm': _text(upload.get('arm'), 128), 'n_queries': upload.get('n_queries'),
                         'metrics': [_text(k, 160) for k in list(metric_rows)[:32] if isinstance(k, str)],
+                        'scalar_applicability': scalar_app,
                         'consistency': {k: _text(consistency.get(k), 160) for k in ('status', 'metric', 'node_metric')}})
     versions = report_versions(events, current_seq=(state.report or {}).get('published_seq'), max_versions=None)
     overview = None

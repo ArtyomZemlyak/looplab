@@ -30,11 +30,20 @@ export default function RuntimeSnapshotPanel({ runId, node, expectedGeneration }
           <td>{String(row.declared)}</td>
           <td>{(row.sources || []).map(s => `${s.value} (${s.source}${s.line ? `:${s.line}` : ''})`).join('; ') || '—'}</td>
           <td>{uiText(MATCH_LABEL[row.match] || row.match)}</td></tr>)}</tbody></table>}
-      {view.carriers.length === 0 && <p className="muted">{uiText('No configuration document (.env, JSON, YAML, TOML) was found for this attempt.')}</p>}
+      {view.effectiveRows.length > 0 && <div className="runtime-carrier">
+        <div className="section-h">{uiText('Effective configuration (what the evaluation used)')}</div>
+        <div className="md-table-wrap" role="region" tabIndex={0}><table className="tbl">
+          <tbody>{view.effectiveRows.map(row => <tr key={row.key}><th scope="row"><code>{row.key}</code></th>
+            <td>{row.value}</td><td className="muted">{row.source}</td></tr>)}</tbody></table></div>
+      </div>}
+      {view.carriers.length === 0 && view.effectiveRows.length === 0 && <p className="muted">{uiText('No configuration document (.env, JSON, YAML, TOML) was found for this attempt.')}</p>}
       {view.carriers.map(carrier => {
         const rows = view.params.filter(p => p.source === carrier.path)
+        const originLabel = carrier.origin === 'authored'
+          ? 'changed by this experiment'
+          : carrier.origin === 'eval_command' ? 'evaluation --config file' : 'task workspace'
         return <div key={carrier.path} className="runtime-carrier">
-          <div className="section-h"><code>{carrier.path}</code> <span className="muted">· {uiText(carrier.origin === 'authored' ? 'changed by this experiment' : 'task workspace')}
+          <div className="section-h"><code>{carrier.path}</code> <span className="muted">· {uiText(originLabel)}
             {carrier.status !== 'read' ? ` · ${uiText(carrier.status === 'withheld' ? 'withheld: secret-like file name' : carrier.status)}` : ''}</span></div>
           {rows.length > 0 && <div className="md-table-wrap" role="region" tabIndex={0}><table className="tbl">
             <tbody>{rows.map(row => <tr key={row.key}><th scope="row"><code>{row.key}</code></th>

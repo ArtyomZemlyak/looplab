@@ -43,7 +43,18 @@ export function resourceSnapshot(node, { effectiveConfig = null } = {}) {
     ? effectiveConfig.effective : {}
   const worldSize = count(effective.world_size)
   const maxSteps = count(effective.max_steps)
-  const train = stages.find(stage => TRAIN_STAGE.test(stage.name) && stage.timed && stage.seconds > 0) || null
+  const wallSeconds = finite(node.eval_seconds) ? node.eval_seconds : null
+  const stageTrain = stages.find(stage => TRAIN_STAGE.test(stage.name) && stage.timed && stage.seconds > 0) || null
+  const nonTrainRole = node.job_role === 'score' || node.job_role === 'prepare' || node.job_role === 'profile'
+  const train = stageTrain
+    ? { name: stageTrain.name, seconds: stageTrain.seconds, source: 'stage' }
+    : (stages.length === 0 && wallSeconds != null && wallSeconds > 0 && maxSteps != null && !nonTrainRole
+      ? { name: 'eval', seconds: wallSeconds, source: 'eval_wall' } : null)
+  const gpuTimeSeconds = stageSeconds != null
+    ? stageSeconds
+    : (stages.length === 0 && wallSeconds != null && wallSeconds >= 0 ? wallSeconds : null)
+  const gpuHoursSource = gpus != null && gpuTimeSeconds != null
+    ? (stageSeconds != null ? 'stages' : 'eval_wall') : null
   const extras = node.extra_metrics && typeof node.extra_metrics === 'object' ? node.extra_metrics : {}
   const reported = (pattern) => Object.entries(extras)
     .filter(([key, value]) => pattern.test(key) && finite(value))
@@ -56,11 +67,12 @@ export function resourceSnapshot(node, { effectiveConfig = null } = {}) {
     gpus, worldSize,
     stages,
     stageSeconds,
-    wallSeconds: finite(node.eval_seconds) ? node.eval_seconds : null,
-    // gpus × the time the stages ran: the GPUs the experiment DECLARED, assumed held for every stage.
-    gpuHours: gpus != null && stageSeconds != null ? (gpus * stageSeconds) / 3600 : null,
-    train: train ? { name: train.name, seconds: train.seconds } : null,
-    // max_steps over the training stage's wall clock: includes start-up and checkpointing.
+    wallSeconds,
+    // gpus × stage wall time when stages exist, or evaluation wall time on single-command runs.
+    gpuHours: gpus != null && gpuTimeSeconds != null ? (gpus * gpuTimeSeconds) / 3600 : null,
+    gpuHoursSource,
+    train,
+    // max_steps over the training stage's (or single-command eval's) wall clock.
     stepsPerSecond: train && maxSteps != null ? maxSteps / train.seconds : null,
     maxSteps,
     trainerRates: reported(TRAINER_RATE),

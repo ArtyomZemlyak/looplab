@@ -1459,7 +1459,10 @@ class EvalDispatchMixin:
                 overlay_files=sorted((node.files or {}) if node is not None else {}),
                 stage_names=[s.get("name") for s in (stages or ()) if isinstance(s, dict)],
                 declared=(dict(node.idea.params or {})
-                          if node is not None and node.idea is not None else {}))
+                          if node is not None and node.idea is not None else {}),
+                command=(None if stages else cmd),
+                stage_commands=[(s.get("name"), s.get("command"))
+                                for s in (stages or ()) if isinstance(s, dict)])
             # THE PROTOCOL SIDE — which profile's overrides the score command ran under, as
             # `_eval_pipeline` resolved them for THIS dispatch (`command_eval.eval_protocol`). A pure
             # record: it folds into `metric_provenance.comparability` at the terminal, where it can

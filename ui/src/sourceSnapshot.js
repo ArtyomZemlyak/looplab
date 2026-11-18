@@ -42,7 +42,8 @@ export function runtimeParamsView(value) {
   const params = (Array.isArray(value.params) ? value.params : []).filter(p => p && typeof p.key === 'string')
   const comparisons = (Array.isArray(value.comparisons) ? value.comparisons : [])
     .filter(c => c && typeof c.param === 'string')
-  return { carriers, params, comparisons, truncated: value.truncated === true }
+  const effectiveRows = value.effective_config ? effectiveConfigRows(value.effective_config) : []
+  return { carriers, params, comparisons, effectiveRows, truncated: value.truncated === true }
 }
 
 // The attempt's own row of `GET /api/runs/{id}/code` (doc 79 §3, §6): its commit in the run-owned

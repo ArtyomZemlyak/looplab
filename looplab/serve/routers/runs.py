@@ -2019,6 +2019,64 @@ def build_router(srv) -> APIRouter:
             return []
         return [s for s in surface if isinstance(s, str)] if isinstance(surface, list) else []
 
+    def _attempt_eval_command_and_effective_config(rd: Path, nid: int, attempt: int) -> tuple[Optional[list], Optional[dict]]:
+        """Resolve the eval command active at `(nid, attempt)` without misattributing a later
+        `task_changed` snapshot to an earlier attempt, plus any recorded `effective_config` row."""
+        eff_cfg = None
+        node_seq = -1
+        later_task_changed = False
+        try:
+            events = srv.events(rd)
+        except (OSError, ValueError, HTTPException):
+            events = []
+        for ev in events:
+            d = ev.data if isinstance(ev.data, dict) else {}
+            if d.get("node_id") == nid:
+                ev_gen = d.get("generation", d.get("attempt", 0))
+                if ev_gen == attempt or (ev.type == "node_created" and attempt == 0):
+                    node_seq = max(node_seq, ev.seq)
+            if ev.type == "effective_config" and d.get("node_id") == nid and d.get("generation", 0) == attempt:
+                eff_cfg = {k: d.get(k) for k in ("effective", "by_stage", "mismatches", "conflicts",
+                                                 "unknown", "checked", "declared", "sources_read")}
+        if node_seq >= 0:
+            later_task_changed = any(ev.type == "task_changed" and ev.seq > node_seq for ev in events)
+        if later_task_changed:
+            # Reconstruct the amendment command active at `node_seq` from `protocol_amendments.jsonl`
+            # (`changes.eval_command.{expected,command}`) when recorded; never attribute a newer
+            # `task.snapshot.json` command to an earlier node.
+            try:
+                from looplab.harness.campaign import read_journal
+                rows, health = read_journal(rd)
+                if health.get("read_complete"):
+                    cmd = None
+                    first_future_expected = None
+                    for row in rows:
+                        if row.get("kind") != "task":
+                            continue
+                        payload = row.get("payload") if isinstance(row.get("payload"), dict) else {}
+                        ec = ((payload.get("changes") or {}).get("eval_command")
+                              if isinstance(payload.get("changes"), dict) else None)
+                        if not isinstance(ec, dict):
+                            ec = payload.get("eval_command") if isinstance(payload.get("eval_command"), dict) else {}
+                        after_cmd = ec.get("command") if isinstance(ec.get("command"), list) else ec.get("after")
+                        before_cmd = ec.get("expected") if isinstance(ec.get("expected"), list) else ec.get("before")
+                        at_seq = int(row.get("at_event_seq", -1))
+                        if at_seq <= node_seq:
+                            if isinstance(after_cmd, list):
+                                cmd = after_cmd
+                        elif first_future_expected is None and isinstance(before_cmd, list):
+                            first_future_expected = before_cmd
+                    return (cmd if cmd is not None else first_future_expected), eff_cfg
+            except (OSError, ValueError, TypeError, HTTPException):
+                pass
+            return None, eff_cfg
+        try:
+            snap = json.loads((rd / "task.snapshot.json").read_text(encoding="utf-8"))
+            cmd = ((snap.get("eval") if isinstance(snap, dict) else None) or {}).get("command")
+            return (cmd if isinstance(cmd, list) else None), eff_cfg
+        except (OSError, ValueError, TypeError):
+            return None, eff_cfg
+
     @router.get("/api/runs/{run_id}/nodes/{nid}/runtime-params")
     def node_runtime_params(run_id: str, nid: int, expected_generation: str,
                             attempt: int = Query(..., ge=0)):
@@ -2037,9 +2095,11 @@ def build_router(srv) -> APIRouter:
             raise HTTPException(404, "no such node")
         if node.attempt != attempt:
             raise _attempt_cas_409(nid, attempt, node.attempt,
-                                   "The node was reset before its configuration was read.")
+                                   "The node was reset before its recorded configuration was read.")
+        eval_cmd, eff_cfg = _attempt_eval_command_and_effective_config(rd, nid, attempt)
         result = runtime_params(node, workdir=_node_dir(rd, nid),
-                                edit_surface=_task_edit_surface(rd))
+                                edit_surface=_task_edit_surface(rd),
+                                eval_command=eval_cmd, effective_config=eff_cfg)
         _assert_historical_generation(rd, expected_generation)
         current = srv.state(rd).nodes.get(nid)
         if current is None or current.attempt != attempt or current.tombstoned:

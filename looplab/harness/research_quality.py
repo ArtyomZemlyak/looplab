@@ -89,6 +89,16 @@ def project(state, experiments: dict, *, notice_dispositions=None, notice_health
             nid, kind = arm.get('node_id'), arm.get('work_kind')
             if type(nid) is int and kind in ('scientific_experiment', 'fit', 'score_only', 'engineering_recovery'):
                 work.setdefault(nid, set()).add(kind)
+    engineering_roles = ('prepare', 'profile', 'recovery')
+    scientific_roles = ('fit', 'score')
+    role_counts: dict[str, int] = {}
+    for n in nodes:
+        nid = getattr(n, 'id', None)
+        role = getattr(n, 'job_role', None)
+        if role in engineering_roles or role in scientific_roles:
+            role_counts[role] = role_counts.get(role, 0) + 1
+            if type(nid) is int:
+                work.setdefault(nid, set()).add('engineering_recovery' if role in engineering_roles else role)
     engineering = {nid for nid, kinds in work.items() if kinds == {'engineering_recovery'}}
     applicable_nodes = [n for n in nodes if getattr(n, 'id', None) not in engineering]
     unclassified = [n for n in nodes if getattr(n, 'id', None) not in work]
@@ -114,6 +124,7 @@ def project(state, experiments: dict, *, notice_dispositions=None, notice_health
         'nodes_with_parent_card': sum(bool(n.idea.parent_card_id) for n in nodes),
         'engineering_nodes_excluded': len(engineering.intersection({getattr(n, 'id', None) for n in nodes})),
         'unclassified_nodes': len(unclassified),
+        'job_role_counts': role_counts,
         'question_applicable_or_unknown_nodes': len(applicable_nodes),
         'question_applicable_or_unknown_without_card': sum(not bool(n.idea.parent_card_id) for n in applicable_nodes),
         'notice_resolution': notice_resolution,

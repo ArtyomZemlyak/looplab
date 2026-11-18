@@ -30,6 +30,7 @@ is_secret_env`) or one the shape screen would rewrite (`redact_secrets`) is repl
 from __future__ import annotations
 
 import math
+import os
 from pathlib import Path
 from typing import Optional
 
@@ -51,6 +52,8 @@ MASK = "***"
 
 ORIGIN_AUTHORED = "authored"
 ORIGIN_WORKSPACE = "workspace"
+ORIGIN_EVAL_COMMAND = "eval_command"
+_CONFIG_FLAGS = frozenset({"--config", "--config-file", "--cfg"})
 
 # Carrier read outcomes. `withheld` is a refusal (secret-shaped file name), never "empty".
 STATUS_READ = "read"
@@ -243,15 +246,43 @@ def compare_declared(declared: dict, rows: list[dict]) -> list[dict]:
     return out
 
 
-def runtime_params(node, *, workdir: Optional[Path], edit_surface=()) -> dict:
+def command_config_carriers(eval_command) -> list[str]:
+    """Configuration documents (`--config <path>`) explicitly passed on an evaluation argv."""
+    if not isinstance(eval_command, (list, tuple)):
+        return []
+    tokens = [str(x) for x in eval_command if isinstance(x, str) and x]
+    out: list[str] = []
+    idx = 0
+    while idx < len(tokens):
+        tok = tokens[idx]
+        cand = None
+        if tok in _CONFIG_FLAGS and idx + 1 < len(tokens):
+            cand = tokens[idx + 1]
+            idx += 2
+        elif "=" in tok and tok.partition("=")[0] in _CONFIG_FLAGS:
+            cand = tok.partition("=")[2]
+            idx += 1
+        else:
+            idx += 1
+        if cand and carrier_format(cand) and cand not in out:
+            out.append(cand)
+    return out
+
+
+def runtime_params(node, *, workdir: Optional[Path], edit_surface=(),
+                   eval_command=None, effective_config: Optional[dict] = None) -> dict:
     """The projection for one node attempt. Total: every failure is a carrier status, never a raise."""
     files = getattr(node, "files", None) or {}
     authored = sorted(p for p in files if isinstance(p, str) and carrier_format(p))
     surface = [p for p in literal_surface_carriers(edit_surface) if p not in files]
+    seen = set(authored) | set(surface)
+    cmd_carriers = [p for p in command_config_carriers(eval_command) if p not in seen]
     carriers: list[dict] = []
     rows: list[dict] = []
     truncated = False
-    planned = [(p, ORIGIN_AUTHORED) for p in authored] + [(p, ORIGIN_WORKSPACE) for p in surface]
+    planned = ([(p, ORIGIN_AUTHORED) for p in authored]
+               + [(p, ORIGIN_WORKSPACE) for p in surface]
+               + [(p, ORIGIN_EVAL_COMMAND) for p in cmd_carriers])
     if len(planned) > MAX_CARRIERS:
         planned, truncated = planned[:MAX_CARRIERS], True
     for path, origin in planned:
@@ -269,7 +300,11 @@ def runtime_params(node, *, workdir: Optional[Path], edit_surface=()) -> dict:
                 entry["status"] = STATUS_TOO_LARGE
                 continue
         else:
-            target = contained_member(workdir, path) if workdir is not None else None
+            expanded = os.path.expanduser(os.path.expandvars(path))
+            if origin == ORIGIN_EVAL_COMMAND and os.path.isabs(expanded):
+                target = Path(expanded)
+            else:
+                target = contained_member(workdir, path) if workdir is not None else None
             raw = (read_bounded_regular_file(target, MAX_CARRIER_BYTES + 1)
                    if target is not None else None)
             if raw is None:
@@ -291,7 +326,7 @@ def runtime_params(node, *, workdir: Optional[Path], edit_surface=()) -> dict:
             rows.append({**row, "source": path, "origin": origin})
     idea = getattr(node, "idea", None)
     declared = dict(getattr(idea, "params", None) or {})
-    return {
+    out = {
         "node_id": getattr(node, "id", None),
         "attempt": getattr(node, "attempt", None),
         "declared": declared,
@@ -300,3 +335,6 @@ def runtime_params(node, *, workdir: Optional[Path], edit_surface=()) -> dict:
         "comparisons": compare_declared(declared, rows),
         "truncated": truncated,
     }
+    if isinstance(effective_config, dict):
+        out["effective_config"] = effective_config
+    return out
