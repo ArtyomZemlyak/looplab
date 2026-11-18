@@ -1255,12 +1255,9 @@ When the Developer is delegated to an external coding agent (`developer_backend`
 | `agent_surface` | `LOOPLAB_AGENT_SURFACE` | `["*.py"]` | Edit-surface allow-list (globs) |
 | `agent_cmd` | `LOOPLAB_AGENT_CMD` | — | Override the agent's launcher/path |
 
-External-only startup never requires or probes an in-process `developer` target merely because a
-custom/historical split Strategy could later ask for `llm`. Its profile may set the external model
-and endpoint, but must omit `api_key_env`: a LoopLab-managed key cannot reach the secret-scrubbed CLI.
-The in-process target is validated and probed only when replacement is actually requested; a failed
-check leaves the current external Developer active. Active validation fallbacks and Repo onboarding
-remain real startup consumers and are still checked before work begins.
+External-only startup never probes an in-process `developer` target unless replacement is requested;
+a failed check keeps the external Developer active. Its profile omits `api_key_env` (scrubbed from
+the CLI); active validation fallbacks and Repo onboarding are still checked at startup.
 
 See [LLM & coding agents → External coding agents](llm-and-agents.md#external-coding-agents).
 
@@ -1302,9 +1299,4 @@ These server flags are not experiment Settings and are not pinned to a run snaps
 Quick start requires neither. See [Deployment](deployment.md#what-an-unset-looplab_ui_token-means)
 for open/protected mode, harness credentials and shared deployment boundaries.
 
-
-Retired setting `cross_run_structured_claims` is no longer a configurable field: claim identity
-always uses the scope/polarity-safe structured projection. Original snapshots containing the old
-key remain readable without rewriting their bytes. New snapshots and the UI omit it. The v1
-calibration identity retains only its historical fixed digest slot, so removing this no-op does
-not revoke evidence; source, runtime-scope and every active-setting check still apply.
+| `cross_run_structured_claims` | *(retired)* | Always uses the scope/polarity-safe structured projection; original snapshots containing the old key remain readable without rewriting bytes, new snapshots and the UI omit it, and the v1 calibration identity reserves only its historical fixed digest slot (source, runtime-scope and active-setting checks still apply). |

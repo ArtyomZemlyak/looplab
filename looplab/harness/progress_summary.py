@@ -177,6 +177,8 @@ def brief(progress: dict) -> dict:
         result["canary_preflight"] = progress["canary_preflight"]
     if "current_evaluator_digest" in progress:
         result["current_evaluator_digest"] = progress["current_evaluator_digest"]
+    if "runtime_build" in progress:
+        result["runtime_build"] = progress["runtime_build"]
     nodes = progress["finish_pending_nodes"]
     result.update(finish_pending_nodes=nodes[:20], finish_pending_node_count=len(nodes),
                   finish_pending_nodes_truncated=len(nodes) > 20)

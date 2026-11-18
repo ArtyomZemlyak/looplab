@@ -32,6 +32,7 @@ import base64
 import difflib
 import hashlib
 import json
+import math
 import os
 import re
 import time
@@ -470,8 +471,10 @@ def _require_stopped(srv, rd: Path, kind: str) -> None:
             "code": "engine_running" if alive else "engine_liveness_unknown",
             "message": (f"a {kind} amendment needs a stopped engine: the engine reads the task "
                         "snapshot and copies the base repository when a lifecycle starts"),
-            "remediation": ("pause the run (command `pause`), wait until the run state reports "
-                            "engine_running=false, amend, then resume or inject"),
+            "remediation": ("stop the engine cleanly at an idle boundary (`POST /api/runs/{run_id}/stop` "
+                            "or `looplab stop`; note `command \"pause\"` pauses scheduling while an idle "
+                            "engine loop keeps `engine_running=true`), verify `execution.engine_running` "
+                            "is false and no evaluation is active, amend, then resume or inject"),
             "retryable": True})
     srv.commands.reject_if_active(rd, f"record a {kind} amendment")
 
@@ -727,11 +730,13 @@ def _apply_task_amendment(rd: Path, changes) -> tuple[dict, Any]:
             raise HTTPException(400, "invalid eval canary declaration") from exc
         task["eval"]["canary"] = canary
 
+    _MAX_AMENDMENT_PATHS = 2048
+
     def strings(name, *, absolute=False):
         value = changes.get(name, [])
-        if not isinstance(value, list) or len(value) > 256 or not all(
+        if not isinstance(value, list) or len(value) > _MAX_AMENDMENT_PATHS or not all(
                 isinstance(v, str) and v and len(v) <= 4096 for v in value):
-            raise HTTPException(400, f"{name} must be a list of at most 256 paths")
+            raise HTTPException(400, f"{name} must be a list of at most {_MAX_AMENDMENT_PATHS} paths")
         if absolute and not all(os.path.isabs(os.path.expanduser(os.path.expandvars(v)))
                                 for v in value):
             raise HTTPException(400, f"{name} must hold absolute paths")
@@ -998,13 +1003,65 @@ def agent_budget_refusal(srv, rd: Path, add_nodes) -> Optional[HTTPException]:
     return None
 
 
+_BUDGET_AMENDMENT_FIELDS = ("add_nodes", "eval_timeout", "timeout", "max_seconds", "max_eval_seconds")
+_BUDGET_LAUNCH_LIMIT_S = 7 * 86400.0
+
+
+def _validate_budget_amendment(raw: Any) -> dict[str, Any]:
+    budget = raw if isinstance(raw, dict) else {}
+    unknown = set(budget) - set(_BUDGET_AMENDMENT_FIELDS)
+    if unknown:
+        raise HTTPException(
+            400,
+            "a budget amendment takes {add_nodes, eval_timeout, timeout, max_seconds, max_eval_seconds}; "
+            f"unknown field(s): {', '.join(sorted(str(k) for k in unknown))}",
+        )
+    out: dict[str, Any] = {}
+    if budget.get("add_nodes") is not None:
+        add_nodes = budget["add_nodes"]
+        if not isinstance(add_nodes, int) or isinstance(add_nodes, bool) or not 1 <= add_nodes <= 1000:
+            raise HTTPException(400, "add_nodes must be an integer in [1, 1000]")
+        out["add_nodes"] = add_nodes
+    for name in ("eval_timeout", "timeout", "max_seconds", "max_eval_seconds"):
+        if budget.get(name) is None:
+            continue
+        raw_val = budget[name]
+        if isinstance(raw_val, bool):
+            raise HTTPException(400, f"{name} must be a finite positive number")
+        try:
+            val = float(raw_val)
+        except (TypeError, ValueError, OverflowError):
+            raise HTTPException(400, f"{name} must be a finite positive number") from None
+        if not math.isfinite(val) or val <= 0:
+            raise HTTPException(400, f"{name} must be a finite positive number")
+        if name in ("eval_timeout", "timeout") and val > _BUDGET_LAUNCH_LIMIT_S:
+            raise HTTPException(
+                400,
+                f"{name} must be a finite number of seconds in (0, {_BUDGET_LAUNCH_LIMIT_S:.0f}]",
+            )
+        out[name] = val
+    if not out:
+        raise HTTPException(
+            400,
+            "a budget amendment needs at least one of {add_nodes, eval_timeout, timeout, max_seconds, max_eval_seconds}",
+        )
+    return out
+
+
+def _budget_amendment_summary(cmd_data: dict[str, Any]) -> str:
+    if set(cmd_data) == {"add_nodes"}:
+        return f"+{cmd_data['add_nodes']} node(s) via budget_extend"
+    parts = []
+    if "add_nodes" in cmd_data:
+        parts.append(f"+{cmd_data['add_nodes']} node(s)")
+    for name in ("eval_timeout", "timeout", "max_seconds", "max_eval_seconds"):
+        if name in cmd_data:
+            parts.append(f"{name}={cmd_data[name]:g}s")
+    return f"{', '.join(parts)} via budget_extend"
+
+
 def _publish_budget(srv, rd: Path, body, *, agent_token: bool) -> dict:
-    budget = body.budget if isinstance(body.budget, dict) else {}
-    if set(budget) - {"add_nodes"}:
-        raise HTTPException(400, "a budget amendment takes {add_nodes}")
-    add_nodes = budget.get("add_nodes")
-    if not isinstance(add_nodes, int) or isinstance(add_nodes, bool) or not 1 <= add_nodes <= 1000:
-        raise HTTPException(400, "add_nodes must be an integer in [1, 1000]")
+    cmd_data = _validate_budget_amendment(body.budget)
     path = journal_path(rd)
     request_digest = hashlib.sha256(_canonical(body.request_payload())).hexdigest()
     rows, health = read_journal(rd)
@@ -1022,7 +1079,7 @@ def _publish_budget(srv, rd: Path, body, *, agent_token: bool) -> dict:
     # The command service owns admission (its own sequencer, generation fence and the cap check in
     # `normalize_control` for the agent token); the same key makes a retry resolve, not repeat.
     record = srv.commands.submit(rd, f"protocol-budget:{state.run_uid}:{body.action_id}",
-                                 "budget_extend", {"add_nodes": add_nodes},
+                                 "budget_extend", cmd_data,
                                  expected_generation=body.expected_generation,
                                  agent_token=agent_token)
     try:
@@ -1041,9 +1098,9 @@ def _publish_budget(srv, rd: Path, body, *, agent_token: bool) -> dict:
                        "at_event_seq": events[-1].seq, "at_node_count": len(fold(events).nodes),
                        "version": len(current) + 1,
                        "amendment_id": f"am{len(current) + 1}-{request_digest[:10]}",
-                       "payload": {"add_nodes": add_nodes, "command_id": record.get("id"),
+                       "payload": {**cmd_data, "command_id": record.get("id"),
                                    "command_status": record.get("status")},
-                       "summary": f"+{add_nodes} node(s) via budget_extend"}
+                       "summary": _budget_amendment_summary(cmd_data)}
                 append_jsonl_bytes_locked(path, _canonical(row))
                 return {"ok": True, "replayed": False, "amendment": row, "command": record}
     except HTTPException:

@@ -9,6 +9,7 @@ of several files; clients refresh when ``event_seq`` moves.
 from __future__ import annotations
 
 from collections import Counter
+import functools
 from pathlib import Path
 from hashlib import sha256
 from urllib.parse import quote, urlencode
@@ -166,6 +167,51 @@ def canary_preflight(rd: Path) -> dict:
                         "harness_policy implicit_canary=sandboxed.")}
 
 
+@functools.lru_cache(maxsize=1)
+def runtime_build_info() -> dict:
+    """Running LoopLab package version and source checkout commit SHA when readable (no subprocess)."""
+    import looplab
+    version = str(getattr(looplab, "__version__", "unknown"))
+    head_sha = None
+    try:
+        repo_root = Path(looplab.__file__).resolve().parent.parent
+        dot_git = repo_root / ".git"
+        git_dir = dot_git
+        common_dir = dot_git
+        if dot_git.is_file():
+            first = dot_git.read_text(encoding="utf-8", errors="replace").strip()
+            if first.startswith("gitdir:"):
+                git_dir = (repo_root / first.split(":", 1)[1].strip()).resolve()
+                common_file = git_dir / "commondir"
+                common_dir = ((git_dir / common_file.read_text(encoding="utf-8").strip()).resolve()
+                              if common_file.is_file() else git_dir)
+        head_file = git_dir / "HEAD"
+        if head_file.is_file():
+            ref_line = head_file.read_text(encoding="utf-8", errors="replace").strip()
+            if ref_line.startswith("ref:"):
+                ref = ref_line.split(":", 1)[1].strip()
+                for base in (git_dir, common_dir):
+                    loose = base / ref
+                    if loose.is_file():
+                        cand = loose.read_text(encoding="utf-8", errors="replace").strip()
+                        if len(cand) == 40 and all(c in "0123456789abcdefABCDEF" for c in cand):
+                            head_sha = cand.lower()
+                            break
+                if head_sha is None and (common_dir / "packed-refs").is_file():
+                    for line in (common_dir / "packed-refs").read_text(encoding="utf-8", errors="replace").splitlines():
+                        if not line or line.startswith(("#", "^")):
+                            continue
+                        parts = line.split()
+                        if len(parts) == 2 and parts[1] == ref and len(parts[0]) == 40:
+                            head_sha = parts[0].lower()
+                            break
+            elif len(ref_line) == 40 and all(c in "0123456789abcdefABCDEF" for c in ref_line):
+                head_sha = ref_line.lower()
+    except OSError:
+        head_sha = None
+    return {"package_version": version, "git_head": head_sha}
+
+
 def _page(rows: list[dict], offset: int, limit: int) -> dict:
     return {"total": len(rows), "offset": offset, "limit": limit,
             "items": list(reversed(rows))[offset:offset + limit],
@@ -236,10 +282,17 @@ def snapshot(rd: Path, expected_generation: str, *, activity_reader,
     activity = Counter(activity_reader(state, nid, withheld=withheld)["status"]
                        for nid in finish_due["pending_nodes"])
     from looplab.engine.run_lifecycle import engine_liveness
-    execution = {"engine_running": engine_liveness(rd),
+    engine_running = engine_liveness(rd)
+    execution = {"engine_running": engine_running,
                  "agent_connection": "not_measured",
+                 "task_or_files_amendable": bool(engine_running is False and activity["evaluating"] == 0),
                  "recorded_node_counts": {kind: activity[kind] for kind in
                      ("building", "queued", "evaluating", "pending")}}
+    if state.paused and engine_running is True:
+        execution["stop_vs_pause_note"] = (
+            "Run is paused, but the engine process is still running; task/files protocol "
+            "amendments require stopping the engine (`POST /api/runs/{run_id}/stop` or `looplab stop`)."
+        )
     from looplab.harness.campaign import read_policy
     from looplab.harness.work_state import project as project_work_state
     from looplab.harness.telemetry import project as project_telemetry
@@ -248,6 +301,7 @@ def snapshot(rd: Path, expected_generation: str, *, activity_reader,
     from looplab.engine.shared import run_dir_evaluator_digest
     canonical_id = run_address(root if root is not None else rd.parent, rd)
     result = {"generation": generation, "run_uid": uid,
+            "runtime_build": runtime_build_info(),
             "current_evaluator_digest": run_dir_evaluator_digest(rd, run_uid=uid or None),
             "execution_scope": read_policy(rd).get("execution")
                                  or {"mode": "science", "version": 1},

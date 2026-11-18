@@ -89,6 +89,7 @@ looplab tensorboard     Serve TensorBoard over per-experiment training logs
 looplab build-ui        Build the React UI bundle (ui/dist)
 looplab harness         Print the external-agent capability contract as JSON (read-only)
 looplab harness-mcp     Serve the live UI API to a coding agent over stdio MCP
+looplab skill-distill   Package/publish a pinned external technique against a supported lesson
 looplab agent-notify    Agent wake-up hook (doc 78)
 looplab agent-events    Agent event outbox
 looplab gpu-gate        Hold/order a run's GPUs
@@ -895,8 +896,7 @@ looplab replay RUN_DIR --summary   # a few lines
 
 ## `policy-replay`
 
-Compare a current pure selection policy on a fixed recorded proposal tape. This reads only
-`RUN_DIR/events.jsonl`; it does not start an engine, model, evaluator or agent, and writes nothing.
+Compare a pure selection policy (`greedy`, `evolutionary`, `mcts`) on a fixed recorded proposal tape (`RUN_DIR/events.jsonl` only; read-only, no model or evaluator calls). Full contract and limits: [recorded-policy-replay.md](../audit/recorded-policy-replay.md).
 
 ```bash
 looplab policy-replay RUN_DIR --policy greedy --n-seeds 3
@@ -904,34 +904,7 @@ looplab policy-replay RUN_DIR --policy evolutionary --n-seeds 3 --max-attempts 1
 looplab policy-replay RUN_DIR --policy mcts --n-seeds 3
 ```
 
-Supported policies are `greedy`, `evolutionary` and `mcts`, with their current default knobs;
-`n_seeds` is also the evolutionary initial population. The JSON records effective policy
-attributes, implementation SHA256s, input byte SHA256/size, run UID/generation and event sequence.
-These are diagnostic settings, not a reconstruction of the original launch settings.
-
-For each operator/parent choice, use the **earliest unused exact recorded match**, independent
-of its score. Only that chosen node's original facts through its terminal enter the policy state.
-A request outside the tape, missing dependency/outcome, different recorded protocol version,
-reset/recreated/retired lifecycle or unsupported action stops the replay. It never substitutes
-another branch or imputes a metric. Post-terminal confirmation/holdout/verifier/approval schedules,
-selection-setting changes and objective retargets are unsupported. Legacy null protocol versions
-remain unknown, not evidence of `same_protocol`.
-
-`coverage` is supported decisions divided by considered decisions, including the first
-unsupported decision. `replayed_attempts_to_champion` is a number only when the exact original
-champion node and attempt were reached. Counts mean **completed recorded nodes**, not physical
-evaluator calls, repairs, elapsed time or budget savings. The original terminal-position count is
-withheld when resets make it ambiguous. A truncated attempt budget can have coverage 1 while its
-target count is still null. An entirely unavailable source has null coverage and an explicit reason.
-
-This is conditional fixed-pool analysis. A differently ordered research history could generate
-different code or outcomes; no causal policy-quality improvement follows from this comparison.
-No generated proposal, new outcome, paid value estimate, scheduling/parallelism or grant is inferred.
-Sources must be regular, unchanged during descriptor capture, at most 128 MiB, complete through
-a final newline, with valid envelope versions, atomic-batch structure and a dense event sequence.
-Corruption is refused with exit 2, without prefix repair. SHA256 identifies captured bytes; it does
-not authenticate their author or attest remote storage flush. Flags cap seeds and replayed attempts
-at 1000. See [implementation acceptance](../audit/recorded-policy-replay.md).
+| `RUN_DIR [--policy greedy\|evolutionary\|mcts] [--n-seeds N] [--max-attempts N]` | Uses the earliest unused exact recorded operator/parent match; stops on missing dependencies, protocol shifts, resets or unsupported post-terminal gates without imputing metrics. Outputs `coverage`, `replayed_attempts_to_champion` (completed recorded nodes, not physical evals) and SHA-256 input/policy descriptors (regular complete log `<= 128 MiB`; corruption exits `2`; flags cap at `1000`). |
 
 ## `readmodel`
 
@@ -3415,18 +3388,7 @@ looplab tensorboard RUN_DIR [--port 6006] [--host 127.0.0.1]
 
 ## `build-ui`
 
-Build the React UI bundle (`ui/dist`) so `looplab ui` can serve it. Under the same required interprocess
-lock as `looplab ui`, it rechecks source/dependency stamps, installs missing or manifest-mismatched
-dependencies (`npm ci`, then a visible `npm install` fallback if needed), and runs `npm run build`.
-Normally not needed — `looplab ui` builds on demand — but handy for CI or a warm-up step.
-
-```bash
-looplab build-ui [--force]
-```
-
-| Option | Default | Description |
-|---|---|---|
-| `--force` | off | Rebuild even if a bundle already exists |
+| `[--force]` | Build `ui/dist` under the same interprocess lock as `looplab ui` (`npm ci` / `npm install` when stamps differ, then `npm run build`). `looplab ui` builds on demand; `--force` rebuilds unconditionally. |
 
 ## `harness`
 
@@ -3439,17 +3401,16 @@ looplab harness [--settings]
 
 ## `research-map`
 
-Read research questions, experiments and reports without changing work. `--generation` is required;
-`--briefing` returns action context. `looplab research-map RUN_DIR --generation TOKEN`.
-Use repeatable `--collection NAME`, `--max-bytes 4096..65536`, `--max-items 1..100` and
-`--cursors '{"reports":"map1:…"}'` for exact per-collection continuation. The default whole JSON
-document budget is 65536 UTF-8 bytes and 40 items; the printed newline is framing.
-See [bounded reads](research-workflow-migration.md#bounded-research-reads) for omissions and changed collections.
+| `RUN_DIR --generation TOKEN [--briefing] [--collection NAME]... [--cursors JSON] [--max-bytes 4096..65536] [--max-items 1..100] [--offset N] [--limit N]` | Read research questions, experiments and reports without changing work (`--briefing` returns action context; default budget `65536` UTF-8 bytes / `40` items). See [bounded reads](research-workflow-migration.md#bounded-research-reads). |
 
 ## `harness-mcp`
 
 Serve a UI over stdio MCP: `codex mcp add looplab -- looplab harness-mcp`. Protected UI:
 `LOOPLAB_HARNESS_TOKEN`; remote UI: `LOOPLAB_HARNESS_URL`.
+
+## `skill-distill`
+
+| `RUN_ID --repo DIR --revision SHA --source-file PATH... --label L --generation TOKEN --action-id ID --lesson-action-id ID --body-file PATH --smoke-file PATH --exclusion-review TEXT [--exclude TERM]... [--source-url URL] [--publish --url SERVER]` | Package a pinned external Git technique against a supported lesson (no model call; default prints a request preview, `--publish --url` validates and submits via `/api/runs/{run_id}/skill-candidates`). |
 
 ## `agent-notify`
 
